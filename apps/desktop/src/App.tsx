@@ -46,6 +46,7 @@ import {
   useSessions,
 } from "./sessions/store";
 import { hydrateThemeFromUserState, useTheme } from "./theme/store";
+import { animatedBackgroundSource } from "./theme/applyTheme";
 import {
   installInterfaceSoundClicks,
   setInterfaceSoundsEnabled,
@@ -89,6 +90,20 @@ const inTauri =
 const DOCS_URL = "https://docs.milim.ai/";
 const APP_MENU_EVENT = "milim://menu-action";
 
+function BackgroundLayer() {
+  const source = animatedBackgroundSource(useTheme.getState().theme.background.image);
+  return (
+    <div className="bg-layer" aria-hidden="true">
+      <img
+        className="bg-layer-gif"
+        data-theme-background-gif
+        src={source}
+        hidden={!source}
+        alt=""
+      />
+    </div>
+  );
+}
 function OnboardingGate() {
   const status = useOnboarding((s) => s.status);
   const developerShowOnboarding = useOnboarding(
@@ -232,7 +247,7 @@ function AppRecoveryScreen({
   const { backgroundFit, backgroundTreatment } = useUiPreferences.getState();
   return (
     <div className={`app app-error-state bg-fit-${backgroundFit} bg-treatment-${backgroundTreatment}`}>
-      <div className="bg-layer" aria-hidden="true" />
+      <BackgroundLayer />
       <div className="app-error-backdrop" aria-hidden="true" />
       <main className="app-error-layout" aria-labelledby="app-error-title">
         <header className="app-error-brand">
@@ -564,7 +579,7 @@ function AppContent() {
 
   return (
     <div className={appClassName} onContextMenu={openAppContextMenu}>
-      <div className="bg-layer" />
+      <BackgroundLayer />
       <div className="main">
         <Sidebar
           open={sidebarOpen}

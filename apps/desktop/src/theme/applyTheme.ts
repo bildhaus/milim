@@ -1,5 +1,10 @@
 import type { Theme } from "./types";
 
+export function animatedBackgroundSource(image: string | undefined): string | undefined {
+  const match = image?.trim().match(/^url\(\s*(["']?)(data:image\/gif(?:;[^,]*)?,[^)]*)\1\s*\)$/i);
+  return match?.[2];
+}
+
 /** Convert `#rrggbb` (or `#rgb`) + alpha -> `rgba(...)`. Non-hex passes through. */
 function rgba(hex: string, alpha: number): string {
   let h = hex.trim();
@@ -84,6 +89,18 @@ export function applyTheme(t: Theme): void {
   for (const [key, value] of Object.entries(themeCssVariables(t))) {
     s.setProperty(key, value);
   }
+
+  const animatedBackground = animatedBackgroundSource(t.background.image);
+  document.documentElement.dataset.animatedBackground = String(Boolean(animatedBackground));
+  document.querySelectorAll?.<HTMLImageElement>("[data-theme-background-gif]").forEach((image) => {
+    if (animatedBackground) {
+      if (image.getAttribute("src") !== animatedBackground) image.src = animatedBackground;
+      image.hidden = false;
+    } else {
+      image.removeAttribute("src");
+      image.hidden = true;
+    }
+  });
 
   document.documentElement.dataset.dark = String(t.isDark);
   document.documentElement.style.colorScheme = t.isDark ? "dark" : "light";

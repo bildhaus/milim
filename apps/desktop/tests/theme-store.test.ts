@@ -98,7 +98,14 @@ localStorage.setItem("milim.customThemes", JSON.stringify([customTheme]));
 localStorage.setItem("milim.themeId", customTheme.id);
 
 const { hydrateThemeFromUserState, useTheme } = await import("../src/theme/store.js");
-const { themeCssVariables } = await import("../src/theme/applyTheme.js");
+const { animatedBackgroundSource, themeCssVariables } = await import("../src/theme/applyTheme.js");
+
+equal(
+  animatedBackgroundSource("url(data:image/gif;base64,R0lGODlhAQABAIAAAAUEBA==)"),
+  "data:image/gif;base64,R0lGODlhAQABAIAAAAUEBA==",
+  "embedded GIF backgrounds should use the animated image layer",
+);
+equal(animatedBackgroundSource("url(data:image/png;base64,iVBORw0KGgo=)"), undefined, "static backgrounds should keep the CSS layer");
 
 equal(useTheme.getState().themeId, customTheme.id, "legacy raw active custom theme should initialize");
 equal(useTheme.getState().theme.name, customTheme.name, "active custom theme should resolve from persisted custom themes");

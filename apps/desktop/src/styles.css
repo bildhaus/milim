@@ -521,15 +521,36 @@ body.sidebar-pointer-dragging .session-section-title {
   filter: blur(var(--bg-image-blur, 0px));
   transform: scale(1.06);
 }
+:root[data-animated-background="true"] .bg-layer::before {
+  background-image: none;
+}
+.bg-layer-gif {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+  opacity: var(--bg-image-opacity, 1);
+  filter: blur(var(--bg-image-blur, 0px));
+  transform: scale(1.06);
+}
 .app.bg-fit-cover .bg-layer::before {
   background-size: cover;
   background-repeat: no-repeat;
   background-position: center;
 }
+.app.bg-fit-cover .bg-layer-gif {
+  object-fit: cover;
+}
 .app.bg-fit-contain .bg-layer::before {
   background-size: contain;
   background-repeat: no-repeat;
   background-position: center;
+  transform: none;
+}
+.app.bg-fit-contain .bg-layer-gif {
+  object-fit: contain;
   transform: none;
 }
 .app.bg-fit-center .bg-layer::before {
@@ -538,20 +559,40 @@ body.sidebar-pointer-dragging .session-section-title {
   background-position: center;
   transform: none;
 }
+.app.bg-fit-center .bg-layer-gif,
+.app.bg-fit-tile .bg-layer-gif {
+  object-fit: none;
+  object-position: center;
+  transform: none;
+}
 .app.bg-fit-tile .bg-layer::before {
   background-size: auto;
   background-repeat: repeat;
   background-position: top left;
   transform: none;
 }
+.app.bg-fit-tile .bg-layer-gif {
+  /* ponytail: animated tiles render once; duplicate image nodes if real usage warrants it. */
+  object-position: top left;
+}
 .app.bg-treatment-blur .bg-layer::before {
+  filter: blur(calc(var(--bg-image-blur, 0px) + 8px));
+  transform: scale(1.09);
+}
+.app.bg-treatment-blur .bg-layer-gif {
   filter: blur(calc(var(--bg-image-blur, 0px) + 8px));
   transform: scale(1.09);
 }
 .app.bg-treatment-mono .bg-layer::before {
   filter: grayscale(1) blur(var(--bg-image-blur, 0px));
 }
+.app.bg-treatment-mono .bg-layer-gif {
+  filter: grayscale(1) blur(var(--bg-image-blur, 0px));
+}
 .app.bg-fit-tile.bg-treatment-blur .bg-layer::before {
+  transform: none;
+}
+.app.bg-fit-tile.bg-treatment-blur .bg-layer-gif {
   transform: none;
 }
 .bg-layer::after {
