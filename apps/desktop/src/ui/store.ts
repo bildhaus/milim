@@ -24,6 +24,28 @@ export type AvatarStyle = "none" | "avatar" | "role";
 export type CodeBlockTheme = "match" | "terminal" | "github" | "high-contrast";
 export type BackgroundFit = "cover" | "contain" | "tile" | "center";
 export type BackgroundTreatment = "clear" | "dim" | "blur" | "mono";
+export type StartupBehavior = "restore" | "new-chat";
+export type QuickActionMode = "smart" | "pinned" | "hidden";
+export type AutocompleteMode = "automatic" | "manual" | "off";
+export type PromptHistoryScope = "thread" | "global" | "off";
+export type ThreadExportFormat = "json" | "markdown";
+export type NewProjectChatWorkspace = "current" | "ask" | "worktree";
+export type WorkspaceLauncherPreference = "remember" | WorkspaceLauncherId;
+export type ComposerCompletionMode = "off" | "local" | "current";
+export type AutocompleteSource = "commands" | "files" | "skills" | "mcp";
+export type AutocompleteSources = Record<AutocompleteSource, boolean>;
+
+export interface PinnedQuickAction {
+  id: string;
+  label: string;
+  prompt: string;
+  builtinId?: string;
+}
+
+export interface SuggestionUsage {
+  count: number;
+  lastUsedAt: number;
+}
 export const FINISHED_SOUND_OPTIONS = ["ready", "success", "chime", "bloom"] as const;
 export const ATTENTION_SOUND_OPTIONS = ["error", "tick", "chime", "droplet"] as const;
 export type FinishedSound = (typeof FINISHED_SOUND_OPTIONS)[number];
@@ -63,6 +85,7 @@ interface UiPreferencesState {
   developerMode: boolean;
   experimentalHashlinePatch: boolean;
   chatLayoutStyle: ChatLayoutStyle;
+  showEmptyChatRidgeline: boolean;
   messageWidth: MessageWidth;
   avatarStyle: AvatarStyle;
   codeBlockTheme: CodeBlockTheme;
@@ -70,6 +93,26 @@ interface UiPreferencesState {
   backgroundTreatment: BackgroundTreatment;
   gitPanelExpanded: boolean;
   toolsExpanded: boolean;
+  startupBehavior: StartupBehavior;
+  restoreOpenPanels: boolean;
+  notifyRunFinished: boolean;
+  notifyNeedsAttention: boolean;
+  notifyOnlyWhenUnfocused: boolean;
+  notificationIncludeThreadTitle: boolean;
+  quickActionMode: QuickActionMode;
+  pinnedQuickActions: PinnedQuickAction[];
+  projectQuickActionOverrides: Record<string, PinnedQuickAction[]>;
+  autocompleteMode: AutocompleteMode;
+  autocompleteSources: AutocompleteSources;
+  personalizedSuggestions: boolean;
+  suggestionUsage: Record<string, SuggestionUsage>;
+  promptHistoryScope: PromptHistoryScope;
+  globalPromptHistory: string[];
+  threadExportFormat: ThreadExportFormat;
+  workspaceLauncherPreference: WorkspaceLauncherPreference;
+  newProjectChatWorkspace: NewProjectChatWorkspace;
+  composerCompletionMode: ComposerCompletionMode;
+  remoteCompletionConfirmed: boolean;
   workspaceLauncherLastUsedByFolder: Record<string, WorkspaceLauncherId>;
   notices: AppNotice[];
   appShortcuts: AppShortcuts;
@@ -95,6 +138,7 @@ interface UiPreferencesState {
   setDeveloperMode: (developerMode: boolean) => void;
   setExperimentalHashlinePatch: (experimentalHashlinePatch: boolean) => void;
   setChatLayoutStyle: (chatLayoutStyle: ChatLayoutStyle) => void;
+  setShowEmptyChatRidgeline: (showEmptyChatRidgeline: boolean) => void;
   setMessageWidth: (messageWidth: MessageWidth) => void;
   setAvatarStyle: (avatarStyle: AvatarStyle) => void;
   setCodeBlockTheme: (codeBlockTheme: CodeBlockTheme) => void;
@@ -102,6 +146,28 @@ interface UiPreferencesState {
   setBackgroundTreatment: (backgroundTreatment: BackgroundTreatment) => void;
   setGitPanelExpanded: (gitPanelExpanded: boolean) => void;
   setToolsExpanded: (toolsExpanded: boolean) => void;
+  setStartupBehavior: (startupBehavior: StartupBehavior) => void;
+  setRestoreOpenPanels: (restoreOpenPanels: boolean) => void;
+  setNotifyRunFinished: (notifyRunFinished: boolean) => void;
+  setNotifyNeedsAttention: (notifyNeedsAttention: boolean) => void;
+  setNotifyOnlyWhenUnfocused: (notifyOnlyWhenUnfocused: boolean) => void;
+  setNotificationIncludeThreadTitle: (notificationIncludeThreadTitle: boolean) => void;
+  setQuickActionMode: (quickActionMode: QuickActionMode) => void;
+  setPinnedQuickActions: (actions: PinnedQuickAction[]) => void;
+  setProjectQuickActionOverride: (projectId: string, actions: PinnedQuickAction[] | null) => void;
+  setAutocompleteMode: (autocompleteMode: AutocompleteMode) => void;
+  setAutocompleteSource: (source: AutocompleteSource, enabled: boolean) => void;
+  setPersonalizedSuggestions: (personalizedSuggestions: boolean) => void;
+  recordSuggestionUse: (id: string) => void;
+  resetSuggestionHistory: () => void;
+  setPromptHistoryScope: (promptHistoryScope: PromptHistoryScope) => void;
+  recordGlobalPrompt: (prompt: string) => void;
+  clearGlobalPromptHistory: () => void;
+  setThreadExportFormat: (threadExportFormat: ThreadExportFormat) => void;
+  setWorkspaceLauncherPreference: (workspaceLauncherPreference: WorkspaceLauncherPreference) => void;
+  setNewProjectChatWorkspace: (newProjectChatWorkspace: NewProjectChatWorkspace) => void;
+  setComposerCompletionMode: (composerCompletionMode: ComposerCompletionMode) => void;
+  setRemoteCompletionConfirmed: (remoteCompletionConfirmed: boolean) => void;
   rememberWorkspaceLauncher: (folder: string, launcherId: WorkspaceLauncherId) => void;
   pushNotice: (notice: { tone: AppNoticeTone; message: string }) => string;
   dismissNotice: (id: string) => void;
@@ -199,6 +265,87 @@ function normalizeAttentionSound(value: unknown): AttentionSound {
     : "error";
 }
 
+const DEFAULT_AUTOCOMPLETE_SOURCES: AutocompleteSources = {
+  commands: true,
+  files: true,
+  skills: true,
+  mcp: true,
+};
+
+function normalizeEnum<T extends string>(value: unknown, values: readonly T[], fallback: T): T {
+  return typeof value === "string" && values.includes(value as T) ? value as T : fallback;
+}
+
+function normalizePinnedQuickActions(value: unknown): PinnedQuickAction[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const actions: PinnedQuickAction[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const source = item as Partial<PinnedQuickAction>;
+    const id = typeof source.id === "string" ? source.id.trim() : "";
+    const label = typeof source.label === "string" ? source.label.trim().slice(0, 80) : "";
+    const prompt = typeof source.prompt === "string" ? source.prompt.trim().slice(0, 4000) : "";
+    if (!id || !label || !prompt || seen.has(id)) continue;
+    seen.add(id);
+    actions.push({ id, label, prompt, ...(typeof source.builtinId === "string" ? { builtinId: source.builtinId } : {}) });
+    if (actions.length === 3) break;
+  }
+  return actions;
+}
+
+function normalizeQuickActionOverrides(value: unknown): Record<string, PinnedQuickAction[]> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const result: Record<string, PinnedQuickAction[]> = {};
+  for (const [projectId, actions] of Object.entries(value)) {
+    if (!projectId.trim()) continue;
+    result[projectId] = normalizePinnedQuickActions(actions);
+  }
+  return result;
+}
+
+function normalizeAutocompleteSources(value: unknown): AutocompleteSources {
+  const saved = value && typeof value === "object" && !Array.isArray(value) ? value as Partial<AutocompleteSources> : {};
+  return Object.fromEntries(
+    Object.entries(DEFAULT_AUTOCOMPLETE_SOURCES).map(([source, fallback]) => [
+      source,
+      typeof saved[source as AutocompleteSource] === "boolean" ? saved[source as AutocompleteSource] : fallback,
+    ]),
+  ) as AutocompleteSources;
+}
+
+function normalizeSuggestionUsage(value: unknown): Record<string, SuggestionUsage> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value)
+      .map(([id, usage]) => {
+        if (!id.trim() || !usage || typeof usage !== "object" || Array.isArray(usage)) return null;
+        const source = usage as Partial<SuggestionUsage>;
+        if (!Number.isFinite(source.count) || !Number.isFinite(source.lastUsedAt)) return null;
+        return [id, { count: Math.min(999, Math.max(1, Math.round(source.count!))), lastUsedAt: Math.max(0, Math.round(source.lastUsedAt!)) }] as const;
+      })
+      .filter((entry): entry is readonly [string, SuggestionUsage] => Boolean(entry))
+      .sort((a, b) => b[1].lastUsedAt - a[1].lastUsedAt)
+      .slice(0, 200),
+  );
+}
+
+function normalizeGlobalPromptHistory(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  return value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter((item) => item && !seen.has(item) && Boolean(seen.add(item)))
+    .slice(0, 100);
+}
+
+function normalizeWorkspaceLauncherPreference(value: unknown): WorkspaceLauncherPreference {
+  return value === "vscode" || value === "zed" || value === "file_manager" || value === "terminal" || value === "git_bash" || value === "wsl" || value === "android_studio"
+    ? value
+    : "remember";
+}
+
 function persistWindowAlwaysOnTop(windowAlwaysOnTop: boolean): void {
   void Promise.resolve(writeUserStateKey(WINDOW_ALWAYS_ON_TOP_KEY, String(windowAlwaysOnTop))).catch(() => {});
 }
@@ -229,6 +376,7 @@ export const useUiPreferences = create<UiPreferencesState>()(
       developerMode: false,
       experimentalHashlinePatch: false,
       chatLayoutStyle: "transcript",
+      showEmptyChatRidgeline: true,
       messageWidth: "standard",
       avatarStyle: "none",
       codeBlockTheme: "match",
@@ -236,6 +384,26 @@ export const useUiPreferences = create<UiPreferencesState>()(
       backgroundTreatment: "clear",
       gitPanelExpanded: false,
       toolsExpanded: false,
+      startupBehavior: "restore",
+      restoreOpenPanels: true,
+      notifyRunFinished: false,
+      notifyNeedsAttention: false,
+      notifyOnlyWhenUnfocused: true,
+      notificationIncludeThreadTitle: false,
+      quickActionMode: "smart",
+      pinnedQuickActions: [],
+      projectQuickActionOverrides: {},
+      autocompleteMode: "automatic",
+      autocompleteSources: { ...DEFAULT_AUTOCOMPLETE_SOURCES },
+      personalizedSuggestions: true,
+      suggestionUsage: {},
+      promptHistoryScope: "thread",
+      globalPromptHistory: [],
+      threadExportFormat: "json",
+      workspaceLauncherPreference: "remember",
+      newProjectChatWorkspace: "current",
+      composerCompletionMode: "off",
+      remoteCompletionConfirmed: false,
       workspaceLauncherLastUsedByFolder: {},
       notices: [],
       appShortcuts: { ...DEFAULT_APP_SHORTCUTS },
@@ -268,6 +436,7 @@ export const useUiPreferences = create<UiPreferencesState>()(
       setDeveloperMode: (developerMode) => set({ developerMode }),
       setExperimentalHashlinePatch: (experimentalHashlinePatch) => set({ experimentalHashlinePatch }),
       setChatLayoutStyle: (chatLayoutStyle) => set({ chatLayoutStyle: normalizeChatLayoutStyle(chatLayoutStyle) }),
+      setShowEmptyChatRidgeline: (showEmptyChatRidgeline) => set({ showEmptyChatRidgeline }),
       setMessageWidth: (messageWidth) => set({ messageWidth: normalizeMessageWidth(messageWidth) }),
       setAvatarStyle: (avatarStyle) => set({ avatarStyle: normalizeAvatarStyle(avatarStyle) }),
       setCodeBlockTheme: (codeBlockTheme) => set({ codeBlockTheme: normalizeCodeBlockTheme(codeBlockTheme) }),
@@ -275,6 +444,49 @@ export const useUiPreferences = create<UiPreferencesState>()(
       setBackgroundTreatment: (backgroundTreatment) => set({ backgroundTreatment: normalizeBackgroundTreatment(backgroundTreatment) }),
       setGitPanelExpanded: (gitPanelExpanded) => set({ gitPanelExpanded }),
       setToolsExpanded: (toolsExpanded) => set({ toolsExpanded }),
+      setStartupBehavior: (startupBehavior) => set({ startupBehavior: normalizeEnum<StartupBehavior>(startupBehavior, ["restore", "new-chat"], "restore") }),
+      setRestoreOpenPanels: (restoreOpenPanels) => set({ restoreOpenPanels }),
+      setNotifyRunFinished: (notifyRunFinished) => set({ notifyRunFinished }),
+      setNotifyNeedsAttention: (notifyNeedsAttention) => set({ notifyNeedsAttention }),
+      setNotifyOnlyWhenUnfocused: (notifyOnlyWhenUnfocused) => set({ notifyOnlyWhenUnfocused }),
+      setNotificationIncludeThreadTitle: (notificationIncludeThreadTitle) => set({ notificationIncludeThreadTitle }),
+      setQuickActionMode: (quickActionMode) => set({ quickActionMode: normalizeEnum<QuickActionMode>(quickActionMode, ["smart", "pinned", "hidden"], "smart") }),
+      setPinnedQuickActions: (actions) => set({ pinnedQuickActions: normalizePinnedQuickActions(actions) }),
+      setProjectQuickActionOverride: (projectId, actions) => set((state) => {
+        const key = projectId.trim();
+        if (!key) return {};
+        const next = { ...state.projectQuickActionOverrides };
+        if (actions == null) delete next[key];
+        else next[key] = normalizePinnedQuickActions(actions);
+        return { projectQuickActionOverrides: next };
+      }),
+      setAutocompleteMode: (autocompleteMode) => set({ autocompleteMode: normalizeEnum<AutocompleteMode>(autocompleteMode, ["automatic", "manual", "off"], "automatic") }),
+      setAutocompleteSource: (source, enabled) => set((state) => ({ autocompleteSources: { ...state.autocompleteSources, [source]: enabled } })),
+      setPersonalizedSuggestions: (personalizedSuggestions) => set({ personalizedSuggestions }),
+      recordSuggestionUse: (id) => set((state) => {
+        const key = id.trim();
+        if (!key) return {};
+        const existing = state.suggestionUsage[key];
+        return {
+          suggestionUsage: normalizeSuggestionUsage({
+            ...state.suggestionUsage,
+            [key]: { count: Math.min(999, (existing?.count ?? 0) + 1), lastUsedAt: Date.now() },
+          }),
+        };
+      }),
+      resetSuggestionHistory: () => set({ suggestionUsage: {} }),
+      setPromptHistoryScope: (promptHistoryScope) => set({ promptHistoryScope: normalizeEnum<PromptHistoryScope>(promptHistoryScope, ["thread", "global", "off"], "thread") }),
+      recordGlobalPrompt: (prompt) => set((state) => {
+        const value = prompt.trim();
+        if (!value) return {};
+        return { globalPromptHistory: [value, ...state.globalPromptHistory.filter((item) => item !== value)].slice(0, 100) };
+      }),
+      clearGlobalPromptHistory: () => set({ globalPromptHistory: [] }),
+      setThreadExportFormat: (threadExportFormat) => set({ threadExportFormat: normalizeEnum<ThreadExportFormat>(threadExportFormat, ["json", "markdown"], "json") }),
+      setWorkspaceLauncherPreference: (workspaceLauncherPreference) => set({ workspaceLauncherPreference: normalizeWorkspaceLauncherPreference(workspaceLauncherPreference) }),
+      setNewProjectChatWorkspace: (newProjectChatWorkspace) => set({ newProjectChatWorkspace: normalizeEnum<NewProjectChatWorkspace>(newProjectChatWorkspace, ["current", "ask", "worktree"], "current") }),
+      setComposerCompletionMode: (composerCompletionMode) => set({ composerCompletionMode: normalizeEnum<ComposerCompletionMode>(composerCompletionMode, ["off", "local", "current"], "off") }),
+      setRemoteCompletionConfirmed: (remoteCompletionConfirmed) => set({ remoteCompletionConfirmed }),
       rememberWorkspaceLauncher: (folder, launcherId) =>
         set((state) => ({
           workspaceLauncherLastUsedByFolder: rememberWorkspaceLauncherInHistory(
@@ -365,6 +577,7 @@ export const useUiPreferences = create<UiPreferencesState>()(
           developerMode: typeof saved?.developerMode === "boolean" ? saved.developerMode : current.developerMode,
           experimentalHashlinePatch: typeof saved?.experimentalHashlinePatch === "boolean" ? saved.experimentalHashlinePatch : current.experimentalHashlinePatch,
           chatLayoutStyle: normalizeChatLayoutStyle(saved?.chatLayoutStyle),
+          showEmptyChatRidgeline: typeof saved?.showEmptyChatRidgeline === "boolean" ? saved.showEmptyChatRidgeline : true,
           messageWidth: normalizeMessageWidth(saved?.messageWidth),
           avatarStyle: normalizeAvatarStyle(saved?.avatarStyle),
           codeBlockTheme: normalizeCodeBlockTheme(saved?.codeBlockTheme),
@@ -377,6 +590,26 @@ export const useUiPreferences = create<UiPreferencesState>()(
               : typeof (saved as { workbenchExpanded?: unknown } | undefined)?.workbenchExpanded === "boolean"
                 ? Boolean((saved as { workbenchExpanded: boolean }).workbenchExpanded)
                 : current.toolsExpanded,
+          startupBehavior: normalizeEnum(saved?.startupBehavior, ["restore", "new-chat"], "restore"),
+          restoreOpenPanels: typeof saved?.restoreOpenPanels === "boolean" ? saved.restoreOpenPanels : true,
+          notifyRunFinished: typeof saved?.notifyRunFinished === "boolean" ? saved.notifyRunFinished : false,
+          notifyNeedsAttention: typeof saved?.notifyNeedsAttention === "boolean" ? saved.notifyNeedsAttention : false,
+          notifyOnlyWhenUnfocused: typeof saved?.notifyOnlyWhenUnfocused === "boolean" ? saved.notifyOnlyWhenUnfocused : true,
+          notificationIncludeThreadTitle: typeof saved?.notificationIncludeThreadTitle === "boolean" ? saved.notificationIncludeThreadTitle : false,
+          quickActionMode: normalizeEnum(saved?.quickActionMode, ["smart", "pinned", "hidden"], "smart"),
+          pinnedQuickActions: normalizePinnedQuickActions(saved?.pinnedQuickActions),
+          projectQuickActionOverrides: normalizeQuickActionOverrides(saved?.projectQuickActionOverrides),
+          autocompleteMode: normalizeEnum(saved?.autocompleteMode, ["automatic", "manual", "off"], "automatic"),
+          autocompleteSources: normalizeAutocompleteSources(saved?.autocompleteSources),
+          personalizedSuggestions: typeof saved?.personalizedSuggestions === "boolean" ? saved.personalizedSuggestions : true,
+          suggestionUsage: normalizeSuggestionUsage(saved?.suggestionUsage),
+          promptHistoryScope: normalizeEnum(saved?.promptHistoryScope, ["thread", "global", "off"], "thread"),
+          globalPromptHistory: normalizeGlobalPromptHistory(saved?.globalPromptHistory),
+          threadExportFormat: normalizeEnum(saved?.threadExportFormat, ["json", "markdown"], "json"),
+          workspaceLauncherPreference: normalizeWorkspaceLauncherPreference(saved?.workspaceLauncherPreference),
+          newProjectChatWorkspace: normalizeEnum(saved?.newProjectChatWorkspace, ["current", "ask", "worktree"], "current"),
+          composerCompletionMode: normalizeEnum(saved?.composerCompletionMode, ["off", "local", "current"], "off"),
+          remoteCompletionConfirmed: typeof saved?.remoteCompletionConfirmed === "boolean" ? saved.remoteCompletionConfirmed : false,
           workspaceLauncherLastUsedByFolder: normalizeWorkspaceLauncherHistory(saved?.workspaceLauncherLastUsedByFolder),
           notices: [],
           appShortcuts: normalizeAppShortcuts(saved?.appShortcuts),
@@ -406,6 +639,7 @@ export const useUiPreferences = create<UiPreferencesState>()(
         developerMode: state.developerMode,
         experimentalHashlinePatch: state.experimentalHashlinePatch,
         chatLayoutStyle: normalizeChatLayoutStyle(state.chatLayoutStyle),
+        showEmptyChatRidgeline: state.showEmptyChatRidgeline,
         messageWidth: normalizeMessageWidth(state.messageWidth),
         avatarStyle: normalizeAvatarStyle(state.avatarStyle),
         codeBlockTheme: normalizeCodeBlockTheme(state.codeBlockTheme),
@@ -413,6 +647,26 @@ export const useUiPreferences = create<UiPreferencesState>()(
         backgroundTreatment: normalizeBackgroundTreatment(state.backgroundTreatment),
         gitPanelExpanded: state.gitPanelExpanded,
         toolsExpanded: state.toolsExpanded,
+        startupBehavior: state.startupBehavior,
+        restoreOpenPanels: state.restoreOpenPanels,
+        notifyRunFinished: state.notifyRunFinished,
+        notifyNeedsAttention: state.notifyNeedsAttention,
+        notifyOnlyWhenUnfocused: state.notifyOnlyWhenUnfocused,
+        notificationIncludeThreadTitle: state.notificationIncludeThreadTitle,
+        quickActionMode: state.quickActionMode,
+        pinnedQuickActions: normalizePinnedQuickActions(state.pinnedQuickActions),
+        projectQuickActionOverrides: normalizeQuickActionOverrides(state.projectQuickActionOverrides),
+        autocompleteMode: state.autocompleteMode,
+        autocompleteSources: normalizeAutocompleteSources(state.autocompleteSources),
+        personalizedSuggestions: state.personalizedSuggestions,
+        suggestionUsage: normalizeSuggestionUsage(state.suggestionUsage),
+        promptHistoryScope: state.promptHistoryScope,
+        globalPromptHistory: normalizeGlobalPromptHistory(state.globalPromptHistory),
+        threadExportFormat: state.threadExportFormat,
+        workspaceLauncherPreference: state.workspaceLauncherPreference,
+        newProjectChatWorkspace: state.newProjectChatWorkspace,
+        composerCompletionMode: state.composerCompletionMode,
+        remoteCompletionConfirmed: state.remoteCompletionConfirmed,
         workspaceLauncherLastUsedByFolder: normalizeWorkspaceLauncherHistory(state.workspaceLauncherLastUsedByFolder),
         appShortcuts: normalizeAppShortcuts(state.appShortcuts),
       }),

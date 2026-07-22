@@ -1,4 +1,5 @@
-import { composerAutocompleteTriggerAt, composerCommandRunsOnSelection, mcpToolTagCompletion, replaceComposerAutocompleteTrigger, skillTagCompletion } from "../src/lib/composerAutocomplete.js";
+import { composerAutocompleteTriggerAt, composerCommandRunsOnSelection, composerSuggestionMatchScore, mcpToolTagCompletion, replaceComposerAutocompleteTrigger, skillTagCompletion } from "../src/lib/composerAutocomplete.js";
+import { isLoopbackProviderEndpoint } from "../src/lib/providerEndpoint.js";
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -38,3 +39,10 @@ equal(composerAutocompleteTriggerAt("run/path", "run/path".length), null, "slash
 equal(composerCommandRunsOnSelection("plan"), true, "plan should activate as soon as it is selected");
 equal(composerCommandRunsOnSelection("goal"), true, "goal should activate as soon as it is selected");
 equal(composerCommandRunsOnSelection("model"), false, "argument-taking settings should remain in the composer");
+equal(composerSuggestionMatchScore("model picker", "mo"), 0, "prefix matches should rank first");
+equal(composerSuggestionMatchScore("choose model", "mo"), 1, "token-prefix matches should rank second");
+assert((composerSuggestionMatchScore("remote model", "emote") ?? 0) >= 2, "substring matches should rank after token matches");
+equal(composerSuggestionMatchScore("model picker", "xyz"), null, "non-matches should be excluded");
+equal(isLoopbackProviderEndpoint("http://127.0.0.1:11434/v1"), true, "IPv4 loopback providers should be local");
+equal(isLoopbackProviderEndpoint("http://localhost:1234/v1"), true, "localhost providers should be local");
+equal(isLoopbackProviderEndpoint("https://api.openai.com/v1"), false, "hosted providers should not be local");

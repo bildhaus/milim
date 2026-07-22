@@ -1,4 +1,5 @@
 import type { ModelInfo, ProviderInfo } from "../api";
+import { isLoopbackProviderEndpoint } from "./providerEndpoint.js";
 
 const PROVIDER_MODEL_PREFIX = "provider:";
 const CODEX_MODEL_PREFIX = "codex:";
@@ -339,21 +340,10 @@ function trimTrailingZero(value: number): string {
 function providerNeedsKey(
   provider: Pick<ProviderInfo, "kind" | "base_url">,
 ): boolean {
-  if (provider.kind === "openai_compatible" && isLocalEndpoint(provider.base_url)) {
+  if (provider.kind === "openai_compatible" && isLoopbackProviderEndpoint(provider.base_url)) {
     return false;
   }
   return true;
-}
-
-function isLocalEndpoint(baseUrl: string): boolean {
-  try {
-    const url = new URL(baseUrl);
-    return ["localhost", "127.0.0.1", "::1", "[::1]"].includes(url.hostname);
-  } catch {
-    return /^(https?:\/\/)?(localhost|127\.0\.0\.1|\[::1\])/i.test(
-      baseUrl.trim(),
-    );
-  }
 }
 
 export function mergeModelListsForPicker(

@@ -8160,6 +8160,35 @@ html[data-dark="true"] .preview-control-cursor {
   text-decoration-color: color-mix(in srgb, currentColor 66%, transparent);
   text-underline-offset: 2px;
 }
+.composer-ghost-text {
+  color: var(--tertiary-text);
+  opacity: 0.72;
+}
+
+.quick-action-editor {
+  display: grid;
+  gap: 7px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border-primary);
+}
+.quick-action-editor input,
+.quick-action-editor textarea {
+  width: 100%;
+  min-height: 32px;
+  padding: 7px 9px;
+  border: 1px solid var(--border-primary);
+  border-radius: 7px;
+  background: var(--bg-secondary);
+  color: var(--primary-text);
+  font: inherit;
+  resize: vertical;
+}
+.quick-action-editor textarea { min-height: 64px; }
+.quick-action-editor-controls {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
 .composer-token-link {
   display: inline-block;
   text-decoration-thickness: 1.5px;
@@ -8410,6 +8439,7 @@ html[data-dark="true"] .preview-control-cursor {
   grid-template-columns: 196px minmax(0, 1fr);
   gap: 18px;
   min-height: 0;
+  margin-top: 12px;
 }
 .settings-nav {
   display: flex;
@@ -8592,13 +8622,20 @@ html[data-dark="true"] .preview-control-cursor {
   background: rgba(245, 158, 11, 0.13);
   color: #f59e0b;
 }
+.settings-nav-status.neutral {
+  gap: 5px;
+  padding: 2px 6px;
+  background: var(--chip-hover);
+  color: var(--secondary-text);
+}
 .settings-nav-status.warn::before { width: 5px; height: 5px; }
 .settings-search-results {
   display: grid;
+  align-content: start;
   gap: 3px;
-  margin-top: 6px;
-  padding-top: 6px;
-  border-top: 1px solid var(--border-primary);
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 .settings-search-result {
   display: grid;
@@ -8673,12 +8710,6 @@ html[data-dark="true"] .preview-control-cursor {
   display: grid;
   gap: 14px;
 }
-.settings-section-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  flex: none;
-}
 .settings-master-toggle {
   display: inline-flex;
   align-items: center;
@@ -8719,40 +8750,6 @@ html[data-dark="true"] .preview-control-cursor {
 .settings-subtab.active {
   background: var(--panel-row-active);
   color: var(--primary-text);
-}
-.settings-status-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  flex: none;
-  max-width: 150px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  padding: 4px 8px;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--tertiary-text);
-  font-size: 11px;
-  font-weight: 600;
-}
-.settings-status-pill::before {
-  content: "";
-  display: inline-block;
-  width: 5px;
-  height: 5px;
-  margin-right: 5px;
-  border-radius: 50%;
-  background: currentColor;
-  vertical-align: 1px;
-}
-.settings-status-pill.ready {
-  background: color-mix(in srgb, var(--success) 12%, transparent);
-  color: var(--success);
-}
-.settings-status-pill.warn {
-  background: rgba(245, 158, 11, 0.13);
-  color: #f59e0b;
 }
 .settings-block {
   display: grid;
@@ -9615,8 +9612,9 @@ html[data-dark="true"] .preview-control-cursor {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-top: 4px;
-  padding: 9px 0 0;
+  min-height: 56px;
+  margin: 0;
+  padding: 12px 0;
   border: 1px solid color-mix(in srgb, var(--border-primary) 76%, transparent);
   border-width: 1px 0 0;
   border-radius: 0;
@@ -9630,10 +9628,11 @@ html[data-dark="true"] .preview-control-cursor {
 }
 .setting-toggle-row strong {
   color: var(--primary-text);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
 }
 .setting-toggle-row span {
+  color: var(--tertiary-text);
   font-size: 12px;
   line-height: 1.35;
 }
@@ -9642,8 +9641,9 @@ html[data-dark="true"] .preview-control-cursor {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
-  margin-top: 4px;
-  padding: 9px 0 0;
+  min-height: 56px;
+  margin: 0;
+  padding: 12px 0;
   border: 1px solid color-mix(in srgb, var(--border-primary) 76%, transparent);
   border-width: 1px 0 0;
   border-radius: 0;
@@ -9656,7 +9656,7 @@ html[data-dark="true"] .preview-control-cursor {
 }
 .settings-action-row strong {
   color: var(--primary-text);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
 }
 .settings-action-row span {
@@ -9674,8 +9674,9 @@ html[data-dark="true"] .preview-control-cursor {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
-  margin-top: 4px;
-  padding: 9px 0 0;
+  min-height: 56px;
+  margin: 0;
+  padding: 12px 0;
   border: 1px solid color-mix(in srgb, var(--border-primary) 76%, transparent);
   border-width: 1px 0 0;
   color: var(--secondary-text);
@@ -9687,7 +9688,7 @@ html[data-dark="true"] .preview-control-cursor {
 }
 .shortcut-recorder-row strong {
   color: var(--primary-text);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
 }
 .shortcut-recorder-row span {
@@ -9757,9 +9758,34 @@ html[data-dark="true"] .preview-control-cursor {
   display: grid;
   gap: 9px;
 }
+.setting-stack:has(> .setting-toggle-row),
+.setting-stack:has(> .settings-action-row),
+.setting-stack:has(> .shortcut-recorder-row) {
+  gap: 0;
+}
 .setting-stack > .setting-toggle-row:first-child {
   padding-top: 0;
   border-top-color: transparent;
+}
+.settings-block > .settings-action-row:first-child,
+.settings-block > .shortcut-recorder-row:first-child,
+.setting-stack > .settings-action-row:first-child,
+.setting-stack > .shortcut-recorder-row:first-child {
+  padding-top: 0;
+  border-top-color: transparent;
+}
+.settings-content .ui-switch {
+  width: 40px;
+  height: 24px;
+}
+.settings-content .ui-switch-knob {
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+}
+.settings-content .ui-switch.on .ui-switch-knob {
+  left: 20px;
 }
 .setting-field input {
   width: 100%;
@@ -11122,11 +11148,6 @@ html[data-dark="true"] .preview-control-cursor {
   .settings-detail-head {
     align-items: flex-start;
     gap: 12px;
-  }
-  .settings-section-actions {
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 8px;
   }
   .appearance-choice-grid,
   .appearance-chat-layout-grid,

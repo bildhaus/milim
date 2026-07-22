@@ -52,6 +52,7 @@ import {
   setInterfaceSoundsEnabled,
 } from "./ui/sounds";
 import { shortcutLabel } from "./ui/shortcuts";
+import { createInteractiveChat } from "./lib/newChatCoordinator";
 import { useUiPreferences } from "./ui/store";
 
 const SettingsDialog = lazy(() =>
@@ -104,6 +105,7 @@ function BackgroundLayer() {
     </div>
   );
 }
+
 function OnboardingGate() {
   const status = useOnboarding((s) => s.status);
   const developerShowOnboarding = useOnboarding(
@@ -341,6 +343,8 @@ function AppContent() {
   const [sessionsHydrated, setSessionsHydrated] = useState(() =>
     useSessions.persist.hasHydrated(),
   );
+  const [uiHydrated, setUiHydrated] = useState(() => useUiPreferences.persist.hasHydrated());
+  const startupAppliedRef = useRef(false);
   useEffect(() => {
     installUserStateFlushHandlers();
     return purgeExpiredArchivesAfterHydration();
@@ -351,6 +355,22 @@ function AppContent() {
       setSessionsHydrated(true),
     );
   }, [sessionsHydrated]);
+  useEffect(() => {
+    if (uiHydrated) return;
+    return useUiPreferences.persist.onFinishHydration(() => setUiHydrated(true));
+  }, [uiHydrated]);
+  useEffect(() => {
+    if (!sessionsHydrated || !uiHydrated || startupAppliedRef.current) return;
+    startupAppliedRef.current = true;
+    const preferences = useUiPreferences.getState();
+    const sessions = useSessions.getState();
+    if (preferences.startupBehavior === "new-chat") sessions.newUserChat();
+    if (!preferences.restoreOpenPanels) {
+      const activeId = useSessions.getState().activeId;
+      sessions.setContextPanelOpen(activeId, false);
+      sessions.setInspectorOpen(activeId, false);
+    }
+  }, [sessionsHydrated, uiHydrated]);
   useEffect(() => {
     const ids = new Set(sessionIds ? sessionIds.split("\0") : []);
     if (!sessionsHydrated) return;
@@ -424,8 +444,7 @@ function AppContent() {
   }
 
   function startNewChat() {
-    const { activeId, getSettings, newChat } = useSessions.getState();
-    newChat(getSettings(activeId));
+    void createInteractiveChat();
     focusComposer();
   }
 

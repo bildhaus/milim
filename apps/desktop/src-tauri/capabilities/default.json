@@ -31,6 +31,7 @@
     "core:webview:allow-webview-close",
     "core:webview:allow-webview-hide",
     "core:webview:allow-webview-show",
-    "dialog:default"
+    "dialog:default",
+    "notification:default"
   ]
 }

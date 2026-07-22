@@ -57,6 +57,9 @@ equal(DEFAULT_MEDIA_SETTINGS.providerId, "", "media provider should be unset by 
 equal(useSettings.getState().media.providerId, "", "persisted media provider should start unset");
 deepEqual(useSettings.getState().reasoningEffortByModel, {}, "reasoning effort should default to no global model overrides");
 deepEqual(useSettings.getState().collapsedModelGroups, [], "model provider groups should default to expanded");
+equal(useSettings.getState().newThreadBehavior, "inherit", "new chats should preserve inheritance by default");
+equal(useSettings.getState().unavailableModelPolicy, "ask", "unavailable defaults should ask by default");
+equal(useSettings.getState().configuredThreadDefaults.toolApproval, "guarded", "configured approval should default guarded");
 assert(!("modelPresets" in useSettings.getState()), "obsolete model presets should not be exposed");
 assert(!("presetsOnly" in useSettings.getState()), "obsolete presets-only state should not be exposed");
 
@@ -135,5 +138,14 @@ localStorage.setItem("milim.settings", JSON.stringify({
 }));
 await useSettings.persist.rehydrate();
 deepEqual(useSettings.getState().collapsedModelGroups, ["OpenAI", "Codex"], "persisted model groups should normalize malformed values");
+
+useSettings.getState().setNewThreadBehavior("configured");
+useSettings.getState().setConfiguredThreadDefaults({ model: "provider:model", toolApproval: "review", privacy: "redact" });
+equal(useSettings.getState().configuredThreadDefaults.model, "provider:model", "configured model should persist");
+equal(useSettings.getState().configuredThreadDefaults.toolApproval, "review", "review should be a valid configured approval");
+useSettings.getState().setConfiguredThreadDefaults({ toolApproval: "open" as never });
+equal(useSettings.getState().configuredThreadDefaults.toolApproval, "guarded", "open should never persist as a global approval default");
+useSettings.getState().setUnavailableModelPolicy("blocked");
+equal(useSettings.getState().unavailableModelPolicy, "blocked", "blocked fallback should persist");
 
 export {};

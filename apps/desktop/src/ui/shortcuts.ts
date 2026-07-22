@@ -1,10 +1,11 @@
-export type AppShortcutAction = "newChat" | "focusSearch" | "focusComposer" | "stopGeneration" | "toggleSidebar" | "previousThread";
+export type AppShortcutAction = "newChat" | "focusSearch" | "focusComposer" | "openComposerSuggestions" | "stopGeneration" | "toggleSidebar" | "previousThread";
 export type AppShortcuts = Record<AppShortcutAction, string>;
 
 export const APP_SHORTCUT_ACTIONS: AppShortcutAction[] = [
   "newChat",
   "focusSearch",
   "focusComposer",
+  "openComposerSuggestions",
   "stopGeneration",
   "toggleSidebar",
   "previousThread",
@@ -14,6 +15,7 @@ export const APP_SHORTCUT_LABELS: Record<AppShortcutAction, string> = {
   newChat: "New chat",
   focusSearch: "Command palette",
   focusComposer: "Focus composer",
+  openComposerSuggestions: "Open composer suggestions",
   stopGeneration: "Stop generation",
   toggleSidebar: "Toggle sidebar",
   previousThread: "Previous thread",
@@ -23,6 +25,7 @@ export const DEFAULT_APP_SHORTCUTS: AppShortcuts = {
   newChat: "Mod+N",
   focusSearch: "Mod+K",
   focusComposer: "Mod+L",
+  openComposerSuggestions: "Mod+/",
   stopGeneration: "Escape",
   toggleSidebar: "Mod+B",
   previousThread: "Ctrl+Tab",

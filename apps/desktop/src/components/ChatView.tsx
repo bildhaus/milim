@@ -22,6 +22,7 @@ import {
   claudeRuntimeModel,
   completeChat,
   completeChatWithMetrics,
+  requestComposerCompletion,
   codexRuntimeModel,
   inferAttachmentMime,
   generateMedia,
@@ -319,6 +320,9 @@ import { useSettings, type MediaSettings } from "../settings/store";
 import { themeCssVariables } from "../theme/applyTheme";
 import { useTheme } from "../theme/store";
 import { shortcutLabel, shortcutMatchesEvent } from "../ui/shortcuts";
+import { sendMilimNotification } from "../lib/nativeNotifications";
+import { createInteractiveChat } from "../lib/newChatCoordinator";
+import { isLoopbackProviderEndpoint } from "../lib/providerEndpoint.js";
 import { pendingAttentionKey, playInterfaceSound } from "../ui/sounds";
 import { DEFAULT_PREVIEW_PANEL_WIDTH, useUiPreferences } from "../ui/store";
 import { AgentAvatar } from "./AgentAvatar";
@@ -2206,7 +2210,7 @@ function EmptyStarterActions({
   onSelect,
 }: {
   strip: EmptyStarterStrip;
-  onSelect: (prompt: string) => void;
+  onSelect: (id: string, prompt: string) => void;
 }) {
   return (
     <section
@@ -2241,7 +2245,7 @@ function EmptyStarterActions({
                 data-testid="empty-starter-action"
                 key={suggestion.id}
                 title={`${suggestion.label}: ${suggestion.detail}`}
-                onClick={() => onSelect(suggestion.prompt)}
+                onClick={() => onSelect(suggestion.id, suggestion.prompt)}
               >
                 <span className="empty-starter-icon" aria-hidden="true">
                   {emptyStarterIcon(suggestion.icon)}
@@ -3256,13 +3260,16 @@ export function ChatView({
     () => artifactRevisionChoiceByOccurrence(artifactRevisionGroupsForThread),
     [artifactRevisionGroupsForThread],
   );
-  const sentHistory = useMemo(
-    () =>
-      messages
-        .filter((message) => message.role === "user" && message.content.trim())
-        .map((message) => message.content.trim()),
-    [messages],
-  );
+  const promptHistoryScope = useUiPreferences((s) => s.promptHistoryScope);
+  const globalPromptHistory = useUiPreferences((s) => s.globalPromptHistory);
+  const recordGlobalPrompt = useUiPreferences((s) => s.recordGlobalPrompt);
+  const sentHistory = useMemo(() => {
+    if (promptHistoryScope === "off") return [];
+    if (promptHistoryScope === "global") return globalPromptHistory.slice().reverse();
+    return messages
+      .filter((message) => message.role === "user" && message.content.trim())
+      .map((message) => message.content.trim());
+  }, [globalPromptHistory, messages, promptHistoryScope]);
   const activeTitle = useSessions(
     (s) =>
       s.sessions.find((x) => x.id === s.activeId)?.title ?? "Current thread",
@@ -3297,7 +3304,14 @@ export function ChatView({
       preferences.interfaceSounds &&
       preferences.soundOnAttention
     ) playInterfaceSound(preferences.attentionSound);
-  }, [attentionKey]);
+    if (preferences.notifyNeedsAttention) {
+      void sendMilimNotification("attention", {
+        threadTitle: activeTitle,
+        includeThreadTitle: preferences.notificationIncludeThreadTitle,
+        onlyWhenUnfocused: preferences.notifyOnlyWhenUnfocused,
+      });
+    }
+  }, [activeTitle, attentionKey]);
   const projects = useSessions((s) => s.projects);
   const sidebarState = useSessions((s) => s.sidebar);
   const generatingSessionIds = useSessions((s) => s.generatingSessionIds);
@@ -3371,6 +3385,9 @@ export function ChatView({
   );
   const agents = useAgents((s) => s.agents);
   const mediaSettings = useSettings((s) => s.media);
+  const favoriteModels = useSettings((s) => s.favorites);
+  const configuredNewThreads = useSettings((s) => s.newThreadBehavior === "configured");
+  const unavailableModelPolicy = useSettings((s) => s.unavailableModelPolicy);
   const setMediaSettings = useSettings((s) => s.setMediaSettings);
   const previewPanelWidth = useUiPreferences((s) => s.previewPanelWidth);
   const setPreviewPanelWidth = useUiPreferences((s) => s.setPreviewPanelWidth);
@@ -3386,7 +3403,17 @@ export function ChatView({
   const activeTheme = useTheme((s) => s.theme);
   const backgroundFit = useUiPreferences((s) => s.backgroundFit);
   const backgroundTreatment = useUiPreferences((s) => s.backgroundTreatment);
+  const showEmptyChatRidgeline = useUiPreferences((s) => s.showEmptyChatRidgeline);
   const pushNotice = useUiPreferences((s) => s.pushNotice);
+  const quickActionMode = useUiPreferences((s) => s.quickActionMode);
+  const pinnedQuickActions = useUiPreferences((s) => s.pinnedQuickActions);
+  const projectQuickActionOverrides = useUiPreferences((s) => s.projectQuickActionOverrides);
+  const recordSuggestionUse = useUiPreferences((s) => s.recordSuggestionUse);
+  const personalizedSuggestions = useUiPreferences((s) => s.personalizedSuggestions);
+  const suggestionUsage = useUiPreferences((s) => s.suggestionUsage);
+  const threadExportFormat = useUiPreferences((s) => s.threadExportFormat);
+  const composerCompletionMode = useUiPreferences((s) => s.composerCompletionMode);
+  const remoteCompletionConfirmed = useUiPreferences((s) => s.remoteCompletionConfirmed);
   const {
     model,
     instructions,
@@ -3428,15 +3455,34 @@ export function ChatView({
   const emptyStarterStatusLoading =
     gitStatusLoading ||
     Boolean(folder.trim() && gitStatus?.folder && !gitStatusMatchesActiveFolder);
-  const emptyStarterStrip = useMemo(
-    () =>
-      buildEmptyStarterStrip(
-        folder,
-        emptyStarterGitStatus,
-        emptyStarterStatusLoading,
-      ),
-    [folder, emptyStarterGitStatus, emptyStarterStatusLoading],
-  );
+  const emptyStarterStrip = useMemo(() => {
+    if (quickActionMode === "pinned") {
+      const projectId = projects.find((project) => project.folder === folder)?.id;
+      const actions = projectId && Object.prototype.hasOwnProperty.call(projectQuickActionOverrides, projectId)
+        ? projectQuickActionOverrides[projectId]
+        : pinnedQuickActions;
+      return {
+        context: null,
+        loading: false,
+        suggestions: actions.map((action) => ({
+          id: action.id,
+          label: action.label,
+          detail: "Pinned prompt",
+          prompt: action.prompt,
+          icon: "pencil" as const,
+        })),
+      };
+    }
+    const strip = buildEmptyStarterStrip(folder, emptyStarterGitStatus, emptyStarterStatusLoading);
+    if (!personalizedSuggestions || strip.loading) return strip;
+    return {
+      ...strip,
+      suggestions: strip.suggestions
+        .map((suggestion, index) => ({ suggestion, index, count: suggestionUsage[`quick:${suggestion.id}`]?.count ?? 0 }))
+        .sort((left, right) => right.count - left.count || left.index - right.index)
+        .map(({ suggestion }) => suggestion),
+    };
+  }, [emptyStarterGitStatus, emptyStarterStatusLoading, folder, personalizedSuggestions, pinnedQuickActions, projectQuickActionOverrides, projects, quickActionMode, suggestionUsage]);
   const activeAgent = useMemo(
     () => agents.find((agent) => agent.id === activeAgentId) ?? null,
     [activeAgentId, agents],
@@ -3595,6 +3641,35 @@ export function ChatView({
     () => mergeModelListsForPicker(models, mediaModelEntries),
     [models, mediaModelEntries],
   );
+  const composerCompletionRequest = useMemo(() => {
+    if (composerCompletionMode === "off" || !model.trim() || isCodexModel(model) || isClaudeModel(model) || isOpenCodeModel(model)) return undefined;
+    const modelInfo = pickerModels.find((item) => item.id === model);
+    const provider = providers.find((item) => item.id === modelInfo?.provider_id);
+    if (!provider) return undefined;
+    if (composerCompletionMode === "local" && !isLoopbackProviderEndpoint(provider.base_url)) return undefined;
+    if (composerCompletionMode === "current" && !remoteCompletionConfirmed) return undefined;
+    return (text: string, signal: AbortSignal) => requestComposerCompletion(model, text, signal);
+  }, [composerCompletionMode, model, pickerModels, providers, remoteCompletionConfirmed]);
+  const unavailableDefaultHandledRef = useRef("");
+  useEffect(() => {
+    if (!modelsLoaded || !configuredNewThreads || messages.length || !model.trim()) return;
+    if (pickerModels.some((item) => item.id === model)) return;
+    const key = `${activeId}:${model}:${unavailableModelPolicy}`;
+    if (unavailableDefaultHandledRef.current === key) return;
+    unavailableDefaultHandledRef.current = key;
+    if (unavailableModelPolicy === "blocked") {
+      setChatNotice({ tone: "error", message: `${model} is unavailable. Configure its provider or choose another model.` });
+      return;
+    }
+    const favorite = unavailableModelPolicy === "favorite"
+      ? favoriteModels.find((favoriteId) => pickerModels.some((item) => item.id === favoriteId))
+      : undefined;
+    updateThreadSettings(activeId, { model: favorite ?? "" });
+    if (!favorite) {
+      setChatNotice({ tone: "info", message: `${model} is unavailable. Choose a model to continue.` });
+      setProvidersOpen(true);
+    }
+  }, [activeId, configuredNewThreads, favoriteModels, messages.length, model, modelsLoaded, pickerModels, unavailableModelPolicy, updateThreadSettings]);
   const activeMediaTarget = useMemo(
     () => resolveActiveMediaTarget(
       effectiveModel,
@@ -6167,6 +6242,21 @@ export function ChatView({
         preferences.soundOnAttention
       ) playInterfaceSound(preferences.attentionSound);
     }
+    const preferences = useUiPreferences.getState();
+    const threadTitle = useSessions.getState().sessions.find((session) => session.id === sessionId)?.title;
+    if (terminalResult.status === "done" && preferences.notifyRunFinished) {
+      void sendMilimNotification("finished", {
+        threadTitle,
+        includeThreadTitle: preferences.notificationIncludeThreadTitle,
+        onlyWhenUnfocused: preferences.notifyOnlyWhenUnfocused,
+      });
+    } else if (terminalResult.status === "error" && preferences.notifyNeedsAttention) {
+      void sendMilimNotification("attention", {
+        threadTitle,
+        includeThreadTitle: preferences.notificationIncludeThreadTitle,
+        onlyWhenUnfocused: preferences.notifyOnlyWhenUnfocused,
+      });
+    }
     return result;
   }
 
@@ -6808,8 +6898,7 @@ export function ChatView({
   }
 
   function startChatInFolder(nextFolder: string) {
-    const store = useSessions.getState();
-    store.newChat({ ...store.getSettings(store.activeId), folder: nextFolder });
+    void createInteractiveChat({ folder: nextFolder });
     setChatNotice(null);
     focusComposer();
   }
@@ -7166,7 +7255,11 @@ export function ChatView({
       case "export":
         exportSessionById(
           activeId,
-          arg === "md" || arg === "markdown" ? "markdown" : "json",
+          arg === "md" || arg === "markdown"
+            ? "markdown"
+            : arg === "json"
+              ? "json"
+              : threadExportFormat,
         );
         return true;
       case "import":
@@ -7174,7 +7267,7 @@ export function ChatView({
         return true;
       case "clear":
         setPendingAttachments([]);
-        useSessions.getState().newChat(threadSettings);
+        void createInteractiveChat();
         focusComposer();
         return true;
       default:
@@ -8015,6 +8108,7 @@ export function ChatView({
         content: text,
         attachments: pendingAttachments,
       });
+      if (text) recordGlobalPrompt(text);
       setInput("");
       setPendingAttachments([]);
       setChatNotice({
@@ -8032,6 +8126,7 @@ export function ChatView({
         });
         return;
       }
+      recordGlobalPrompt(text);
       void sendMediaPrompt(text, activeMediaTarget);
       return;
     }
@@ -8048,6 +8143,7 @@ export function ChatView({
           pendingAttachments,
         )
       ) {
+        recordGlobalPrompt(text);
         setInput("");
         setPendingAttachments([]);
         setGoalComposerSessions((current) => {
@@ -8066,6 +8162,7 @@ export function ChatView({
     setPendingAttachments([]);
     setPendingReviewComments([]);
     const conversation = appendUserTurn(messages, text, attachments);
+    if (text) recordGlobalPrompt(text);
     if (reviewComments.length) {
       conversation[conversation.length - 1] = {
         ...conversation[conversation.length - 1],
@@ -8254,7 +8351,7 @@ export function ChatView({
     setInput("");
     setPendingAttachments([]);
     setChatNotice(null);
-    useSessions.getState().newChat(threadSettings);
+    void createInteractiveChat();
     focusComposer();
   }
 
@@ -8297,6 +8394,13 @@ export function ChatView({
       keywords: ["prompt", "input"],
       shortcut: shortcutLabel(appShortcuts.focusComposer),
       run: focusComposer,
+    },
+    {
+      id: "composer.suggestions",
+      label: "Open composer suggestions",
+      keywords: ["autocomplete", "commands", "skills", "files"],
+      shortcut: shortcutLabel(appShortcuts.openComposerSuggestions),
+      run: () => window.dispatchEvent(new Event("milim:open-composer-suggestions")),
     },
     {
       id: "sidebar.toggle",
@@ -8367,6 +8471,9 @@ export function ChatView({
       } else if (shortcutMatchesEvent(appShortcuts.focusComposer, event)) {
         event.preventDefault();
         focusComposer();
+      } else if (shortcutMatchesEvent(appShortcuts.openComposerSuggestions, event)) {
+        event.preventDefault();
+        window.dispatchEvent(new Event("milim:open-composer-suggestions"));
       } else if (shortcutMatchesEvent(appShortcuts.toggleSidebar, event)) {
         event.preventDefault();
         toggleSidebar();
@@ -9205,7 +9312,7 @@ export function ChatView({
           </div>
 
           <div className="dock">
-            {emptyThread && <MilimUsageRidgeline usage={milimUsage} />}
+            {emptyThread && showEmptyChatRidgeline && <MilimUsageRidgeline usage={milimUsage} />}
             {chatNotice && (
               <div
                 className={`sheet-hint dock-notice ${chatNotice.tone}`}
@@ -9354,15 +9461,19 @@ export function ChatView({
                     : undefined
                 }
                 sentHistory={sentHistory}
+                requestCompletion={composerCompletionRequest}
                 tokens={tokens}
                 contextBudgetTokens={activeContextBudget?.promptBudget}
                 busy={busy}
               />
             </ComposerSurface>
-            {emptyThread && !input.trim() && !activeMediaTarget && (
+            {emptyThread && !input.trim() && !activeMediaTarget && quickActionMode !== "hidden" && (
               <EmptyStarterActions
                 strip={emptyStarterStrip}
-                onSelect={prefillEmptyStarter}
+                onSelect={(id, prompt) => {
+                  recordSuggestionUse(`quick:${id}`);
+                  prefillEmptyStarter(prompt);
+                }}
               />
             )}
           </div>

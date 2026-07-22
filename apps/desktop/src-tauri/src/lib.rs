@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use reqwest::header::ACCEPT;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::ipc::Channel;
@@ -49,7 +49,7 @@ use milim_inference::{remote::RemoteBackend, unavailable::UnavailableBackend, Sh
 use milim_sandbox::{DockerBackend, RunOpts};
 use milim_server::AppState;
 use milim_storage::{Database, DatabaseOptions, JournalMode, SessionsDelta};
-use milim_tools::{Tool, ToolEffect, ToolRegistry};
+use milim_tools::{atomic_write, Tool, ToolEffect, ToolRegistry};
 
 /// Simple Rust/JS bridge example.
 #[tauri::command]
@@ -118,6 +118,192 @@ const MAX_ARTIFACT_PREVIEW_BYTES: usize = 256 * 1024;
 const MAX_WORKSPACE_FILE_SUGGESTION_SCAN: usize = 5_000;
 const ARTIFACT_DIFF_CONTEXT_LINES: usize = 2;
 const ARTIFACT_DIFF_LCS_CELL_LIMIT: usize = 2_000_000;
+const BACKUP_SCHEMA_VERSION: u32 = 1;
+const MAX_BACKUP_BYTES: u64 = 64 * 1024 * 1024;
+const BACKUP_STATE_KEYS: &[&str] = &[
+    "milim.settings",
+    "milim.ui",
+    "milim.onboarding",
+    "milim.themeId",
+    "milim.customThemes",
+    "milim.window.alwaysOnTop",
+    "milim.sessionDrafts",
+];
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MilimBackup {
+    schema_version: u32,
+    app_version: String,
+    created_at: u64,
+    summary: MilimBackupSummary,
+    state: MilimBackupState,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MilimBackupSummary {
+    chats: usize,
+    projects: usize,
+    state_keys: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MilimBackupState {
+    sessions: Value,
+    entries: BTreeMap<String, Value>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupInspection {
+    schema_version: u32,
+    app_version: String,
+    created_at: u64,
+    summary: MilimBackupSummary,
+    bytes: u64,
+}
+
+fn now_timestamp_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn strip_backup_exclusions(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for key in [
+                "threadWorkspace",
+                "retryWorkspace",
+                "pendingHotSwap",
+                "pendingWorkerRunIds",
+                "previewRuntime",
+                "previewRuntimesByKey",
+                "workerRuns",
+                "generatingSessionIds",
+                "accountRuntime",
+                "media",
+                "mediaRequestId",
+            ] {
+                map.remove(key);
+            }
+            for child in map.values_mut() {
+                strip_backup_exclusions(child);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(strip_backup_exclusions),
+        _ => {}
+    }
+}
+
+fn build_backup(store: &milim_storage::UserDataStore) -> std::result::Result<MilimBackup, String> {
+    let sessions_json = store
+        .get_sessions_snapshot()
+        .map_err(|error| error.to_string())?
+        .unwrap_or_else(|| serde_json::json!({ "state": { "sessions": [] }, "version": 0 }).to_string());
+    let mut sessions: Value = serde_json::from_str(&sessions_json).map_err(|error| error.to_string())?;
+    strip_backup_exclusions(&mut sessions);
+    let state = sessions.get("state").and_then(Value::as_object);
+    let chats = state
+        .and_then(|value| value.get("sessions"))
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let projects = state
+        .and_then(|value| value.get("projects"))
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let mut entries = BTreeMap::new();
+    for key in BACKUP_STATE_KEYS {
+        if let Some(raw) = store.get_json(key).map_err(|error| error.to_string())? {
+            entries.insert((*key).to_string(), serde_json::from_str(&raw).map_err(|error| error.to_string())?);
+        }
+    }
+    Ok(MilimBackup {
+        schema_version: BACKUP_SCHEMA_VERSION,
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        created_at: now_timestamp_ms(),
+        summary: MilimBackupSummary { chats, projects, state_keys: entries.len() },
+        state: MilimBackupState { sessions, entries },
+    })
+}
+
+fn read_backup(path: &Path) -> std::result::Result<(MilimBackup, u64), String> {
+    let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
+    if metadata.len() > MAX_BACKUP_BYTES {
+        return Err("Backup is larger than the 64 MiB safety limit.".into());
+    }
+    let bytes = fs::read(path).map_err(|error| error.to_string())?;
+    let backup: MilimBackup = serde_json::from_slice(&bytes).map_err(|error| format!("Malformed backup JSON: {error}"))?;
+    if backup.schema_version != BACKUP_SCHEMA_VERSION {
+        return Err(format!("Unsupported backup schema version {}.", backup.schema_version));
+    }
+    if !backup.state.sessions.is_object() {
+        return Err("Backup sessions state is invalid.".into());
+    }
+    if backup.state.entries.keys().any(|key| !BACKUP_STATE_KEYS.contains(&key.as_str())) {
+        return Err("Backup contains unsupported state keys.".into());
+    }
+    Ok((backup, metadata.len()))
+}
+
+#[tauri::command]
+async fn export_milim_backup(state: tauri::State<'_, UserDataState>, path: String) -> std::result::Result<BackupInspection, String> {
+    let store = state.0.clone();
+    tokio::task::spawn_blocking(move || {
+        let backup = build_backup(&store)?;
+        let bytes = serde_json::to_vec_pretty(&backup).map_err(|error| error.to_string())?;
+        atomic_write(Path::new(&path), &bytes).map_err(|error| error.to_string())?;
+        Ok(BackupInspection {
+            schema_version: backup.schema_version,
+            app_version: backup.app_version,
+            created_at: backup.created_at,
+            summary: backup.summary,
+            bytes: bytes.len() as u64,
+        })
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn inspect_milim_backup(path: String) -> std::result::Result<BackupInspection, String> {
+    tokio::task::spawn_blocking(move || {
+        let (backup, bytes) = read_backup(Path::new(&path))?;
+        Ok(BackupInspection {
+            schema_version: backup.schema_version,
+            app_version: backup.app_version,
+            created_at: backup.created_at,
+            summary: backup.summary,
+            bytes,
+        })
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn restore_milim_backup(state: tauri::State<'_, UserDataState>, path: String) -> std::result::Result<String, String> {
+    let store = state.0.clone();
+    tokio::task::spawn_blocking(move || {
+        let (backup, _) = read_backup(Path::new(&path))?;
+        let recovery = build_backup(&store)?;
+        let recovery_bytes = serde_json::to_vec_pretty(&recovery).map_err(|error| error.to_string())?;
+        let data_path = Paths::resolve().user_db_file();
+        let recovery_path = data_path.parent().unwrap_or(Path::new(".")).join(format!(
+            "pre-restore-{}.milim-backup.json",
+            now_timestamp_ms()
+        ));
+        atomic_write(&recovery_path, &recovery_bytes).map_err(|error| error.to_string())?;
+        let entries = backup.state.entries.into_iter()
+            .map(|(key, value)| serde_json::to_string(&value).map(|json| (key, json)).map_err(|error| error.to_string()))
+            .collect::<std::result::Result<BTreeMap<_, _>, _>>()?;
+        let sessions = serde_json::to_string(&backup.state.sessions).map_err(|error| error.to_string())?;
+        let replace_keys = BACKUP_STATE_KEYS.iter().map(|key| (*key).to_string()).collect::<Vec<_>>();
+        store.replace_backup_state(&replace_keys, entries, &sessions).map_err(|error| error.to_string())?;
+        Ok(recovery_path.to_string_lossy().to_string())
+    }).await.map_err(|error| error.to_string())?
+}
 
 #[derive(serde::Serialize)]
 struct AttachmentFilePayload {
@@ -3608,6 +3794,7 @@ pub fn run() {
         .manage(DesktopPreviewRuntime(preview_runtime))
         .manage(preview_tools_state.clone())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         // Persist + restore window size/position/maximized across restarts.
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(preview_webview::init())
@@ -3711,6 +3898,9 @@ pub fn run() {
             user_sessions_apply_delta,
             user_sessions_delete,
             user_state_import_legacy,
+            export_milim_backup,
+            inspect_milim_backup,
+            restore_milim_backup,
             quit_after_user_state_flush,
             user_data_path,
             pick_attachment_files,

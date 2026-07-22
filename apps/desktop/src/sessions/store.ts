@@ -47,6 +47,7 @@ import {
   sessionStateStorage,
   writeUserStateKey,
 } from "../persistence/userStateStorage.js";
+import { useSettings } from "../settings/store.js";
 
 const COMPOSER_DRAFTS_KEY = "milim.sessionDrafts";
 const STREAMING_PERSIST_MARKER = "__deferStreamingWrite";
@@ -1611,6 +1612,7 @@ interface SessionState {
   queuedMessagesBySession: Record<string, QueuedMessage[]>;
   sidebar: SessionSidebarState;
   newChat: (settings?: ThreadSettingsPatch) => string;
+  newUserChat: (settings?: ThreadSettingsPatch) => string;
   forkSession: (id: string, throughMessageIndex?: number) => string | null;
   importSession: (
     session: Partial<Omit<Session, "settings">> & {
@@ -1803,6 +1805,26 @@ export const useSessions = create<SessionState>()(
             ),
           }));
           return s.id;
+        },
+
+        newUserChat: (settings) => {
+          const current = get().sessions.find((session) => session.id === get().activeId);
+          const preferences = useSettings.getState();
+          const base = preferences.newThreadBehavior === "configured"
+            ? {
+                ...DEFAULT_THREAD_SETTINGS,
+                ...preferences.configuredThreadDefaults,
+                folder: current?.settings?.folder ?? "",
+              }
+            : normalizeSettings(current?.settings);
+          return get().newChat({
+            ...base,
+            ...settings,
+            instructions: "",
+            computerUse: false,
+            planMode: false,
+            goal: DEFAULT_GOAL_SETTINGS,
+          });
         },
 
         forkSession: (id, throughMessageIndex) => {

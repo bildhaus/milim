@@ -1,12 +1,22 @@
-import { type KeyboardEvent, useEffect, useMemo, useState } from "react";
+import { Fragment, type KeyboardEvent, useEffect, useMemo, useState } from "react";
 import {
   listModelsDetailed,
+  listWorkspaceLaunchers,
+  exportMilimBackup,
+  inspectMilimBackup,
+  restoreMilimBackup,
+  restartDesktopApp,
   openDiagnosticsFolder,
   type ModelInfo,
+  type WorkspaceLauncher,
 } from "../api";
+import { flushDeferredUserStateWrites } from "../persistence/userStateStorage";
+import { useAgents } from "../agents/store";
+import { useSettings, type ConfiguredThreadDefaults } from "./store";
+import { BUILTIN_QUICK_ACTIONS } from "../lib/emptyStarterSuggestions";
+import { ensureNativeNotificationPermission } from "../lib/nativeNotifications";
 import { isThreadNamingModel } from "../lib/threadTitles";
 import {
-  SETTINGS_SEARCH_ENTRIES,
   matchingSettingsEntries,
   type SettingSearchEntry,
   type SettingsSectionId,
@@ -53,6 +63,7 @@ import {
   type ComposerDensity,
   type ComposerSendShortcut,
   type FinishedSound,
+  type PinnedQuickAction,
 } from "../ui/store";
 import { playInterfaceSound } from "../ui/sounds";
 import { Archive, Check, Code, Download, FolderOpen, Gear, GitLogo, Pencil, PlusSquare, Refresh, Search, Sidebar, Smartphone, Sun, Trash, X } from "../components/icons";
@@ -66,9 +77,8 @@ type SettingsSection = {
   label: string;
   detail: string;
   icon: typeof Gear;
-  search: string[];
 };
-type SettingsStatusTone = "ready" | "warn" | "muted";
+type SettingsBadge = { label: string; tone: "neutral" | "warn" };
 type SettingsSectionActivation = { focusTab?: boolean; remember?: boolean };
 type ShortcutRecordingTarget = AppShortcutAction;
 
@@ -87,60 +97,71 @@ let lastSettingsSection: SettingsSectionId = "app";
 const SETTINGS_SECTIONS: SettingsSection[] = [
   {
     id: "app",
-    label: "App",
+    label: "General",
     detail: "Window behavior and layout",
     icon: Sidebar,
-    search: ["app", "general", "window", "layout", "ui size", "zoom", "scale", "100", "percent", "sidebar", "new chat", "bottom", "always on top", "pin", "account usage", "quota", "codex", "claude", "panel", "width", "reset"],
   },
   {
     id: "chat",
     label: "Chat",
     detail: "Composer behavior and thread naming",
     icon: Pencil,
-    search: ["chat", "composer", "send", "enter", "ctrl enter", "cmd enter", "density", "auto title", "ai title", "thread name", "naming model"],
   },
   {
     id: "appearance",
     label: "Appearance",
     detail: "Themes and custom styles",
     icon: Sun,
-    search: ["theme", "themes", "dark", "light", "custom", "color", "style", "visual", "chat layout", "bubbles", "width", "avatar", "code", "background", "sound", "audio", "feedback", "cuelume"],
+  },
+  {
+    id: "models",
+    label: "Models & agents",
+    detail: "Defaults and unavailable-model behavior",
+    icon: Gear,
+  },
+  {
+    id: "workspace",
+    label: "Workspace",
+    detail: "Openers, checkouts, and isolated worktrees",
+    icon: FolderOpen,
   },
   {
     id: "history",
-    label: "History",
-    detail: "Archived chats and projects",
+    label: "Data",
+    detail: "Archives, exports, backup, and recovery",
     icon: Archive,
-    search: ["archive", "history", "archived", "restore", "delete", "retention", "7 days", "14 days", "30 days", "projects", "folders", "threads"],
   },
   {
     id: "mobile",
     label: "Mobile",
     detail: "Phone companion relay and pairing",
     icon: Smartphone,
-    search: ["mobile", "phone", "companion", "relay", "pair", "qr", "tailscale", "android"],
   },
   {
     id: "system",
-    label: "System",
+    label: "Shortcuts",
     detail: "Keyboard shortcuts and app commands",
     icon: Gear,
-    search: ["system", "keyboard", "shortcut", "hotkey", "command", "reset"],
   },
   {
     id: "about",
     label: "About",
     detail: "Version and GitHub release updates",
     icon: GitLogo,
-    search: ["about", "version", "update", "updates", "release", "download", "restart"],
   },
   {
     id: "developer",
     label: "Developer",
     detail: "Developer-only setup and experimental controls",
     icon: Code,
-    search: ["developer", "debug", "test", "onboarding", "first run", "reset", "flow", "experimental", "hashline", "patch"],
   },
+];
+
+const SETTINGS_SECTION_GROUPS: Array<{ label: string; sections: SettingsSectionId[] }> = [
+  { label: "Preferences", sections: ["app", "chat", "appearance"] },
+  { label: "Workflows", sections: ["models", "workspace"] },
+  { label: "Data & devices", sections: ["history", "mobile"] },
+  { label: "Application", sections: ["system", "about", "developer"] },
 ];
 function onboardingSetupLabel(value: string | null): string {
   if (value === "local_detect") return "Local detection";
@@ -173,12 +194,6 @@ function updateStatusLabel(status: UpdateStatus): string {
   return "Not checked";
 }
 
-function updateStatusTone(status: UpdateStatus): SettingsStatusTone {
-  if (status === "available" || status === "ready" || status === "error") return "warn";
-  if (status === "disabled" || status === "idle") return "muted";
-  return "ready";
-}
-
 export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const themes = useTheme((s) => s.themes);
   const custom = useTheme((s) => s.custom);
@@ -207,11 +222,31 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const developerMode = useUiPreferences((s) => s.developerMode);
   const experimentalHashlinePatch = useUiPreferences((s) => s.experimentalHashlinePatch);
   const chatLayoutStyle = useUiPreferences((s) => s.chatLayoutStyle);
+  const showEmptyChatRidgeline = useUiPreferences((s) => s.showEmptyChatRidgeline);
   const messageWidth = useUiPreferences((s) => s.messageWidth);
   const avatarStyle = useUiPreferences((s) => s.avatarStyle);
   const codeBlockTheme = useUiPreferences((s) => s.codeBlockTheme);
   const backgroundFit = useUiPreferences((s) => s.backgroundFit);
   const backgroundTreatment = useUiPreferences((s) => s.backgroundTreatment);
+  const startupBehavior = useUiPreferences((s) => s.startupBehavior);
+  const restoreOpenPanels = useUiPreferences((s) => s.restoreOpenPanels);
+  const notifyRunFinished = useUiPreferences((s) => s.notifyRunFinished);
+  const notifyNeedsAttention = useUiPreferences((s) => s.notifyNeedsAttention);
+  const notifyOnlyWhenUnfocused = useUiPreferences((s) => s.notifyOnlyWhenUnfocused);
+  const notificationIncludeThreadTitle = useUiPreferences((s) => s.notificationIncludeThreadTitle);
+  const quickActionMode = useUiPreferences((s) => s.quickActionMode);
+  const pinnedQuickActions = useUiPreferences((s) => s.pinnedQuickActions);
+  const projectQuickActionOverrides = useUiPreferences((s) => s.projectQuickActionOverrides);
+  const autocompleteMode = useUiPreferences((s) => s.autocompleteMode);
+  const autocompleteSources = useUiPreferences((s) => s.autocompleteSources);
+  const personalizedSuggestions = useUiPreferences((s) => s.personalizedSuggestions);
+  const promptHistoryScope = useUiPreferences((s) => s.promptHistoryScope);
+  const globalPromptHistory = useUiPreferences((s) => s.globalPromptHistory);
+  const threadExportFormat = useUiPreferences((s) => s.threadExportFormat);
+  const workspaceLauncherPreference = useUiPreferences((s) => s.workspaceLauncherPreference);
+  const newProjectChatWorkspace = useUiPreferences((s) => s.newProjectChatWorkspace);
+  const composerCompletionMode = useUiPreferences((s) => s.composerCompletionMode);
+  const remoteCompletionConfirmed = useUiPreferences((s) => s.remoteCompletionConfirmed);
   const appShortcuts = useUiPreferences((s) => s.appShortcuts);
   const setSidebarOpen = useUiPreferences((s) => s.setSidebarOpen);
   const setUiSize = useUiPreferences((s) => s.setUiSize);
@@ -232,11 +267,32 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const setDeveloperMode = useUiPreferences((s) => s.setDeveloperMode);
   const setExperimentalHashlinePatch = useUiPreferences((s) => s.setExperimentalHashlinePatch);
   const setChatLayoutStyle = useUiPreferences((s) => s.setChatLayoutStyle);
+  const setShowEmptyChatRidgeline = useUiPreferences((s) => s.setShowEmptyChatRidgeline);
   const setMessageWidth = useUiPreferences((s) => s.setMessageWidth);
   const setAvatarStyle = useUiPreferences((s) => s.setAvatarStyle);
   const setCodeBlockTheme = useUiPreferences((s) => s.setCodeBlockTheme);
   const setBackgroundFit = useUiPreferences((s) => s.setBackgroundFit);
   const setBackgroundTreatment = useUiPreferences((s) => s.setBackgroundTreatment);
+  const setStartupBehavior = useUiPreferences((s) => s.setStartupBehavior);
+  const setRestoreOpenPanels = useUiPreferences((s) => s.setRestoreOpenPanels);
+  const setNotifyRunFinished = useUiPreferences((s) => s.setNotifyRunFinished);
+  const setNotifyNeedsAttention = useUiPreferences((s) => s.setNotifyNeedsAttention);
+  const setNotifyOnlyWhenUnfocused = useUiPreferences((s) => s.setNotifyOnlyWhenUnfocused);
+  const setNotificationIncludeThreadTitle = useUiPreferences((s) => s.setNotificationIncludeThreadTitle);
+  const setQuickActionMode = useUiPreferences((s) => s.setQuickActionMode);
+  const setPinnedQuickActions = useUiPreferences((s) => s.setPinnedQuickActions);
+  const setProjectQuickActionOverride = useUiPreferences((s) => s.setProjectQuickActionOverride);
+  const setAutocompleteMode = useUiPreferences((s) => s.setAutocompleteMode);
+  const setAutocompleteSource = useUiPreferences((s) => s.setAutocompleteSource);
+  const setPersonalizedSuggestions = useUiPreferences((s) => s.setPersonalizedSuggestions);
+  const resetSuggestionHistory = useUiPreferences((s) => s.resetSuggestionHistory);
+  const setPromptHistoryScope = useUiPreferences((s) => s.setPromptHistoryScope);
+  const clearGlobalPromptHistory = useUiPreferences((s) => s.clearGlobalPromptHistory);
+  const setThreadExportFormat = useUiPreferences((s) => s.setThreadExportFormat);
+  const setWorkspaceLauncherPreference = useUiPreferences((s) => s.setWorkspaceLauncherPreference);
+  const setNewProjectChatWorkspace = useUiPreferences((s) => s.setNewProjectChatWorkspace);
+  const setComposerCompletionMode = useUiPreferences((s) => s.setComposerCompletionMode);
+  const setRemoteCompletionConfirmed = useUiPreferences((s) => s.setRemoteCompletionConfirmed);
   const resetLayoutWidths = useUiPreferences((s) => s.resetLayoutWidths);
   const setAppShortcut = useUiPreferences((s) => s.setAppShortcut);
   const resetAppShortcuts = useUiPreferences((s) => s.resetAppShortcuts);
@@ -259,6 +315,17 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const checkForAppUpdate = useUpdateStore((s) => s.checkNow);
   const downloadAppUpdate = useUpdateStore((s) => s.downloadNow);
   const installAppUpdate = useUpdateStore((s) => s.installNow);
+  const automaticCheck = useUpdateStore((s) => s.automaticCheck);
+  const automaticDownload = useUpdateStore((s) => s.automaticDownload);
+  const setAutomaticCheck = useUpdateStore((s) => s.setAutomaticCheck);
+  const setAutomaticDownload = useUpdateStore((s) => s.setAutomaticDownload);
+  const agents = useAgents((s) => s.agents);
+  const newThreadBehavior = useSettings((s) => s.newThreadBehavior);
+  const configuredThreadDefaults = useSettings((s) => s.configuredThreadDefaults);
+  const unavailableModelPolicy = useSettings((s) => s.unavailableModelPolicy);
+  const setNewThreadBehavior = useSettings((s) => s.setNewThreadBehavior);
+  const setConfiguredThreadDefaults = useSettings((s) => s.setConfiguredThreadDefaults);
+  const setUnavailableModelPolicy = useSettings((s) => s.setUnavailableModelPolicy);
   const sessions = useSessions((s) => s.sessions);
   const projects = useSessions((s) => s.projects);
   const archiveRetentionDays = useSessions((s) => s.archiveRetentionDays);
@@ -268,6 +335,8 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const restoreProject = useSessions((s) => s.restoreProject);
   const removeProject = useSessions((s) => s.removeProject);
   const purgeExpiredArchives = useSessions((s) => s.purgeExpiredArchives);
+  const activeFolder = useSessions((s) => s.sessions.find((session) => session.id === s.activeId)?.settings?.folder ?? "");
+  const refreshAgents = useAgents((s) => s.refresh);
 
   const [editing, setEditing] = useState<{ base: Theme; isNew: boolean } | null>(null);
   const [activeSection, setActiveSection] = useState<SettingsSectionId>(lastSettingsSection);
@@ -275,6 +344,13 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const [highlightedSettingId, setHighlightedSettingId] = useState<string | null>(null);
   const [confirmArchiveDelete, setConfirmArchiveDelete] = useState<string | null>(null);
   const [threadNameModels, setThreadNameModels] = useState<ModelInfo[]>([]);
+  const [catalogModels, setCatalogModels] = useState<ModelInfo[]>([]);
+  const [workspaceLaunchers, setWorkspaceLaunchers] = useState<WorkspaceLauncher[]>([]);
+  const [notificationError, setNotificationError] = useState<string | null>(null);
+  const [backupStatus, setBackupStatus] = useState<string | null>(null);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [selectedBuiltinAction, setSelectedBuiltinAction] = useState(BUILTIN_QUICK_ACTIONS[0]?.id ?? "");
+  const [editProjectQuickActions, setEditProjectQuickActions] = useState(false);
   const [recordingShortcut, setRecordingShortcut] = useState<ShortcutRecordingTarget | null>(null);
   const [shortcutError, setShortcutError] = useState<string | null>(null);
   const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
@@ -287,50 +363,20 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     [projects],
   );
   const archivedCount = archivedSessions.length + archivedProjects.length;
-  const systemStatus =
-    updateStatus === "available" || updateStatus === "ready" || updateStatus === "error"
-      ? { label: updateStatusLabel(updateStatus), tone: updateStatusTone(updateStatus) }
-      : developerMode
-        ? { label: "Developer on", tone: "ready" as SettingsStatusTone }
-        : { label: updateStatusLabel(updateStatus), tone: updateStatusTone(updateStatus) };
-  const sectionStatus: Record<SettingsSectionId, { label: string; tone: SettingsStatusTone }> = {
-    app: { label: "Ready", tone: "ready" },
-    chat: { label: aiThreadNames ? "AI names" : "Manual names", tone: "ready" },
-    appearance: { label: current.name, tone: "ready" },
-    history: { label: archivedCount ? `${archivedCount} archived` : "Empty", tone: archivedCount ? "warn" : "muted" },
-    mobile: { label: "Relay", tone: "muted" },
-    system: { label: "Shortcuts", tone: "ready" },
-    about: systemStatus,
-    developer: { label: developerMode ? "On" : "Off", tone: developerMode ? "ready" : "muted" },
+  const sectionBadges: Partial<Record<SettingsSectionId, SettingsBadge>> = {
+    ...(archivedCount ? { history: { label: `${archivedCount} archived`, tone: "neutral" } } : {}),
+    ...(updateStatus === "available"
+      ? { about: { label: "Update available", tone: "warn" } }
+      : updateStatus === "ready"
+        ? { about: { label: "Restart to update", tone: "warn" } }
+        : updateStatus === "error"
+          ? { about: { label: "Update error", tone: "warn" } }
+          : {}),
   };
-  const visibleSettingsSections = SETTINGS_SECTIONS;
-  const sectionStatusKey = `${windowAlwaysOnTop}\n${uiSize}\n${showAccountUsageInTitleBar}\n${composerSendShortcut}\n${Object.values(appShortcuts).join("\n")}\n${aiThreadNames}\n${aiThreadNameModel}\n${developerMode}\n${experimentalHashlinePatch}\n${onboardingStatus}\n${onboardingDeveloperShow}\n${systemStatus.label}\n${systemStatus.tone}\n${archivedCount}\n${archiveRetentionDays}\n${current.name}\n${updateStatus}\n${chatLayoutStyle}\n${messageWidth}\n${avatarStyle}\n${codeBlockTheme}\n${backgroundFit}\n${backgroundTreatment}`;
-  const normalizedSettingsQuery = settingsQuery.trim().toLowerCase();
   const settingsSearchResults = useMemo(
     () => matchingSettingsEntries(settingsQuery),
     [settingsQuery],
   );
-  const filteredSettingsSections = useMemo(() => {
-    if (!normalizedSettingsQuery) return visibleSettingsSections;
-    const resultSections = new Set(settingsSearchResults.map((entry) => entry.section));
-    return visibleSettingsSections.filter((section) => {
-      const status = sectionStatus[section.id];
-      const settingText = SETTINGS_SEARCH_ENTRIES
-        .filter((entry) => entry.section === section.id)
-        .map((entry) => [entry.label, ...(entry.aliases ?? [])].join(" "))
-        .join(" ");
-      return resultSections.has(section.id) || [section.id, section.label, section.detail, status.label, settingText, ...section.search]
-        .join(" ")
-        .toLowerCase()
-        .includes(normalizedSettingsQuery);
-    });
-  }, [normalizedSettingsQuery, sectionStatusKey, settingsSearchResults, visibleSettingsSections]);
-  useEffect(() => {
-    if (filteredSettingsSections.length === 0) return;
-    if (!filteredSettingsSections.some((section) => section.id === activeSection)) {
-      activateSettingsSection(filteredSettingsSections[0].id, { focusTab: false, remember: false });
-    }
-  }, [activeSection, filteredSettingsSections]);
 
   useEffect(() => {
     void loadCurrentVersion();
@@ -340,13 +386,36 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     let cancelled = false;
     listModelsDetailed()
       .then((items) => {
-        if (!cancelled) setThreadNameModels(items.filter(isThreadNamingModel));
+        if (!cancelled) {
+          setCatalogModels(items);
+          setThreadNameModels(items.filter(isThreadNamingModel));
+        }
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    void refreshAgents().catch(() => {});
+  }, [refreshAgents]);
+
+  useEffect(() => {
+    if (!activeFolder.trim()) {
+      setWorkspaceLaunchers([]);
+      return;
+    }
+    let cancelled = false;
+    void listWorkspaceLaunchers(activeFolder)
+      .then((items) => {
+        if (!cancelled) setWorkspaceLaunchers(items);
+      })
+      .catch(() => {
+        if (!cancelled) setWorkspaceLaunchers([]);
+      });
+    return () => { cancelled = true; };
+  }, [activeFolder]);
 
   useEffect(() => {
     if (!recordingShortcut) return;
@@ -389,6 +458,120 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const archiveRetentionValue = String(archiveRetentionDays) as "7" | "14" | "30";
   const projectNameByFolder = new Map(projects.map((project) => [project.folder, project.name]));
   const activeSettingsSection = SETTINGS_SECTIONS.find((section) => section.id === activeSection) ?? SETTINGS_SECTIONS[0];
+  const activeProject = projects.find((project) => project.folder === activeFolder);
+  const editablePinnedActions = editProjectQuickActions && activeProject
+    ? projectQuickActionOverrides[activeProject.id] ?? pinnedQuickActions
+    : pinnedQuickActions;
+  const modelOptions = [
+    { value: "", label: "Choose when starting" },
+    ...catalogModels.map((item) => ({ value: item.id, label: item.display_id || item.id })),
+  ];
+  const agentOptions = [
+    { value: "", label: "Default chat" },
+    ...agents.map((agent) => ({ value: agent.id, label: agent.name })),
+  ];
+  const launcherOptions = [
+    { value: "remember", label: "Remember per project" },
+    ...workspaceLaunchers.filter((launcher) => launcher.available).map((launcher) => ({ value: launcher.id, label: launcher.label })),
+  ];
+
+  async function setNotificationPreference(kind: "finished" | "attention", enabled: boolean) {
+    setNotificationError(null);
+    if (!enabled) {
+      if (kind === "finished") setNotifyRunFinished(false);
+      else setNotifyNeedsAttention(false);
+      return;
+    }
+    try {
+      if (!(await ensureNativeNotificationPermission())) {
+        setNotificationError("Notification permission was denied. The setting remains off.");
+        return;
+      }
+      if (kind === "finished") setNotifyRunFinished(true);
+      else setNotifyNeedsAttention(true);
+    } catch (error) {
+      setNotificationError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  function updatePinnedAction(id: string, patch: Partial<PinnedQuickAction>) {
+    savePinnedActions(editablePinnedActions.map((action) => action.id === id ? { ...action, ...patch } : action));
+  }
+
+  function savePinnedActions(actions: PinnedQuickAction[]) {
+    if (editProjectQuickActions && activeProject) setProjectQuickActionOverride(activeProject.id, actions);
+    else setPinnedQuickActions(actions);
+  }
+
+  function addBuiltinQuickAction() {
+    const builtin = BUILTIN_QUICK_ACTIONS.find((action) => action.id === selectedBuiltinAction);
+    if (!builtin || editablePinnedActions.length >= 3 || editablePinnedActions.some((action) => action.id === builtin.id)) return;
+    savePinnedActions([...editablePinnedActions, {
+      id: builtin.id,
+      builtinId: builtin.id,
+      label: builtin.label,
+      prompt: builtin.prompt,
+    }]);
+  }
+
+  function addCustomQuickAction() {
+    if (editablePinnedActions.length >= 3) return;
+    savePinnedActions([...editablePinnedActions, {
+      id: `custom-${Date.now()}`,
+      label: "Custom action",
+      prompt: "Describe what you want Milim to help with.",
+    }]);
+  }
+
+  function movePinnedAction(index: number, direction: -1 | 1) {
+    const target = index + direction;
+    if (target < 0 || target >= editablePinnedActions.length) return;
+    const next = editablePinnedActions.slice();
+    [next[index], next[target]] = [next[target], next[index]];
+    savePinnedActions(next);
+  }
+
+  function updateConfiguredDefaults(patch: Partial<ConfiguredThreadDefaults>) {
+    setConfiguredThreadDefaults(patch);
+  }
+
+  async function exportBackupFromSettings() {
+    setBackupStatus(null);
+    setBackupBusy(true);
+    try {
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const path = await save({ defaultPath: `milim-${new Date().toISOString().slice(0, 10)}.milim-backup.json`, filters: [{ name: "Milim backup", extensions: ["json"] }] });
+      if (!path) return;
+      await flushDeferredUserStateWrites();
+      const result = await exportMilimBackup(path);
+      setBackupStatus(`Exported ${result.summary.chats} chats and ${result.summary.projects} projects.`);
+    } catch (error) {
+      setBackupStatus(`Export failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setBackupBusy(false);
+    }
+  }
+
+  async function restoreBackupFromSettings() {
+    setBackupStatus(null);
+    setBackupBusy(true);
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const path = await open({ multiple: false, directory: false, filters: [{ name: "Milim backup", extensions: ["json"] }] });
+      if (typeof path !== "string") return;
+      const inspection = await inspectMilimBackup(path);
+      const accepted = window.confirm(`Replace local Milim data with this v${inspection.appVersion} backup containing ${inspection.summary.chats} chats and ${inspection.summary.projects} projects? A recovery snapshot will be created first.`);
+      if (!accepted) return;
+      await flushDeferredUserStateWrites();
+      const recoveryPath = await restoreMilimBackup(path);
+      setBackupStatus(`Restore completed. Recovery snapshot: ${recoveryPath}`);
+      await restartDesktopApp();
+    } catch (error) {
+      setBackupStatus(`Restore failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setBackupBusy(false);
+    }
+  }
 
   function setArchiveRetentionFromSettings(value: "7" | "14" | "30") {
     setArchiveRetentionDays(Number(value) as ArchiveRetentionDays);
@@ -496,6 +679,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
 
   function openSettingSearchResult(entry: SettingSearchEntry) {
     activateSettingsSection(entry.section);
+    setSettingsQuery("");
     setHighlightedSettingId(entry.id);
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
@@ -512,23 +696,23 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   }
 
   function onSettingsNavKeyDown(event: KeyboardEvent<HTMLButtonElement>) {
-    const currentIndex = filteredSettingsSections.findIndex((section) => section.id === activeSection);
+    const currentIndex = SETTINGS_SECTIONS.findIndex((section) => section.id === activeSection);
     if (currentIndex < 0) return;
 
     let nextIndex: number | null = null;
     if (event.key === "ArrowRight" || event.key === "ArrowDown") {
-      nextIndex = (currentIndex + 1) % filteredSettingsSections.length;
+      nextIndex = (currentIndex + 1) % SETTINGS_SECTIONS.length;
     } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
-      nextIndex = (currentIndex - 1 + filteredSettingsSections.length) % filteredSettingsSections.length;
+      nextIndex = (currentIndex - 1 + SETTINGS_SECTIONS.length) % SETTINGS_SECTIONS.length;
     } else if (event.key === "Home") {
       nextIndex = 0;
     } else if (event.key === "End") {
-      nextIndex = filteredSettingsSections.length - 1;
+      nextIndex = SETTINGS_SECTIONS.length - 1;
     }
 
     if (nextIndex == null) return;
     event.preventDefault();
-    selectSettingsSection(filteredSettingsSections[nextIndex].id, { focusTab: true });
+    selectSettingsSection(SETTINGS_SECTIONS[nextIndex].id, { focusTab: true });
   }
 
   const settingHighlightClass = (id: string) => highlightedSettingId === id ? " setting-highlight" : "";
@@ -547,7 +731,6 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             <X size={15} />
           </button>
         </div>
-        <p className="sheet-sub">Configure app-level preferences that apply across chats.</p>
 
         <div className="settings-layout">
           <nav className="settings-nav" aria-label="Settings sections">
@@ -573,65 +756,69 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                 </button>
               ) : null}
             </div>
-            <div className="settings-nav-list" role="tablist" aria-label="Settings sections">
-              {filteredSettingsSections.map((section) => {
-                const Icon = section.icon;
-                const selected = activeSection === section.id;
-                const status = sectionStatus[section.id];
-                return (
-                  <button
-                    key={section.id}
-                    id={`settings-tab-${section.id}`}
-                    className={"settings-nav-item" + (selected ? " active" : "")}
-                    type="button"
-                    role="tab"
-                    data-testid={`settings-section-${section.id}`}
-                    aria-selected={selected}
-                    aria-controls={`settings-panel-${section.id}`}
-                    tabIndex={selected ? 0 : -1}
-                    onClick={() => selectSettingsSection(section.id)}
-                    onKeyDown={onSettingsNavKeyDown}
-                  >
-                    <span className="settings-nav-icon" aria-hidden="true">
-                      <Icon size={15} />
-                    </span>
-                    <span className="settings-nav-copy">
-                      <span className="settings-nav-label">{section.label}</span>
-                    </span>
-                    {status.tone === "warn" ? (
-                      <span
-                        className="settings-nav-status warn"
-                        aria-label={`${section.label}: ${status.label}`}
-                        title={status.label}
-                      >
-                        {status.label}
-                      </span>
-                    ) : null}
-                  </button>
-                );
-              })}
-              {filteredSettingsSections.length === 0 ? (
-                <div className="settings-nav-empty">No settings match.</div>
-              ) : null}
-            </div>
-              {settingsSearchResults.length > 0 ? (
-                <div className="settings-search-results" aria-label="Matching settings">
-                  {settingsSearchResults.slice(0, 8).map((entry) => {
-                    const section = SETTINGS_SECTIONS.find((item) => item.id === entry.section);
-                    return (
-                      <button
-                        key={entry.id}
-                        className="settings-search-result"
-                        type="button"
-                        onClick={() => openSettingSearchResult(entry)}
-                      >
-                        <span>{entry.label}</span>
-                        <small>{section?.label ?? entry.section}</small>
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : null}
+            {settingsQuery.trim() ? (
+              <div className="settings-search-results" aria-label="Matching settings">
+                {settingsSearchResults.length ? settingsSearchResults.map((entry) => {
+                  const section = SETTINGS_SECTIONS.find((item) => item.id === entry.section);
+                  return (
+                    <button
+                      key={entry.id}
+                      className="settings-search-result"
+                      type="button"
+                      onClick={() => openSettingSearchResult(entry)}
+                    >
+                      <span>{entry.label}</span>
+                      <small>{section?.label ?? entry.section}</small>
+                    </button>
+                  );
+                }) : <div className="settings-nav-empty">No settings match.</div>}
+              </div>
+            ) : (
+              <div className="settings-nav-list" role="tablist" aria-label="Settings sections">
+                {SETTINGS_SECTION_GROUPS.map((group) => (
+                  <Fragment key={group.label}>
+                    <div className="settings-nav-group">{group.label}</div>
+                    {group.sections.map((sectionId) => {
+                      const section = SETTINGS_SECTIONS.find((item) => item.id === sectionId)!;
+                      const Icon = section.icon;
+                      const selected = activeSection === section.id;
+                      const badge = sectionBadges[section.id];
+                      return (
+                        <button
+                          key={section.id}
+                          id={`settings-tab-${section.id}`}
+                          className={"settings-nav-item" + (selected ? " active" : "")}
+                          type="button"
+                          role="tab"
+                          data-testid={`settings-section-${section.id}`}
+                          aria-selected={selected}
+                          aria-controls={`settings-panel-${section.id}`}
+                          tabIndex={selected ? 0 : -1}
+                          onClick={() => selectSettingsSection(section.id)}
+                          onKeyDown={onSettingsNavKeyDown}
+                        >
+                          <span className="settings-nav-icon" aria-hidden="true">
+                            <Icon size={15} />
+                          </span>
+                          <span className="settings-nav-copy">
+                            <span className="settings-nav-label">{section.label}</span>
+                          </span>
+                          {badge ? (
+                            <span
+                              className={`settings-nav-status ${badge.tone}`}
+                              aria-label={`${section.label}: ${badge.label}`}
+                              title={badge.label}
+                            >
+                              {badge.label}
+                            </span>
+                          ) : null}
+                        </button>
+                      );
+                    })}
+                  </Fragment>
+                ))}
+              </div>
+            )}
           </nav>
 
           <div className="settings-detail">
@@ -640,16 +827,30 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                 <h3>{activeSettingsSection.label}</h3>
                 <p>{activeSettingsSection.detail}</p>
               </div>
-              <div className="settings-section-actions">
-                <span className={`settings-status-pill ${sectionStatus[activeSection].tone}`}>{sectionStatus[activeSection].label}</span>
-              </div>
             </div>
 
             <div className="settings-content">
             {activeSection === "app" && (
         <section className="settings-section" id="settings-panel-app" role="tabpanel" aria-labelledby="settings-tab-app" tabIndex={-1}>
           <SettingsPanel>
-            <SettingsBlock title="Window and layout" data-setting-id="app-window-layout" className={settingHighlightClass("app-window-layout").trim()}>
+            <SettingsBlock title="Startup" data-setting-id="app-startup" className={settingHighlightClass("app-startup").trim()}>
+              <div className="setting-stack">
+                <SettingsChoiceGroup
+                  value={startupBehavior}
+                  onChange={setStartupBehavior}
+                  testIdPrefix="startup-behavior"
+                  options={[
+                    { value: "restore", label: "Restore last chat", detail: "Return to the chat that was open." },
+                    { value: "new-chat", label: "Open a new chat", detail: "Start fresh using your new-chat policy." },
+                  ]}
+                />
+                <div className="setting-toggle-row">
+                  <div><strong>Restore open panels</strong><span>Remember context and preview panel state between launches.</span></div>
+                  <Toggle checked={restoreOpenPanels} onChange={setRestoreOpenPanels} ariaLabel="Restore open panels" />
+                </div>
+              </div>
+            </SettingsBlock>
+            <SettingsBlock title="Window & layout" data-setting-id="app-window-layout" className={settingHighlightClass("app-window-layout").trim()}>
               <div className="setting-stack">
                 <div className="setting-toggle-row">
                   <div>
@@ -659,6 +860,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                   <Toggle
                     checked={windowAlwaysOnTop}
                     onChange={setWindowAlwaysOnTop}
+                    ariaLabel="Keep window on top"
                     testId="general-always-on-top-toggle"
                   />
                 </div>
@@ -667,7 +869,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                     <strong>Open sidebar</strong>
                     <span>Keep the chat list visible by default.</span>
                   </div>
-                  <Toggle checked={sidebarOpen} onChange={setSidebarOpen} testId="general-sidebar-open-toggle" />
+                  <Toggle checked={sidebarOpen} onChange={setSidebarOpen} ariaLabel="Open sidebar" testId="general-sidebar-open-toggle" />
                 </div>
                 <div className="setting-field">
                   <div className="settings-action-row">
@@ -687,29 +889,59 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                     <strong>Show account usage in title bar</strong>
                     <span>Show compact quota details for the active Codex or Claude runtime.</span>
                   </div>
-                  <Toggle checked={showAccountUsageInTitleBar} onChange={setShowAccountUsageInTitleBar} testId="general-titlebar-account-usage-toggle" />
+                  <Toggle checked={showAccountUsageInTitleBar} onChange={setShowAccountUsageInTitleBar} ariaLabel="Show account usage in title bar" testId="general-titlebar-account-usage-toggle" />
                 </div>
                 <div className="setting-toggle-row">
                   <div>
                     <strong>New chat at bottom</strong>
                     <span>Anchor the new chat button above the sidebar footer.</span>
                   </div>
-                  <Toggle checked={newChatButtonAtBottom} onChange={setNewChatButtonAtBottom} testId="general-new-chat-bottom-toggle" />
+                  <Toggle checked={newChatButtonAtBottom} onChange={setNewChatButtonAtBottom} ariaLabel="New chat at bottom" testId="general-new-chat-bottom-toggle" />
                 </div>
                 <div className="settings-action-row">
                   <div>
                     <strong>Panel widths</strong>
                     <span>
-                      Sidebar {sidebarWidth}px / Preview {previewPanelWidth}px
+                      Sidebar {sidebarWidth}px / Preview {previewPanelWidth}px · Defaults {DEFAULT_SIDEBAR_WIDTH}px / {DEFAULT_PREVIEW_PANEL_WIDTH}px
                     </span>
                   </div>
                   <button className="btn-ghost" type="button" data-testid="general-reset-layout" onClick={resetLayoutWidths}>
                     Reset
                   </button>
                 </div>
-                <p className="sheet-hint">
-                  Default reset: sidebar {DEFAULT_SIDEBAR_WIDTH}px and preview {DEFAULT_PREVIEW_PANEL_WIDTH}px.
-                </p>
+              </div>
+            </SettingsBlock>
+            <SettingsBlock title="Notifications" data-setting-id="app-notifications" className={settingHighlightClass("app-notifications").trim()}>
+              <div className="setting-stack">
+                <div className="setting-toggle-row">
+                  <div><strong>Run finished</strong><span>Show a native notification after a run and its queue finish.</span></div>
+                  <Toggle checked={notifyRunFinished} onChange={(enabled) => void setNotificationPreference("finished", enabled)} ariaLabel="Run finished notifications" />
+                </div>
+                <div className="setting-toggle-row">
+                  <div><strong>Needs attention</strong><span>Notify for approvals, proposed workers, and terminal errors.</span></div>
+                  <Toggle checked={notifyNeedsAttention} onChange={(enabled) => void setNotificationPreference("attention", enabled)} ariaLabel="Needs attention notifications" />
+                </div>
+                <div className="setting-toggle-row">
+                  <div><strong>Only when Milim is unfocused</strong><span>Suppress native notifications while you are using the app.</span></div>
+                  <Toggle checked={notifyOnlyWhenUnfocused} onChange={setNotifyOnlyWhenUnfocused} ariaLabel="Only notify when Milim is unfocused" />
+                </div>
+                <div className="setting-toggle-row">
+                  <div><strong>Include thread title</strong><span>Otherwise notification text stays generic.</span></div>
+                  <Toggle checked={notificationIncludeThreadTitle} onChange={setNotificationIncludeThreadTitle} ariaLabel="Include thread title in notifications" />
+                </div>
+                {notificationError ? <p className="sheet-hint error" role="alert">{notificationError}</p> : null}
+              </div>
+            </SettingsBlock>
+            <SettingsBlock title="Update policy" data-setting-id="app-update-policy" className={settingHighlightClass("app-update-policy").trim()}>
+              <div className="setting-stack">
+                <div className="setting-toggle-row">
+                  <div><strong>Check automatically</strong><span>Check at startup and periodically while Milim is open.</span></div>
+                  <Toggle checked={automaticCheck} onChange={setAutomaticCheck} ariaLabel="Check for updates automatically" />
+                </div>
+                <div className="setting-toggle-row">
+                  <div><strong>Download automatically</strong><span>Download verified updates after an automatic check. Installation always remains manual.</span></div>
+                  <Toggle checked={automaticDownload} onChange={setAutomaticDownload} ariaLabel="Download updates automatically" />
+                </div>
               </div>
             </SettingsBlock>
             </SettingsPanel>
@@ -748,6 +980,118 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
               </div>
             </SettingsBlock>
 
+            <SettingsBlock title="New chats" data-setting-id="chat-new-thread" className={settingHighlightClass("chat-new-thread").trim()}>
+              <div className="setting-stack">
+                <SettingsChoiceGroup
+                  value={newThreadBehavior}
+                  onChange={setNewThreadBehavior}
+                  testIdPrefix="new-thread-behavior"
+                  options={[
+                    { value: "inherit", label: "Inherit current chat", detail: "Keep the current model and safety settings." },
+                    { value: "configured", label: "Use configured defaults", detail: "Apply the defaults below to new chats." },
+                  ]}
+                />
+                {newThreadBehavior === "configured" ? (
+                  <>
+                    <div className="setting-toggle-row"><div><strong>Memory</strong><span>Enable scoped memory for configured new chats.</span></div><Toggle checked={configuredThreadDefaults.memory} onChange={(memory) => updateConfiguredDefaults({ memory })} ariaLabel="Default memory" /></div>
+                    <div className="setting-toggle-row"><div><strong>Sandbox</strong><span>Enable sandbox tools for configured new chats.</span></div><Toggle checked={configuredThreadDefaults.sandbox} onChange={(sandbox) => updateConfiguredDefaults({ sandbox })} ariaLabel="Default sandbox" /></div>
+                    <div className="setting-field"><span className="setting-mini-title">Privacy</span><SettingsChoiceGroup value={configuredThreadDefaults.privacy} onChange={(privacy) => updateConfiguredDefaults({ privacy })} testIdPrefix="default-privacy" options={[
+                      { value: "off", label: "Off", detail: "Send prompts unchanged." },
+                      { value: "redact", label: "Redact", detail: "Remove detected secrets." },
+                      { value: "block", label: "Block", detail: "Stop risky outbound prompts." },
+                    ]} /></div>
+                    <div className="setting-field"><span className="setting-mini-title">Tool approval</span><SettingsChoiceGroup value={configuredThreadDefaults.toolApproval} onChange={(toolApproval) => updateConfiguredDefaults({ toolApproval })} testIdPrefix="default-approval" options={[
+                      { value: "guarded", label: "Guarded", detail: "Read-only tools run without prompts." },
+                      { value: "review", label: "Review", detail: "Approve each mutating action." },
+                    ]} /></div>
+                    <div className="setting-field"><span className="setting-mini-title">Delegation</span><SettingsChoiceGroup value={configuredThreadDefaults.delegationPolicy} onChange={(delegationPolicy) => updateConfiguredDefaults({ delegationPolicy })} testIdPrefix="default-delegation" options={[
+                      { value: "off", label: "Off", detail: "Do not delegate." },
+                      { value: "ask", label: "Ask", detail: "Pause on delegation proposals." },
+                      { value: "auto", label: "Automatic", detail: "Allow eligible delegation." },
+                    ]} /></div>
+                    <p className="sheet-hint">Computer Use, Plan Mode, goals, temporary instructions, and running state always reset. Open approval is intentionally unavailable as a global default.</p>
+                  </>
+                ) : null}
+              </div>
+            </SettingsBlock>
+
+            <SettingsBlock title="Quick actions" data-setting-id="chat-quick-actions" className={settingHighlightClass("chat-quick-actions").trim()}>
+              <div className="setting-stack">
+                <SettingsChoiceGroup value={quickActionMode} onChange={setQuickActionMode} testIdPrefix="quick-action-mode" options={[
+                  { value: "smart", label: "Smart", detail: "Use current Git and workspace context." },
+                  { value: "pinned", label: "Pinned only", detail: "Show your saved prompts." },
+                  { value: "hidden", label: "Hidden", detail: "Hide empty-chat actions." },
+                ]} />
+                <div className="settings-action-row">
+                  <div><strong>Editing {editProjectQuickActions && activeProject ? activeProject.name : "global"} actions</strong><span>Up to three actions; selecting one only prefills the composer.</span></div>
+                  {activeProject ? <button type="button" className="btn-ghost" onClick={() => setEditProjectQuickActions((value) => !value)}>{editProjectQuickActions ? "Edit global" : "Edit project"}</button> : null}
+                </div>
+                {editProjectQuickActions && activeProject && Object.prototype.hasOwnProperty.call(projectQuickActionOverrides, activeProject.id) ? (
+                  <div className="settings-action-row"><div><strong>Project override</strong><span>Remove it to inherit global actions again.</span></div><button type="button" className="btn-ghost" onClick={() => setProjectQuickActionOverride(activeProject.id, null)}>Use global</button></div>
+                ) : null}
+                {editablePinnedActions.map((action, index) => (
+                  <div className="quick-action-editor" key={action.id}>
+                    <input aria-label={`Quick action ${index + 1} label`} value={action.label} onChange={(event) => updatePinnedAction(action.id, { label: event.currentTarget.value })} />
+                    <textarea aria-label={`Quick action ${index + 1} prompt`} value={action.prompt} onChange={(event) => updatePinnedAction(action.id, { prompt: event.currentTarget.value })} />
+                    <div className="quick-action-editor-controls">
+                      <button className="btn-ghost" type="button" aria-label={`Move ${action.label} up`} disabled={index === 0} onClick={() => movePinnedAction(index, -1)}>Up</button>
+                      <button className="btn-ghost" type="button" aria-label={`Move ${action.label} down`} disabled={index === editablePinnedActions.length - 1} onClick={() => movePinnedAction(index, 1)}>Down</button>
+                      <button className="btn-ghost danger" type="button" aria-label={`Delete ${action.label}`} onClick={() => savePinnedActions(editablePinnedActions.filter((item) => item.id !== action.id))}>Delete</button>
+                    </div>
+                  </div>
+                ))}
+                <div className="setting-field-action">
+                  <Select value={selectedBuiltinAction} options={BUILTIN_QUICK_ACTIONS.map((action) => ({ value: action.id, label: action.label }))} onChange={setSelectedBuiltinAction} />
+                  <button className="btn-ghost" type="button" disabled={editablePinnedActions.length >= 3} onClick={addBuiltinQuickAction}>Add built-in</button>
+                  <button className="btn-ghost" type="button" disabled={editablePinnedActions.length >= 3} onClick={addCustomQuickAction}>Add custom</button>
+                </div>
+              </div>
+            </SettingsBlock>
+
+            <SettingsBlock title="Autocomplete" data-setting-id="chat-autocomplete" className={settingHighlightClass("chat-autocomplete").trim()}>
+              <div className="setting-stack">
+                <SettingsChoiceGroup value={autocompleteMode} onChange={setAutocompleteMode} testIdPrefix="autocomplete-mode" options={[
+                  { value: "automatic", label: "Automatic", detail: "/ and @ open suggestions while typing." },
+                  { value: "manual", label: "Manual", detail: "Use the button or shortcut." },
+                  { value: "off", label: "Off", detail: "Typed slash commands still execute." },
+                ]} />
+                {(["commands", "files", "skills", "mcp"] as const).map((source) => (
+                  <div className="setting-toggle-row" key={source}><div><strong>{source === "mcp" ? "MCP tools" : source[0].toUpperCase() + source.slice(1)}</strong><span>Include {source} in composer results.</span></div><Toggle checked={autocompleteSources[source]} onChange={(enabled) => setAutocompleteSource(source, enabled)} ariaLabel={`Autocomplete source ${source}`} /></div>
+                ))}
+                <div className="setting-toggle-row"><div><strong>Personalized ranking</strong><span>Use bounded local ID counts; file paths and prompt contents are never stored.</span></div><Toggle checked={personalizedSuggestions} onChange={setPersonalizedSuggestions} ariaLabel="Personalized suggestion ranking" /></div>
+                <div className="settings-action-row"><div><strong>Suggestion history</strong><span>Clear local ranking counts for commands, skills, MCP tools, and quick actions.</span></div><button className="btn-ghost" type="button" onClick={resetSuggestionHistory}>Reset</button></div>
+              </div>
+            </SettingsBlock>
+
+            <SettingsBlock title="Prompt history" data-setting-id="chat-prompt-history" className={settingHighlightClass("chat-prompt-history").trim()}>
+              <div className="setting-stack">
+                <SettingsChoiceGroup value={promptHistoryScope} onChange={setPromptHistoryScope} testIdPrefix="prompt-history" options={[
+                  { value: "thread", label: "Current chat", detail: "Recall prompts from this chat." },
+                  { value: "global", label: "Across chats", detail: "Keep 100 deduplicated prompts locally." },
+                  { value: "off", label: "Off", detail: "Disable arrow-key prompt recall." },
+                ]} />
+                <div className="settings-action-row"><div><strong>Global prompt history</strong><span>{globalPromptHistory.length} of 100 prompts stored locally.</span></div><button className="btn-ghost" type="button" disabled={!globalPromptHistory.length} onClick={clearGlobalPromptHistory}>Clear</button></div>
+              </div>
+            </SettingsBlock>
+
+            <SettingsBlock title="AI composer completion" data-setting-id="chat-ai-completion" className={settingHighlightClass("chat-ai-completion").trim()}>
+              <div className="setting-stack">
+                <SettingsChoiceGroup value={composerCompletionMode} onChange={(mode) => {
+                  if (mode === "current" && !remoteCompletionConfirmed) {
+                    const accepted = window.confirm("Remote completion sends only the current composer text to the selected provider and may incur cost. Enable it?");
+                    if (!accepted) return;
+                    setRemoteCompletionConfirmed(true);
+                  }
+                  setComposerCompletionMode(mode);
+                }} testIdPrefix="composer-completion" options={[
+                  { value: "off", label: "Off", detail: "No background completion requests." },
+                  { value: "local", label: "Local providers", detail: "Only loopback provider endpoints." },
+                  { value: "current", label: "Current provider model", detail: "Provider models only; explicit remote opt-in." },
+                ]} />
+                <p className="sheet-hint">Completion receives only current composer text, never chat history, memory, tools, files, or workspace contents. Tab accepts ghost text; Escape dismisses it.</p>
+              </div>
+            </SettingsBlock>
+
             <SettingsBlock title="Threads" data-setting-id="chat-threads" className={settingHighlightClass("chat-threads").trim()}>
               <div className="setting-stack">
                 <div className="setting-toggle-row">
@@ -755,14 +1099,14 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                     <strong>Auto-title new chats</strong>
                     <span>Rename a new chat from the first user message.</span>
                   </div>
-                  <Toggle checked={autoTitleChats} onChange={setAutoTitleChats} testId="chat-auto-title-toggle" />
+                  <Toggle checked={autoTitleChats} onChange={setAutoTitleChats} ariaLabel="Auto-title new chats" testId="chat-auto-title-toggle" />
                 </div>
                 <div className="setting-toggle-row">
                   <div>
                     <strong>AI thread names</strong>
                     <span>After the first reply, ask a model for a 2-5 word name.</span>
                   </div>
-                  <Toggle checked={aiThreadNames} onChange={setAiThreadNames} testId="chat-ai-title-toggle" />
+                  <Toggle checked={aiThreadNames} onChange={setAiThreadNames} ariaLabel="AI thread names" testId="chat-ai-title-toggle" />
                 </div>
                 {aiThreadNames && (
                   <div className="setting-field">
@@ -785,9 +1129,71 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
         </section>
             )}
 
+            {activeSection === "models" && (
+        <section className="settings-section" id="settings-panel-models" role="tabpanel" aria-labelledby="settings-tab-models" tabIndex={-1}>
+          <SettingsPanel>
+            <SettingsBlock data-setting-id="models-defaults" className={settingHighlightClass("models-defaults").trim()}>
+              <div className="setting-stack">
+                <div className="setting-field"><span className="setting-mini-title">Default chat model</span><Select value={configuredThreadDefaults.model} options={modelOptions} onChange={(model) => updateConfiguredDefaults({ model })} /></div>
+                <div className="setting-field"><span className="setting-mini-title">Default agent</span><Select value={configuredThreadDefaults.activeAgentId ?? ""} options={agentOptions} onChange={(activeAgentId) => updateConfiguredDefaults({ activeAgentId: activeAgentId || null })} /></div>
+                <div className="setting-field"><span className="setting-mini-title">Default worker model</span><Select value={configuredThreadDefaults.workerModel} options={modelOptions} onChange={(workerModel) => updateConfiguredDefaults({ workerModel })} /></div>
+                <div className="setting-field">
+                  <span className="setting-mini-title">If a configured model is unavailable</span>
+                  <SettingsChoiceGroup value={unavailableModelPolicy} onChange={setUnavailableModelPolicy} testIdPrefix="unavailable-model" options={[
+                    { value: "ask", label: "Ask", detail: "Clear it and open the model picker." },
+                    { value: "favorite", label: "First favorite", detail: "Use the first available ordered favorite." },
+                    { value: "blocked", label: "Remain blocked", detail: "Keep it and show the setup error." },
+                  ]} />
+                </div>
+                <p className="sheet-hint">Milim never silently selects an arbitrary non-favorite remote model.</p>
+              </div>
+            </SettingsBlock>
+          </SettingsPanel>
+        </section>
+            )}
+
+            {activeSection === "workspace" && (
+        <section className="settings-section" id="settings-panel-workspace" role="tabpanel" aria-labelledby="settings-tab-workspace" tabIndex={-1}>
+          <SettingsPanel>
+            <SettingsBlock title="Opener" data-setting-id="workspace-opener" className={settingHighlightClass("workspace-opener").trim()}>
+              <div className="setting-field">
+                <span className="setting-mini-title">Preferred opener</span>
+                <Select value={workspaceLauncherPreference} options={launcherOptions} onChange={(value) => setWorkspaceLauncherPreference(value as typeof workspaceLauncherPreference)} />
+                <p className="sheet-hint">{activeFolder ? `Detected launchers for ${folderLabel(activeFolder)}.` : "Open a project to detect installed launchers."} If the selected launcher disappears, Milim uses its existing recommendation logic and shows a notice.</p>
+              </div>
+            </SettingsBlock>
+            <SettingsBlock title="New project chats" data-setting-id="workspace-new-chat" className={settingHighlightClass("workspace-new-chat").trim()}>
+              <SettingsChoiceGroup value={newProjectChatWorkspace} onChange={setNewProjectChatWorkspace} testIdPrefix="project-chat-workspace" options={[
+                { value: "current", label: "Current checkout", detail: "Start in the selected project folder." },
+                { value: "ask", label: "Ask", detail: "Choose checkout or worktree each time." },
+                { value: "worktree", label: "Isolated worktree", detail: "Create one for interactive Git-project chats." },
+              ]} />
+              <p className="sheet-hint">If worktree creation fails, the chat stays in the current checkout and offers a retry.</p>
+            </SettingsBlock>
+          </SettingsPanel>
+        </section>
+            )}
+
             {activeSection === "history" && (
         <section className="settings-section" id="settings-panel-history" role="tabpanel" aria-labelledby="settings-tab-history" tabIndex={-1}>
           <SettingsPanel>
+            <SettingsBlock title="Export" data-setting-id="data-export" className={settingHighlightClass("data-export").trim()}>
+              <div className="setting-field">
+                <span className="setting-mini-title">Default single-thread format</span>
+                <SettingsChoiceGroup value={threadExportFormat} onChange={setThreadExportFormat} testIdPrefix="thread-export-format" options={[
+                  { value: "json", label: "JSON", detail: "Preserve structured Milim thread data." },
+                  { value: "markdown", label: "Markdown", detail: "Create a readable conversation document." },
+                ]} />
+              </div>
+            </SettingsBlock>
+            <SettingsBlock title="Backup & restore" data-setting-id="data-backup" className={settingHighlightClass("data-backup").trim()}>
+              <div className="setting-stack">
+                <div className="settings-action-row"><div><strong>Export Milim backup</strong><span>Chats, projects, drafts, archive state, settings, themes, quick actions, and local personalization metadata.</span></div><button className="btn-ghost" type="button" disabled={backupBusy} onClick={() => void exportBackupFromSettings()}>Export</button></div>
+                <div className="settings-action-row"><div><strong>Restore backup</strong><span>Validate, snapshot current data, then replace backed-up state in one transaction.</span></div><button className="btn-ghost" type="button" disabled={backupBusy} onClick={() => void restoreBackupFromSettings()}>Restore</button></div>
+                <p className="sheet-hint">Credentials, MCP secrets, paired-device tokens, memory databases, generated media, update packages, worktrees, and running jobs are excluded.</p>
+                {backupStatus ? <p className={backupStatus.includes("failed") ? "sheet-hint error" : "sheet-hint"} role="status">{backupStatus}</p> : null}
+              </div>
+            </SettingsBlock>
             <SettingsBlock title="Retention" data-setting-id="history-retention" className={settingHighlightClass("history-retention").trim()}>
               <div className="setting-stack">
                 <div className="setting-field">
@@ -989,6 +1395,20 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                 </div>
               </div>
             </SettingsBlock>
+            <SettingsBlock title="Empty chat" data-setting-id="appearance-empty-chat-ridgeline" className={settingHighlightClass("appearance-empty-chat-ridgeline").trim()}>
+              <div className="setting-toggle-row">
+                <div>
+                  <strong>Show activity ridgeline</strong>
+                  <span>Display the local activity chart above the composer in an empty chat.</span>
+                </div>
+                <Toggle
+                  checked={showEmptyChatRidgeline}
+                  onChange={setShowEmptyChatRidgeline}
+                  ariaLabel="Show empty-chat activity ridgeline"
+                  testId="empty-chat-ridgeline-toggle"
+                />
+              </div>
+            </SettingsBlock>
             <SettingsBlock title="Code blocks" data-setting-id="appearance-code-blocks" className={settingHighlightClass("appearance-code-blocks").trim()}>
               <AppearanceCodeBlockThemeChoices
                 value={codeBlockTheme}
@@ -1082,7 +1502,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             {activeSection === "system" && (
         <section className="settings-section" id="settings-panel-system" role="tabpanel" aria-labelledby="settings-tab-system" tabIndex={-1}>
           <SettingsPanel>
-            <SettingsBlock title="Keyboard shortcuts" data-setting-id="system-shortcuts" className={settingHighlightClass("system-shortcuts").trim()}>
+            <SettingsBlock data-setting-id="system-shortcuts" className={settingHighlightClass("system-shortcuts").trim()}>
               <div className="setting-stack">
                 {APP_SHORTCUT_ACTIONS.map((action) => (
                   <div className="shortcut-recorder-row" key={action}>
@@ -1130,7 +1550,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             {activeSection === "mobile" && (
         <section className="settings-section" id="settings-panel-mobile" role="tabpanel" aria-labelledby="settings-tab-mobile" tabIndex={-1}>
           <SettingsPanel>
-            <SettingsBlock title="Mobile companion" data-setting-id="mobile-companion" className={settingHighlightClass("mobile-companion").trim()}>
+            <SettingsBlock data-setting-id="mobile-companion" className={settingHighlightClass("mobile-companion").trim()}>
               <MobileCompanionSettings />
             </SettingsBlock>
           </SettingsPanel>
@@ -1240,7 +1660,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                   <strong>Developer mode</strong>
                   <span>Show developer-only settings for testing setup flows.</span>
                 </div>
-                <Toggle checked={developerMode} onChange={setDeveloperMode} testId="general-developer-mode-toggle" />
+                <Toggle checked={developerMode} onChange={setDeveloperMode} ariaLabel="Developer mode" testId="general-developer-mode-toggle" />
               </div>
             </SettingsBlock>
 
@@ -1255,6 +1675,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                   <Toggle
                     checked={experimentalHashlinePatch}
                     onChange={setExperimentalHashlinePatch}
+                    ariaLabel="Hashline file patching"
                     testId="developer-hashline-patch-toggle"
                   />
                 </div>
@@ -1273,6 +1694,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                   <Toggle
                     checked={onboardingDeveloperShow || onboardingStatus === "in_progress"}
                     onChange={setDeveloperShowOnboarding}
+                    ariaLabel="Onboarding flow"
                     testId="developer-onboarding-toggle"
                   />
                 </div>

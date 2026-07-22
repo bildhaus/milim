@@ -34,3 +34,13 @@ export function mcpToolTagCompletion(toolName: string): string {
 export function composerCommandRunsOnSelection(commandId: string): boolean {
   return commandId === "plan" || commandId === "goal";
 }
+
+export function composerSuggestionMatchScore(text: string, query: string): number | null {
+  const normalizedText = text.trim().toLowerCase();
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) return 0;
+  if (normalizedText.startsWith(normalizedQuery)) return 0;
+  if (normalizedText.split(/[^a-z0-9]+/).some((token) => token.startsWith(normalizedQuery))) return 1;
+  const index = normalizedText.indexOf(normalizedQuery);
+  return index >= 0 ? 2 + index / Math.max(1, normalizedText.length) : null;
+}

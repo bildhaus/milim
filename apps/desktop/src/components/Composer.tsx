@@ -1,7 +1,7 @@
 import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import { type Agent, type ChatAttachment, type MediaKind, type SkillInfo, type ToolInfo } from "../api";
 import type { WorkspaceFileSuggestion } from "../api";
-import { composerAutocompleteTriggerAt, composerCommandRunsOnSelection, mcpToolTagCompletion, replaceComposerAutocompleteTrigger, skillTagCompletion } from "../lib/composerAutocomplete";
+import { composerAutocompleteTriggerAt, composerCommandRunsOnSelection, composerSuggestionMatchScore, mcpToolTagCompletion, replaceComposerAutocompleteTrigger, skillTagCompletion } from "../lib/composerAutocomplete";
 import { canNavigateComposerHistory, moveComposerHistory, type ComposerHistoryDirection } from "../lib/composerHistory";
 import { composerTokenParts, composerTokensForText } from "../lib/composerTokens";
 import { shortcutLabel, shortcutMatchesEvent } from "../ui/shortcuts";
@@ -118,6 +118,7 @@ export function Composer({
   mediaKind = "image",
   mediaTargetLabel,
   sentHistory = [],
+  requestCompletion,
   tokens,
   contextBudgetTokens,
   busy,
@@ -148,6 +149,7 @@ export function Composer({
   mediaKind?: MediaKind;
   mediaTargetLabel?: string;
   sentHistory?: string[];
+  requestCompletion?: (text: string, signal: AbortSignal) => Promise<string | null>;
   tokens: number;
   contextBudgetTokens?: number;
   busy: boolean;
@@ -159,10 +161,16 @@ export function Composer({
   const projectRef = useRef<HTMLDivElement>(null);
   const composerSendShortcut = useUiPreferences((s) => s.composerSendShortcut);
   const composerDensity = useUiPreferences((s) => s.composerDensity);
+  const autocompleteMode = useUiPreferences((s) => s.autocompleteMode);
+  const autocompleteSources = useUiPreferences((s) => s.autocompleteSources);
+  const personalizedSuggestions = useUiPreferences((s) => s.personalizedSuggestions);
+  const suggestionUsage = useUiPreferences((s) => s.suggestionUsage);
+  const recordSuggestionUse = useUiPreferences((s) => s.recordSuggestionUse);
   const valueRef = useRef(value);
   const applyingHistoryRef = useRef(false);
   const historyDraftRef = useRef("");
   const historyNoticeTimerRef = useRef<number | null>(null);
+  const completionControllerRef = useRef<AbortController | null>(null);
   const [personaOpen, setPersonaOpen] = useState(false);
   const [projectOpen, setProjectOpen] = useState(false);
   const [slashOpen, setSlashOpen] = useState(false);
@@ -173,6 +181,8 @@ export function Composer({
   const [dragOver, setDragOver] = useState(false);
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
   const [historyNotice, setHistoryNotice] = useState<string | null>(null);
+  const [ghostCompletion, setGhostCompletion] = useState("");
+  const [imeComposing, setImeComposing] = useState(false);
 
   const slashInput = parseSlashInput(value);
   const activeTrigger = composerAutocompleteTriggerAt(value, cursor);
@@ -189,39 +199,44 @@ export function Composer({
     ? workspaceProjects.find((project) => project.folder === activeWorkspaceFolder)?.name ?? folderLabel(activeWorkspaceFolder)
     : "No project";
   const showWorkspaceSelector = true;
-  const availableSlashCommands = SLASH_COMMANDS;
+  const availableSlashCommands = autocompleteSources.commands ? SLASH_COMMANDS : [];
   const suggestions = useMemo(() => {
-    const match = (text: string) => !suggestionQuery || text.toLowerCase().includes(suggestionQuery);
-    const items: Suggestion[] = [];
-    if (!suggestionPrefix && match("files folders attach")) {
-      items.push({ kind: "action", group: "Add", key: "files", name: "Files", label: "Files and folders", hint: "Attach local context" });
+    const scored: Array<{ item: Suggestion; score: number; usageId?: string }> = [];
+    const add = (item: Suggestion, text: string, usageId?: string) => {
+      const matchScore = composerSuggestionMatchScore(text, suggestionQuery);
+      if (matchScore == null) return;
+      const usage = personalizedSuggestions && usageId ? suggestionUsage[usageId] : undefined;
+      scored.push({ item, usageId, score: matchScore - Math.min(0.75, (usage?.count ?? 0) * 0.05) });
+    };
+    if (!suggestionPrefix && composerSuggestionMatchScore("files folders attach", suggestionQuery) != null) {
+      add({ kind: "action", group: "Add", key: "files", name: "Files", label: "Files and folders", hint: "Attach local context" }, "files folders attach");
     }
-    if (suggestionPrefix === "@") {
-      items.push(...workspaceFiles.map((file) => ({ kind: "file" as const, group: "Files" as const, file })));
+    if (suggestionPrefix === "@" && autocompleteSources.files) {
+      workspaceFiles.forEach((file) => add({ kind: "file", group: "Files", file }, `${file.name} ${file.path}`));
     }
     if (suggestionPrefix !== "@") {
-      items.push(
-        ...availableSlashCommands
-          .filter((cmd) => match(`${cmd.id} ${cmd.label} ${cmd.hint}`))
-          .map((command) => ({ kind: "command" as const, group: command.group, command })),
-      );
+      availableSlashCommands.forEach((command) => add(
+        { kind: "command", group: command.group, command },
+        `${command.id} ${command.label} ${command.hint}`,
+        `command:${command.id}`,
+      ));
     }
-    if (suggestionPrefix === "/") {
-      items.push(
-        ...tools
-          .filter((tool) => tool.name.includes("__") && match(`${tool.name} ${tool.description}`))
-          .slice(0, 8)
-          .map((tool) => ({ kind: "mcp" as const, group: "MCP" as const, tool })),
-      );
+    if (suggestionPrefix === "/" && autocompleteSources.mcp) {
+      tools.filter((tool) => tool.name.includes("__")).forEach((tool) => add(
+        { kind: "mcp", group: "MCP", tool },
+        `${tool.name} ${tool.description}`,
+        `mcp:${tool.name}`,
+      ));
     }
-    items.push(
-      ...skills
-        .filter((skill) => skill.enabled && match(`${skill.name} ${skill.description}`))
-        .slice(0, 8)
-        .map((skill) => ({ kind: "skill" as const, group: "Skills" as const, skill })),
-    );
-    return items;
-  }, [availableSlashCommands, skills, suggestionPrefix, suggestionQuery, tools, workspaceFiles]);
+    if (autocompleteSources.skills) {
+      skills.filter((skill) => skill.enabled).forEach((skill) => add(
+        { kind: "skill", group: "Skills", skill },
+        `${skill.name} ${skill.description}`,
+        `skill:${skill.id}`,
+      ));
+    }
+    return scored.sort((left, right) => left.score - right.score).map(({ item }) => item);
+  }, [autocompleteSources, availableSlashCommands, personalizedSuggestions, skills, suggestionPrefix, suggestionQuery, suggestionUsage, tools, workspaceFiles]);
   const suggestionGroups = useMemo(() => {
     const groups: Array<{ label: Suggestion["group"]; items: Suggestion[] }> = [];
     for (const item of suggestions) {
@@ -232,8 +247,8 @@ export function Composer({
     return groups;
   }, [suggestions]);
   const orderedSuggestions = useMemo(() => suggestionGroups.flatMap((group) => group.items), [suggestionGroups]);
-  const autoSlashMenuOpen = Boolean(activeTrigger) && orderedSuggestions.length > 0 && value !== slashDismissedValue;
-  const showSlashMenu = slashOpen || autoSlashMenuOpen;
+  const autoSlashMenuOpen = autocompleteMode === "automatic" && Boolean(activeTrigger) && orderedSuggestions.length > 0 && value !== slashDismissedValue;
+  const showSlashMenu = autocompleteMode !== "off" && (slashOpen || autoSlashMenuOpen);
   const canSend = Boolean(value.trim() || attachments.length);
   const sendShortcutLabel = composerSendShortcut === "modEnter" ? shortcutLabel("Mod+Enter") : "Enter";
   const sentHistoryKey = useMemo(() => sentHistory.join("\0"), [sentHistory]);
@@ -246,6 +261,7 @@ export function Composer({
   );
   const composerHighlightParts = useMemo(() => composerTokenParts(value, composerTokens), [composerTokens, value]);
   const hasTokenLayer = composerTokens.length > 0;
+  const showComposerOverlay = hasTokenLayer || Boolean(ghostCompletion);
 
   // Auto-grow the textarea up to a cap.
   useEffect(() => {
@@ -283,6 +299,38 @@ export function Composer({
   useEffect(() => () => clearHistoryNoticeTimer(), []);
 
   useEffect(() => {
+    completionControllerRef.current?.abort();
+    completionControllerRef.current = null;
+    setGhostCompletion("");
+    if (!requestCompletion || busy || mediaActive || showSlashMenu || imeComposing || value.replace(/\s/g, "").length < 20) return;
+    const controller = new AbortController();
+    completionControllerRef.current = controller;
+    const timer = window.setTimeout(() => {
+      void requestCompletion(value, controller.signal)
+        .then((completion) => {
+          if (!controller.signal.aborted && completion) setGhostCompletion(completion);
+        })
+        .catch((error) => {
+          if (!(error instanceof DOMException && error.name === "AbortError")) setGhostCompletion("");
+        });
+    }, 600);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [busy, imeComposing, mediaActive, requestCompletion, showSlashMenu, value]);
+
+  useEffect(() => {
+    const openSuggestions = () => {
+      if (autocompleteMode === "off") return;
+      ref.current?.focus();
+      setSlashOpen(true);
+    };
+    window.addEventListener("milim:open-composer-suggestions", openSuggestions);
+    return () => window.removeEventListener("milim:open-composer-suggestions", openSuggestions);
+  }, [autocompleteMode]);
+
+  useEffect(() => {
     setSlashFocusIndex(0);
   }, [suggestionPrefix, suggestionQuery, orderedSuggestions.length]);
 
@@ -291,7 +339,7 @@ export function Composer({
   }, [cursor, value.length]);
 
   useEffect(() => {
-    if (suggestionPrefix !== "@" || !workspaceFolder.trim()) {
+    if (autocompleteMode === "off" || !autocompleteSources.files || suggestionPrefix !== "@" || !workspaceFolder.trim()) {
       setWorkspaceFiles([]);
       return;
     }
@@ -306,7 +354,7 @@ export function Composer({
     return () => {
       cancelled = true;
     };
-  }, [listWorkspaceFiles, suggestionPrefix, suggestionQuery, workspaceFolder]);
+  }, [autocompleteMode, autocompleteSources.files, listWorkspaceFiles, suggestionPrefix, suggestionQuery, workspaceFolder]);
 
   useEffect(() => {
     if (!personaOpen) return;
@@ -419,17 +467,21 @@ export function Composer({
       return;
     }
     if (item.kind === "skill") {
+      recordSuggestionUse(`skill:${item.skill.id}`);
       insertSkill(item.skill);
       return;
     }
     if (item.kind === "mcp") {
+      recordSuggestionUse(`mcp:${item.tool.name}`);
       insertCompletion(mcpToolTagCompletion(item.tool.name));
       return;
     }
     if (composerCommandRunsOnSelection(item.command.id)) {
+      recordSuggestionUse(`command:${item.command.id}`);
       activateSuggestedCommand(item.command.id);
       return;
     }
+    recordSuggestionUse(`command:${item.command.id}`);
     insertCompletion(`/${item.command.id} `);
   }
 
@@ -488,6 +540,8 @@ export function Composer({
   }
 
   function submitComposer() {
+    completionControllerRef.current?.abort();
+    setGhostCompletion("");
     if (!busy && slashInput && runSlash(slashInput.id, slashInput.argument)) return;
     onSend();
   }
@@ -565,7 +619,7 @@ export function Composer({
         </div>
       )}
       <div className="composer-input-wrap">
-        {hasTokenLayer && (
+        {showComposerOverlay && (
           <div ref={highlightRef} className="composer-input-highlight" aria-hidden="true" data-testid="composer-token-layer">
             {composerHighlightParts.map((part, index) =>
               part.kind === "token" ? (
@@ -580,12 +634,13 @@ export function Composer({
                 <span key={`text-${index}`}>{part.text}</span>
               ),
             )}
+            {ghostCompletion ? <span className="composer-ghost-text">{ghostCompletion}</span> : null}
             <span className="composer-highlight-sentinel">{"\u200b"}</span>
           </div>
         )}
         <textarea
           ref={ref}
-          className={"composer-input" + (hasTokenLayer ? " has-token-layer" : "")}
+          className={"composer-input" + (showComposerOverlay ? " has-token-layer" : "")}
           data-testid="composer-input"
           rows={1}
           value={value}
@@ -596,11 +651,27 @@ export function Composer({
             syncHighlightScroll(e.currentTarget);
             onChange(e.target.value);
           }}
+          onCompositionStart={() => setImeComposing(true)}
+          onCompositionEnd={() => setImeComposing(false)}
           onClick={(e) => syncCursor(e.currentTarget)}
           onKeyUp={(e) => syncCursor(e.currentTarget)}
           onSelect={(e) => syncCursor(e.currentTarget)}
           onScroll={(e) => syncHighlightScroll(e.currentTarget)}
           onKeyDown={(e) => {
+            if (ghostCompletion && e.key === "Tab" && !e.shiftKey) {
+              e.preventDefault();
+              const next = value + ghostCompletion;
+              setGhostCompletion("");
+              onChange(next);
+              window.requestAnimationFrame(() => ref.current?.setSelectionRange(next.length, next.length));
+              return;
+            }
+            if (ghostCompletion && e.key === "Escape") {
+              e.preventDefault();
+              completionControllerRef.current?.abort();
+              setGhostCompletion("");
+              return;
+            }
             if (e.key === "Escape" && showSlashMenu) {
               e.preventDefault();
               setSlashDismissedValue(value);
@@ -803,7 +874,7 @@ export function Composer({
             aria-expanded={showSlashMenu}
             aria-haspopup="menu"
             onClick={() => {
-              setSlashOpen((v) => !v);
+              if (autocompleteMode !== "off") setSlashOpen((v) => !v);
               setPersonaOpen(false);
             }}
           >

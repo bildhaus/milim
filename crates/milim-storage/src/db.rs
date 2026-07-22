@@ -491,6 +491,61 @@ impl UserDataStore {
         Ok(changed > 0)
     }
 
+    pub fn replace_backup_state(
+        &self,
+        replace_keys: &[String],
+        entries: BTreeMap<String, String>,
+        sessions_json: &str,
+    ) -> Result<()> {
+        for (key, value) in &entries {
+            serde_json::from_str::<serde_json::Value>(value)
+                .map_err(|e| Error::InvalidRequest(format!("invalid JSON for {key}: {e}")))?;
+        }
+        serde_json::from_str::<serde_json::Value>(sessions_json)
+            .map_err(|e| Error::InvalidRequest(format!("invalid sessions JSON: {e}")))?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
+        let result = (|| -> Result<()> {
+            for key in replace_keys {
+                conn.execute("DELETE FROM user_json_state WHERE key = ?1", params![key])
+                    .map_err(sqlite)?;
+            }
+            for (key, value) in entries {
+                conn.execute(
+                    "INSERT INTO user_json_state (key, value_json, updated_at_ms)
+                     VALUES (?1, ?2, ?3)
+                     ON CONFLICT(key) DO UPDATE SET
+                        value_json = excluded.value_json,
+                        updated_at_ms = excluded.updated_at_ms",
+                    params![key, value, now_ms()],
+                )
+                .map_err(sqlite)?;
+            }
+            conn.execute("DELETE FROM user_session_messages", [])
+                .map_err(sqlite)?;
+            conn.execute("DELETE FROM user_sessions", [])
+                .map_err(sqlite)?;
+            conn.execute(
+                "DELETE FROM user_json_state WHERE key IN (?1, ?2)",
+                params![SESSIONS_STATE_KEY, SESSIONS_META_KEY],
+            )
+            .map_err(sqlite)?;
+            set_sessions_snapshot_locked(conn, sessions_json)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => conn.execute_batch("COMMIT").map_err(sqlite),
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
     pub fn import_json_entries(&self, entries: BTreeMap<String, String>) -> Result<()> {
         let db = self
             .db
@@ -815,8 +870,11 @@ fn apply_sessions_delta_locked(conn: &Connection, delta: SessionsDelta) -> Resul
         }
     }
 
-    conn.execute_batch("BEGIN IMMEDIATE TRANSACTION;")
-        .map_err(sqlite)?;
+    let owns_transaction = conn.is_autocommit();
+    if owns_transaction {
+        conn.execute_batch("BEGIN IMMEDIATE TRANSACTION;")
+            .map_err(sqlite)?;
+    }
     let result = (|| -> Result<()> {
         for id in &delta.deleted_session_ids {
             conn.execute("DELETE FROM user_sessions WHERE id = ?1", params![id])
@@ -927,9 +985,12 @@ fn apply_sessions_delta_locked(conn: &Connection, delta: SessionsDelta) -> Resul
     })();
 
     match result {
-        Ok(()) => conn.execute_batch("COMMIT;").map_err(sqlite),
+        Ok(()) if owns_transaction => conn.execute_batch("COMMIT;").map_err(sqlite),
+        Ok(()) => Ok(()),
         Err(error) => {
-            let _ = conn.execute_batch("ROLLBACK;");
+            if owns_transaction {
+                let _ = conn.execute_batch("ROLLBACK;");
+            }
             Err(error)
         }
     }
@@ -950,8 +1011,11 @@ fn set_sessions_snapshot_locked(conn: &Connection, value_json: &str) -> Result<(
     let meta_json = serde_json::to_string(&root).map_err(json_error)?;
     let now = now_ms();
 
-    conn.execute_batch("BEGIN IMMEDIATE TRANSACTION;")
-        .map_err(sqlite)?;
+    let owns_transaction = conn.is_autocommit();
+    if owns_transaction {
+        conn.execute_batch("BEGIN IMMEDIATE TRANSACTION;")
+            .map_err(sqlite)?;
+    }
     let result = (|| -> Result<()> {
         let existing = stored_session_rows(conn)?;
         let mut incoming_ids = BTreeSet::new();
@@ -1033,9 +1097,12 @@ fn set_sessions_snapshot_locked(conn: &Connection, value_json: &str) -> Result<(
     })();
 
     match result {
-        Ok(()) => conn.execute_batch("COMMIT;").map_err(sqlite),
+        Ok(()) if owns_transaction => conn.execute_batch("COMMIT;").map_err(sqlite),
+        Ok(()) => Ok(()),
         Err(error) => {
-            let _ = conn.execute_batch("ROLLBACK;");
+            if owns_transaction {
+                let _ = conn.execute_batch("ROLLBACK;");
+            }
             Err(error)
         }
     }
@@ -1597,6 +1664,58 @@ mod tests {
         assert_eq!(
             store.get_json("milim.settings").unwrap().as_deref(),
             Some(r#"{"state":{"theme":"db"},"version":0}"#)
+        );
+    }
+
+    #[test]
+    fn user_backup_restore_replaces_keys_and_sessions_atomically() {
+        let db = Database::open_in_memory().unwrap();
+        let store = UserDataStore::new(db).unwrap();
+        store.set_json("milim.ui", r#"{"old":true}"#).unwrap();
+        store.set_json("milim.settings", r#"{"old":true}"#).unwrap();
+        store.set_sessions_snapshot(r#"{"state":{"sessions":[{"id":"old","messages":[]}],"activeId":"old"},"version":0}"#).unwrap();
+
+        store.replace_backup_state(
+            &["milim.ui".into(), "milim.settings".into()],
+            BTreeMap::from([("milim.ui".into(), r#"{"restored":true}"#.into())]),
+            r#"{"state":{"sessions":[{"id":"restored","messages":[{"role":"user","content":"hello"}]}],"activeId":"restored"},"version":0}"#,
+        ).unwrap();
+
+        assert_eq!(
+            store.get_json("milim.ui").unwrap().as_deref(),
+            Some(r#"{"restored":true}"#)
+        );
+        assert!(store.get_json("milim.settings").unwrap().is_none());
+        let sessions: serde_json::Value =
+            serde_json::from_str(&store.get_sessions_snapshot().unwrap().unwrap()).unwrap();
+        assert_eq!(sessions["state"]["sessions"][0]["id"], "restored");
+    }
+
+    #[test]
+    fn user_backup_restore_rolls_back_on_invalid_session_shape() {
+        let db = Database::open_in_memory().unwrap();
+        let store = UserDataStore::new(db).unwrap();
+        store.set_json("milim.ui", r#"{"old":true}"#).unwrap();
+        let original =
+            r#"{"state":{"sessions":[{"id":"old","messages":[]}],"activeId":"old"},"version":0}"#;
+        store.set_sessions_snapshot(original).unwrap();
+
+        let result = store.replace_backup_state(
+            &["milim.ui".into()],
+            BTreeMap::from([("milim.ui".into(), r#"{"restored":true}"#.into())]),
+            r#"{"state":{"sessions":"invalid"},"version":0}"#,
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            store.get_json("milim.ui").unwrap().as_deref(),
+            Some(r#"{"old":true}"#)
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                &store.get_sessions_snapshot().unwrap().unwrap()
+            )
+            .unwrap(),
+            serde_json::from_str::<serde_json::Value>(original).unwrap(),
         );
     }
 }

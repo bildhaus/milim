@@ -84,15 +84,29 @@ equal("interfaceMode" in useUiPreferences.getState(), false, "obsolete interface
 equal(useUiPreferences.getState().developerMode, false, "developer mode should default off");
 equal(useUiPreferences.getState().experimentalHashlinePatch, false, "hashline patching should default off");
 equal(useUiPreferences.getState().chatLayoutStyle, "transcript", "chat layout should default to transcript");
+equal(useUiPreferences.getState().showEmptyChatRidgeline, true, "empty-chat ridgeline should default on");
 equal(useUiPreferences.getState().messageWidth, "standard", "message width should default to standard");
 equal(useUiPreferences.getState().avatarStyle, "none", "avatar style should default to none");
 equal(useUiPreferences.getState().codeBlockTheme, "match", "code theme should default to match");
 equal(useUiPreferences.getState().backgroundFit, "cover", "background fit should default to cover");
 equal(useUiPreferences.getState().backgroundTreatment, "clear", "background treatment should default to clear");
+equal(useUiPreferences.getState().startupBehavior, "restore", "startup should restore the last chat by default");
+equal(useUiPreferences.getState().restoreOpenPanels, true, "open panels should restore by default");
+equal(useUiPreferences.getState().notifyRunFinished, false, "finished notifications should default off");
+equal(useUiPreferences.getState().notifyNeedsAttention, false, "attention notifications should default off");
+equal(useUiPreferences.getState().notifyOnlyWhenUnfocused, true, "notifications should default to unfocused only");
+equal(useUiPreferences.getState().quickActionMode, "smart", "quick actions should default smart");
+equal(useUiPreferences.getState().autocompleteMode, "automatic", "autocomplete should default automatic");
+equal(useUiPreferences.getState().promptHistoryScope, "thread", "prompt history should default to the current chat");
+equal(useUiPreferences.getState().threadExportFormat, "json", "thread export should default JSON");
+equal(useUiPreferences.getState().workspaceLauncherPreference, "remember", "workspace openers should remember per project");
+equal(useUiPreferences.getState().newProjectChatWorkspace, "current", "new project chats should use the current checkout");
+equal(useUiPreferences.getState().composerCompletionMode, "off", "AI composer completion should default off");
 equal(useUiPreferences.getState().gitPanelExpanded, false, "git panel should default collapsed");
 equal(useUiPreferences.getState().appShortcuts.newChat, DEFAULT_APP_SHORTCUTS.newChat, "new chat shortcut should default");
 equal(useUiPreferences.getState().appShortcuts.focusSearch, DEFAULT_APP_SHORTCUTS.focusSearch, "search shortcut should default");
 equal(useUiPreferences.getState().appShortcuts.focusComposer, DEFAULT_APP_SHORTCUTS.focusComposer, "composer focus shortcut should default");
+equal(useUiPreferences.getState().appShortcuts.openComposerSuggestions, DEFAULT_APP_SHORTCUTS.openComposerSuggestions, "suggestion shortcut should default");
 equal(useUiPreferences.getState().appShortcuts.stopGeneration, DEFAULT_APP_SHORTCUTS.stopGeneration, "stop shortcut should default");
 equal(useUiPreferences.getState().appShortcuts.toggleSidebar, DEFAULT_APP_SHORTCUTS.toggleSidebar, "sidebar shortcut should default");
 equal(useUiPreferences.getState().appShortcuts.previousThread, DEFAULT_APP_SHORTCUTS.previousThread, "previous thread shortcut should default");
@@ -180,6 +194,24 @@ equal(persistedUiState().soundOnInteractions, true, "interaction sound preferenc
 equal(persistedUiState().finishedSound, "bloom", "finished sound choice should be persisted");
 equal(persistedUiState().attentionSound, "droplet", "attention sound choice should be persisted");
 
+useUiPreferences.getState().setQuickActionMode("pinned");
+useUiPreferences.getState().setPinnedQuickActions([
+  { id: "one", label: "One", prompt: "First" },
+  { id: "two", label: "Two", prompt: "Second" },
+  { id: "three", label: "Three", prompt: "Third" },
+  { id: "four", label: "Four", prompt: "Fourth" },
+]);
+equal(useUiPreferences.getState().pinnedQuickActions.length, 3, "pinned actions should be bounded to three");
+useUiPreferences.getState().recordGlobalPrompt("same prompt");
+useUiPreferences.getState().recordGlobalPrompt("same prompt");
+equal(useUiPreferences.getState().globalPromptHistory.length, 1, "global prompt history should deduplicate prompts");
+for (let index = 0; index < 110; index += 1) useUiPreferences.getState().recordGlobalPrompt(`prompt ${index}`);
+equal(useUiPreferences.getState().globalPromptHistory.length, 100, "global prompt history should be bounded to 100");
+useUiPreferences.getState().recordSuggestionUse("command:model");
+equal(useUiPreferences.getState().suggestionUsage["command:model"].count, 1, "suggestion use should store bounded local counts");
+useUiPreferences.getState().resetSuggestionHistory();
+equal(Object.keys(useUiPreferences.getState().suggestionUsage).length, 0, "suggestion history should reset");
+
 useUiPreferences.getState().setComposerSendShortcut("modEnter");
 equal(useUiPreferences.getState().composerSendShortcut, "modEnter", "send shortcut should update");
 
@@ -210,6 +242,10 @@ equal(persistedUiState().experimentalHashlinePatch, true, "hashline patching sho
 
 useUiPreferences.getState().setChatLayoutStyle("bubbles");
 equal(useUiPreferences.getState().chatLayoutStyle, "bubbles", "chat layout should update");
+
+useUiPreferences.getState().setShowEmptyChatRidgeline(false);
+equal(useUiPreferences.getState().showEmptyChatRidgeline, false, "empty-chat ridgeline should update");
+equal(persistedUiState().showEmptyChatRidgeline, false, "empty-chat ridgeline should be persisted");
 
 useUiPreferences.getState().setMessageWidth("wide");
 equal(useUiPreferences.getState().messageWidth, "wide", "message width should update");
@@ -274,6 +310,7 @@ useUiPreferences.setState({
   developerMode: false,
   experimentalHashlinePatch: false,
   chatLayoutStyle: "transcript",
+  showEmptyChatRidgeline: true,
   messageWidth: "standard",
   avatarStyle: "none",
   codeBlockTheme: "match",
@@ -311,6 +348,7 @@ equal("interfaceMode" in useUiPreferences.getState(), false, "obsolete persisted
 equal(useUiPreferences.getState().developerMode, true, "developer mode should rehydrate");
 equal(useUiPreferences.getState().experimentalHashlinePatch, true, "hashline patching should rehydrate");
 equal(useUiPreferences.getState().chatLayoutStyle, "compact", "chat layout should rehydrate");
+equal(useUiPreferences.getState().showEmptyChatRidgeline, true, "missing empty-chat ridgeline preference should keep its enabled default");
 equal(useUiPreferences.getState().messageWidth, "full", "message width should rehydrate");
 equal(useUiPreferences.getState().avatarStyle, "role", "avatar style should rehydrate");
 equal(useUiPreferences.getState().codeBlockTheme, "high-contrast", "code theme should rehydrate");

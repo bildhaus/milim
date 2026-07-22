@@ -212,7 +212,7 @@ export function MobileCompanionSettings() {
           <strong>Enable companion bridge</strong>
           <span>Allow paired phones to relay text to the active desktop composer.</span>
         </div>
-        <Toggle checked={enabled} onChange={updateEnabled} testId="mobile-companion-enabled-toggle" />
+        <Toggle checked={enabled} onChange={updateEnabled} ariaLabel="Enable companion bridge" testId="mobile-companion-enabled-toggle" />
       </div>
 
       <label className="setting-field">

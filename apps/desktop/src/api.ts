@@ -670,6 +670,29 @@ export async function restartDesktopApp(): Promise<void> {
   await invoke("restart_app");
 }
 
+export interface MilimBackupInspection {
+  schemaVersion: number;
+  appVersion: string;
+  createdAt: number;
+  summary: { chats: number; projects: number; stateKeys: number };
+  bytes: number;
+}
+
+export async function exportMilimBackup(path: string): Promise<MilimBackupInspection> {
+  if (!inTauri) throw new Error("Backup export is only available in the desktop app.");
+  return invoke<MilimBackupInspection>("export_milim_backup", { path });
+}
+
+export async function inspectMilimBackup(path: string): Promise<MilimBackupInspection> {
+  if (!inTauri) throw new Error("Backup restore is only available in the desktop app.");
+  return invoke<MilimBackupInspection>("inspect_milim_backup", { path });
+}
+
+export async function restoreMilimBackup(path: string): Promise<string> {
+  if (!inTauri) throw new Error("Backup restore is only available in the desktop app.");
+  return invoke<string>("restore_milim_backup", { path });
+}
+
 export async function requestDesktopQuit(): Promise<void> {
   if (!inTauri) return;
   await invoke("request_desktop_quit");
@@ -1329,6 +1352,24 @@ export async function completeChatWithMetrics(
     ...(usage ? { usage } : {}),
     ...(typeof finishReason === "string" ? { finishReason } : {}),
   };
+}
+
+export async function requestComposerCompletion(
+  model: string,
+  composerText: string,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  const text = composerText.trimEnd();
+  if (!model.trim() || text.replace(/\s/g, "").length < 20) return null;
+  const result = await completeChatWithMetrics(
+    model,
+    [{ role: "user", content: text }],
+    { signal, maxTokens: 64, temperature: 0 },
+  );
+  const completion = result.content.trim();
+  if (!completion) return null;
+  const suffix = completion.startsWith(text) ? completion.slice(text.length) : completion;
+  return suffix.slice(0, 400) || null;
 }
 
 export async function completeChat(

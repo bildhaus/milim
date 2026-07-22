@@ -27,6 +27,7 @@ computer-use = ["dep:enigo", "dep:xcap", "dep:image", "dep:core-graphics"]
 [dependencies]
 tauri = { version = "2", features = ["unstable", "tray-icon", "macos-private-api"] }
 tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
 tauri-plugin-window-state = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

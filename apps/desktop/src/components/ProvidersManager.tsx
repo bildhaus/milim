@@ -25,6 +25,7 @@ import {
   type ProviderKind,
 } from "../api";
 import { recoveredCodexSession, recoveredCodexSessionId } from "../lib/codexRecovery";
+import { isLoopbackProviderEndpoint } from "../lib/providerEndpoint.js";
 import { useSessions } from "../sessions/store";
 import { Plus, Refresh, Search, X } from "./icons";
 import { SheetDialog } from "./SheetDialog";
@@ -60,17 +61,6 @@ function isMediaProvider(
   );
 }
 
-function isLocalEndpoint(baseUrl: string): boolean {
-  try {
-    const url = new URL(baseUrl);
-    return ["localhost", "127.0.0.1", "::1", "[::1]"].includes(url.hostname);
-  } catch {
-    return /^(https?:\/\/)?(localhost|127\.0\.0\.1|\[::1\])/i.test(
-      baseUrl.trim(),
-    );
-  }
-}
-
 function providerNeedsKey(
   provider: Pick<ProviderInfo, "kind" | "name" | "base_url">,
 ): boolean {
@@ -84,7 +74,7 @@ function providerNeedsKey(
       p.base_url.trim().replace(/\/+$/, "").toLowerCase() === normalizedBase,
   );
   if (preset) return preset.needsKey;
-  return !isLocalEndpoint(provider.base_url);
+  return !isLoopbackProviderEndpoint(provider.base_url);
 }
 
 function providerCategory(
@@ -97,7 +87,7 @@ function providerCategory(
 
 function providerGroup(provider: ProviderInfo): string {
   if (!provider.enabled) return "Disabled";
-  if (isLocalEndpoint(provider.base_url)) return "Local";
+  if (isLoopbackProviderEndpoint(provider.base_url)) return "Local";
   if (isMediaProvider(provider)) return "Media";
   return "Hosted chat";
 }

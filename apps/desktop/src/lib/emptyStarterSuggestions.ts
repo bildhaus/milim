@@ -59,8 +59,7 @@ function recentCommitContext(status: WorkspaceGitStatus): string {
     .join(", ");
 }
 
-function noFolderSuggestions(): EmptyStarterSuggestion[] {
-  return [
+export const BUILTIN_QUICK_ACTIONS: EmptyStarterSuggestion[] = [
     {
       id: "plan-feature",
       label: "Plan a feature",
@@ -83,6 +82,9 @@ function noFolderSuggestions(): EmptyStarterSuggestion[] {
       icon: "refresh",
     },
   ];
+
+function noFolderSuggestions(): EmptyStarterSuggestion[] {
+  return BUILTIN_QUICK_ACTIONS.map((suggestion) => ({ ...suggestion }));
 }
 
 function folderSuggestions(name: string): EmptyStarterSuggestion[] {

@@ -11,13 +11,13 @@ import {
   type SessionPreviewRuntime,
   type SessionSidebarState,
 } from "../sessions/store";
+import { createInteractiveChat } from "../lib/newChatCoordinator";
 import { markPerfRender } from "../lib/perf";
 import { previewRuntimeKeyForThread } from "../lib/previewRuntimeKeys";
 import { sessionRecencyLabel } from "../lib/sessionRecency.js";
-import { chatExportFilename, sessionExportPayload } from "../lib/threadExport";
+import { chatExportFilename, sessionExportPayload, sessionMarkdownExport } from "../lib/threadExport";
 import { DEFAULT_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, normalizeSidebarWidth, useUiPreferences } from "../ui/store";
 import { GitPanel } from "./GitPanel";
-import { runWorkspaceGitAction, setWorkspace } from "../api";
 import { useContextMenu } from "./ContextMenu";
 import { Archive, ArrowUp, Bolt, Calendar, ChevronDown, Cube, Download, Folder, FolderOpen, Gear, GitBranch, Image, Lightbulb, MoreHorizontal, Pin, Plus, Search, Sidebar as PanelIcon } from "./icons";
 
@@ -420,8 +420,7 @@ export function Sidebar({
   }
 
   function createChat() {
-    const { activeId, getSettings, newChat } = useSessions.getState();
-    newChat(getSettings(activeId));
+    void createInteractiveChat();
     focusComposerSoon();
     setQuery("");
     setConfirmArchiveId(null);
@@ -431,42 +430,21 @@ export function Sidebar({
     const store = useSessions.getState();
     const projectFolder = store.getSettings(store.activeId).folder.trim();
     if (!projectFolder) return;
-    const id = store.newChat(store.getSettings(store.activeId));
-    try {
-      await setWorkspace(projectFolder);
-      const result = await runWorkspaceGitAction("create_thread_worktree", {
-        thread_id: id,
-      });
-      if (!result.ok || !result.worktree)
-        throw new Error(result.message || "Could not create the isolated worktree.");
-      store.setThreadWorkspace(id, {
-        mode: "worktree",
-        projectFolder,
-        worktreeFolder: result.worktree,
-        branch: result.stdout.trim() || undefined,
-        baseCommit: result.head,
-        createdAt: Date.now(),
-      });
-      await setWorkspace(result.worktree);
-      focusComposerSoon();
-      setQuery("");
-    } catch (error) {
-      window.alert(error instanceof Error ? error.message : String(error));
-    }
+    await createInteractiveChat(undefined, { forceWorktree: true });
+    focusComposerSoon();
+    setQuery("");
   }
 
   function createChatInSection(sectionId: string) {
-    const { activeId, getSettings, newChat } = useSessions.getState();
     const folder = folderFromSectionId(sectionId);
-    newChat({ ...getSettings(activeId), folder });
+    void createInteractiveChat({ folder });
     focusComposerSoon();
     setQuery("");
     setConfirmArchiveId(null);
   }
 
   function startScratchProject() {
-    const { activeId, getSettings, newChat } = useSessions.getState();
-    newChat({ ...getSettings(activeId), folder: "" });
+    void createInteractiveChat({ folder: "" });
     focusComposerSoon();
     setProjectMenuOpen(false);
     setQuery("");
@@ -482,8 +460,7 @@ export function Sidebar({
       const selected = await open({ directory: true, multiple: false });
       if (typeof selected !== "string") return;
       addProjectFolder(selected);
-      const { activeId, getSettings, newChat } = useSessions.getState();
-      newChat({ ...getSettings(activeId), folder: selected });
+      void createInteractiveChat({ folder: selected });
       focusComposerSoon();
       setQuery("");
     } catch {
@@ -516,11 +493,15 @@ export function Sidebar({
   function exportChat(id: string) {
     const session = useSessions.getState().sessions.find((item) => item.id === id);
     if (!session) return;
-    const blob = new Blob([JSON.stringify(sessionExportPayload(session), null, 2)], { type: "application/json" });
+    const format = useUiPreferences.getState().threadExportFormat;
+    const blob = new Blob(
+      [format === "markdown" ? sessionMarkdownExport(session) : JSON.stringify(sessionExportPayload(session), null, 2)],
+      { type: format === "markdown" ? "text/markdown" : "application/json" },
+    );
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = chatExportFilename(session.title);
+    link.download = chatExportFilename(session.title, format);
     document.body.appendChild(link);
     link.click();
     link.remove();

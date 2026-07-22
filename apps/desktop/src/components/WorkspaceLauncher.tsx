@@ -41,6 +41,9 @@ export function WorkspaceLauncherButton({
   const ref = useRef<HTMLDivElement>(null);
   const lastUsedByFolder = useUiPreferences((s) => s.workspaceLauncherLastUsedByFolder);
   const rememberWorkspaceLauncher = useUiPreferences((s) => s.rememberWorkspaceLauncher);
+  const launcherPreference = useUiPreferences((s) => s.workspaceLauncherPreference);
+  const pushNotice = useUiPreferences((s) => s.pushNotice);
+  const unavailableNoticeRef = useRef("");
   const activeFolder = folder.trim();
 
   useEffect(() => {
@@ -82,10 +85,21 @@ export function WorkspaceLauncherButton({
     };
   }, [activeFolder, open]);
 
-  const rankedLaunchers = useMemo(
-    () => rankedWorkspaceLaunchers(launchers, activeFolder, lastUsedByFolder),
-    [activeFolder, lastUsedByFolder, launchers],
-  );
+  const rankedLaunchers = useMemo(() => {
+    const ranked = rankedWorkspaceLaunchers(launchers, activeFolder, lastUsedByFolder);
+    if (launcherPreference === "remember") return ranked;
+    const preferred = ranked.find((launcher) => launcher.id === launcherPreference);
+    return preferred?.available ? [preferred, ...ranked.filter((launcher) => launcher.id !== preferred.id)] : ranked;
+  }, [activeFolder, lastUsedByFolder, launcherPreference, launchers]);
+  useEffect(() => {
+    if (!open || loading || launcherPreference === "remember") return;
+    const preferred = launchers.find((launcher) => launcher.id === launcherPreference);
+    if (!preferred || preferred.available) return;
+    const key = `${activeFolder}:${launcherPreference}`;
+    if (unavailableNoticeRef.current === key) return;
+    unavailableNoticeRef.current = key;
+    pushNotice({ tone: "warning", message: `${preferred.label} is unavailable. Showing Milim's recommended opener instead.` });
+  }, [activeFolder, launcherPreference, launchers, loading, open, pushNotice]);
   const visibleLaunchers = useMemo(() => {
     const available = rankedLaunchers.filter((launcher) => launcher.available);
     return available.length ? available : rankedLaunchers;
@@ -97,7 +111,7 @@ export function WorkspaceLauncherButton({
     setError(null);
     try {
       await openWorkspaceLauncher(activeFolder, launcher.id);
-      rememberWorkspaceLauncher(activeFolder, launcher.id);
+      if (launcherPreference === "remember") rememberWorkspaceLauncher(activeFolder, launcher.id);
       setOpen(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

@@ -18,6 +18,7 @@ const workersOnly = process.argv.includes("--workers-only");
 const mcpAppsOnly = process.argv.includes("--mcp-apps-only");
 const sidebarMotionOnly = process.argv.includes("--sidebar-motion-only");
 const commandPaletteOnly = process.argv.includes("--command-palette-only");
+const settingsOnly = process.argv.includes("--settings-only");
 const appMenuOnly = process.argv.includes("--app-menu-only");
 const turnChangesOnly = process.argv.includes("--turn-changes-only");
 const mcpAppKinds = ["chart", "diagram", "form", "dashboard", "viewer"];
@@ -26,6 +27,7 @@ const screenshots = {
   avatarsLight: join(tmpdir(), "milim-tauri-webview-agent-avatars-light.png"),
   profiles: join(tmpdir(), "milim-tauri-webview-personalized-profiles.png"),
   settings: join(tmpdir(), "milim-tauri-webview-provider-settings.png"),
+  settingsNarrow: join(tmpdir(), "milim-tauri-webview-settings-narrow.png"),
   chat: join(tmpdir(), "milim-tauri-webview-personalized-chat.png"),
   zoom: join(tmpdir(), "milim-tauri-webview-zoom-chip.png"),
   accountUsage: join(tmpdir(), "milim-tauri-webview-account-usage.png"),
@@ -128,6 +130,10 @@ try {
     await seedChatSearchFixture(session.page);
     await runCommandPaletteCheck(session.page);
     await runRestartCheck(session);
+    consoleErrors.push(...errors.filter((message) => !message.includes("/codex/models")));
+  } else if (settingsOnly) {
+    const errors = collectErrors(session.page);
+    await runSettingsLayoutCheck(session.page);
     consoleErrors.push(...errors.filter((message) => !message.includes("/codex/models")));
   } else if (zoomOnly || microUiOnly) {
     const errors = collectErrors(session.page);
@@ -1838,6 +1844,36 @@ async function openSettings(page) {
   }
 }
 
+async function runSettingsLayoutCheck(page) {
+  await page.getByTestId("chat-shell").waitFor();
+  await dismissOnboardingIfPresent(page);
+  await page.getByTestId("empty-usage-ridgeline").waitFor();
+  await openSettings(page);
+  await page.getByTestId("settings-section-appearance").click();
+  const ridgelineToggle = page.getByTestId("empty-chat-ridgeline-toggle");
+  await ridgelineToggle.scrollIntoViewIfNeeded();
+  if (await ridgelineToggle.getAttribute("aria-checked") !== "true") {
+    throw new Error("The empty-chat ridgeline should default on.");
+  }
+  await page.screenshot({ path: screenshots.settings, fullPage: false });
+
+  await page.setViewportSize({ width: 740, height: 720 });
+  await page.waitForTimeout(200);
+  const navigation = await page.locator(".settings-nav-list").evaluate((element) => ({
+    display: getComputedStyle(element).display,
+    direction: getComputedStyle(element).flexDirection,
+  }));
+  if (navigation.display !== "flex" || navigation.direction !== "row") {
+    throw new Error(`Settings navigation should become horizontal below 760px: ${JSON.stringify(navigation)}.`);
+  }
+  await ridgelineToggle.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: screenshots.settingsNarrow, fullPage: false });
+
+  await ridgelineToggle.click();
+  await closeSettings(page);
+  await page.getByTestId("empty-usage-ridgeline").waitFor({ state: "hidden" });
+}
+
 async function closeSettings(page) {
   await page.getByTestId("close-settings").click();
 }
@@ -3060,6 +3096,7 @@ function printEvidencePaths(milimHome) {
   console.log(`avatarsLightScreenshot=${screenshots.avatarsLight}`);
   console.log(`profilesScreenshot=${screenshots.profiles}`);
   console.log(`settingsScreenshot=${screenshots.settings}`);
+  console.log(`settingsNarrowScreenshot=${screenshots.settingsNarrow}`);
   console.log(`chatScreenshot=${screenshots.chat}`);
   console.log(`zoomScreenshot=${screenshots.zoom}`);
   console.log(`accountUsageScreenshot=${screenshots.accountUsage}`);

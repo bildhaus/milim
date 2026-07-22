@@ -4,6 +4,7 @@ import { useUpdateStore } from "../update/store";
 export function AutoUpdater() {
   const runningRef = useRef(false);
   const checkNow = useUpdateStore((s) => s.checkNow);
+  const automaticCheck = useUpdateStore((s) => s.automaticCheck);
 
   useEffect(() => {
     async function run(startup = false) {
@@ -18,12 +19,13 @@ export function AutoUpdater() {
       }
     }
 
+    if (!automaticCheck) return;
     void run(true);
     const timer = window.setInterval(() => void run(), 60 * 60 * 1000);
     return () => {
       window.clearInterval(timer);
     };
-  }, [checkNow]);
+  }, [automaticCheck, checkNow]);
 
   return null;
 }

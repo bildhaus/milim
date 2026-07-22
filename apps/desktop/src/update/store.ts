@@ -9,7 +9,7 @@ import {
   STARTUP_UPDATE_INTERVAL_MS,
   type UpdateDownloadProgress,
   type UpdateInfo,
-} from "./service";
+} from "./service.js";
 
 export type UpdateStatus =
   | "idle"
@@ -23,6 +23,8 @@ export type UpdateStatus =
   | "error";
 
 interface UpdateState {
+  automaticCheck: boolean;
+  automaticDownload: boolean;
   currentVersion: string | null;
   status: UpdateStatus;
   updateInfo: UpdateInfo | null;
@@ -37,6 +39,8 @@ interface UpdateState {
   downloadNow: (info?: UpdateInfo | null) => Promise<string | null>;
   installNow: () => Promise<void>;
   ignoreVersion: (version: string) => void;
+  setAutomaticCheck: (automaticCheck: boolean) => void;
+  setAutomaticDownload: (automaticDownload: boolean) => void;
 }
 
 const LOCAL_UPDATE_STATE_KEY = "milim.local.updates";
@@ -82,6 +86,8 @@ async function takeUpdateRecoveryError(): Promise<string | null> {
 export const useUpdateStore = create<UpdateState>()(
   persist(
     (set, get) => ({
+      automaticCheck: true,
+      automaticDownload: false,
       currentVersion: null,
       status: "idle",
       updateInfo: null,
@@ -161,6 +167,9 @@ export const useUpdateStore = create<UpdateState>()(
             return null;
           }
           set({ status: "available", updateInfo: info, updatePath: null, lastCheckedAt: Date.now() });
+          if (options?.automatic && get().automaticDownload) {
+            await get().downloadNow(info);
+          }
           return info;
         } catch (error) {
           set({ status: "error", downloadProgress: null, error: formatError(error), lastCheckedAt: Date.now() });
@@ -208,11 +217,24 @@ export const useUpdateStore = create<UpdateState>()(
       },
 
       ignoreVersion: (version) => set({ ignoredVersion: version }),
+      setAutomaticCheck: (automaticCheck) => set({ automaticCheck }),
+      setAutomaticDownload: (automaticDownload) => set({ automaticDownload }),
     }),
     {
       name: LOCAL_UPDATE_STATE_KEY,
       storage: createJSONStorage(() => getMachineLocalStorage() ?? localStorage),
+      merge: (persisted, current) => {
+        const saved = persisted as Partial<UpdateState> | undefined;
+        return {
+          ...current,
+          ...saved,
+          automaticCheck: typeof saved?.automaticCheck === "boolean" ? saved.automaticCheck : true,
+          automaticDownload: typeof saved?.automaticDownload === "boolean" ? saved.automaticDownload : false,
+        };
+      },
       partialize: (state) => ({
+        automaticCheck: state.automaticCheck,
+        automaticDownload: state.automaticDownload,
         status: state.status,
         updateInfo: state.updateInfo,
         updatePath: state.updatePath,

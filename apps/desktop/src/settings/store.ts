@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
-import type { ReasoningEffort } from "../api";
+import type { DelegationPolicy, PrivacyMode, ReasoningEffort } from "../api";
 import { userStateStorage } from "../persistence/userStateStorage.js";
 import { reasoningEffortByModelWithSelection } from "../lib/reasoningEffort.js";
 
@@ -22,6 +22,31 @@ export const DEFAULT_MEDIA_SETTINGS: MediaSettings = {
   modelSearchByProvider: {},
 };
 
+export type NewThreadBehavior = "inherit" | "configured";
+export type UnavailableModelPolicy = "ask" | "favorite" | "blocked";
+
+export interface ConfiguredThreadDefaults {
+  model: string;
+  activeAgentId: string | null;
+  memory: boolean;
+  privacy: PrivacyMode;
+  sandbox: boolean;
+  toolApproval: "review" | "guarded";
+  workerModel: string;
+  delegationPolicy: DelegationPolicy;
+}
+
+export const DEFAULT_CONFIGURED_THREAD_DEFAULTS: ConfiguredThreadDefaults = {
+  model: "",
+  activeAgentId: null,
+  memory: true,
+  privacy: "off",
+  sandbox: false,
+  toolApproval: "guarded",
+  workerModel: "",
+  delegationPolicy: "ask",
+};
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
@@ -32,11 +57,17 @@ interface SettingsState {
   collapsedModelGroups: string[];
   reasoningEffortByModel: Record<string, ReasoningEffort>;
   media: MediaSettings;
+  newThreadBehavior: NewThreadBehavior;
+  configuredThreadDefaults: ConfiguredThreadDefaults;
+  unavailableModelPolicy: UnavailableModelPolicy;
   toggleFavorite: (id: string) => void;
   setFavoritesOnly: (v: boolean) => void;
   setModelGroupCollapsed: (group: string, collapsed: boolean) => void;
   setModelReasoningEffort: (model: string, effort: ReasoningEffort) => void;
   setMediaSettings: (settings: Partial<MediaSettings>) => void;
+  setNewThreadBehavior: (behavior: NewThreadBehavior) => void;
+  setConfiguredThreadDefaults: (settings: Partial<ConfiguredThreadDefaults>) => void;
+  setUnavailableModelPolicy: (policy: UnavailableModelPolicy) => void;
 }
 
 function normalizeStringArray(value: unknown): string[] {
@@ -104,6 +135,22 @@ function normalizeMediaSettings(settings?: Partial<MediaSettings>): MediaSetting
   };
 }
 
+function normalizeConfiguredThreadDefaults(value: unknown): ConfiguredThreadDefaults {
+  const settings = asRecord(value) ?? {};
+  const privacy = settings.privacy;
+  const delegationPolicy = settings.delegationPolicy;
+  return {
+    model: typeof settings.model === "string" && settings.model.trim().toLowerCase() !== "mock-echo" ? settings.model.trim() : "",
+    activeAgentId: typeof settings.activeAgentId === "string" && settings.activeAgentId.trim() ? settings.activeAgentId.trim() : null,
+    memory: typeof settings.memory === "boolean" ? settings.memory : true,
+    privacy: privacy === "redact" || privacy === "block" ? privacy : "off",
+    sandbox: typeof settings.sandbox === "boolean" ? settings.sandbox : false,
+    toolApproval: settings.toolApproval === "review" ? "review" : "guarded",
+    workerModel: typeof settings.workerModel === "string" && settings.workerModel.trim().toLowerCase() !== "mock-echo" ? settings.workerModel.trim() : "",
+    delegationPolicy: delegationPolicy === "off" || delegationPolicy === "auto" ? delegationPolicy : "ask",
+  };
+}
+
 export const useSettings = create<SettingsState>()(
   persist(
     (set) => ({
@@ -112,6 +159,9 @@ export const useSettings = create<SettingsState>()(
       collapsedModelGroups: [],
       reasoningEffortByModel: {},
       media: DEFAULT_MEDIA_SETTINGS,
+      newThreadBehavior: "inherit",
+      configuredThreadDefaults: DEFAULT_CONFIGURED_THREAD_DEFAULTS,
+      unavailableModelPolicy: "ask",
       toggleFavorite: (id) =>
         set((s) => ({
           favorites: s.favorites.includes(id)
@@ -136,6 +186,13 @@ export const useSettings = create<SettingsState>()(
         set((s) => ({
           media: normalizeMediaSettings({ ...s.media, ...settings }),
         })),
+      setNewThreadBehavior: (newThreadBehavior) => set({ newThreadBehavior: newThreadBehavior === "configured" ? "configured" : "inherit" }),
+      setConfiguredThreadDefaults: (settings) => set((state) => ({
+        configuredThreadDefaults: normalizeConfiguredThreadDefaults({ ...state.configuredThreadDefaults, ...settings }),
+      })),
+      setUnavailableModelPolicy: (unavailableModelPolicy) => set({
+        unavailableModelPolicy: unavailableModelPolicy === "favorite" || unavailableModelPolicy === "blocked" ? unavailableModelPolicy : "ask",
+      }),
     }),
     {
       name: "milim.settings",
@@ -150,6 +207,9 @@ export const useSettings = create<SettingsState>()(
           collapsedModelGroups: normalizeStringArray(saved?.collapsedModelGroups),
           reasoningEffortByModel: normalizeReasoningEffortByModel(saved?.reasoningEffortByModel),
           media: normalizeMediaSettings(saved?.media),
+          newThreadBehavior: saved?.newThreadBehavior === "configured" ? "configured" : "inherit",
+          configuredThreadDefaults: normalizeConfiguredThreadDefaults(saved?.configuredThreadDefaults),
+          unavailableModelPolicy: saved?.unavailableModelPolicy === "favorite" || saved?.unavailableModelPolicy === "blocked" ? saved.unavailableModelPolicy : "ask",
         };
       },
       partialize: (s) => ({
@@ -158,6 +218,9 @@ export const useSettings = create<SettingsState>()(
         collapsedModelGroups: s.collapsedModelGroups,
         reasoningEffortByModel: s.reasoningEffortByModel,
         media: s.media,
+        newThreadBehavior: s.newThreadBehavior,
+        configuredThreadDefaults: normalizeConfiguredThreadDefaults(s.configuredThreadDefaults),
+        unavailableModelPolicy: s.unavailableModelPolicy,
       }),
     },
   ),
