@@ -24,7 +24,6 @@ import {
 import { useUpdateStore } from "../update/store";
 import { UpdateProgress } from "../update/UpdateProgress";
 import { Download, Pin } from "./icons";
-import { Logo } from "./Logo";
 import { WindowControls } from "./WindowControls";
 
 const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -223,7 +222,7 @@ export function TopBar({ onOpenAppMenu }: { onOpenAppMenu: (event: MouseEvent<HT
           aria-haspopup="menu"
           onClick={onOpenAppMenu}
         >
-          <Logo height={18} className="topbar-logo" />
+          <span className="topbar-logo" aria-hidden="true" />
         </button>
         <span className="topbar-divider" aria-hidden="true" data-tauri-drag-region />
         <span className="topbar-thread" title={threadTitle} data-tauri-drag-region>

@@ -862,7 +862,11 @@ body.sidebar-pointer-dragging .session-section-title {
 .topbar-logo-button:focus-visible { outline: 2px solid var(--focus-border); outline-offset: -2px; }
 .topbar-logo {
   flex: none;
-  color: currentColor;
+  width: 17px;
+  height: 18px;
+  background: currentColor;
+  -webkit-mask: url("/milim-single-m.svg") center / contain no-repeat;
+  mask: url("/milim-single-m.svg") center / contain no-repeat;
   filter: var(--icon-contrast-filter);
 }
 .topbar-divider {
