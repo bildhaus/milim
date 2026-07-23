@@ -14,6 +14,7 @@ import {
   claudeRuntimeModel,
   codexRuntimeModel,
   opencodeRuntimeModel,
+  piRuntimeModel,
   completeChat,
   getWorkspaceGitStatus,
   listModelsDetailed,
@@ -24,9 +25,11 @@ import {
   streamClaudeRun,
   streamCodexRun,
   streamOpenCodeRun,
+  streamPiRun,
   type ClaudeRunEvent,
   type CodexRunEvent,
   type OpenCodeRunEvent,
+  type PiRunEvent,
   type WorkspaceGitAction,
   type WorkspaceGitActionResult,
   type WorkspaceGitDiffScope,
@@ -483,13 +486,14 @@ async function generateAccountRuntimeCommitMessage(
   const codexModel = codexRuntimeModel(preferredModel);
   const claudeModel = claudeRuntimeModel(preferredModel);
   const opencodeModel = opencodeRuntimeModel(preferredModel);
-  if (!codexModel && !claudeModel && !opencodeModel) return null;
+  const piModel = piRuntimeModel(preferredModel);
+  if (!codexModel && !claudeModel && !opencodeModel && !piModel) return null;
 
   let response = "";
   let runtimeError = "";
   let runtimeWarning = "";
   const prompt = `${COMMIT_MESSAGE_SYSTEM_PROMPT}\n\n${commitMessageContext(status, diff)}`;
-  const onEvent = (event: CodexRunEvent | ClaudeRunEvent | OpenCodeRunEvent) => {
+  const onEvent = (event: CodexRunEvent | ClaudeRunEvent | OpenCodeRunEvent | PiRunEvent) => {
     if (event.type === "token" && event.text) response += event.text;
     else if (event.type === "warning") runtimeWarning = event.message;
     else if (event.type === "error") runtimeError = event.message;
@@ -528,6 +532,16 @@ async function generateAccountRuntimeCommitMessage(
       tool_approval_grant: false,
       plan_mode: true,
     }, onEvent);
+  } else if (piModel) {
+    await streamPiRun({
+      model: piModel,
+      prompt,
+      cwd: folder.trim() || undefined,
+      persist_session: false,
+      tool_approval_policy: "review",
+      tool_approval_grant: false,
+      plan_mode: true,
+    }, onEvent);
   }
 
   if (runtimeWarning) throw new Error(runtimeWarning);
@@ -536,7 +550,7 @@ async function generateAccountRuntimeCommitMessage(
   const message = cleanGeneratedCommitMessage(response);
   if (!message)
     throw new Error(
-      `${codexModel ? "Codex" : claudeModel ? "Claude CLI" : "OpenCode CLI"} returned an empty commit message.`,
+      `${codexModel ? "Codex" : claudeModel ? "Claude CLI" : opencodeModel ? "OpenCode CLI" : "Pi CLI"} returned an empty commit message.`,
     );
   return message;
 }

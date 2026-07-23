@@ -12,6 +12,7 @@ mod error;
 pub mod mcp_bridge;
 pub mod media_library;
 mod opencode_bridge;
+mod pi_bridge;
 pub mod preview_runtime;
 pub mod privacy;
 pub mod providers;
@@ -181,6 +182,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/opencode/status", get(routes::opencode_status))
         .route("/opencode/models", get(routes::opencode_models))
         .route("/opencode/run", post(routes::opencode_run))
+        // User-installed Pi JSONL RPC runtime
+        .route("/pi/status", get(routes::pi_status))
+        .route("/pi/models", get(routes::pi_models))
+        .route("/pi/run", post(routes::pi_run))
         .route(
             "/internal/claude-approvals/{run_id}/mcp",
             post(routes::claude_approval_mcp),
@@ -589,7 +594,11 @@ async fn fire_schedule(
         return true;
     }
     let lower_model = model.to_ascii_lowercase();
-    if lower_model.starts_with("codex:") || lower_model.starts_with("claude:") {
+    if lower_model.starts_with("codex:")
+        || lower_model.starts_with("claude:")
+        || lower_model.starts_with("opencode:")
+        || lower_model.starts_with("pi:")
+    {
         state.schedule_runs.push(state::ScheduleRunEvent {
             id: format!("{}-{now_unix}-{index}", schedule.id),
             schedule_id: schedule.id,

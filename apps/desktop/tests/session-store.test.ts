@@ -489,6 +489,29 @@ equal(
   "assistant-1",
   "account runtime sync cursors should persist with native ids",
 );
+useSessions.getState().setAccountRuntime(first, {
+  piSessionId: "pi-session-1",
+  piLastSyncedMessageId: "assistant-pi-1",
+});
+equal(
+  useSessions.getState().sessions.find((session) => session.id === first)
+    ?.accountRuntime?.piSessionId,
+  "pi-session-1",
+  "Pi session id should persist on the Milim session",
+);
+useSessions.getState().clearAccountRuntimeKind(first, "pi");
+equal(
+  useSessions.getState().sessions.find((session) => session.id === first)
+    ?.accountRuntime?.piSessionId,
+  undefined,
+  "clearing Pi should preserve the other account runtimes and remove only Pi",
+);
+equal(
+  useSessions.getState().sessions.find((session) => session.id === first)
+    ?.accountRuntime?.codexThreadId,
+  "codex-thread-1",
+  "clearing Pi should preserve Codex",
+);
 useSessions.getState().setPendingHotSwap(first, {
   fromModel: "model-a",
   toModel: "model-b",

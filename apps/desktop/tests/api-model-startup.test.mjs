@@ -42,6 +42,9 @@ globalThis.fetch = async (input) => {
   if (url.endsWith("/claude/status")) {
     return Response.json({ available: false, authenticated: false, models: [] });
   }
+  if (url.endsWith("/pi/status")) {
+    return Response.json({ available: false, authenticated: false, models: [] });
+  }
   return new Response("not found", { status: 404 });
 };
 

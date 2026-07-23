@@ -1462,7 +1462,8 @@ export interface ModelReasoningMetadata {
 export const CODEX_MODEL_PREFIX = "codex:";
 export const CLAUDE_MODEL_PREFIX = "claude:";
 export const OPENCODE_MODEL_PREFIX = "opencode:";
-export type AccountRuntimeKind = "codex" | "claude" | "opencode";
+export const PI_MODEL_PREFIX = "pi:";
+export type AccountRuntimeKind = "codex" | "claude" | "opencode" | "pi";
 
 export function isCodexModel(model: string): boolean {
   return model.trim().toLowerCase().startsWith(CODEX_MODEL_PREFIX);
@@ -1476,14 +1477,24 @@ export function isOpenCodeModel(model: string): boolean {
   return model.trim().toLowerCase().startsWith(OPENCODE_MODEL_PREFIX);
 }
 
+export function isPiModel(model: string): boolean {
+  return model.trim().toLowerCase().startsWith(PI_MODEL_PREFIX);
+}
+
 export function isAccountRuntimeModel(model: string): boolean {
-  return isCodexModel(model) || isClaudeModel(model) || isOpenCodeModel(model);
+  return (
+    isCodexModel(model) ||
+    isClaudeModel(model) ||
+    isOpenCodeModel(model) ||
+    isPiModel(model)
+  );
 }
 
 export function accountRuntimeKind(model: string): AccountRuntimeKind | null {
   if (isCodexModel(model)) return "codex";
   if (isClaudeModel(model)) return "claude";
   if (isOpenCodeModel(model)) return "opencode";
+  if (isPiModel(model)) return "pi";
   return null;
 }
 
@@ -1505,6 +1516,13 @@ export function opencodeRuntimeModel(model: string): string | null {
   const trimmed = model.trim();
   return trimmed.toLowerCase().startsWith(OPENCODE_MODEL_PREFIX)
     ? trimmed.slice(OPENCODE_MODEL_PREFIX.length).trim() || null
+    : null;
+}
+
+export function piRuntimeModel(model: string): string | null {
+  const trimmed = model.trim();
+  return trimmed.toLowerCase().startsWith(PI_MODEL_PREFIX)
+    ? trimmed.slice(PI_MODEL_PREFIX.length).trim() || null
     : null;
 }
 
@@ -1554,13 +1572,21 @@ async function listProviderModelsForPicker(): Promise<ModelInfo[]> {
 
 /** Models with their provider (`owned_by`) for grouping in the picker. */
 export async function listModelsDetailed(): Promise<ModelInfo[]> {
-  const [providerModels, codexModels, claudeModels, openCodeModels] = await Promise.all([
-    listProviderModelsForPicker(),
-    listCodexModelsForPicker(),
-    listClaudeModelsForPicker(),
-    listOpenCodeModelsForPicker(),
-  ]);
-  return [...providerModels, ...codexModels, ...claudeModels, ...openCodeModels];
+  const [providerModels, codexModels, claudeModels, openCodeModels, piModels] =
+    await Promise.all([
+      listProviderModelsForPicker(),
+      listCodexModelsForPicker(),
+      listClaudeModelsForPicker(),
+      listOpenCodeModelsForPicker(),
+      listPiModelsForPicker(),
+    ]);
+  return [
+    ...providerModels,
+    ...codexModels,
+    ...claudeModels,
+    ...openCodeModels,
+    ...piModels,
+  ];
 }
 
 export async function loadStartupModels(
@@ -1792,6 +1818,26 @@ export interface OpenCodeStatusResponse {
   error?: string | null;
 }
 
+export interface PiModelInfo {
+  id: string;
+  provider: string;
+  model_id: string;
+  name: string;
+  context_length?: number | null;
+  max_completion_tokens?: number | null;
+  reasoning: boolean;
+  image_input: boolean;
+}
+
+export interface PiStatusResponse {
+  available: boolean;
+  authenticated: boolean;
+  version?: string | null;
+  provider_count?: number;
+  models?: PiModelInfo[];
+  error?: string | null;
+}
+
 export type CodexLoginEvent =
   | { type: "browser"; login_id: string; auth_url: string }
   | {
@@ -1877,6 +1923,8 @@ export type OpenCodeRunEvent =
   | { type: "done"; status: string; usage?: TokenUsage; cost_usd?: number }
   | { type: "warning"; message: string }
   | { type: "error"; message: string; usage?: TokenUsage; cost_usd?: number };
+
+export type PiRunEvent = OpenCodeRunEvent;
 
 export interface AccountNativeWorkerLifecycle {
   runtime: "codex" | "claude" | string;
@@ -2001,6 +2049,44 @@ async function listOpenCodeModelsForPicker(): Promise<ModelInfo[]> {
   }
 }
 
+async function listPiModelsForPicker(): Promise<ModelInfo[]> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(
+    () => ctrl.abort(),
+    ACCOUNT_RUNTIME_PICKER_TIMEOUT_MS,
+  );
+  try {
+    const status = await getPiStatus(ctrl.signal);
+    if (!status.available || !status.authenticated) return [];
+    return (status.models ?? []).map((model) => ({
+      id: `${PI_MODEL_PREFIX}${model.id}`,
+      display_id: model.name,
+      owned_by: "Local Pi CLI",
+      context_length: numberOrUndefined(model.context_length),
+      max_completion_tokens: numberOrUndefined(model.max_completion_tokens),
+      capabilities: { imageInput: model.image_input, toolUse: true },
+      reasoning: model.reasoning
+        ? {
+            supported_efforts: [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+            ],
+            default_enabled: true,
+            mandatory: false,
+          }
+        : undefined,
+    }));
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function getClaudeStatus(
   signal?: AbortSignal,
 ): Promise<ClaudeStatusResponse> {
@@ -2016,6 +2102,15 @@ export async function getOpenCodeStatus(
   return await parseJsonResponse<OpenCodeStatusResponse>(
     await authFetch(`${BASE}/opencode/status`, signal ? { signal } : undefined),
     "OpenCode CLI status check failed",
+  );
+}
+
+export async function getPiStatus(
+  signal?: AbortSignal,
+): Promise<PiStatusResponse> {
+  return await parseJsonResponse<PiStatusResponse>(
+    await authFetch(`${BASE}/pi/status`, signal ? { signal } : undefined),
+    "Pi CLI status check failed",
   );
 }
 
@@ -2131,6 +2226,36 @@ export async function streamOpenCodeRun(
   if (!resp.ok || !resp.body)
     throw new Error(
       await responseErrorMessage(resp, `OpenCode CLI run HTTP ${resp.status}`),
+    );
+  await streamJsonSse(resp, onEvent);
+}
+
+export async function streamPiRun(
+  request: {
+    model: string;
+    prompt: string;
+    cwd?: string;
+    reasoning_effort?: ReasoningEffort;
+    session_id?: string;
+    persist_session?: boolean;
+    tool_approval_policy?: ToolApprovalMode;
+    tool_approval_grant?: boolean;
+    interactive_tool_approval?: boolean;
+    plan_mode?: boolean;
+    images?: AccountRuntimeImageInput[];
+  },
+  onEvent: (ev: PiRunEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const resp = await authFetch(`${BASE}/pi/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+    signal,
+  });
+  if (!resp.ok || !resp.body)
+    throw new Error(
+      await responseErrorMessage(resp, `Pi CLI run HTTP ${resp.status}`),
     );
   await streamJsonSse(resp, onEvent);
 }

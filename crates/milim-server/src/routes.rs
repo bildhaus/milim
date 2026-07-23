@@ -3439,6 +3439,58 @@ pub(crate) async fn opencode_run(
     .into_response())
 }
 
+/// `GET /pi/status` - installed Pi CLI and configured-model state.
+pub(crate) async fn pi_status(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: Peer,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    Ok(Json(crate::pi_bridge::status().await.map_err(ApiError)?).into_response())
+}
+
+/// `GET /pi/models` - models exposed by the installed Pi CLI.
+pub(crate) async fn pi_models(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: Peer,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    Ok(Json(crate::pi_bridge::models().await.map_err(ApiError)?).into_response())
+}
+
+/// `POST /pi/run` - create or resume one Pi RPC session turn.
+pub(crate) async fn pi_run(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: Peer,
+    Json(mut req): Json<crate::pi_bridge::PiRunRequest>,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    if req.cwd.trim().is_empty() {
+        return Err(ApiError(Error::InvalidRequest(
+            "Pi requires a workspace folder".to_string(),
+        )));
+    }
+    if req.prompt.trim().is_empty() && req.images.is_empty() {
+        return Err(ApiError(Error::InvalidRequest(
+            "Pi requires a prompt or at least one image".to_string(),
+        )));
+    }
+    req.prompt = account_runtime_workspace_prompt(&st, Some(&req.cwd), &req.prompt, "native");
+    let (prompt, redactions) =
+        account_runtime_prompt_for_remote(&st, &req.prompt, "Pi").map_err(ApiError)?;
+    account_runtime_images_for_remote(&st, &req.images, "Pi").map_err(ApiError)?;
+    req.prompt = prompt;
+    Ok(Sse::new(crate::pi_bridge::run_stream(
+        req,
+        redactions,
+        Some(st.tool_approvals.clone()),
+    ))
+    .keep_alive(KeepAlive::default())
+    .into_response())
+}
+
 /// `POST /claude/run` - run an installed Claude CLI turn as a separate account runtime.
 pub(crate) async fn claude_run(
     State(st): State<AppState>,
@@ -12568,9 +12620,13 @@ pub(crate) struct UpdateScheduleRequest {
 
 fn provider_schedule_model(model: String) -> milim_core::Result<String> {
     let lower = model.to_ascii_lowercase();
-    if lower.starts_with("codex:") || lower.starts_with("claude:") {
+    if lower.starts_with("codex:")
+        || lower.starts_with("claude:")
+        || lower.starts_with("opencode:")
+        || lower.starts_with("pi:")
+    {
         return Err(Error::InvalidRequest(
-            "schedules require a configured provider model; Codex and Claude account runtimes are interactive only"
+            "schedules require a configured provider model; account runtimes are interactive only"
                 .to_string(),
         ));
     }

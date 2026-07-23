@@ -174,6 +174,8 @@ export interface Session {
     claudeLastSyncedMessageId?: string;
     opencodeSessionId?: string;
     opencodeLastSyncedMessageId?: string;
+    piSessionId?: string;
+    piLastSyncedMessageId?: string;
   };
   pendingHotSwap?: PendingHotSwap;
   retryWorkspace?: RetryWorkspace;
@@ -351,6 +353,10 @@ function normalizeAccountRuntime(
     typeof raw.opencodeSessionId === "string" && raw.opencodeSessionId.trim()
       ? raw.opencodeSessionId.trim()
       : undefined;
+  const piSessionId =
+    typeof raw.piSessionId === "string" && raw.piSessionId.trim()
+      ? raw.piSessionId.trim()
+      : undefined;
   const codexLastSyncedMessageId =
     codexThreadId &&
     typeof raw.codexLastSyncedMessageId === "string" &&
@@ -369,7 +375,13 @@ function normalizeAccountRuntime(
     raw.opencodeLastSyncedMessageId.trim()
       ? raw.opencodeLastSyncedMessageId.trim()
       : undefined;
-  return codexThreadId || claudeSessionId || opencodeSessionId
+  const piLastSyncedMessageId =
+    piSessionId &&
+    typeof raw.piLastSyncedMessageId === "string" &&
+    raw.piLastSyncedMessageId.trim()
+      ? raw.piLastSyncedMessageId.trim()
+      : undefined;
+  return codexThreadId || claudeSessionId || opencodeSessionId || piSessionId
     ? {
         codexThreadId,
         codexLastSyncedMessageId,
@@ -377,6 +389,8 @@ function normalizeAccountRuntime(
         claudeLastSyncedMessageId,
         opencodeSessionId,
         opencodeLastSyncedMessageId,
+        piSessionId,
+        piLastSyncedMessageId,
       }
     : undefined;
 }
@@ -1749,7 +1763,10 @@ interface SessionState {
     runtime: Partial<NonNullable<Session["accountRuntime"]>>,
   ) => void;
   clearAccountRuntime: (id: string) => void;
-  clearAccountRuntimeKind: (id: string, kind: "codex" | "claude" | "opencode") => void;
+  clearAccountRuntimeKind: (
+    id: string,
+    kind: "codex" | "claude" | "opencode" | "pi",
+  ) => void;
   setPendingHotSwap: (id: string, pending?: PendingHotSwap) => void;
   setRetryWorkspace: (id: string, retry?: RetryWorkspace) => void;
   ensureClaudeSessionId: (id: string) => string;
@@ -3185,6 +3202,8 @@ export const useSessions = create<SessionState>()(
                       claudeLastSyncedMessageId: current.claudeLastSyncedMessageId,
                       opencodeSessionId: current.opencodeSessionId,
                       opencodeLastSyncedMessageId: current.opencodeLastSyncedMessageId,
+                      piSessionId: current.piSessionId,
+                      piLastSyncedMessageId: current.piLastSyncedMessageId,
                     }
                   : kind === "claude"
                   ? {
@@ -3192,12 +3211,25 @@ export const useSessions = create<SessionState>()(
                       codexLastSyncedMessageId: current.codexLastSyncedMessageId,
                       opencodeSessionId: current.opencodeSessionId,
                       opencodeLastSyncedMessageId: current.opencodeLastSyncedMessageId,
+                      piSessionId: current.piSessionId,
+                      piLastSyncedMessageId: current.piLastSyncedMessageId,
+                    }
+                  : kind === "opencode"
+                  ? {
+                      codexThreadId: current.codexThreadId,
+                      codexLastSyncedMessageId: current.codexLastSyncedMessageId,
+                      claudeSessionId: current.claudeSessionId,
+                      claudeLastSyncedMessageId: current.claudeLastSyncedMessageId,
+                      piSessionId: current.piSessionId,
+                      piLastSyncedMessageId: current.piLastSyncedMessageId,
                     }
                   : {
                       codexThreadId: current.codexThreadId,
                       codexLastSyncedMessageId: current.codexLastSyncedMessageId,
                       claudeSessionId: current.claudeSessionId,
                       claudeLastSyncedMessageId: current.claudeLastSyncedMessageId,
+                      opencodeSessionId: current.opencodeSessionId,
+                      opencodeLastSyncedMessageId: current.opencodeLastSyncedMessageId,
                     },
               );
               return { ...s, accountRuntime, updatedAt: Date.now() };

@@ -10,6 +10,14 @@ const chatView = readFileSync(
   join(root, "src", "components", "ChatView.tsx"),
   "utf8",
 );
+const providersManager = readFileSync(
+  join(root, "src", "components", "ProvidersManager.tsx"),
+  "utf8",
+);
+const providersCss = readFileSync(
+  join(root, "src", "components", "ProvidersManager.css"),
+  "utf8",
+);
 const picker =
   api.match(
     /async function listCodexModelsForPicker\(\): Promise<ModelInfo\[]> \{[\s\S]*?\n\}\n\nexport interface CodexAccountResponse/,
@@ -52,7 +60,18 @@ assert.match(
 assert.match(claudePicker, /finally \{[\s\S]*clearTimeout\(timer\);[\s\S]*\}/);
 assert.match(
   api,
-  /Promise\.all\(\[\s*listProviderModelsForPicker\(\),\s*listCodexModelsForPicker\(\),\s*listClaudeModelsForPicker\(\),\s*listOpenCodeModelsForPicker\(\),\s*\]\)/,
+  /Promise\.all\(\[\s*listProviderModelsForPicker\(\),\s*listCodexModelsForPicker\(\),\s*listClaudeModelsForPicker\(\),\s*listOpenCodeModelsForPicker\(\),\s*listPiModelsForPicker\(\),\s*\]\)/,
+);
+assert.match(api, /export const PI_MODEL_PREFIX = "pi:";/);
+assert.match(api, /export async function getPiStatus/);
+assert.match(api, /export async function streamPiRun/);
+assert.match(api, /`\$\{BASE\}\/pi\/status`/);
+assert.match(api, /`\$\{BASE\}\/pi\/run`/);
+assert.match(providersManager, /<strong>Installed Pi CLI<\/strong>/);
+assert.match(providersManager, /piStatus\.provider_count/);
+assert.match(
+  providersCss,
+  /\.provider-account-card:last-child:nth-child\(odd\)\s*\{\s*grid-column:\s*1\s*\/\s*-1;/,
 );
 assert.match(
   api,

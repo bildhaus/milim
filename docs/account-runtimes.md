@@ -1,14 +1,24 @@
 # Account Runtimes
 
-Milim can use signed-in Codex, bring-your-own Claude CLI, and OpenCode CLI tools as chat runtimes. These are separate from saved provider records. The privacy gate scans, redacts, or blocks text before any account runtime receives it. Image pixels cannot be scanned or redacted, so account-runtime images require Privacy Off.
+Milim can use signed-in Codex, bring-your-own Claude CLI, OpenCode, and Pi as chat runtimes. These are separate from saved provider records. The privacy gate scans, redacts, or blocks text before any account runtime receives it. Image pixels cannot be scanned or redacted, so account-runtime images require Privacy Off.
 
-After a Milim chat has a native Codex thread id, Claude session id, or OpenCode session id, Milim lets that runtime own prior context. Later turns send the current per-turn context plus the latest user message instead of replaying the visible Milim transcript or auto-compacting it first. Manual `/compact` still creates a visible Milim checkpoint, but its summary call is ephemeral and the stored native runtime id is cleared afterward.
+After a Milim chat has a native Codex thread id, Claude session id, OpenCode session id, or Pi session id, Milim lets that runtime own prior context. Later turns send the current per-turn context plus the latest user message instead of replaying the visible Milim transcript or auto-compacting it first. Manual `/compact` still creates a visible Milim checkpoint, but its summary call is ephemeral and the stored native runtime id is cleared afterward.
 
 ## OpenCode
 
 Milim invokes the user-installed `opencode acp` process once per turn and speaks ACP v1 JSON-RPC over stdio. `GET /opencode/status` and `GET /opencode/models` discover configured models without refreshing OpenCode's network cache; `POST /opencode/run` creates or resumes the native session, applies the exact selected model, streams normalized events, and forwards permission requests to Milim's one-shot approval cards. Plan, Guarded, Review, and Open map to a Milim-owned permission overlay. Guarded and Review refuse to run when `opencode debug config` shows that higher-precedence configuration weakened the promised policy.
 
 OpenCode remains responsible for its providers, credentials, instructions, and plugins. Milim does not bundle the CLI or read its credentials. Images use the existing outbound privacy gate and require Privacy Off.
+
+## Pi
+
+Milim invokes the separately installed `pi` CLI in offline JSONL RPC mode. `GET /pi/status` reports availability, version, authentication/configuration state, provider count, normalized model metadata, and an actionable error; `GET /pi/models` returns the normalized catalog; `POST /pi/run` starts or resumes a Milim-owned Pi session with the exact `provider/model`, reasoning level, prompt, image inputs, workspace, and approval fields. Pi model ids use the `pi:<provider>/<model>` desktop prefix. Milim stores `piSessionId` plus its last-synced Milim message cursor so later turns resume Pi's native JSONL session without replaying already-owned history. Compaction and other side calls are ephemeral and do not reuse that session.
+
+Install Pi separately and authenticate inside Pi with `/login`. Pi owns its credentials and provider configuration; Milim neither reads nor stores them. Pi is useful as a distinct lean agent experience with its own detailed multi-provider catalog and subscription-backed providers such as GitHub Copilot, even where individual models overlap OpenCode or saved Milim providers.
+
+Embedded runs always pass `--offline --no-extensions`. This prevents user or project extensions from executing startup code outside Milim's approval boundary while leaving Pi's context files, prompt templates, and skills on their normal discovery path. Plan and Guarded expose only `read`, `grep`, `find`, and `ls`. Review loads one temporary Milim-owned extension that pauses `bash`, `write`, `edit`, and any unknown tool call and forwards the exact generated arguments to Milim's one-shot approval broker. Open exposes Pi's built-in tools without prompts. The temporary extension is removed after the run; standalone Pi settings are never modified.
+
+Images are sent as native RPC image blocks and require Privacy Off. Text uses the same server-side scan/redact/block gate as the other account runtimes. Pi discovery and startup failures are isolated from the other provider and account-runtime lanes.
 
 CLI calls to an authenticated standalone server should pass `--token` or set `MILIM_API_TOKEN`; desktop account-runtime calls use the desktop app's per-launch bearer token internally.
 

@@ -336,11 +336,11 @@ export function contextMessagesForTurn(context: TurnPromptContext, mode: TurnCon
 
 export function workspaceRuleMessagesForRuntime(
   context: TurnPromptContext,
-  runtime: "native" | "codex" | "claude" | "opencode",
+  runtime: "native" | "codex" | "claude" | "opencode" | "pi",
 ): ChatMessage[] {
   const files = context.workspaceContext?.instructions.filter((file) =>
     file.status === "loaded" && (
-      runtime === "native"
+      runtime === "native" || runtime === "pi"
       || (runtime === "codex" && file.family === "claude")
       || ((runtime === "claude" || runtime === "opencode") && file.family === "agents")
     )
@@ -356,7 +356,7 @@ export function workspaceRuleMessagesForRuntime(
 
 export function toolDefinitionMessagesForRuntime(
   context: TurnPromptContext,
-  runtime: "native" | "codex" | "claude" | "opencode",
+  runtime: "native" | "codex" | "claude" | "opencode" | "pi",
 ): ChatMessage[] {
   return runtime === "native" ? (context.toolDefinitionMessages ?? []) : [];
 }

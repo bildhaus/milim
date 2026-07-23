@@ -5,6 +5,7 @@ import {
   getClaudeStatus,
   getCodexAccount,
   getOpenCodeStatus,
+  getPiStatus,
   isCliPathWarningMessage,
   isOpenRouterProvider,
   listCodexThreads,
@@ -20,6 +21,7 @@ import {
   type CodexLoginEvent,
   type CodexThreadSummary,
   type OpenCodeStatusResponse,
+  type PiStatusResponse,
   type ProviderDiscovery,
   type ProviderInfo,
   type ProviderKind,
@@ -182,6 +184,9 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
   const [openCodeStatus, setOpenCodeStatus] = useState<OpenCodeStatusResponse | null>(null);
   const [openCodeBusy, setOpenCodeBusy] = useState(false);
   const [openCodeNote, setOpenCodeNote] = useState<{ tone: StatusTone; message: string } | null>(null);
+  const [piStatus, setPiStatus] = useState<PiStatusResponse | null>(null);
+  const [piBusy, setPiBusy] = useState(false);
+  const [piNote, setPiNote] = useState<{ tone: StatusTone; message: string } | null>(null);
   const [discoveries, setDiscoveries] = useState<ProviderDiscovery[]>([]);
   const [note, setNote] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
@@ -192,6 +197,7 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
     void refreshCodexAccount();
     void refreshClaudeStatus();
     void refreshOpenCodeStatus();
+    void refreshPiStatus();
   }, []);
 
   function edit(p: ProviderInfo | "new") {
@@ -288,6 +294,22 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
       if (showNote) setOpenCodeNote({ tone: "error", message: error instanceof Error ? error.message : "OpenCode status check failed." });
     } finally {
       setOpenCodeBusy(false);
+    }
+  }
+
+  async function refreshPiStatus(showNote = false) {
+    setPiBusy(true);
+    try {
+      const status = await getPiStatus();
+      setPiStatus(status);
+      if (showNote) setPiNote(status.available && status.authenticated
+        ? { tone: "ready", message: `Pi connected with ${status.provider_count ?? 0} provider${status.provider_count === 1 ? "" : "s"} and ${status.models?.length ?? 0} available models.` }
+        : { tone: status.available ? "warning" : "error", message: status.error || "Install Pi and use /login in its terminal, then refresh." });
+    } catch (error) {
+      setPiStatus(null);
+      if (showNote) setPiNote({ tone: "error", message: error instanceof Error ? error.message : "Pi status check failed." });
+    } finally {
+      setPiBusy(false);
     }
   }
 
@@ -659,8 +681,8 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
             <div className="providers-section-head">
               <h4 id="provider-account-title">Account runtimes</h4>
               <p>
-                Codex, the installed Claude CLI, and OpenCode use their own
-                desktop tooling.
+                Codex, the installed Claude CLI, OpenCode, and Pi use their
+                own desktop tooling.
               </p>
               <p>
                 Milim does not include Claude Code, provide Anthropic
@@ -762,6 +784,20 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                   {claudeBusy ? "Checking..." : "Refresh"}
                 </button>
               </div>
+              <div className={"provider-account-card " + (piStatus?.available && piStatus.authenticated ? "ready" : "off")}>
+                <div className="provider-account-main">
+                  <span className={"provider-status-dot " + (piStatus?.available && piStatus.authenticated ? "ready" : "off")} />
+                  <div>
+                    <strong>Installed Pi CLI</strong>
+                    <span>{piStatus?.available
+                      ? `${piStatus.provider_count ?? 0} provider${piStatus.provider_count === 1 ? "" : "s"} / ${piStatus.models?.length ?? 0} model${piStatus.models?.length === 1 ? "" : "s"}`
+                      : "Install Pi separately and use /login in its terminal."}</span>
+                  </div>
+                </div>
+                <button className="btn-ghost" data-testid="pi-status" type="button" onClick={() => void refreshPiStatus(true)} disabled={piBusy}>
+                  {piBusy ? "Checking..." : "Refresh"}
+                </button>
+              </div>
             </div>
             {codexNote && (
               <p className={"provider-note " + codexNote.tone}>
@@ -774,6 +810,7 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
               </p>
             )}
             {openCodeNote && <p className={"provider-note " + openCodeNote.tone}>{openCodeNote.message}</p>}
+            {piNote && <p className={"provider-note " + piNote.tone}>{piNote.message}</p>}
           </section>
 
           <section

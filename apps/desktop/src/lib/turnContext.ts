@@ -72,6 +72,7 @@ export type TurnSetupResult =
       codexModel: string | null;
       claudeModel: string | null;
       opencodeModel: string | null;
+      piModel: string | null;
     }
   | { ok: false; error: string };
 
@@ -146,9 +147,11 @@ export function resolveTurnSetup({
   codexRuntimeModel,
   claudeRuntimeModel,
   opencodeRuntimeModel = () => null,
+  piRuntimeModel = () => null,
   isCodexModel,
   isClaudeModel,
   isOpenCodeModel = () => false,
+  isPiModel = () => false,
 }: {
   sessionId: string;
   selectedModel?: string;
@@ -160,9 +163,11 @@ export function resolveTurnSetup({
   codexRuntimeModel: (model: string) => string | null;
   claudeRuntimeModel: (model: string) => string | null;
   opencodeRuntimeModel?: (model: string) => string | null;
+  piRuntimeModel?: (model: string) => string | null;
   isCodexModel: (model: string) => boolean;
   isClaudeModel: (model: string) => boolean;
   isOpenCodeModel?: (model: string) => boolean;
+  isPiModel?: (model: string) => boolean;
 }): TurnSetupResult {
   const session = sessions.find((item) => item.id === sessionId);
   const activeAgent = settings.activeAgentId
@@ -181,14 +186,17 @@ export function resolveTurnSetup({
   const codexModel = codexRuntimeModel(model);
   const claudeModel = claudeRuntimeModel(model);
   const opencodeModel = opencodeRuntimeModel(model);
+  const piModel = piRuntimeModel(model);
   const runtimeError = accountRuntimeSelectionError({
     model,
     codexModel,
     claudeModel,
     opencodeModel,
+    piModel,
     isCodexModel,
     isClaudeModel,
     isOpenCodeModel,
+    isPiModel,
   });
   if (runtimeError) return { ok: false, error: runtimeError };
   return {
@@ -201,6 +209,7 @@ export function resolveTurnSetup({
     codexModel,
     claudeModel,
     opencodeModel,
+    piModel,
   };
 }
 
@@ -209,17 +218,21 @@ export function accountRuntimeSelectionError({
   codexModel,
   claudeModel,
   opencodeModel,
+  piModel,
   isCodexModel,
   isClaudeModel,
   isOpenCodeModel = () => false,
+  isPiModel = () => false,
 }: {
   model: string;
   codexModel?: string | null;
   claudeModel?: string | null;
   opencodeModel?: string | null;
+  piModel?: string | null;
   isCodexModel: (model: string) => boolean;
   isClaudeModel: (model: string) => boolean;
   isOpenCodeModel?: (model: string) => boolean;
+  isPiModel?: (model: string) => boolean;
 }): string | null {
   if (isCodexModel(model) && !codexModel)
     return "Choose a concrete Codex model.";
@@ -227,6 +240,7 @@ export function accountRuntimeSelectionError({
     return "Choose a concrete Claude CLI model.";
   if (isOpenCodeModel(model) && !opencodeModel)
     return "Choose a concrete OpenCode model.";
+  if (isPiModel(model) && !piModel) return "Choose a concrete Pi model.";
   return null;
 }
 
@@ -235,7 +249,7 @@ export function accountRuntimeNotReadyTurn({
   ready,
   conversation,
 }: {
-  kind: "codex" | "claude" | "opencode";
+  kind: "codex" | "claude" | "opencode" | "pi";
   ready: { ok: true } | { ok: false; message: string; warning?: boolean };
   conversation: ChatMessage[];
 }): null | {
@@ -248,13 +262,17 @@ export function accountRuntimeNotReadyTurn({
     ? "Codex not on PATH"
     : kind === "claude"
       ? "Claude CLI not on PATH"
-      : "OpenCode CLI not on PATH";
+      : kind === "opencode"
+        ? "OpenCode CLI not on PATH"
+        : "Pi CLI not on PATH";
   const content =
     kind === "codex"
       ? "Codex is not ready. Check the login notice and resend when it completes."
       : kind === "claude"
         ? "Claude CLI is not ready. Check the login notice and resend when it is signed in."
-        : "OpenCode CLI is not ready. Configure a provider in OpenCode, then refresh models.";
+        : kind === "opencode"
+          ? "OpenCode CLI is not ready. Configure a provider in OpenCode, then refresh models."
+          : "Pi CLI is not ready. Run Pi and use /login, then refresh models.";
   return {
     status: ready.warning ? "skipped" : "error",
     messages: [
@@ -271,18 +289,22 @@ export async function accountRuntimeNotReadyForTurn({
   codexModel,
   claudeModel,
   opencodeModel,
+  piModel,
   conversation,
   ensureCodexAccount,
   ensureClaudeAccount,
   ensureOpenCodeAccount = async () => ({ ok: true as const }),
+  ensurePiAccount = async () => ({ ok: true as const }),
 }: {
   codexModel?: string | null;
   claudeModel?: string | null;
   opencodeModel?: string | null;
+  piModel?: string | null;
   conversation: ChatMessage[];
   ensureCodexAccount: () => Promise<AccountRuntimeReady>;
   ensureClaudeAccount: () => Promise<AccountRuntimeReady>;
   ensureOpenCodeAccount?: () => Promise<AccountRuntimeReady>;
+  ensurePiAccount?: () => Promise<AccountRuntimeReady>;
 }): Promise<null | {
   status: "skipped" | "error";
   messages: ChatMessage[];
@@ -304,6 +326,12 @@ export async function accountRuntimeNotReadyForTurn({
     return accountRuntimeNotReadyTurn({
       kind: "opencode",
       ready: await ensureOpenCodeAccount(),
+      conversation,
+    });
+  if (piModel)
+    return accountRuntimeNotReadyTurn({
+      kind: "pi",
+      ready: await ensurePiAccount(),
       conversation,
     });
   return null;

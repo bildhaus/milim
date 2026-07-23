@@ -34,6 +34,21 @@ globalThis.fetch = async (input) => {
       models: ["sonnet"],
     });
   }
+  if (url.endsWith("/pi/status")) {
+    return Response.json({
+      available: true,
+      authenticated: true,
+      provider_count: 1,
+      models: [{
+        id: "openai-codex/gpt-pi-test",
+        provider: "openai-codex",
+        model_id: "gpt-pi-test",
+        name: "GPT Pi Test",
+        reasoning: true,
+        image_input: true,
+      }],
+    });
+  }
   return new Response("not found", { status: 404 });
 };
 
@@ -43,11 +58,12 @@ try {
 
   assert.deepEqual(
     models.map((model) => model.id),
-    ["codex:gpt-test", "claude:sonnet"],
+    ["codex:gpt-test", "claude:sonnet", "pi:openai-codex/gpt-pi-test"],
   );
   assert(requests.some((url) => url.endsWith("/v1/models")));
   assert(requests.some((url) => url.endsWith("/codex/models")));
   assert(requests.some((url) => url.endsWith("/claude/status")));
+  assert(requests.some((url) => url.endsWith("/pi/status")));
 } finally {
   globalThis.fetch = originalFetch;
   await server.close();

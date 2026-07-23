@@ -18,6 +18,7 @@ const models: ModelInfo[] = [
   { id: "no-tools", owned_by: "Ready", provider_id: "ready", context_length: 32_000, capabilities: { toolUse: false } },
   { id: "text-only", owned_by: "Ready", provider_id: "ready", context_length: 32_000, capabilities: { imageInput: false } },
   { id: "codex:gpt", owned_by: "Codex", context_length: 32_000 },
+  { id: "pi:openai-codex/gpt", owned_by: "Local Pi CLI", context_length: 32_000 },
 ];
 
 const baseSession = {
@@ -97,4 +98,20 @@ assert.equal(assessHotSwap({
   models,
   providers,
   session: stale,
+}).nativeSessionStale, true);
+
+const stalePi = {
+  messages: [
+    { id: "a1", role: "assistant", content: "Pi answer" },
+    { id: "u2", role: "user", content: "Another model continued" },
+  ],
+  accountRuntime: { piSessionId: "pi-session", piLastSyncedMessageId: "a1" },
+};
+assert.equal(nativeRuntimeIsStale(stalePi, "pi"), true);
+assert.equal(assessHotSwap({
+  currentModel: "model-a",
+  target: models[6],
+  models,
+  providers,
+  session: stalePi,
 }).nativeSessionStale, true);

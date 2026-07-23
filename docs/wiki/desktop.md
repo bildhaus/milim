@@ -6,10 +6,12 @@ title: Desktop app
 summary: Unified threads, projects, composer controls, artifacts, plan mode, goals, search, rendering, settings, and slash commands.
 group: Core
 order: 30
-updated: 2026-07-22
+updated: 2026-07-23
 ---
 
 Milim is your local control plane for coding agents: use your own models and subscriptions, keep one canonical thread, review the diff, and ship.
+
+The Providers sheet shows Codex, OpenCode, Claude, and Pi as separate installed account-runtime cards. Pi reports its configured provider and model counts with refresh and `/login` guidance. Cards use a two-column grid: four runtimes render 2×2, while a final odd card spans both columns.
 
 Git-backed New Chat flows keep the current checkout by default and offer a separate isolated worktree. Isolated threads execute from `~/.milim/runtime/threads/<thread-id>` on a retained `milim/thread-<short-id>` branch while continuing to group under the original project. Uncommitted changes in the original checkout are excluded. Archive preserves the worktree; deletion removes a clean worktree or asks before force-discarding dirty state, and never deletes its branch.
 
@@ -50,9 +52,9 @@ User and assistant message bodies render Markdown in the transcript, and message
 
 The composer keeps prompt storage plain text. Recognized `@Skill Name`, `/Skill Name`, and `/server__tool` tags render as compact pills, while workspace `@file` references and bare HTTP(S) URLs render with link-like highlighting in the editor mirror layer; MCP slash suggestions insert the visible tag only and do not force a tool call or bypass approval/exposure policy.
 
-PNG, JPEG, WebP, and GIF attachments up to 2 MB each are preserved as real image content for provider chat, server-side agent runs, Codex app-server, Claude CLI, and provider-backed schedules. Browser and native attachment paths use the same validation and reject unsupported, oversized, empty, or unreadable images before attaching them. Each outbound turn keeps the latest images and then complete recent image-bearing turns newest-first within a 20 MiB encoded-image budget. Older pixels stay visible in the local transcript but are replaced by an omission note in model context; a final 30 MiB desktop body check reports removal/compaction guidance before the embedded server can return 413. Codex receives temporary `localImage` inputs; Claude receives native base64 image blocks over `stream-json`; neither path uses OCR. Desktop files come from the native picker or workspace-relative `@file` suggestions under the selected folder.
+PNG, JPEG, WebP, and GIF attachments up to 2 MB each are preserved as real image content for provider chat, server-side agent runs, Codex app-server, Claude CLI, Pi RPC, and provider-backed schedules. Browser and native attachment paths use the same validation and reject unsupported, oversized, empty, or unreadable images before attaching them. Each outbound turn keeps the latest images and then complete recent image-bearing turns newest-first within a 20 MiB encoded-image budget. Older pixels stay visible in the local transcript but are replaced by an omission note in model context; a final 30 MiB desktop body check reports removal/compaction guidance before the embedded server can return 413. Codex receives temporary `localImage` inputs; Claude and Pi receive native base64 image blocks; none of these paths uses OCR. Desktop files come from the native picker or workspace-relative `@file` suggestions under the selected folder.
 
-Schedules accept the same stored `dataUrl` pixels and build a multimodal user message when they fire. A legacy scheduled image without stored pixel data records a visible reattachment error. Background schedules list and accept provider/local API models only; Codex and Claude account runtimes remain interactive because their approval and session semantics are not safe for unattended runs.
+Schedules accept the same stored `dataUrl` pixels and build a multimodal user message when they fire. A legacy scheduled image without stored pixel data records a visible reattachment error. Background schedules list and accept provider/local API models only; account runtimes remain interactive because their approval and session semantics are not safe for unattended runs.
 
 ## Session controls
 

@@ -192,6 +192,19 @@ equal(
   ).lane,
   "claude-runtime",
 );
+const piProfile = modelDevProfile(
+  {
+    id: "pi:openai-codex/gpt-5.4",
+    owned_by: "Local Pi CLI",
+    context_length: 272000,
+    capabilities: { imageInput: true, toolUse: true },
+  },
+  "pi:openai-codex/gpt-5.4",
+);
+equal(piProfile.lane, "pi-runtime");
+equal(piProfile.providerLabel, "Pi CLI");
+equal(piProfile.setupLabel, "CLI ready");
+equal(piProfile.capabilities.includes("vision"), true);
 equal(
   modelDevProfile(
     {

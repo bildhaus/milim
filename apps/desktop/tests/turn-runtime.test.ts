@@ -750,6 +750,59 @@ assert.equal(selectedCodexThread, "new-codex");
 assert.equal(selectedImageUrl, "https://example.com/selected.png");
 assert.equal(selectedClaudeSessions, 0);
 
+let selectedPiSession = "";
+const selectedPiResult = await runSelectedAccountRuntimeTurn({
+  piModel: "openai-codex/gpt-5.4",
+  accountRuntime: {
+    piSessionId: "stored-pi",
+    piLastSyncedMessageId: "pi-assistant-1",
+  },
+  promptContext: accountPromptContext,
+  conversation: [
+    { id: "pi-assistant-1", role: "assistant", content: "Earlier Pi reply" },
+    { id: "pi-user-2", role: "user", content: "Continue with this image", attachments: [{
+      id: "pi-image",
+      name: "screen.png",
+      mime: "image/png",
+      size: 4,
+      dataUrl: "data:image/png;base64,AAAA",
+    }] },
+  ],
+  prepareOutbound: async (_contextMessages, conversation) => ({ conversation, outbound: [] }),
+  beginAssistant: () => {},
+  checkpointWorkspace: async () => {},
+  workspace: "C:\\work",
+  reasoningEffort: "high",
+  toolApproval: "review",
+  toolApprovalGrant: false,
+  planMode: false,
+  append: () => {},
+  appendThinking: () => {},
+  flush: () => {},
+  appendStreamEvent: () => {},
+  completeStreamEvent: () => {},
+  captureRuntimeMetrics: () => {},
+  captureProviderLimit: () => {},
+  setCodexThreadId: () => {},
+  ensureClaudeSessionId: () => "unused-claude",
+  streamCodexRun: async () => assert.fail("Pi should not dispatch to Codex"),
+  streamClaudeRun: async () => assert.fail("Pi should not dispatch to Claude"),
+  setPiSessionId: (sessionId) => { selectedPiSession = sessionId; },
+  streamPiRun: async (request, onEvent) => {
+    assert.equal(request.model, "openai-codex/gpt-5.4");
+    assert.equal(request.session_id, "stored-pi");
+    assert.equal(request.persist_session, true);
+    assert.equal(request.reasoning_effort, "high");
+    assert.equal(request.interactive_tool_approval, true);
+    assert.deepEqual(request.images, [{ media_type: "image/png", data: "AAAA" }]);
+    assert(!request.prompt.includes("Earlier Pi reply"));
+    onEvent({ type: "session", session_id: "resumed-pi", model: request.model });
+    onEvent({ type: "done", status: "done" });
+  },
+});
+assert.equal(selectedPiResult?.status, "done");
+assert.equal(selectedPiSession, "resumed-pi");
+
 let toolRun: RunTrace | null = null;
 const toolSignal = new AbortController().signal;
 let toolSnapshots = 0;

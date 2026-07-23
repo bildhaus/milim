@@ -50,6 +50,13 @@ export function shouldReplaceThreadTitle(currentTitle: string, messages: ChatMes
 
 export function isThreadNamingModel(model: string | { id: string; capabilities?: { imageOutput?: boolean; videoOutput?: boolean; musicOutput?: boolean } }): boolean {
   const id = (typeof model === "string" ? model : model.id).trim().toLowerCase();
-  if (!id || id === "mock-echo" || id.startsWith("codex:") || id.startsWith("claude:")) return false;
+  if (
+    !id ||
+    id === "mock-echo" ||
+    id.startsWith("codex:") ||
+    id.startsWith("claude:") ||
+    id.startsWith("opencode:") ||
+    id.startsWith("pi:")
+  ) return false;
   return typeof model === "string" || (!model.capabilities?.imageOutput && !model.capabilities?.videoOutput && !model.capabilities?.musicOutput);
 }

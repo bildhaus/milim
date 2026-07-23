@@ -28,6 +28,7 @@ import {
   generateMedia,
   getClaudeStatus,
   getOpenCodeStatus,
+  getPiStatus,
   getCodexAccount,
   getMobileCompanionStatus,
   getWorkspaceGitStatus,
@@ -40,6 +41,7 @@ import {
   isCliPathWarningMessage,
   isCodexModel,
   isOpenCodeModel,
+  isPiModel,
   listWorkspaceFiles,
   loadStartupModels,
   listModelsDetailed,
@@ -83,7 +85,9 @@ import {
   streamCodexDeviceLogin,
   streamCodexRun,
   streamOpenCodeRun,
+  streamPiRun,
   opencodeRuntimeModel,
+  piRuntimeModel,
   wireMessageContent,
   mediaProviders,
   type AgentEvent,
@@ -102,6 +106,7 @@ import {
   type CodexLoginEvent,
   type CodexRunEvent,
   type OpenCodeRunEvent,
+  type PiRunEvent,
   type MediaGenerationResult,
   type MediaKind,
   type MediaModelSchema,
@@ -3642,7 +3647,7 @@ export function ChatView({
     [models, mediaModelEntries],
   );
   const composerCompletionRequest = useMemo(() => {
-    if (composerCompletionMode === "off" || !model.trim() || isCodexModel(model) || isClaudeModel(model) || isOpenCodeModel(model)) return undefined;
+    if (composerCompletionMode === "off" || !model.trim() || isCodexModel(model) || isClaudeModel(model) || isOpenCodeModel(model) || isPiModel(model)) return undefined;
     const modelInfo = pickerModels.find((item) => item.id === model);
     const provider = providers.find((item) => item.id === modelInfo?.provider_id);
     if (!provider) return undefined;
@@ -5361,6 +5366,8 @@ export function ChatView({
         ? "claude"
         : target.id.startsWith("opencode:")
           ? "opencode"
+          : target.id.startsWith("pi:")
+            ? "pi"
           : null;
     if (kind && nativeSessionMode === "fresh") {
       useSessions.getState().clearAccountRuntimeKind(activeId, kind);
@@ -5377,6 +5384,10 @@ export function ChatView({
       } else if (kind === "opencode" && runtime?.opencodeSessionId && !runtime.opencodeLastSyncedMessageId) {
         useSessions.getState().setAccountRuntime(activeId, {
           opencodeLastSyncedMessageId: "__milim_hot_swap_full__",
+        });
+      } else if (kind === "pi" && runtime?.piSessionId && !runtime.piLastSyncedMessageId) {
+        useSessions.getState().setAccountRuntime(activeId, {
+          piLastSyncedMessageId: "__milim_hot_swap_full__",
         });
       }
     }
@@ -5870,6 +5881,7 @@ export function ChatView({
     const codexModel = codexRuntimeModel(model);
     const claudeModel = claudeRuntimeModel(model);
     const opencodeModel = opencodeRuntimeModel(model);
+    const piModel = piRuntimeModel(model);
     const summaryStartedAt = Date.now();
     const selectedProvider = providers.find(
       (item) => providerOwnsModel(item, model),
@@ -5880,6 +5892,8 @@ export function ChatView({
         ? "Local Claude CLI"
         : opencodeModel
           ? "Local OpenCode CLI"
+          : piModel
+            ? "Local Pi CLI"
         : selectedProvider?.name;
     const summaryReasoningEffort =
       compactionSummaryReasoningEffort(selectedProvider);
@@ -5928,6 +5942,16 @@ export function ChatView({
           opencodeModel,
           promptMessages,
           options.folder,
+          options.signal,
+        );
+      } else if (piModel) {
+        const ready = await ensurePiAccount();
+        if (!ready.ok) throw new Error(ready.message);
+        summary = await summarizeWithPi(
+          piModel,
+          promptMessages,
+          options.folder,
+          options.reasoningEffort,
           options.signal,
         );
       } else {
@@ -6079,6 +6103,38 @@ export function ChatView({
       tool_approval_policy: "guarded",
       plan_mode: true,
     }, (ev: OpenCodeRunEvent) => {
+      if (ev.type === "token" && ev.text) text += ev.text;
+      else if (ev.type === "warning") warning = ev.message;
+      else if (ev.type === "error") error = ev.message;
+      else if (ev.type === "done") usage = ev.usage;
+    }, signal);
+    if (error) throw new Error(error);
+    if (warning) throw new Error(warning);
+    return { content: text, usage };
+  }
+
+  async function summarizeWithPi(
+    model: string,
+    promptMessages: ChatMessage[],
+    folder: string,
+    reasoningEffort: ReasoningEffort,
+    signal?: AbortSignal,
+  ): Promise<CompactionSummaryResult> {
+    let text = "";
+    let error: string | null = null;
+    let warning: string | null = null;
+    let usage: TokenUsage | undefined;
+    const runtimeInput = accountRuntimeInputFromMessages(promptMessages);
+    await streamPiRun({
+      model,
+      prompt: runtimeInput.prompt,
+      cwd: folder.trim() || undefined,
+      images: runtimeInput.images,
+      reasoning_effort: reasoningEffort,
+      persist_session: false,
+      tool_approval_policy: "guarded",
+      plan_mode: true,
+    }, (ev: PiRunEvent) => {
       if (ev.type === "token" && ev.text) text += ev.text;
       else if (ev.type === "warning") warning = ev.message;
       else if (ev.type === "error") error = ev.message;
@@ -6494,6 +6550,7 @@ export function ChatView({
       const codexModel = codexRuntimeModel(turnModel);
       const claudeModel = claudeRuntimeModel(turnModel);
       const opencodeModel = opencodeRuntimeModel(turnModel);
+      const piModel = piRuntimeModel(turnModel);
       const runtimeInput = accountRuntimeInputFromMessages(decisionMessages);
       let content = "";
       if (codexModel) {
@@ -6554,6 +6611,26 @@ export function ChatView({
           tool_approval_grant: false,
           plan_mode: false,
         }, (ev: OpenCodeRunEvent) => {
+          if (ev.type === "token" && ev.text) content += ev.text;
+          else if (ev.type === "warning") runtimeWarning = ev.message;
+          else if (ev.type === "error") runtimeError = ev.message;
+        }, controller.signal);
+        if (runtimeWarning) throw new Error(runtimeWarning);
+        if (runtimeError) throw new Error(runtimeError);
+      } else if (piModel) {
+        let runtimeError: string | null = null;
+        let runtimeWarning: string | null = null;
+        await streamPiRun({
+          model: piModel,
+          prompt: runtimeInput.prompt,
+          images: runtimeInput.images,
+          cwd: folder.trim() || undefined,
+          reasoning_effort: decisionReasoningEffort,
+          persist_session: false,
+          tool_approval_policy: "guarded",
+          tool_approval_grant: false,
+          plan_mode: true,
+        }, (ev: PiRunEvent) => {
           if (ev.type === "token" && ev.text) content += ev.text;
           else if (ev.type === "warning") runtimeWarning = ev.message;
           else if (ev.type === "error") runtimeError = ev.message;
@@ -7542,6 +7619,24 @@ export function ChatView({
     }
   }
 
+  async function ensurePiAccount(): Promise<AccountRuntimeReady> {
+    try {
+      const status = await getPiStatus();
+      if (status.available && status.authenticated) return { ok: true };
+      const message = status.available
+        ? "Pi has no authenticated or configured models. Run Pi and use /login, then refresh models."
+        : `Pi CLI is unavailable: ${status.error || "install Pi separately and make sure `pi` is on PATH."}`;
+      const warning = isCliPathWarningMessage(message);
+      setChatNotice({ tone: warning ? "warning" : "error", message });
+      return { ok: false, message, warning };
+    } catch (e) {
+      const message = `Pi CLI is unavailable: ${e instanceof Error ? e.message : String(e)}`;
+      const warning = isCliPathWarningMessage(message);
+      setChatNotice({ tone: warning ? "warning" : "error", message });
+      return { ok: false, message, warning };
+    }
+  }
+
   /** Stream the assistant's reply to a conversation that ends with a user turn. */
   async function runTurn(
     convo: ChatMessage[],
@@ -7568,9 +7663,11 @@ export function ChatView({
       codexRuntimeModel,
       claudeRuntimeModel,
       opencodeRuntimeModel,
+      piRuntimeModel,
       isCodexModel,
       isClaudeModel,
       isOpenCodeModel,
+      isPiModel,
     });
     if (!turnSetup.ok) {
       setChatNotice({ tone: "error", message: turnSetup.error });
@@ -7608,6 +7705,7 @@ export function ChatView({
     const codexModel = turnSetup.codexModel;
     const claudeModel = turnSetup.claudeModel;
     const opencodeModel = turnSetup.opencodeModel;
+    const piModel = turnSetup.piModel;
     const store = useSessions.getState();
     const controller = claimTurnGeneration({
       sessionId: id,
@@ -7627,10 +7725,12 @@ export function ChatView({
         codexModel,
         claudeModel,
         opencodeModel,
+        piModel,
         conversation: convo,
         ensureCodexAccount,
         ensureClaudeAccount,
         ensureOpenCodeAccount,
+        ensurePiAccount,
       });
     } catch (e) {
       releaseTurnGeneration({
@@ -7835,7 +7935,7 @@ export function ChatView({
       });
 
     try {
-      if (codexModel || claudeModel || opencodeModel) {
+      if (codexModel || claudeModel || opencodeModel || piModel) {
         const accountRuntime = useSessions
           .getState()
           .sessions.find((session) => session.id === id)?.accountRuntime;
@@ -7843,6 +7943,7 @@ export function ChatView({
           codexModel,
           claudeModel,
           opencodeModel,
+          piModel,
           accountRuntime,
           promptContext,
           conversation: assistantStart.state.activeConversation,
@@ -7897,9 +7998,12 @@ export function ChatView({
             useSessions.getState().ensureClaudeSessionId(id),
           setOpenCodeSessionId: (sessionId) =>
             store.setAccountRuntime(id, { opencodeSessionId: sessionId }),
+          setPiSessionId: (sessionId) =>
+            store.setAccountRuntime(id, { piSessionId: sessionId }),
           streamCodexRun,
           streamClaudeRun,
           streamOpenCodeRun,
+          streamPiRun,
           signal: controller.signal,
           models: pickerModels,
           runRef,
@@ -8027,6 +8131,10 @@ export function ChatView({
         } else if (opencodeModel) {
           store.setAccountRuntime(id, {
             opencodeLastSyncedMessageId: assistantMessageId,
+          });
+        } else if (piModel) {
+          store.setAccountRuntime(id, {
+            piLastSyncedMessageId: assistantMessageId,
           });
         }
       }
@@ -8814,6 +8922,8 @@ export function ChatView({
             ? "claude"
             : nextModel.startsWith("opencode:")
               ? "opencode"
+              : nextModel.startsWith("pi:")
+                ? "pi"
               : null;
         if (session && kind && nativeRuntimeIsStale(session, kind)) {
           useSessions.getState().clearAccountRuntimeKind(activeId, kind);

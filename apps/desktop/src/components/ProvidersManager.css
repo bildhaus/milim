@@ -287,6 +287,10 @@
   gap: 10px;
 }
 
+.provider-account-card:last-child:nth-child(odd) {
+  grid-column: 1 / -1;
+}
+
 .provider-account-card {
   min-width: 0;
   display: grid;

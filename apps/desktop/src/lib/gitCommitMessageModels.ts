@@ -5,7 +5,12 @@ export type CommitMessageModelInfo = {
 
 function isAccountRuntimeId(id: string): boolean {
   const normalized = id.trim().toLowerCase();
-  return normalized.startsWith("codex:") || normalized.startsWith("claude:");
+  return (
+    normalized.startsWith("codex:") ||
+    normalized.startsWith("claude:") ||
+    normalized.startsWith("opencode:") ||
+    normalized.startsWith("pi:")
+  );
 }
 
 export function commitMessageModelCandidates(
