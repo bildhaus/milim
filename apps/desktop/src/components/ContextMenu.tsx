@@ -8,6 +8,7 @@ export type ContextMenuItem = {
   label: string;
   icon?: ReactNode;
   detail?: string;
+  description?: string;
   disabled?: boolean;
   danger?: boolean;
   checked?: boolean;
@@ -136,7 +137,10 @@ export function ContextMenuProvider({ children }: { children: ReactNode }) {
               <span className="app-context-menu-icon" aria-hidden="true">
                 {item.checked ? <Check size={13} /> : item.icon}
               </span>
-              <span className="app-context-menu-label">{item.label}</span>
+              <span className="app-context-menu-copy">
+                <span className="app-context-menu-label">{item.label}</span>
+                {item.description && <span className="app-context-menu-description">{item.description}</span>}
+              </span>
               {item.detail && <span className="app-context-menu-detail">{item.detail}</span>}
             </button>
           ))}

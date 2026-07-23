@@ -286,7 +286,7 @@ export function Sidebar({
   onOpenGitPanel: () => void;
 }) {
   markPerfRender("Sidebar");
-  const { openContextMenu } = useContextMenu();
+  const { openContextMenu, openMenuAt } = useContextMenu();
   const sidebarSessionsSelector = useMemo(createSidebarSessionsSelector, []);
   const sessions = useSessions(sidebarSessionsSelector);
   const projects = useSessions((s) => s.projects);
@@ -419,20 +419,33 @@ export function Sidebar({
     });
   }
 
-  function createChat() {
-    void createInteractiveChat();
+  function createChat(workspace?: "current" | "worktree") {
+    void createInteractiveChat(undefined, workspace ? { workspace } : undefined);
     focusComposerSoon();
     setQuery("");
     setConfirmArchiveId(null);
   }
 
-  async function createIsolatedChat() {
-    const store = useSessions.getState();
-    const projectFolder = store.getSettings(store.activeId).folder.trim();
-    if (!projectFolder) return;
-    await createInteractiveChat(undefined, { forceWorktree: true });
-    focusComposerSoon();
-    setQuery("");
+  function openNewChatMenu(event: ReactMouseEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    const trigger = event.currentTarget;
+    const rect = trigger.parentElement?.getBoundingClientRect() ?? trigger.getBoundingClientRect();
+    openMenuAt({ x: rect.left, y: rect.bottom + 4 }, [
+      {
+        id: "current-checkout",
+        label: "Current checkout",
+        icon: <Plus size={13} />,
+        action: () => createChat("current"),
+      },
+      {
+        id: "isolated-worktree",
+        label: "Isolated worktree",
+        description: "Excludes uncommitted changes",
+        icon: <GitBranch size={13} />,
+        action: () => createChat("worktree"),
+      },
+    ], "New chat workspace", trigger);
   }
 
   function createChatInSection(sectionId: string) {
@@ -745,23 +758,33 @@ export function Sidebar({
   const sidebarStyle = {
     "--sidebar-width": `${resolvedSidebarWidth}px`,
   } as CSSProperties;
-  const newChatButton = (
+  const newChatPrimaryButton = (
+    <button
+      type="button"
+      className="new-chat"
+      title="New chat using the configured workspace preference"
+      onClick={() => createChat()}
+    >
+      <Plus size={16} />
+      <span>New chat</span>
+    </button>
+  );
+  const newChatButton = activeFolder ? (
     <div className="new-chat-actions">
-      <button className="new-chat" title="New chat in current checkout" onClick={createChat}>
-        <Plus size={16} />
-        <span>New chat</span>
+      {newChatPrimaryButton}
+      <button
+        type="button"
+        className="new-chat new-chat-menu"
+        title="Choose current checkout or isolated worktree"
+        aria-label="Choose new chat workspace"
+        aria-haspopup="menu"
+        onClick={openNewChatMenu}
+      >
+        <ChevronDown size={14} />
       </button>
-      {activeFolder ? (
-        <button
-          className="new-chat new-chat-isolated"
-          title="New isolated worktree (uncommitted changes in the current checkout are excluded)"
-          onClick={() => void createIsolatedChat()}
-        >
-          <GitBranch size={15} />
-          <span>Isolated</span>
-        </button>
-      ) : null}
     </div>
+  ) : (
+    newChatPrimaryButton
   );
 
   function resizeSidebar(width: number) {
@@ -873,7 +896,7 @@ export function Sidebar({
             <button className="icon-btn" title="Expand sidebar" onClick={onToggle}>
               <PanelIcon size={16} />
             </button>
-            <button className="icon-btn" title="New chat" onClick={createChat}>
+            <button className="icon-btn" title="New chat" onClick={() => createChat()}>
               <Plus size={16} />
             </button>
             <button className="icon-btn" title="Search chats" onClick={onToggle}>

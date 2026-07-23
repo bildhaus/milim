@@ -268,12 +268,19 @@ for (const needle of [
   "aria-expanded={sectionManuallyExpanded}",
   "next.delete(group.id)",
   "focusComposerSoon",
+  'aria-haspopup="menu"',
+  "Current checkout",
+  "Isolated worktree",
 ]) {
   if (!sidebar.includes(needle)) {
     throw new Error(
-      `Sidebar must include ${needle} for toggleable section overflow and new-chat composer focus`,
+      `Sidebar must include ${needle} for section overflow and new-chat behavior`,
     );
   }
+}
+
+if (sidebar.includes("new-chat-isolated") || sidebar.includes("<span>Isolated</span>")) {
+  throw new Error("Isolated worktrees should be a New chat menu option, not a peer sidebar button");
 }
 
 if (

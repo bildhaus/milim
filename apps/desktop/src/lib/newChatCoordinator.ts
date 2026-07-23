@@ -6,11 +6,11 @@ type NewChatPatch = Partial<Omit<ThreadSettings, "goal">>;
 
 export async function createInteractiveChat(
   settings?: NewChatPatch,
-  options: { forceWorktree?: boolean } = {},
+  options: { workspace?: "current" | "worktree" } = {},
 ): Promise<string> {
   const sessions = useSessions.getState();
   const folder = (settings?.folder ?? sessions.getSettings(sessions.activeId).folder).trim();
-  const policy = options.forceWorktree ? "worktree" : useUiPreferences.getState().newProjectChatWorkspace;
+  const policy = options.workspace ?? useUiPreferences.getState().newProjectChatWorkspace;
   const id = sessions.newUserChat(settings);
   if (!folder || policy === "current") return id;
   try {

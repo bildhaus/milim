@@ -17,6 +17,7 @@ const microUiOnly = process.argv.includes("--micro-ui-only");
 const workersOnly = process.argv.includes("--workers-only");
 const mcpAppsOnly = process.argv.includes("--mcp-apps-only");
 const sidebarMotionOnly = process.argv.includes("--sidebar-motion-only");
+const newChatSplitOnly = process.argv.includes("--new-chat-split-only");
 const commandPaletteOnly = process.argv.includes("--command-palette-only");
 const settingsOnly = process.argv.includes("--settings-only");
 const appMenuOnly = process.argv.includes("--app-menu-only");
@@ -35,6 +36,7 @@ const screenshots = {
   inspectorOverlay: join(tmpdir(), "milim-tauri-webview-inspector-overlay.png"),
   workersPlan: join(tmpdir(), "milim-tauri-webview-workers-plan.png"),
   workersNarrow: join(tmpdir(), "milim-tauri-webview-workers-narrow.png"),
+  newChatSplit: join(tmpdir(), "milim-tauri-webview-new-chat-split.png"),
   mcpAppsLight: join(tmpdir(), "milim-tauri-webview-mcp-apps-light.png"),
   mcpAppsDark: join(tmpdir(), "milim-tauri-webview-mcp-apps-dark.png"),
   turnChanges: join(tmpdir(), "milim-tauri-webview-turn-changes.png"),
@@ -105,9 +107,9 @@ try {
     const errors = collectErrors(session.page);
     await runNativePreviewOcclusionCheck(session.page, session.child.pid);
     consoleErrors.push(...errors);
-  } else if (sidebarMotionOnly) {
+  } else if (sidebarMotionOnly || newChatSplitOnly) {
     const errors = collectErrors(session.page);
-    await runSidebarSectionMotionCheck(session.page);
+    await runSidebarSectionMotionCheck(session.page, newChatSplitOnly);
     consoleErrors.push(...errors);
   } else if (mcpAppsOnly) {
     await session.page.getByTestId("chat-shell").waitFor();
@@ -381,7 +383,21 @@ async function runPersistenceAndChat(page, pid) {
   return errors;
 }
 
-async function runSidebarSectionMotionCheck(page) {
+async function runSidebarSectionMotionCheck(page, splitOnly = false) {
+  if (splitOnly) {
+    const standaloneNewChat = page.getByRole("button", { name: "New chat", exact: true });
+    const standaloneLayout = await standaloneNewChat.evaluate((button) => {
+      const style = getComputedStyle(button);
+      return {
+        wrapped: button.parentElement?.classList.contains("new-chat-actions"),
+        border: style.borderTopWidth,
+        radius: style.borderTopRightRadius,
+      };
+    });
+    if (standaloneLayout.wrapped || standaloneLayout.border !== "1px" || standaloneLayout.radius !== "8px") {
+      throw new Error(`Gitless new chat button has unexpected geometry: ${JSON.stringify(standaloneLayout)}.`);
+    }
+  }
   const project = await page.evaluate(async ({ folder }) => {
     const key = "milim.sessions";
     const id = `project:${folder}`;
@@ -402,10 +418,67 @@ async function runSidebarSectionMotionCheck(page) {
     state.activeId = "e2e-project-chat";
     parsed.state = state;
     await invoke("user_state_set", { key, value: JSON.stringify(parsed) });
+    await invoke("user_state_set", {
+      key: "milim.onboarding",
+      value: JSON.stringify({
+        state: {
+          version: 1,
+          status: "completed",
+          selectedSetupPath: null,
+          completedSteps: ["finish"],
+          developerShowOnboarding: false,
+          completedAt: now,
+        },
+        version: 0,
+      }),
+    });
     return { name: "E2E Project" };
   }, { folder: root });
   await page.reload();
   await page.getByTestId("chat-shell").waitFor();
+  const newChatMenu = page.getByRole("button", { name: "Choose new chat workspace", exact: true });
+  const splitLayout = await newChatMenu.evaluate((menu) => {
+    const style = getComputedStyle(menu);
+    const shellStyle = getComputedStyle(menu.parentElement);
+    return {
+      width: menu.getBoundingClientRect().width,
+      leftRadius: style.borderTopLeftRadius,
+      rightRadius: style.borderTopRightRadius,
+      topBorder: style.borderTopWidth,
+      leftBorder: style.borderLeftWidth,
+      shellRightRadius: shellStyle.borderTopRightRadius,
+    };
+  });
+  if (
+    splitLayout.width !== 24 ||
+    splitLayout.leftRadius !== "0px" ||
+    splitLayout.rightRadius !== "0px" ||
+    splitLayout.topBorder !== "0px" ||
+    splitLayout.leftBorder !== "1px" ||
+    splitLayout.shellRightRadius !== "8px"
+  ) {
+    throw new Error(`New chat split control has unexpected geometry: ${JSON.stringify(splitLayout)}.`);
+  }
+  await newChatMenu.click();
+  await page.getByRole("menu", { name: "New chat workspace", exact: true }).waitFor();
+  await page.getByRole("menuitem", { name: "Current checkout", exact: true }).waitFor();
+  const isolatedWorktree = page.getByRole("menuitem", { name: /Isolated worktree/ });
+  await isolatedWorktree.waitFor();
+  const isolatedLayout = await isolatedWorktree.evaluate((element) => {
+    const label = element.querySelector(".app-context-menu-label").getBoundingClientRect();
+    const description = element.querySelector(".app-context-menu-description").getBoundingClientRect();
+    return {
+      menuWidth: element.closest(".app-context-menu").getBoundingClientRect().width,
+      labelBottom: label.bottom,
+      descriptionTop: description.top,
+    };
+  });
+  if (isolatedLayout.descriptionTop < isolatedLayout.labelBottom || isolatedLayout.menuWidth > 240) {
+    throw new Error(`Worktree note should sit below its title in a compact menu: ${JSON.stringify(isolatedLayout)}.`);
+  }
+  await page.screenshot({ path: screenshots.newChatSplit, fullPage: false });
+  await page.keyboard.press("Escape");
+  if (splitOnly) return;
   const sidebarMotion = await page.locator(".sidebar").evaluate((element) => {
     const style = getComputedStyle(element);
     return { duration: style.transitionDuration, property: style.transitionProperty };
@@ -3104,6 +3177,7 @@ function printEvidencePaths(milimHome) {
   console.log(`inspectorOverlayScreenshot=${screenshots.inspectorOverlay}`);
   console.log(`workersPlanScreenshot=${screenshots.workersPlan}`);
   console.log(`workersNarrowScreenshot=${screenshots.workersNarrow}`);
+  console.log(`newChatSplitScreenshot=${screenshots.newChatSplit}`);
   console.log(`mcpAppsLightScreenshot=${screenshots.mcpAppsLight}`);
   console.log(`mcpAppsDarkScreenshot=${screenshots.mcpAppsDark}`);
   console.log(`turnChangesScreenshot=${screenshots.turnChanges}`);
