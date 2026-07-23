@@ -1,6 +1,6 @@
 # Account Runtimes
 
-Milim can use signed-in Codex, bring-your-own Claude CLI, OpenCode, and Pi as chat runtimes. These are separate from saved provider records. The privacy gate scans, redacts, or blocks text before any account runtime receives it. Image pixels cannot be scanned or redacted, so account-runtime images require Privacy Off.
+Milim can use signed-in Codex, bring-your-own Claude CLI, OpenCode, and Pi as chat runtimes. These are separate from saved provider records. Each runtime can be enabled or disabled independently in Providers; disabled runtimes remain authenticated but are not queried for the desktop model catalog, shown in model pickers, or allowed to start a desktop turn. The privacy gate scans, redacts, or blocks text before any account runtime receives it. Image pixels cannot be scanned or redacted, so account-runtime images require Privacy Off.
 
 After a Milim chat has a native Codex thread id, Claude session id, OpenCode session id, or Pi session id, Milim lets that runtime own prior context. Later turns send the current per-turn context plus the latest user message instead of replaying the visible Milim transcript or auto-compacting it first. Manual `/compact` still creates a visible Milim checkpoint, but its summary call is ephemeral and the stored native runtime id is cleared afterward.
 

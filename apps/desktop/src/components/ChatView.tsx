@@ -38,6 +38,7 @@ import {
   getMediaStatus,
   getPreviewAppStatus,
   isClaudeModel,
+  accountRuntimeKind,
   isCliPathWarningMessage,
   isCodexModel,
   isOpenCodeModel,
@@ -3391,6 +3392,7 @@ export function ChatView({
   const agents = useAgents((s) => s.agents);
   const mediaSettings = useSettings((s) => s.media);
   const favoriteModels = useSettings((s) => s.favorites);
+  const accountRuntimeEnabled = useSettings((s) => s.accountRuntimeEnabled);
   const configuredNewThreads = useSettings((s) => s.newThreadBehavior === "configured");
   const unavailableModelPolicy = useSettings((s) => s.unavailableModelPolicy);
   const setMediaSettings = useSettings((s) => s.setMediaSettings);
@@ -4163,15 +4165,18 @@ export function ChatView({
 
   useEffect(() => {
     let cancelled = false;
-    void loadStartupModels((nextModels) => {
-      if (cancelled) return;
-      setModels(nextModels);
-      setModelsLoaded(true);
-    });
+    void loadStartupModels(
+      (nextModels) => {
+        if (cancelled) return;
+        setModels(nextModels);
+        setModelsLoaded(true);
+      },
+      accountRuntimeEnabled,
+    );
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [accountRuntimeEnabled]);
 
   useEffect(() => {
     listProviders().then(setProviders);
@@ -5766,7 +5771,16 @@ export function ChatView({
 
   function requireChatModel(): string | null {
     const selected = effectiveModel.trim();
-    if (selected) return selected;
+    if (selected) {
+      const runtime = accountRuntimeKind(selected);
+      if (!runtime || accountRuntimeEnabled[runtime]) return selected;
+      setChatNotice({
+        tone: "error",
+        message: `${runtime === "claude" ? "Claude CLI" : runtime === "opencode" ? "OpenCode" : runtime === "pi" ? "Pi" : "Codex"} is disabled in Providers.`,
+      });
+      setProvidersOpen(true);
+      return null;
+    }
     setChatNotice({
       tone: "error",
       message:
@@ -7668,6 +7682,7 @@ export function ChatView({
       isClaudeModel,
       isOpenCodeModel,
       isPiModel,
+      accountRuntimeEnabled: useSettings.getState().accountRuntimeEnabled,
     });
     if (!turnSetup.ok) {
       setChatNotice({ tone: "error", message: turnSetup.error });
@@ -9849,7 +9864,9 @@ export function ChatView({
           <ProvidersManager
             onClose={() => {
               setProvidersOpen(false);
-              listModelsDetailed().then(setModels);
+              listModelsDetailed(
+                useSettings.getState().accountRuntimeEnabled,
+              ).then(setModels);
               listProviders().then(setProviders);
             }}
           />

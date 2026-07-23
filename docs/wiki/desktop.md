@@ -11,7 +11,7 @@ updated: 2026-07-23
 
 Milim is your local control plane for coding agents: use your own models and subscriptions, keep one canonical thread, review the diff, and ship.
 
-The Providers sheet shows Codex, OpenCode, Claude, and Pi as separate installed account-runtime cards. Pi reports its configured provider and model counts with refresh and `/login` guidance. Cards use a two-column grid: four runtimes render 2×2, while a final odd card spans both columns.
+The Providers sheet uses branded icons for saved providers, setup shortcuts, detected local runtimes, and the separate Codex, OpenCode, Claude, and Pi account-runtime cards. Pi reports its configured provider and model counts with refresh and `/login` guidance. Cards use a two-column grid: four runtimes render 2×2, while a final odd card spans both columns.
 
 Git-backed New Chat flows keep the current checkout by default and offer a separate isolated worktree. Isolated threads execute from `~/.milim/runtime/threads/<thread-id>` on a retained `milim/thread-<short-id>` branch while continuing to group under the original project. Uncommitted changes in the original checkout are excluded. Archive preserves the worktree; deletion removes a clean worktree or asks before force-discarding dirty state, and never deletes its branch.
 
@@ -70,7 +70,7 @@ The latest code-changing turn ends with a compact changed-files card. **Review c
 
 | Control | Behavior |
 |---|---|
-| Model | Pick any discovered chat, account-runtime, or media-capable model. The chip shows provider, runtime lane, setup status, capabilities, favorite state, and reasoning effort where supported. |
+| Model | Pick any discovered chat, account-runtime, or media-capable model. The chip and picker groups use branded icons for provider/runtime identity while keeping readiness as a separate status. They also show runtime lane, capabilities, favorite state, and reasoning effort where supported. |
 | Folder | Sets the host working folder. Each run captures that folder immutably; filesystem tools reject symlink/junction escapes, writes replace files atomically, directory results are sorted and bounded, and `read_file` accepts byte `offset`/`limit` ranges. |
 | Sandbox | Enables bounded Docker execution through `run_command`: no network, read-only root, dropped capabilities, no-new-privileges, memory/CPU/PID limits, output caps, timeout, and cancellation cleanup. |
 | Computer use | Enables OS-level screen capture plus mouse/keyboard tools when the desktop build includes the feature. |

@@ -103,6 +103,7 @@ try {
   );
 
   assert(markup.includes("OpenAI"), "Picker should render provider names");
+  assert(markup.includes('data-provider-brand="openai"'), "Picker provider groups should render brand icons");
   assert(markup.includes("Milim tools"), "Picker should keep the active dev runtime lane in accessible metadata");
   assert(markup.includes("Ready"), "Picker should keep setup status in accessible metadata");
   assert(!markup.includes("mp-meta"), "Picker rows should stay visually compact");
@@ -171,6 +172,23 @@ try {
   );
   assert(controlBarMarkup.includes('data-testid="goal-mode-chip"'), "Goal mode should show its pill before a goal starts");
   assert(controlBarMarkup.includes(">Ready<"), "The pre-send Goal pill should communicate that it is ready");
+  assert(controlBarMarkup.includes('data-provider-brand="openai"'), "The active model chip should render its provider icon");
+
+  const { providerBrandForModel, providerBrandForProvider } = (await server.ssrLoadModule(
+    "/src/components/ProviderIcon.tsx",
+  )) as {
+    providerBrandForModel: (model: Pick<ModelInfo, "id" | "owned_by" | "provider_id">, providers?: ProviderInfo[]) => string | null;
+    providerBrandForProvider: (provider: Pick<ProviderInfo, "name" | "base_url">) => string | null;
+  };
+  assert(providerBrandForProvider(providers[0]) === "openai", "Known provider endpoints should resolve their brand");
+  assert(
+    providerBrandForModel({ id: "pi:github-copilot/claude", owned_by: "Local Pi CLI" }) === "pi",
+    "Account-runtime prefixes should win over the underlying model provider",
+  );
+  assert(
+    providerBrandForProvider({ name: "Custom", base_url: "https://example.com/v1" }) === null,
+    "Custom endpoints should keep the generic connection icon",
+  );
 
   const { BatonMenu, HotSwapPreflightSheet } = (await server.ssrLoadModule(
     "/src/components/HotSwapDialogs.tsx",

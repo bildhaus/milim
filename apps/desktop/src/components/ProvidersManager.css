@@ -283,12 +283,8 @@
 
 .provider-account-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.provider-account-card:last-child:nth-child(odd) {
-  grid-column: 1 / -1;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
 }
 
 .provider-account-card {
@@ -297,26 +293,27 @@
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
-  padding: 10px;
-  border: 1px solid color-mix(in srgb, var(--border-primary) 70%, transparent);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--chip-bg) 18%, transparent);
+  padding: 9px 0;
 }
 
-.provider-account-card.ready {
-  border-color: color-mix(in srgb, var(--success) 28%, var(--border-primary));
+.provider-account-card + .provider-account-card {
+  border-top: 1px solid color-mix(in srgb, var(--border-primary) 70%, transparent);
 }
 
 .provider-account-main {
   min-width: 0;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto auto minmax(0, 1fr);
   align-items: start;
   gap: 8px;
 }
 
+.provider-account-main > div {
+  min-width: 0;
+}
+
 .provider-account-main strong,
-.provider-account-main span {
+.provider-account-main > div > span {
   min-width: 0;
   display: block;
   overflow: hidden;
@@ -331,7 +328,7 @@
   line-height: 1.25;
 }
 
-.provider-account-main span {
+.provider-account-main > div > span {
   margin-top: 3px;
   color: var(--tertiary-text);
   font-size: 11.5px;
@@ -393,13 +390,14 @@
   cursor: default;
 }
 
-.provider-quick-action > svg {
+.provider-quick-action > svg,
+.provider-quick-action > .provider-brand-icon {
   color: var(--accent);
   margin-top: 1px;
 }
 
 .provider-quick-action strong,
-.provider-quick-action span {
+.provider-quick-action > span:last-child {
   min-width: 0;
 }
 
@@ -410,7 +408,7 @@
   line-height: 1.25;
 }
 
-.provider-quick-action span {
+.provider-quick-action > span:last-child {
   grid-column: 1 / -1;
   display: block;
   color: var(--tertiary-text);
@@ -441,7 +439,7 @@
 }
 
 .providers-sheet .provider-discovery-row {
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   padding: 7px 0;
   border: 1px solid var(--border-primary);
   border-width: 1px 0 0;
@@ -663,6 +661,7 @@
 .provider-account-actions {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   justify-content: flex-end;
   gap: 6px;
 }

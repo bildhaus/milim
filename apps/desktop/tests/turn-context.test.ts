@@ -215,6 +215,22 @@ assert.equal(
   null,
 );
 assert.equal(
+  accountRuntimeSelectionError({
+    model: "codex:gpt-5",
+    codexModel: "gpt-5",
+    claudeModel: null,
+    isCodexModel: (model) => model.startsWith("codex:"),
+    isClaudeModel: () => false,
+    accountRuntimeEnabled: {
+      codex: false,
+      claude: true,
+      opencode: true,
+      pi: true,
+    },
+  }),
+  "Codex is disabled in Providers.",
+);
+assert.equal(
   accountRuntimeNotReadyTurn({
     kind: "codex",
     ready: { ok: true },

@@ -36,6 +36,9 @@ export const Terminal = (p: P) => (
 export const ExternalLink = (p: P) => (
   <Svg {...p}><path d="M15 3h6v6" /><path d="m10 14 11-11" /><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /></Svg>
 );
+export const Plug = (p: P) => (
+  <Svg {...p}><path d="M9 2v6M15 2v6M7 8h10v3a5 5 0 0 1-10 0zM12 16v6" /></Svg>
+);
 export const Pencil = (p: P) => (
   <Svg {...p}><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></Svg>
 );

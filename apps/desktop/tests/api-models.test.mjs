@@ -60,8 +60,11 @@ assert.match(
 assert.match(claudePicker, /finally \{[\s\S]*clearTimeout\(timer\);[\s\S]*\}/);
 assert.match(
   api,
-  /Promise\.all\(\[\s*listProviderModelsForPicker\(\),\s*listCodexModelsForPicker\(\),\s*listClaudeModelsForPicker\(\),\s*listOpenCodeModelsForPicker\(\),\s*listPiModelsForPicker\(\),\s*\]\)/,
+  /accountRuntimeEnabled\.codex\s*\?\s*listCodexModelsForPicker\(\)/,
 );
+assert.match(api, /accountRuntimeEnabled\.claude\s*\?\s*listClaudeModelsForPicker\(\)/);
+assert.match(api, /accountRuntimeEnabled\.opencode\s*\?\s*listOpenCodeModelsForPicker\(\)/);
+assert.match(api, /accountRuntimeEnabled\.pi\s*\?\s*listPiModelsForPicker\(\)/);
 assert.match(api, /export const PI_MODEL_PREFIX = "pi:";/);
 assert.match(api, /export async function getPiStatus/);
 assert.match(api, /export async function streamPiRun/);
@@ -71,7 +74,7 @@ assert.match(providersManager, /<strong>Installed Pi CLI<\/strong>/);
 assert.match(providersManager, /piStatus\.provider_count/);
 assert.match(
   providersCss,
-  /\.provider-account-card:last-child:nth-child\(odd\)\s*\{\s*grid-column:\s*1\s*\/\s*-1;/,
+  /\.provider-account-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\);[^}]*gap:\s*0;/,
 );
 assert.match(
   api,
@@ -79,10 +82,13 @@ assert.match(
 );
 assert.match(
   api,
-  /const providerRefresh = refreshProviderModelsAtStartup\(\);\s*onModels\(await listModelsDetailed\(\)\);\s*if \(await providerRefresh\) onModels\(await listModelsDetailed\(\)\);/,
+  /const providerRefresh = refreshProviderModelsAtStartup\(\);\s*onModels\(await listModelsDetailed\(accountRuntimeEnabled\)\);\s*if \(await providerRefresh\)\s*onModels\(await listModelsDetailed\(accountRuntimeEnabled\)\);/,
 );
-assert.match(app, /loadStartupModels\(\(models\) =>/);
-assert.match(chatView, /loadStartupModels\(\(nextModels\) =>/);
+assert.match(app, /loadStartupModels\(\s*\(models\) =>/);
+assert.match(chatView, /loadStartupModels\(\s*\(nextModels\) =>/);
+for (const runtime of ["codex", "claude", "opencode", "pi"]) {
+  assert.match(providersManager, new RegExp(`${runtime}-enabled-toggle`));
+}
 assert.match(
   api,
   /export type ReasoningEffort\s*=\s*(?:\|\s*)?"auto"\s*\|\s*"none"\s*\|\s*"minimal"\s*\|\s*"low"\s*\|\s*"medium"\s*\|\s*"high"\s*\|\s*"on"\s*\|\s*"xhigh"\s*\|\s*"max";/,

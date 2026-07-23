@@ -57,6 +57,11 @@ equal(DEFAULT_MEDIA_SETTINGS.providerId, "", "media provider should be unset by 
 equal(useSettings.getState().media.providerId, "", "persisted media provider should start unset");
 deepEqual(useSettings.getState().reasoningEffortByModel, {}, "reasoning effort should default to no global model overrides");
 deepEqual(useSettings.getState().collapsedModelGroups, [], "model provider groups should default to expanded");
+deepEqual(
+  useSettings.getState().accountRuntimeEnabled,
+  { codex: true, claude: true, opencode: true, pi: true },
+  "account runtimes should default enabled",
+);
 equal(useSettings.getState().newThreadBehavior, "inherit", "new chats should preserve inheritance by default");
 equal(useSettings.getState().unavailableModelPolicy, "ask", "unavailable defaults should ask by default");
 equal(useSettings.getState().configuredThreadDefaults.toolApproval, "guarded", "configured approval should default guarded");
@@ -75,6 +80,11 @@ deepEqual(useSettings.getState().collapsedModelGroups, ["OpenAI"], "collapsed mo
 assert(localStorage.getItem("milim.settings")?.includes('"collapsedModelGroups":["OpenAI"]'), "collapsed model groups should persist in settings");
 useSettings.getState().setModelGroupCollapsed("OpenAI", false);
 deepEqual(useSettings.getState().collapsedModelGroups, [], "expanded model groups should leave persisted collapse state");
+
+useSettings.getState().setAccountRuntimeEnabled("claude", false);
+equal(useSettings.getState().accountRuntimeEnabled.claude, false, "account runtimes should be disableable");
+assert(localStorage.getItem("milim.settings")?.includes('"claude":false'), "account runtime toggles should persist");
+useSettings.getState().setAccountRuntimeEnabled("claude", true);
 
 useSettings.getState().setMediaSettings({
   providerId: "prov-openrouter",
@@ -133,11 +143,19 @@ useSettings.getState().setModelReasoningEffort("openrouter/deepseek-r1", "auto")
 deepEqual(useSettings.getState().reasoningEffortByModel, {}, "auto should remove the global model reasoning override");
 
 localStorage.setItem("milim.settings", JSON.stringify({
-  state: { collapsedModelGroups: [" OpenAI ", "OpenAI", "", 42, "Codex"] },
+  state: {
+    collapsedModelGroups: [" OpenAI ", "OpenAI", "", 42, "Codex"],
+    accountRuntimeEnabled: { codex: false, claude: "no", pi: false },
+  },
   version: 0,
 }));
 await useSettings.persist.rehydrate();
 deepEqual(useSettings.getState().collapsedModelGroups, ["OpenAI", "Codex"], "persisted model groups should normalize malformed values");
+deepEqual(
+  useSettings.getState().accountRuntimeEnabled,
+  { codex: false, claude: true, opencode: true, pi: false },
+  "persisted account runtime toggles should normalize malformed values",
+);
 
 useSettings.getState().setNewThreadBehavior("configured");
 useSettings.getState().setConfiguredThreadDefaults({ model: "provider:model", toolApproval: "review", privacy: "redact" });

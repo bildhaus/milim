@@ -35,6 +35,7 @@ import {
   shouldShowOnboarding,
   useOnboarding,
 } from "./onboarding/store";
+import { useSettings } from "./settings/store";
 import {
   importLegacyLocalStorageOnce,
   flushDeferredUserStateWrites,
@@ -112,6 +113,7 @@ function OnboardingGate() {
     (s) => s.developerShowOnboarding,
   );
   const dismissedAt = useOnboarding((s) => s.dismissedAt);
+  const accountRuntimeEnabled = useSettings((s) => s.accountRuntimeEnabled);
   const shouldCheckModels = shouldCheckOnboardingModels(
     status,
     developerShowOnboarding,
@@ -131,23 +133,26 @@ function OnboardingGate() {
 
   const refreshModelReadiness = useCallback(async () => {
     try {
-      const models = await listModelsDetailed();
+      const models = await listModelsDetailed(accountRuntimeEnabled);
       setModelsReady(models.length > 0);
     } catch {
       setModelsReady(false);
     } finally {
       setModelsChecked(true);
     }
-  }, []);
+  }, [accountRuntimeEnabled]);
 
   useEffect(() => {
     if (!hydrated || !shouldCheckModels) return;
     let cancelled = false;
-    void loadStartupModels((models) => {
-      if (cancelled) return;
-      setModelsReady(models.length > 0);
-      setModelsChecked(true);
-    }).catch(() => {
+    void loadStartupModels(
+      (models) => {
+        if (cancelled) return;
+        setModelsReady(models.length > 0);
+        setModelsChecked(true);
+      },
+      accountRuntimeEnabled,
+    ).catch(() => {
       if (cancelled) return;
       setModelsReady(false);
       setModelsChecked(true);
@@ -155,7 +160,7 @@ function OnboardingGate() {
     return () => {
       cancelled = true;
     };
-  }, [hydrated, shouldCheckModels]);
+  }, [accountRuntimeEnabled, hydrated, shouldCheckModels]);
 
   if (!hydrated || (shouldCheckModels && !modelsChecked))
     return (

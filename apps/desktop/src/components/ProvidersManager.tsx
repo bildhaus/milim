@@ -17,6 +17,7 @@ import {
   saveProvider,
   streamCodexDeviceLogin,
   type ClaudeStatusResponse,
+  type AccountRuntimeKind,
   type CodexAccountResponse,
   type CodexLoginEvent,
   type CodexThreadSummary,
@@ -29,7 +30,9 @@ import {
 import { recoveredCodexSession, recoveredCodexSessionId } from "../lib/codexRecovery";
 import { isLoopbackProviderEndpoint } from "../lib/providerEndpoint.js";
 import { useSessions } from "../sessions/store";
+import { useSettings } from "../settings/store";
 import { Plus, Refresh, Search, X } from "./icons";
+import { ProviderIcon, providerBrandForProvider, type ProviderBrand } from "./ProviderIcon";
 import { SheetDialog } from "./SheetDialog";
 import { Select, Toggle } from "./ui";
 import "./ProvidersManager.css";
@@ -190,15 +193,46 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
   const [discoveries, setDiscoveries] = useState<ProviderDiscovery[]>([]);
   const [note, setNote] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const accountRuntimeEnabled = useSettings((s) => s.accountRuntimeEnabled);
+  const setAccountRuntimeEnabled = useSettings(
+    (s) => s.setAccountRuntimeEnabled,
+  );
 
   const refresh = () => listProviders().then(setProviders);
   useEffect(() => {
     void refresh();
-    void refreshCodexAccount();
-    void refreshClaudeStatus();
-    void refreshOpenCodeStatus();
-    void refreshPiStatus();
+    if (accountRuntimeEnabled.codex) void refreshCodexAccount();
+    if (accountRuntimeEnabled.claude) void refreshClaudeStatus();
+    if (accountRuntimeEnabled.opencode) void refreshOpenCodeStatus();
+    if (accountRuntimeEnabled.pi) void refreshPiStatus();
   }, []);
+
+  function updateAccountRuntimeEnabled(
+    runtime: AccountRuntimeKind,
+    nextEnabled: boolean,
+  ) {
+    setAccountRuntimeEnabled(runtime, nextEnabled);
+    if (!nextEnabled) {
+      if (runtime === "codex") {
+        setCodexAccount(null);
+        setCodexNote(null);
+      } else if (runtime === "claude") {
+        setClaudeStatus(null);
+        setClaudeNote(null);
+      } else if (runtime === "opencode") {
+        setOpenCodeStatus(null);
+        setOpenCodeNote(null);
+      } else {
+        setPiStatus(null);
+        setPiNote(null);
+      }
+      return;
+    }
+    if (runtime === "codex") void refreshCodexAccount();
+    else if (runtime === "claude") void refreshClaudeStatus();
+    else if (runtime === "opencode") void refreshOpenCodeStatus();
+    else void refreshPiStatus();
+  }
 
   function edit(p: ProviderInfo | "new") {
     setSel(p);
@@ -513,10 +547,22 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
   }
 
   const codexReady = Boolean(
-    codexAccount?.account || (codexAccount && !codexAccount.requiresOpenaiAuth),
+    accountRuntimeEnabled.codex &&
+      (codexAccount?.account ||
+        (codexAccount && !codexAccount.requiresOpenaiAuth)),
   );
   const claudeReady = Boolean(
-    claudeStatus?.available && claudeStatus.authenticated,
+    accountRuntimeEnabled.claude &&
+      claudeStatus?.available &&
+      claudeStatus.authenticated,
+  );
+  const openCodeReady = Boolean(
+    accountRuntimeEnabled.opencode &&
+      openCodeStatus?.available &&
+      openCodeStatus.authenticated,
+  );
+  const piReady = Boolean(
+    accountRuntimeEnabled.pi && piStatus?.available && piStatus.authenticated,
   );
   const claudeAccountLabel =
     claudeStatus?.auth?.email ?? claudeStatus?.auth?.subscriptionType ?? null;
@@ -643,6 +689,7 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                         <span
                           className={"provider-status-dot " + status.tone}
                         />
+                        <ProviderIcon brand={providerBrandForProvider(p)} size={16} />
                         <span className="provider-row-name">{p.name}</span>
                       </span>
                       <span className="provider-row-meta">
@@ -682,7 +729,8 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
               <h4 id="provider-account-title">Account runtimes</h4>
               <p>
                 Codex, the installed Claude CLI, OpenCode, and Pi use their
-                own desktop tooling.
+                own desktop tooling. Disable one to hide its models and block
+                new runs without signing out.
               </p>
               <p>
                 Milim does not include Claude Code, provide Anthropic
@@ -703,15 +751,26 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                       "provider-status-dot " + (codexReady ? "ready" : "off")
                     }
                   />
+                  <ProviderIcon brand="codex" size={24} />
                   <div>
                     <strong>Codex</strong>
                     <span>
-                      {codexAccount?.account?.email ??
+                      {!accountRuntimeEnabled.codex
+                        ? "Disabled"
+                        : codexAccount?.account?.email ??
                         "ChatGPT account runtime"}
                     </span>
                   </div>
                 </div>
                 <div className="provider-account-actions">
+                  <Toggle
+                    checked={accountRuntimeEnabled.codex}
+                    onChange={(enabled) =>
+                      updateAccountRuntimeEnabled("codex", enabled)
+                    }
+                    ariaLabel="Enable Codex runtime"
+                    testId="codex-enabled-toggle"
+                  />
                   {codexReady && (
                     <button
                       className="btn-ghost"
@@ -729,7 +788,7 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                     onClick={() =>
                       void (codexReady ? disconnectCodex() : connectCodex())
                     }
-                    disabled={codexBusy}
+                    disabled={codexBusy || !accountRuntimeEnabled.codex}
                   >
                     {codexBusy
                       ? "Working..."
@@ -739,19 +798,32 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                   </button>
                 </div>
               </div>
-              <div className={"provider-account-card " + (openCodeStatus?.available && openCodeStatus.authenticated ? "ready" : "off")}>
+              <div className={"provider-account-card " + (openCodeReady ? "ready" : "off")}>
                 <div className="provider-account-main">
-                  <span className={"provider-status-dot " + (openCodeStatus?.available && openCodeStatus.authenticated ? "ready" : "off")} />
+                  <span className={"provider-status-dot " + (openCodeReady ? "ready" : "off")} />
+                  <ProviderIcon brand="opencode" size={24} />
                   <div>
                     <strong>Installed OpenCode CLI</strong>
-                    <span>{openCodeStatus?.available
+                    <span>{!accountRuntimeEnabled.opencode
+                      ? "Disabled"
+                      : openCodeStatus?.available
                       ? `${openCodeStatus.models?.length ?? 0} configured model${openCodeStatus.models?.length === 1 ? "" : "s"}`
                       : "Install OpenCode separately and configure its providers."}</span>
                   </div>
                 </div>
-                <button className="btn-ghost" type="button" onClick={() => void refreshOpenCodeStatus(true)} disabled={openCodeBusy}>
-                  {openCodeBusy ? "Checking..." : "Refresh"}
-                </button>
+                <div className="provider-account-actions">
+                  <Toggle
+                    checked={accountRuntimeEnabled.opencode}
+                    onChange={(enabled) =>
+                      updateAccountRuntimeEnabled("opencode", enabled)
+                    }
+                    ariaLabel="Enable OpenCode runtime"
+                    testId="opencode-enabled-toggle"
+                  />
+                  <button className="btn-ghost" type="button" onClick={() => void refreshOpenCodeStatus(true)} disabled={openCodeBusy || !accountRuntimeEnabled.opencode}>
+                    {openCodeBusy ? "Checking..." : "Refresh"}
+                  </button>
+                </div>
               </div>
               <div
                 className={
@@ -764,39 +836,65 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                       "provider-status-dot " + (claudeReady ? "ready" : "off")
                     }
                   />
+                  <ProviderIcon brand="claude" size={24} />
                   <div>
                     <strong>Installed Claude CLI</strong>
                     <span>
-                      {claudeAccountLabel ??
-                        (claudeStatus?.available
+                      {!accountRuntimeEnabled.claude
+                        ? "Disabled"
+                        : claudeAccountLabel ??
+                          (claudeStatus?.available
                           ? "Run `claude auth login`, then refresh."
                           : "Install Anthropic's official Claude CLI separately.")}
                     </span>
                   </div>
                 </div>
-                <button
-                  className="btn-ghost"
-                  data-testid="claude-code-status"
-                  type="button"
-                  onClick={() => void refreshClaudeStatus(true)}
-                  disabled={claudeBusy}
-                >
-                  {claudeBusy ? "Checking..." : "Refresh"}
-                </button>
+                <div className="provider-account-actions">
+                  <Toggle
+                    checked={accountRuntimeEnabled.claude}
+                    onChange={(enabled) =>
+                      updateAccountRuntimeEnabled("claude", enabled)
+                    }
+                    ariaLabel="Enable Claude runtime"
+                    testId="claude-enabled-toggle"
+                  />
+                  <button
+                    className="btn-ghost"
+                    data-testid="claude-code-status"
+                    type="button"
+                    onClick={() => void refreshClaudeStatus(true)}
+                    disabled={claudeBusy || !accountRuntimeEnabled.claude}
+                  >
+                    {claudeBusy ? "Checking..." : "Refresh"}
+                  </button>
+                </div>
               </div>
-              <div className={"provider-account-card " + (piStatus?.available && piStatus.authenticated ? "ready" : "off")}>
+              <div className={"provider-account-card " + (piReady ? "ready" : "off")}>
                 <div className="provider-account-main">
-                  <span className={"provider-status-dot " + (piStatus?.available && piStatus.authenticated ? "ready" : "off")} />
+                  <span className={"provider-status-dot " + (piReady ? "ready" : "off")} />
+                  <ProviderIcon brand="pi" size={24} />
                   <div>
                     <strong>Installed Pi CLI</strong>
-                    <span>{piStatus?.available
+                    <span>{!accountRuntimeEnabled.pi
+                      ? "Disabled"
+                      : piStatus?.available
                       ? `${piStatus.provider_count ?? 0} provider${piStatus.provider_count === 1 ? "" : "s"} / ${piStatus.models?.length ?? 0} model${piStatus.models?.length === 1 ? "" : "s"}`
                       : "Install Pi separately and use /login in its terminal."}</span>
                   </div>
                 </div>
-                <button className="btn-ghost" data-testid="pi-status" type="button" onClick={() => void refreshPiStatus(true)} disabled={piBusy}>
-                  {piBusy ? "Checking..." : "Refresh"}
-                </button>
+                <div className="provider-account-actions">
+                  <Toggle
+                    checked={accountRuntimeEnabled.pi}
+                    onChange={(enabled) =>
+                      updateAccountRuntimeEnabled("pi", enabled)
+                    }
+                    ariaLabel="Enable Pi runtime"
+                    testId="pi-enabled-toggle"
+                  />
+                  <button className="btn-ghost" data-testid="pi-status" type="button" onClick={() => void refreshPiStatus(true)} disabled={piBusy || !accountRuntimeEnabled.pi}>
+                    {piBusy ? "Checking..." : "Refresh"}
+                  </button>
+                </div>
               </div>
             </div>
             {codexNote && (
@@ -830,7 +928,7 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                 title="Start OpenRouter provider setup."
                 aria-label="Start OpenRouter provider setup"
               >
-                <Plus size={13} />
+                <ProviderIcon brand="openrouter" size={18} />
                 <strong>OpenRouter</strong>
                 <span>Endpoint and encrypted key.</span>
               </button>
@@ -847,13 +945,17 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                     : "Detect local providers"
                 }
               >
-                <Search size={13} />
+                <Search size={15} />
                 <strong>
                   {detecting ? "Detecting local" : "Detect local"}
                 </strong>
                 <span>Find Ollama or LM Studio.</span>
               </button>
-              {["OpenAI", "Anthropic", "Gemini"].map((presetName) => (
+              {([
+                ["OpenAI", "openai"],
+                ["Anthropic", "claude"],
+                ["Gemini", "gemini"],
+              ] satisfies Array<[string, ProviderBrand]>).map(([presetName, brand]) => (
                 <button
                   className="provider-quick-action"
                   type="button"
@@ -862,7 +964,7 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                   title={`Start ${presetName} provider setup.`}
                   aria-label={`Start ${presetName} provider setup`}
                 >
-                  <Plus size={13} />
+                  <ProviderIcon brand={brand} size={18} />
                   <strong>{presetName}</strong>
                   <span>Endpoint and encrypted key.</span>
                 </button>
@@ -880,6 +982,7 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
               </div>
               {discoveries.map((d) => (
                 <div className="provider-discovery-row" key={d.base_url}>
+                  <ProviderIcon brand={providerBrandForProvider(d)} size={16} />
                   <div>
                     <strong>{d.name}</strong>
                     <span>

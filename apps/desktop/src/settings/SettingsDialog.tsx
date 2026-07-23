@@ -323,6 +323,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const newThreadBehavior = useSettings((s) => s.newThreadBehavior);
   const configuredThreadDefaults = useSettings((s) => s.configuredThreadDefaults);
   const unavailableModelPolicy = useSettings((s) => s.unavailableModelPolicy);
+  const accountRuntimeEnabled = useSettings((s) => s.accountRuntimeEnabled);
   const setNewThreadBehavior = useSettings((s) => s.setNewThreadBehavior);
   const setConfiguredThreadDefaults = useSettings((s) => s.setConfiguredThreadDefaults);
   const setUnavailableModelPolicy = useSettings((s) => s.setUnavailableModelPolicy);
@@ -384,7 +385,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     let cancelled = false;
-    listModelsDetailed()
+    listModelsDetailed(accountRuntimeEnabled)
       .then((items) => {
         if (!cancelled) {
           setCatalogModels(items);
@@ -395,7 +396,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [accountRuntimeEnabled]);
 
   useEffect(() => {
     void refreshAgents().catch(() => {});

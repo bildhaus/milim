@@ -11,20 +11,13 @@ import {
 } from "../lib/modelPicker";
 import { hasReasoningEffortChoices, normalizeReasoningEffortForModel, REASONING_EFFORT_LABEL, reasoningEffortDisplay, reasoningEffortOptions } from "../lib/reasoningEffort";
 import { useSettings } from "../settings/store";
-import { Bolt, Check, ChevronDown, Eye, Image, PlusSquare, Search, Sparkles, Volume2 } from "./icons";
+import { Bolt, Check, ChevronDown, Eye, Image, Plug, PlusSquare, Search, Sparkles, Volume2 } from "./icons";
+import { ProviderIcon, providerBrandForModel } from "./ProviderIcon";
 
 function Star({ filled }: { filled: boolean }) {
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill={filled ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round">
       <path d="M12 3.5l2.6 5.6 5.9.8-4.3 4 1 6L12 17.2 6.8 19.9l1-6-4.3-4 5.9-.8z" />
-    </svg>
-  );
-}
-
-function Plug({ size = 13 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M9 2v6M15 2v6M7 8h10v3a5 5 0 0 1-10 0zM12 16v6" />
     </svg>
   );
 }
@@ -142,6 +135,7 @@ export function ModelPicker({
             {groups.map(([label, ms]) => {
               const collapsible = label !== "Favorites";
               const collapsed = isModelPickerGroupCollapsed(label, collapsedModelGroups, filtering);
+              const brand = collapsible ? providerBrandForModel(ms[0], providers) : null;
               return (
                 <div key={label} className="mp-group">
                   {collapsible ? (
@@ -153,7 +147,10 @@ export function ModelPicker({
                       disabled={filtering}
                       onClick={() => setModelGroupCollapsed(label, !collapsed)}
                     >
-                      <span>{label}</span>
+                      <span className="mp-group-label">
+                        <ProviderIcon brand={brand} />
+                        <span>{label}</span>
+                      </span>
                       <ChevronDown size={12} />
                     </button>
                   ) : (

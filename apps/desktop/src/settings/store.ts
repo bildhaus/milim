@@ -1,6 +1,13 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
-import type { DelegationPolicy, PrivacyMode, ReasoningEffort } from "../api";
+import {
+  DEFAULT_ACCOUNT_RUNTIME_ENABLEMENT,
+  type AccountRuntimeEnablement,
+  type AccountRuntimeKind,
+  type DelegationPolicy,
+  type PrivacyMode,
+  type ReasoningEffort,
+} from "../api.js";
 import { userStateStorage } from "../persistence/userStateStorage.js";
 import { reasoningEffortByModelWithSelection } from "../lib/reasoningEffort.js";
 
@@ -55,6 +62,7 @@ interface SettingsState {
   favorites: string[];
   favoritesOnly: boolean;
   collapsedModelGroups: string[];
+  accountRuntimeEnabled: AccountRuntimeEnablement;
   reasoningEffortByModel: Record<string, ReasoningEffort>;
   media: MediaSettings;
   newThreadBehavior: NewThreadBehavior;
@@ -63,6 +71,7 @@ interface SettingsState {
   toggleFavorite: (id: string) => void;
   setFavoritesOnly: (v: boolean) => void;
   setModelGroupCollapsed: (group: string, collapsed: boolean) => void;
+  setAccountRuntimeEnabled: (kind: AccountRuntimeKind, enabled: boolean) => void;
   setModelReasoningEffort: (model: string, effort: ReasoningEffort) => void;
   setMediaSettings: (settings: Partial<MediaSettings>) => void;
   setNewThreadBehavior: (behavior: NewThreadBehavior) => void;
@@ -87,6 +96,30 @@ function normalizeStringRecord(value: unknown): Record<string, string> {
     Object.entries(record)
       .filter((entry): entry is [string, string] => typeof entry[1] === "string"),
   );
+}
+
+function normalizeAccountRuntimeEnablement(
+  value: unknown,
+): AccountRuntimeEnablement {
+  const record = asRecord(value);
+  return {
+    codex:
+      typeof record?.codex === "boolean"
+        ? record.codex
+        : DEFAULT_ACCOUNT_RUNTIME_ENABLEMENT.codex,
+    claude:
+      typeof record?.claude === "boolean"
+        ? record.claude
+        : DEFAULT_ACCOUNT_RUNTIME_ENABLEMENT.claude,
+    opencode:
+      typeof record?.opencode === "boolean"
+        ? record.opencode
+        : DEFAULT_ACCOUNT_RUNTIME_ENABLEMENT.opencode,
+    pi:
+      typeof record?.pi === "boolean"
+        ? record.pi
+        : DEFAULT_ACCOUNT_RUNTIME_ENABLEMENT.pi,
+  };
 }
 
 function isReasoningEffort(value: unknown): value is ReasoningEffort {
@@ -157,6 +190,7 @@ export const useSettings = create<SettingsState>()(
       favorites: [],
       favoritesOnly: false,
       collapsedModelGroups: [],
+      accountRuntimeEnabled: { ...DEFAULT_ACCOUNT_RUNTIME_ENABLEMENT },
       reasoningEffortByModel: {},
       media: DEFAULT_MEDIA_SETTINGS,
       newThreadBehavior: "inherit",
@@ -178,6 +212,13 @@ export const useSettings = create<SettingsState>()(
           else groups.delete(key);
           return { collapsedModelGroups: Array.from(groups) };
         }),
+      setAccountRuntimeEnabled: (kind, enabled) =>
+        set((state) => ({
+          accountRuntimeEnabled: {
+            ...state.accountRuntimeEnabled,
+            [kind]: enabled,
+          },
+        })),
       setModelReasoningEffort: (model, effort) =>
         set((s) => ({
           reasoningEffortByModel: reasoningEffortByModelWithSelection(s.reasoningEffortByModel, model, effort),
@@ -205,6 +246,7 @@ export const useSettings = create<SettingsState>()(
           ...saved,
           favoritesOnly: Boolean(saved?.favoritesOnly),
           collapsedModelGroups: normalizeStringArray(saved?.collapsedModelGroups),
+          accountRuntimeEnabled: normalizeAccountRuntimeEnablement(saved?.accountRuntimeEnabled),
           reasoningEffortByModel: normalizeReasoningEffortByModel(saved?.reasoningEffortByModel),
           media: normalizeMediaSettings(saved?.media),
           newThreadBehavior: saved?.newThreadBehavior === "configured" ? "configured" : "inherit",
@@ -216,6 +258,7 @@ export const useSettings = create<SettingsState>()(
         favorites: s.favorites,
         favoritesOnly: s.favoritesOnly,
         collapsedModelGroups: s.collapsedModelGroups,
+        accountRuntimeEnabled: normalizeAccountRuntimeEnablement(s.accountRuntimeEnabled),
         reasoningEffortByModel: s.reasoningEffortByModel,
         media: s.media,
         newThreadBehavior: s.newThreadBehavior,

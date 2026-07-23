@@ -1,4 +1,5 @@
 import type {
+  AccountRuntimeEnablement,
   ChatMessage,
   DelegationPolicy,
   ModelInfo,
@@ -152,6 +153,7 @@ export function resolveTurnSetup({
   isClaudeModel,
   isOpenCodeModel = () => false,
   isPiModel = () => false,
+  accountRuntimeEnabled,
 }: {
   sessionId: string;
   selectedModel?: string;
@@ -168,6 +170,7 @@ export function resolveTurnSetup({
   isClaudeModel: (model: string) => boolean;
   isOpenCodeModel?: (model: string) => boolean;
   isPiModel?: (model: string) => boolean;
+  accountRuntimeEnabled?: Readonly<AccountRuntimeEnablement>;
 }): TurnSetupResult {
   const session = sessions.find((item) => item.id === sessionId);
   const activeAgent = settings.activeAgentId
@@ -197,6 +200,7 @@ export function resolveTurnSetup({
     isClaudeModel,
     isOpenCodeModel,
     isPiModel,
+    accountRuntimeEnabled,
   });
   if (runtimeError) return { ok: false, error: runtimeError };
   return {
@@ -223,6 +227,7 @@ export function accountRuntimeSelectionError({
   isClaudeModel,
   isOpenCodeModel = () => false,
   isPiModel = () => false,
+  accountRuntimeEnabled,
 }: {
   model: string;
   codexModel?: string | null;
@@ -233,7 +238,16 @@ export function accountRuntimeSelectionError({
   isClaudeModel: (model: string) => boolean;
   isOpenCodeModel?: (model: string) => boolean;
   isPiModel?: (model: string) => boolean;
+  accountRuntimeEnabled?: Readonly<AccountRuntimeEnablement>;
 }): string | null {
+  if (isCodexModel(model) && accountRuntimeEnabled?.codex === false)
+    return "Codex is disabled in Providers.";
+  if (isClaudeModel(model) && accountRuntimeEnabled?.claude === false)
+    return "Claude CLI is disabled in Providers.";
+  if (isOpenCodeModel(model) && accountRuntimeEnabled?.opencode === false)
+    return "OpenCode is disabled in Providers.";
+  if (isPiModel(model) && accountRuntimeEnabled?.pi === false)
+    return "Pi is disabled in Providers.";
   if (isCodexModel(model) && !codexModel)
     return "Choose a concrete Codex model.";
   if (isClaudeModel(model) && !claudeModel)

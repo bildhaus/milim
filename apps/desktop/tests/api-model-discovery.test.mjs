@@ -64,6 +64,17 @@ try {
   assert(requests.some((url) => url.endsWith("/codex/models")));
   assert(requests.some((url) => url.endsWith("/claude/status")));
   assert(requests.some((url) => url.endsWith("/pi/status")));
+
+  requests.length = 0;
+  const withoutAccountRuntimes = await listModelsDetailed({
+    codex: false,
+    claude: false,
+    opencode: false,
+    pi: false,
+  });
+  assert.deepEqual(withoutAccountRuntimes, []);
+  assert(requests.some((url) => url.endsWith("/v1/models")));
+  assert(!requests.some((url) => /\/(codex|claude|opencode|pi)\//.test(url)));
 } finally {
   globalThis.fetch = originalFetch;
   await server.close();

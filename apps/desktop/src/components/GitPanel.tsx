@@ -17,6 +17,7 @@ import {
   piRuntimeModel,
   completeChat,
   getWorkspaceGitStatus,
+  isAccountRuntimeEnabled,
   listModelsDetailed,
   openArtifactLocation,
   openExternalUrl,
@@ -27,6 +28,7 @@ import {
   streamOpenCodeRun,
   streamPiRun,
   type ClaudeRunEvent,
+  type AccountRuntimeEnablement,
   type CodexRunEvent,
   type OpenCodeRunEvent,
   type PiRunEvent,
@@ -51,6 +53,7 @@ import {
 } from "../lib/gitDiffRows";
 import { shouldRefreshGitStatus } from "../lib/gitRefresh";
 import { useUiPreferences } from "../ui/store";
+import { useSettings } from "../settings/store";
 import { useContextMenu } from "./ContextMenu";
 import {
   ArrowUp,
@@ -482,12 +485,15 @@ async function generateAccountRuntimeCommitMessage(
   folder: string,
   status: WorkspaceGitStatus,
   diff: string,
+  accountRuntimeEnabled: Readonly<AccountRuntimeEnablement>,
 ): Promise<string | null> {
   const codexModel = codexRuntimeModel(preferredModel);
   const claudeModel = claudeRuntimeModel(preferredModel);
   const opencodeModel = opencodeRuntimeModel(preferredModel);
   const piModel = piRuntimeModel(preferredModel);
   if (!codexModel && !claudeModel && !opencodeModel && !piModel) return null;
+  if (!isAccountRuntimeEnabled(preferredModel, accountRuntimeEnabled))
+    return null;
 
   let response = "";
   let runtimeError = "";
@@ -560,6 +566,7 @@ async function generateCommitMessageWithFallback(
   folder: string,
   status: WorkspaceGitStatus,
   diff: string,
+  accountRuntimeEnabled: Readonly<AccountRuntimeEnablement>,
 ): Promise<string> {
   let lastError = "";
   try {
@@ -568,6 +575,7 @@ async function generateCommitMessageWithFallback(
       folder,
       status,
       diff,
+      accountRuntimeEnabled,
     );
     if (accountRuntimeMessage) return accountRuntimeMessage;
   } catch (error) {
@@ -578,7 +586,7 @@ async function generateCommitMessageWithFallback(
   }
 
   const candidates = commitMessageModelCandidates(
-    await listModelsDetailed(),
+    await listModelsDetailed(accountRuntimeEnabled),
     preferredModel,
   );
   if (!candidates.length) {
@@ -620,6 +628,7 @@ export function GitPanel({
   const [refreshKey, setRefreshKey] = useState(0);
   const lastGitStatusRunAtRef = useRef<number | null>(null);
   const expandedPreference = useUiPreferences((s) => s.gitPanelExpanded);
+  const accountRuntimeEnabled = useSettings((s) => s.accountRuntimeEnabled);
   const setExpanded = useUiPreferences((s) => s.setGitPanelExpanded);
   const expanded = forceExpanded || (onOpenPanel ? false : expandedPreference);
   const [notice, setNotice] = useState<string | null>(null);
@@ -1785,6 +1794,7 @@ export function GitPanel({
           selectedFolder,
           readyStatus,
           output,
+          accountRuntimeEnabled,
         );
         setCommitMessage(message);
       } catch (error) {

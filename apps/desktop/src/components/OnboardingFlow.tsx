@@ -23,8 +23,10 @@ import {
 import { modelDisplayName } from "../lib/modelPicker";
 import { useOnboarding, type OnboardingSetupPath, type OnboardingStepId } from "../onboarding/store";
 import { DEFAULT_THREAD_SETTINGS, useSessions } from "../sessions/store";
-import { ArrowRight, Bolt, Check, PlusSquare, Search, X } from "./icons";
+import { useSettings } from "../settings/store";
+import { ArrowRight, Check, PlusSquare, Search, X } from "./icons";
 import { Logo } from "./Logo";
+import { ProviderIcon, providerBrandForProvider } from "./ProviderIcon";
 import { SheetDialog } from "./SheetDialog";
 import { Select, Toggle } from "./ui";
 
@@ -118,6 +120,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
   const activeId = useSessions((s) => s.activeId);
   const rawThreadSettings = useSessions((s) => s.sessions.find((x) => x.id === s.activeId)?.settings);
   const updateThreadSettings = useSessions((s) => s.updateSettings);
+  const accountRuntimeEnabled = useSettings((s) => s.accountRuntimeEnabled);
   const threadSettings = useMemo(() => ({ ...DEFAULT_THREAD_SETTINGS, ...rawThreadSettings }), [rawThreadSettings]);
   const selectedModel = threadSettings.model.trim();
   const [step, setStep] = useState<OnboardingStepId>(() => onboarding.completedSteps.includes("model") ? "defaults" : "model");
@@ -147,7 +150,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
   async function refreshModels(selectFirst = false, preferredOwner?: string) {
     setModelsLoading(true);
     try {
-      const next = await listModelsDetailed();
+      const next = await listModelsDetailed(accountRuntimeEnabled);
       setModels(next);
       if (!next.length)
         setProviderNotice({ tone: "info", message: "No chat models found. Connect a provider or start a local runtime." });
@@ -170,10 +173,10 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
 
   useEffect(() => {
     void refreshModels();
-    void refreshCodexAccount();
+    if (accountRuntimeEnabled.codex) void refreshCodexAccount();
     onboarding.start();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [accountRuntimeEnabled]);
 
   useEffect(() => {
     setFolderDraft(threadSettings.folder);
@@ -537,7 +540,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
                       <span><strong>Hosted</strong><small>OpenAI, OpenRouter, Gemini</small></span>
                     </button>
                     <button className={"onboarding-path-option" + (activeSetupPath === "codex" ? " active" : "")} type="button" onClick={() => chooseSetupPath("codex")}>
-                      <span className="onboarding-path-icon"><Bolt size={14} /></span>
+                      <span className="onboarding-path-icon"><ProviderIcon brand="codex" /></span>
                       <span><strong>Codex</strong><small>Account-backed runtime</small></span>
                     </button>
                   </div>
@@ -559,6 +562,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
                         <div className="onboarding-discoveries">
                           {discoveries.map((discovery) => (
                             <div className="onboarding-discovery" key={discovery.base_url}>
+                              <ProviderIcon brand={providerBrandForProvider(discovery)} size={16} />
                               <span>
                                 <strong>{discovery.name}</strong>
                                 <small>{discovery.models.length ? `${discovery.models.length} models at ${discovery.base_url}` : discovery.error ?? discovery.base_url}</small>
@@ -585,12 +589,15 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
                         </div>
                       </div>
                       <div className="onboarding-hosted-form">
-                        <Select
-                          value={hostedPresetName}
-                          onChange={setHostedPresetName}
-                          options={PROVIDER_PRESETS.filter((preset) => preset.needsKey).map((preset) => ({ value: preset.name, label: preset.name }))}
-                          testId="onboarding-hosted-preset"
-                        />
+                        <div className="onboarding-provider-select">
+                          <ProviderIcon brand={providerBrandForProvider(hostedPreset)} size={16} />
+                          <Select
+                            value={hostedPresetName}
+                            onChange={setHostedPresetName}
+                            options={PROVIDER_PRESETS.filter((preset) => preset.needsKey).map((preset) => ({ value: preset.name, label: preset.name }))}
+                            testId="onboarding-hosted-preset"
+                          />
+                        </div>
                         <input
                           className="onboarding-input"
                           value={hostedApiKey}
@@ -609,7 +616,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
                   {activeSetupPath === "codex" && (
                     <>
                       <div className="onboarding-path-head">
-                        <span className="onboarding-path-icon"><Bolt size={15} /></span>
+                        <span className="onboarding-path-icon"><ProviderIcon brand="codex" size={15} /></span>
                         <div>
                           <h4>Use Codex</h4>
                           <p>Connect the account-backed Codex runtime. Codex models appear only after authentication.</p>

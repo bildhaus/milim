@@ -10,6 +10,7 @@ import { goalChipVisible, type GoalSettings } from "../lib/goals";
 import { modelDevProfile, modelDisplayName } from "../lib/modelPicker";
 import { ChevronDown, Cube, Lightbulb, Pin, Sliders } from "./icons";
 import { ModelPicker, type ModelPickerSelection } from "./ModelPicker";
+import { ProviderIcon, providerBrandForModel } from "./ProviderIcon";
 import { RunTimeline } from "./RunTimeline";
 
 function Shield({ size = 13 }: { size?: number }) {
@@ -181,6 +182,7 @@ export function ControlBar({
             aria-expanded={menu === "model"}
           >
             <span className={`dot ${activeModelDot}`} />
+            <ProviderIcon brand={providerBrandForModel(activeModel, providers)} />
             <span className="chip-label">{activeModelLabel || "Choose model"}</span>
             <ChevronDown size={12} className="chip-chev" />
           </button>

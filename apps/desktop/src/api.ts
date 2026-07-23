@@ -1464,6 +1464,14 @@ export const CLAUDE_MODEL_PREFIX = "claude:";
 export const OPENCODE_MODEL_PREFIX = "opencode:";
 export const PI_MODEL_PREFIX = "pi:";
 export type AccountRuntimeKind = "codex" | "claude" | "opencode" | "pi";
+export type AccountRuntimeEnablement = Record<AccountRuntimeKind, boolean>;
+
+export const DEFAULT_ACCOUNT_RUNTIME_ENABLEMENT: AccountRuntimeEnablement = {
+  codex: true,
+  claude: true,
+  opencode: true,
+  pi: true,
+};
 
 export function isCodexModel(model: string): boolean {
   return model.trim().toLowerCase().startsWith(CODEX_MODEL_PREFIX);
@@ -1496,6 +1504,14 @@ export function accountRuntimeKind(model: string): AccountRuntimeKind | null {
   if (isOpenCodeModel(model)) return "opencode";
   if (isPiModel(model)) return "pi";
   return null;
+}
+
+export function isAccountRuntimeEnabled(
+  model: string,
+  enablement: Readonly<AccountRuntimeEnablement>,
+): boolean {
+  const kind = accountRuntimeKind(model);
+  return !kind || enablement[kind];
 }
 
 export function codexRuntimeModel(model: string): string | null {
@@ -1571,14 +1587,23 @@ async function listProviderModelsForPicker(): Promise<ModelInfo[]> {
 }
 
 /** Models with their provider (`owned_by`) for grouping in the picker. */
-export async function listModelsDetailed(): Promise<ModelInfo[]> {
+export async function listModelsDetailed(
+  accountRuntimeEnabled: Readonly<AccountRuntimeEnablement> =
+    DEFAULT_ACCOUNT_RUNTIME_ENABLEMENT,
+): Promise<ModelInfo[]> {
   const [providerModels, codexModels, claudeModels, openCodeModels, piModels] =
     await Promise.all([
       listProviderModelsForPicker(),
-      listCodexModelsForPicker(),
-      listClaudeModelsForPicker(),
-      listOpenCodeModelsForPicker(),
-      listPiModelsForPicker(),
+      accountRuntimeEnabled.codex
+        ? listCodexModelsForPicker()
+        : Promise.resolve([]),
+      accountRuntimeEnabled.claude
+        ? listClaudeModelsForPicker()
+        : Promise.resolve([]),
+      accountRuntimeEnabled.opencode
+        ? listOpenCodeModelsForPicker()
+        : Promise.resolve([]),
+      accountRuntimeEnabled.pi ? listPiModelsForPicker() : Promise.resolve([]),
     ]);
   return [
     ...providerModels,
@@ -1591,10 +1616,13 @@ export async function listModelsDetailed(): Promise<ModelInfo[]> {
 
 export async function loadStartupModels(
   onModels: (models: ModelInfo[]) => void,
+  accountRuntimeEnabled: Readonly<AccountRuntimeEnablement> =
+    DEFAULT_ACCOUNT_RUNTIME_ENABLEMENT,
 ): Promise<void> {
   const providerRefresh = refreshProviderModelsAtStartup();
-  onModels(await listModelsDetailed());
-  if (await providerRefresh) onModels(await listModelsDetailed());
+  onModels(await listModelsDetailed(accountRuntimeEnabled));
+  if (await providerRefresh)
+    onModels(await listModelsDetailed(accountRuntimeEnabled));
 }
 
 function numberOrUndefined(value: unknown): number | undefined {

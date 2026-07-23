@@ -7766,6 +7766,17 @@ html[data-dark="true"] .preview-control-cursor {
 .dot-red { background: var(--danger, #e5484d); box-shadow: 0 0 6px var(--danger, #e5484d); }
 .dot-yellow { background: var(--warning); box-shadow: 0 0 6px var(--warning); }
 
+.provider-brand-icon {
+  flex: none;
+  color: inherit;
+}
+span.provider-brand-icon {
+  display: inline-block;
+  background: currentColor;
+  mask: var(--provider-brand-icon) center / contain no-repeat;
+  -webkit-mask: var(--provider-brand-icon) center / contain no-repeat;
+}
+
 .context-chip { max-width: min(360px, 45vw); }
 
 /* model dropdown */
@@ -10259,6 +10270,16 @@ html[data-dark="true"] .preview-control-cursor {
 .onboarding-hosted-form .ui-select {
   min-width: 0;
 }
+.onboarding-provider-select {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+}
+.onboarding-provider-select .ui-select {
+  width: 100%;
+}
 .onboarding-input,
 .onboarding-field input {
   width: 100%;
@@ -10323,6 +10344,9 @@ html[data-dark="true"] .preview-control-cursor {
   gap: 9px;
   min-height: 44px;
   padding: 8px;
+}
+.onboarding-discovery {
+  grid-template-columns: auto minmax(0, 1fr) auto;
 }
 .onboarding-discovery span,
 .onboarding-model-row span,
@@ -12902,6 +12926,8 @@ body.media-studio-resizing {
 .mp-empty { padding: 14px; text-align: center; color: var(--tertiary-text); font-size: 12.5px; }
 .mp-group { margin-bottom: 4px; }
 .mp-group-head { padding: 6px 8px 3px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--tertiary-text); }
+.mp-group-label { min-width: 0; display: flex; align-items: center; gap: 6px; }
+.mp-group-label > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mp-group-toggle { width: 100%; display: flex; align-items: center; justify-content: space-between; border: 0; border-radius: 5px; background: transparent; font-family: inherit; text-align: left; cursor: pointer; }
 .mp-group-toggle:hover,
 .mp-group-toggle:focus-visible { background: var(--chip-hover); color: var(--primary-text); }
