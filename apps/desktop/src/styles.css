@@ -5998,7 +5998,7 @@ html[data-dark="true"] .preview-control-cursor {
 }
 
 .turn-changes-card {
-  width: min(100%, 640px);
+  width: 100%;
   margin: 10px 0 5px;
   overflow: hidden;
   border: 1px solid var(--border-primary);
