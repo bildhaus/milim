@@ -6,6 +6,13 @@ const CODEX_MODEL_PREFIX = "codex:";
 const CLAUDE_MODEL_PREFIX = "claude:";
 const OPENCODE_MODEL_PREFIX = "opencode:";
 const PI_MODEL_PREFIX = "pi:";
+const ACCOUNT_PROVIDER_PART_LABELS: Record<string, string> = {
+  github: "GitHub",
+  openai: "OpenAI",
+  openrouter: "OpenRouter",
+  opencode: "OpenCode",
+  lmstudio: "LM Studio",
+};
 
 export type ModelDevLane =
   | "plain-chat"
@@ -31,6 +38,7 @@ export type ModelDevProfile = {
   lane: ModelDevLane;
   laneLabel: string;
   providerLabel: string;
+  routeLabel: string;
   setupLabel: string;
   setupDetail: string;
   setupTone: ModelDevSetupTone;
@@ -72,6 +80,16 @@ export function modelDisplayName(model: Pick<ModelInfo, "id" | "display_id">): s
 
 export function modelPickerKey(model: Pick<ModelInfo, "id" | "owned_by" | "provider_id">): string {
   return `${model.provider_id || model.owned_by}\0${model.id}`;
+}
+
+function accountRuntimeProviderLabel(id: string, prefix: string): string | null {
+  const provider = id.slice(prefix.length).split("/", 1)[0];
+  if (!provider) return null;
+  return provider
+    .split(/[-_.]+/)
+    .filter(Boolean)
+    .map((part) => ACCOUNT_PROVIDER_PART_LABELS[part.toLowerCase()] ?? `${part[0].toUpperCase()}${part.slice(1)}`)
+    .join(" ");
 }
 
 export function qualifyDuplicateProviderModels(models: ModelInfo[]): ModelInfo[] {
@@ -145,12 +163,23 @@ export function modelDevProfile(
         : pi
           ? "Pi CLI"
           : provider?.name || model?.owned_by || "Unknown provider";
+  const nestedProvider = opencode
+    ? accountRuntimeProviderLabel(id, OPENCODE_MODEL_PREFIX)
+    : pi
+      ? accountRuntimeProviderLabel(id, PI_MODEL_PREFIX)
+      : null;
+  const routeLabel = opencode
+    ? `OpenCode${nestedProvider ? ` · ${nestedProvider}` : ""}`
+    : pi
+      ? `Pi${nestedProvider ? ` · ${nestedProvider}` : ""}`
+      : providerLabel;
 
   if (codex) {
     return {
       lane: "codex-runtime",
       laneLabel: "Codex runtime",
       providerLabel,
+      routeLabel,
       ...setup,
       capabilities,
       detailTags,
@@ -164,6 +193,7 @@ export function modelDevProfile(
       lane: "claude-runtime",
       laneLabel: "Claude runtime",
       providerLabel,
+      routeLabel,
       ...setup,
       capabilities,
       detailTags,
@@ -177,6 +207,7 @@ export function modelDevProfile(
       lane: "opencode-runtime",
       laneLabel: "OpenCode runtime",
       providerLabel,
+      routeLabel,
       ...setup,
       capabilities,
       detailTags,
@@ -190,6 +221,7 @@ export function modelDevProfile(
       lane: "pi-runtime",
       laneLabel: "Pi runtime",
       providerLabel,
+      routeLabel,
       ...setup,
       capabilities,
       detailTags,
@@ -203,6 +235,7 @@ export function modelDevProfile(
       lane: "media",
       laneLabel: "Media",
       providerLabel,
+      routeLabel,
       ...setup,
       capabilities,
       detailTags,
@@ -214,6 +247,7 @@ export function modelDevProfile(
       lane: "milim-tools",
       laneLabel: "Milim tools",
       providerLabel,
+      routeLabel,
       ...setup,
       capabilities,
       detailTags,
@@ -224,6 +258,7 @@ export function modelDevProfile(
     lane: "plain-chat",
     laneLabel: context.planMode ? "Plan/chat" : "Plain chat",
     providerLabel,
+    routeLabel,
     ...setup,
     capabilities,
     detailTags,
@@ -402,13 +437,16 @@ export function modelPickerGroups(
   favorites: string[],
   favoritesOnly: boolean,
   query: string,
+  providers: ProviderInfo[] = [],
 ): Array<[string, ModelInfo[]]> {
   const normalizedQuery = query.trim().toLowerCase();
   let list = models;
   if (normalizedQuery) {
-    list = list.filter((model) =>
-      modelDisplayName(model).toLowerCase().includes(normalizedQuery),
-    );
+    list = list.filter((model) => {
+      const routeLabel = modelDevProfile(model, model.id, { providers }).routeLabel;
+      return [modelDisplayName(model), model.id, model.owned_by, routeLabel]
+        .some((value) => value.toLowerCase().includes(normalizedQuery));
+    });
   }
   if (favoritesOnly) list = list.filter((model) => favorites.includes(model.id));
   const favs = list.filter((model) => favorites.includes(model.id));

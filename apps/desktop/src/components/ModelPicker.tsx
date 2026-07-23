@@ -110,8 +110,8 @@ export function ModelPicker({
   const applyFavorite = onToggleFavorite ?? toggleFavorite;
 
   const groups = useMemo<Array<[string, ModelInfo[]]>>(() => {
-    return modelPickerGroups(models, favorites, favoritesOnly, q);
-  }, [models, q, favorites, favoritesOnly]);
+    return modelPickerGroups(models, favorites, favoritesOnly, q, providers);
+  }, [models, q, favorites, favoritesOnly, providers]);
   const filtering = Boolean(q.trim()) || favoritesOnly;
   return (
     <div className="mp">
@@ -166,6 +166,7 @@ export function ModelPicker({
                       toolIntent,
                       planMode,
                     });
+                    const rowBrand = providerBrandForModel(m, providers);
                     const modelCaps = profile.capabilities.filter((cap) => cap !== "reasoning" || !hasEffortChoices);
                     return (
                       <div key={modelPickerKey(m)} className={"mp-item" + (m.id === model ? " active" : "") + (effortOpen ? " effort-open" : "")}>
@@ -182,16 +183,18 @@ export function ModelPicker({
                   <button
                     type="button"
                     className="mp-pick"
-                    title={`${profile.routeDetail} ${profile.setupDetail}`}
-                    aria-label={`${modelDisplayName(m)}, ${profile.providerLabel}, ${profile.laneLabel}, ${profile.setupLabel}`}
+                    title={`${profile.routeLabel}. ${profile.routeDetail} ${profile.setupDetail}`}
+                    aria-label={`${modelDisplayName(m)}, ${profile.routeLabel}, ${profile.laneLabel}, ${profile.setupLabel}`}
                     onClick={() => {
                       onModel({ model: m.id });
                       onClose();
                     }}
                   >
                     <span className="mp-title">
+                      <ProviderIcon brand={rowBrand} className="mp-row-provider" size={13} />
                       <span className="mp-name">{modelDisplayName(m)}</span>
                       {effort !== "auto" && <span className="mp-effort-label">{REASONING_EFFORT_LABEL[effort]}</span>}
+                      <span className="mp-route" title={profile.routeLabel}>{profile.routeLabel}</span>
                     </span>
                   </button>
                   {(modelCaps.length > 0 || hasEffortChoices) && (

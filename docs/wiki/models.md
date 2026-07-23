@@ -11,7 +11,7 @@ updated: 2026-07-23
 
 Model routing is provider-agnostic and centered on the active dev thread. The provider registry stores enabled remotes and their model metadata, then the desktop model picker merges local API runtime models, provider models, account runtime models, and media-capable models. Duplicate provider model ids stay provider-scoped in the picker and route back to the selected provider; provider sections with fewer visible models appear first.
 
-On desktop startup, the picker reads the cached catalog while a single live refresh checks enabled chat providers. It reads the catalog once more after that refresh completes, without requiring a trip through provider settings. Provider, Codex, Claude, OpenCode, and Pi discovery are isolated so a slow or unavailable lane does not suppress successful lanes.
+On desktop startup, the picker reads the cached catalog while a single live refresh checks enabled chat providers. It reads the catalog once more after that refresh completes, without requiring a trip through provider settings. Provider, Codex, Claude, OpenCode, and Pi discovery are isolated so a slow or unavailable lane does not suppress successful lanes. Enabled account-runtime probes allow the CLI bridge's full startup window and retry once after a transient failure.
 
 The model chip and picker classify the selected model into one runtime lane: plain chat, Milim tools, Codex runtime, Claude runtime, OpenCode runtime, Pi runtime, or media. Switching models changes the next turn for the active thread without resetting workspace context, memory, previews, artifacts, approvals, or queued messages.
 
@@ -19,7 +19,7 @@ Worker routing is a separate thread setting. A thread may choose an optional Wor
 
 ## Favorites and reasoning effort
 
-Favorites are the only model shortcut. The picker switches between Models and Favorites, and each model keeps its own persisted reasoning-effort choice. Agents do not pin models, so changing the thread model keeps the active Agent enabled and changes the model used by its next interactive run.
+Favorites are the only model shortcut. Every picker row keeps its provider or runtime identity visible, including nested routes such as `OpenCode · OpenAI` and `Pi · GitHub Copilot`, so overlapping model names remain distinct in Favorites, search results, and provider groups. Search matches model names, route ids, runtimes, and providers. Each model keeps its own persisted reasoning-effort choice. Agents do not pin models, so changing the thread model keeps the active Agent enabled and changes the model used by its next interactive run.
 
 Every provider and runtime group can be collapsed. The layout is shared by the chat, Hot Swap, and Worker model pickers and persists across restarts. Favorites stays expanded, while search and Favorites-only filtering temporarily reveal matches without changing the saved collapsed groups.
 

@@ -120,6 +120,36 @@ try {
   assert(markup.includes('aria-label="Collapse OpenAI models"'), "Provider headers should render accessible collapse controls");
   assert(markup.includes('aria-expanded="true"'), "Provider headers should expose their expanded state");
 
+  const overlappingModels: ModelInfo[] = [
+    { ...models[0], display_id: "Shared model" },
+    { id: "codex:gpt-shared", display_id: "Shared model", owned_by: "Codex" },
+    { id: "opencode:openai/gpt-shared", display_id: "Shared model", owned_by: "Local OpenCode CLI" },
+    { id: "pi:github-copilot/gpt-shared", display_id: "Shared model", owned_by: "Local Pi CLI" },
+  ];
+  const overlapMarkup = renderToStaticMarkup(
+    createElement(ModelPicker, {
+      models: overlappingModels,
+      model: overlappingModels[0].id,
+      providers,
+      onModel: () => {},
+      onClose: () => {},
+      favoriteIds: overlappingModels.map((item) => item.id),
+      favoritesOnlyValue: false,
+      onToggleFavorite: () => {},
+      onFavoritesOnlyChange: () => {},
+    }),
+  );
+  for (const route of ["OpenAI", "Codex", "OpenCode · OpenAI", "Pi · GitHub Copilot"]) {
+    assert(overlapMarkup.includes(`title="${route}">${route}</span>`), `Favorites should show the ${route} route`);
+  }
+  for (const brand of ["openai", "codex", "opencode", "pi"]) {
+    assert(overlapMarkup.includes(`data-provider-brand="${brand}"`), `Favorites should show the ${brand} route icon`);
+  }
+  assert(
+    overlapMarkup.match(/Shared model/g)?.length === overlappingModels.length * 2,
+    "Overlapping favorite names should remain present in visible and accessible labels",
+  );
+
   const mediaMarkup = renderToStaticMarkup(
     createElement(ModelPicker, {
       models: [models[1]],
@@ -210,6 +240,10 @@ try {
   assert(hotSwapSource.includes('className="baton-menu-popover message-popover-layer"'), "Baton actions should use the shared message popover layer");
   assert(hotSwapSource.includes("Continue with...") && hotSwapSource.includes("Review with...") && hotSwapSource.includes("Retry with..."), "Baton menu should offer all handoff actions");
   assert(styles.includes(".message-popover-layer") && styles.includes("z-index: 1200 !important"), "Message popovers should render above the sidebar layer");
+  assert(styles.includes(".mp-route") && styles.includes("max-width: 42%"), "Picker routes should truncate within compact rows");
+  const effortStyles = styles.match(/\.mp-effort-label\s*\{([^}]*)\}/)?.[1] ?? "";
+  assert(effortStyles.includes("line-height: 1"), "Reasoning effort should share the metadata baseline");
+  assert(!effortStyles.includes("transform:"), "Reasoning effort should not be vertically offset");
 
   const hotSwapMarkup = renderToStaticMarkup(
     createElement(HotSwapPreflightSheet, {

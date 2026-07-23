@@ -5,6 +5,7 @@ import { createServer } from "vite";
 const root = fileURLToPath(new URL("..", import.meta.url));
 const originalFetch = globalThis.fetch;
 const requests = [];
+let openCodeAttempts = 0;
 const server = await createServer({
   root,
   logLevel: "silent",
@@ -34,6 +35,15 @@ globalThis.fetch = async (input) => {
       models: ["sonnet"],
     });
   }
+  if (url.endsWith("/opencode/status")) {
+    openCodeAttempts += 1;
+    if (openCodeAttempts === 1) throw new Error("OpenCode still starting");
+    return Response.json({
+      available: true,
+      authenticated: true,
+      models: ["openai/gpt-opencode-test"],
+    });
+  }
   if (url.endsWith("/pi/status")) {
     return Response.json({
       available: true,
@@ -58,11 +68,17 @@ try {
 
   assert.deepEqual(
     models.map((model) => model.id),
-    ["codex:gpt-test", "claude:sonnet", "pi:openai-codex/gpt-pi-test"],
+    [
+      "codex:gpt-test",
+      "claude:sonnet",
+      "opencode:openai/gpt-opencode-test",
+      "pi:openai-codex/gpt-pi-test",
+    ],
   );
   assert(requests.some((url) => url.endsWith("/v1/models")));
   assert(requests.some((url) => url.endsWith("/codex/models")));
   assert(requests.some((url) => url.endsWith("/claude/status")));
+  assert.equal(openCodeAttempts, 2);
   assert(requests.some((url) => url.endsWith("/pi/status")));
 
   requests.length = 0;

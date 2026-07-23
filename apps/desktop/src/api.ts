@@ -385,7 +385,8 @@ export interface RunTrace {
 
 const DEFAULT_BASE = "http://127.0.0.1:7377";
 const BASE = DEFAULT_BASE;
-const ACCOUNT_RUNTIME_PICKER_TIMEOUT_MS = 5000;
+const ACCOUNT_RUNTIME_PICKER_TIMEOUT_MS = 12000;
+const ACCOUNT_RUNTIME_PICKER_RETRY_DELAY_MS = 500;
 const inTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -1748,17 +1749,12 @@ function normalizeCodexReasoning(
 }
 
 async function listCodexModelsForPicker(): Promise<ModelInfo[]> {
-  const ctrl = new AbortController();
-  const timer = setTimeout(
-    () => ctrl.abort(),
-    ACCOUNT_RUNTIME_PICKER_TIMEOUT_MS,
-  );
-  try {
-    const account = await getCodexAccount(false, ctrl.signal);
+  return discoverAccountRuntimeModels(async (signal) => {
+    const account = await getCodexAccount(false, signal);
     if (!account.account && account.requiresOpenaiAuth) return [];
 
-    const r = await authFetch(`${BASE}/codex/models`, { signal: ctrl.signal });
-    if (!r.ok) return [];
+    const r = await authFetch(`${BASE}/codex/models`, { signal });
+    if (!r.ok) throw new Error("Codex model discovery failed");
     const j = await r.json();
     const byId = new Map<string, ModelInfo>();
     for (const item of j.data ?? []) {
@@ -1782,11 +1778,7 @@ async function listCodexModelsForPicker(): Promise<ModelInfo[]> {
       });
     }
     return Array.from(byId.values());
-  } catch {
-    return [];
-  } finally {
-    clearTimeout(timer);
-  }
+  });
 }
 
 export interface CodexAccountResponse {
@@ -2023,13 +2015,8 @@ export async function recoverCodexThread(id: string): Promise<CodexRecoveredThre
 }
 
 async function listClaudeModelsForPicker(): Promise<ModelInfo[]> {
-  const ctrl = new AbortController();
-  const timer = setTimeout(
-    () => ctrl.abort(),
-    ACCOUNT_RUNTIME_PICKER_TIMEOUT_MS,
-  );
-  try {
-    const status = await getClaudeStatus(ctrl.signal);
+  return discoverAccountRuntimeModels(async (signal) => {
+    const status = await getClaudeStatus(signal);
     if (!status.available || !status.authenticated) return [];
     return (status.models ?? [])
       .filter((model) => model.trim())
@@ -2047,21 +2034,12 @@ async function listClaudeModelsForPicker(): Promise<ModelInfo[]> {
           mandatory: false,
         },
       }));
-  } catch {
-    return [];
-  } finally {
-    clearTimeout(timer);
-  }
+  });
 }
 
 async function listOpenCodeModelsForPicker(): Promise<ModelInfo[]> {
-  const ctrl = new AbortController();
-  const timer = setTimeout(
-    () => ctrl.abort(),
-    ACCOUNT_RUNTIME_PICKER_TIMEOUT_MS,
-  );
-  try {
-    const status = await getOpenCodeStatus(ctrl.signal);
+  return discoverAccountRuntimeModels(async (signal) => {
+    const status = await getOpenCodeStatus(signal);
     if (!status.available || !status.authenticated) return [];
     return (status.models ?? [])
       .filter((model) => model.trim())
@@ -2070,21 +2048,12 @@ async function listOpenCodeModelsForPicker(): Promise<ModelInfo[]> {
         owned_by: "Local OpenCode CLI",
         capabilities: { imageInput: true, toolUse: true },
       }));
-  } catch {
-    return [];
-  } finally {
-    clearTimeout(timer);
-  }
+  });
 }
 
 async function listPiModelsForPicker(): Promise<ModelInfo[]> {
-  const ctrl = new AbortController();
-  const timer = setTimeout(
-    () => ctrl.abort(),
-    ACCOUNT_RUNTIME_PICKER_TIMEOUT_MS,
-  );
-  try {
-    const status = await getPiStatus(ctrl.signal);
+  return discoverAccountRuntimeModels(async (signal) => {
+    const status = await getPiStatus(signal);
     if (!status.available || !status.authenticated) return [];
     return (status.models ?? []).map((model) => ({
       id: `${PI_MODEL_PREFIX}${model.id}`,
@@ -2108,11 +2077,27 @@ async function listPiModelsForPicker(): Promise<ModelInfo[]> {
           }
         : undefined,
     }));
-  } catch {
-    return [];
-  } finally {
-    clearTimeout(timer);
+  });
+}
+
+async function discoverAccountRuntimeModels(
+  discover: (signal: AbortSignal) => Promise<ModelInfo[]>,
+): Promise<ModelInfo[]> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), ACCOUNT_RUNTIME_PICKER_TIMEOUT_MS);
+    try {
+      return await discover(ctrl.signal);
+    } catch {
+      // Retry once after the embedded backend and CLI have had time to finish startup.
+    } finally {
+      clearTimeout(timer);
+    }
+    if (attempt === 0) {
+      await new Promise((resolve) => setTimeout(resolve, ACCOUNT_RUNTIME_PICKER_RETRY_DELAY_MS));
+    }
   }
+  return [];
 }
 
 export async function getClaudeStatus(

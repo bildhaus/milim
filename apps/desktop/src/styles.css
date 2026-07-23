@@ -13055,12 +13055,23 @@ body.media-studio-resizing {
   align-items: center;
   gap: 6px;
 }
-.mp-name { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mp-row-provider { opacity: 0.8; transform: translateY(0.5px); }
+.mp-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mp-route {
+  flex: none;
+  max-width: 42%;
+  overflow: hidden;
+  color: var(--tertiary-text);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .mp-effort-label {
   flex: none;
   display: inline-flex;
   align-items: center;
-  transform: translateY(1.5px);
   color: var(--tertiary-text);
   font-size: 10.5px;
   font-weight: 650;

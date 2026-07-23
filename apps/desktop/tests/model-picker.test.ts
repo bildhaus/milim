@@ -162,6 +162,7 @@ const providerProfile = modelDevProfile(
 );
 equal(providerProfile.lane, "milim-tools");
 equal(providerProfile.providerLabel, "OpenAI");
+equal(providerProfile.routeLabel, "OpenAI");
 equal(providerProfile.setupLabel, "Ready");
 deepEqual(providerProfile.detailTags, ["128k ctx", "16k out", "pricing"]);
 
@@ -186,11 +187,29 @@ equal(
   "codex-runtime",
 );
 equal(
+  modelDevProfile({ id: "codex:gpt-5", owned_by: "Codex" }, "codex:gpt-5").routeLabel,
+  "Codex",
+);
+equal(
   modelDevProfile(
     { id: "claude:sonnet", owned_by: "Local Claude CLI" },
     "claude:sonnet",
   ).lane,
   "claude-runtime",
+);
+equal(
+  modelDevProfile(
+    { id: "claude:sonnet", owned_by: "Local Claude CLI" },
+    "claude:sonnet",
+  ).routeLabel,
+  "Claude CLI",
+);
+equal(
+  modelDevProfile(
+    { id: "opencode:openai/gpt-5.4", owned_by: "Local OpenCode CLI" },
+    "opencode:openai/gpt-5.4",
+  ).routeLabel,
+  "OpenCode · OpenAI",
 );
 const piProfile = modelDevProfile(
   {
@@ -203,8 +222,30 @@ const piProfile = modelDevProfile(
 );
 equal(piProfile.lane, "pi-runtime");
 equal(piProfile.providerLabel, "Pi CLI");
+equal(piProfile.routeLabel, "Pi · OpenAI Codex");
 equal(piProfile.setupLabel, "CLI ready");
 equal(piProfile.capabilities.includes("vision"), true);
+equal(
+  modelDevProfile(
+    { id: "pi:new_provider/model", owned_by: "Local Pi CLI" },
+    "pi:new_provider/model",
+  ).routeLabel,
+  "Pi · New Provider",
+  "unknown nested providers should remain readable",
+);
+deepEqual(
+  modelPickerGroups(
+    [
+      { id: "opencode:openai/shared", display_id: "Shared", owned_by: "Local OpenCode CLI" },
+      { id: "pi:github-copilot/shared", display_id: "Shared", owned_by: "Local Pi CLI" },
+    ],
+    [],
+    false,
+    "github copilot",
+  ).flatMap(([, models]) => models.map((model) => model.id)),
+  ["pi:github-copilot/shared"],
+  "search should match humanized nested provider routes",
+);
 equal(
   modelDevProfile(
     {

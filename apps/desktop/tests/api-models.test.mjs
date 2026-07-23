@@ -35,29 +35,34 @@ const claudeRun =
     /export async function streamClaudeRun\([\s\S]*?\n\): Promise<void> \{/,
   )?.[0] ?? "";
 
-assert.match(api, /const ACCOUNT_RUNTIME_PICKER_TIMEOUT_MS = 5000;/);
+assert.match(api, /const ACCOUNT_RUNTIME_PICKER_TIMEOUT_MS = 12000;/);
+assert.match(api, /const ACCOUNT_RUNTIME_PICKER_RETRY_DELAY_MS = 500;/);
 assert.ok(picker, "Codex picker function should exist");
+assert.match(picker, /discoverAccountRuntimeModels\(async \(signal\) =>/);
+assert.match(picker, /getCodexAccount\(false, signal\)/);
 assert.match(
   picker,
-  /const ctrl = new AbortController\(\);[\s\S]*ACCOUNT_RUNTIME_PICKER_TIMEOUT_MS/,
-);
-assert.match(picker, /getCodexAccount\(false, ctrl\.signal\)/);
-assert.match(
-  picker,
-  /authFetch\(`\$\{BASE\}\/codex\/models`, \{ signal: ctrl\.signal \}\)/,
+  /authFetch\(`\$\{BASE\}\/codex\/models`, \{ signal \}\)/,
 );
 assert.match(api, /supportedReasoningEfforts/);
 assert.match(picker, /inputModalities/);
-assert.match(picker, /finally \{[\s\S]*clearTimeout\(timer\);[\s\S]*\}/);
 assert.match(api, /export const CLAUDE_MODEL_PREFIX = "claude:";/);
 assert.ok(claudePicker, "Claude picker function should exist");
-assert.match(claudePicker, /getClaudeStatus\(ctrl\.signal\)/);
+assert.match(claudePicker, /getClaudeStatus\(signal\)/);
 assert.match(claudePicker, /CLAUDE_MODEL_PREFIX/);
 assert.match(
   claudePicker,
   /supported_efforts: \["low", "medium", "high", "xhigh", "max"\]/,
 );
-assert.match(claudePicker, /finally \{[\s\S]*clearTimeout\(timer\);[\s\S]*\}/);
+assert.equal(
+  (api.match(/discoverAccountRuntimeModels\(/g) ?? []).length,
+  5,
+  "all four account runtimes should share one discovery retry path",
+);
+assert.match(
+  api,
+  /for \(let attempt = 0; attempt < 2; attempt \+= 1\)[\s\S]*new AbortController\(\)[\s\S]*ACCOUNT_RUNTIME_PICKER_TIMEOUT_MS[\s\S]*ACCOUNT_RUNTIME_PICKER_RETRY_DELAY_MS/,
+);
 assert.match(
   api,
   /accountRuntimeEnabled\.codex\s*\?\s*listCodexModelsForPicker\(\)/,
