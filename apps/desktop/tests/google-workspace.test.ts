@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { googleWorkspaceFileUrl, googleWorkspaceUrl } from "../src/lib/googleWorkspace.js";
+import {
+  googleDocEditableParagraph,
+  googleSheetCellRange,
+  googleWorkspaceFileUrl,
+  googleWorkspaceUrl,
+  parseGoogleSheetClipboard,
+} from "../src/lib/googleWorkspace.js";
 
 test("recognizes supported Google Workspace URLs", () => {
   assert.deepEqual(
@@ -35,5 +41,37 @@ test("builds stable fallback URLs by MIME type", () => {
       web_view_link: "https://drive.google.com/file/d/blob/view",
     }),
     "https://drive.google.com/file/d/blob/view",
+  );
+});
+
+test("builds safe edit ranges and parses pasted cells", () => {
+  assert.equal(googleSheetCellRange("Omer's sheet", "B4"), "'Omer''s sheet'!B4");
+  assert.deepEqual(
+    parseGoogleSheetClipboard("one\ttwo\r\nthree\tfour\r\n"),
+    [["one", "two"], ["three", "four"]],
+  );
+});
+
+test("extracts only safe top-level Docs paragraphs for editing", () => {
+  assert.deepEqual(
+    googleDocEditableParagraph({
+      startIndex: 4,
+      endIndex: 11,
+      paragraph: {
+        elements: [
+          { textRun: { content: "Hello " } },
+          { textRun: { content: "world\n" } },
+        ],
+      },
+    }),
+    { start: 4, end: 10, text: "Hello world" },
+  );
+  assert.equal(
+    googleDocEditableParagraph({
+      startIndex: 4,
+      endIndex: 6,
+      paragraph: { elements: [{ inlineObjectElement: { inlineObjectId: "image" } }] },
+    }),
+    null,
   );
 });

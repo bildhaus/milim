@@ -1118,6 +1118,7 @@ impl GoogleWorkspaceConnection {
         .map_err(|error| Error::Other(error.to_string()))?;
         let presentation = self.request(Method::GET, url, None).await?;
         let presentation = response_json_bounded(presentation, PREVIEW_BYTE_LIMIT).await?;
+        let page_size = google_slide_page_size(&presentation);
         let mut remaining = MODEL_TEXT_LIMIT;
         let mut slides = Vec::new();
         for slide in presentation
@@ -1129,12 +1130,13 @@ impl GoogleWorkspaceConnection {
             if remaining == 0 {
                 break;
             }
-            slides.push(google_slide_preview_item(slide, &mut remaining));
+            slides.push(google_slide_preview_item(slide, &mut remaining, page_size));
         }
         Ok(json!({
             "kind": "presentation",
             "file": file,
             "title": presentation.get("title"),
+            "pageAspectRatio": page_size.map(|(width, height)| width / height),
             "slides": slides,
         }))
     }
@@ -1443,22 +1445,179 @@ fn take_chars_from_budget(value: &str, remaining: &mut usize) -> String {
     text
 }
 
-fn google_slide_preview_item(slide: &Value, remaining: &mut usize) -> Value {
+fn google_slide_preview_item(
+    slide: &Value,
+    remaining: &mut usize,
+    page_size: Option<(f64, f64)>,
+) -> Value {
+    let text_elements = google_slide_text_elements(
+        slide.get("pageElements").unwrap_or(&Value::Null),
+        remaining,
+        page_size,
+    );
+    let notes_element = google_slide_notes_element(
+        slide
+            .pointer("/slideProperties/notesPage")
+            .unwrap_or(&Value::Null),
+        remaining,
+    );
     json!({
         "objectId": slide.get("objectId"),
-        "text": take_chars_from_budget(
-            &extract_google_text(slide.get("pageElements").unwrap_or(&Value::Null)),
-            remaining,
-        ),
-        "notes": take_chars_from_budget(
-            &extract_google_text(
-                slide
-                    .pointer("/slideProperties/notesPage")
-                    .unwrap_or(&Value::Null),
-            ),
-            remaining,
-        ),
+        "text": text_elements.iter()
+            .filter_map(|element| element.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        "textElements": text_elements,
+        "notes": notes_element.as_ref()
+            .and_then(|element| element.get("text"))
+            .cloned()
+            .unwrap_or_else(|| json!("")),
+        "notesObjectId": notes_element.as_ref()
+            .and_then(|element| element.get("objectId"))
+            .cloned(),
     })
+}
+
+fn google_slide_text_elements(
+    value: &Value,
+    remaining: &mut usize,
+    page_size: Option<(f64, f64)>,
+) -> Vec<Value> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|element| {
+            let object_id = element.get("objectId")?.as_str()?;
+            let text = element.pointer("/shape/text")?;
+            let rect =
+                page_size.and_then(|page_size| google_slide_element_rect(element, page_size));
+            Some(json!({
+                "objectId": object_id,
+                "text": take_chars_from_budget(&extract_google_text(text), remaining),
+                "x": rect.map(|value| value.0),
+                "y": rect.map(|value| value.1),
+                "width": rect.map(|value| value.2),
+                "height": rect.map(|value| value.3),
+            }))
+        })
+        .take(49)
+        .collect()
+}
+
+fn google_slide_page_size(presentation: &Value) -> Option<(f64, f64)> {
+    let width = google_slide_dimension(presentation.pointer("/pageSize/width")?)?;
+    let height = google_slide_dimension(presentation.pointer("/pageSize/height")?)?;
+    (width > 0.0 && height > 0.0).then_some((width, height))
+}
+
+fn google_slide_dimension(value: &Value) -> Option<f64> {
+    let magnitude = value.get("magnitude")?.as_f64()?;
+    Some(
+        match value.get("unit").and_then(Value::as_str).unwrap_or("EMU") {
+            "PT" => magnitude * 12_700.0,
+            "PX" => magnitude * 9_525.0,
+            _ => magnitude,
+        },
+    )
+}
+
+fn google_slide_element_rect(
+    element: &Value,
+    (page_width, page_height): (f64, f64),
+) -> Option<(f64, f64, f64, f64)> {
+    let width = google_slide_dimension(element.pointer("/size/width")?)?;
+    let height = google_slide_dimension(element.pointer("/size/height")?)?;
+    let transform = element.get("transform").unwrap_or(&Value::Null);
+    let translate_x = transform
+        .get("translateX")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let translate_y = transform
+        .get("translateY")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let unit = transform
+        .get("unit")
+        .and_then(Value::as_str)
+        .unwrap_or("EMU");
+    let unit_scale = match unit {
+        "PT" => 12_700.0,
+        "PX" => 9_525.0,
+        _ => 1.0,
+    };
+    if transform
+        .get("shearX")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0)
+        .abs()
+        > f64::EPSILON
+        || transform
+            .get("shearY")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0)
+            .abs()
+            > f64::EPSILON
+    {
+        return None;
+    }
+    let scale_x = transform
+        .get("scaleX")
+        .and_then(Value::as_f64)
+        .unwrap_or(1.0)
+        .abs();
+    let scale_y = transform
+        .get("scaleY")
+        .and_then(Value::as_f64)
+        .unwrap_or(1.0)
+        .abs();
+    // ponytail: axis-aligned overlays; use affine corners if rotated text editing is needed.
+    Some((
+        (translate_x * unit_scale / page_width).clamp(0.0, 1.0),
+        (translate_y * unit_scale / page_height).clamp(0.0, 1.0),
+        (width * scale_x / page_width).clamp(0.01, 1.0),
+        (height * scale_y / page_height).clamp(0.01, 1.0),
+    ))
+}
+
+fn google_slide_notes_element(value: &Value, remaining: &mut usize) -> Option<Value> {
+    let elements = value
+        .get("pageElements")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let speaker_id = value
+        .pointer("/notesProperties/speakerNotesObjectId")
+        .and_then(Value::as_str);
+    let element = speaker_id
+        .and_then(|id| {
+            elements
+                .iter()
+                .find(|element| element.get("objectId").and_then(Value::as_str) == Some(id))
+        })
+        .or_else(|| {
+            elements.iter().find(|element| {
+                element
+                    .pointer("/shape/placeholder/type")
+                    .and_then(Value::as_str)
+                    == Some("BODY")
+            })
+        })
+        .or_else(|| {
+            elements
+                .iter()
+                .find(|element| element.pointer("/shape/text").is_some())
+        });
+    let object_id = speaker_id
+        .or_else(|| element.and_then(|element| element.get("objectId").and_then(Value::as_str)))?;
+    let text = element
+        .and_then(|element| element.pointer("/shape/text"))
+        .map(extract_google_text)
+        .unwrap_or_default();
+    Some(json!({
+        "objectId": object_id,
+        "text": take_chars_from_budget(&text, remaining),
+    }))
 }
 
 fn google_doc_model_content(document: &Value, limit: usize) -> Vec<Value> {
@@ -1827,6 +1986,57 @@ pub(crate) async fn content_route(
         bytes,
     )
         .into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WorkspaceEditRequest {
+    operations: Vec<Value>,
+}
+
+pub(crate) async fn sheet_edit_route(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: Peer,
+    AxumPath(id): AxumPath<String>,
+    Json(request): Json<WorkspaceEditRequest>,
+) -> ApiResult<Json<Value>> {
+    authorize(&st, &headers, Some(peer.0))?;
+    GoogleSheetsEditTool(connection(&st)?)
+        .invoke(json!({ "file_id": id, "operations": request.operations }))
+        .await
+        .map(Json)
+        .map_err(ApiError)
+}
+
+pub(crate) async fn doc_edit_route(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: Peer,
+    AxumPath(id): AxumPath<String>,
+    Json(request): Json<WorkspaceEditRequest>,
+) -> ApiResult<Json<Value>> {
+    authorize(&st, &headers, Some(peer.0))?;
+    GoogleDocsEditTool(connection(&st)?)
+        .invoke(json!({ "file_id": id, "operations": request.operations }))
+        .await
+        .map(Json)
+        .map_err(ApiError)
+}
+
+pub(crate) async fn slide_edit_route(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: Peer,
+    AxumPath(id): AxumPath<String>,
+    Json(request): Json<WorkspaceEditRequest>,
+) -> ApiResult<Json<Value>> {
+    authorize(&st, &headers, Some(peer.0))?;
+    GoogleSlidesEditTool(connection(&st)?)
+        .invoke(json!({ "file_id": id, "operations": request.operations }))
+        .await
+        .map(Json)
+        .map_err(ApiError)
 }
 
 pub fn tools(connection: Arc<GoogleWorkspaceConnection>) -> Vec<Arc<dyn Tool>> {
@@ -3696,19 +3906,69 @@ mod tests {
     fn separates_slide_content_from_speaker_notes() {
         let slide = json!({
             "objectId": "slide_1",
-            "pageElements": [{ "shape": { "text": { "textElements": [
+            "pageElements": [{ "objectId": "title_1", "shape": { "text": { "textElements": [
                 { "textRun": { "content": "Visible title" } }
             ]}}}],
-            "slideProperties": { "notesPage": { "pageElements": [
-                { "shape": { "text": { "textElements": [
+            "slideProperties": { "notesPage": {
+                "notesProperties": { "speakerNotesObjectId": "notes_1" },
+                "pageElements": [
+                { "objectId": "notes_1", "shape": {
+                    "placeholder": { "type": "BODY" },
+                    "text": { "textElements": [
                     { "textRun": { "content": "Private speaker note" } }
                 ]}}}
             ]}}
         });
         let mut remaining = 100;
-        let preview = google_slide_preview_item(&slide, &mut remaining);
+        let preview =
+            google_slide_preview_item(&slide, &mut remaining, Some((9_144_000.0, 5_143_500.0)));
         assert_eq!(preview["text"], "Visible title");
         assert_eq!(preview["notes"], "Private speaker note");
+        assert_eq!(preview["textElements"][0]["objectId"], "title_1");
+        assert_eq!(preview["notesObjectId"], "notes_1");
+
+        let mut remaining = 100;
+        let empty_notes = google_slide_preview_item(
+            &json!({
+                "objectId": "slide_2",
+                "slideProperties": { "notesPage": {
+                    "notesProperties": { "speakerNotesObjectId": "notes_2" }
+                }}
+            }),
+            &mut remaining,
+            None,
+        );
+        assert_eq!(empty_notes["notesObjectId"], "notes_2");
+        assert_eq!(empty_notes["notes"], "");
+    }
+
+    #[test]
+    fn normalizes_slide_text_box_geometry() {
+        let presentation = json!({
+            "pageSize": {
+                "width": { "magnitude": 720.0, "unit": "PT" },
+                "height": { "magnitude": 405.0, "unit": "PT" }
+            }
+        });
+        let element = json!({
+            "size": {
+                "width": { "magnitude": 360.0, "unit": "PT" },
+                "height": { "magnitude": 81.0, "unit": "PT" }
+            },
+            "transform": {
+                "translateX": 180.0,
+                "translateY": 40.5,
+                "unit": "PT"
+            }
+        });
+        let page_size = google_slide_page_size(&presentation).unwrap();
+        assert_eq!(
+            google_slide_element_rect(&element, page_size),
+            Some((0.25, 0.1, 0.5, 0.2))
+        );
+        let mut rotated = element;
+        rotated["transform"]["shearX"] = json!(0.25);
+        assert_eq!(google_slide_element_rect(&rotated, page_size), None);
     }
 
     #[test]

@@ -979,10 +979,51 @@ export interface GooglePickerFlow {
 export type GoogleFilePreview =
   | { kind: "sheet"; file: GoogleFileSummary; range: string; sheets: unknown[]; values: unknown[][]; formulas: unknown[][] }
   | { kind: "document"; file: GoogleFileSummary; document: Record<string, unknown>; text: string }
-  | { kind: "presentation"; file: GoogleFileSummary; title?: string | null; slides: Array<{ objectId?: string | null; text: string; notes?: string | null }> }
+  | {
+      kind: "presentation";
+      file: GoogleFileSummary;
+      title?: string | null;
+      pageAspectRatio?: number | null;
+      slides: Array<{
+        objectId?: string | null;
+        text: string;
+        notes?: string | null;
+        notesObjectId?: string | null;
+        textElements: Array<{
+          objectId: string;
+          text: string;
+          x?: number | null;
+          y?: number | null;
+          width?: number | null;
+          height?: number | null;
+        }>;
+      }>;
+    }
   | { kind: "folder"; file: GoogleFileSummary; children: GoogleFileSummary[] }
   | { kind: "text"; file: GoogleFileSummary; text: string; truncated: boolean }
   | { kind: "image" | "pdf" | "audio" | "video" | "unsupported"; file: GoogleFileSummary };
+
+export type GoogleSheetEditOperation =
+  | {
+      action: "set_values";
+      range: string;
+      values: unknown[][];
+      input_option?: "USER_ENTERED" | "RAW";
+    }
+  | {
+      action: "insert_rows" | "delete_rows" | "insert_columns" | "delete_columns";
+      sheet_id: number;
+      start: number;
+      end: number;
+    };
+
+export type GoogleDocEditOperation =
+  | { action: "delete_range"; start: number; end: number }
+  | { action: "insert_text"; index: number; text: string };
+
+export type GoogleSlidesEditOperation =
+  | { action: "delete_text"; object_id: string }
+  | { action: "insert_text"; object_id: string; offset?: number; text: string };
 
 export async function getGoogleWorkspaceStatus(): Promise<GoogleWorkspaceStatus> {
   return await parseJsonResponse<GoogleWorkspaceStatus>(
@@ -1088,6 +1129,46 @@ export async function getGoogleFileContent(
     throw new Error(await responseErrorMessage(response, "Google file content failed"));
   }
   return await response.blob();
+}
+
+export async function editGoogleSheet(
+  id: string,
+  operations: GoogleSheetEditOperation[],
+): Promise<void> {
+  await editGoogleWorkspaceFile("sheets", id, operations, "Google Sheets edit failed");
+}
+
+export async function editGoogleDoc(
+  id: string,
+  operations: GoogleDocEditOperation[],
+): Promise<void> {
+  await editGoogleWorkspaceFile("docs", id, operations, "Google Docs edit failed");
+}
+
+export async function editGoogleSlides(
+  id: string,
+  operations: GoogleSlidesEditOperation[],
+): Promise<void> {
+  await editGoogleWorkspaceFile("slides", id, operations, "Google Slides edit failed");
+}
+
+async function editGoogleWorkspaceFile(
+  kind: "sheets" | "docs" | "slides",
+  id: string,
+  operations: unknown[],
+  fallback: string,
+): Promise<void> {
+  const response = await authFetch(
+    `${BASE}/google-workspace/${kind}/${encodeURIComponent(id)}/edit`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ operations }),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response, fallback));
+  }
 }
 
 export type PreviewAppState =

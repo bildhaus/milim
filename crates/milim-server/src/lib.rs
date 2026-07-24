@@ -127,6 +127,18 @@ pub fn build_router(state: AppState) -> Router {
             "/google-workspace/content/{id}",
             get(google_workspace::content_route),
         )
+        .route(
+            "/google-workspace/sheets/{id}/edit",
+            post(google_workspace::sheet_edit_route),
+        )
+        .route(
+            "/google-workspace/docs/{id}/edit",
+            post(google_workspace::doc_edit_route),
+        )
+        .route(
+            "/google-workspace/slides/{id}/edit",
+            post(google_workspace::slide_edit_route),
+        )
         // Media generation through encrypted remote provider credentials
         .route("/media/models", get(routes::media_models))
         .route("/media/model-schema", get(routes::media_model_schema))

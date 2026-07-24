@@ -59,3 +59,42 @@ export function googleWorkspaceFileUrl(file: {
       return `https://drive.google.com/file/d/${file.id}/view`;
   }
 }
+
+export function googleSheetCellRange(sheetTitle: string, address: string): string {
+  const escapedTitle = sheetTitle.split("'").join("''");
+  return sheetTitle ? `'${escapedTitle}'!${address}` : address;
+}
+
+export function parseGoogleSheetClipboard(text: string): string[][] {
+  const rows = text.replace(/\r\n?/g, "\n").split("\n");
+  if (rows[rows.length - 1] === "") rows.pop();
+  return rows.map((row) => row.split("\t"));
+}
+
+export type GoogleDocEditableParagraph = {
+  start: number;
+  end: number;
+  text: string;
+};
+
+export function googleDocEditableParagraph(value: unknown): GoogleDocEditableParagraph | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const item = value as Record<string, unknown>;
+  const paragraph = item.paragraph;
+  if (!paragraph || typeof paragraph !== "object" || Array.isArray(paragraph)) return null;
+  const elements = (paragraph as Record<string, unknown>).elements;
+  if (!Array.isArray(elements)) return null;
+  const runs = elements.map((element) => {
+    if (!element || typeof element !== "object" || Array.isArray(element)) return null;
+    const textRun = (element as Record<string, unknown>).textRun;
+    if (!textRun || typeof textRun !== "object" || Array.isArray(textRun)) return null;
+    const content = (textRun as Record<string, unknown>).content;
+    return typeof content === "string" ? content : null;
+  });
+  if (runs.some((run) => run === null)) return null;
+  const start = item.startIndex;
+  const end = item.endIndex;
+  if (typeof start !== "number" || typeof end !== "number" || start < 1 || end <= start) return null;
+  const text = (runs as string[]).join("").replace(/\n$/, "");
+  return { start, end: Math.max(start, end - 1), text };
+}

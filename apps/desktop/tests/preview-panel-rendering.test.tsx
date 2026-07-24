@@ -174,8 +174,11 @@ try {
   };
   const { DocumentPreview, FolderPreview, SheetPreview, SlidesPreview, browserLinkOpensNewTab, googleWorkspacePreviewNeedsLoad } = await server.ssrLoadModule("/src/components/GoogleWorkspacePreview.tsx") as {
     DocumentPreview: ComponentType<{
+      fileId: string;
+      canEdit: boolean;
       document: Record<string, unknown>;
       fallbackText: string;
+      onSaved: () => void;
     }>;
     FolderPreview: ComponentType<{
       children: GoogleFileSummary[];
@@ -190,11 +193,15 @@ try {
       setRange: (value: string) => void;
       loadRange: (value: string) => void;
       submitRange: () => void;
+      onSaved: () => void;
     }>;
     SlidesPreview: ComponentType<{
       fileId: string;
-      slides: Array<{ objectId?: string | null; text: string; notes?: string | null }>;
+      slides: Extract<GoogleFilePreview, { kind: "presentation" }>["slides"];
+      pageAspectRatio: number;
       active: boolean;
+      canEdit: boolean;
+      onSaved: () => void;
     }>;
     browserLinkOpensNewTab: (event: { button: number; ctrlKey: boolean; metaKey: boolean }) => boolean;
     googleWorkspacePreviewNeedsLoad: (active: boolean, loadedRequest: string | null, request: string) => boolean;
@@ -221,7 +228,7 @@ try {
       created_by_milim: false,
     },
     range: "'Venues'!B2:C3",
-    sheets: [{ properties: { title: "Venues" } }, { properties: { title: "Archive" } }],
+    sheets: [{ properties: { title: "Venues", sheetId: 7 } }, { properties: { title: "Archive", sheetId: 8 } }],
     values: [["Venue", "Status"], ["Noor", "Completed"]],
     formulas: [["Venue", "Status"], ["Noor", "=UPPER(\"completed\")"]],
   };
@@ -231,37 +238,58 @@ try {
     setRange: () => {},
     loadRange: () => {},
     submitRange: () => {},
+    onSaved: () => {},
   }));
   assert(sheetMarkup.includes('aria-current="page"'), "Sheets preview should mark the active worksheet");
   assert(sheetMarkup.includes('aria-label="Active cell">B2'), "Sheets preview should expose the active cell address");
   assert(sheetMarkup.includes('aria-label="Search this sheet range"'), "Sheets preview should expose range search");
   assert(sheetMarkup.includes('aria-label="Sheet zoom"'), "Sheets preview should expose zoom");
   assert(sheetMarkup.includes('aria-label="Resize column B"'), "Sheets preview should expose keyboard-accessible column resizing");
+  assert(sheetMarkup.includes("Double-click a cell to edit"), "Editable Sheets previews should expose inline cell editing");
+  assert(sheetMarkup.includes('aria-label="Row and column actions"'), "Editable Sheets previews should expose dimension actions");
   const documentMarkup = renderToStaticMarkup(createElement(DocumentPreview, {
+    fileId: "doc_123",
+    canEdit: true,
     document: {
       body: { content: [
-        { paragraph: {
+        { startIndex: 1, endIndex: 15, paragraph: {
           paragraphStyle: { namedStyleType: "TITLE", alignment: "CENTER" },
           elements: [{ textRun: { content: "Project brief", textStyle: { bold: true } } }],
         } },
-        { paragraph: {
+        { startIndex: 15, endIndex: 24, paragraph: {
           paragraphStyle: { namedStyleType: "HEADING_1" },
           elements: [{ textRun: { content: "Overview" } }],
         } },
       ] },
     },
     fallbackText: "Project brief Overview",
+    onSaved: () => {},
   }));
   assert(documentMarkup.includes('aria-label="Search document"'), "Docs preview should expose document search");
   assert(documentMarkup.includes('aria-label="Document zoom"'), "Docs preview should expose zoom");
   assert(documentMarkup.includes('aria-label="Show document outline"'), "Docs preview should expose a heading outline control");
   assert(documentMarkup.includes("text-align:center"), "Docs preview should preserve paragraph alignment");
+  assert(documentMarkup.includes("Double-click to edit this paragraph"), "Editable Docs previews should expose paragraph editing");
   const slidesMarkup = renderToStaticMarkup(createElement(SlidesPreview, {
     fileId: "slides_123",
     active: true,
+    canEdit: true,
+    pageAspectRatio: 16 / 9,
+    onSaved: () => {},
     slides: [
-      { objectId: "slide_1", text: "Opening", notes: "Welcome everyone" },
-      { objectId: "slide_2", text: "Details", notes: "" },
+      {
+        objectId: "slide_1",
+        text: "Opening",
+        notes: "Welcome everyone",
+        notesObjectId: "notes_1",
+        textElements: [{ objectId: "title_1", text: "Opening", x: 0.1, y: 0.1, width: 0.8, height: 0.2 }],
+      },
+      {
+        objectId: "slide_2",
+        text: "Details",
+        notes: "",
+        textElements: [{ objectId: "title_2", text: "Details", x: 0.1, y: 0.1, width: 0.8, height: 0.2 }],
+      },
     ],
   }));
   assert(slidesMarkup.includes('aria-label="Previous slide"'), "Slides preview should expose previous-slide navigation");
@@ -269,6 +297,7 @@ try {
   assert(slidesMarkup.includes('aria-label="Search slides"'), "Slides preview should expose presentation search");
   assert(slidesMarkup.includes('aria-label="Slide zoom"'), "Slides preview should expose zoom");
   assert(slidesMarkup.includes(">Notes<"), "Slides preview should expose available speaker notes");
+  assert(slidesMarkup.includes(">Edit text<"), "Editable Slides previews should expose shape-text editing");
   assert(slidesMarkup.includes('aria-current="page"'), "Slides preview should mark the active slide");
   const folderMarkup = renderToStaticMarkup(createElement(
     ContextMenuProvider,

@@ -4709,7 +4709,9 @@ button.quick-summary-row:disabled {
 }
 .google-sheet-toolbar button,
 .google-sheet-toolbar input,
-.google-sheet-toolbar select {
+.google-sheet-toolbar select,
+.google-sheet-formula-bar input,
+.google-sheet-formula-bar button {
   height: 24px;
   border: 1px solid var(--border-primary);
   border-radius: var(--input-radius);
@@ -4723,6 +4725,14 @@ button.quick-summary-row:disabled {
 .google-sheet-toolbar button.active {
   border-color: color-mix(in srgb, var(--accent) 65%, var(--border-primary));
   background: color-mix(in srgb, var(--accent) 14%, var(--bg-tertiary));
+}
+.google-sheet-edit-actions {
+  display: flex;
+  gap: 3px;
+}
+.google-sheet-edit-actions button {
+  padding-inline: 6px;
+  white-space: nowrap;
 }
 .google-sheet-search {
   position: relative;
@@ -4757,16 +4767,29 @@ button.quick-summary-row:disabled {
   font: 10px/1 var(--font-mono);
   text-align: center;
 }
-.google-sheet-formula-bar span {
+.google-sheet-formula-value {
   flex: 1;
   min-width: 0;
-  padding-left: 8px;
-  overflow: hidden;
+  padding: 0 8px;
   border-left: 1px solid var(--border-primary);
-  color: var(--primary-text);
   font: 10px/1.4 var(--font-mono);
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.google-sheet-formula-bar button {
+  padding-inline: 9px;
+}
+.google-sheet-formula-bar small {
+  color: var(--tertiary-text);
+  font-size: 9px;
+}
+.google-sheet-edit-error {
+  padding: 5px 9px;
+  border-bottom: 1px solid color-mix(in srgb, var(--error) 35%, var(--border-primary));
+  background: color-mix(in srgb, var(--error) 8%, transparent);
+  color: var(--error);
+  font-size: 10px;
 }
 .google-sheet-grid-wrap,
 .google-doc-preview,
@@ -4838,6 +4861,17 @@ button.quick-summary-row:disabled {
 }
 .google-sheet-grid td {
   cursor: cell;
+}
+.google-sheet-cell-editor {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: var(--bg-primary);
+  color: var(--primary-text);
+  font: inherit;
 }
 .google-sheet-grid td.match {
   background: color-mix(in srgb, #fbbc04 18%, transparent);
@@ -5021,6 +5055,45 @@ button.quick-summary-row:disabled {
   margin: 0 0 calc(8px * var(--doc-zoom));
   white-space: pre-wrap;
 }
+.google-doc-editable-block {
+  border-radius: 2px;
+  outline: 1px solid transparent;
+}
+.google-doc-editable-block:hover {
+  outline-color: color-mix(in srgb, #1a73e8 28%, transparent);
+}
+.google-doc-editable-block:focus-visible {
+  outline: 2px solid #1a73e8;
+}
+.google-doc-inline-editor {
+  position: relative;
+  display: block;
+  margin-bottom: calc(8px * var(--doc-zoom));
+}
+.google-doc-inline-editor textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: calc(3.2em * var(--doc-zoom));
+  padding: 3px;
+  resize: vertical;
+  border: 1px solid #1a73e8;
+  border-radius: 2px;
+  outline: 0;
+  background: #fff;
+  color: #202124;
+  font: inherit;
+  line-height: inherit;
+}
+.google-doc-inline-editor small {
+  position: absolute;
+  top: 3px;
+  right: 5px;
+  color: #5f6368;
+  font: 9px/1.2 Arial, sans-serif;
+}
+.google-doc-inline-editor small.error {
+  color: #d93025;
+}
 .google-doc-preview h1 {
   font-size: calc(26pt * var(--doc-zoom));
   line-height: 1.15;
@@ -5090,9 +5163,6 @@ button.quick-summary-row:disabled {
   display: grid;
   grid-template-columns: minmax(118px, 24%) minmax(0, 1fr);
   min-height: 0;
-}
-.google-slides-preview.notes-open {
-  grid-template-columns: minmax(118px, 24%) minmax(0, 1fr) minmax(130px, 24%);
 }
 .google-slide-rail {
   padding: 8px;
@@ -5173,13 +5243,69 @@ button.quick-summary-row:disabled {
   object-fit: contain;
 }
 .google-slide-stage {
+  align-content: center;
   background: radial-gradient(circle at center, color-mix(in srgb, var(--bg-tertiary) 88%, transparent), var(--bg-primary));
 }
-.google-slide-stage img {
+.google-slide-canvas {
+  position: relative;
+  width: min(100%, 960px);
+  flex: none;
+  overflow: hidden;
+  background: #fff;
   box-shadow: 0 10px 34px color-mix(in srgb, #000 42%, transparent);
 }
-.google-slide-stage img.fit {
+.google-slide-canvas img,
+.google-slide-canvas .google-slide-fallback {
   width: 100%;
+  height: 100%;
+}
+.google-slide-canvas img {
+  display: block;
+  object-fit: fill;
+}
+.google-slide-inline-editor {
+  position: absolute;
+  box-sizing: border-box;
+  min-width: 24px;
+  min-height: 18px;
+  padding: 2px 3px;
+  resize: none;
+  border: 1px solid #1a73e8;
+  outline: 0;
+  background: color-mix(in srgb, #fff 88%, transparent);
+  color: #202124;
+  font: clamp(8px, 1.2vw, 18px)/1.2 Arial, sans-serif;
+}
+.google-slide-inline-notes {
+  display: grid;
+  gap: 5px;
+  width: min(100%, 960px);
+  color: var(--tertiary-text);
+  font-size: 9px;
+  text-transform: uppercase;
+}
+.google-slide-inline-notes textarea {
+  min-height: 72px;
+  resize: vertical;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--input-radius);
+  background: var(--bg-secondary);
+  color: var(--primary-text);
+  font: 10px/1.45 var(--font-ui);
+  text-transform: none;
+}
+.google-slide-inline-notes p {
+  margin: 0;
+  color: var(--secondary-text);
+  font-size: 11px;
+  line-height: 1.55;
+  text-transform: none;
+  white-space: pre-wrap;
+}
+.google-autosave-status,
+.google-slide-layout-hint {
+  color: var(--tertiary-text);
+  font-size: 9px;
 }
 .google-slide-counter {
   min-width: 40px;
@@ -5198,23 +5324,6 @@ button.quick-summary-row:disabled {
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22);
   text-align: center;
 }
-.google-slide-notes {
-  padding: 12px;
-  overflow-y: auto;
-  border-left: 1px solid var(--border-primary);
-  background: var(--bg-secondary);
-}
-.google-slide-notes strong {
-  color: var(--tertiary-text);
-  font-size: 9px;
-  text-transform: uppercase;
-}
-.google-slide-notes p {
-  color: var(--secondary-text);
-  font-size: 11px;
-  line-height: 1.55;
-  white-space: pre-wrap;
-}
 @media (max-width: 740px) {
   .google-viewer-toolbar {
     flex-wrap: wrap;
@@ -5227,15 +5336,6 @@ button.quick-summary-row:disabled {
   }
   .google-doc-canvas {
     padding: 12px;
-  }
-  .google-slides-preview.notes-open {
-    grid-template-columns: minmax(105px, 28%) minmax(0, 1fr);
-  }
-  .google-slide-notes {
-    grid-column: 1 / -1;
-    max-height: 130px;
-    border-top: 1px solid var(--border-primary);
-    border-left: 0;
   }
 }
 .google-folder-preview {
