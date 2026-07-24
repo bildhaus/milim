@@ -141,6 +141,9 @@ pub struct AppState {
     pub skills: Option<Arc<SkillStore>>,
     /// Optional multi-provider registry exposed via `/providers`.
     pub providers: Option<Arc<crate::providers::ProviderRegistry>>,
+    /// Selected-file Google Workspace connection used by internal desktop APIs
+    /// and the Drive/Docs/Sheets/Slides agent tools.
+    pub google_workspace: Option<Arc<crate::google_workspace::GoogleWorkspaceConnection>>,
     /// Durable local media metadata and generated files.
     pub media_library: Option<Arc<MediaLibrary>>,
     /// Host working-folder root shared with the desktop's filesystem/shell
@@ -185,6 +188,7 @@ impl AppState {
             schedule_runs: Arc::new(ScheduleRunQueue::default()),
             skills: None,
             providers: None,
+            google_workspace: None,
             media_library: None,
             workspace: Arc::new(RwLock::new(None)),
             tool_approvals: Arc::new(milim_agents::ToolApprovalBroker::default()),
@@ -237,6 +241,15 @@ impl AppState {
     /// Attach a multi-provider registry for the `/providers` endpoints.
     pub fn with_providers(mut self, providers: Arc<crate::providers::ProviderRegistry>) -> Self {
         self.providers = Some(providers);
+        self
+    }
+
+    /// Attach the selected-file Google Workspace connector.
+    pub fn with_google_workspace(
+        mut self,
+        google_workspace: Arc<crate::google_workspace::GoogleWorkspaceConnection>,
+    ) -> Self {
+        self.google_workspace = Some(google_workspace);
         self
     }
 

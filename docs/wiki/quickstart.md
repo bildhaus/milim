@@ -15,7 +15,7 @@ Aim for one complete loop first: connect a model source, select a workspace fold
 
 | Step | What to check |
 |---|---|
-| Install or run | Use a release build for normal use. Use `pnpm -C apps/desktop tauri dev` only when working on the app. |
+| Install or run | Use a release build for normal use. Use `pnpm -C apps/desktop tauri:dev` only when working on the app. |
 | Choose a model | The model chip is the sole selector; Favorites and per-model reasoning effort keep frequent choices close. |
 | Add a model source | Configure a hosted provider, start Ollama or LM Studio, or set `MILIM_REMOTE_BASE_URL` for the CLI server path. |
 | Select a workspace | Pick the folder before asking for file reads, shell commands, Git actions, or artifact saves. |
@@ -30,7 +30,7 @@ Aim for one complete loop first: connect a model source, select a workspace fold
 ```powershell Run the desktop app
 corepack enable
 pnpm -C apps/desktop install
-pnpm -C apps/desktop tauri dev
+pnpm -C apps/desktop tauri:dev
 ```
 
 The desktop app embeds the server in-process. There is no separate `milim serve` process for normal desktop use.

@@ -1,4 +1,4 @@
-import { artifactDisposition, artifactPreviewAutoOpenKey, defaultArtifactTargetPath, extractArtifactsFromContent, extractArtifactsFromRunTrace, extractLivePreviewArtifactFromContent, extractLocalhostUrlFromRunTrace, hasPreviewPackageJson, isArtifactBrowserUrl, isFileArtifact, isLocalhostPreviewUrl, isPreviewableArtifact, markdownTableToCsv, normalizeArtifactBrowserUrl, previewRuntimeBrowserUrl, previewRuntimeFiles } from "../src/lib/artifacts.js";
+import { artifactDisposition, artifactPreviewAutoOpenKey, defaultArtifactTargetPath, extractArtifactsFromContent, extractArtifactsFromRunTrace, extractLivePreviewArtifactFromContent, extractLocalhostUrlFromRunTrace, hasPreviewPackageJson, isArtifactBrowserUrl, isFileArtifact, isLocalhostPreviewUrl, isPreviewableArtifact, markdownTableToCsv, normalizeArtifactBrowserUrl, previewRuntimeBrowserUrl, previewRuntimeFiles, resolveArtifactBrowserInput } from "../src/lib/artifacts.js";
 import { artifactOccurrenceKey, artifactRevisionChoiceByOccurrence, artifactRevisionGroups } from "../src/lib/artifactRevisions.js";
 import { buildArtifactPreviewDocument } from "../src/lib/artifactPreview.js";
 import { planModeInstructionMessages, threadArtifactInstructionMessages } from "../src/lib/chatInstructions.js";
@@ -307,6 +307,9 @@ equal(normalizeArtifactBrowserUrl("http://example.com"), null, "public http shou
 equal(normalizeArtifactBrowserUrl("file:///tmp/a.html"), null, "file URLs should be rejected");
 equal(normalizeArtifactBrowserUrl("javascript:alert(1)"), null, "javascript URLs should be rejected");
 equal(normalizeArtifactBrowserUrl(""), null, "blank URLs should be rejected");
+equal(resolveArtifactBrowserInput("example.com/path"), "https://example.com/path", "address-like input should remain a URL");
+equal(resolveArtifactBrowserInput("google sheets tips"), "https://www.google.com/search?q=google%20sheets%20tips", "plain words should become a Google search");
+equal(resolveArtifactBrowserInput("javascript:alert(1)"), null, "invalid schemes should not become searches");
 
 const multiFileArtifacts = extractArtifactsFromContent([
   "```html file=index.html",

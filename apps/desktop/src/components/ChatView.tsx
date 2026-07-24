@@ -153,6 +153,8 @@ import {
   type Project,
   type QueuedMessage,
   type Session,
+  type SessionBrowserSession,
+  type SessionBrowserTab,
   type SessionPreviewRuntime,
   type SessionSidebarState,
   type SessionVirtualFile,
@@ -897,18 +899,34 @@ function blankWorkspaceReviewSelection(): PreviewSelection {
 }
 
 function emptyBrowserSession(): InspectorBrowserSession {
-  return { url: null, input: "", history: [], historyIndex: -1 };
+  const tab = emptyBrowserTab();
+  return {
+    profileId: `session-${Math.random().toString(36).slice(2)}`,
+    tabs: [tab],
+    activeTabId: tab.id,
+  };
+}
+
+function emptyBrowserTab(url: string | null = null): InspectorBrowserTab {
+  return {
+    id: `tab-${Math.random().toString(36).slice(2)}`,
+    url,
+    input: url ?? "",
+    history: url ? [url] : [],
+    historyIndex: url ? 0 : -1,
+  };
 }
 
 function browserPreviewSelection(
   session: InspectorBrowserSession,
 ): PreviewSelection {
-  if (!session.url) return blankBrowserPreviewSelection();
+  const tab = session.tabs.find((item) => item.id === session.activeTabId) ?? session.tabs[0];
+  if (!tab?.url) return blankBrowserPreviewSelection();
   const artifact: ChatArtifact = {
     ...blankBrowserArtifact(),
-    title: session.url,
-    content: session.url,
-    size: session.url.length,
+    title: tab.url,
+    content: tab.url,
+    size: tab.url.length,
   };
   return { artifact, artifacts: [artifact], previewDeferred: false };
 }
@@ -2711,12 +2729,8 @@ type PreviewSelection = {
 
 type InspectorPreviewSource = "artifact" | "app" | "url";
 
-type InspectorBrowserSession = {
-  url: string | null;
-  input: string;
-  history: string[];
-  historyIndex: number;
-};
+type InspectorBrowserTab = SessionBrowserTab;
+type InspectorBrowserSession = SessionBrowserSession;
 
 type ActiveMediaTarget = {
   provider: ProviderInfo;
@@ -3195,8 +3209,6 @@ export function ChatView({
   const [previewPanelClosing, setPreviewPanelClosing] = useState(false);
   const [, setPreviewSource] =
     useState<InspectorPreviewSource>("url");
-  const [, setBrowserSession] =
-    useState<InspectorBrowserSession>(emptyBrowserSession);
   const [chatBodyWidth, setChatBodyWidth] = useState(() =>
     typeof window === "undefined" ? INSPECTOR_STACK_THRESHOLD : window.innerWidth,
   );
@@ -3369,6 +3381,7 @@ export function ChatView({
   );
   const setSessionInspectorOpen = useSessions((s) => s.setInspectorOpen);
   const setSessionInspectorTab = useSessions((s) => s.setInspectorTab);
+  const setSessionBrowserSession = useSessions((s) => s.setBrowserSession);
   const setSessionPreviewRuntime = useSessions((s) => s.setPreviewRuntime);
   const setPreviewRuntimeByKey = useSessions((s) => s.setPreviewRuntimeByKey);
   const updateThreadSettings = useSessions((s) => s.updateSettings);
@@ -3798,9 +3811,6 @@ export function ChatView({
   const previewSourcesByThreadRef = useRef(
     new Map<string, InspectorPreviewSource>(),
   );
-  const browserSessionsByThreadRef = useRef(
-    new Map<string, InspectorBrowserSession>(),
-  );
   const preparedPreviewFilesByThreadRef = useRef(
     new Map<string, PreviewAppFile[]>(),
   );
@@ -4140,7 +4150,12 @@ export function ChatView({
     return () => {
       cancelled = true;
     };
-  }, [activeId, sessionsHydrated]);
+  }, [
+    activeId,
+    activeSession?.browserSession,
+    sessionsHydrated,
+    setSessionBrowserSession,
+  ]);
 
   useEffect(() => {
     for (const record of activeWorkerRuns) startWorkerRunEvents(record);
@@ -4610,7 +4625,7 @@ export function ChatView({
         ? "app"
         : "url");
   const activeInspectorBrowserSession =
-    browserSessionsByThreadRef.current.get(activeId) ?? emptyBrowserSession();
+    activeSession?.browserSession ?? emptyBrowserSession();
 
   useEffect(() => {
     const restoreKey = `${activeId}:${sessionsHydrated ? "hydrated" : "initial"}`;
@@ -4626,9 +4641,9 @@ export function ChatView({
       artifactSelectionsByThreadRef.current.set(activeId, restoredArtifact);
     setPreviewSelection(restoredArtifact);
     const restoredBrowser =
-      browserSessionsByThreadRef.current.get(activeId) ?? emptyBrowserSession();
-    browserSessionsByThreadRef.current.set(activeId, restoredBrowser);
-    setBrowserSession(restoredBrowser);
+      activeSession?.browserSession ?? emptyBrowserSession();
+    if (!activeSession?.browserSession)
+      setSessionBrowserSession(activeId, restoredBrowser);
     const restoredSource =
       previewSourcesByThreadRef.current.get(activeId) ??
       (inspectorTab === "code" || restoredArtifact
@@ -4642,6 +4657,43 @@ export function ChatView({
       inspectorOpen ? null : (latestPreviewSelection?.autoOpenKey ?? null),
     );
   }, [activeId, sessionsHydrated]);
+
+  useEffect(() => {
+    const openUrl = (event: Event) => {
+      const url = (event as CustomEvent<{ url?: unknown }>).detail?.url;
+      if (typeof url !== "string") return;
+      let parsed: URL;
+      try {
+        parsed = new URL(url);
+      } catch {
+        return;
+      }
+      if (parsed.protocol !== "https:") return;
+      const current =
+        useSessions.getState().sessions.find((session) => session.id === activeId)
+          ?.browserSession ??
+        emptyBrowserSession();
+      const tab = emptyBrowserTab(parsed.toString());
+      const next = {
+        ...current,
+        tabs: [...current.tabs, tab],
+        activeTabId: tab.id,
+      };
+      setSessionBrowserSession(activeId, next);
+      previewSourcesByThreadRef.current.set(activeId, "url");
+      setPreviewSource("url");
+      setPreviewPanelClosing(false);
+      setSessionInspectorTab(activeId, "preview");
+      setSessionInspectorOpen(activeId, true);
+    };
+    window.addEventListener("milim-open-browser-url", openUrl);
+    return () => window.removeEventListener("milim-open-browser-url", openUrl);
+  }, [
+    activeId,
+    setSessionBrowserSession,
+    setSessionInspectorOpen,
+    setSessionInspectorTab,
+  ]);
 
   useEffect(() => {
     if (
@@ -4932,14 +4984,13 @@ export function ChatView({
     const target = selection.artifact;
     if (target.mime === "text/uri-list") {
       const url = target.content.trim() || null;
+      const tab = emptyBrowserTab(url);
       const nextBrowser: InspectorBrowserSession = {
-        url,
-        input: url ?? "",
-        history: url ? [url] : [],
-        historyIndex: url ? 0 : -1,
+        profileId: `session-${Math.random().toString(36).slice(2)}`,
+        tabs: [tab],
+        activeTabId: tab.id,
       };
-      browserSessionsByThreadRef.current.set(activeId, nextBrowser);
-      setBrowserSession(nextBrowser);
+      setSessionBrowserSession(activeId, nextBrowser);
       selectPreviewSource("url");
     } else {
       artifactSelectionsByThreadRef.current.set(activeId, selection);
@@ -5017,8 +5068,7 @@ export function ChatView({
   }
 
   function updateBrowserSession(session: InspectorBrowserSession) {
-    browserSessionsByThreadRef.current.set(activeId, session);
-    setBrowserSession(session);
+    setSessionBrowserSession(activeId, session);
   }
 
   function managedPreviewFiles(
@@ -7924,6 +7974,9 @@ export function ChatView({
       onEvent(event);
       if (event.type === "tool_result" && event.name === "mcp_server_save") {
         void listTools().then(setComposerTools).catch(() => {});
+      }
+      if (event.type === "tool_result" && event.name?.startsWith("google_")) {
+        window.dispatchEvent(new Event("milim-google-workspace-refresh"));
       }
     };
     const prepareOutbound = (

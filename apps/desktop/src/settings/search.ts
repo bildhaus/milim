@@ -28,6 +28,8 @@ export const SETTINGS_SEARCH_ENTRIES: SettingSearchEntry[] = [
   { id: "history-retention", label: "Archive retention", section: "history", aliases: ["delete", "purge", "7 days", "14 days", "30 days"] },
   { id: "history-projects", label: "Archived projects", section: "history", aliases: ["restore", "delete"] },
   { id: "history-chats", label: "Archived chats", section: "history", aliases: ["threads", "restore", "delete"] },
+  { id: "google-workspace", label: "Google Workspace", section: "history", aliases: ["drive", "docs", "sheets", "slides", "picker", "oauth", "selected files"] },
+  { id: "browser-data", label: "Browser data", section: "history", aliases: ["cookies", "sign in", "credentials", "private", "persistent", "clear"] },
   { id: "data-export", label: "Thread export defaults", section: "history", aliases: ["json", "markdown"] },
   { id: "data-backup", label: "Backup and restore", section: "history", aliases: ["export backup", "restore backup", "recovery snapshot"] },
   { id: "app-startup", label: "Startup behavior", section: "app", aliases: ["restore last chat", "new chat", "open panels"] },

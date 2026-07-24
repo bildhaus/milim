@@ -10,6 +10,7 @@ import {
 } from "../api.js";
 import { userStateStorage } from "../persistence/userStateStorage.js";
 import { reasoningEffortByModelWithSelection } from "../lib/reasoningEffort.js";
+import type { PreviewBrowserStorageMode } from "../lib/previewWebview.js";
 
 export interface MediaSettings {
   providerId: string;
@@ -31,6 +32,7 @@ export const DEFAULT_MEDIA_SETTINGS: MediaSettings = {
 
 export type NewThreadBehavior = "inherit" | "configured";
 export type UnavailableModelPolicy = "ask" | "favorite" | "blocked";
+export type BrowserStorageMode = PreviewBrowserStorageMode;
 
 export interface ConfiguredThreadDefaults {
   model: string;
@@ -68,6 +70,8 @@ interface SettingsState {
   newThreadBehavior: NewThreadBehavior;
   configuredThreadDefaults: ConfiguredThreadDefaults;
   unavailableModelPolicy: UnavailableModelPolicy;
+  browserStorageMode: BrowserStorageMode;
+  browserSetupSeen: boolean;
   toggleFavorite: (id: string) => void;
   setFavoritesOnly: (v: boolean) => void;
   setModelGroupCollapsed: (group: string, collapsed: boolean) => void;
@@ -77,6 +81,8 @@ interface SettingsState {
   setNewThreadBehavior: (behavior: NewThreadBehavior) => void;
   setConfiguredThreadDefaults: (settings: Partial<ConfiguredThreadDefaults>) => void;
   setUnavailableModelPolicy: (policy: UnavailableModelPolicy) => void;
+  setBrowserStorageMode: (mode: BrowserStorageMode) => void;
+  setBrowserSetupSeen: (seen: boolean) => void;
 }
 
 function normalizeStringArray(value: unknown): string[] {
@@ -196,6 +202,8 @@ export const useSettings = create<SettingsState>()(
       newThreadBehavior: "inherit",
       configuredThreadDefaults: DEFAULT_CONFIGURED_THREAD_DEFAULTS,
       unavailableModelPolicy: "ask",
+      browserStorageMode: "persistent",
+      browserSetupSeen: false,
       toggleFavorite: (id) =>
         set((s) => ({
           favorites: s.favorites.includes(id)
@@ -234,6 +242,10 @@ export const useSettings = create<SettingsState>()(
       setUnavailableModelPolicy: (unavailableModelPolicy) => set({
         unavailableModelPolicy: unavailableModelPolicy === "favorite" || unavailableModelPolicy === "blocked" ? unavailableModelPolicy : "ask",
       }),
+      setBrowserStorageMode: (browserStorageMode) => set({
+        browserStorageMode: browserStorageMode === "private" ? "private" : "persistent",
+      }),
+      setBrowserSetupSeen: (browserSetupSeen) => set({ browserSetupSeen: Boolean(browserSetupSeen) }),
     }),
     {
       name: "milim.settings",
@@ -252,6 +264,8 @@ export const useSettings = create<SettingsState>()(
           newThreadBehavior: saved?.newThreadBehavior === "configured" ? "configured" : "inherit",
           configuredThreadDefaults: normalizeConfiguredThreadDefaults(saved?.configuredThreadDefaults),
           unavailableModelPolicy: saved?.unavailableModelPolicy === "favorite" || saved?.unavailableModelPolicy === "blocked" ? saved.unavailableModelPolicy : "ask",
+          browserStorageMode: saved?.browserStorageMode === "private" ? "private" : "persistent",
+          browserSetupSeen: Boolean(saved?.browserSetupSeen),
         };
       },
       partialize: (s) => ({
@@ -264,6 +278,8 @@ export const useSettings = create<SettingsState>()(
         newThreadBehavior: s.newThreadBehavior,
         configuredThreadDefaults: normalizeConfiguredThreadDefaults(s.configuredThreadDefaults),
         unavailableModelPolicy: s.unavailableModelPolicy,
+        browserStorageMode: s.browserStorageMode,
+        browserSetupSeen: s.browserSetupSeen,
       }),
     },
   ),

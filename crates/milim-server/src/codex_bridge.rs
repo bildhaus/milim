@@ -1568,7 +1568,7 @@ fn codex_approval_policy(req: &CodexRunRequest) -> &'static str {
         || !codex_tools_allowed(req)
         || account_runtime_policy(req.tool_approval_policy.as_deref()) == "guarded"
     {
-        "onRequest"
+        "on-request"
     } else {
         // Matches Milim's Open mode: no per-tool prompt after the user selected Open or approved a Review run.
         "never"
@@ -2598,7 +2598,7 @@ mod tests {
             interactive_tool_approval: false,
             plan_mode: false,
         };
-        assert_eq!(codex_approval_policy(&req), "onRequest");
+        assert_eq!(codex_approval_policy(&req), "on-request");
         assert_eq!(codex_sandbox_mode(&req, req.cwd.as_deref()), "read-only");
         assert_eq!(
             codex_sandbox_policy(&req, req.cwd.as_deref())["type"],
@@ -2606,7 +2606,7 @@ mod tests {
         );
 
         req.tool_approval_policy = Some("review".into());
-        assert_eq!(codex_approval_policy(&req), "onRequest");
+        assert_eq!(codex_approval_policy(&req), "on-request");
         assert_eq!(codex_sandbox_mode(&req, req.cwd.as_deref()), "read-only");
         assert_eq!(
             codex_sandbox_policy(&req, req.cwd.as_deref())["type"],
@@ -2614,7 +2614,7 @@ mod tests {
         );
 
         req.interactive_tool_approval = true;
-        assert_eq!(codex_approval_policy(&req), "onRequest");
+        assert_eq!(codex_approval_policy(&req), "on-request");
         assert_eq!(
             codex_sandbox_mode(&req, req.cwd.as_deref()),
             "workspace-write"

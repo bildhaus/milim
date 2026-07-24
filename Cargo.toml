@@ -50,6 +50,7 @@ thiserror = "2"
 anyhow = "1"
 uuid = { version = "1", features = ["v4"] }
 time = { version = "0.3", features = ["formatting"] }
+sha2 = "0.10"
 
 # internal crates
 milim-core = { path = "crates/milim-core" }

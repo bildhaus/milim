@@ -935,6 +935,161 @@ async function parseJsonResponse<T>(
   return (await resp.json()) as T;
 }
 
+export interface GoogleFileCapabilities {
+  can_edit: boolean;
+  can_download: boolean;
+  can_move: boolean;
+  can_rename: boolean;
+  can_share: boolean;
+  can_trash: boolean;
+}
+
+export interface GoogleFileSummary {
+  id: string;
+  name: string;
+  mime_type: string;
+  web_view_link?: string | null;
+  icon_link?: string | null;
+  modified_time?: string | null;
+  size?: number | null;
+  trashed: boolean;
+  parents: string[];
+  drive_id?: string | null;
+  capabilities: GoogleFileCapabilities;
+  created_by_milim: boolean;
+}
+
+export interface GoogleWorkspaceStatus {
+  available: boolean;
+  connected: boolean;
+  managed_folder_id?: string | null;
+  files: GoogleFileSummary[];
+  unavailable_reason?: string | null;
+  error?: string | null;
+}
+
+export interface GooglePickerFlow {
+  id: string;
+  status: "pending" | "complete" | "error" | string;
+  url?: string | null;
+  error?: string | null;
+  files: GoogleFileSummary[];
+}
+
+export type GoogleFilePreview =
+  | { kind: "sheet"; file: GoogleFileSummary; range: string; sheets: unknown[]; values: unknown[][]; formulas: unknown[][] }
+  | { kind: "document"; file: GoogleFileSummary; document: Record<string, unknown>; text: string }
+  | { kind: "presentation"; file: GoogleFileSummary; title?: string | null; slides: Array<{ objectId?: string | null; text: string; notes?: string | null }> }
+  | { kind: "folder"; file: GoogleFileSummary; children: GoogleFileSummary[] }
+  | { kind: "text"; file: GoogleFileSummary; text: string; truncated: boolean }
+  | { kind: "image" | "pdf" | "audio" | "video" | "unsupported"; file: GoogleFileSummary };
+
+export async function getGoogleWorkspaceStatus(): Promise<GoogleWorkspaceStatus> {
+  return await parseJsonResponse<GoogleWorkspaceStatus>(
+    await authFetch(`${BASE}/google-workspace/status`),
+    "Google Workspace status failed",
+  );
+}
+
+export async function startGoogleWorkspacePicker(
+  fileIds: string[] = [],
+): Promise<GooglePickerFlow> {
+  return await parseJsonResponse<GooglePickerFlow>(
+    await authFetch(`${BASE}/google-workspace/picker`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file_ids: fileIds }),
+    }),
+    "Google Picker failed to start",
+  );
+}
+
+export async function getGoogleWorkspacePicker(
+  id: string,
+): Promise<GooglePickerFlow> {
+  return await parseJsonResponse<GooglePickerFlow>(
+    await authFetch(`${BASE}/google-workspace/picker/${encodeURIComponent(id)}`),
+    "Google Picker status failed",
+  );
+}
+
+export async function chooseGoogleWorkspaceFiles(
+  fileIds: string[] = [],
+  signal?: AbortSignal,
+): Promise<GooglePickerFlow> {
+  const started = await startGoogleWorkspacePicker(fileIds);
+  if (!started.url) throw new Error("Google Picker returned no browser URL");
+  await openExternalUrl(started.url);
+  const deadline = Date.now() + 5 * 60_000;
+  while (Date.now() < deadline) {
+    if (signal?.aborted) throw new DOMException("Google Picker cancelled", "AbortError");
+    await new Promise<void>((resolve, reject) => {
+      const finish = () => {
+        signal?.removeEventListener("abort", cancel);
+        resolve();
+      };
+      const cancel = () => {
+        window.clearTimeout(timer);
+        reject(new DOMException("Google Picker cancelled", "AbortError"));
+      };
+      const timer = window.setTimeout(finish, 800);
+      signal?.addEventListener("abort", cancel, { once: true });
+    });
+    const flow = await getGoogleWorkspacePicker(started.id);
+    if (flow.status === "complete") return flow;
+    if (flow.status === "error") {
+      throw new Error(flow.error || "Google Picker failed");
+    }
+  }
+  throw new Error("Google Picker timed out");
+}
+
+export async function removeGoogleWorkspaceFile(id: string): Promise<void> {
+  const response = await authFetch(
+    `${BASE}/google-workspace/files/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response, "Removing Google file failed"));
+  }
+}
+
+export async function disconnectGoogleWorkspace(): Promise<void> {
+  const response = await authFetch(`${BASE}/google-workspace/disconnect`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response, "Disconnecting Google failed"));
+  }
+}
+
+export async function getGoogleFilePreview(
+  id: string,
+  range?: string,
+): Promise<GoogleFilePreview> {
+  const query = range?.trim() ? `?range=${encodeURIComponent(range.trim())}` : "";
+  return await parseJsonResponse<GoogleFilePreview>(
+    await authFetch(
+      `${BASE}/google-workspace/preview/${encodeURIComponent(id)}${query}`,
+    ),
+    "Google file preview failed",
+  );
+}
+
+export async function getGoogleFileContent(
+  id: string,
+  slideId?: string,
+): Promise<Blob> {
+  const query = slideId ? `?slide_id=${encodeURIComponent(slideId)}` : "";
+  const response = await authFetch(
+    `${BASE}/google-workspace/content/${encodeURIComponent(id)}${query}`,
+  );
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response, "Google file content failed"));
+  }
+  return await response.blob();
+}
+
 export type PreviewAppState =
   | "idle"
   | "staged"
@@ -3792,11 +3947,13 @@ async function responseErrorMessage(
   resp: Response,
   fallback: string,
 ): Promise<string> {
+  const text = await resp.text().catch(() => "");
+  if (!text.trim()) return fallback;
   try {
-    const json = await resp.json();
+    const json = JSON.parse(text);
     return String(json.error?.message ?? json.error ?? fallback);
   } catch {
-    return fallback;
+    return text.trim();
   }
 }
 

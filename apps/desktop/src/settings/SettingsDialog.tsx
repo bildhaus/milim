@@ -7,10 +7,18 @@ import {
   restoreMilimBackup,
   restartDesktopApp,
   openDiagnosticsFolder,
+  chooseGoogleWorkspaceFiles,
+  disconnectGoogleWorkspace,
+  getGoogleWorkspaceStatus,
+  openExternalUrl,
+  removeGoogleWorkspaceFile,
+  type GoogleWorkspaceStatus,
   type ModelInfo,
   type WorkspaceLauncher,
 } from "../api";
 import { flushDeferredUserStateWrites } from "../persistence/userStateStorage";
+import { clearPreviewWebviewData } from "../lib/previewWebview";
+import { googleWorkspaceFileUrl } from "../lib/googleWorkspace";
 import { useAgents } from "../agents/store";
 import { useSettings, type ConfiguredThreadDefaults } from "./store";
 import { BUILTIN_QUICK_ACTIONS } from "../lib/emptyStarterSuggestions";
@@ -66,7 +74,7 @@ import {
   type PinnedQuickAction,
 } from "../ui/store";
 import { playInterfaceSound } from "../ui/sounds";
-import { Archive, Check, Code, Download, FolderOpen, Gear, GitLogo, Pencil, PlusSquare, Refresh, Search, Sidebar, Smartphone, Sun, Trash, X } from "../components/icons";
+import { Archive, Check, Code, Download, ExternalLink, FileText, FolderOpen, Gear, GitLogo, Pencil, PlusSquare, Refresh, Search, Sidebar, Smartphone, Sun, Trash, X } from "../components/icons";
 import { MobileCompanionSettings } from "../components/MobileCompanionSettings";
 import { SheetDialog } from "../components/SheetDialog";
 import { ThemeEditor } from "../components/ThemeEditor";
@@ -81,6 +89,8 @@ type SettingsSection = {
 type SettingsBadge = { label: string; tone: "neutral" | "warn" };
 type SettingsSectionActivation = { focusTab?: boolean; remember?: boolean };
 type ShortcutRecordingTarget = AppShortcutAction;
+
+const googleLogo = new URL("../assets/google.svg", import.meta.url).href;
 
 const SOUND_LABELS: Record<AttentionSound | FinishedSound, string> = {
   ready: "Ready",
@@ -180,6 +190,14 @@ function archiveDeleteLabel(archivedAt: number | undefined, retentionDays: Archi
 
 function folderLabel(folder: string): string {
   return folder.split(/[\\/]/).filter(Boolean).pop() || folder || "Project";
+}
+
+function googleFileTypeLabel(mimeType: string): string {
+  if (mimeType.endsWith(".spreadsheet")) return "Sheet";
+  if (mimeType.endsWith(".document")) return "Doc";
+  if (mimeType.endsWith(".presentation")) return "Slides";
+  if (mimeType.endsWith(".folder")) return "Folder";
+  return mimeType.split("/").pop() || "Drive file";
 }
 
 function updateStatusLabel(status: UpdateStatus): string {
@@ -323,10 +341,12 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const newThreadBehavior = useSettings((s) => s.newThreadBehavior);
   const configuredThreadDefaults = useSettings((s) => s.configuredThreadDefaults);
   const unavailableModelPolicy = useSettings((s) => s.unavailableModelPolicy);
+  const browserStorageMode = useSettings((s) => s.browserStorageMode);
   const accountRuntimeEnabled = useSettings((s) => s.accountRuntimeEnabled);
   const setNewThreadBehavior = useSettings((s) => s.setNewThreadBehavior);
   const setConfiguredThreadDefaults = useSettings((s) => s.setConfiguredThreadDefaults);
   const setUnavailableModelPolicy = useSettings((s) => s.setUnavailableModelPolicy);
+  const setBrowserStorageMode = useSettings((s) => s.setBrowserStorageMode);
   const sessions = useSessions((s) => s.sessions);
   const projects = useSessions((s) => s.projects);
   const archiveRetentionDays = useSessions((s) => s.archiveRetentionDays);
@@ -350,6 +370,13 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const [notificationError, setNotificationError] = useState<string | null>(null);
   const [backupStatus, setBackupStatus] = useState<string | null>(null);
   const [backupBusy, setBackupBusy] = useState(false);
+  const [browserDataStatus, setBrowserDataStatus] = useState<string | null>(null);
+  const [browserDataBusy, setBrowserDataBusy] = useState(false);
+  const [confirmBrowserDataClear, setConfirmBrowserDataClear] = useState(false);
+  const [googleWorkspace, setGoogleWorkspace] = useState<GoogleWorkspaceStatus | null>(null);
+  const [googleWorkspaceBusy, setGoogleWorkspaceBusy] = useState(false);
+  const [googleWorkspaceMessage, setGoogleWorkspaceMessage] = useState<string | null>(null);
+  const [confirmGoogleDisconnect, setConfirmGoogleDisconnect] = useState(false);
   const [selectedBuiltinAction, setSelectedBuiltinAction] = useState(BUILTIN_QUICK_ACTIONS[0]?.id ?? "");
   const [editProjectQuickActions, setEditProjectQuickActions] = useState(false);
   const [recordingShortcut, setRecordingShortcut] = useState<ShortcutRecordingTarget | null>(null);
@@ -401,6 +428,10 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     void refreshAgents().catch(() => {});
   }, [refreshAgents]);
+
+  useEffect(() => {
+    void refreshGoogleWorkspace();
+  }, []);
 
   useEffect(() => {
     if (!activeFolder.trim()) {
@@ -572,6 +603,99 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     } finally {
       setBackupBusy(false);
     }
+  }
+
+  async function clearBrowserDataFromSettings() {
+    if (!confirmBrowserDataClear) {
+      setConfirmBrowserDataClear(true);
+      setBrowserDataStatus(null);
+      return;
+    }
+    setBrowserDataBusy(true);
+    setBrowserDataStatus(null);
+    try {
+      await flushDeferredUserStateWrites();
+      await clearPreviewWebviewData();
+      setBrowserDataStatus("Browser sign-ins and site data cleared.");
+    } catch (error) {
+      setBrowserDataStatus(`Clear failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setBrowserDataBusy(false);
+      setConfirmBrowserDataClear(false);
+    }
+  }
+
+  async function refreshGoogleWorkspace() {
+    try {
+      setGoogleWorkspace(await getGoogleWorkspaceStatus());
+    } catch (error) {
+      setGoogleWorkspace(null);
+      setGoogleWorkspaceMessage(
+        `Google Workspace status failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  async function chooseGoogleFilesFromSettings() {
+    setGoogleWorkspaceBusy(true);
+    setGoogleWorkspaceMessage("Finish choosing files in your browser.");
+    try {
+      const flow = await chooseGoogleWorkspaceFiles();
+      setGoogleWorkspaceMessage(
+        flow.files.length
+          ? `Added ${flow.files.length} Google ${flow.files.length === 1 ? "file" : "files"}.`
+          : "No files were added.",
+      );
+      await refreshGoogleWorkspace();
+    } catch (error) {
+      setGoogleWorkspaceMessage(
+        `Google connection failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      setGoogleWorkspaceBusy(false);
+    }
+  }
+
+  async function removeGoogleFileFromSettings(id: string) {
+    setGoogleWorkspaceBusy(true);
+    try {
+      await removeGoogleWorkspaceFile(id);
+      setGoogleWorkspaceMessage("Removed Milim access. The Drive file was not deleted.");
+      await refreshGoogleWorkspace();
+    } catch (error) {
+      setGoogleWorkspaceMessage(
+        `Remove failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      setGoogleWorkspaceBusy(false);
+    }
+  }
+
+  async function disconnectGoogleFromSettings() {
+    if (!confirmGoogleDisconnect) {
+      setConfirmGoogleDisconnect(true);
+      return;
+    }
+    setGoogleWorkspaceBusy(true);
+    try {
+      await disconnectGoogleWorkspace();
+      setGoogleWorkspaceMessage("Google Workspace disconnected and local authorization removed.");
+      setConfirmGoogleDisconnect(false);
+      await refreshGoogleWorkspace();
+    } catch (error) {
+      setGoogleWorkspaceMessage(
+        `Disconnect failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      setGoogleWorkspaceBusy(false);
+    }
+  }
+
+  function openGoogleFileInMilim(url: string) {
+    window.dispatchEvent(
+      new CustomEvent("milim-open-browser-url", { detail: { url } }),
+    );
+    onClose();
   }
 
   function setArchiveRetentionFromSettings(value: "7" | "14" | "30") {
@@ -1178,6 +1302,142 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             {activeSection === "history" && (
         <section className="settings-section" id="settings-panel-history" role="tabpanel" aria-labelledby="settings-tab-history" tabIndex={-1}>
           <SettingsPanel>
+            <SettingsBlock title="Google Workspace" data-setting-id="google-workspace" className={settingHighlightClass("google-workspace").trim()}>
+              <div className="setting-stack">
+                <div className="google-workspace-connect-card">
+                  <div className="google-workspace-connect-copy">
+                    <span className="google-workspace-logo" aria-hidden="true">
+                      <img src={googleLogo} alt="" />
+                    </span>
+                    <div>
+                      <strong>{googleWorkspace?.connected ? "Google Workspace connected" : "Connect Google Workspace"}</strong>
+                      <span>Choose one or many Sheets, Docs, Slides, and Drive files for Milim.</span>
+                    </div>
+                  </div>
+                  <button
+                    className="btn-accent google-workspace-connect-button"
+                    type="button"
+                    disabled={googleWorkspaceBusy || !googleWorkspace?.available}
+                    onClick={() => void chooseGoogleFilesFromSettings()}
+                  >
+                    {googleWorkspaceBusy
+                      ? "Waiting..."
+                      : !googleWorkspace
+                        ? "Loading..."
+                        : !googleWorkspace.available
+                          ? "Unavailable"
+                          : googleWorkspace.connected
+                            ? "Choose more files"
+                            : "Connect Google Workspace"}
+                  </button>
+                </div>
+                {!googleWorkspace ? (
+                  <p className="sheet-hint">{googleWorkspaceMessage || "Loading Google Workspace status..."}</p>
+                ) : !googleWorkspace.available ? (
+                  <p className="sheet-hint">
+                    {googleWorkspace.unavailable_reason || "Google Workspace is unavailable in this build."}
+                  </p>
+                ) : (
+                  <>
+                    {googleWorkspace.files.length ? (
+                      <div className="google-workspace-file-list">
+                        {googleWorkspace.files.map((file) => {
+                          const url = googleWorkspaceFileUrl(file);
+                          return (
+                            <div className="google-workspace-file-row" key={file.id}>
+                              {file.icon_link ? (
+                                <img className="google-file-icon" src={file.icon_link} alt="" />
+                              ) : file.mime_type.endsWith(".folder") ? (
+                                <FolderOpen size={15} aria-hidden="true" />
+                              ) : (
+                                <FileText size={15} aria-hidden="true" />
+                              )}
+                              <div className="google-workspace-file-copy">
+                                <strong>{file.name}</strong>
+                                <span>
+                                  {googleFileTypeLabel(file.mime_type)}
+                                  {googleWorkspace.managed_folder_id === file.id ? " · Managed folder" : ""}
+                                  {file.trashed ? " · In trash" : ""}
+                                </span>
+                              </div>
+                              <div className="google-workspace-file-actions">
+                                <button className="btn-ghost" type="button" onClick={() => openGoogleFileInMilim(url)}>
+                                  Open in Milim
+                                </button>
+                                <button className="btn-ghost" type="button" onClick={() => void openExternalUrl(url)}>
+                                  <ExternalLink size={12} />
+                                  Open in Google
+                                </button>
+                                <button
+                                  className="btn-ghost danger"
+                                  type="button"
+                                  disabled={googleWorkspaceBusy}
+                                  onClick={() => void removeGoogleFileFromSettings(file.id)}
+                                >
+                                  Remove
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <p className="sheet-hint">No Google files are authorized yet.</p>
+                    )}
+                    {googleWorkspace.connected ? (
+                      <div className="settings-action-row">
+                        <div>
+                          <strong>Disconnect Google Workspace</strong>
+                          <span>Revoke Milim's token and remove the local selected-file registry. Drive files are never deleted.</span>
+                        </div>
+                        <button
+                          className={"btn-ghost danger" + (confirmGoogleDisconnect ? " confirm" : "")}
+                          type="button"
+                          disabled={googleWorkspaceBusy}
+                          onClick={() => void disconnectGoogleFromSettings()}
+                        >
+                          {confirmGoogleDisconnect ? "Confirm?" : "Disconnect"}
+                        </button>
+                      </div>
+                    ) : null}
+                    {googleWorkspace.error ? <p className="sheet-hint error" role="alert">{googleWorkspace.error}</p> : null}
+                  </>
+                )}
+                <p className="sheet-hint">Read access follows Guarded mode. Changes follow the chat's Review or Open approval mode. Tokens and the selected-file registry are encrypted locally and excluded from backups.</p>
+                {googleWorkspaceMessage ? <p className={googleWorkspaceMessage.includes("failed") ? "sheet-hint error" : "sheet-hint"} role="status">{googleWorkspaceMessage}</p> : null}
+              </div>
+            </SettingsBlock>
+            <SettingsBlock title="Browser data" data-setting-id="browser-data" className={settingHighlightClass("browser-data").trim()}>
+              <div className="setting-stack">
+                <SettingsChoiceGroup
+                  value={browserStorageMode}
+                  onChange={setBrowserStorageMode}
+                  testIdPrefix="browser-storage"
+                  ariaLabel="Browser storage"
+                  options={[
+                    { value: "persistent", label: "Remember sign-ins", detail: "Share one local Milim browser profile across chats and restarts." },
+                    { value: "private", label: "Private", detail: "Discard cookies and site storage when the sidepanel browser closes." },
+                  ]}
+                />
+                <p className="sheet-hint">Milim does not read or import Chrome, Safari, Firefox, or Edge passwords and cookies. Sign in once inside the Milim browser instead. Generated App previews always remain private.</p>
+                <div className="settings-action-row">
+                  <div>
+                    <strong>Clear sign-ins and site data</strong>
+                    <span>Remove cookies, local storage, cache, and other data from the persistent Milim browser profile.</span>
+                  </div>
+                  <button
+                    className={"btn-ghost danger" + (confirmBrowserDataClear ? " confirm" : "")}
+                    type="button"
+                    disabled={browserDataBusy}
+                    onClick={() => void clearBrowserDataFromSettings()}
+                    data-testid="browser-data-clear"
+                  >
+                    {browserDataBusy ? "Clearing..." : confirmBrowserDataClear ? "Confirm?" : "Clear"}
+                  </button>
+                </div>
+                {browserDataStatus ? <p className={browserDataStatus.startsWith("Clear failed") ? "sheet-hint error" : "sheet-hint"} role="status">{browserDataStatus}</p> : null}
+              </div>
+            </SettingsBlock>
             <SettingsBlock title="Export" data-setting-id="data-export" className={settingHighlightClass("data-export").trim()}>
               <div className="setting-field">
                 <span className="setting-mini-title">Default single-thread format</span>
@@ -1191,7 +1451,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
               <div className="setting-stack">
                 <div className="settings-action-row"><div><strong>Export Milim backup</strong><span>Chats, projects, drafts, archive state, settings, themes, quick actions, and local personalization metadata.</span></div><button className="btn-ghost" type="button" disabled={backupBusy} onClick={() => void exportBackupFromSettings()}>Export</button></div>
                 <div className="settings-action-row"><div><strong>Restore backup</strong><span>Validate, snapshot current data, then replace backed-up state in one transaction.</span></div><button className="btn-ghost" type="button" disabled={backupBusy} onClick={() => void restoreBackupFromSettings()}>Restore</button></div>
-                <p className="sheet-hint">Credentials, MCP secrets, paired-device tokens, memory databases, generated media, update packages, worktrees, and running jobs are excluded.</p>
+                <p className="sheet-hint">Credentials, browser profile data, MCP secrets, paired-device tokens, memory databases, generated media, update packages, worktrees, and running jobs are excluded.</p>
                 {backupStatus ? <p className={backupStatus.includes("failed") ? "sheet-hint error" : "sheet-hint"} role="status">{backupStatus}</p> : null}
               </div>
             </SettingsBlock>

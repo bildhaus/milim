@@ -1,7 +1,7 @@
 import { createElement, type ComponentType, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
-import type { ChatArtifact, PreviewAppPreflight, PreviewAppStatus, PreviewSurfaceTarget } from "../src/api.js";
+import type { ChatArtifact, GoogleFilePreview, GoogleFileSummary, PreviewAppPreflight, PreviewAppStatus, PreviewSurfaceTarget } from "../src/api.js";
 import type { ArtifactRevision } from "../src/lib/artifactRevisions.js";
 import type { PreviewControlActivity } from "../src/lib/previewActivity.js";
 import type { PreviewBrowserSession, PreviewSource, PreviewTab } from "../src/components/PreviewPanel.js";
@@ -56,6 +56,20 @@ const blankUrlArtifact: ChatArtifact = {
   content: "",
   size: 0,
   language: "url",
+};
+
+const googleSheetArtifact: ChatArtifact = {
+  ...urlArtifact,
+  id: "google-sheet-preview",
+  title: "Google Sheet",
+  content: "https://docs.google.com/spreadsheets/d/sheet_123/edit",
+};
+
+const googleFolderArtifact: ChatArtifact = {
+  ...urlArtifact,
+  id: "google-folder-preview",
+  title: "Google Drive folder",
+  content: "https://drive.google.com/drive/folders/folder_123",
 };
 
 const htmlArtifact: ChatArtifact = {
@@ -140,7 +154,7 @@ const server = await createServer({
 });
 
 try {
-  const { PreviewPanel, buildFixPrompt, nativePreviewBlockedByAppUi, previewSurfaceIsInspectable, nextPreviewTab } = await server.ssrLoadModule("/src/components/PreviewPanel.tsx") as {
+  const { PreviewPanel, buildFixPrompt, nativePreviewBlockedByAppUi, previewDocumentReadyForSurface, previewSurfaceIsInspectable, nextPreviewTab } = await server.ssrLoadModule("/src/components/PreviewPanel.tsx") as {
     PreviewPanel: ComponentType<PreviewPanelProps>;
     buildFixPrompt: (
       artifact: ChatArtifact,
@@ -151,15 +165,129 @@ try {
       errors: Array<{ id: number; level: "error"; message: string; timestamp: number }>,
     ) => string;
     nativePreviewBlockedByAppUi: (root: Pick<ParentNode, "querySelector">) => boolean;
+    previewDocumentReadyForSurface: (isUrlPreview: boolean, builtKey: string, requestedKey: string) => boolean;
     previewSurfaceIsInspectable: (surface: PreviewSurfaceTarget | null) => boolean;
     nextPreviewTab: (current: PreviewTab, key: string, tabs: readonly PreviewTab[]) => PreviewTab | null;
   };
   const { ContextMenuProvider } = await server.ssrLoadModule("/src/components/ContextMenu.tsx") as {
     ContextMenuProvider: ComponentType<{ children: ReactNode }>;
   };
+  const { DocumentPreview, FolderPreview, SheetPreview, SlidesPreview, browserLinkOpensNewTab, googleWorkspacePreviewNeedsLoad } = await server.ssrLoadModule("/src/components/GoogleWorkspacePreview.tsx") as {
+    DocumentPreview: ComponentType<{
+      document: Record<string, unknown>;
+      fallbackText: string;
+    }>;
+    FolderPreview: ComponentType<{
+      children: GoogleFileSummary[];
+      choosing: boolean;
+      onChoose: () => void;
+      onOpenFile: (url: string) => void;
+      onOpenFileInNewTab: (url: string) => void;
+    }>;
+    SheetPreview: ComponentType<{
+      preview: Extract<GoogleFilePreview, { kind: "sheet" }>;
+      range: string;
+      setRange: (value: string) => void;
+      loadRange: (value: string) => void;
+      submitRange: () => void;
+    }>;
+    SlidesPreview: ComponentType<{
+      fileId: string;
+      slides: Array<{ objectId?: string | null; text: string; notes?: string | null }>;
+      active: boolean;
+    }>;
+    browserLinkOpensNewTab: (event: { button: number; ctrlKey: boolean; metaKey: boolean }) => boolean;
+    googleWorkspacePreviewNeedsLoad: (active: boolean, loadedRequest: string | null, request: string) => boolean;
+  };
   const renderPreviewPanel = (props: PreviewPanelProps) => renderToStaticMarkup(
     createElement(ContextMenuProvider, null, createElement(PreviewPanel, props)),
   );
+  const sheetPreview: Extract<GoogleFilePreview, { kind: "sheet" }> = {
+    kind: "sheet",
+    file: {
+      id: "sheet_123",
+      name: "Pipeline",
+      mime_type: "application/vnd.google-apps.spreadsheet",
+      trashed: false,
+      parents: [],
+      capabilities: {
+        can_edit: true,
+        can_download: true,
+        can_move: true,
+        can_rename: true,
+        can_share: true,
+        can_trash: true,
+      },
+      created_by_milim: false,
+    },
+    range: "'Venues'!B2:C3",
+    sheets: [{ properties: { title: "Venues" } }, { properties: { title: "Archive" } }],
+    values: [["Venue", "Status"], ["Noor", "Completed"]],
+    formulas: [["Venue", "Status"], ["Noor", "=UPPER(\"completed\")"]],
+  };
+  const sheetMarkup = renderToStaticMarkup(createElement(SheetPreview, {
+    preview: sheetPreview,
+    range: sheetPreview.range,
+    setRange: () => {},
+    loadRange: () => {},
+    submitRange: () => {},
+  }));
+  assert(sheetMarkup.includes('aria-current="page"'), "Sheets preview should mark the active worksheet");
+  assert(sheetMarkup.includes('aria-label="Active cell">B2'), "Sheets preview should expose the active cell address");
+  assert(sheetMarkup.includes('aria-label="Search this sheet range"'), "Sheets preview should expose range search");
+  assert(sheetMarkup.includes('aria-label="Sheet zoom"'), "Sheets preview should expose zoom");
+  assert(sheetMarkup.includes('aria-label="Resize column B"'), "Sheets preview should expose keyboard-accessible column resizing");
+  const documentMarkup = renderToStaticMarkup(createElement(DocumentPreview, {
+    document: {
+      body: { content: [
+        { paragraph: {
+          paragraphStyle: { namedStyleType: "TITLE", alignment: "CENTER" },
+          elements: [{ textRun: { content: "Project brief", textStyle: { bold: true } } }],
+        } },
+        { paragraph: {
+          paragraphStyle: { namedStyleType: "HEADING_1" },
+          elements: [{ textRun: { content: "Overview" } }],
+        } },
+      ] },
+    },
+    fallbackText: "Project brief Overview",
+  }));
+  assert(documentMarkup.includes('aria-label="Search document"'), "Docs preview should expose document search");
+  assert(documentMarkup.includes('aria-label="Document zoom"'), "Docs preview should expose zoom");
+  assert(documentMarkup.includes('aria-label="Show document outline"'), "Docs preview should expose a heading outline control");
+  assert(documentMarkup.includes("text-align:center"), "Docs preview should preserve paragraph alignment");
+  const slidesMarkup = renderToStaticMarkup(createElement(SlidesPreview, {
+    fileId: "slides_123",
+    active: true,
+    slides: [
+      { objectId: "slide_1", text: "Opening", notes: "Welcome everyone" },
+      { objectId: "slide_2", text: "Details", notes: "" },
+    ],
+  }));
+  assert(slidesMarkup.includes('aria-label="Previous slide"'), "Slides preview should expose previous-slide navigation");
+  assert(slidesMarkup.includes('aria-label="Next slide"'), "Slides preview should expose next-slide navigation");
+  assert(slidesMarkup.includes('aria-label="Search slides"'), "Slides preview should expose presentation search");
+  assert(slidesMarkup.includes('aria-label="Slide zoom"'), "Slides preview should expose zoom");
+  assert(slidesMarkup.includes(">Notes<"), "Slides preview should expose available speaker notes");
+  assert(slidesMarkup.includes('aria-current="page"'), "Slides preview should mark the active slide");
+  const folderMarkup = renderToStaticMarkup(createElement(
+    ContextMenuProvider,
+    null,
+    createElement(FolderPreview, {
+      children: [sheetPreview.file],
+      choosing: false,
+      onChoose: () => {},
+      onOpenFile: () => {},
+      onOpenFileInNewTab: () => {},
+    }),
+  ));
+  assert(folderMarkup.includes('class="google-folder-entry-main"'), "Folder entry bodies should open files in Milim");
+  assert(folderMarkup.includes('aria-label="Open Pipeline in Google"'), "Folder entries should keep a separate external-browser action");
+  assert(browserLinkOpensNewTab({ button: 1, ctrlKey: false, metaKey: false }), "Middle-click should open browser links in a new tab");
+  assert(browserLinkOpensNewTab({ button: 0, ctrlKey: true, metaKey: false }), "Ctrl-click should open browser links in a new tab");
+  assert(!browserLinkOpensNewTab({ button: 0, ctrlKey: false, metaKey: false }), "Plain click should reuse the active browser tab");
+  assert(!googleWorkspacePreviewNeedsLoad(true, "same", "same"), "Reactivating a loaded Google tab should not refetch it");
+  assert(googleWorkspacePreviewNeedsLoad(true, "same", "refreshed"), "Explicit Google refreshes should still fetch");
   let blockerSelector = "";
   nativePreviewBlockedByAppUi({
     querySelector: ((selector: string) => {
@@ -198,6 +326,8 @@ try {
   assert(nextPreviewTab("preview", "ArrowLeft", ["preview", "code"]) === "code", "Left Arrow should wrap inspector tabs");
   assert(nextPreviewTab("code", "Home", ["preview", "code"]) === "preview", "Home should focus the first inspector tab");
   assert(nextPreviewTab("preview", "End", ["preview", "code"]) === "code", "End should focus the last inspector tab");
+  assert(previewDocumentReadyForSurface(true, "previous-url", "active-url"), "URL tabs should bypass artifact document rebuilding");
+  assert(!previewDocumentReadyForSurface(false, "old-artifact", "new-artifact"), "Artifact previews should still wait for their built document");
   const fixPrompt = buildFixPrompt(
     htmlArtifact,
     ["index.html"],
@@ -213,9 +343,33 @@ try {
 
   const urlMarkup = renderPreviewPanel({ artifact: urlArtifact, onClose: () => {} });
   assert(urlMarkup.includes('data-testid="preview-browser-bar"'), "URL artifacts should render browser chrome");
+  assert(urlMarkup.includes('data-testid="preview-browser-tabs"'), "URL artifacts should render browser tabs");
   assert(urlMarkup.includes('data-testid="preview-browser-url"'), "URL artifacts should render an address input");
+  assert(!urlMarkup.includes('data-testid="preview-context-title"'), "URL artifacts should not duplicate the browser address in the inspector header");
+  assert(urlMarkup.includes('data-testid="preview-browser-setup"'), "First URL-browser use should disclose persistent sign-ins");
   assert(urlMarkup.includes('data-testid="preview-native-browser"'), "URL artifacts should render the native browser host");
   assert(urlMarkup.includes('src="http://localhost:5173/"'), "URL artifacts should render a non-Tauri iframe fallback");
+  const tabbedUrlMarkup = renderPreviewPanel({
+    artifact: urlArtifact,
+    onClose: () => {},
+    browserSession: {
+      profileId: "test-profile",
+      activeTabId: "second",
+      tabs: [
+        { id: "first", url: "https://example.com/", input: "https://example.com/", history: ["https://example.com/"], historyIndex: 0 },
+        { id: "second", url: "https://sheets.google.com/", input: "https://sheets.google.com/", history: ["https://sheets.google.com/"], historyIndex: 0 },
+      ],
+    },
+  });
+  assert(tabbedUrlMarkup.includes("example.com") && tabbedUrlMarkup.includes("sheets.google.com"), "Browser sessions should render every tab");
+  assert(tabbedUrlMarkup.includes('aria-selected="true"'), "Browser sessions should identify the active tab");
+
+  const googleMarkup = renderPreviewPanel({ artifact: googleSheetArtifact, onClose: () => {} });
+  assert(googleMarkup.includes("Choose this file with Google"), "Unauthorized Google files should offer the Picker flow");
+  assert(!googleMarkup.includes('data-testid="preview-native-browser"'), "Recognized Google files should use a native Milim viewer instead of embedding Google");
+  const googleFolderMarkup = renderPreviewPanel({ artifact: googleFolderArtifact, onClose: () => {} });
+  assert(googleFolderMarkup.includes("Choose files from this folder"), "Google Drive folders should offer one multi-file Picker flow");
+  assert(googleFolderMarkup.includes("select its files"), "Folder selection should explain the explicit per-file authorization boundary");
 
   const blankUrlMarkup = renderPreviewPanel({ artifact: blankUrlArtifact, onClose: () => {} });
   assert(blankUrlMarkup.includes('data-testid="preview-browser-bar"'), "Blank URL artifacts should still render browser chrome");
@@ -297,6 +451,7 @@ try {
     onClose: () => {},
   });
   assert(!readyRuntimeMarkup.includes('data-testid="preview-managed-runtime"'), "Healthy runtime should give the preview the full content area");
+  assert(!readyRuntimeMarkup.includes('data-testid="preview-browser-setup"'), "Generated App previews should not show persistent browser setup");
   assert(readyRuntimeMarkup.includes('data-testid="preview-runtime-status"'), "Healthy runtime should keep a status disclosure");
   assert(readyRuntimeMarkup.includes('aria-expanded="false"'), "Healthy runtime details should start collapsed");
   assert(readyRuntimeMarkup.includes('data-testid="preview-runtime-quick-stop"'), "Healthy runtime should keep a one-click Stop action");

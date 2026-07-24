@@ -65,6 +65,8 @@ deepEqual(
 equal(useSettings.getState().newThreadBehavior, "inherit", "new chats should preserve inheritance by default");
 equal(useSettings.getState().unavailableModelPolicy, "ask", "unavailable defaults should ask by default");
 equal(useSettings.getState().configuredThreadDefaults.toolApproval, "guarded", "configured approval should default guarded");
+equal(useSettings.getState().browserStorageMode, "persistent", "sidepanel browser should remember sign-ins by default");
+equal(useSettings.getState().browserSetupSeen, false, "browser persistence disclosure should start unseen");
 assert(!("modelPresets" in useSettings.getState()), "obsolete model presets should not be exposed");
 assert(!("presetsOnly" in useSettings.getState()), "obsolete presets-only state should not be exposed");
 
@@ -85,6 +87,13 @@ useSettings.getState().setAccountRuntimeEnabled("claude", false);
 equal(useSettings.getState().accountRuntimeEnabled.claude, false, "account runtimes should be disableable");
 assert(localStorage.getItem("milim.settings")?.includes('"claude":false'), "account runtime toggles should persist");
 useSettings.getState().setAccountRuntimeEnabled("claude", true);
+
+useSettings.getState().setBrowserStorageMode("private");
+useSettings.getState().setBrowserSetupSeen(true);
+equal(useSettings.getState().browserStorageMode, "private", "private browser storage should be selectable");
+equal(useSettings.getState().browserSetupSeen, true, "browser setup disclosure should persist");
+assert(localStorage.getItem("milim.settings")?.includes('"browserStorageMode":"private"'), "browser storage mode should persist");
+useSettings.getState().setBrowserStorageMode("persistent");
 
 useSettings.getState().setMediaSettings({
   providerId: "prov-openrouter",
@@ -146,6 +155,8 @@ localStorage.setItem("milim.settings", JSON.stringify({
   state: {
     collapsedModelGroups: [" OpenAI ", "OpenAI", "", 42, "Codex"],
     accountRuntimeEnabled: { codex: false, claude: "no", pi: false },
+    browserStorageMode: "shared",
+    browserSetupSeen: 0,
   },
   version: 0,
 }));
@@ -156,6 +167,8 @@ deepEqual(
   { codex: false, claude: true, opencode: true, pi: false },
   "persisted account runtime toggles should normalize malformed values",
 );
+equal(useSettings.getState().browserStorageMode, "persistent", "malformed browser storage should normalize to persistent");
+equal(useSettings.getState().browserSetupSeen, false, "malformed browser disclosure state should normalize to unseen");
 
 useSettings.getState().setNewThreadBehavior("configured");
 useSettings.getState().setConfiguredThreadDefaults({ model: "provider:model", toolApproval: "review", privacy: "redact" });

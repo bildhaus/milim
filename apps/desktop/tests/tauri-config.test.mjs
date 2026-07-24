@@ -63,6 +63,14 @@ if (config.productName !== "milim") {
   throw new Error(`Tauri productName must be milim, got ${config.productName}`);
 }
 
+if (!packageJson.scripts?.tauri?.includes("--env-file-if-exists=../../.env.local")) {
+  throw new Error("Tauri commands must load the ignored repo-root .env.local when present");
+}
+
+if (!packageJson.scripts?.["tauri:dev"]?.includes("--additional-watch-folders ../../crates")) {
+  throw new Error("Tauri dev must rebuild when workspace Rust crates change");
+}
+
 if (config.identifier !== "com.omershatz.milim") {
   throw new Error(
     `Tauri bundle identifier must be com.omershatz.milim, got ${config.identifier}`,
@@ -186,14 +194,17 @@ for (const needle of [
 
 for (const needle of [
   'data-testid="preview-browser-bar"',
+  'data-testid="preview-browser-tabs"',
   'data-testid="preview-browser-url"',
   'data-testid="preview-browser-empty"',
   'data-testid="preview-native-browser"',
-  "new Webview",
+  'data-testid="preview-browser-setup"',
+  "createPreviewWebview",
+  "listenForPreviewWebviewNewTab",
   "new WebviewWindow",
   "@tauri-apps/api/webview",
   "@tauri-apps/api/webviewWindow",
-  "incognito: true",
+  'storageMode={selectedPreviewSource === "url" ? browserStorageMode : "private"}',
   "setIgnoreCursorEvents(true)",
   "normalizeArtifactBrowserUrl",
 ]) {

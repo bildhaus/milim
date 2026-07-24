@@ -2,23 +2,25 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState, type CSSPropertie
 import { cancelPreviewPicker, listWorkspaceDirectory, openExternalUrl, readWorkspaceReviewFile, setActivePreviewTarget, startPreviewPicker, takePreviewPicker, type ChatArtifact, type PreviewAppPreflight, type PreviewAppStatus, type PreviewSurfaceCapability, type PreviewSurfaceKind, type PreviewSurfaceTarget, type WorkspaceDirectoryEntry } from "../api";
 import type { ArtifactRevision, ArtifactRevisionGroup } from "../lib/artifactRevisions";
 import { buildArtifactPreviewDocument, previewKindForArtifact } from "../lib/artifactPreview";
-import { isFileArtifact, isPreviewableArtifact, normalizeArtifactBrowserUrl } from "../lib/artifacts";
+import { isFileArtifact, isPreviewableArtifact, normalizeArtifactBrowserUrl, resolveArtifactBrowserInput } from "../lib/artifacts";
+import { useBrowserRecentVisits, type BrowserRecentVisit } from "../browser/recentVisits";
 import type { PreviewControlActivity } from "../lib/previewActivity";
-import { listenForPreviewWebviewNavigation, movePreviewWebviewHistory, navigatePreviewWebview, reloadPreviewWebview, type PreviewWebviewLoadState } from "../lib/previewWebview";
+import { googleWorkspaceUrl } from "../lib/googleWorkspace";
+import type { SessionBrowserSession, SessionBrowserTab } from "../sessions/store";
+import { closePreviewWebview, createPreviewWebview, listenForPreviewWebviewNavigation, listenForPreviewWebviewNewTab, listenForPreviewWebviewShortcut, listenForPreviewWebviewTitle, movePreviewWebviewHistory, navigatePreviewWebview, reloadPreviewWebview, type PreviewBrowserStorageMode, type PreviewWebviewLoadState, type PreviewWebviewShortcut } from "../lib/previewWebview";
+import { useSettings } from "../settings/store";
+import { shortcutLabel, shortcutMatchesEvent } from "../ui/shortcuts";
 import { useContextMenu } from "./ContextMenu";
 import { ArrowLeft, ArrowRight, Bolt, Code, Copy, Download, ExternalLink, Eye, FileText, Folder, Globe, MoreHorizontal, Plus, Refresh, Sidebar, Square, Terminal, X } from "./icons";
+import { GoogleWorkspacePreview } from "./GoogleWorkspacePreview";
 import { Logo } from "./Logo";
 
 const Markdown = lazy(() => import("./Markdown").then((mod) => ({ default: mod.Markdown })));
 
 export type PreviewTab = "preview" | "code";
 export type PreviewSource = "artifact" | "app" | "url";
-export interface PreviewBrowserSession {
-  url: string | null;
-  input: string;
-  history: string[];
-  historyIndex: number;
-}
+export type PreviewBrowserPage = SessionBrowserTab;
+export type PreviewBrowserSession = SessionBrowserSession;
 type PreviewLogLevel = "log" | "info" | "warn" | "error";
 type NativeWebviewHandle = {
   label: string;
@@ -174,6 +176,13 @@ export function PreviewPanel({
   workspaceFolder?: string;
 }) {
   const { openContextMenu } = useContextMenu();
+  const browserStorageMode = useSettings((state) => state.browserStorageMode);
+  const browserSetupSeen = useSettings((state) => state.browserSetupSeen);
+  const setBrowserStorageMode = useSettings((state) => state.setBrowserStorageMode);
+  const setBrowserSetupSeen = useSettings((state) => state.setBrowserSetupSeen);
+  const browserRecentVisits = useBrowserRecentVisits((state) => state.visits);
+  const recordBrowserVisit = useBrowserRecentVisits((state) => state.recordVisit);
+  const clearBrowserRecentVisits = useBrowserRecentVisits((state) => state.clearVisits);
   const panelRef = useRef<HTMLElement | null>(null);
   const returnFocusRef = useRef<HTMLElement | null>(typeof document !== "undefined" && document.activeElement instanceof HTMLElement ? document.activeElement : null);
   const tabRefs = useRef<Record<PreviewTab, HTMLButtonElement | null>>({ preview: null, code: null });
@@ -220,9 +229,10 @@ export function PreviewPanel({
   const codeSplitStartRef = useRef<{ clientX: number; width: number } | null>(null);
   const logResizeStartRef = useRef<{ clientY: number; height: number } | null>(null);
   const previewWasDeferredRef = useRef(previewDeferred);
-  const nativeBrowserLabelRef = useRef<string | null>(null);
-  const pendingNativeHistoryDeltaRef = useRef<-1 | 1 | null>(null);
-  const pendingNativeUrlRef = useRef<string | null>(null);
+  const nativeBrowserLabelsRef = useRef(new Map<string, string>());
+  const handledNewTabRequestsRef = useRef(new Set<number>());
+  const pendingNativeHistoryDeltaRef = useRef(new Map<string, -1 | 1>());
+  const pendingNativeUrlRef = useRef(new Map<string, string>());
   const runtimeStatusTriggerRef = useRef<HTMLButtonElement | null>(null);
   const runtimePanelRef = useRef<HTMLElement | null>(null);
   const title = artifact.filename ?? artifact.title;
@@ -232,8 +242,14 @@ export function PreviewPanel({
   const previewKind = isUrlPreview ? "html" : previewKindForArtifact(artifact);
   const [localBrowserSession, setLocalBrowserSession] = useState<PreviewBrowserSession>(() => initialBrowserSession(previewUrl));
   const browserSession = controlledBrowserSession ?? localBrowserSession;
-  const { url: browserUrl, input: browserInput, history: browserHistory, historyIndex: browserHistoryIndex } = browserSession;
+  const browserSessionRef = useRef(browserSession);
+  browserSessionRef.current = browserSession;
+  const activeBrowserPage = browserSession.tabs.find((tab) => tab.id === browserSession.activeTabId) ?? browserSession.tabs[0] ?? initialBrowserPage(null, "main");
+  const { url: browserUrl, input: browserInput, history: browserHistory, historyIndex: browserHistoryIndex } = activeBrowserPage;
   const [browserError, setBrowserError] = useState<string | null>(null);
+  const [browserRecentOpen, setBrowserRecentOpen] = useState(false);
+  const [browserRecentEditing, setBrowserRecentEditing] = useState(false);
+  const [browserRecentIndex, setBrowserRecentIndex] = useState(-1);
   const artifactContext = useMemo(() => (artifacts?.length ? artifacts : [artifact]), [artifact, artifacts]);
   const codeFiles = useMemo(
     () => artifactContext.map((item) => ({ artifact: item, path: artifactLabel(item), entry: item.id === artifact.id })),
@@ -257,6 +273,11 @@ export function PreviewPanel({
   const errorLogs = visibleLogs.filter((log) => log.level === "error");
   const fixLogs = visibleLogs.filter((log) => log.level === "error" || log.label === "stderr");
   const selectedPreviewSource = controlledPreviewSource ?? (isUrlPreview ? "url" : "artifact");
+  const browserRecentEnabled = selectedPreviewSource === "url" && browserStorageMode === "persistent";
+  const filteredBrowserRecentVisits = useMemo(() => {
+    const query = browserRecentEditing ? browserInput.trim().toLowerCase() : "";
+    return browserRecentVisits.filter((visit) => !query || `${visit.title ?? ""} ${visit.url}`.toLowerCase().includes(query)).slice(0, 8);
+  }, [browserInput, browserRecentEditing, browserRecentVisits]);
   const runtimeError = runtimeErrorMessage(runtimeStatus);
   const prepareArtifactFix = onPrepareArtifactFix ?? onSendArtifactFixPrompt;
   const canPrepareFix = Boolean(selectedPreviewSource !== "url" && prepareArtifactFix && (previewError || runtimeError || errorLogs.length));
@@ -266,9 +287,17 @@ export function PreviewPanel({
   } as CSSProperties;
   const canGoBack = isUrlPreview && browserHistoryIndex > 0;
   const canGoForward = isUrlPreview && browserHistoryIndex >= 0 && browserHistoryIndex < browserHistory.length - 1;
+
+  useEffect(() => {
+    if (!browserRecentEnabled) setBrowserRecentOpen(false);
+  }, [browserRecentEnabled]);
   const iframeSurfaceKey = `${artifact.id}:${frameKey}`;
   const previewBuildKey = `${artifact.id}:${source}`;
-  const previewDocumentReady = previewDocument.key === previewBuildKey;
+  const previewDocumentReady = previewDocumentReadyForSurface(
+    isUrlPreview,
+    previewDocument.key,
+    previewBuildKey,
+  );
   const previewSources = availablePreviewSources?.length ? availablePreviewSources : [selectedPreviewSource];
   const previewAvailable = selectedPreviewSource !== "artifact" || isUrlPreview || isPreviewableArtifact(artifact);
   const resolvedRuntimePreflight = runtimePreflight ?? runtimeStatus?.preflight ?? null;
@@ -297,8 +326,63 @@ export function PreviewPanel({
   }
 
   function updateBrowserSession(next: PreviewBrowserSession) {
+    browserSessionRef.current = next;
     if (!controlledBrowserSession) setLocalBrowserSession(next);
     onBrowserSessionChange?.(next);
+  }
+
+  function updateBrowserPage(page: PreviewBrowserPage) {
+    const current = browserSessionRef.current;
+    updateBrowserSession({
+      ...current,
+      tabs: current.tabs.map((tab) => tab.id === page.id ? page : tab),
+    });
+  }
+
+  function selectBrowserTab(tabId: string) {
+    if (!browserSession.tabs.some((tab) => tab.id === tabId)) return;
+    updateBrowserSession({ ...browserSession, activeTabId: tabId });
+    setBrowserError(null);
+  }
+
+  function openBrowserTab(url: string | null) {
+    const normalized = url === "about:blank" || !url ? null : normalizeArtifactBrowserUrl(url);
+    if (url && url !== "about:blank" && !normalized) {
+      setBrowserError("Blocked new tab: preview URLs must use HTTPS or loopback HTTP.");
+      return;
+    }
+    const tab = initialBrowserPage(normalized);
+    const current = browserSessionRef.current;
+    updateBrowserSession({
+      ...current,
+      tabs: [...current.tabs, tab],
+      activeTabId: tab.id,
+    });
+    setBrowserError(null);
+  }
+
+  function openRequestedBrowserTab(requestId: number, url: string) {
+    if (handledNewTabRequestsRef.current.has(requestId)) return;
+    handledNewTabRequestsRef.current.add(requestId);
+    openBrowserTab(url);
+  }
+
+  function closeBrowserTab(tabId: string) {
+    const index = browserSession.tabs.findIndex((tab) => tab.id === tabId);
+    if (index < 0) return;
+    nativeBrowserLabelsRef.current.delete(tabId);
+    pendingNativeHistoryDeltaRef.current.delete(tabId);
+    pendingNativeUrlRef.current.delete(tabId);
+    const tabs = browserSession.tabs.filter((tab) => tab.id !== tabId);
+    if (!tabs.length) {
+      const blank = initialBrowserPage(null);
+      updateBrowserSession({ ...browserSession, tabs: [blank], activeTabId: blank.id });
+      return;
+    }
+    const activeTabId = browserSession.activeTabId === tabId
+      ? tabs[Math.min(index, tabs.length - 1)].id
+      : browserSession.activeTabId;
+    updateBrowserSession({ ...browserSession, tabs, activeTabId });
   }
 
   function closePanel() {
@@ -324,6 +408,18 @@ export function PreviewPanel({
   }
 
   function handlePanelKeyDown(event: KeyboardEvent<HTMLElement>) {
+    if (!event.defaultPrevented && isUrlPreview && shortcutMatchesEvent("Mod+T", event)) {
+      event.preventDefault();
+      event.stopPropagation();
+      blankBrowser();
+      return;
+    }
+    if (!event.defaultPrevented && isUrlPreview && shortcutMatchesEvent("Mod+W", event)) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeBrowserTab(browserSession.activeTabId);
+      return;
+    }
     if (event.key !== "Escape" || event.defaultPrevented) return;
     event.preventDefault();
     event.stopPropagation();
@@ -394,12 +490,7 @@ export function PreviewPanel({
     if (previewDeferred) return;
     let cancelled = false;
     setPreviewError(null);
-    if (isUrlPreview) {
-      setPreviewDocument({ key: previewBuildKey, source: browserUrl ?? "" });
-      return () => {
-        cancelled = true;
-      };
-    }
+    if (isUrlPreview) return;
     if (previewKind === "markdown") {
       setPreviewDocument({ key: previewBuildKey, source });
       return () => {
@@ -420,7 +511,7 @@ export function PreviewPanel({
     return () => {
       cancelled = true;
     };
-  }, [artifact, artifactContext, browserUrl, isUrlPreview, previewBuildKey, previewDeferred, previewKind, source]);
+  }, [artifact, artifactContext, isUrlPreview, previewBuildKey, previewDeferred, previewKind, source]);
 
   useEffect(() => {
     setLogs([]);
@@ -542,89 +633,212 @@ export function PreviewPanel({
     setBrowserError(null);
     const nextHistory = browserHistory.slice(0, Math.max(browserHistoryIndex + 1, 0));
     if (nextHistory[nextHistory.length - 1] !== url) nextHistory.push(url);
-    if (IS_TAURI && nativeBrowserLabelRef.current) pendingNativeUrlRef.current = url;
-    updateBrowserSession({ url, input: url, history: nextHistory, historyIndex: nextHistory.length - 1 });
+    if (IS_TAURI && nativeBrowserLabelsRef.current.has(activeBrowserPage.id)) {
+      pendingNativeUrlRef.current.set(activeBrowserPage.id, url);
+    }
+    updateBrowserPage({
+      ...activeBrowserPage,
+      url,
+      input: url,
+      history: nextHistory,
+      historyIndex: nextHistory.length - 1,
+      title: activeBrowserPage.url === url ? activeBrowserPage.title : undefined,
+      faviconUrl: browserFaviconUrl(url),
+    });
   }
 
   function submitBrowserUrl(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const normalized = normalizeArtifactBrowserUrl(browserInput);
+    const normalized = resolveArtifactBrowserInput(browserInput);
     if (!normalized) {
-      setBrowserError("Enter a valid HTTPS or local URL.");
+      setBrowserError("Enter a search or a valid HTTPS or local URL.");
       return;
     }
     openBrowserUrl(normalized);
+    setBrowserRecentOpen(false);
+    setBrowserRecentEditing(false);
+  }
+
+  function openRecentBrowserVisit(visit: BrowserRecentVisit) {
+    openBrowserUrl(visit.url);
+    setBrowserRecentOpen(false);
+    setBrowserRecentEditing(false);
+    setBrowserRecentIndex(-1);
+  }
+
+  function handleBrowserAddressKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "Escape" && browserRecentOpen) {
+      event.preventDefault();
+      event.stopPropagation();
+      setBrowserRecentOpen(false);
+      setBrowserRecentIndex(-1);
+      return;
+    }
+    if (event.key === "Enter" && browserRecentOpen && browserRecentIndex >= 0) {
+      const visit = filteredBrowserRecentVisits[browserRecentIndex];
+      if (!visit) return;
+      event.preventDefault();
+      openRecentBrowserVisit(visit);
+      return;
+    }
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    if (!browserRecentEnabled || !filteredBrowserRecentVisits.length) return;
+    event.preventDefault();
+    setBrowserRecentOpen(true);
+    setBrowserRecentIndex((current) => event.key === "ArrowDown"
+      ? (current + 1) % filteredBrowserRecentVisits.length
+      : (current <= 0 ? filteredBrowserRecentVisits.length : current) - 1);
   }
 
   function navigateBrowser(delta: -1 | 1) {
     const nextIndex = browserHistoryIndex + delta;
     const nextUrl = browserHistory[nextIndex];
     if (!nextUrl) return;
-    if (IS_TAURI && nativeBrowserLabelRef.current) {
-      pendingNativeHistoryDeltaRef.current = delta;
-      void movePreviewWebviewHistory(nativeBrowserLabelRef.current, delta).catch((error) => {
-        pendingNativeHistoryDeltaRef.current = null;
+    const label = nativeBrowserLabelsRef.current.get(activeBrowserPage.id);
+    if (IS_TAURI && label) {
+      pendingNativeHistoryDeltaRef.current.set(activeBrowserPage.id, delta);
+      void movePreviewWebviewHistory(label, delta).catch((error) => {
+        pendingNativeHistoryDeltaRef.current.delete(activeBrowserPage.id);
         setBrowserError(error instanceof Error ? error.message : String(error));
       });
       return;
     }
-    updateBrowserSession({ url: nextUrl, input: nextUrl, history: browserHistory, historyIndex: nextIndex });
+    updateBrowserPage({ ...activeBrowserPage, url: nextUrl, input: nextUrl, history: browserHistory, historyIndex: nextIndex });
     setBrowserError(null);
   }
 
-  function syncNativeNavigation(url: string, state: PreviewWebviewLoadState) {
+  function syncNativeNavigation(tabId: string, url: string, state: PreviewWebviewLoadState) {
     if (state === "error") return;
+    const tab = browserSessionRef.current.tabs.find((item) => item.id === tabId);
+    if (!tab) return;
+    if (state === "ready" && selectedPreviewSource === "url" && browserStorageMode === "persistent") {
+      recordBrowserVisit(url, tab.url === url ? tab.title : undefined);
+    }
+    const metadata = tab.url === url ? {} : { title: undefined, faviconUrl: browserFaviconUrl(url) };
     if (state !== "ready") {
-      updateBrowserSession({ ...browserSession, url, input: url });
+      updateBrowserPage({ ...tab, ...metadata, url, input: url });
       setBrowserError(null);
       return;
     }
-    const pendingDelta = pendingNativeHistoryDeltaRef.current;
+    const pendingDelta = pendingNativeHistoryDeltaRef.current.get(tabId);
     if (pendingDelta) {
-      pendingNativeHistoryDeltaRef.current = null;
-      const nextIndex = Math.min(Math.max(browserHistoryIndex + pendingDelta, 0), Math.max(browserHistory.length - 1, 0));
-      const nextHistory = [...browserHistory];
+      pendingNativeHistoryDeltaRef.current.delete(tabId);
+      const nextIndex = Math.min(Math.max(tab.historyIndex + pendingDelta, 0), Math.max(tab.history.length - 1, 0));
+      const nextHistory = [...tab.history];
       if (nextHistory.length) nextHistory[nextIndex] = url;
       else nextHistory.push(url);
-      updateBrowserSession({ url, input: url, history: nextHistory, historyIndex: nextIndex });
-    } else if (pendingNativeUrlRef.current) {
-      pendingNativeUrlRef.current = null;
-      const nextHistory = [...browserHistory];
-      const index = Math.min(Math.max(browserHistoryIndex, 0), Math.max(nextHistory.length - 1, 0));
+      updateBrowserPage({ ...tab, ...metadata, url, input: url, history: nextHistory, historyIndex: nextIndex });
+    } else if (pendingNativeUrlRef.current.has(tabId)) {
+      pendingNativeUrlRef.current.delete(tabId);
+      const nextHistory = [...tab.history];
+      const index = Math.min(Math.max(tab.historyIndex, 0), Math.max(nextHistory.length - 1, 0));
       if (nextHistory.length) nextHistory[index] = url;
       else nextHistory.push(url);
-      updateBrowserSession({ url, input: url, history: nextHistory, historyIndex: index });
-    } else if (browserHistory[browserHistoryIndex] !== url) {
-      const nextHistory = browserHistory.slice(0, Math.max(browserHistoryIndex + 1, 0));
+      updateBrowserPage({ ...tab, ...metadata, url, input: url, history: nextHistory, historyIndex: index });
+    } else if (tab.history[tab.historyIndex] !== url) {
+      const nextHistory = tab.history.slice(0, Math.max(tab.historyIndex + 1, 0));
       if (nextHistory[nextHistory.length - 1] !== url) nextHistory.push(url);
-      updateBrowserSession({ url, input: url, history: nextHistory, historyIndex: nextHistory.length - 1 });
-    } else if (browserInput !== url) {
-      updateBrowserSession({ ...browserSession, input: url });
+      updateBrowserPage({ ...tab, ...metadata, url, input: url, history: nextHistory, historyIndex: nextHistory.length - 1 });
+    } else if (tab.input !== url) {
+      updateBrowserPage({ ...tab, input: url });
     }
     setBrowserError(null);
   }
 
-  function handleNativeBrowserError(message: string) {
-    pendingNativeUrlRef.current = null;
-    pendingNativeHistoryDeltaRef.current = null;
-    setBrowserError(message);
+  function handleNativeBrowserError(tabId: string, message: string) {
+    pendingNativeUrlRef.current.delete(tabId);
+    pendingNativeHistoryDeltaRef.current.delete(tabId);
+    if (tabId === browserSessionRef.current.activeTabId) setBrowserError(message);
+  }
+
+  function syncNativeTitle(tabId: string, title: string, faviconUrl?: string) {
+    const tab = browserSessionRef.current.tabs.find((item) => item.id === tabId);
+    if (!tab) return;
+    updateBrowserPage({
+      ...tab,
+      title: title.trim() || undefined,
+      faviconUrl: faviconUrl || browserFaviconUrl(tab.url),
+    });
+    if (tab.url && selectedPreviewSource === "url" && browserStorageMode === "persistent") {
+      recordBrowserVisit(tab.url, title);
+    }
   }
 
   function blankBrowser() {
-    pendingNativeUrlRef.current = null;
-    pendingNativeHistoryDeltaRef.current = null;
-    updateBrowserSession({ url: null, input: "", history: browserHistory, historyIndex: browserHistory.length });
-    setBrowserError(null);
+    openBrowserTab(null);
   }
 
   function reloadBrowser() {
     if (!browserUrl) return;
+    const label = nativeBrowserLabelsRef.current.get(activeBrowserPage.id);
+    if (IS_TAURI && label) {
+      void reloadPreviewWebview(label).catch((error) => setBrowserError(error instanceof Error ? error.message : String(error)));
+      return;
+    }
     setFrameKey((key) => key + 1);
   }
 
-  function openBrowserUrlExternal() {
-    if (!browserUrl) return;
-    void openExternalUrl(browserUrl).catch((error) => console.warn("failed to open URL", error));
+  function reloadBrowserTab(tab: PreviewBrowserPage) {
+    if (!tab.url) return;
+    const label = nativeBrowserLabelsRef.current.get(tab.id);
+    if (IS_TAURI && label) {
+      void reloadPreviewWebview(label).catch((error) => setBrowserError(error instanceof Error ? error.message : String(error)));
+      return;
+    }
+    if (tab.id !== browserSession.activeTabId) selectBrowserTab(tab.id);
+    setFrameKey((key) => key + 1);
+  }
+
+  function openBrowserUrlExternal(url = browserUrl) {
+    if (!url) return;
+    void openExternalUrl(url).catch((error) => console.warn("failed to open URL", error));
+  }
+
+  function copyBrowserUrl(url: string) {
+    void navigator.clipboard?.writeText(url);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1200);
+  }
+
+  function openBrowserTabContextMenu(event: ReactMouseEvent, tab: PreviewBrowserPage) {
+    openContextMenu(event, [
+      {
+        id: "new-browser-tab",
+        label: "New tab",
+        icon: <Plus size={13} />,
+        detail: shortcutLabel("Mod+T"),
+        action: blankBrowser,
+      },
+      {
+        id: "reload-browser-tab",
+        label: "Reload",
+        icon: <Refresh size={13} />,
+        disabled: !tab.url,
+        action: () => reloadBrowserTab(tab),
+      },
+      {
+        id: "open-browser-tab-external",
+        label: "Open in system browser",
+        icon: <ExternalLink size={13} />,
+        disabled: !tab.url,
+        separatorBefore: true,
+        action: () => openBrowserUrlExternal(tab.url),
+      },
+      {
+        id: "copy-browser-tab-url",
+        label: "Copy URL",
+        icon: <Copy size={13} />,
+        disabled: !tab.url,
+        action: () => tab.url && copyBrowserUrl(tab.url),
+      },
+      {
+        id: "close-browser-tab",
+        label: "Close tab",
+        icon: <X size={13} />,
+        separatorBefore: true,
+        action: () => closeBrowserTab(tab.id),
+      },
+    ], browserTabLabel(tab));
   }
 
   function prepareFix() {
@@ -646,6 +860,32 @@ export function PreviewPanel({
 
   function openPreviewContextMenu(event: ReactMouseEvent) {
     openContextMenu(event, [
+      ...(isUrlPreview ? [{
+        id: "new-browser-tab",
+        label: "New tab",
+        icon: <Plus size={13} />,
+        detail: shortcutLabel("Mod+T"),
+        action: blankBrowser,
+      }, {
+        id: "browser-back",
+        label: "Back",
+        icon: <ArrowLeft size={13} />,
+        disabled: !canGoBack,
+        separatorBefore: true,
+        action: () => navigateBrowser(-1),
+      }, {
+        id: "browser-forward",
+        label: "Forward",
+        icon: <ArrowRight size={13} />,
+        disabled: !canGoForward,
+        action: () => navigateBrowser(1),
+      }, {
+        id: "reload-browser",
+        label: "Reload",
+        icon: <Refresh size={13} />,
+        disabled: !browserUrl,
+        action: reloadBrowser,
+      }] : []),
       ...(!isUrlPreview ? [{
         id: "preview-tab",
         label: "Show preview",
@@ -677,18 +917,27 @@ export function PreviewPanel({
       }] : []),
       ...(isUrlPreview && browserUrl ? [{
         id: "open-external",
-        label: "Open in browser",
-        icon: <ArrowRight size={13} />,
+        label: "Open in system browser",
+        icon: <ExternalLink size={13} />,
         separatorBefore: true,
-        action: openBrowserUrlExternal,
+        action: () => openBrowserUrlExternal(),
       }] : []),
       {
         id: "copy",
         label: isUrlPreview ? "Copy URL" : "Copy source",
         icon: <Copy size={13} />,
-        separatorBefore: true,
+        disabled: isUrlPreview && !browserUrl && !browserInput,
+        separatorBefore: !isUrlPreview,
         action: () => void copySource(),
       },
+      ...(isUrlPreview ? [{
+        id: "close-browser-tab",
+        label: "Close tab",
+        icon: <X size={13} />,
+        detail: shortcutLabel("Mod+W"),
+        separatorBefore: true,
+        action: () => closeBrowserTab(browserSession.activeTabId),
+      }] : []),
       ...(!isUrlPreview ? [{
         id: "download",
         label: "Download source",
@@ -876,10 +1125,12 @@ export function PreviewPanel({
       </div>
 
       <div className="preview-context-toolbar">
-        <div className="preview-context-title" data-testid="preview-context-title">
-          <span>{contextSource === "app" ? "App" : contextSource === "url" ? "URL" : "Artifact"}</span>
-          <strong title={inspectorTitle}>{inspectorTitle}</strong>
-        </div>
+        {!isUrlPreview && (
+          <div className="preview-context-title" data-testid="preview-context-title">
+            <span>{contextSource === "app" ? "App" : contextSource === "url" ? "URL" : "Artifact"}</span>
+            <strong title={inspectorTitle}>{inspectorTitle}</strong>
+          </div>
+        )}
         {activeTab === "preview" && previewSources.length > 1 && (
           <>
             <div className="preview-source-selector" role="group" aria-label="Preview source" data-testid="preview-source-selector">
@@ -1024,37 +1275,153 @@ export function PreviewPanel({
         ) : (
           <div className="preview-runtime-shell">
             {isUrlPreview && (
-              <div className="preview-browser-bar" data-testid="preview-browser-bar">
-                <div className="preview-browser-nav">
-                  <button className="preview-browser-action" title="Back" aria-label="Back" disabled={!canGoBack} onClick={() => navigateBrowser(-1)}>
-                    <ArrowLeft size={14} />
-                  </button>
-                  <button className="preview-browser-action" title="Forward" aria-label="Forward" disabled={!canGoForward} onClick={() => navigateBrowser(1)}>
-                    <ArrowRight size={14} />
-                  </button>
-                  <button className="preview-browser-action" title="Reload" aria-label="Reload page" disabled={!browserUrl} onClick={reloadBrowser}>
-                    <Refresh size={14} />
-                  </button>
-                  <button className="preview-browser-action" title="New" aria-label="Open blank page" onClick={blankBrowser}>
-                    <Plus size={14} />
+              <>
+                <div className="preview-browser-tabs" data-testid="preview-browser-tabs" role="tablist" aria-label="Browser tabs">
+                  {browserSession.tabs.map((tab) => (
+                    <div
+                      className={`preview-browser-tab${tab.id === browserSession.activeTabId ? " active" : ""}`}
+                      key={tab.id}
+                      onContextMenu={(event) => openBrowserTabContextMenu(event, tab)}
+                    >
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={tab.id === browserSession.activeTabId}
+                        title={tab.url ?? "New tab"}
+                        onClick={() => selectBrowserTab(tab.id)}
+                      >
+                        <span className="preview-browser-tab-icon" aria-hidden="true">
+                          {tab.faviconUrl && <img key={tab.faviconUrl} src={tab.faviconUrl} alt="" onError={(event) => { event.currentTarget.hidden = true; }} />}
+                          <Globe size={12} />
+                        </span>
+                        <span>{browserTabLabel(tab)}</span>
+                      </button>
+                      <button type="button" className="preview-browser-tab-close" aria-label={`Close ${browserTabLabel(tab)}`} onClick={() => closeBrowserTab(tab.id)}>
+                        <X size={11} />
+                      </button>
+                    </div>
+                  ))}
+                  <button type="button" className="preview-browser-tab-add" title="New tab" aria-label="Open new tab" onClick={blankBrowser}>
+                    <Plus size={13} />
                   </button>
                 </div>
-                <form className="preview-browser-form" onSubmit={submitBrowserUrl}>
-                  <Globe size={14} aria-hidden="true" />
-                  <input
-                    data-testid="preview-browser-url"
-                    value={browserInput}
-                    onChange={(event) => {
-                      updateBrowserSession({ ...browserSession, input: event.currentTarget.value });
-                      setBrowserError(null);
+                <div className="preview-browser-bar" data-testid="preview-browser-bar">
+                  <div className="preview-browser-nav">
+                    <button className="preview-browser-action" title="Back" aria-label="Back" disabled={!canGoBack} onClick={() => navigateBrowser(-1)}>
+                      <ArrowLeft size={14} />
+                    </button>
+                    <button className="preview-browser-action" title="Forward" aria-label="Forward" disabled={!canGoForward} onClick={() => navigateBrowser(1)}>
+                      <ArrowRight size={14} />
+                    </button>
+                    <button className="preview-browser-action" title="Reload" aria-label="Reload page" disabled={!browserUrl} onClick={reloadBrowser}>
+                      <Refresh size={14} />
+                    </button>
+                  </div>
+                  <form
+                    className="preview-browser-form"
+                    onSubmit={submitBrowserUrl}
+                    onBlur={(event) => {
+                      if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return;
+                      setBrowserRecentOpen(false);
+                      setBrowserRecentIndex(-1);
                     }}
-                    placeholder="Enter a URL"
-                    aria-label="Preview URL"
-                  />
-                </form>
-                <button className="preview-browser-action preview-browser-open-external" title="Open in browser" aria-label="Open in system browser" disabled={!browserUrl} onClick={openBrowserUrlExternal}>
-                  <ExternalLink size={14} />
-                </button>
+                  >
+                    <Globe size={14} aria-hidden="true" />
+                    <input
+                      data-testid="preview-browser-url"
+                      value={browserInput}
+                      onChange={(event) => {
+                        updateBrowserPage({ ...activeBrowserPage, input: event.currentTarget.value });
+                        setBrowserError(null);
+                        setBrowserRecentEditing(true);
+                        setBrowserRecentOpen(browserRecentEnabled);
+                        setBrowserRecentIndex(-1);
+                      }}
+                      onFocus={() => {
+                        setBrowserRecentEditing(false);
+                        setBrowserRecentOpen(browserRecentEnabled);
+                        setBrowserRecentIndex(-1);
+                      }}
+                      onKeyDown={handleBrowserAddressKeyDown}
+                      placeholder="Search Google or enter a URL"
+                      aria-label="Search Google or enter a URL"
+                      role="combobox"
+                      aria-autocomplete="list"
+                      aria-expanded={browserRecentOpen && filteredBrowserRecentVisits.length > 0}
+                      aria-controls="preview-browser-recents"
+                      aria-activedescendant={browserRecentIndex >= 0 ? `preview-browser-recent-${browserRecentIndex}` : undefined}
+                    />
+                    {browserRecentOpen && filteredBrowserRecentVisits.length > 0 && (
+                      <div
+                        id="preview-browser-recents"
+                        className="preview-browser-recents"
+                        data-testid="preview-browser-recents"
+                        data-native-preview-blocker="true"
+                        role="listbox"
+                        aria-label="Recently visited"
+                        onMouseDown={(event) => event.preventDefault()}
+                      >
+                        <div className="preview-browser-recents-head">
+                          <span>Recently visited</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              clearBrowserRecentVisits();
+                              setBrowserRecentOpen(false);
+                            }}
+                          >
+                            Clear
+                          </button>
+                        </div>
+                        {filteredBrowserRecentVisits.map((visit, index) => (
+                          <button
+                            id={`preview-browser-recent-${index}`}
+                            className={index === browserRecentIndex ? "active" : ""}
+                            key={visit.url}
+                            type="button"
+                            role="option"
+                            aria-selected={index === browserRecentIndex}
+                            onMouseEnter={() => setBrowserRecentIndex(index)}
+                            onClick={() => openRecentBrowserVisit(visit)}
+                          >
+                            <span className="preview-browser-recent-icon" aria-hidden="true">
+                              <img src={browserFaviconUrl(visit.url)} alt="" onError={(event) => { event.currentTarget.hidden = true; }} />
+                              <Globe size={13} />
+                            </span>
+                            <span className="preview-browser-recent-copy">
+                              <strong>{browserRecentLabel(visit)}</strong>
+                              <small>{visit.url}</small>
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </form>
+                  <button className="preview-browser-action preview-browser-open-external" title="Open in browser" aria-label="Open in system browser" disabled={!browserUrl} onClick={() => openBrowserUrlExternal()}>
+                    <ExternalLink size={14} />
+                  </button>
+                </div>
+              </>
+            )}
+            {selectedPreviewSource === "url" && !browserSetupSeen && (
+              <div className="preview-browser-setup" data-testid="preview-browser-setup" role="status">
+                <div>
+                  <strong>Milim remembers browser sign-ins on this device</strong>
+                  <span>Preview tools can interact with the active page under this chat&apos;s approval mode. External browser credentials are not imported.</span>
+                </div>
+                <div className="preview-browser-setup-actions">
+                  <button className="btn-accent" type="button" onClick={() => setBrowserSetupSeen(true)}>Got it</button>
+                  <button
+                    className="btn-ghost"
+                    type="button"
+                    onClick={() => {
+                      setBrowserStorageMode("private");
+                      setBrowserSetupSeen(true);
+                    }}
+                  >
+                    Use private browsing instead
+                  </button>
+                </div>
               </div>
             )}
             {showRuntimePanel && runtimeStatus && (
@@ -1076,29 +1443,57 @@ export function PreviewPanel({
             {browserError && <div className="preview-browser-error" role="alert">{browserError}</div>}
             {isUrlPreview ? (
               <div className="preview-browser-content">
-                {browserUrl ? (
-                  <NativeArtifactBrowser
-                    key={selectedPreviewSource}
-                    url={browserUrl}
-                    frameKey={frameKey}
-                    title={title}
-                    active={!closing}
-                    surfaceKind={selectedPreviewSource === "app" ? "runtime_browser" : "native_browser"}
-                    surfaceReady={selectedPreviewSource === "app" ? Boolean(runtimeStatus?.ready) : undefined}
-                    surfaceError={selectedPreviewSource === "app" ? runtimeError : null}
-                    onNativeLabelChange={(label) => { nativeBrowserLabelRef.current = label; }}
-                    onNavigation={(nextUrl, state) => syncNativeNavigation(nextUrl, state)}
-                    onNavigationError={handleNativeBrowserError}
-                    onSurfaceChange={onSurfaceChange}
-                    controlActivity={controlActivity}
-                  />
-                ) : (
-                  <div className="preview-browser-empty" data-testid="preview-browser-empty">
-                    <Logo height={42} className="preview-browser-empty-logo" />
-                    <strong>Open a preview URL</strong>
-                    <span>Use the address bar for localhost or HTTPS pages.</span>
+                {browserSession.tabs.map((tab) => {
+                  const googleTarget = selectedPreviewSource === "url" ? googleWorkspaceUrl(tab.url) : null;
+                  const active = tab.id === browserSession.activeTabId;
+                  return (
+                  <div className={`preview-browser-tab-page${active ? " active" : ""}`} key={tab.id}>
+                    {tab.url ? googleTarget ? (
+                      <GoogleWorkspacePreview
+                        fileId={googleTarget.fileId}
+                        fallbackUrl={tab.url}
+                        active={active && !closing}
+                        onMetadata={(title, faviconUrl) => syncNativeTitle(tab.id, title, faviconUrl)}
+                        onOpenFile={openBrowserUrl}
+                        onOpenFileInNewTab={openBrowserTab}
+                      />
+                    ) : (
+                      <NativeArtifactBrowser
+                        url={tab.url}
+                        frameKey={active ? frameKey : 0}
+                        title={tab.url}
+                        mounted={!closing}
+                        visible={active}
+                        profileId={browserSession.profileId}
+                        surfaceKind={selectedPreviewSource === "app" ? "runtime_browser" : "native_browser"}
+                        storageMode={selectedPreviewSource === "url" ? browserStorageMode : "private"}
+                        surfaceReady={selectedPreviewSource === "app" ? Boolean(runtimeStatus?.ready) : undefined}
+                        surfaceError={selectedPreviewSource === "app" ? runtimeError : null}
+                        onNativeLabelChange={(label) => {
+                          if (label) nativeBrowserLabelsRef.current.set(tab.id, label);
+                          else nativeBrowserLabelsRef.current.delete(tab.id);
+                        }}
+                        onNavigation={(nextUrl, state) => syncNativeNavigation(tab.id, nextUrl, state)}
+                        onNavigationError={(message) => handleNativeBrowserError(tab.id, message)}
+                        onNewTab={openRequestedBrowserTab}
+                        onShortcut={(shortcut) => {
+                          if (shortcut.action === "new_tab") blankBrowser();
+                          else closeBrowserTab(tab.id);
+                        }}
+                        onTitle={(nextTitle) => syncNativeTitle(tab.id, nextTitle)}
+                        onSurfaceChange={active ? onSurfaceChange : undefined}
+                        controlActivity={active ? controlActivity : undefined}
+                      />
+                    ) : (
+                      <div className="preview-browser-empty" data-testid="preview-browser-empty">
+                        <Logo height={42} className="preview-browser-empty-logo" />
+                        <strong>Open a preview URL</strong>
+                        <span>Use the address bar for localhost or HTTPS pages.</span>
+                      </div>
+                    )}
                   </div>
-                )}
+                  );
+                })}
               </div>
             ) : (
               <div className="preview-frame-host">
@@ -1522,33 +1917,44 @@ function NativeArtifactBrowser({
   url,
   frameKey,
   title,
-  active,
+  mounted,
+  visible,
+  profileId,
   surfaceKind,
+  storageMode,
   surfaceReady,
   surfaceError,
   onNativeLabelChange,
   onNavigation,
   onNavigationError,
+  onNewTab,
+  onShortcut,
+  onTitle,
   onSurfaceChange,
   controlActivity,
 }: {
   url: string;
   frameKey: number;
   title: string;
-  active: boolean;
+  mounted: boolean;
+  visible: boolean;
+  profileId: string;
   surfaceKind: PreviewSurfaceKind;
+  storageMode: PreviewBrowserStorageMode;
   surfaceReady?: boolean;
   surfaceError?: string | null;
   onNativeLabelChange?: (label: string | null) => void;
   onNavigation?: (url: string, state: PreviewWebviewLoadState) => void;
   onNavigationError?: (message: string) => void;
+  onNewTab?: (requestId: number, url: string) => void;
+  onShortcut?: (shortcut: PreviewWebviewShortcut) => void;
+  onTitle?: (title: string) => void;
   onSurfaceChange?: (surface: PreviewSurfaceTarget | null) => void;
   controlActivity?: PreviewControlActivity | null;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const webviewRef = useRef<NativeWebviewHandle | null>(null);
   const overlayWindowRef = useRef<NativeOverlayWindowHandle | null>(null);
-  const labelRef = useRef(`artifact-browser-${Math.random().toString(36).slice(2)}`);
   const overlayLabelRef = useRef(`artifact-overlay-${Math.random().toString(36).slice(2)}`);
   const overlayChannelRef = useRef(`preview-control-overlay-${Math.random().toString(36).slice(2)}`);
   const overlayCleanupRef = useRef<(() => void) | null>(null);
@@ -1556,7 +1962,11 @@ function NativeArtifactBrowser({
   const overlayInstanceRef = useRef(0);
   const navigationCallbackRef = useRef(onNavigation);
   const navigationErrorCallbackRef = useRef(onNavigationError);
+  const newTabCallbackRef = useRef(onNewTab);
+  const shortcutCallbackRef = useRef(onShortcut);
+  const titleCallbackRef = useRef(onTitle);
   const labelCallbackRef = useRef(onNativeLabelChange);
+  const visibleRef = useRef(visible);
   const currentNativeUrlRef = useRef(url);
   const previousFrameKeyRef = useRef(frameKey);
   const [nativeError, setNativeError] = useState<string | null>(null);
@@ -1568,7 +1978,11 @@ function NativeArtifactBrowser({
 
   navigationCallbackRef.current = onNavigation;
   navigationErrorCallbackRef.current = onNavigationError;
+  newTabCallbackRef.current = onNewTab;
+  shortcutCallbackRef.current = onShortcut;
+  titleCallbackRef.current = onTitle;
   labelCallbackRef.current = onNativeLabelChange;
+  visibleRef.current = visible;
 
   function clearOverlayCloseTimer() {
     if (overlayCloseTimerRef.current === null) return;
@@ -1584,14 +1998,16 @@ function NativeArtifactBrowser({
   }
 
   useEffect(() => {
-    if (!active) return;
+    if (!mounted) return;
     if (!IS_TAURI) return;
 
     let cancelled = false;
     let resizeObserver: ResizeObserver | null = null;
     let appUiObserver: MutationObserver | null = null;
-    let unlistenError: (() => void) | null = null;
     let unlistenNavigation: (() => void) | null = null;
+    let unlistenNewTab: (() => void) | null = null;
+    let unlistenShortcut: (() => void) | null = null;
+    let unlistenTitle: (() => void) | null = null;
     let removeLayoutListeners: (() => void) | null = null;
     let raf = 0;
     let nativeHidden = false;
@@ -1603,7 +2019,7 @@ function NativeArtifactBrowser({
       webviewRef.current = null;
       if (webview) {
         await webview.hide().catch(() => undefined);
-        await webview.close().catch(() => undefined);
+        await closePreviewWebview(webview.label).catch(() => undefined);
       }
     }
 
@@ -1613,9 +2029,8 @@ function NativeArtifactBrowser({
       const hostElement = host;
       setNativeError(null);
 
-      const [{ Webview }, { getCurrentWindow }, { LogicalPosition, LogicalSize }] = await Promise.all([
+      const [{ Webview }, { LogicalPosition, LogicalSize }] = await Promise.all([
         import("@tauri-apps/api/webview"),
-        import("@tauri-apps/api/window"),
         import("@tauri-apps/api/dpi"),
       ]);
       if (cancelled) return;
@@ -1666,7 +2081,7 @@ function NativeArtifactBrowser({
       function syncAppUiVisibility() {
         appUiVisibilitySync = appUiVisibilitySync.then(async () => {
           if (cancelled) return;
-          const blocked = nativePreviewBlockedByAppUi();
+          const blocked = !visibleRef.current || nativePreviewBlockedByAppUi();
           if (blocked === nativeHidden) return;
           try {
             await setNativeWebviewHidden(webviewRef.current, blocked);
@@ -1687,7 +2102,7 @@ function NativeArtifactBrowser({
 
       const rect = bounds();
       lastBoundsKey = boundsKey(rect);
-      const label = `${labelRef.current}-${Math.random().toString(36).slice(2)}`;
+      const label = `artifact-browser-${surfaceKind === "native_browser" ? "url" : "app"}-${Math.random().toString(36).slice(2)}`;
       currentNativeUrlRef.current = url;
       setNativeNavigation({ label, url, state: "loading" });
       labelCallbackRef.current?.(label);
@@ -1705,30 +2120,30 @@ function NativeArtifactBrowser({
         setNativeNavigation(navigation);
         navigationCallbackRef.current?.(navigation.url, navigation.state);
       });
+      unlistenNewTab = await listenForPreviewWebviewNewTab((request) => {
+        if (cancelled || request.openerLabel !== label) return;
+        newTabCallbackRef.current?.(request.requestId, request.url);
+      });
+      unlistenShortcut = await listenForPreviewWebviewShortcut((shortcut) => {
+        if (cancelled || shortcut.label !== label) return;
+        shortcutCallbackRef.current?.(shortcut);
+      });
+      unlistenTitle = await listenForPreviewWebviewTitle((title) => {
+        if (cancelled || title.label !== label) return;
+        titleCallbackRef.current?.(title.title);
+      });
       if (cancelled) {
         unlistenNavigation();
+        unlistenNewTab();
+        unlistenShortcut();
+        unlistenTitle();
         return;
       }
-      const webview = new Webview(getCurrentWindow(), label, {
-        url,
-        x: rect.x,
-        y: rect.y,
-        width: rect.width,
-        height: rect.height,
-        focus: true,
-        incognito: true,
-        zoomHotkeysEnabled: true,
-      }) as NativeWebviewHandle;
+      await createPreviewWebview(label, url, rect, storageMode, profileId);
+      const webview = await Webview.getByLabel(label) as NativeWebviewHandle | null;
+      if (!webview) throw new Error("Could not access the created preview webview.");
       webviewRef.current = webview;
-      unlistenError = await webview.once<string>("tauri://error", (event) => {
-        if (cancelled) return;
-        const message = event.payload || "Could not open this page.";
-        setNativeError(message);
-        navigationErrorCallbackRef.current?.(message);
-      });
-      await waitForNativeCreated(webview);
       if (cancelled) {
-        unlistenError?.();
         await closeWebview();
         return;
       }
@@ -1766,12 +2181,23 @@ function NativeArtifactBrowser({
       resizeObserver?.disconnect();
       appUiObserver?.disconnect();
       removeLayoutListeners?.();
-      unlistenError?.();
       unlistenNavigation?.();
+      unlistenNewTab?.();
+      unlistenShortcut?.();
+      unlistenTitle?.();
       labelCallbackRef.current?.(null);
       void closeWebview();
     };
-  }, [active]);
+  }, [mounted, profileId, storageMode, surfaceKind]);
+
+  useEffect(() => {
+    if (!IS_TAURI) return;
+    const hidden = !visible || nativePreviewBlockedByAppUi();
+    void Promise.all([
+      setNativeWebviewHidden(webviewRef.current, hidden),
+      setNativeWebviewHidden(overlayWindowRef.current, hidden),
+    ]).catch(() => undefined);
+  }, [visible]);
 
   useEffect(() => {
     const label = nativeNavigation.label;
@@ -1801,7 +2227,7 @@ function NativeArtifactBrowser({
   }, [frameKey, nativeNavigation.label]);
 
   useEffect(() => {
-    if (!active) return;
+    if (!visible) return;
     if (!IS_TAURI) {
       void publishPreviewSurface({
         kind: surfaceKind,
@@ -1829,10 +2255,10 @@ function NativeArtifactBrowser({
     };
     void publishPreviewSurface(surface, onSurfaceChange);
     return () => { void publishPreviewSurface(null, onSurfaceChange); };
-  }, [active, nativeError, nativeNavigation, onSurfaceChange, surfaceError, surfaceKind, surfaceReady, title]);
+  }, [visible, nativeError, nativeNavigation, onSurfaceChange, surfaceError, surfaceKind, surfaceReady, title]);
 
   useEffect(() => {
-    if (!active || !controlActivity || !IS_TAURI) return;
+    if (!visible || !controlActivity || !IS_TAURI) return;
     let cancelled = false;
     const channel = overlayChannelRef.current;
     const payload = previewControlOverlayPayload(controlActivity, hostRef.current ?? undefined);
@@ -1926,7 +2352,7 @@ function NativeArtifactBrowser({
     return () => {
       cancelled = true;
     };
-  }, [active, controlActivity?.id]);
+  }, [visible, controlActivity?.id]);
 
   return (
     <div ref={hostRef} className="preview-native-browser" data-testid="preview-native-browser" aria-label={title}>
@@ -2111,12 +2537,51 @@ function isPreviewLogLevel(value: string): value is PreviewLogLevel {
 }
 
 function initialBrowserSession(url: string | null): PreviewBrowserSession {
+  const tab = initialBrowserPage(url, "main");
   return {
+    profileId: `session-${Math.random().toString(36).slice(2)}`,
+    tabs: [tab],
+    activeTabId: tab.id,
+  };
+}
+
+function initialBrowserPage(url: string | null, id = `tab-${Math.random().toString(36).slice(2)}`): PreviewBrowserPage {
+  return {
+    id,
     url,
     input: url ?? "",
     history: url ? [url] : [],
     historyIndex: url ? 0 : -1,
+    faviconUrl: browserFaviconUrl(url),
   };
+}
+
+function browserTabLabel(tab: PreviewBrowserPage): string {
+  if (tab.title) return tab.title;
+  if (!tab.url) return "New tab";
+  try {
+    return new URL(tab.url).hostname || tab.url;
+  } catch {
+    return tab.url;
+  }
+}
+
+function browserRecentLabel(visit: BrowserRecentVisit): string {
+  if (visit.title) return visit.title;
+  try {
+    return new URL(visit.url).hostname || visit.url;
+  } catch {
+    return visit.url;
+  }
+}
+
+function browserFaviconUrl(value: string | null): string | undefined {
+  if (!value) return undefined;
+  try {
+    return new URL("/favicon.ico", value).toString();
+  } catch {
+    return undefined;
+  }
 }
 
 export function nextPreviewTab(current: PreviewTab, key: string, tabs: readonly PreviewTab[]): PreviewTab | null {
@@ -2127,6 +2592,14 @@ export function nextPreviewTab(current: PreviewTab, key: string, tabs: readonly 
   if (!direction) return null;
   const index = Math.max(0, tabs.indexOf(current));
   return tabs[(index + direction + tabs.length) % tabs.length];
+}
+
+export function previewDocumentReadyForSurface(
+  isUrlPreview: boolean,
+  builtKey: string,
+  requestedKey: string,
+): boolean {
+  return isUrlPreview || builtKey === requestedKey;
 }
 
 function previewSourceLabel(source: PreviewSource): string {

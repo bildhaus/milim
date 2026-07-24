@@ -1334,11 +1334,49 @@ equal(
   true,
   "selecting an inspector tab should open it",
 );
-assert(
-  localStorage.getItem("milim.sessions")?.includes('"inspectorTab":"workers"'),
-  "inspector tab should persist in session storage",
+  assert(
+    localStorage.getItem("milim.sessions")?.includes('"inspectorTab":"workers"'),
+    "inspector tab should persist in session storage",
+  );
+useSessions.getState().setBrowserSession(first, {
+  profileId: "session-browser",
+  activeTabId: "slides",
+  tabs: [
+    {
+      id: "docs",
+      url: "https://docs.google.com/document/d/doc-1/edit",
+      input: "https://docs.google.com/document/d/doc-1/edit",
+      history: ["https://docs.google.com/document/d/doc-1/edit"],
+      historyIndex: 0,
+      title: "Brief",
+    },
+    {
+      id: "slides",
+      url: "https://docs.google.com/presentation/d/slides-1/edit",
+      input: "https://docs.google.com/presentation/d/slides-1/edit",
+      history: ["https://docs.google.com/presentation/d/slides-1/edit"],
+      historyIndex: 0,
+      title: "Deck",
+    },
+  ],
+});
+equal(
+  useSessions.getState().sessions.find((session) => session.id === first)
+    ?.browserSession?.tabs.length,
+  2,
+  "browser tabs should persist per thread",
 );
-useSessions.getState().setInspectorOpen(first, false);
+equal(
+  useSessions.getState().sessions.find((session) => session.id === second)
+    ?.browserSession,
+  undefined,
+  "browser tabs should not bleed into another thread",
+);
+assert(
+  localStorage.getItem("milim.sessions")?.includes('"activeTabId":"slides"'),
+  "browser tabs should persist in session storage",
+);
+  useSessions.getState().setInspectorOpen(first, false);
 equal(
   useSessions.getState().sessions.find((session) => session.id === first)
     ?.inspectorOpen,

@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, existsSync, readFileSync, statSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import http from "node:http";
 import net from "node:net";
 import { chromium } from "playwright-core";
 
@@ -12,6 +13,7 @@ const cdpHost = "127.0.0.1";
 const cdpPort = Number(process.env.MILIM_TAURI_E2E_CDP_PORT || 9333);
 const cdpUrl = `http://${cdpHost}:${cdpPort}`;
 const nativePreviewOnly = process.argv.includes("--native-preview-only");
+const browserProfileOnly = process.argv.includes("--browser-profile-only");
 const zoomOnly = process.argv.includes("--zoom-only");
 const microUiOnly = process.argv.includes("--micro-ui-only");
 const workersOnly = process.argv.includes("--workers-only");
@@ -102,6 +104,10 @@ try {
     const errors = collectErrors(session.page);
     turnChangesRepo = createTurnChangesRepo();
     await runTurnChangesCheck(session.page, turnChangesRepo);
+    consoleErrors.push(...errors);
+  } else if (browserProfileOnly) {
+    const errors = collectErrors(session.page);
+    await runBrowserProfileCheck(session);
     consoleErrors.push(...errors);
   } else if (nativePreviewOnly) {
     const errors = collectErrors(session.page);
@@ -847,6 +853,256 @@ async function runNativePreviewOcclusionCheck(page, pid) {
   await waitForWryVisibility(pid, preview.handle, true);
   await page.getByLabel("Close inspector", { exact: true }).click();
   await page.getByTestId("open-artifact-browser").waitFor();
+}
+
+async function runBrowserProfileCheck(session) {
+  const testServer = await startBrowserProfileServer();
+  try {
+    await createE2ePreviewWebview(
+      session.page,
+      "artifact-browser-e2e-persistent-1",
+      `${testServer.origin}/?phase=persistent-write&write=persistent`,
+      "persistent",
+    );
+    assertBrowserReport(
+      await testServer.waitForReport("persistent-write").then((report) => {
+        assertBrowserCapabilities(report);
+        return report;
+      }),
+      "persistent",
+      "Persistent browser write",
+    );
+    await closeE2ePreviewWebview(session.page, "artifact-browser-e2e-persistent-1");
+
+    await createE2ePreviewWebview(
+      session.page,
+      "artifact-browser-e2e-persistent-2",
+      `${testServer.origin}/?phase=persistent-reopen`,
+      "persistent",
+    );
+    assertBrowserReport(
+      await testServer.waitForReport("persistent-reopen"),
+      "persistent",
+      "Persistent browser reopen",
+    );
+    await closeE2ePreviewWebview(session.page, "artifact-browser-e2e-persistent-2");
+    await runRestartCheck(session);
+    await createE2ePreviewWebview(
+      session.page,
+      "artifact-browser-e2e-persistent-3",
+      `${testServer.origin}/?phase=persistent-restart`,
+      "persistent",
+    );
+    assertBrowserReport(
+      await testServer.waitForReport("persistent-restart"),
+      "persistent",
+      "Persistent browser restart",
+    );
+
+    await navigateE2ePreviewWebview(
+      session.page,
+      "artifact-browser-e2e-persistent-3",
+      `${testServer.origin}/?phase=blocked-navigation&blocked=1`,
+    );
+    await testServer.waitForReport("blocked-navigation");
+    await testServer.waitForReport("blocked-navigation-survived");
+    await closeE2ePreviewWebview(session.page, "artifact-browser-e2e-persistent-3");
+
+    await createE2ePreviewWebview(
+      session.page,
+      "artifact-browser-e2e-private-1",
+      `${testServer.origin}/?phase=private-write&write=private`,
+      "private",
+    );
+    assertBrowserReport(
+      await testServer.waitForReport("private-write"),
+      "private",
+      "Private browser write",
+    );
+    await closeE2ePreviewWebview(session.page, "artifact-browser-e2e-private-1");
+    await createE2ePreviewWebview(
+      session.page,
+      "artifact-browser-e2e-private-2",
+      `${testServer.origin}/?phase=private-reopen`,
+      "private",
+    );
+    assertBrowserReport(
+      await testServer.waitForReport("private-reopen"),
+      null,
+      "Private browser reopen",
+    );
+    await closeE2ePreviewWebview(session.page, "artifact-browser-e2e-private-2");
+
+    await session.page.evaluate(async () => {
+      await window.__TAURI_INTERNALS__.invoke("preview_webview_clear_data");
+    });
+    await createE2ePreviewWebview(
+      session.page,
+      "artifact-browser-e2e-persistent-cleared",
+      `${testServer.origin}/?phase=persistent-cleared`,
+      "persistent",
+    );
+    assertBrowserReport(
+      await testServer.waitForReport("persistent-cleared"),
+      null,
+      "Cleared persistent browser",
+    );
+    await closeE2ePreviewWebview(session.page, "artifact-browser-e2e-persistent-cleared");
+  } finally {
+    await testServer.close();
+  }
+}
+
+async function createE2ePreviewWebview(page, label, url, storageMode) {
+  await page.evaluate(async ({ label, url, storageMode }) => {
+    await window.__TAURI_INTERNALS__.invoke("preview_webview_create", {
+      label,
+      url,
+      bounds: { x: 1180, y: 160, width: 480, height: 720 },
+      storageMode,
+      profileId: label,
+    });
+  }, { label, url, storageMode });
+  await delay(500);
+}
+
+async function navigateE2ePreviewWebview(page, label, url) {
+  await page.evaluate(async ({ label, url }) => {
+    await window.__TAURI_INTERNALS__.invoke("preview_webview_navigate", { label, url });
+  }, { label, url });
+}
+
+async function closeE2ePreviewWebview(page, label) {
+  await page.evaluate(async (label) => {
+    await window.__TAURI_INTERNALS__.invoke("preview_webview_close", { label });
+  }, label);
+  await delay(1_000);
+}
+
+function assertBrowserReport(report, expectedValue, label) {
+  const cookieValue = /(?:^|;\s*)milim_e2e=([^;]+)/.exec(report.cookie)?.[1] ?? null;
+  const storageValue = report.storage || null;
+  if (cookieValue !== expectedValue || storageValue !== expectedValue) {
+    throw new Error(
+      `${label} expected cookie and local storage ${JSON.stringify(expectedValue)}, got ${JSON.stringify(report)}.`,
+    );
+  }
+}
+
+function assertBrowserCapabilities(report) {
+  const expected = {
+    cookieEnabled: true,
+    dynamicCode: true,
+    indexedDb: true,
+    serviceWorker: true,
+    webAssembly: true,
+  };
+  if (JSON.stringify(report.capabilities) !== JSON.stringify(expected)) {
+    throw new Error(`Native browser lacks required web capabilities: ${JSON.stringify(report.capabilities)}.`);
+  }
+}
+
+async function startBrowserProfileServer() {
+  const reports = [];
+  const server = http.createServer((request, response) => {
+    const url = new URL(request.url || "/", "http://127.0.0.1");
+    if (url.pathname === "/report") {
+      reports.push({
+        phase: url.searchParams.get("phase"),
+        kind: url.searchParams.get("kind") || "main",
+        cookie: url.searchParams.get("cookie") || "",
+        storage: url.searchParams.get("storage") || "",
+        capabilities: JSON.parse(url.searchParams.get("capabilities") || "null"),
+      });
+      response.writeHead(204);
+      response.end();
+      return;
+    }
+
+    const kind = url.pathname === "/popup" ? "popup" : "main";
+    const phase = url.searchParams.get("phase") || "unknown";
+    if (kind === "popup") {
+      reports.push({
+        phase,
+        kind,
+        cookie: request.headers.cookie || "",
+        storage: "",
+      });
+    }
+    const write = url.searchParams.get("write");
+    const popup = url.searchParams.get("popup");
+    const blocked = url.searchParams.get("blocked") === "1";
+    response.writeHead(200, {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+    });
+    response.end(`<!doctype html>
+<meta charset="utf-8">
+<title>Milim browser profile test</title>
+<style>html,body,#popup{box-sizing:border-box;width:100%;height:100%;margin:0}#popup{font:24px sans-serif}</style>
+<button id="popup" type="button">Open popup</button>
+<script>
+  const phase = ${JSON.stringify(phase)};
+  const kind = ${JSON.stringify(kind)};
+  const write = ${JSON.stringify(write)};
+  const popup = ${JSON.stringify(popup)};
+  const blocked = ${JSON.stringify(blocked)};
+  if (write) {
+    document.cookie = "milim_e2e=" + encodeURIComponent(write) + "; path=/; Max-Age=3600; SameSite=Lax";
+    localStorage.setItem("milim_e2e", write);
+  }
+  const report = (reportPhase, reportKind) => fetch(
+    "/report?phase=" + encodeURIComponent(reportPhase)
+      + "&kind=" + encodeURIComponent(reportKind)
+      + "&cookie=" + encodeURIComponent(document.cookie)
+      + "&storage=" + encodeURIComponent(localStorage.getItem("milim_e2e") || "")
+      + "&capabilities=" + encodeURIComponent(JSON.stringify({
+        cookieEnabled: navigator.cookieEnabled,
+        dynamicCode: Function("return true")(),
+        indexedDb: "indexedDB" in window,
+        serviceWorker: "serviceWorker" in navigator,
+        webAssembly: WebAssembly.validate(new Uint8Array([0,97,115,109,1,0,0,0])),
+      })),
+    { cache: "no-store" },
+  );
+  report(phase, kind).then(() => {
+    if (blocked) {
+      setTimeout(() => {
+        location.assign("http://example.com/blocked");
+        setTimeout(() => report(phase + "-survived", kind), 500);
+      }, 100);
+    }
+  });
+  document.getElementById("popup").addEventListener("click", () => {
+    if (popup) {
+      report(popup + "-click", "main");
+      window.open("/popup?phase=" + encodeURIComponent(popup), "_blank", "width=420,height=320");
+    }
+  });
+</script>`);
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Browser profile test server did not bind.");
+  return {
+    origin: `http://127.0.0.1:${address.port}`,
+    async waitForReport(phase, kind = "main", timeoutMs = 10_000) {
+      const started = Date.now();
+      while (Date.now() - started < timeoutMs) {
+        const report = reports.find((candidate) => candidate.phase === phase && candidate.kind === kind);
+        if (report) return report;
+        await delay(50);
+      }
+      throw new Error(`Timed out waiting for browser report ${kind}:${phase}. reports=${JSON.stringify(reports)}`);
+    },
+    close: () => new Promise((resolve, reject) => {
+      server.closeAllConnections?.();
+      server.close((error) => error ? reject(error) : resolve());
+    }),
+  };
 }
 
 async function waitForNewVisibleWryWebview(pid, baselineHandles, timeoutMs = 10_000) {

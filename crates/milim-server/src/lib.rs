@@ -9,6 +9,7 @@ mod claude_bridge;
 mod codex_bridge;
 pub mod companion;
 mod error;
+pub mod google_workspace;
 pub mod mcp_bridge;
 pub mod media_library;
 mod opencode_bridge;
@@ -93,6 +94,39 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/providers/discover", get(routes::providers_discover))
         .route("/providers/{id}", delete(routes::provider_delete))
+        // Desktop-selected Google Drive, Docs, Sheets, and Slides.
+        .route(
+            "/google-workspace/status",
+            get(google_workspace::status_route),
+        )
+        .route(
+            "/google-workspace/picker",
+            post(google_workspace::picker_start_route),
+        )
+        .route(
+            "/google-workspace/picker/{id}",
+            get(google_workspace::picker_status_route),
+        )
+        .route(
+            "/google-workspace/files",
+            get(google_workspace::file_list_route),
+        )
+        .route(
+            "/google-workspace/files/{id}",
+            delete(google_workspace::file_remove_route),
+        )
+        .route(
+            "/google-workspace/disconnect",
+            post(google_workspace::disconnect_route),
+        )
+        .route(
+            "/google-workspace/preview/{id}",
+            get(google_workspace::preview_route),
+        )
+        .route(
+            "/google-workspace/content/{id}",
+            get(google_workspace::content_route),
+        )
         // Media generation through encrypted remote provider credentials
         .route("/media/models", get(routes::media_models))
         .route("/media/model-schema", get(routes::media_model_schema))

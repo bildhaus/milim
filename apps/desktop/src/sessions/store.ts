@@ -29,6 +29,7 @@ import type {
 import {
   extractArtifactsFromMessage,
   normalizeArtifactDisposition,
+  normalizeArtifactBrowserUrl,
 } from "../lib/artifacts.js";
 import {
   DEFAULT_GOAL_SETTINGS,
@@ -158,6 +159,7 @@ export interface Session {
   contextCollapsedSectionIds?: QuickSummarySectionId[];
   inspectorOpen?: boolean;
   inspectorTab?: SessionInspectorTab;
+  browserSession?: SessionBrowserSession;
   /** @deprecated Read for one-release side-panel migration only. */
   artifactPanelOpen?: boolean;
   /** @deprecated Read for one-release side-panel migration only. */
@@ -192,6 +194,22 @@ export interface Session {
   createdAt: number;
   updatedAt: number;
   archivedAt?: number;
+}
+
+export interface SessionBrowserTab {
+  id: string;
+  url: string | null;
+  input: string;
+  history: string[];
+  historyIndex: number;
+  title?: string;
+  faviconUrl?: string;
+}
+
+export interface SessionBrowserSession {
+  profileId: string;
+  tabs: SessionBrowserTab[];
+  activeTabId: string;
 }
 
 export type SessionWorker = Worker & {
@@ -1209,6 +1227,7 @@ function normalizeSessionArtifacts(session: Session): Session {
       legacyMode,
       legacyArtifactTab,
     ) ?? (legacyOpen === true ? "preview" : undefined),
+    browserSession: normalizeBrowserSession(session.browserSession, session.id),
     previewRuntime: normalizePreviewRuntime(session.previewRuntime),
     threadWorkspace: normalizeThreadWorkspace(
       session.threadWorkspace,
@@ -1231,6 +1250,69 @@ function normalizeSessionArtifacts(session: Session): Session {
       normalizeMessageArtifacts(normalizeStaleToolApprovals(normalizePersistedStreamParts(message))),
     ),
   };
+}
+
+function normalizeBrowserSession(
+  value: unknown,
+  sessionId: string,
+): SessionBrowserSession | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const tabs: SessionBrowserTab[] = [];
+  const ids = new Set<string>();
+  for (const value of Array.isArray(raw.tabs) ? raw.tabs.slice(0, 24) : []) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const tab = value as Record<string, unknown>;
+    const id = typeof tab.id === "string" && /^[A-Za-z0-9_-]+$/.test(tab.id)
+      ? tab.id
+      : "";
+    if (!id || ids.has(id)) continue;
+    ids.add(id);
+    const url = typeof tab.url === "string"
+      ? normalizeArtifactBrowserUrl(tab.url)
+      : null;
+    const history = (Array.isArray(tab.history) ? tab.history : [])
+      .flatMap((item) => typeof item === "string"
+        ? [normalizeArtifactBrowserUrl(item)].filter((entry): entry is string => Boolean(entry))
+        : [])
+      .slice(-100);
+    if (url && !history.length) history.push(url);
+    const historyIndex = history.length
+      ? Math.min(
+          Math.max(
+            typeof tab.historyIndex === "number" && Number.isFinite(tab.historyIndex)
+              ? Math.floor(tab.historyIndex)
+              : history.length - 1,
+            0,
+          ),
+          history.length - 1,
+        )
+      : -1;
+    tabs.push({
+      id,
+      url,
+      input: typeof tab.input === "string" ? tab.input.slice(0, 4096) : (url ?? ""),
+      history,
+      historyIndex,
+      title: typeof tab.title === "string" && tab.title.trim()
+        ? tab.title.trim().slice(0, 512)
+        : undefined,
+      faviconUrl: typeof tab.faviconUrl === "string"
+        ? normalizeArtifactBrowserUrl(tab.faviconUrl) ?? undefined
+        : undefined,
+    });
+  }
+  if (!tabs.length) return undefined;
+  const fallbackProfileId = `session-${sessionId}`.replace(/[^A-Za-z0-9_-]/g, "-");
+  const profileId = typeof raw.profileId === "string" &&
+      /^[A-Za-z0-9_-]+$/.test(raw.profileId)
+    ? raw.profileId
+    : fallbackProfileId;
+  const activeTabId = typeof raw.activeTabId === "string" &&
+      tabs.some((tab) => tab.id === raw.activeTabId)
+    ? raw.activeTabId
+    : tabs[0].id;
+  return { profileId, tabs, activeTabId };
 }
 
 function legacyWorkerRunFromSession(
@@ -1750,6 +1832,7 @@ interface SessionState {
   ) => void;
   setInspectorOpen: (id: string, open: boolean) => void;
   setInspectorTab: (id: string, tab: SessionInspectorTab) => void;
+  setBrowserSession: (id: string, session: SessionBrowserSession) => void;
   setPreviewRuntime: (
     id: string,
     runtime: SessionPreviewRuntime | undefined,
@@ -3131,6 +3214,18 @@ export const useSessions = create<SessionState>()(
                     updatedAt: Date.now(),
                   }
                 : s,
+            ),
+          })),
+
+        setBrowserSession: (id, browserSession) =>
+          set((st) => ({
+            sessions: st.sessions.map((session) =>
+              session.id === id
+                ? {
+                    ...session,
+                    browserSession: normalizeBrowserSession(browserSession, id),
+                  }
+                : session,
             ),
           })),
 

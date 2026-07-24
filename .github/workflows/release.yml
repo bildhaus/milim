@@ -53,6 +53,8 @@ jobs:
     timeout-minutes: 120
     env:
       MILIM_RELEASE_ARTIFACT_NAME: milim-${{ matrix.artifact }}
+      MILIM_GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.MILIM_GOOGLE_OAUTH_CLIENT_ID }}
+      MILIM_GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.MILIM_GOOGLE_OAUTH_CLIENT_SECRET }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable

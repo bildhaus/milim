@@ -72,6 +72,7 @@ export function ContextMenuProvider({ children }: { children: ReactNode }) {
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
         event.preventDefault();
+        event.stopPropagation();
         closeContextMenu();
         trigger?.focus();
         return;
@@ -80,6 +81,7 @@ export function ContextMenuProvider({ children }: { children: ReactNode }) {
       const items = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
       if (!items.length) return;
       event.preventDefault();
+      event.stopPropagation();
       const current = items.indexOf(document.activeElement as HTMLButtonElement);
       const next = event.key === "Home"
         ? 0
@@ -94,12 +96,12 @@ export function ContextMenuProvider({ children }: { children: ReactNode }) {
       if (menuRef.current && event.target instanceof Node && menuRef.current.contains(event.target)) return;
       closeContextMenu();
     }
-    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("pointerdown", onPointerDown, true);
     window.addEventListener("blur", closeContextMenu);
     window.addEventListener("resize", closeContextMenu);
     return () => {
-      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keydown", onKeyDown, true);
       window.removeEventListener("pointerdown", onPointerDown, true);
       window.removeEventListener("blur", closeContextMenu);
       window.removeEventListener("resize", closeContextMenu);

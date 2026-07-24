@@ -203,8 +203,11 @@ fn build_backup(store: &milim_storage::UserDataStore) -> std::result::Result<Mil
     let sessions_json = store
         .get_sessions_snapshot()
         .map_err(|error| error.to_string())?
-        .unwrap_or_else(|| serde_json::json!({ "state": { "sessions": [] }, "version": 0 }).to_string());
-    let mut sessions: Value = serde_json::from_str(&sessions_json).map_err(|error| error.to_string())?;
+        .unwrap_or_else(|| {
+            serde_json::json!({ "state": { "sessions": [] }, "version": 0 }).to_string()
+        });
+    let mut sessions: Value =
+        serde_json::from_str(&sessions_json).map_err(|error| error.to_string())?;
     strip_backup_exclusions(&mut sessions);
     let state = sessions.get("state").and_then(Value::as_object);
     let chats = state
@@ -220,14 +223,21 @@ fn build_backup(store: &milim_storage::UserDataStore) -> std::result::Result<Mil
     let mut entries = BTreeMap::new();
     for key in BACKUP_STATE_KEYS {
         if let Some(raw) = store.get_json(key).map_err(|error| error.to_string())? {
-            entries.insert((*key).to_string(), serde_json::from_str(&raw).map_err(|error| error.to_string())?);
+            entries.insert(
+                (*key).to_string(),
+                serde_json::from_str(&raw).map_err(|error| error.to_string())?,
+            );
         }
     }
     Ok(MilimBackup {
         schema_version: BACKUP_SCHEMA_VERSION,
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         created_at: now_timestamp_ms(),
-        summary: MilimBackupSummary { chats, projects, state_keys: entries.len() },
+        summary: MilimBackupSummary {
+            chats,
+            projects,
+            state_keys: entries.len(),
+        },
         state: MilimBackupState { sessions, entries },
     })
 }
@@ -238,21 +248,33 @@ fn read_backup(path: &Path) -> std::result::Result<(MilimBackup, u64), String> {
         return Err("Backup is larger than the 64 MiB safety limit.".into());
     }
     let bytes = fs::read(path).map_err(|error| error.to_string())?;
-    let backup: MilimBackup = serde_json::from_slice(&bytes).map_err(|error| format!("Malformed backup JSON: {error}"))?;
+    let backup: MilimBackup = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("Malformed backup JSON: {error}"))?;
     if backup.schema_version != BACKUP_SCHEMA_VERSION {
-        return Err(format!("Unsupported backup schema version {}.", backup.schema_version));
+        return Err(format!(
+            "Unsupported backup schema version {}.",
+            backup.schema_version
+        ));
     }
     if !backup.state.sessions.is_object() {
         return Err("Backup sessions state is invalid.".into());
     }
-    if backup.state.entries.keys().any(|key| !BACKUP_STATE_KEYS.contains(&key.as_str())) {
+    if backup
+        .state
+        .entries
+        .keys()
+        .any(|key| !BACKUP_STATE_KEYS.contains(&key.as_str()))
+    {
         return Err("Backup contains unsupported state keys.".into());
     }
     Ok((backup, metadata.len()))
 }
 
 #[tauri::command]
-async fn export_milim_backup(state: tauri::State<'_, UserDataState>, path: String) -> std::result::Result<BackupInspection, String> {
+async fn export_milim_backup(
+    state: tauri::State<'_, UserDataState>,
+    path: String,
+) -> std::result::Result<BackupInspection, String> {
     let store = state.0.clone();
     tokio::task::spawn_blocking(move || {
         let backup = build_backup(&store)?;
@@ -265,7 +287,9 @@ async fn export_milim_backup(state: tauri::State<'_, UserDataState>, path: Strin
             summary: backup.summary,
             bytes: bytes.len() as u64,
         })
-    }).await.map_err(|error| error.to_string())?
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -279,30 +303,51 @@ async fn inspect_milim_backup(path: String) -> std::result::Result<BackupInspect
             summary: backup.summary,
             bytes,
         })
-    }).await.map_err(|error| error.to_string())?
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-async fn restore_milim_backup(state: tauri::State<'_, UserDataState>, path: String) -> std::result::Result<String, String> {
+async fn restore_milim_backup(
+    state: tauri::State<'_, UserDataState>,
+    path: String,
+) -> std::result::Result<String, String> {
     let store = state.0.clone();
     tokio::task::spawn_blocking(move || {
         let (backup, _) = read_backup(Path::new(&path))?;
         let recovery = build_backup(&store)?;
-        let recovery_bytes = serde_json::to_vec_pretty(&recovery).map_err(|error| error.to_string())?;
+        let recovery_bytes =
+            serde_json::to_vec_pretty(&recovery).map_err(|error| error.to_string())?;
         let data_path = Paths::resolve().user_db_file();
         let recovery_path = data_path.parent().unwrap_or(Path::new(".")).join(format!(
             "pre-restore-{}.milim-backup.json",
             now_timestamp_ms()
         ));
         atomic_write(&recovery_path, &recovery_bytes).map_err(|error| error.to_string())?;
-        let entries = backup.state.entries.into_iter()
-            .map(|(key, value)| serde_json::to_string(&value).map(|json| (key, json)).map_err(|error| error.to_string()))
+        let entries = backup
+            .state
+            .entries
+            .into_iter()
+            .map(|(key, value)| {
+                serde_json::to_string(&value)
+                    .map(|json| (key, json))
+                    .map_err(|error| error.to_string())
+            })
             .collect::<std::result::Result<BTreeMap<_, _>, _>>()?;
-        let sessions = serde_json::to_string(&backup.state.sessions).map_err(|error| error.to_string())?;
-        let replace_keys = BACKUP_STATE_KEYS.iter().map(|key| (*key).to_string()).collect::<Vec<_>>();
-        store.replace_backup_state(&replace_keys, entries, &sessions).map_err(|error| error.to_string())?;
+        let sessions =
+            serde_json::to_string(&backup.state.sessions).map_err(|error| error.to_string())?;
+        let replace_keys = BACKUP_STATE_KEYS
+            .iter()
+            .map(|key| (*key).to_string())
+            .collect::<Vec<_>>();
+        store
+            .replace_backup_state(&replace_keys, entries, &sessions)
+            .map_err(|error| error.to_string())?;
         Ok(recovery_path.to_string_lossy().to_string())
-    }).await.map_err(|error| error.to_string())?
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[derive(serde::Serialize)]
@@ -3378,6 +3423,14 @@ fn open_user_data_store() -> Result<Arc<milim_storage::UserDataStore>> {
     open_user_data_store_at(&paths.user_db_file())
 }
 
+fn desktop_google_oauth_value(name: &str, compiled: Option<&'static str>) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .or_else(|| compiled.map(str::to_string))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 /// Build the embedded server state (backend + tools). Returns the MCP hub too
 /// so the caller can connect persisted servers on the async runtime (connecting
 /// spawns child processes).
@@ -3410,6 +3463,35 @@ fn build_state(
     for tool in host_tools::host_tools(workspace.clone()) {
         tools.register(tool);
     }
+
+    let google_workspace = match milim_server::google_workspace::GoogleWorkspaceConnection::open(
+        paths.root(),
+        milim_server::google_workspace::GoogleWorkspaceConfig::desktop(
+            desktop_google_oauth_value(
+                "MILIM_GOOGLE_OAUTH_CLIENT_ID",
+                option_env!("MILIM_GOOGLE_OAUTH_CLIENT_ID"),
+            ),
+            desktop_google_oauth_value(
+                "MILIM_GOOGLE_OAUTH_CLIENT_SECRET",
+                option_env!("MILIM_GOOGLE_OAUTH_CLIENT_SECRET"),
+            ),
+        ),
+        workspace.clone(),
+    ) {
+        Ok(connection) => {
+            let connection = Arc::new(connection);
+            if connection.available() {
+                for tool in milim_server::google_workspace::tools(connection.clone()) {
+                    tools.register(tool);
+                }
+            }
+            Some(connection)
+        }
+        Err(error) => {
+            tracing::warn!("Google Workspace connector unavailable: {error}");
+            None
+        }
+    };
 
     // Computer-use tools (screen capture + mouse/keyboard). Registered when
     // built with the feature; dormant until the runtime gate is enabled.
@@ -3462,6 +3544,9 @@ fn build_state(
     }
     if let Some(registry) = &registry {
         state = state.with_providers(registry.clone());
+    }
+    if let Some(google_workspace) = google_workspace {
+        state = state.with_google_workspace(google_workspace);
     }
     #[cfg(feature = "computer-use")]
     {
@@ -3928,7 +4013,10 @@ pub fn run() {
             preview_webview::preview_webview_navigate,
             preview_webview::preview_webview_reload,
             preview_webview::preview_webview_history,
-            preview_webview::preview_webview_url
+            preview_webview::preview_webview_url,
+            preview_webview::preview_webview_create,
+            preview_webview::preview_webview_clear_data,
+            preview_webview::preview_webview_close
         ])
         .run(tauri::generate_context!())
         .expect("error while running milim desktop");

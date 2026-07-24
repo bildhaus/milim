@@ -134,6 +134,16 @@ export function normalizeArtifactBrowserUrl(input: string): string | null {
   }
 }
 
+export function resolveArtifactBrowserInput(input: string): string | null {
+  const text = input.trim();
+  if (!text) return null;
+  if (/^(?:https?:\/\/|localhost(?::|\/|[?#]|$)|127\.0\.0\.1(?::|\/|[?#]|$)|\[::1\](?::|\/|[?#]|$)|[^\s/]+\.[^\s]+)/i.test(text)) {
+    return normalizeArtifactBrowserUrl(text);
+  }
+  if (/^[a-z][a-z0-9+.-]*:/i.test(text)) return null;
+  return `https://www.google.com/search?q=${encodeURIComponent(text)}`;
+}
+
 export function isArtifactBrowserUrl(value: string): boolean {
   return normalizeArtifactBrowserUrl(value) !== null;
 }

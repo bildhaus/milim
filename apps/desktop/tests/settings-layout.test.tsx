@@ -21,6 +21,15 @@ assert(source.includes('label: "General"'), "App should be labeled General");
 assert(source.includes('label: "Shortcuts"'), "System should be labeled Shortcuts");
 assert(source.includes('label: "Data"'), "History should be labeled Data");
 assert(source.includes('label: "Models & agents"'), "Models and agents should have a workflow section");
+assert(source.includes('title="Browser data"'), "Data settings should expose browser profile controls");
+assert(source.includes('title="Google Workspace"'), "Data settings should expose Google Workspace controls");
+assert(source.includes("chooseGoogleFilesFromSettings"), "Google Workspace settings should start the system-browser Picker");
+assert(source.includes('className="btn-accent google-workspace-connect-button"'), "Google Workspace connection should be a prominent primary action");
+assert(source.includes('new URL("../assets/google.svg", import.meta.url).href'), "Google Workspace settings should use the bundled Google logo");
+assert(source.includes('" · Managed folder"'), "Google Workspace settings should identify Milim's managed Drive folder");
+assert(source.includes("Removed Milim access. The Drive file was not deleted."), "Removing access must not imply deleting Drive files");
+assert(source.includes('testIdPrefix="browser-storage"'), "Browser storage should use the accessible choice control");
+assert(source.includes('data-testid="browser-data-clear"'), "Browser data should have an explicit clear action");
 assert(!source.includes("filteredSettingsSections"), "Search should not switch the active section while typing");
 assert(!source.includes("settings-status-pill"), "Decorative section status pills should stay removed");
 
@@ -73,5 +82,7 @@ equal(matchingSettingsEntries("sound")[0]?.id, "appearance-interface-sounds", "S
 equal(matchingSettingsEntries("worktree")[0]?.id, "workspace-new-chat", "Search should find workspace policies");
 equal(matchingSettingsEntries("ghost text")[0]?.id, "chat-ai-completion", "Search should find composer completion");
 equal(matchingSettingsEntries("ridgeline")[0]?.id, "appearance-empty-chat-ridgeline", "Search should find the empty-chat ridgeline preference");
+equal(matchingSettingsEntries("cookies")[0]?.id, "browser-data", "Search should find browser data controls");
+equal(matchingSettingsEntries("sheets")[0]?.id, "google-workspace", "Search should find Google Workspace controls");
 
 export {};
