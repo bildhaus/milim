@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build && node scripts/prerender-docs.mjs && node --check dist/_worker.js && pnpm run check:copy",
+    "build": "tsc && vite build && vite build --ssr src/entry-server.tsx --outDir .ssr-dist && node scripts/prerender-docs.mjs && node --check dist/_worker.js && pnpm run check:copy",
     "preview": "vite preview",
     "check:copy": "node scripts/check-copy.mjs"
   },

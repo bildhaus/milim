@@ -369,15 +369,15 @@ function searchDocs(index: SearchIndex, query: string) {
 }
 
 function docsHref(path: string, anchor?: string) {
-  const isDocsHost = window.location.hostname === "docs.milim.ai";
+  const isDocsHost = typeof window === "undefined" || window.location.hostname === "docs.milim.ai";
   const base = isDocsHost ? "" : "/docs";
   const href = path ? `${base}/${path}` : base || "/";
   return anchor ? `${href}#${anchor}` : href;
 }
 
-function currentDocPage() {
-  const path = window.location.pathname.replace(/\/+$/, "") || "/";
-  const isDocsHost = window.location.hostname === "docs.milim.ai";
+function currentDocPage(pathname?: string) {
+  const path = (pathname ?? window.location.pathname).replace(/\/+$/, "") || "/";
+  const isDocsHost = typeof window === "undefined" || window.location.hostname === "docs.milim.ai";
   const slug = isDocsHost
     ? path.replace(/^\/(?:docs|wiki)\/?/, "").replace(/^\//, "")
     : (path.match(/^\/(?:docs|wiki)(?:\/(.*))?$/)?.[1] ?? "");
@@ -394,9 +394,9 @@ function formatUpdated(date: string) {
   }).format(new Date(`${date}T00:00:00Z`));
 }
 
-export function DocsPage() {
+export function DocsPage({ pathname }: { pathname?: string } = {}) {
   const root = useRef<HTMLDivElement>(null);
-  const currentPage = currentDocPage();
+  const currentPage = currentDocPage(pathname);
   const isOverviewPage = currentPage.id === "overview";
   const searchIndex = useMemo(() => buildSearchIndex(docsSearchDocuments), []);
   const [scrollProgress, setScrollProgress] = useState(0);

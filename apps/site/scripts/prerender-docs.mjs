@@ -1,13 +1,15 @@
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const siteRoot = fileURLToPath(new URL("..", import.meta.url));
 const repoRoot = join(siteRoot, "..", "..");
 const docsRoot = join(repoRoot, "docs", "wiki");
 const distRoot = join(siteRoot, "dist");
+const ssrRoot = join(siteRoot, ".ssr-dist");
 const internalPrefix = "__docs";
-const landingHtml = readFileSync(join(distRoot, "index.html"), "utf8");
+const templateHtml = readFileSync(join(distRoot, "index.html"), "utf8");
+const { renderDocsPage, renderLandingPage } = await import(pathToFileURL(join(ssrRoot, "entry-server.js")).href);
 
 const pages = readdirSync(docsRoot)
   .filter((name) => name.endsWith(".md"))
@@ -19,7 +21,8 @@ for (const page of pages) {
   if (paths.has(page.path)) throw new Error(`Duplicate docs path: ${page.path || "/"}`);
   paths.add(page.path);
 
-  const html = withMetadata(landingHtml, page);
+  const pathname = page.path ? `/${page.path}` : "/";
+  const html = withMetadata(withBody(templateHtml, await renderDocsPage(pathname)), page);
   const outputDir = join(distRoot, internalPrefix, page.path);
   mkdirSync(outputDir, { recursive: true });
   writeFileSync(join(outputDir, "index.html"), html);
@@ -27,8 +30,11 @@ for (const page of pages) {
 
 if (!paths.has("")) throw new Error("Docs frontmatter must define one root page with an empty path");
 
+writeFileSync(join(distRoot, "index.html"), withBody(templateHtml, renderLandingPage()));
+writeFileSync(join(distRoot, "sitemap.xml"), sitemap(pages));
 writeFileSync(join(distRoot, "_worker.js"), workerSource(pages));
-console.log(`Prerendered ${pages.length} docs pages with static metadata.`);
+rmSync(ssrRoot, { recursive: true, force: true });
+console.log(`Prerendered the landing page and ${pages.length} docs pages with static bodies.`);
 
 function parsePage(name, markdown) {
   const match = markdown.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
@@ -41,17 +47,23 @@ function parsePage(name, markdown) {
     meta[line.slice(0, separator).trim()] = line.slice(separator + 1).trim();
   }
 
-  for (const key of ["id", "path", "title", "summary"]) {
+  for (const key of ["id", "path", "title", "summary", "updated"]) {
     if (!(key in meta)) throw new Error(`${name} is missing frontmatter key ${key}`);
   }
-  for (const key of ["id", "title", "summary"]) {
+  for (const key of ["id", "title", "summary", "updated"]) {
     if (!meta[key]) throw new Error(`${name} has an empty frontmatter key ${key}`);
   }
   if (meta.path && !/^[a-z0-9-]+(?:\/[a-z0-9-]+)*$/.test(meta.path)) {
     throw new Error(`${name} has unsafe docs path ${meta.path}`);
   }
 
-  return { id: meta.id, path: meta.path, title: meta.title, summary: meta.summary };
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(meta.updated)) throw new Error(`${name} has an invalid updated date`);
+
+  return { id: meta.id, path: meta.path, title: meta.title, summary: meta.summary, updated: meta.updated };
+}
+
+function withBody(html, body) {
+  return replaceOne(html, /<div id="root"><\/div>/i, `<div id="root">${body}</div>`, "root");
 }
 
 function withMetadata(html, page) {
@@ -86,6 +98,26 @@ function escapeText(value) {
 
 function escapeAttribute(value) {
   return escapeText(value).replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+}
+
+function sitemap(docs) {
+  const today = new Date().toISOString().slice(0, 10);
+  const urls = [
+    { loc: "https://milim.ai/", updated: today },
+    ...docs.map((page) => ({
+      loc: `https://docs.milim.ai${page.path ? `/${page.path}` : "/"}`,
+      updated: page.updated,
+    })),
+  ];
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+${urls.map(({ loc, updated }) => `  <url>
+    <loc>${loc}</loc>
+    <lastmod>${updated}</lastmod>
+  </url>`).join("\n")}
+</urlset>
+`;
 }
 
 function workerSource(docs) {

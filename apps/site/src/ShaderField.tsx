@@ -154,6 +154,8 @@ export function ShaderField({ dither = true }: ShaderFieldProps) {
 
     let frame = 0;
     let start = performance.now();
+    let visible = true;
+    let scrollProgress = 0;
 
     const resize = () => {
       const rect = host.getBoundingClientRect();
@@ -171,14 +173,19 @@ export function ShaderField({ dither = true }: ShaderFieldProps) {
       ];
     };
 
+    const updateScroll = () => {
+      scrollProgress = Math.min(1, window.scrollY / Math.max(1, window.innerHeight));
+    };
+
     const render = (now = 0) => {
       const elapsed = reduceMotion ? 0 : (now - start) * 0.001;
       program.uniforms.uTime.value = elapsed;
-      program.uniforms.uScroll.value = Math.min(1, window.scrollY / Math.max(1, window.innerHeight));
+      program.uniforms.uScroll.value = scrollProgress;
       renderer.render({ scene: mesh });
     };
 
     const loop = (now: number) => {
+      if (!visible) return;
       render(now);
       frame = requestAnimationFrame(loop);
     };
@@ -189,8 +196,16 @@ export function ShaderField({ dither = true }: ShaderFieldProps) {
     };
 
     resize();
+    updateScroll();
     render(performance.now());
     window.addEventListener("resize", onResize);
+    window.addEventListener("scroll", updateScroll, { passive: true });
+    const observer = new IntersectionObserver(([entry]) => {
+      visible = entry.isIntersecting;
+      cancelAnimationFrame(frame);
+      if (visible && !reduceMotion) frame = requestAnimationFrame(loop);
+    });
+    observer.observe(host);
     if (!reduceMotion) {
       frame = requestAnimationFrame(loop);
     }
@@ -200,7 +215,9 @@ export function ShaderField({ dither = true }: ShaderFieldProps) {
 
     return () => {
       cancelAnimationFrame(frame);
+      observer.disconnect();
       window.removeEventListener("resize", onResize);
+      window.removeEventListener("scroll", updateScroll);
       window.removeEventListener("pointermove", updatePointer);
       start = 0;
       gl.canvas.remove();

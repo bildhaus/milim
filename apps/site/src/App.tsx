@@ -1,9 +1,8 @@
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode, type SVGProps } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, type ReactNode, type SVGProps } from "react";
 import { useGSAP } from "@gsap/react";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 import Lenis from "lenis";
-import { DocsPage } from "./DocsPage";
 import { HeroAsciiField } from "./HeroAsciiField";
 import { ShaderField } from "./ShaderField";
 import { SiteMobileNav } from "./SiteMobileNav";
@@ -18,8 +17,9 @@ const RELEASES_URL = "https://github.com/oshtz/milim/releases/latest";
 const DOCS_URL = "https://docs.milim.ai/";
 const DOCS_QUICKSTART_URL = `${DOCS_URL}quickstart`;
 const GITHUB_RELEASE_API_URL = "https://api.github.com/repos/oshtz/milim/releases/latest";
+const GITHUB_REPO_API_URL = "https://api.github.com/repos/oshtz/milim";
 const RELEASE_CACHE_KEY = "milim-release-latest";
-const TYPER_VARIATIONS = ["typer-fill", "typer-accent", "typer-accent-fill", "typer-border"];
+const DocsPage = lazy(() => import("./DocsPage").then(({ DocsPage: Page }) => ({ default: Page })));
 
 type DownloadPlatform = "windows" | "macos";
 
@@ -33,6 +33,10 @@ type GitHubRelease = {
   tag_name?: string;
   html_url?: string;
   assets?: GitHubAsset[];
+};
+
+type GitHubRepo = {
+  stargazers_count?: number;
 };
 
 type ReleaseDownload = {
@@ -56,10 +60,9 @@ const fallbackDownloads: ReleaseDownloads = {
 const navLinks = [
   { label: "Docs", href: DOCS_URL, className: "nav-docs-link" },
   { label: "Product", href: "/#product" },
-  { label: "Privacy", href: "/#privacy" },
-  { label: "Agents", href: "/#agents" },
+  { label: "How it works", href: "/#workflow" },
+  { label: "Quickstart", href: "/#quickstart" },
   { label: "Download", href: "/#releases" },
-  { label: "FAQ", href: "/#faq" },
   { label: "GitHub", href: GITHUB_URL },
 ];
 
@@ -112,56 +115,87 @@ const faqItems = [
     answer:
       "Only to let you choose, view, and work with specific Drive, Docs, Sheets, and Slides files inside Milim. It requests per-file access rather than access to your whole Drive; details and removal controls are in the privacy policy.",
   },
+  {
+    id: "faq-difference",
+    question: "How is Milim different from Claude Code, LM Studio, or Open WebUI?",
+    answer:
+      "Those tools are strong at a specific runtime or interface. Milim is the local control plane around them: one project thread, visible tool runs, review controls, local memory, and provider switching without rebuilding the work around one vendor.",
+  },
 ];
 
 const features = [
   {
-    title: "Model choice stays simple",
-    body: "Hosted APIs, local runtimes, account runtimes, and media providers all fit the same development thread.",
+    title: "One desktop app, not a toolchain",
+    body: "Model switching, generated artifacts, previews, voice, schedules, themes, and provider setup sit in a single cross-platform shell instead of spreading across terminals and browser tabs.",
     wide: true,
   },
   {
-    title: "Privacy gate",
-    body: "Remote requests can pass through an outbound redact or block gate before anything leaves the machine.",
+    id: "review",
+    title: "Nothing lands without approval",
+    body: "Edits and tool calls arrive as proposals with a readable diff. The agent suggests; you decide what actually touches the repo.",
     visual: true,
   },
   {
-    title: "Agents use real tools",
-    body: "Filesystem, shell, sandbox, MCP, account-runtime, and preview-tool activity show up as structured runs instead of hidden prompt magic.",
-  },
-  {
-    title: "Memory lives locally",
-    body: "Embeddings, retrieved context, and scoped notes persist on disk in the local data store.",
-  },
-  {
-    title: "Desktop-first flow",
-    body: "Model switching, generated artifacts, previews, voice, schedules, themes, and provider setup sit in one cross-platform desktop shell.",
+    title: "Works on your actual repo",
+    body: "Git status, diffs, branches, and pull requests sit beside the thread, so the agent operates on the project you already have instead of a sandbox copy of it.",
+    full: true,
   },
 ];
 
 type ChapterKind = "models" | "privacy" | "tools" | "memory";
 
-const chapters: Array<{ title: string; body: string; kind: ChapterKind }> = [
+const chapters: Array<{ id?: string; title: string; kicker: string; body: string; kind: ChapterKind }> = [
   {
     title: "Model freedom",
+    kicker: "routing",
     body: "Switch between hosted APIs, local runtimes, account runtimes, and media models without rebuilding the thread around one vendor.",
     kind: "models",
   },
   {
+    id: "privacy",
     title: "Privacy control",
+    kicker: "boundary",
     body: "Keep local model traffic untouched and gate remote traffic with deterministic redaction or blocking.",
     kind: "privacy",
   },
   {
     title: "Agents and tools",
+    kicker: "execution",
     body: "Run tools with visible timelines: each model step, tool call, result, error, and elapsed time stays inspectable.",
     kind: "tools",
   },
   {
     title: "Local memory",
+    kicker: "context",
     body: "Ingest project context, search it semantically, and keep the useful parts near the thread.",
     kind: "memory",
   },
+];
+
+const chapterVisuals: Record<ChapterKind, { label: string; foot: string }> = {
+  models: { label: "model router", foot: "one thread / four sources" },
+  privacy: { label: "outbound gate", foot: "local passthrough / remote redacted" },
+  tools: { label: "tool run", foot: "3 steps / 1.9s" },
+  memory: { label: "local recall", foot: "3 chunks pinned to thread" },
+};
+
+const routeSources = [
+  { name: "openai", tag: "hosted" },
+  { name: "ollama", tag: "local" },
+  { name: "claude code", tag: "account" },
+  { name: "custom /v1", tag: "compatible" },
+];
+
+const toolSteps = [
+  { name: "mcp:list_files", meta: "42ms", detail: "src/App.tsx" },
+  { name: "sandbox:run", meta: "1.8s", detail: "pnpm build" },
+  { name: "diff:review", meta: "ready", detail: "3 checks passed" },
+];
+
+const recallHits = [
+  { path: "auth/session.rs", score: "0.92" },
+  { path: "docs/wiki/auth.md", score: "0.81" },
+  { path: "api/tokens.ts", score: "0.64" },
 ];
 
 export function App() {
@@ -174,18 +208,35 @@ export function App() {
   }, []);
 
   const path = window.location.pathname.replace(/\/+$/, "") || "/";
-  if (window.location.hostname === "docs.milim.ai") return <DocsPage />;
-  if (path === "/docs" || path === "/wiki" || path.startsWith("/docs/") || path.startsWith("/wiki/")) return <DocsPage />;
+  if (window.location.hostname === "docs.milim.ai") return <Suspense fallback={<DocsFallback />}><DocsPage /></Suspense>;
+  if (path === "/docs" || path === "/wiki" || path.startsWith("/docs/") || path.startsWith("/wiki/")) {
+    return <Suspense fallback={<DocsFallback />}><DocsPage /></Suspense>;
+  }
   return <LandingPage />;
 }
 
-function LandingPage() {
+export function LandingPage() {
   const root = useRef<HTMLDivElement>(null);
   const [downloadPlatform, setDownloadPlatform] = useState<DownloadPlatform | null>(null);
   const [downloads, setDownloads] = useState<ReleaseDownloads>(fallbackDownloads);
+  const [githubStars, setGithubStars] = useState<number | null>(null);
 
   useEffect(() => {
     setDownloadPlatform(detectDownloadPlatform());
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(GITHUB_REPO_API_URL, { headers: { Accept: "application/vnd.github+json" } })
+      .then((response) => (response.ok ? response.json() : Promise.reject()))
+      .then((repo: GitHubRepo) => {
+        if (!cancelled && Number.isFinite(repo.stargazers_count)) setGithubStars(repo.stargazers_count!);
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -217,14 +268,6 @@ function LandingPage() {
     () => {
       const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
       if (reduceMotion) return;
-
-      gsap.from(".hero-copy > :not(h1):not(.hero-line)", {
-        y: 28,
-        opacity: 0,
-        duration: 0.9,
-        stagger: 0.09,
-        ease: "power3.out",
-      });
 
       gsap.from(".hero-media", {
         y: 38,
@@ -270,84 +313,133 @@ function LandingPage() {
         },
       });
 
-      gsap.timeline({ repeat: -1, repeatDelay: 0.7 })
+      const streamLines = gsap.utils.toArray<HTMLElement>(".mini-stream-text span");
+      const composerText = document.querySelector<HTMLElement>(".mini-composer-input span");
+      const streamTimeline = gsap.timeline({
+        paused: true,
+        repeat: -1,
+        repeatDelay: 0.8,
+      })
+        .set(".mini-sent-message, .mini-response, .mini-diff-card, .mini-model-switch-note", {
+          autoAlpha: 0,
+          y: 12,
+        })
+        .set(".mini-composer-card", { y: -112 })
+        .set(".mini-composer-input span, .mini-stream-text span", {
+          clipPath: "inset(0 100% 0 0)",
+          opacity: 0,
+        })
+        .set(".mini-model-a", { autoAlpha: 1 })
+        .set(".mini-model-b", { autoAlpha: 0 })
+        .set(".mini-tool-row span", { y: 5, opacity: 0.48 })
+        .to(".mini-composer-input span", {
+          clipPath: "inset(0 0% 0 0)",
+          opacity: 1,
+          duration: 1.35,
+          ease: `steps(${composerText?.textContent?.length ?? 46})`,
+        })
+        .to(".mini-composer-send b", {
+          y: -1,
+          scale: 1.04,
+          duration: 0.16,
+          ease: "power2.out",
+        })
+        .to(".mini-composer-send b", { y: 0, scale: 1, duration: 0.2 })
+        .to(".mini-composer-card", { y: 0, duration: 0.72, ease: "power3.inOut" }, "<")
+        .to(".mini-sent-message", { autoAlpha: 1, y: 0, duration: 0.4, ease: "power2.out" }, "-=0.25")
+        .to(".mini-response", { autoAlpha: 1, y: 0, duration: 0.42, ease: "power2.out" })
         .to(".mini-stream-event i", {
           scale: 1.28,
           duration: 0.22,
           boxShadow: "0 0 24px rgba(184, 195, 165, 0.48)",
           ease: "power2.out",
         })
-        .to(".mini-stream-event i", { scale: 1, duration: 0.32, ease: "power2.inOut" })
-        .fromTo(
-          ".mini-tool-row span",
-          { y: 5, opacity: 0.48 },
-          { y: 0, opacity: 1, duration: 0.34, stagger: 0.09, ease: "power2.out" },
-          "<",
-        )
-        .to(".mini-tool-row span", { opacity: 0.72, duration: 0.5 }, "+=1.2");
-
-      const desktopMotion = gsap.matchMedia();
-      desktopMotion.add("(min-width: 981px)", () => {
-        ScrollTrigger.create({
-          trigger: ".story",
-          pin: ".story-copy",
-          start: "top top",
-          end: "bottom bottom",
+        .to(".mini-stream-event i", {
+          scale: 1,
+          boxShadow: "0 0 18px rgba(184, 195, 165, 0.28)",
+          duration: 0.32,
+          ease: "power2.inOut",
         });
 
-        gsap.utils.toArray<HTMLElement>(".chapter").forEach((chapter, index, cards) => {
-          gsap.fromTo(
-            chapter,
-            { opacity: 0.66, y: 46, scale: 0.985 },
-            {
-              opacity: 1,
-              y: 0,
-              scale: 1,
-              ease: "power2.out",
-              scrollTrigger: {
-                trigger: chapter,
-                start: "top 92%",
-                end: "top 38%",
-                scrub: 1.1,
-              },
-            },
-          );
-
-          const next = cards[index + 1];
-          if (!next) return;
-
-          gsap.to(chapter, {
-            opacity: 0.72,
-            y: -10,
-            scale: 0.985,
-            ease: "power1.out",
-            scrollTrigger: {
-              trigger: next,
-              start: "top 82%",
-              end: "top 28%",
-              scrub: 1.1,
-            },
-          });
+      streamLines.forEach((line) => {
+        streamTimeline.to(line, {
+          clipPath: "inset(0 0% 0 0)",
+          opacity: 1,
+          duration: Math.max(0.7, (line.textContent?.length ?? 30) / 32),
+          ease: `steps(${line.textContent?.length ?? 30})`,
         });
       });
 
-      return () => desktopMotion.revert();
+      streamTimeline
+        .to(".mini-tool-row span", {
+          y: 0,
+          opacity: 1,
+          duration: 0.34,
+          stagger: 0.09,
+          ease: "power2.out",
+        }, "<")
+        .to(".mini-model-a", { autoAlpha: 0, duration: 0.24 }, "+=0.35")
+        .to(".mini-model-b", { autoAlpha: 1, duration: 0.24 }, "<")
+        .to(".mini-model-switch-note", { autoAlpha: 1, y: 0, duration: 0.3 }, "<")
+        .to(".mini-diff-card", { autoAlpha: 1, y: 0, duration: 0.48, ease: "power2.out" }, "+=0.18")
+        .to(".mini-review-approve", {
+          borderColor: "rgba(184, 195, 165, 0.58)",
+          color: "var(--object-text)",
+          duration: 0.28,
+        }, "+=0.35")
+        .to({}, { duration: 1.15 })
+        .to(".mini-sent-message, .mini-response, .mini-diff-card", {
+          autoAlpha: 0,
+          y: -8,
+          duration: 0.45,
+          ease: "power2.in",
+        })
+        .to(".mini-composer-card", { y: -112, duration: 0.5, ease: "power2.inOut" }, "<");
+      ScrollTrigger.create({
+        trigger: ".hero-media",
+        start: "top bottom",
+        end: "bottom top",
+        onToggle: ({ isActive }) => isActive ? streamTimeline.play() : streamTimeline.pause(),
+      });
+
+      gsap.from(".chapter", {
+        y: 28,
+        opacity: 0,
+        duration: 0.7,
+        stagger: 0.08,
+        ease: "power3.out",
+        scrollTrigger: {
+          trigger: ".chapter-stack",
+          start: "top 78%",
+        },
+      });
+
+      gsap.utils.toArray<HTMLElement>(".chapter").forEach((chapter) => {
+        const trigger = ScrollTrigger.create({
+          trigger: chapter,
+          start: "top 94%",
+          end: "bottom 6%",
+          onToggle: ({ isActive }) => chapter.classList.toggle("is-idle", !isActive),
+        });
+        chapter.classList.toggle("is-idle", !trigger.isActive);
+      });
     },
     { scope: root },
   );
 
   return (
     <div ref={root} className="site-shell">
-      <main>
-        <Nav />
+      <a className="skip-link" href="#main-content">Skip to content</a>
+      <Nav />
+      <main id="main-content" tabIndex={-1}>
         <section className="hero" id="top">
           <HeroBackgroundEffect />
           <div className="hero-copy">
-            <h1>milim</h1>
-            <p className="hero-line"><TyperText text="Your local control plane for coding agents." delay={0.27} /></p>
+            <p className="hero-kicker">local-first / model-agnostic / MIT licensed</p>
+            <h1>Your local control plane for coding agents.</h1>
             <p className="hero-subline">
-              Use your own models and subscriptions, keep one canonical thread, review the diff, and ship.
-              <br className="desktop-copy-break" /> One MIT-licensed desktop app.{" "}
+              milim lets you use your own models and subscriptions, keep one canonical thread, review the diff, and ship.
+              <br className="desktop-copy-break" /> One desktop app.{" "}
               <a className="copy-doc-link" href={DOCS_URL}>Read the docs</a>.
             </p>
             <div className="hero-actions" aria-label="Download milim">
@@ -362,40 +454,44 @@ function LandingPage() {
 
         <section className="feature-section reveal" id="product">
           <div className="section-head">
+            <Eyebrow label="product" />
             <h2>
-              many models.
+              one app.
               <br />
-              one dev thread.
+              no black boxes.
             </h2>
             <p>
-              Use your own models and subscriptions, keep one canonical thread, review the diff, and ship.
+              A single desktop shell over the whole loop, where every run, diff, and outbound request is something you can open and read.
             </p>
           </div>
           <div className="feature-grid">
             {features.map((feature) => (
               <article
-                className={`feature-cell${feature.wide ? " feature-cell-wide" : ""}${feature.visual ? " feature-cell-visual" : ""}`}
+                className={`feature-cell${feature.wide ? " feature-cell-wide" : ""}${feature.visual ? " feature-cell-visual" : ""}${feature.full ? " feature-cell-full" : ""}`}
+                id={feature.id}
                 key={feature.title}
               >
                 <h3>{feature.title}</h3>
                 <p>{feature.body}</p>
-                {feature.visual ? <PrivacyGlyph /> : null}
+                {feature.visual ? <ReviewGlyph /> : null}
               </article>
             ))}
           </div>
         </section>
 
-        <section className="story" id="privacy">
+        <section className="story reveal" id="workflow">
           <div className="story-copy">
+            <Eyebrow label="how it works" />
             <h2>Switch the model without losing the work.</h2>
             <p>
               The desktop app keeps workspace context, memory, previews, artifacts, approvals, and remote boundaries visible.
             </p>
           </div>
-          <div className="chapter-stack" id="agents">
+          <div className="chapter-stack">
             {chapters.map((chapter, index) => (
-              <article className="chapter" style={{ "--chapter-offset": `${index * 18}px` } as CSSProperties} key={chapter.title}>
-                <div>
+              <article className={`chapter chapter-${chapter.kind}`} id={chapter.id} key={chapter.title}>
+                <Eyebrow index={String(index + 1).padStart(2, "0")} label={chapter.kicker} />
+                <div className="chapter-copy">
                   <h3>{chapter.title}</h3>
                   <p>{chapter.body}</p>
                 </div>
@@ -407,13 +503,13 @@ function LandingPage() {
 
         <section className="quickstart-strip reveal" id="quickstart" aria-labelledby="quickstart-title">
           <div>
-            <span className="section-kicker">quickstart</span>
+            <Eyebrow label="quickstart" />
             <h2 id="quickstart-title">download, connect, develop.</h2>
           </div>
           <div className="quickstart-steps">
             {quickstartSteps.map((item, index) => (
               <article className="quickstart-step" key={item.step}>
-                <span>{String(index + 1).padStart(2, "0")}</span>
+                <Eyebrow index={String(index + 1).padStart(2, "0")} label={item.step} />
                 <h3>{item.title}</h3>
                 <p>{item.body}</p>
               </article>
@@ -426,6 +522,7 @@ function LandingPage() {
 
         <section className="download-section reveal" id="releases">
           <div className="download-copy">
+            <Eyebrow label="download" />
             <h2 aria-label="Open source. Native desktop.">
               <span>Open source.</span>
               <span>Native desktop.</span>
@@ -438,6 +535,7 @@ function LandingPage() {
             </p>
             <p className="release-meta">
               Latest release: <a href={downloads.releaseUrl}>{downloads.tagName ?? "GitHub latest"}</a>
+              {githubStars !== null ? ` / ${githubStars.toLocaleString()} GitHub stars` : ""}
             </p>
             <div className="download-actions">
               <DownloadActions downloads={downloads} platform={downloadPlatform} context="release" />
@@ -448,6 +546,7 @@ function LandingPage() {
 
         <section className="faq-section reveal" id="faq" aria-labelledby="faq-title">
           <div className="section-head faq-head">
+            <Eyebrow label="faq" />
             <h2 id="faq-title">questions before install.</h2>
             <p>Short answers for the local-first and provider-boundary parts people usually check first.</p>
           </div>
@@ -463,77 +562,24 @@ function LandingPage() {
           </div>
         </section>
 
-        <footer className="footer">
-          <div className="footer-main">
-            <a className="footer-mark" href="/" aria-label="milim home">
-              <img src="/assets/milim-wordmark.svg" alt="" />
-            </a>
-            <p>&copy; {new Date().getFullYear()} Omer Shatzberg. MIT licensed.</p>
-          </div>
-          <nav className="footer-nav" aria-label="Footer">
-            <a href={DOCS_URL}>Docs</a>
-            <a href={DOCS_QUICKSTART_URL}>Quickstart</a>
-            <a href={`${DOCS_URL}models`}>Providers</a>
-            <a href={`${DOCS_URL}privacy`}>Privacy</a>
-            <a href={RELEASES_URL}>Latest release</a>
-            <a href={`${GITHUB_URL}/releases`}>Changelog</a>
-            <a href={GITHUB_URL}>GitHub</a>
-            <a href={`${GITHUB_URL}/blob/main/LICENSE`}>License</a>
-          </nav>
-        </footer>
       </main>
+      <Footer />
       <FaqJsonLd />
+      <SoftwareApplicationJsonLd version={downloads.tagName} />
     </div>
   );
 }
 
-function TyperText({ text, delay }: { text: string; delay: number }) {
-  const ref = useRef<HTMLSpanElement>(null);
-
-  useEffect(() => {
-    const element = ref.current;
-    if (!element) return;
-
-    const chars = Array.from(element.querySelectorAll<HTMLElement>(".typer-char"));
-    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (reduceMotion) {
-      chars.forEach((char) => char.classList.remove("typer-init"));
-      element.dataset.typerType = "done";
-      return;
-    }
-
-    const variations = [...TYPER_VARIATIONS].sort(() => Math.random() - 0.5);
-    const start = performance.now() + delay * 1000;
-    const duration = 1000 + chars.length * 10;
-    const divisor = Math.max(chars.length - 1, 1);
-    let frame = 0;
-
-    const draw = (now: number) => {
-      const progress = (now - start) / duration;
-      if (progress >= 0) element.dataset.typerType = "in";
-
-      chars.forEach((char, index) => {
-        const local = Math.max(0, Math.min(1, (progress - (index / divisor) * 0.35) / 0.65));
-        const variation = variations[Math.min(variations.length - 1, Math.floor(local * variations.length))];
-        char.className = `typer-char${local <= 0 ? " typer-init" : local >= 1 ? "" : ` ${variation}`}`;
-      });
-
-      if (progress < 1) frame = window.requestAnimationFrame(draw);
-      else element.dataset.typerType = "done";
-    };
-
-    frame = window.requestAnimationFrame(draw);
-    return () => window.cancelAnimationFrame(frame);
-  }, [delay, text]);
-
+function DocsFallback() {
   return (
-    <span ref={ref} data-typer data-typer-type="initial" aria-label={text}>
-      <span aria-hidden="true">
-        {text.split(/(\s+)/).map((part, index) => part.trim()
-          ? <span className="typer-word" key={index}>{[...part].map((char, charIndex) => <span className="typer-char typer-init" key={charIndex}>{char}</span>)}</span>
-          : part)}
-      </span>
-    </span>
+    <div className="docs-loading" role="status" aria-label="Loading documentation">
+      <img src="/assets/milim-wordmark.svg" alt="" />
+      <div>
+        <span />
+        <span />
+        <span />
+      </div>
+    </div>
   );
 }
 
@@ -604,6 +650,25 @@ function FaqJsonLd() {
   return <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(json) }} />;
 }
 
+function SoftwareApplicationJsonLd({ version }: { version?: string }) {
+  const json = {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    name: "milim",
+    description: "A local-first desktop control plane for coding agents, models, tools, memory, and review.",
+    applicationCategory: "DeveloperApplication",
+    operatingSystem: "Windows, macOS",
+    softwareVersion: version,
+    offers: {
+      "@type": "Offer",
+      price: "0",
+      priceCurrency: "USD",
+    },
+  };
+
+  return <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(json) }} />;
+}
+
 function detectDownloadPlatform(): DownloadPlatform | null {
   const navigatorWithUaData = navigator as Navigator & { userAgentData?: { platform?: string } };
   const platform = `${navigatorWithUaData.userAgentData?.platform ?? navigator.platform} ${navigator.userAgent}`.toLowerCase();
@@ -653,27 +718,38 @@ function formatBytes(size?: number) {
   return `${megabytes >= 10 ? Math.round(megabytes) : megabytes.toFixed(1)} MB`;
 }
 
-function PrivacyGlyph() {
+function Eyebrow({ index, label }: { index?: string; label: string }) {
   return (
-    <div className="privacy-glyph" aria-hidden="true">
-      <div className="privacy-board">
-        {["allow", "redact", "block", "local"].map((item) => (
-          <span key={item}>{item}</span>
-        ))}
+    <span className="eyebrow">
+      {index ? <span className="eyebrow-index">{index}</span> : null}
+      <span className="eyebrow-label">{label}</span>
+    </span>
+  );
+}
+
+function ReviewGlyph() {
+  return (
+    <div className="chapter-visual feature-glyph" aria-label="Proposed edits waiting on approval" role="img">
+      <div className="chapter-visual-bar">
+        <span>awaiting approval</span>
+        <i />
       </div>
-      <div className="privacy-line" />
+      <div className="chapter-visual-body">
+        <ul className="review-files">
+          <li className="review-edit"><b>M</b><s>auth/session.rs</s><em>+18 −4</em></li>
+          <li className="review-add"><b>A</b><s>auth/rotate.rs</s><em>+61</em></li>
+          <li className="review-del"><b>D</b><s>auth/legacy.rs</s><em>−42</em></li>
+        </ul>
+      </div>
+      <p className="chapter-visual-foot">3 files staged / none written yet</p>
     </div>
   );
 }
 
 function WorkbenchObject() {
   return (
-    <div className="hero-media workbench-object" aria-label="milim desktop workbench concept">
+    <div className="hero-media workbench-object" aria-label="milim desktop workbench concept" role="img">
       <MiniAppShell />
-      <div className="media-caption">
-        <span>MIT licensed</span>
-        <span>Windows and macOS desktop</span>
-      </div>
     </div>
   );
 }
@@ -694,10 +770,10 @@ function MiniAppShell() {
       <div className="mini-content">
         <div className="mini-topbar">
           <div className="mini-topbar-main">
-            <img src="/assets/milim-wordmark.svg" alt="" />
+            <span className="mini-wordmark">milim</span>
             <i />
             <strong>New chat</strong>
-            <code>ollama/llama3.2</code>
+            <code>reviewing workspace</code>
           </div>
           <div className="mini-topbar-actions" aria-hidden="true">
             <span><MiniPinIcon size={13} /></span>
@@ -717,34 +793,57 @@ function MiniAppShell() {
               <code>pnpm test</code>
             </div>
             <p className="mini-stream-text">
-              <span style={{ "--line-width": "39ch" } as CSSProperties}>Workspace context stays attached.</span>
-              <span style={{ "--line-width": "44ch" } as CSSProperties}>Model switches affect the next turn only.</span>
-              <span style={{ "--line-width": "37ch" } as CSSProperties}>Artifacts and previews remain in thread.</span>
+              <span>Tests pass after the targeted fix.</span>
+              <span>Workspace context stays attached.</span>
+              <span>The diff is ready for review.</span>
             </p>
             <div className="mini-tool-row">
               <span>workspace</span>
               <span>test output</span>
-              <span>model switch</span>
+              <span>diff ready</span>
+            </div>
+            <p className="mini-model-switch-note"><span>model switched</span><code>thread retained</code></p>
+          </div>
+          <div className="mini-diff-card">
+            <div className="mini-diff-head">
+              <span>src/review.ts</span>
+              <code>+3 −1</code>
+            </div>
+            <pre>
+              <span className="mini-diff-context">@@ -42,4 +42,6 @@ reviewDiff</span>
+              <span className="mini-diff-remove">- return publish(change)</span>
+              <span className="mini-diff-add">+ const review = await inspect(change)</span>
+              <span className="mini-diff-add">+ if (!review.approved) return hold(change)</span>
+              <span className="mini-diff-add">+ return publish(review.patch)</span>
+            </pre>
+            <div className="mini-diff-review">
+              <span>inline review ready</span>
+              <em>Reject</em>
+              <em className="mini-review-approve">Approve</em>
             </div>
           </div>
           <div className="mini-composer-card">
             <div className="mini-control-bar">
               <div className="mini-chips">
-                <span className="mini-chip">
+                <span className="mini-chip mini-model-chip">
                   <i />
-                  <span>ollama/llama3.2</span>
+                  <span className="mini-model-label mini-model-a">ollama/llama3.2</span>
+                  <span className="mini-model-label mini-model-b">openai/gpt-5</span>
                   <MiniChevronDownIcon size={10} />
                 </span>
-                <span className="mini-chip mini-session-chip">
-                  <MiniFolderIcon size={12} />
-                  <span>Session</span>
-                  <em>2 active</em>
-                  <MiniChevronDownIcon size={10} />
+                <span className="mini-chip mini-plan-chip">
+                  <MiniLightbulbIcon size={12} />
+                  <span>Plan</span>
+                  <em>Read-only</em>
+                </span>
+                <span className="mini-chip mini-goal-chip">
+                  <MiniPinIcon size={12} />
+                  <span>Goal</span>
                 </span>
               </div>
             </div>
             <div className="mini-composer-input">
-              <span>Switch to a faster model and check the fix.</span>
+              <span>Switch models, review the diff, then approve.</span>
             </div>
             <div className="mini-composer-bar">
               <div className="mini-composer-tools">
@@ -754,7 +853,6 @@ function MiniAppShell() {
                 <span><MiniUserRoundIcon size={13} /></span>
               </div>
               <div className="mini-composer-send">
-                <span className="mini-token-count">~0 / 1044k tokens</span>
                 <b><MiniArrowUpIcon size={17} /></b>
               </div>
             </div>
@@ -767,8 +865,7 @@ function MiniAppShell() {
 
 function ReleaseObject() {
   return (
-    <div className="download-media release-object" aria-label="milim source and release concept">
-      <HeroBackgroundEffect />
+    <div className="download-media release-object" aria-label="milim source and release concept" role="img">
       <div className="release-grid" aria-hidden="true">
         <span>git clone oshtz/milim</span>
         <span>pnpm build</span>
@@ -816,41 +913,91 @@ function Nav() {
   );
 }
 
-function ChapterVisual({ kind }: { kind: ChapterKind }) {
+function Footer() {
   return (
-    <div className={`mini-panel chapter-visual chapter-visual-${kind}`} aria-hidden="true">
-      {kind === "models" ? (
-        <div className="model-router">
-          <span className="route-node route-node-openai">openai</span>
-          <span className="route-node route-node-local">local</span>
-          <span className="route-node route-node-anthropic">anthropic</span>
-          <span className="route-node route-node-custom">custom /v1</span>
-          <div className="route-pulse" />
-          <p>route by task, not vendor</p>
-        </div>
-      ) : null}
-      {kind === "privacy" ? (
-        <div className="privacy-gate">
-          <p className="payload payload-in"><span>privacy gate</span><b>email: omer@local.dev</b><em>redact before remote</em></p>
-        </div>
-      ) : null}
-      {kind === "tools" ? (
-        <ol className="tool-timeline">
-          <li><span>mcp:list_files</span><b>42ms</b><em>src/App.tsx</em></li>
-          <li><span>sandbox:run</span><b>1.8s</b><em>pnpm build</em></li>
-          <li><span>result streamed</span><b>done</b><em>3 checks passed</em></li>
-        </ol>
-      ) : null}
-      {kind === "memory" ? (
-        <div className="memory-map">
-          <span className="memory-node memory-thread">thread</span>
-          <span className="memory-node memory-project">project</span>
-          <span className="memory-node memory-rag">rag</span>
-          <span className="memory-node memory-history">history</span>
-          <i />
-          <b>context stack</b>
-        </div>
-      ) : null}
+    <footer className="footer">
+      <div className="footer-main">
+        <a className="footer-mark" href="/" aria-label="milim home">
+          <img src="/assets/milim-wordmark.svg" alt="" />
+        </a>
+        <p>&copy; {new Date().getFullYear()} milim contributors. MIT licensed.</p>
+      </div>
+      <nav className="footer-nav" aria-label="Footer">
+        <a href={DOCS_URL}>Docs</a>
+        <a href={DOCS_QUICKSTART_URL}>Quickstart</a>
+        <a href={`${DOCS_URL}models`}>Providers</a>
+        <a href={`${DOCS_URL}privacy`}>Privacy</a>
+        <a href={RELEASES_URL}>Latest release</a>
+        <a href={`${GITHUB_URL}/releases`}>Changelog</a>
+        <a href={GITHUB_URL}>GitHub</a>
+        <a href={`${GITHUB_URL}/blob/main/LICENSE`}>License</a>
+      </nav>
+    </footer>
+  );
+}
+
+function ChapterVisual({ kind }: { kind: ChapterKind }) {
+  const { label, foot } = chapterVisuals[kind];
+  return (
+    <div className={`chapter-visual chapter-visual-${kind}`} aria-hidden="true">
+      <div className="chapter-visual-bar">
+        <span>{label}</span>
+        <i />
+      </div>
+      <div className="chapter-visual-body">
+        {kind === "models" ? (
+          <div className="route-rail">
+            <span className="route-cursor" />
+            {routeSources.map((source) => (
+              <span className="route-row" key={source.name}>
+                <b>{source.name}</b>
+                <em>{source.tag}</em>
+              </span>
+            ))}
+          </div>
+        ) : null}
+        {kind === "privacy" ? (
+          <div className="gate-lanes">
+            <span className="gate-line" />
+            <span className="gate-lane gate-lane-local">
+              <b>local</b>
+              <s>127.0.0.1:11434</s>
+              <em>untouched</em>
+            </span>
+            <span className="gate-lane gate-lane-remote">
+              <b>remote</b>
+              <s>email: <u>dev@example.test<i /></u></s>
+              <em>redacted</em>
+            </span>
+          </div>
+        ) : null}
+        {kind === "tools" ? (
+          <ol className="run-timeline">
+            {toolSteps.map((step) => (
+              <li key={step.name}>
+                <b>{step.name}</b>
+                <s>{step.meta}</s>
+                <em>{step.detail}</em>
+              </li>
+            ))}
+          </ol>
+        ) : null}
+        {kind === "memory" ? (
+          <div className="recall">
+            <p className="recall-query">where is auth handled?</p>
+            <ul className="recall-hits">
+              {recallHits.map((hit) => (
+                <li key={hit.path}>
+                  <b>{hit.path}</b>
+                  <i />
+                  <s>{hit.score}</s>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+      </div>
+      <p className="chapter-visual-foot">{foot}</p>
     </div>
   );
 }

@@ -38,6 +38,7 @@ export function HeroAsciiField() {
     let frame = 0;
     let last = 0;
     let dpr = 1;
+    let visible = true;
 
     const resize = () => {
       const rect = host.getBoundingClientRect();
@@ -169,6 +170,7 @@ export function HeroAsciiField() {
     };
 
     const loop = (now: number) => {
+      if (!visible) return;
       frame = requestAnimationFrame(loop);
       if (now - last < 50) return;
       last = now;
@@ -183,12 +185,19 @@ export function HeroAsciiField() {
     resize();
     drawShaderText();
     window.addEventListener("resize", onResize);
+    const observer = new IntersectionObserver(([entry]) => {
+      visible = entry.isIntersecting;
+      cancelAnimationFrame(frame);
+      if (visible && !reduceMotion) frame = requestAnimationFrame(loop);
+    });
+    observer.observe(canvas);
     if (!reduceMotion) {
       frame = requestAnimationFrame(loop);
     }
 
     return () => {
       cancelAnimationFrame(frame);
+      observer.disconnect();
       window.removeEventListener("resize", onResize);
     };
   }, []);

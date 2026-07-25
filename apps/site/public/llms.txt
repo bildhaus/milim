@@ -1,0 +1,15 @@
+# milim
+
+> milim is an MIT-licensed local control plane for coding agents.
+
+Use your own hosted models, local runtimes, and account subscriptions while keeping workspace context, tool history, artifacts, approvals, and diffs in one canonical development thread.
+
+## Links
+
+- Website: https://milim.ai/
+- Documentation: https://docs.milim.ai/
+- Quickstart: https://docs.milim.ai/quickstart
+- Models and providers: https://docs.milim.ai/models
+- Privacy: https://docs.milim.ai/privacy
+- GitHub: https://github.com/oshtz/milim
+- Latest release: https://github.com/oshtz/milim/releases/latest

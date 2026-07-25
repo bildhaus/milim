@@ -29,7 +29,7 @@ export function ThemeControl() {
   }, [themeMode]);
 
   return (
-    <div className="theme-control" aria-label="Color mode" data-theme-mode={themeMode}>
+    <div className="theme-control" aria-label="Color mode" data-theme-mode={themeMode} role="group">
       {themeModes.map((mode) => (
         <button
           type="button"
