@@ -35,6 +35,7 @@ import {
   type OpenCodeRunEvent,
   type PiRunEvent,
   type PullRequestDetails,
+  type ReviewComment,
   type WorkspaceGitAction,
   type WorkspaceGitActionResult,
   type WorkspaceGitDiffScope,
@@ -708,6 +709,12 @@ export function GitPanel({
   const [diffScope, setDiffScope] = useState<WorkspaceGitDiffScope>("all");
   const [diffBase, setDiffBase] = useState("");
   const [reviewAnchor, setReviewAnchor] = useState<{ sectionId: string; index: number } | null>(null);
+  const [diffReviewDraft, setDiffReviewDraft] = useState<{
+    sectionId: string;
+    index: number;
+    body: string;
+    comment: Omit<ReviewComment, "id" | "body" | "timestamp">;
+  } | null>(null);
   const [pendingDiffFile, setPendingDiffFile] = useState<{
     path: string;
     index: number;
@@ -1566,29 +1573,41 @@ export function GitPanel({
   }
 
   function renderDiffView() {
-    const addReviewComment = (row: DiffRow, index: number, section: DiffSection | undefined, shift: boolean) => {
+    const openReviewComment = (row: DiffRow, index: number, section: DiffSection | undefined, shift: boolean) => {
       if (!section || !["add", "delete", "context"].includes(row.kind)) return;
       let start = index;
       if (shift && reviewAnchor?.sectionId === section.id) start = Math.min(reviewAnchor.index, index);
       const end = shift && reviewAnchor?.sectionId === section.id ? Math.max(reviewAnchor.index, index) : index;
       const rows = renderedDiffRows.slice(start, end + 1).filter((candidate) => ["add", "delete", "context"].includes(candidate.kind));
-      const body = window.prompt("Review comment");
-      if (!body?.trim()) { setReviewAnchor({ sectionId: section.id, index }); return; }
       const side = row.kind === "delete" ? "old" : "new";
       const lineNumbers = rows
         .map((candidate) => Number(side === "old" ? candidate.oldNo : candidate.newNo))
         .filter((value) => Number.isFinite(value) && value > 0);
-      window.dispatchEvent(new CustomEvent("milim:add-review-comment", { detail: {
+      setReviewAnchor({ sectionId: section.id, index });
+      setDiffReviewDraft({
+        sectionId: section.id,
+        index: end,
+        body: "",
+        comment: {
+          surface: "diff",
+          filePath: section.path,
+          side,
+          startLine: Math.min(...lineNumbers),
+          endLine: Math.max(...lineNumbers),
+          selectedText: rows.map((candidate) => candidate.text).join("\n"),
+        },
+      });
+    };
+    const submitReviewComment = () => {
+      const body = diffReviewDraft?.body.trim();
+      if (!diffReviewDraft || !body) return;
+      window.dispatchEvent(new CustomEvent<ReviewComment>("milim:add-review-comment", { detail: {
+        ...diffReviewDraft.comment,
         id: `review-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-        surface: "diff",
-        filePath: section.path,
-        side,
-        startLine: Math.min(...lineNumbers),
-        endLine: Math.max(...lineNumbers),
-        selectedText: rows.map((candidate) => candidate.text).join("\n"),
-        body: body.trim(),
+        body,
         timestamp: Date.now(),
       } }));
+      setDiffReviewDraft(null);
       setReviewAnchor(null);
     };
     return (
@@ -1606,6 +1625,12 @@ export function GitPanel({
           const searchActive =
             matchIndex === activeDiffSearchIndex &&
             diffSearchMatches.length > 0;
+          const activeReviewDraft =
+            diffReviewDraft &&
+            diffReviewDraft.sectionId === section?.id &&
+            diffReviewDraft.index === index
+              ? diffReviewDraft
+              : null;
           return (
             <div
               className={`git-diff-row ${row.kind}${searchActive ? " search-active" : ""}`}
@@ -1618,7 +1643,7 @@ export function GitPanel({
               onClick={(event) => {
                 if (["add", "delete", "context"].includes(row.kind) && section) {
                   setReviewAnchor({ sectionId: section.id, index });
-                  if (event.shiftKey) addReviewComment(row, index, section, true);
+                  if (event.shiftKey) openReviewComment(row, index, section, true);
                 }
               }}
             >
@@ -1662,9 +1687,50 @@ export function GitPanel({
                       title="Add review comment (Shift-click another line for a range)"
                       onClick={(event) => {
                         event.stopPropagation();
-                        addReviewComment(row, index, section, event.shiftKey);
+                        openReviewComment(row, index, section, event.shiftKey);
                       }}
                     >+</button>
+                  ) : null}
+                  {activeReviewDraft ? (
+                    <form
+                      className="git-diff-comment-editor"
+                      onClick={(event) => event.stopPropagation()}
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        submitReviewComment();
+                      }}
+                    >
+                      <textarea
+                        autoFocus
+                        aria-label="Review comment"
+                        placeholder="Add a review comment..."
+                        rows={3}
+                        value={activeReviewDraft.body}
+                        onChange={(event) =>
+                          setDiffReviewDraft({
+                            ...activeReviewDraft,
+                            body: event.currentTarget.value,
+                          })
+                        }
+                        onKeyDown={(event) => {
+                          if (event.key === "Escape") {
+                            event.preventDefault();
+                            setDiffReviewDraft(null);
+                          }
+                        }}
+                      />
+                      <div className="git-diff-comment-actions">
+                        <button
+                          type="button"
+                          onClick={() => setDiffReviewDraft(null)}
+                        >
+                          Cancel
+                        </button>
+                        <button type="submit" disabled={!activeReviewDraft.body.trim()}>
+                          Add to composer
+                        </button>
+                      </div>
+                    </form>
                   ) : null}
                 </>
               )}

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { diffRows, diffSections, diffStats, findDiffSectionIndex, gitFileTree, shouldCollapseDiffSection } from "../src/lib/gitDiffRows.js";
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -52,5 +54,12 @@ const fileTree = gitFileTree([
 assert(fileTree[0].name === "apps/desktop/src", "single-child folders should be compacted");
 assert(fileTree[0].children.map((node) => node.name).join(",") === "components,lib", "folders should preserve the file hierarchy");
 assert(fileTree[1].name === "README.md" && fileTree[1].fileIndex === 2, "root files should remain navigable");
+
+const gitPanelSource = readFileSync(resolve(process.cwd(), "src/components/GitPanel.tsx"), "utf8");
+const styles = readFileSync(resolve(process.cwd(), "src/styles.css"), "utf8");
+assert(!gitPanelSource.includes('window.prompt("Review comment")'), "diff review comments should use the Milim editor");
+assert(gitPanelSource.includes('className="git-diff-comment-editor"'), "diff review comments should render inline");
+assert(styles.includes(".git-diff-comment {\n  position: absolute;"), "the review button should overlay the gutter instead of creating a row");
+assert(styles.includes(".git-diff-comment-editor {\n  position: sticky;"), "only the open review editor should occupy a full diff row");
 
 export {};
