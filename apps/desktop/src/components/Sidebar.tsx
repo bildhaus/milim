@@ -324,25 +324,23 @@ export function ProjectCustomizationDialog({
           <h2>Customize project</h2>
           <p title={project.folder}>{project.folder}</p>
         </div>
-        <div className="editor-actions">
-          <button className="btn-ghost" type="button" onClick={reset}>Reset</button>
-          <button className="btn-ghost" type="button" onClick={onClose}>Cancel</button>
-          <button
-            className="btn-accent"
-            type="button"
-            disabled={!colorValid}
-            onClick={() => {
-              onSave({ name, icon, color: normalizedColor });
-              onClose();
-            }}
-          >
-            Save
-          </button>
-        </div>
       </div>
 
       <div className="project-customization-body">
-        <section className="editor-section">
+        <section className="project-customization-preview" aria-label="Project preview">
+          <span className="project-customization-preview-label">Sidebar preview</span>
+          <div className="project-customization-preview-row">
+            <span style={previewColor ? { color: previewColor } : undefined}>
+              <ProjectIcon icon={icon} />
+            </span>
+            <div className="project-customization-preview-copy">
+              <strong style={previewColor ? { color: previewColor } : undefined}>{name.trim() || folderLabel(project.folder)}</strong>
+              <span style={previewColor ? { color: previewColor } : undefined}>Example thread name</span>
+            </div>
+          </div>
+        </section>
+
+        <section className="project-customization-name-section">
           <label className="project-customization-name">
             <span>Name</span>
             <input
@@ -356,7 +354,7 @@ export function ProjectCustomizationDialog({
           </label>
         </section>
 
-        <section className="editor-section">
+        <section className="editor-section project-appearance-section">
           <div className="editor-section-head">
             <h3>Icon</h3>
             <span>{PROJECT_ICON_OPTIONS.find((option) => option.id === (icon ?? "folder"))?.label}</span>
@@ -380,32 +378,44 @@ export function ProjectCustomizationDialog({
               );
             })}
           </div>
-        </section>
 
-        <section className="editor-section project-color-section">
-          <div className="editor-section-head">
-            <h3>Icon and thread color</h3>
-            <button className="btn-ghost compact" type="button" disabled={color == null} onClick={() => setColor(undefined)}>
-              Use default
-            </button>
+          <div className="project-appearance-divider" />
+          <div className="project-color-section">
+            <div className="project-color-heading">
+              <div>
+                <h3>Color</h3>
+                <p>Applied to the icon, project name, and thread names</p>
+              </div>
+              <button className="btn-ghost compact" type="button" disabled={color == null} onClick={() => setColor(undefined)}>
+                Use default
+              </button>
+            </div>
+            <ColorField
+              value={color ?? previewColor ?? theme.colors.tertiaryText}
+              onChange={setColor}
+              label={color == null ? "Default" : color}
+            />
+            {!colorValid && <p className="sheet-hint error">Enter a 3- or 6-digit hex color.</p>}
           </div>
-          <ColorField
-            value={color ?? previewColor ?? theme.colors.tertiaryText}
-            onChange={setColor}
-            label={color == null ? "Default" : color}
-          />
-          {!colorValid && <p className="sheet-hint error">Enter a 3- or 6-digit hex color.</p>}
         </section>
+      </div>
 
-        <section className="project-customization-preview" aria-label="Project preview">
-          <div className="project-customization-preview-head">
-            <span style={previewColor ? { color: previewColor } : undefined}>
-              <ProjectIcon icon={icon} />
-            </span>
-            <strong>{name.trim() || folderLabel(project.folder)}</strong>
-          </div>
-          <span style={previewColor ? { color: previewColor } : undefined}>Example thread name</span>
-        </section>
+      <div className="project-customization-footer">
+        <button className="btn-ghost" type="button" onClick={reset}>Reset to defaults</button>
+        <div className="editor-actions">
+          <button className="btn-ghost" type="button" onClick={onClose}>Cancel</button>
+          <button
+            className="btn-accent"
+            type="button"
+            disabled={!colorValid}
+            onClick={() => {
+              onSave({ name, icon, color: normalizedColor });
+              onClose();
+            }}
+          >
+            Save
+          </button>
+        </div>
       </div>
     </SheetDialog>
   );
@@ -1422,7 +1432,7 @@ export function Sidebar({
                       </span>
                       <span className="section-copy" title={group.subtitle ?? group.label}>
                         <span className="section-label-row">
-                          <span className="section-label">{group.label}</span>
+                          <span className={"section-label" + (sectionProjectColor ? " project-colored" : "")}>{group.label}</span>
                         </span>
                       </span>
                     </button>

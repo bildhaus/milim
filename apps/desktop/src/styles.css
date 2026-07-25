@@ -1681,6 +1681,9 @@ body.sidebar-pointer-dragging .session-section-title {
 .session-section .section-type-icon.project-colored {
   color: var(--project-color);
 }
+.session-section .section-label.project-colored {
+  color: var(--project-color);
+}
 .section-type-icon.chat-toggle-icon svg {
   transition: transform var(--motion-fast) var(--motion-ease-out);
 }
@@ -12957,15 +12960,18 @@ span.provider-brand-icon {
   gap: 8px;
 }
 .project-customization-sheet {
-  width: min(560px, 94vw);
+  width: min(540px, 94vw);
   height: auto;
   max-height: 88vh;
+  padding: 0;
 }
 .project-customization-header {
   align-items: flex-start;
+  padding: 16px 18px 14px;
+  border-bottom: 1px solid var(--border-primary);
 }
 .project-customization-header p {
-  max-width: 310px;
+  max-width: 440px;
   margin: 4px 0 0;
   overflow: hidden;
   color: var(--tertiary-text);
@@ -12976,26 +12982,31 @@ span.provider-brand-icon {
 }
 .project-customization-body {
   display: grid;
-  gap: 12px;
-  margin-top: 16px;
+  gap: 14px;
+  padding: 14px 18px 16px;
   overflow: auto;
+}
+.project-customization-name-section {
+  min-width: 0;
 }
 .project-customization-name {
   display: grid;
-  gap: 8px;
-  color: var(--secondary-text);
-  font-size: 12px;
+  gap: 7px;
+  color: var(--tertiary-text);
+  font-size: 11px;
+  font-weight: 650;
 }
 .project-customization-name .name-input {
   width: 100%;
+  font-size: 15px;
 }
 .project-icon-grid {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 7px;
+  gap: 8px;
 }
 .project-icon-option {
-  min-height: 42px;
+  min-height: 40px;
   border: 1px solid var(--border-primary);
   border-radius: 8px;
   background: var(--input-bg);
@@ -13010,27 +13021,96 @@ span.provider-brand-icon {
   border-color: color-mix(in srgb, var(--accent) 68%, var(--border-primary));
   background: var(--accent-soft);
   color: var(--accent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.project-appearance-divider {
+  height: 1px;
+  margin: 14px -13px;
+  background: var(--border-primary);
+}
+.project-color-section {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px 16px;
+  align-items: center;
+}
+.project-color-heading {
+  display: contents;
+}
+.project-color-heading > div {
+  min-width: 0;
+}
+.project-color-heading h3 {
+  margin: 0;
+  color: var(--primary-text);
+  font-size: 12px;
+  font-weight: 650;
+}
+.project-color-heading p {
+  margin: 3px 0 0;
+  color: var(--tertiary-text);
+  font-size: 11px;
+  line-height: 1.35;
 }
 .project-color-section .ui-color {
+  grid-column: 1 / -1;
   min-height: 34px;
+}
+.sheet .project-color-section .ui-color-pop {
+  top: auto;
+  bottom: calc(100% + 6px);
+  transform-origin: bottom left;
 }
 .project-customization-preview {
   display: grid;
-  gap: 6px;
-  padding: 12px;
+  gap: 9px;
+  padding: 11px 12px;
   border: 1px solid var(--border-primary);
   border-radius: 8px;
-  background: var(--sidebar-bg);
+  background: color-mix(in srgb, var(--sidebar-bg) 88%, var(--panel-bg));
   color: var(--primary-text);
   font-size: 13px;
 }
-.project-customization-preview-head {
+.project-customization-preview-label {
+  color: var(--tertiary-text);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.project-customization-preview-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+}
+.project-customization-preview-row > span {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 18px;
+}
+.project-customization-preview-copy {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+.project-customization-preview-copy strong,
+.project-customization-preview-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-customization-preview-copy span {
+  font-size: 12px;
+}
+.project-customization-footer {
   display: flex;
   align-items: center;
-  gap: 7px;
-}
-.project-customization-preview > span {
-  padding-left: 21px;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--border-primary);
+  background: color-mix(in srgb, var(--bg-secondary) 96%, var(--bg-primary));
 }
 .btn-ghost, .btn-accent, .btn-file {
   border: 1px solid var(--border-primary);
