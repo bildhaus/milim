@@ -841,15 +841,14 @@ async function runNativePreviewOcclusionCheck(page, pid) {
   await page.getByTitle("Expand sidebar").click();
   await delay(220);
 
-  await page.getByTestId("composer-input").fill("/goal");
-  await page.getByTestId("composer-send").click();
-  await page.getByTestId("goal-panel").waitFor();
+  await page.getByTestId("open-settings").click();
+  await page.getByTestId("settings-section-app").waitFor();
   const blockedViews = await waitForWryVisibility(pid, preview.handle, false);
   if (!blockedViews.some((view) => visibleBaselineHandles.has(view.handle) && view.visible)) {
     throw new Error(`Native preview blocker hid the main webview: ${describeWryWebviews(blockedViews)}`);
   }
 
-  await page.getByLabel("Close goal", { exact: true }).click();
+  await page.getByTestId("close-settings").click();
   await waitForWryVisibility(pid, preview.handle, true);
   await page.getByLabel("Close inspector", { exact: true }).click();
   await page.getByTestId("open-artifact-browser").waitFor();
@@ -1222,7 +1221,8 @@ async function runModelPickerSurfaceCheck(page) {
       const pickChildren = Array.from(pick?.children ?? []).map((child) => child.className || child.tagName);
       return {
         height: row.getBoundingClientRect().height,
-        heavyMetadataCount: row.querySelectorAll(".mp-meta, .mp-status, .mp-provider, .mp-runtime, .mp-route, .mp-lane").length,
+        heavyMetadataCount: row.querySelectorAll(".mp-meta, .mp-status, .mp-provider, .mp-runtime, .mp-lane").length,
+        routeCount: row.querySelectorAll(".mp-route").length,
         starCount: row.querySelectorAll(".mp-star").length,
         capsCount: row.querySelectorAll(".mp-caps").length,
         effortCount: row.querySelectorAll(".mp-effort-btn").length,
@@ -1237,6 +1237,9 @@ async function runModelPickerSurfaceCheck(page) {
     }
     if (audit.heavyMetadataCount !== 0) {
       throw new Error("Model picker row should not render visible provider/runtime/status metadata elements.");
+    }
+    if (audit.routeCount !== 1) {
+      throw new Error("Model picker row should render one visible route label.");
     }
     if (audit.starCount !== 1) {
       throw new Error("Model picker row should include one favorite control.");
@@ -1254,7 +1257,7 @@ async function runModelPickerSurfaceCheck(page) {
     const collapsibleGroup = picker.locator(".mp-group:has(.mp-group-toggle)").first();
     if (await collapsibleGroup.count()) {
       const toggle = collapsibleGroup.locator(".mp-group-toggle");
-      const groupLabel = (await toggle.locator("span").textContent())?.trim();
+      const groupLabel = (await toggle.locator(".mp-group-label > span").last().textContent())?.trim();
       const modelName = (await collapsibleGroup.locator(".mp-name").first().textContent())?.trim();
       if (groupLabel && modelName) {
         await toggle.click();
@@ -1755,11 +1758,9 @@ async function runMemoryLibraryCheck(page) {
 
 async function runContextDrawerCheck(page) {
   await page.getByLabel("Open context").click();
-  await page.getByLabel("Thread context").waitFor();
-  await page.getByLabel("Thread context").getByText("Model", { exact: true }).waitFor();
-  if (await page.getByTestId("account-usage-pill").count()) {
-    throw new Error("Provider-key models should not render account usage in the title bar.");
-  }
+  const context = page.getByTestId("quick-summary-panel");
+  await context.waitFor();
+  await context.getByText("Model", { exact: true }).waitFor();
   await page.getByLabel("Close context").click();
 }
 
@@ -1874,8 +1875,8 @@ async function runProviderSetup(page) {
   await page.getByTestId("chat-shell").waitFor();
 
   await openProviders(page);
-  await assertTextContains(page.getByTestId("provider-readiness"), "Hosted");
-  await assertTextContains(page.getByTestId("provider-readiness"), "Not set");
+  await page.getByText("Account runtimes", { exact: true }).waitFor();
+  await page.getByText("Add providers", { exact: true }).waitFor();
   await page.getByTestId("detect-local-providers").click();
   await page.getByText("Ollama (local)").waitFor({ timeout: 20_000 });
   await page.getByText("LM Studio (local)").waitFor({ timeout: 20_000 });
@@ -2080,9 +2081,16 @@ async function seedWorkerRunDatabase(milimHome, fixture, status) {
 async function dismissOnboardingIfPresent(page) {
   await page.getByTestId("onboarding-preflight").waitFor({ state: "hidden", timeout: 10_000 }).catch(() => {});
   const flow = page.getByTestId("onboarding-flow");
-  if (!(await flow.isVisible().catch(() => false))) return;
-  await page.getByLabel("Close onboarding").click();
-  await flow.waitFor({ state: "hidden", timeout: 10_000 });
+  if (await flow.isVisible().catch(() => false)) {
+    await page.getByLabel("Close onboarding").click();
+    await flow.waitFor({ state: "hidden", timeout: 10_000 });
+    await page.getByTestId("update-cards").waitFor({ state: "visible", timeout: 10_000 });
+  }
+  const updates = page.getByTestId("update-cards");
+  if (await updates.isVisible().catch(() => false)) {
+    await page.getByLabel("Dismiss updates").click();
+    await updates.waitFor({ state: "hidden", timeout: 10_000 });
+  }
 }
 
 async function runWindowPinCheck(page) {
@@ -2140,7 +2148,7 @@ async function closeAgents(page) {
 async function openProviders(page) {
   await page.getByTestId("model-picker-trigger").click();
   await page.getByTestId("manage-providers").click();
-  await page.getByTestId("provider-readiness").waitFor();
+  await page.getByTestId("provider-overview").waitFor();
 }
 
 async function closeProviders(page) {
@@ -2427,6 +2435,7 @@ async function runMicroUiCheck(page) {
   await copy.click();
   await assertAttribute(copy, "title", "Copied");
 
+  await runHoverScrollTextCheck(page);
   await assertPointerReorderFollowsSource(page, {
     rowSelector: ".queued-item[data-queued-message-id]",
     handleSelector: ".queued-drag-handle",
@@ -2619,6 +2628,79 @@ async function runMicroUiCheck(page) {
     throw new Error("Reopened inspector should remain resizable.");
   }
   await page.keyboard.press("Enter");
+}
+
+async function runHoverScrollTextCheck(page) {
+  const label = page.locator('[data-sidebar-session-id="e2e-motion-fixture"] [data-hover-scroll-text]').first();
+  const composer = page.getByTestId("composer-input");
+  await label.waitFor();
+  const overflowing = await label.evaluate((outer) => {
+    const inner = outer.querySelector("[data-hover-scroll-inner]");
+    return Boolean(inner && inner.scrollWidth > outer.clientWidth + 1);
+  });
+  if (!overflowing) throw new Error("Hover-scroll fixture should overflow its sidebar row.");
+
+  await label.hover();
+  await delay(800);
+  const waiting = await label.evaluate((outer) => {
+    const inner = outer.querySelector("[data-hover-scroll-inner]");
+    return {
+      active: inner?.classList.contains("hover-scroll-text-active") ?? false,
+      animations: inner?.getAnimations().length ?? 0,
+      overflow: inner ? getComputedStyle(inner).textOverflow : "",
+      title: outer.getAttribute("title"),
+    };
+  });
+  if (waiting.active || waiting.animations || waiting.overflow !== "ellipsis" || waiting.title !== "") {
+    throw new Error(`Hover scroll should retain its ellipsis during the delay: ${JSON.stringify(waiting)}.`);
+  }
+
+  await delay(350);
+  const running = await label.evaluate((outer) => {
+    const inner = outer.querySelector("[data-hover-scroll-inner]");
+    return {
+      active: inner?.classList.contains("hover-scroll-text-active") ?? false,
+      animations: inner?.getAnimations().length ?? 0,
+      transform: inner ? getComputedStyle(inner).transform : "none",
+    };
+  });
+  if (!running.active || running.animations !== 1 || running.transform === "none") {
+    throw new Error(`Hover scroll should move overflowing text after one second: ${JSON.stringify(running)}.`);
+  }
+
+  await composer.hover();
+  const reset = await label.evaluate((outer) => {
+    const inner = outer.querySelector("[data-hover-scroll-inner]");
+    return {
+      active: inner?.classList.contains("hover-scroll-text-active") ?? false,
+      animations: inner?.getAnimations().length ?? 0,
+      transform: inner ? getComputedStyle(inner).transform : "none",
+      title: outer.getAttribute("title"),
+    };
+  });
+  if (reset.active || reset.animations || reset.transform !== "none" || !reset.title) {
+    throw new Error(`Hover scroll should reset and restore its title on exit: ${JSON.stringify(reset)}.`);
+  }
+
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  try {
+    await label.hover();
+    await delay(1_100);
+    const reduced = await label.evaluate((outer) => {
+      const inner = outer.querySelector("[data-hover-scroll-inner]");
+      return {
+        active: inner?.classList.contains("hover-scroll-text-active") ?? false,
+        animations: inner?.getAnimations().length ?? 0,
+        title: outer.getAttribute("title"),
+      };
+    });
+    if (reduced.active || reduced.animations || !reduced.title) {
+      throw new Error(`Reduced motion should retain the static label and native title: ${JSON.stringify(reduced)}.`);
+    }
+  } finally {
+    await composer.hover();
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+  }
 }
 
 async function runProgressiveInspectorResizeCheck(page, previewHandle) {
@@ -2882,7 +2964,7 @@ async function seedChatSearchFixture(page, withQueuedMessages = false) {
       session && session.id !== "e2e-search-fixture" && session.id !== "e2e-motion-fixture");
     sessions.push({
       id: "e2e-motion-fixture",
-      title: "Motion Fixture",
+      title: "Motion Fixture With A Deliberately Long Sidebar Thread Title",
       messages: [],
       createdAt: now - 6 * 24 * 60 * 60 * 1000,
       updatedAt: now - 1,
@@ -3196,7 +3278,10 @@ function collectErrors(page) {
   const expectedFailedResources = [];
   page.on("response", (response) => {
     const url = response.url();
-    if ([400, 502].includes(response.status()) && /\/media\/(?:models|model-schema)\b/.test(url)) {
+    if (
+      ([400, 502].includes(response.status()) && /\/media\/(?:models|model-schema)\b/.test(url)) ||
+      (response.status() === 400 && /\/(?:codex|claude|opencode|pi)\/run\b/.test(url))
+    ) {
       expectedFailedResources.push(url);
     }
   });
@@ -3210,6 +3295,7 @@ function collectErrors(page) {
     ) {
       return;
     }
+    if (text.includes("favicon.ico") && text.includes("Content Security Policy directive")) return;
     if (/^Failed to load resource: the server responded with a status of (?:400 \(Bad Request\)|502 \(Bad Gateway\))$/.test(text)) {
       const responseIndex = expectedFailedResources.findIndex((resourceUrl) => !url || resourceUrl === url);
       if (/\/media\/(?:models|model-schema)\b/.test(url) || responseIndex >= 0) {

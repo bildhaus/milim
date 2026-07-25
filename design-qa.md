@@ -1,39 +1,60 @@
-**Design QA**
+# PR Cockpit Design QA
 
-- Source visual truth: `C:\Users\USER\AppData\Local\Temp\codex-clipboard-d9a54dec-8e90-42e0-bc6a-6a2508b94e98.png`, `C:\Users\USER\AppData\Local\Temp\codex-clipboard-f3bc2b29-c3ef-4aaf-9915-b8f6dbda4281.png`, `C:\Users\USER\AppData\Local\Temp\codex-clipboard-a8fadff7-db14-4158-a2e6-04ed5e422057.png`, and `C:\Users\USER\AppData\Local\Temp\codex-clipboard-0551bec5-c63e-4735-95a0-3e737d85e416.png`
-- Implementation screenshot: unavailable; Windows capture returned a different application window for the selected Milim handle
-- Viewport: desktop, Git inspector with the diff-scope menu open
-- State: dark theme, custom scope selector, left file navigator, narrow diff toolbar
+## Comparison target
 
-**Full-view comparison evidence**
+- Source visual truth:
+  - `C:\Users\USER\AppData\Local\Temp\codex-clipboard-183854df-f6b5-48a2-8cf2-fc29628016ac.png`
+  - `C:\Users\USER\AppData\Local\Temp\codex-clipboard-dd301700-cc43-4721-8adf-02934589fe83.png`
+- Browser-rendered implementation:
+  - `C:\Users\USER\.codex\visualizations\2026\07\25\019f9845-ac78-7e73-9489-5882a1c53530\pr-cockpit-implementation.png`
+  - `C:\Users\USER\.codex\visualizations\2026\07\25\019f9845-ac78-7e73-9489-5882a1c53530\pr-cockpit-narrow.png`
+- Combined same-input comparison:
+  - `C:\Users\USER\.codex\visualizations\2026\07\25\019f9845-ac78-7e73-9489-5882a1c53530\pr-cockpit-comparison.png`
+- Reference pixels: cockpit `752 x 1357`; sidebar detail `135 x 124`.
+- Implementation pixels: full harness `900 x 1354`; normalized cockpit crop `752 x 1354`; narrow state `600 x 1000`.
+- CSS viewport and density: `900 x 1354` at device scale factor `1` for the primary comparison; `600 x 1000` at device scale factor `1` for the narrow-layout check.
+- State: dark theme, open non-draft PR, approved review decision, all checks passing, merge-ready, one review, one comment, PR subview selected.
 
-The sources showed the native Windows select menu breaking the app-styled surface, the hide-files control detached from its context, the search field overlapping the diff summary at a narrow width, and the review body floating inside a second card with Agent review stranded below it. The native selects were replaced with Milim's existing checked context-menu pattern, the hide control was moved next to the scope selector when collapsed, the toolbar now wraps before controls can overlap, Agent review moved into the repository action row, and the review body now fills the inspector edge to edge. A post-fix Milim capture could not be obtained.
+## Evidence
 
-**Focused region comparison evidence**
+### Full-view comparison
 
-The scope-control and narrow-toolbar regions are readable in the supplied focused screenshots. Post-fix focused evidence is blocked by the capture mismatch.
+The normalized side-by-side comparison shows the same dense, flat inspector hierarchy as the source: compact identity and state header, branch/review/comment/check rows, two equal-width merge actions, Markdown description, and divided disclosure sections. The implementation intentionally adds the requested Changes / PR #N sub-navigation and renders populated review/comment content. It uses Milim's existing system font, theme tokens, icon family, disclosure behavior, and panel chrome rather than copying foreign window controls from the reference.
 
-**Findings**
+### Focused-region comparison
 
-- [P1] Native diff selectors did not match Milim's visual language. Fixed in code by reusing the existing app context menu for scope, commit, and branch choices.
-- [P1] Search could overlap the scope summary. Fixed with container-based wrapping at 760px and 520px.
-- [P2] The file navigator toggle was detached from the surface it controls. Fixed by placing Hide files in the Changes header and showing the restore control only while hidden.
-- [P1] The diff workspace read as a floating card rather than the inspector body. Fixed by removing the outer inset, radius, and side borders while retaining the file/diff divider.
-- [P2] Agent review was visually disconnected below the main workflow. Fixed by moving it into the repository action row.
-- [P2] Post-fix visual fidelity is unverified because the selected Milim window could not be captured reliably.
+The bottom row of the combined comparison isolates the sidebar treatment. Both source and implementation use a compact pull-request glyph with a small semantic status dot at the row edge. The implementation's accessible name supplies PR number, lifecycle, checks, review state, and readiness so the status is not color-only.
 
-**Comparison history**
+### Required fidelity surfaces
 
-- Initial finding: native operating-system dropdown was visually inconsistent.
-- Fixes: replaced both native selects with app-styled menu triggers, relocated the file toggle contextually, added collision-safe toolbar wrapping, moved Agent review into the header, and flattened the review body into the inspector.
-- Post-fix evidence: blocked by the window-capture mismatch.
+- Fonts and typography: Milim's configured system sans and mono stacks render at the existing 14 px app base, with clear title, metadata, Markdown, and code hierarchy. No unintended serif fallback remains.
+- Spacing and layout rhythm: the cockpit preserves the reference's flat sections and wide action row. The `472 px` narrow inspector measured `clientWidth === scrollWidth` for both panel and PR workspace, with actions and metadata reflowing without horizontal overflow.
+- Colors and tokens: backgrounds, dividers, text hierarchy, and green merge-ready/check states come from Milim theme variables. Other semantic tones are covered by state-unit tests.
+- Image quality and assets: no raster imagery is required. All visible interface symbols use Milim's existing icon component library; there are no handcrafted SVG, CSS-art, emoji, or placeholder substitutes.
+- Copy and content: labels are concise and contextual. GitHub-only boundaries remain explicit through “Open on GitHub” and external check targets.
 
-**Implementation checklist**
+## Interaction and accessibility checks
 
-- Confirm the scope menu uses the app context-menu surface.
-- Confirm Commit and Branch open the same styled surface.
-- Confirm the Changes header owns the Hide files control.
-- Confirm the search field wraps without overlapping the scope summary.
-- Confirm checked, disabled, hover, and keyboard-focus states are visible.
+- Changes / PR #N navigation is present and the PR view is the selected target.
+- Description, checks, and comments/reviews are native keyboard-reachable disclosures.
+- Review modal opens; switching to Request changes disables submission until a body is present.
+- Merge modal opens with Merge commit, Squash, and Rebase; confirmation is disabled before a method is selected and enabled after Squash while displaying the guarded head SHA.
+- Prepare to merge drafts the agent prompt without sending it.
+- Comment submit is disabled for an empty body.
+- The sidebar PR control has a complete accessible label.
+- No browser console errors were reported.
 
-final result: blocked
+## Findings
+
+No actionable P0, P1, or P2 fidelity findings remain. The extra Git sub-navigation, status detail, and populated conversation are intentional requirements rather than source drift.
+
+## Comparison history
+
+- Pass 1: the isolated render lacked the app's theme initialization, producing a serif fallback and missing surface tokens. Fixed by initializing the existing theme store in the temporary QA harness.
+- Pass 2: the corrected render used Milim typography and tokens. The normalized full-view and focused sidebar comparison found no actionable P0/P1/P2 differences.
+
+## Follow-up polish
+
+No blocking polish items. Live GitHub content will naturally vary in height and density from the reference.
+
+final result: passed

@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useEffect,
   useMemo,
   useRef,
@@ -32,6 +34,7 @@ import {
   type CodexRunEvent,
   type OpenCodeRunEvent,
   type PiRunEvent,
+  type PullRequestDetails,
   type WorkspaceGitAction,
   type WorkspaceGitActionResult,
   type WorkspaceGitDiffScope,
@@ -52,11 +55,17 @@ import {
   type GitFileTreeNode,
 } from "../lib/gitDiffRows";
 import { shouldRefreshGitStatus } from "../lib/gitRefresh";
+import {
+  pullRequestReadiness,
+} from "../lib/pullRequests";
+import { useSessions } from "../sessions/store";
 import { useUiPreferences } from "../ui/store";
 import { useSettings } from "../settings/store";
 import { useContextMenu } from "./ContextMenu";
 import {
   ArrowUp,
+  ArrowRight,
+  Check,
   ChevronDown,
   Code,
   Copy,
@@ -65,13 +74,27 @@ import {
   GitBranch,
   GitCommit,
   GitLogo,
+  GitPullRequest,
   GitRemote,
+  ExternalLink,
   Lightbulb,
   Refresh,
   Search,
   Sidebar,
   X,
 } from "./icons";
+
+const PullRequestMarkdown = lazy(() =>
+  import("./Markdown").then((module) => ({ default: module.Markdown })),
+);
+
+function PullRequestMarkdownContent({ content }: { content: string }) {
+  return (
+    <Suspense fallback={<p>Loading...</p>}>
+      <PullRequestMarkdown content={content} collapseArtifacts={false} />
+    </Suspense>
+  );
+}
 
 const COMMIT_MESSAGE_DIFF_LIMIT = 18_000;
 const DIFF_NAVIGATOR_MIN_WIDTH = 160;
@@ -91,6 +114,8 @@ export type GitPanelDiffRequest = {
   checkpoint: string;
   result: WorkspaceGitActionResult;
 };
+
+export type GitPanelView = "changes" | "pull_request";
 const COMMIT_MESSAGE_SYSTEM_PROMPT =
   "Write one professional Git commit subject. Return exactly one line, no markdown, no quotes. Use imperative mood when natural. Keep it under 72 characters.";
 
@@ -607,19 +632,23 @@ async function generateCommitMessageWithFallback(
 }
 
 export function GitPanel({
+  sessionId,
   folder,
   onDraftAction,
   model,
   onOpenPanel,
   forceExpanded = false,
   diffRequest,
+  requestedView = "changes",
 }: {
+  sessionId?: string;
   folder: string;
   onDraftAction: (text: string) => void;
   model: string;
   onOpenPanel?: () => void;
   forceExpanded?: boolean;
   diffRequest?: GitPanelDiffRequest | null;
+  requestedView?: GitPanelView;
 }) {
   const { openContextMenu } = useContextMenu();
   const [status, setStatus] = useState<WorkspaceGitStatus | null>(null);
@@ -629,6 +658,10 @@ export function GitPanel({
   const lastGitStatusRunAtRef = useRef<number | null>(null);
   const expandedPreference = useUiPreferences((s) => s.gitPanelExpanded);
   const accountRuntimeEnabled = useSettings((s) => s.accountRuntimeEnabled);
+  const pullRequestSnapshot = useSessions((s) =>
+    sessionId ? s.pullRequestsBySession[sessionId] : undefined,
+  );
+  const setSessionPullRequest = useSessions((s) => s.setSessionPullRequest);
   const setExpanded = useUiPreferences((s) => s.setGitPanelExpanded);
   const expanded = forceExpanded || (onOpenPanel ? false : expandedPreference);
   const [notice, setNotice] = useState<string | null>(null);
@@ -648,6 +681,22 @@ export function GitPanel({
   const [branchMenuOpen, setBranchMenuOpen] = useState(false);
   const [branchFilter, setBranchFilter] = useState("");
   const [newBranchName, setNewBranchName] = useState("");
+  const [panelView, setPanelView] = useState<GitPanelView>(requestedView);
+  const [pullRequest, setPullRequest] = useState<PullRequestDetails | null>(
+    pullRequestSnapshot?.folder === folder ? pullRequestSnapshot.pullRequest : null,
+  );
+  const [pullRequestLoading, setPullRequestLoading] = useState(false);
+  const [pullRequestLoaded, setPullRequestLoaded] = useState(false);
+  const [reviewDialogOpen, setReviewDialogOpen] = useState(false);
+  const [reviewAction, setReviewAction] = useState<
+    "approve" | "request_changes" | "comment"
+  >("approve");
+  const [reviewBody, setReviewBody] = useState("");
+  const [mergeDialogOpen, setMergeDialogOpen] = useState(false);
+  const [mergeMethod, setMergeMethod] = useState<
+    "merge" | "squash" | "rebase" | ""
+  >("");
+  const [commentBody, setCommentBody] = useState("");
   const [commitMessage, setCommitMessage] = useState("");
   const [generatingCommitMessage, setGeneratingCommitMessage] = useState(false);
   const [stageAll, setStageAll] = useState(true);
@@ -701,7 +750,29 @@ export function GitPanel({
     setPendingDiffFile(null);
     setActiveDiffSectionId(null);
     setCollapsedFileTreePaths(new Set());
+    setPanelView(requestedView);
+    setPullRequest(
+      pullRequestSnapshot?.folder === selectedFolder
+        ? pullRequestSnapshot.pullRequest
+        : null,
+    );
+    setPullRequestLoaded(false);
+    setReviewDialogOpen(false);
+    setReviewBody("");
+    setMergeDialogOpen(false);
+    setMergeMethod("");
+    setCommentBody("");
   }, [selectedFolder]);
+
+  useEffect(() => {
+    setPanelView(requestedView);
+  }, [requestedView]);
+
+  useEffect(() => {
+    if (!pullRequestSnapshot || pullRequestSnapshot.folder !== selectedFolder)
+      return;
+    setPullRequest(pullRequestSnapshot.pullRequest);
+  }, [pullRequestSnapshot, selectedFolder]);
 
   useEffect(() => {
     if (!diffRequest) return;
@@ -764,16 +835,31 @@ export function GitPanel({
   }, [updatedAt]);
 
   useEffect(() => {
-    if (!commandMenu && !branchMenuOpen && !diffResult) return;
+    if (
+      !commandMenu &&
+      !branchMenuOpen &&
+      !diffResult &&
+      !reviewDialogOpen &&
+      !mergeDialogOpen
+    )
+      return;
     function onKeyDown(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
       setCommandMenu(null);
       setBranchMenuOpen(false);
       setDiffResult(null);
+      setReviewDialogOpen(false);
+      setMergeDialogOpen(false);
     }
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [commandMenu, branchMenuOpen, diffResult]);
+  }, [
+    commandMenu,
+    branchMenuOpen,
+    diffResult,
+    mergeDialogOpen,
+    reviewDialogOpen,
+  ]);
 
   useEffect(() => {
     const output = diffResult ? actionOutputText(diffResult) : "";
@@ -809,9 +895,66 @@ export function GitPanel({
     return root ? basename(root) : "Repository";
   }, [selectedFolder, currentStatus?.root]);
 
+  useEffect(() => {
+    if (
+      !forceExpanded ||
+      pullRequestLoaded ||
+      currentStatus?.state !== "ready" ||
+      !currentStatus.is_repo
+    )
+      return;
+    void refreshPullRequest(false);
+  }, [
+    currentStatus?.branch,
+    currentStatus?.is_repo,
+    currentStatus?.state,
+    forceExpanded,
+    pullRequestLoaded,
+    selectedFolder,
+  ]);
+
+  async function refreshPullRequest(showError = true) {
+    if (!selectedFolder) return null;
+    setPullRequestLoading(true);
+    try {
+      const result = await runWorkspaceGitAction("pr_status", {
+        folder: selectedFolder,
+      });
+      if (!result.ok) throw new Error(result.message);
+      const next = result.pull_request ?? null;
+      setPullRequest(next);
+      setPullRequestLoaded(true);
+      if (sessionId) {
+        setSessionPullRequest(sessionId, {
+          folder: selectedFolder,
+          pullRequest: next,
+          checkedAt: Date.now(),
+          stale: false,
+        });
+      }
+      return next;
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Couldn't refresh pull request.";
+      if (showError) setNotice(message);
+      if (sessionId && pullRequestSnapshot?.pullRequest) {
+        setSessionPullRequest(sessionId, {
+          ...pullRequestSnapshot,
+          stale: true,
+          error: message,
+          checkedAt: Date.now(),
+        });
+      }
+      return pullRequest;
+    } finally {
+      setPullRequestLoading(false);
+    }
+  }
+
   function forceRefreshGitStatus() {
     lastGitStatusRunAtRef.current = Date.now();
     setRefreshKey((value) => value + 1);
+    if (forceExpanded) void refreshPullRequest();
   }
 
   if (!selectedFolder) return null;
@@ -1742,13 +1885,24 @@ export function GitPanel({
     if (!readyStatus) return;
     setCommandBusy("pr_status");
     try {
-      const existing = await runWorkspaceGitAction("pr_status");
-      if (existing.ok) {
-        const summary = JSON.parse(existing.stdout) as { url?: string };
-        if (summary.url) await openExternalUrl(summary.url);
+      const existing = await runWorkspaceGitAction("pr_status", {
+        folder: selectedFolder,
+      });
+      if (!existing.ok) throw new Error(existing.message);
+      if (existing.pull_request) {
+        setPullRequest(existing.pull_request);
+        setPullRequestLoaded(true);
+        if (sessionId) {
+          setSessionPullRequest(sessionId, {
+            folder: selectedFolder,
+            pullRequest: existing.pull_request,
+            checkedAt: Date.now(),
+            stale: false,
+          });
+        }
+        setPanelView("pull_request");
         return;
       }
-      if (!existing.message.includes("No pull request")) throw new Error(existing.message);
       const prefill = JSON.parse(existing.stdout || "{}") as { title?: string; baseRefName?: string };
       const title = window.prompt("Pull request title", prefill.title || readyStatus.recent_commits[0]?.subject || readyStatus.branch || "Changes");
       if (!title?.trim()) return;
@@ -1756,17 +1910,321 @@ export function GitPanel({
       if (!base?.trim()) return;
       const body = window.prompt("Pull request body", "") ?? "";
       const created = await runWorkspaceGitAction("pr_create", {
+        folder: selectedFolder,
         title: title.trim(), body, base: base.trim(), draft: true,
       });
       setCommandResult(created);
       if (!created.ok) throw new Error(created.message);
-      const url = created.stdout.trim().split(/\s+/).find((value) => /^https?:\/\//.test(value));
-      if (url) await openExternalUrl(url);
+      const next = await refreshPullRequest();
+      if (next) setPanelView("pull_request");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
     } finally {
       setCommandBusy(null);
     }
+  }
+
+  function preparePullRequest() {
+    if (!pullRequest) return;
+    const blockers = (pullRequest.checks ?? [])
+      .filter((check) => ["fail", "pending", "cancel"].includes(check.bucket))
+      .map((check) => `${check.name}: ${check.bucket}`)
+      .join(", ");
+    onDraftAction(
+      [
+        `Prepare PR #${pullRequest.number} (${pullRequest.title}) to merge.`,
+        `Workspace: ${selectedFolder}`,
+        `Branch: ${pullRequest.headRefName} -> ${pullRequest.baseRefName}`,
+        `Review decision: ${pullRequest.reviewDecision || "none"}`,
+        `Checks needing attention: ${blockers || "none reported"}`,
+        "Review the complete diff and current PR blockers. Fix only actionable issues in this workspace, run the smallest relevant checks, and summarize anything that still blocks merging. Do not merge the PR.",
+      ].join("\n"),
+    );
+    setNotice("Prepared an editable merge-readiness prompt in the composer.");
+  }
+
+  async function runPullRequestMutation(
+    action: "pr_ready" | "pr_comment" | "pr_review" | "pr_merge",
+    options: {
+      body?: string;
+      review_action?: "approve" | "request_changes" | "comment";
+      merge_method?: "merge" | "squash" | "rebase";
+      expected_head?: string;
+    } = {},
+  ) {
+    if (!pullRequest) return;
+    setCommandBusy(action);
+    setNotice(null);
+    try {
+      const result = await runWorkspaceGitAction(action, {
+        folder: selectedFolder,
+        pull_request: pullRequest.number,
+        ...options,
+      });
+      setCommandResult(result);
+      if (!result.ok) throw new Error(result.message);
+      setNotice(result.message);
+      setReviewDialogOpen(false);
+      setMergeDialogOpen(false);
+      setReviewBody("");
+      setCommentBody("");
+      await refreshPullRequest(false);
+    } catch (error) {
+      setNotice(
+        error instanceof Error ? error.message : "Pull request action failed.",
+      );
+    } finally {
+      setCommandBusy(null);
+    }
+  }
+
+  function renderPullRequestNavigation() {
+    if (!forceExpanded || (!pullRequest && !pullRequestLoading)) return null;
+    return (
+      <nav className="git-pr-navigation" aria-label="Git workspace view">
+        <button
+          type="button"
+          className={panelView === "changes" ? "active" : ""}
+          aria-current={panelView === "changes" ? "page" : undefined}
+          onClick={() => setPanelView("changes")}
+        >
+          Changes
+        </button>
+        {pullRequest && (
+          <button
+            type="button"
+            className={panelView === "pull_request" ? "active" : ""}
+            aria-current={panelView === "pull_request" ? "page" : undefined}
+            onClick={() => setPanelView("pull_request")}
+          >
+            <GitPullRequest size={12} />
+            PR #{pullRequest.number}
+          </button>
+        )}
+        {pullRequestLoading && <span>Refreshing...</span>}
+      </nav>
+    );
+  }
+
+  function renderPullRequestWorkspace(pullRequest: PullRequestDetails) {
+    const readiness = pullRequestReadiness(
+      pullRequest,
+      pullRequestSnapshot?.stale,
+    );
+    const checks = pullRequest.checks ?? [];
+    const comments = pullRequest.comments ?? [];
+    const reviews = pullRequest.latestReviews ?? [];
+    const passedChecks = checks.filter((check) => check.bucket === "pass").length;
+    const requestedReviewers = (pullRequest.reviewRequests ?? [])
+      .map((reviewer) => reviewer.login || reviewer.name)
+      .filter(Boolean)
+      .join(", ");
+    const lifecycle = pullRequest.isDraft
+      ? "Draft"
+      : pullRequest.state.charAt(0) +
+        pullRequest.state.slice(1).toLowerCase();
+    const mutable = pullRequest.state.toUpperCase() === "OPEN";
+
+    return (
+      <div className="git-pr-workspace">
+        <header className="git-pr-header">
+          <div className="git-pr-title">
+            <span>PR #{pullRequest.number}</span>
+            <h2>{pullRequest.title}</h2>
+          </div>
+          <div className="git-pr-header-actions">
+            <span className={`git-pr-state ${readiness.tone}`}>
+              {lifecycle} · {readiness.label}
+            </span>
+            {mutable && !pullRequest.isDraft && (
+              <button
+                type="button"
+                className="git-icon-btn"
+                title="Review pull request"
+                aria-label="Review pull request"
+                onClick={() => setReviewDialogOpen(true)}
+              >
+                <Check size={13} />
+              </button>
+            )}
+            <button
+              type="button"
+              className="git-icon-btn"
+              title="Refresh pull request"
+              aria-label="Refresh pull request"
+              disabled={pullRequestLoading}
+              onClick={() => void refreshPullRequest()}
+            >
+              <Refresh size={13} />
+            </button>
+            <button
+              type="button"
+              className="git-icon-btn"
+              title="Open pull request on GitHub"
+              aria-label="Open pull request on GitHub"
+              onClick={() => void openExternalUrl(pullRequest.url)}
+            >
+              <ExternalLink size={13} />
+            </button>
+          </div>
+        </header>
+
+        <div className="git-pr-meta" aria-label="Pull request summary">
+          <div>
+            <GitBranch size={14} />
+            <span>Branch</span>
+            <strong>
+              {pullRequest.headRefName}
+              <ArrowRight size={11} />
+              {pullRequest.baseRefName}
+            </strong>
+            <small>
+              <b>+{pullRequest.additions}</b>
+              <i>-{pullRequest.deletions}</i>
+            </small>
+          </div>
+          <div>
+            <Check size={14} />
+            <span>Reviewers</span>
+            <strong>{requestedReviewers || "No reviewers requested"}</strong>
+            <small>{pullRequest.reviewDecision?.toLowerCase().replace(/_/g, " ") || "No decision"}</small>
+          </div>
+          <div>
+            <GitPullRequest size={14} />
+            <span>Comments</span>
+            <strong>{comments.length + reviews.length}</strong>
+            <small>{reviews.length ? `${reviews.length} reviews` : "No reviews"}</small>
+          </div>
+          <div>
+            <Check size={14} />
+            <span>Checks</span>
+            <strong>{checks.length ? `${passedChecks}/${checks.length} passing` : "No checks"}</strong>
+            <small>{readiness.label}</small>
+          </div>
+        </div>
+
+        {mutable && (
+          <div className="git-pr-primary-actions">
+            <button type="button" onClick={preparePullRequest}>
+              <Lightbulb size={14} />
+              Prepare to merge
+            </button>
+            {pullRequest.isDraft ? (
+              <button
+                type="button"
+                disabled={Boolean(commandBusy)}
+                onClick={() => void runPullRequestMutation("pr_ready")}
+              >
+                <GitPullRequest size={14} />
+                {commandBusy === "pr_ready" ? "Marking ready..." : "Mark ready"}
+              </button>
+            ) : (
+              <button
+                type="button"
+                disabled={!readiness.canMerge || Boolean(commandBusy)}
+                title={readiness.canMerge ? "Merge pull request" : readiness.label}
+                onClick={() => setMergeDialogOpen(true)}
+              >
+                <GitBranch size={14} />
+                Merge
+              </button>
+            )}
+          </div>
+        )}
+
+        <details className="git-pr-section" open>
+          <summary>Description</summary>
+          <div className="git-pr-markdown">
+            {pullRequest.body.trim() ? (
+              <PullRequestMarkdownContent content={pullRequest.body} />
+            ) : (
+              <p>No description.</p>
+            )}
+          </div>
+        </details>
+
+        <details className="git-pr-section" open>
+          <summary>
+            Checks <span>{checks.length}</span>
+          </summary>
+          <div className="git-pr-list">
+            {checks.map((check) => (
+              <button
+                type="button"
+                key={`${check.workflow}:${check.name}`}
+                className={`git-pr-check ${check.bucket}`}
+                disabled={!check.link}
+                onClick={() => check.link && void openExternalUrl(check.link)}
+              >
+                <span className="git-pr-check-dot" aria-hidden="true" />
+                <strong>{check.name}</strong>
+                <small>{check.workflow || check.state}</small>
+                <span>{check.bucket}</span>
+              </button>
+            ))}
+            {!checks.length && (
+              <p>{pullRequest.checksError || "No checks reported."}</p>
+            )}
+          </div>
+        </details>
+
+        <details className="git-pr-section" open>
+          <summary>
+            Comments and reviews <span>{comments.length + reviews.length}</span>
+          </summary>
+          <div className="git-pr-conversation">
+            {reviews.map((review, index) => (
+              <article key={`review:${review.author?.login}:${index}`}>
+                <header>
+                  <strong>{review.author?.login || "Reviewer"}</strong>
+                  <span>{review.state.toLowerCase().replace(/_/g, " ")}</span>
+                </header>
+                {review.body?.trim() && (
+                  <PullRequestMarkdownContent content={review.body} />
+                )}
+              </article>
+            ))}
+            {comments.map((comment, index) => (
+              <article key={`comment:${comment.author?.login}:${index}`}>
+                <header>
+                  <strong>{comment.author?.login || "Comment"}</strong>
+                  <span>{comment.createdAt ? new Date(comment.createdAt).toLocaleString() : ""}</span>
+                </header>
+                <PullRequestMarkdownContent content={comment.body} />
+              </article>
+            ))}
+            {!comments.length && !reviews.length && <p>No comments.</p>}
+            {mutable && (
+              <div className="git-pr-comment">
+                <textarea
+                  value={commentBody}
+                  placeholder="Add a comment"
+                  rows={3}
+                  onChange={(event) => setCommentBody(event.currentTarget.value)}
+                />
+                <button
+                  type="button"
+                  disabled={!commentBody.trim() || Boolean(commandBusy)}
+                  onClick={() =>
+                    void runPullRequestMutation("pr_comment", {
+                      body: commentBody.trim(),
+                    })
+                  }
+                >
+                  {commandBusy === "pr_comment" ? "Commenting..." : "Comment"}
+                </button>
+              </div>
+            )}
+          </div>
+        </details>
+
+        {notice && (
+          <div className="git-panel-note" role="status">
+            {notice}
+          </div>
+        )}
+      </div>
+    );
   }
 
   function openCommandMenu(action: WorkspaceGitAction) {
@@ -1812,6 +2270,187 @@ export function GitPanel({
       message,
       stage_all: stageAll,
     });
+  }
+
+  if (forceExpanded && panelView === "pull_request") {
+    return (
+      <>
+        <section
+          className="git-panel git-panel-workspace git-pr-panel"
+          data-testid="git-panel"
+          aria-label="Pull request"
+        >
+          {renderPullRequestNavigation()}
+          {pullRequest ? (
+            renderPullRequestWorkspace(pullRequest)
+          ) : (
+            <div className="git-pr-empty">
+              <GitPullRequest size={24} />
+              <strong>
+                {pullRequestLoading ? "Loading pull request..." : "No pull request found"}
+              </strong>
+              {!pullRequestLoading && (
+                <button type="button" onClick={() => setPanelView("changes")}>
+                  Back to changes
+                </button>
+              )}
+            </div>
+          )}
+        </section>
+        {typeof document !== "undefined" &&
+          reviewDialogOpen &&
+          pullRequest &&
+          createPortal(
+            <div
+              className="git-modal-backdrop"
+              data-native-preview-blocker="true"
+              onMouseDown={(event) =>
+                event.target === event.currentTarget &&
+                setReviewDialogOpen(false)
+              }
+            >
+              <section
+                className="git-modal git-pr-dialog"
+                role="dialog"
+                aria-modal="true"
+                aria-label="Review pull request"
+              >
+                <div className="git-modal-head">
+                  <strong>Review PR #{pullRequest.number}</strong>
+                  <button
+                    type="button"
+                    className="git-icon-btn"
+                    title="Close"
+                    aria-label="Close"
+                    onClick={() => setReviewDialogOpen(false)}
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+                <label>
+                  <span>Decision</span>
+                  <select
+                    value={reviewAction}
+                    onChange={(event) =>
+                      setReviewAction(
+                        event.currentTarget.value as typeof reviewAction,
+                      )
+                    }
+                  >
+                    <option value="approve">Approve</option>
+                    <option value="request_changes">Request changes</option>
+                    <option value="comment">Comment</option>
+                  </select>
+                </label>
+                <label>
+                  <span>
+                    Review body
+                    {reviewAction === "approve" ? " (optional)" : ""}
+                  </span>
+                  <textarea
+                    rows={5}
+                    value={reviewBody}
+                    onChange={(event) =>
+                      setReviewBody(event.currentTarget.value)
+                    }
+                  />
+                </label>
+                <div className="git-command-options">
+                  <button
+                    type="button"
+                    disabled={
+                      Boolean(commandBusy) ||
+                      (reviewAction !== "approve" && !reviewBody.trim())
+                    }
+                    onClick={() =>
+                      void runPullRequestMutation("pr_review", {
+                        review_action: reviewAction,
+                        body: reviewBody.trim(),
+                      })
+                    }
+                  >
+                    {commandBusy === "pr_review"
+                      ? "Submitting..."
+                      : "Submit review"}
+                  </button>
+                </div>
+              </section>
+            </div>,
+            document.body,
+          )}
+        {typeof document !== "undefined" &&
+          mergeDialogOpen &&
+          pullRequest &&
+          createPortal(
+            <div
+              className="git-modal-backdrop"
+              data-native-preview-blocker="true"
+              onMouseDown={(event) =>
+                event.target === event.currentTarget &&
+                setMergeDialogOpen(false)
+              }
+            >
+              <section
+                className="git-modal git-pr-dialog"
+                role="dialog"
+                aria-modal="true"
+                aria-label="Merge pull request"
+              >
+                <div className="git-modal-head">
+                  <strong>Merge PR #{pullRequest.number}</strong>
+                  <button
+                    type="button"
+                    className="git-icon-btn"
+                    title="Close"
+                    aria-label="Close"
+                    onClick={() => setMergeDialogOpen(false)}
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+                <p>
+                  The merge is guarded against head changes at{" "}
+                  <code>{pullRequest.headRefOid.slice(0, 7)}</code>.
+                </p>
+                <div className="git-pr-merge-methods">
+                  {(["merge", "squash", "rebase"] as const).map((method) => (
+                    <label key={method}>
+                      <input
+                        type="radio"
+                        name="merge-method"
+                        value={method}
+                        checked={mergeMethod === method}
+                        onChange={() => setMergeMethod(method)}
+                      />
+                      <span>
+                        {method === "merge"
+                          ? "Merge commit"
+                          : method.charAt(0).toUpperCase() + method.slice(1)}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+                <div className="git-command-options">
+                  <button
+                    type="button"
+                    disabled={!mergeMethod || Boolean(commandBusy)}
+                    onClick={() =>
+                      mergeMethod &&
+                      void runPullRequestMutation("pr_merge", {
+                        merge_method: mergeMethod,
+                        expected_head: pullRequest.headRefOid,
+                      })
+                    }
+                  >
+                    {commandBusy === "pr_merge" ? "Merging..." : "Confirm merge"}
+                  </button>
+                </div>
+              </section>
+            </div>,
+            document.body,
+          )}
+      </>
+    );
   }
 
   if (!expanded) {
@@ -1867,6 +2506,7 @@ export function GitPanel({
         aria-label="Git environment"
         onContextMenu={openGitContextMenu}
       >
+        {renderPullRequestNavigation()}
         <div className="git-panel-head">
           <button
             type="button"
@@ -2565,10 +3205,12 @@ export function GitPanel({
 }
 
 export function GitWorkspacePanel({
+  sessionId,
   folder,
   model,
   onDraftAction,
   diffRequest,
+  requestedView,
   closing = false,
   noEnterMotion = false,
   onClose,
@@ -2576,10 +3218,12 @@ export function GitWorkspacePanel({
   style,
   headerNotice,
 }: {
+  sessionId: string;
   folder: string;
   model: string;
   onDraftAction: (text: string) => void;
   diffRequest?: GitPanelDiffRequest | null;
+  requestedView?: GitPanelView;
   closing?: boolean;
   noEnterMotion?: boolean;
   onClose: () => void;
@@ -2609,11 +3253,13 @@ export function GitWorkspacePanel({
       <div className="git-workspace-scroll">
         {headerNotice}
         <GitPanel
+          sessionId={sessionId}
           folder={folder}
           model={model}
           onDraftAction={onDraftAction}
           forceExpanded
           diffRequest={diffRequest}
+          requestedView={requestedView}
         />
       </div>
     </aside>

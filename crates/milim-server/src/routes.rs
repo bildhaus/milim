@@ -3467,17 +3467,13 @@ pub(crate) async fn pi_run(
     Json(mut req): Json<crate::pi_bridge::PiRunRequest>,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
-    if req.cwd.trim().is_empty() {
-        return Err(ApiError(Error::InvalidRequest(
-            "Pi requires a workspace folder".to_string(),
-        )));
-    }
+    req.cwd = req.cwd.take().filter(|cwd| !cwd.trim().is_empty());
     if req.prompt.trim().is_empty() && req.images.is_empty() {
         return Err(ApiError(Error::InvalidRequest(
             "Pi requires a prompt or at least one image".to_string(),
         )));
     }
-    req.prompt = account_runtime_workspace_prompt(&st, Some(&req.cwd), &req.prompt, "native");
+    req.prompt = account_runtime_workspace_prompt(&st, req.cwd.as_deref(), &req.prompt, "native");
     let (prompt, redactions) =
         account_runtime_prompt_for_remote(&st, &req.prompt, "Pi").map_err(ApiError)?;
     account_runtime_images_for_remote(&st, &req.images, "Pi").map_err(ApiError)?;
@@ -3488,6 +3484,34 @@ pub(crate) async fn pi_run(
         Some(st.tool_approvals.clone()),
     ))
     .keep_alive(KeepAlive::default())
+    .into_response())
+}
+
+/// `GET /account-runtimes/updates` - installed versions for user-owned CLIs.
+pub(crate) async fn account_runtime_updates(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: Peer,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    Ok(Json(crate::account_runtime_update::statuses().await).into_response())
+}
+
+/// `POST /account-runtimes/{runtime}/update` - run the CLI's own updater.
+pub(crate) async fn account_runtime_update(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: Peer,
+    Path(runtime): Path<String>,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    let runtime = crate::account_runtime_update::AccountRuntime::parse(&runtime)
+        .ok_or_else(|| ApiError(Error::InvalidRequest("Unknown account runtime".into())))?;
+    Ok(Json(
+        crate::account_runtime_update::update(runtime)
+            .await
+            .map_err(ApiError)?,
+    )
     .into_response())
 }
 
@@ -4142,6 +4166,8 @@ pub(crate) struct WorkspaceGitCommit {
 pub(crate) struct WorkspaceGitActionRequest {
     action: String,
     #[serde(default)]
+    folder: Option<String>,
+    #[serde(default)]
     message: Option<String>,
     #[serde(default)]
     checkpoint: Option<String>,
@@ -4169,6 +4195,14 @@ pub(crate) struct WorkspaceGitActionRequest {
     base: Option<String>,
     #[serde(default)]
     draft: bool,
+    #[serde(default)]
+    pull_request: Option<u64>,
+    #[serde(default)]
+    review_action: Option<String>,
+    #[serde(default)]
+    merge_method: Option<String>,
+    #[serde(default)]
+    expected_head: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -4193,6 +4227,7 @@ pub(crate) struct WorkspaceGitActionResponse {
     undo_checkpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     conflicts: Option<Vec<String>>,
+    pull_request: Option<Value>,
 }
 
 #[derive(Debug, Default)]
@@ -4405,13 +4440,36 @@ pub(crate) async fn workspace_git_action(
             | "remove_thread_worktree"
             | "pr_status"
             | "pr_create"
+            | "pr_ready"
+            | "pr_comment"
+            | "pr_review"
+            | "pr_merge"
     ) {
         return Err(ApiError(Error::InvalidRequest(format!(
             "unsupported git action: {action}"
         ))));
     }
 
-    let folder = st.workspace.read().ok().and_then(|g| g.clone());
+    let active_folder = st.workspace.read().ok().and_then(|g| g.clone());
+    let folder = if action.starts_with("pr_") {
+        req.folder
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or(active_folder)
+    } else {
+        if req
+            .folder
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            return Err(ApiError(Error::InvalidRequest(
+                "folder override is only supported for pull request actions".to_string(),
+            )));
+        }
+        active_folder
+    };
     let hot_swap_root = milim_core::paths::Paths::resolve()
         .root()
         .join("runtime")
@@ -4804,6 +4862,7 @@ fn workspace_git_action_blocking(
     const OUTPUT_LIMIT: usize = 24_000;
     let WorkspaceGitActionRequest {
         action,
+        folder: _,
         message,
         checkpoint,
         stage_all,
@@ -4818,6 +4877,10 @@ fn workspace_git_action_blocking(
         body,
         base,
         draft,
+        pull_request,
+        review_action,
+        merge_method,
+        expected_head,
     } = request;
 
     let status = workspace_git_status_blocking(folder);
@@ -4878,6 +4941,21 @@ fn workspace_git_action_blocking(
     }
     if action == "pr_create" {
         return workspace_git_pr_create_action(&root, &status, title, body, base, draft);
+    }
+    if matches!(
+        action.as_str(),
+        "pr_ready" | "pr_comment" | "pr_review" | "pr_merge"
+    ) {
+        return workspace_git_pr_mutation_action(
+            &root,
+            &status,
+            &action,
+            pull_request,
+            body,
+            review_action,
+            merge_method,
+            expected_head,
+        );
     }
     if matches!(action.as_str(), "commit" | "commit_push") {
         return workspace_git_commit_action(&root, &action, &status, message, stage_all);
@@ -5004,6 +5082,7 @@ fn workspace_git_action_blocking(
                 worktree: None,
                 undo_checkpoint: None,
                 conflicts: None,
+                pull_request: None,
             }
         }
         Err(e) => workspace_git_action_message(&action, &command, false, &e),
@@ -5970,6 +6049,14 @@ fn gh_output(root: &FsPath, args: &[&str]) -> Result<Output, String> {
         .map_err(|error| format!("Failed to run GitHub CLI: {error}"))
 }
 
+fn gh_output_owned(root: &FsPath, args: &[String]) -> Result<Output, String> {
+    Command::new("gh")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .map_err(|error| format!("Failed to run GitHub CLI: {error}"))
+}
+
 fn workspace_git_pr_prerequisite(
     root: &FsPath,
     status: &WorkspaceGitStatus,
@@ -5998,24 +6085,60 @@ fn workspace_git_pr_status_action(
     root: &FsPath,
     status: &WorkspaceGitStatus,
 ) -> WorkspaceGitActionResponse {
-    if let Err(message) = workspace_git_pr_prerequisite(root, status) {
-        return workspace_git_action_message("pr_status", "gh pr view --json", false, &message);
-    }
-    let args = [
-        "pr",
-        "view",
-        "--json",
-        "number,title,url,state,isDraft,baseRefName,headRefName",
-    ];
-    let output = match gh_output(root, &args) {
-        Ok(output) => output,
-        Err(error) => {
-            return workspace_git_action_message("pr_status", "gh pr view --json", false, &error)
+    let branch = match workspace_git_pr_prerequisite(root, status) {
+        Ok(branch) => branch,
+        Err(message) => {
+            return workspace_git_action_message(
+                "pr_status",
+                "gh pr list --head <branch>",
+                false,
+                &message,
+            )
         }
     };
-    let ok = output.status.success();
-    let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    if !ok {
+    let fields = "number,title,url,state,isDraft,baseRefName,headRefName,headRefOid,body,author,reviewRequests,latestReviews,reviewDecision,mergeStateStatus,mergeable,comments,additions,deletions,changedFiles,updatedAt";
+    let args = vec![
+        "pr".to_string(),
+        "list".to_string(),
+        "--head".to_string(),
+        branch,
+        "--state".to_string(),
+        "all".to_string(),
+        "--limit".to_string(),
+        "10".to_string(),
+        "--json".to_string(),
+        fields.to_string(),
+    ];
+    let command = format!("gh {}", args.join(" "));
+    let output = match gh_output_owned(root, &args) {
+        Ok(output) => output,
+        Err(error) => return workspace_git_action_message("pr_status", &command, false, &error),
+    };
+    if !output.status.success() {
+        return workspace_git_combined_response(
+            "pr_status",
+            &command,
+            false,
+            String::from_utf8_lossy(&output.stdout).to_string(),
+            String::from_utf8_lossy(&output.stderr).to_string(),
+            output.status.code(),
+            output_error_text(&output),
+        );
+    }
+
+    let candidates = match serde_json::from_slice::<Vec<Value>>(&output.stdout) {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            return workspace_git_action_message(
+                "pr_status",
+                &command,
+                false,
+                &format!("GitHub CLI returned invalid PR data: {error}"),
+            )
+        }
+    };
+    let Some(mut pull_request) = select_pull_request_for_head(candidates, status.head.as_deref())
+    else {
         let base = git_text(
             root,
             &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
@@ -6023,19 +6146,199 @@ fn workspace_git_pr_status_action(
         .and_then(|value| value.strip_prefix("origin/").map(str::to_string))
         .unwrap_or_else(|| "main".to_string());
         let title = git_text(root, &["log", "-1", "--pretty=%s"]).unwrap_or_default();
-        stdout = json!({ "exists": false, "baseRefName": base, "title": title }).to_string();
+        let mut response = workspace_git_combined_response(
+            "pr_status",
+            &command,
+            true,
+            json!({ "exists": false, "baseRefName": base, "title": title }).to_string(),
+            String::new(),
+            output.status.code(),
+            "No pull request exists for this branch.".to_string(),
+        );
+        response.pull_request = None;
+        return response;
+    };
+
+    if let Some(number) = pull_request.get("number").and_then(Value::as_u64) {
+        let check_args = vec![
+            "pr".to_string(),
+            "checks".to_string(),
+            number.to_string(),
+            "--json".to_string(),
+            "bucket,completedAt,description,event,link,name,startedAt,state,workflow".to_string(),
+        ];
+        match gh_output_owned(root, &check_args) {
+            Ok(checks) if checks.status.success() || checks.status.code() == Some(8) => {
+                if let Ok(value) = serde_json::from_slice::<Value>(&checks.stdout) {
+                    pull_request["checks"] = value;
+                }
+            }
+            Ok(checks) => {
+                pull_request["checksError"] = Value::String(output_error_text(&checks));
+            }
+            Err(error) => {
+                pull_request["checksError"] = Value::String(error);
+            }
+        }
     }
-    workspace_git_combined_response(
+    pull_request["exists"] = Value::Bool(true);
+    let mut response = workspace_git_combined_response(
         "pr_status",
-        "gh pr view --json",
+        &command,
+        true,
+        pull_request.to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+        output.status.code(),
+        "Pull request found.".to_string(),
+    );
+    response.pull_request = Some(pull_request);
+    response
+}
+
+fn select_pull_request_for_head(candidates: Vec<Value>, head: Option<&str>) -> Option<Value> {
+    let is_open = |candidate: &&Value| {
+        candidate
+            .get("state")
+            .and_then(Value::as_str)
+            .is_some_and(|state| state.eq_ignore_ascii_case("open"))
+    };
+    let matches_head = |candidate: &&Value| {
+        head.is_some_and(|head| {
+            candidate
+                .get("headRefOid")
+                .and_then(Value::as_str)
+                .is_some_and(|candidate_head| candidate_head == head)
+        })
+    };
+    candidates
+        .iter()
+        .find(|candidate| is_open(candidate) && matches_head(candidate))
+        .or_else(|| candidates.iter().find(is_open))
+        .or_else(|| candidates.iter().find(matches_head))
+        .or_else(|| candidates.first())
+        .cloned()
+}
+
+fn workspace_git_pr_action_args(
+    action: &str,
+    pull_request: Option<u64>,
+    body: Option<&str>,
+    review_action: Option<&str>,
+    merge_method: Option<&str>,
+    expected_head: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let number = pull_request
+        .filter(|number| *number > 0)
+        .ok_or_else(|| "Pull request number is required.".to_string())?
+        .to_string();
+    let mut args = vec!["pr".to_string()];
+    match action {
+        "pr_ready" => args.extend(["ready".to_string(), number]),
+        "pr_comment" => {
+            let body = body
+                .map(str::trim)
+                .filter(|body| !body.is_empty())
+                .ok_or_else(|| "Comment body is required.".to_string())?;
+            args.extend([
+                "comment".to_string(),
+                number,
+                "--body".to_string(),
+                body.to_string(),
+            ]);
+        }
+        "pr_review" => {
+            let review_action = review_action
+                .map(str::trim)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let flag = match review_action.as_str() {
+                "approve" => "--approve",
+                "request_changes" => "--request-changes",
+                "comment" => "--comment",
+                _ => return Err("Choose approve, request changes, or comment.".to_string()),
+            };
+            let body = body.map(str::trim).unwrap_or_default();
+            if review_action != "approve" && body.is_empty() {
+                return Err("Review body is required.".to_string());
+            }
+            args.extend(["review".to_string(), number, flag.to_string()]);
+            if !body.is_empty() {
+                args.extend(["--body".to_string(), body.to_string()]);
+            }
+        }
+        "pr_merge" => {
+            let method = match merge_method.map(str::trim) {
+                Some("merge") => "--merge",
+                Some("squash") => "--squash",
+                Some("rebase") => "--rebase",
+                _ => return Err("Choose merge, squash, or rebase.".to_string()),
+            };
+            let expected_head = expected_head
+                .map(str::trim)
+                .filter(|head| !head.is_empty())
+                .ok_or_else(|| "Current pull request head is required.".to_string())?;
+            args.extend([
+                "merge".to_string(),
+                number,
+                method.to_string(),
+                "--match-head-commit".to_string(),
+                expected_head.to_string(),
+            ]);
+        }
+        _ => return Err("Unsupported pull request action.".to_string()),
+    }
+    Ok(args)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn workspace_git_pr_mutation_action(
+    root: &FsPath,
+    status: &WorkspaceGitStatus,
+    action: &str,
+    pull_request: Option<u64>,
+    body: Option<String>,
+    review_action: Option<String>,
+    merge_method: Option<String>,
+    expected_head: Option<String>,
+) -> WorkspaceGitActionResponse {
+    if let Err(message) = workspace_git_pr_prerequisite(root, status) {
+        return workspace_git_action_message(action, "gh pr", false, &message);
+    }
+    let args = match workspace_git_pr_action_args(
+        action,
+        pull_request,
+        body.as_deref(),
+        review_action.as_deref(),
+        merge_method.as_deref(),
+        expected_head.as_deref(),
+    ) {
+        Ok(args) => args,
+        Err(message) => return workspace_git_action_message(action, "gh pr", false, &message),
+    };
+    let command = format!("gh {}", args.join(" "));
+    let output = match gh_output_owned(root, &args) {
+        Ok(output) => output,
+        Err(error) => return workspace_git_action_message(action, &command, false, &error),
+    };
+    let ok = output.status.success();
+    workspace_git_combined_response(
+        action,
+        &command,
         ok,
-        stdout,
+        String::from_utf8_lossy(&output.stdout).to_string(),
         String::from_utf8_lossy(&output.stderr).to_string(),
         output.status.code(),
         if ok {
-            "Pull request found.".to_string()
+            match action {
+                "pr_ready" => "Pull request marked ready for review.",
+                "pr_comment" => "Comment added.",
+                "pr_review" => "Review submitted.",
+                "pr_merge" => "Pull request merged.",
+                _ => "Pull request updated.",
+            }
+            .to_string()
         } else {
-            "No pull request exists for this branch.".to_string()
+            output_error_text(&output)
         },
     )
 }
@@ -6136,6 +6439,59 @@ fn workspace_git_pr_create_action(
 #[cfg(test)]
 mod git_control_plane_tests {
     use super::*;
+
+    #[test]
+    fn pull_request_actions_validate_review_and_guard_merge_head() {
+        assert!(
+            workspace_git_pr_action_args("pr_comment", Some(12), Some(" "), None, None, None,)
+                .is_err()
+        );
+        assert!(workspace_git_pr_action_args(
+            "pr_review",
+            Some(12),
+            None,
+            Some("request_changes"),
+            None,
+            None,
+        )
+        .is_err());
+
+        let args = workspace_git_pr_action_args(
+            "pr_merge",
+            Some(12),
+            None,
+            None,
+            Some("squash"),
+            Some("abc123"),
+        )
+        .unwrap();
+        assert_eq!(
+            args,
+            [
+                "pr",
+                "merge",
+                "12",
+                "--squash",
+                "--match-head-commit",
+                "abc123"
+            ]
+        );
+        assert!(!args.iter().any(|arg| arg == "--admin"));
+    }
+
+    #[test]
+    fn pull_request_selection_prefers_open_matching_head() {
+        let selected = select_pull_request_for_head(
+            vec![
+                json!({ "number": 1, "state": "MERGED", "headRefOid": "abc" }),
+                json!({ "number": 2, "state": "OPEN", "headRefOid": "def" }),
+                json!({ "number": 3, "state": "OPEN", "headRefOid": "abc" }),
+            ],
+            Some("abc"),
+        )
+        .unwrap();
+        assert_eq!(selected["number"], 3);
+    }
 
     #[test]
     fn thread_worktree_lifecycle_keeps_branch_and_guards_dirty_state() {
@@ -6255,6 +6611,7 @@ fn workspace_git_combined_response(
         worktree: None,
         undo_checkpoint: None,
         conflicts: None,
+        pull_request: None,
     }
 }
 
@@ -6471,6 +6828,7 @@ fn workspace_git_diff_action(
         worktree: None,
         undo_checkpoint: None,
         conflicts: None,
+        pull_request: None,
     }
 }
 
@@ -6570,6 +6928,7 @@ fn workspace_git_action_message(
         worktree: None,
         undo_checkpoint: None,
         conflicts: None,
+        pull_request: None,
     }
 }
 

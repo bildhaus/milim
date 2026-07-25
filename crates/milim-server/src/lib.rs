@@ -4,6 +4,7 @@
 //! unchanged: streamed and non-streamed chat completions, model listing, and
 //! embeddings, with bearer auth + loopback trust, CORS, and a body-size cap.
 
+mod account_runtime_update;
 mod auth;
 mod claude_bridge;
 mod codex_bridge;
@@ -232,6 +233,14 @@ pub fn build_router(state: AppState) -> Router {
         .route("/pi/status", get(routes::pi_status))
         .route("/pi/models", get(routes::pi_models))
         .route("/pi/run", post(routes::pi_run))
+        .route(
+            "/account-runtimes/updates",
+            get(routes::account_runtime_updates),
+        )
+        .route(
+            "/account-runtimes/{runtime}/update",
+            post(routes::account_runtime_update),
+        )
         .route(
             "/internal/claude-approvals/{run_id}/mcp",
             post(routes::claude_approval_mcp),

@@ -11,15 +11,22 @@ import {
   type SessionPreviewRuntime,
   type SessionSidebarState,
 } from "../sessions/store";
+import { runWorkspaceGitAction } from "../api";
 import { createInteractiveChat } from "../lib/newChatCoordinator";
+import { GIT_STATUS_REFRESH_INTERVAL_MS } from "../lib/gitRefresh";
 import { markPerfRender } from "../lib/perf";
 import { previewRuntimeKeyForThread } from "../lib/previewRuntimeKeys";
+import {
+  pullRequestAccessibleLabel,
+  pullRequestReadiness,
+} from "../lib/pullRequests";
 import { sessionRecencyLabel } from "../lib/sessionRecency.js";
 import { chatExportFilename, sessionExportPayload, sessionMarkdownExport } from "../lib/threadExport";
 import { DEFAULT_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, normalizeSidebarWidth, useUiPreferences } from "../ui/store";
-import { GitPanel } from "./GitPanel";
+import { GitPanel, type GitPanelView } from "./GitPanel";
 import { useContextMenu } from "./ContextMenu";
-import { Archive, ArrowUp, Bolt, Calendar, ChevronDown, Cube, Download, Folder, FolderOpen, Gear, GitBranch, Image, Lightbulb, MoreHorizontal, Pin, Plus, Search, Sidebar as PanelIcon } from "./icons";
+import { HoverScrollText } from "./HoverScrollText";
+import { Archive, ArrowUp, Bolt, Calendar, ChevronDown, Cube, Download, Folder, FolderOpen, Gear, GitBranch, GitPullRequest, Image, Lightbulb, MoreHorizontal, Pin, Plus, Search, Sidebar as PanelIcon } from "./icons";
 
 const SIDEBAR_KEYBOARD_STEP = 32;
 const SIDEBAR_COLLAPSE_OVERSHOOT = 96;
@@ -76,6 +83,10 @@ export type SidebarSessionLike = {
   updatedAt: number;
   archivedAt?: number;
   retryWorkspace?: { originalFolder: string };
+  threadWorkspace?: {
+    mode: "current" | "worktree";
+    branch?: string;
+  };
   worker?: unknown;
 };
 
@@ -238,6 +249,7 @@ function sameSidebarSession(a: Session, b: SidebarSession, previewRuntime?: Sess
   return a.id === b.id &&
     a.title === b.title &&
     a.settings === b.settings &&
+    a.threadWorkspace === b.threadWorkspace &&
     previewRuntime === b.previewRuntime &&
     a.parentId === b.parentId &&
     a.worker === b.worker &&
@@ -283,7 +295,7 @@ export function Sidebar({
   onManageMedia: () => void;
   onManageMcp: () => void;
   onGitAction: (text: string) => void;
-  onOpenGitPanel: () => void;
+  onOpenGitPanel: (sessionId?: string, view?: GitPanelView) => void;
 }) {
   markPerfRender("Sidebar");
   const { openContextMenu, openMenuAt } = useContextMenu();
@@ -295,6 +307,8 @@ export function Sidebar({
   const generatingSessionIds = useSessions((s) => s.generatingSessionIds);
   const runningWorkerParentIdsKey = useSessions((s) => runningWorkerParentThreadIdsKey(s.workerRuns));
   const unreadSessionIds = useSessions((s) => s.unreadSessionIds);
+  const pullRequestsBySession = useSessions((s) => s.pullRequestsBySession);
+  const setSessionPullRequest = useSessions((s) => s.setSessionPullRequest);
   const sidebarState = useSessions((s) => s.sidebar);
   const switchTo = useSessions((s) => s.switchTo);
   const archiveSession = useSessions((s) => s.archiveSession);
@@ -412,6 +426,89 @@ export function Sidebar({
   const activeSession = sessions.find((session) => session.id === activeId);
   const activeFolder = activeSession?.settings?.folder ?? "";
   const activeModel = activeSession?.settings?.model ?? "";
+  const pullRequestTargets = useMemo(() => {
+    const targets = new Map<
+      string,
+      { sessionId: string; folder: string; branch?: string }
+    >();
+    for (const group of groupedSessions) {
+      const limit =
+        sectionVisibleLimits[group.id] ?? SIDEBAR_SECTION_PREVIEW_LIMIT;
+      const activeIndex = group.sessions.findIndex(
+        (session) => session.id === activeId,
+      );
+      const visible = group.sessions.slice(0, limit);
+      if (activeIndex >= limit) visible.push(group.sessions[activeIndex]);
+      for (const session of visible) {
+        const folder = session.settings?.folder?.trim() ?? "";
+        const isolated = session.threadWorkspace?.mode === "worktree";
+        if (!folder || (session.id !== activeId && !isolated)) continue;
+        targets.set(session.id, {
+          sessionId: session.id,
+          folder,
+          branch: session.threadWorkspace?.branch,
+        });
+      }
+    }
+    return [...targets.values()];
+  }, [activeId, groupedSessions, sectionVisibleLimits]);
+  const pullRequestTargetsKey = pullRequestTargets
+    .map((target) => `${target.sessionId}\0${target.folder}\0${target.branch ?? ""}`)
+    .join("\x01");
+
+  useEffect(() => {
+    if (!pullRequestTargets.length) return;
+    let cancelled = false;
+    const refresh = async (openOnly: boolean) => {
+      await Promise.all(
+        pullRequestTargets.map(async (target) => {
+          const previous =
+            useSessions.getState().pullRequestsBySession[target.sessionId];
+          if (
+            openOnly &&
+            previous?.pullRequest?.state.toUpperCase() !== "OPEN"
+          )
+            return;
+          try {
+            const result = await runWorkspaceGitAction("pr_status", {
+              folder: target.folder,
+            });
+            if (cancelled) return;
+            if (!result.ok) throw new Error(result.message);
+            setSessionPullRequest(target.sessionId, {
+              folder: target.folder,
+              pullRequest: result.pull_request ?? null,
+              checkedAt: Date.now(),
+              stale: false,
+            });
+          } catch (error) {
+            if (cancelled || !previous?.pullRequest) return;
+            setSessionPullRequest(target.sessionId, {
+              ...previous,
+              checkedAt: Date.now(),
+              stale: true,
+              error:
+                error instanceof Error
+                  ? error.message
+                  : "Couldn't refresh pull request.",
+            });
+          }
+        }),
+      );
+    };
+    void refresh(false);
+    const onFocus = () => void refresh(false);
+    const interval = window.setInterval(
+      () => void refresh(true),
+      GIT_STATUS_REFRESH_INTERVAL_MS,
+    );
+    window.addEventListener("focus", onFocus);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [pullRequestTargetsKey, setSessionPullRequest]);
 
   function focusComposerSoon() {
     window.requestAnimationFrame(() => {
@@ -1140,6 +1237,21 @@ export function Sidebar({
                   const pinned = !s.parentId && sidebarState.pinnedSessionIds.includes(s.id);
                   const showStatus = generating || unread;
                   const statusLabel = parentWorkersRunning ? "Workers running" : s.worker ? `Worker ${s.worker.status}` : generating ? "Working" : unread ? "Unread update" : "Ready";
+                  const pullRequestSnapshot = pullRequestsBySession[s.id];
+                  const pullRequest =
+                    pullRequestSnapshot?.folder ===
+                      (s.settings?.folder?.trim() ?? "") &&
+                    (!s.threadWorkspace?.branch ||
+                      pullRequestSnapshot.pullRequest?.headRefName ===
+                        s.threadWorkspace.branch)
+                      ? pullRequestSnapshot.pullRequest
+                      : null;
+                  const pullRequestState = pullRequest
+                    ? pullRequestReadiness(
+                        pullRequest,
+                        pullRequestSnapshot?.stale,
+                      )
+                    : null;
                   const sessionDragOver = dragOver?.type === "session" && dragOver.id === s.id;
                   const sessionDropClass = sessionDragOver ? ` drag-over drop-${dragOver.position}` : "";
                   const sessionDragging = dragging?.type === "session" && dragging.id === s.id;
@@ -1190,35 +1302,51 @@ export function Sidebar({
                         />
                       ) : (
                         <>
+                          <span
+                            className={"session-status" + (generating ? " working" : unread ? " unread" : "")}
+                            data-testid="session-loader"
+                            role={showStatus ? "img" : undefined}
+                            title={showStatus ? statusLabel : undefined}
+                            aria-label={showStatus ? statusLabel : undefined}
+                            aria-hidden={showStatus ? undefined : true}
+                          />
                           <span className="session-copy">
-                            <span className={"session-title" + (generating ? " shiny-text" : "")}>{s.title}</span>
+                            <HoverScrollText
+                              className="session-title"
+                              innerClassName={generating ? "shiny-text" : undefined}
+                              text={s.title}
+                            />
                           </span>
                           <div className="session-side">
-                            {showStatus ? (
-                              <span
-                                className={
-                                  "session-side-indicator session-loader " + (generating ? "working" : "unread")
-                                }
-                                data-testid="session-loader"
-                                role="img"
-                                title={statusLabel}
-                                aria-label={statusLabel}
-                              >
-                                {generating ? (
-                                  <WorkingSessionLoader />
-                                ) : (
-                                  <span className="loader" aria-hidden="true" />
+                            {pullRequest && pullRequestState && (
+                              <button
+                                type="button"
+                                className={`session-side-indicator session-pr-state ${pullRequestState.tone}`}
+                                title={pullRequestAccessibleLabel(
+                                  pullRequest,
+                                  pullRequestSnapshot?.stale,
                                 )}
-                              </span>
-                            ) : (
-                              <span
-                                className="session-side-indicator session-recency"
-                                data-testid="session-recency"
-                                title={`Updated ${new Date(s.updatedAt).toLocaleString()}`}
+                                aria-label={pullRequestAccessibleLabel(
+                                  pullRequest,
+                                  pullRequestSnapshot?.stale,
+                                )}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  switchVisibleSession(s.id);
+                                  onOpenGitPanel(s.id, "pull_request");
+                                }}
                               >
-                                {sessionRecencyLabel(s.updatedAt)}
-                              </span>
+                                <GitPullRequest size={13} />
+                                <span aria-hidden="true" />
+                              </button>
                             )}
+                            <span
+                              className="session-side-indicator session-recency"
+                              data-testid="session-recency"
+                              title={`Updated ${new Date(s.updatedAt).toLocaleString()}`}
+                            >
+                              {sessionRecencyLabel(s.updatedAt)}
+                            </span>
                             <div className="session-side-actions" aria-label="Thread actions">
                               {!s.parentId && (
                                 <button
@@ -1278,7 +1406,13 @@ export function Sidebar({
           )}
         </div>
 
-        <GitPanel folder={activeFolder} model={activeModel} onDraftAction={onGitAction} onOpenPanel={onOpenGitPanel} />
+        <GitPanel
+          sessionId={activeId}
+          folder={activeFolder}
+          model={activeModel}
+          onDraftAction={onGitAction}
+          onOpenPanel={() => onOpenGitPanel(activeId, "changes")}
+        />
 
         {newChatButtonAtBottom && newChatButton}
 

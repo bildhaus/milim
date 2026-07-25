@@ -492,6 +492,8 @@ mod tests {
         assert!(!native_incognito_for_mode(
             PreviewBrowserStorageMode::Persistent
         ));
-        assert!(native_incognito_for_mode(PreviewBrowserStorageMode::Private));
+        assert!(native_incognito_for_mode(
+            PreviewBrowserStorageMode::Private
+        ));
     }
 }

@@ -3,6 +3,7 @@ import type { ModelInfo, ProviderInfo } from "../src/api";
 import {
   modelDevProfile,
   modelDevCapabilities,
+  modelDisplayName,
   mergeModelListsForPicker,
   isModelPickerGroupCollapsed,
   modelPickerGroups,
@@ -14,6 +15,12 @@ import {
 equal(isModelPickerGroupCollapsed("OpenAI", ["OpenAI"], false), true, "saved provider groups should collapse");
 equal(isModelPickerGroupCollapsed("OpenAI", ["OpenAI"], true), false, "filtering should reveal saved collapsed groups");
 equal(isModelPickerGroupCollapsed("Favorites", ["Favorites"], false), false, "Favorites should always remain expanded");
+
+equal(modelDisplayName({ id: "codex:gpt-5.6-sol" }), "gpt-5.6-sol");
+equal(modelDisplayName({ id: "claude:opus" }), "opus");
+equal(modelDisplayName({ id: "opencode:openrouter/moonshotai/kimi-k2" }), "moonshotai/kimi-k2");
+equal(modelDisplayName({ id: "pi:github-copilot/gpt-5.6-sol", display_id: "GPT-5.6 Sol" }), "GPT-5.6 Sol");
+equal(modelDisplayName({ id: "black-forest-labs/flux-schnell" }), "black-forest-labs/flux-schnell");
 
 equal(
   modelDevCapabilities({

@@ -106,6 +106,12 @@ const faqItems = [
     answer:
       "Yes. The repo is MIT licensed. Provider usage depends on the keys, accounts, or local runtimes you connect.",
   },
+  {
+    id: "faq-google-workspace",
+    question: "Why does Milim connect to Google Drive?",
+    answer:
+      "Only to let you choose, view, and work with specific Drive, Docs, Sheets, and Slides files inside Milim. It requests per-file access rather than access to your whole Drive; details and removal controls are in the privacy policy.",
+  },
 ];
 
 const features = [

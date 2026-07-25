@@ -1,4 +1,4 @@
-export type SettingsSectionId = "app" | "chat" | "appearance" | "models" | "workspace" | "history" | "mobile" | "system" | "about" | "developer";
+export type SettingsSectionId = "app" | "chat" | "appearance" | "models" | "workspace" | "history" | "google" | "mobile" | "system" | "about" | "developer";
 
 export type SettingSearchEntry = {
   id: string;
@@ -28,7 +28,7 @@ export const SETTINGS_SEARCH_ENTRIES: SettingSearchEntry[] = [
   { id: "history-retention", label: "Archive retention", section: "history", aliases: ["delete", "purge", "7 days", "14 days", "30 days"] },
   { id: "history-projects", label: "Archived projects", section: "history", aliases: ["restore", "delete"] },
   { id: "history-chats", label: "Archived chats", section: "history", aliases: ["threads", "restore", "delete"] },
-  { id: "google-workspace", label: "Google Workspace", section: "history", aliases: ["drive", "docs", "sheets", "slides", "picker", "oauth", "selected files"] },
+  { id: "google-workspace", label: "Google Workspace", section: "google", aliases: ["drive", "docs", "sheets", "slides", "picker", "oauth", "selected files"] },
   { id: "browser-data", label: "Browser data", section: "history", aliases: ["cookies", "sign in", "credentials", "private", "persistent", "clear"] },
   { id: "data-export", label: "Thread export defaults", section: "history", aliases: ["json", "markdown"] },
   { id: "data-backup", label: "Backup and restore", section: "history", aliases: ["export backup", "restore backup", "recovery snapshot"] },
@@ -41,6 +41,7 @@ export const SETTINGS_SEARCH_ENTRIES: SettingSearchEntry[] = [
   { id: "about-updates", label: "Updates", section: "about", aliases: ["github release", "download", "restart"] },
   { id: "about-diagnostics", label: "Diagnostics", section: "about", aliases: ["logs", "recovery", "debug"] },
   { id: "developer-mode", label: "Developer mode", section: "developer", aliases: ["debug", "experimental", "onboarding"] },
+  { id: "developer-update-cards", label: "Update cards preview", section: "developer", aliases: ["release notes", "what's new", "debug", "replay"] },
 ];
 
 export function matchingSettingsEntries(query: string): SettingSearchEntry[] {

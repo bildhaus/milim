@@ -11,6 +11,7 @@ import {
   getUpdateFileName,
   selectUpdateAssets,
   shouldRunAutoUpdateCheck,
+  shouldShowUpdateCards,
   type GitHubReleaseAsset,
   type UpdateDownloadProgress,
   type UpdateDownloadServices,
@@ -84,6 +85,9 @@ equal(shouldRunAutoUpdateCheck(10, 10 + AUTO_UPDATE_INTERVAL_MS - 1), false);
 equal(shouldRunAutoUpdateCheck(10, 10 + AUTO_UPDATE_INTERVAL_MS), true);
 equal(shouldRunAutoUpdateCheck(10, 10 + STARTUP_UPDATE_INTERVAL_MS - 1, STARTUP_UPDATE_INTERVAL_MS), false);
 equal(shouldRunAutoUpdateCheck(10, 10 + STARTUP_UPDATE_INTERVAL_MS, STARTUP_UPDATE_INTERVAL_MS), true);
+equal(shouldShowUpdateCards("0.2.0", "0.2.0", null), true);
+equal(shouldShowUpdateCards("0.2.0", "0.2.0", "0.2.0"), false);
+equal(shouldShowUpdateCards("0.2.1", "0.2.0", "0.1.45"), false);
 equal(updateStoreSource.includes("if (get().currentVersion) return;"), false, "current app version should refresh from Tauri on launch");
 equal(updateStoreSource.includes("currentVersion: state.currentVersion"), false, "current app version should not persist across installed binaries");
 equal(

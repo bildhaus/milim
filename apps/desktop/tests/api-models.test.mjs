@@ -75,8 +75,23 @@ assert.match(api, /export async function getPiStatus/);
 assert.match(api, /export async function streamPiRun/);
 assert.match(api, /`\$\{BASE\}\/pi\/status`/);
 assert.match(api, /`\$\{BASE\}\/pi\/run`/);
+assert.match(api, /export async function getAccountRuntimeUpdates/);
+assert.match(api, /export async function updateAccountRuntime/);
+assert.match(api, /`\$\{BASE\}\/account-runtimes\/updates`/);
+assert.match(
+  api,
+  /`\$\{BASE\}\/account-runtimes\/\$\{encodeURIComponent\(runtime\)\}\/update`/,
+);
 assert.match(providersManager, /<strong>Installed Pi CLI<\/strong>/);
 assert.match(providersManager, /piStatus\.provider_count/);
+for (const runtime of ["codex", "claude", "opencode", "pi"]) {
+  assert.match(providersManager, new RegExp(`runtimeUpdateButton\\("${runtime}"`));
+}
+assert.match(providersManager, /data-testid=\{`\$\{runtime\}-update`\}/);
+assert.match(
+  providersManager,
+  /confirmRuntimeUpdate !== runtime[\s\S]*click Confirm update/,
+);
 assert.match(
   providersCss,
   /\.provider-account-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\);[^}]*gap:\s*0;/,

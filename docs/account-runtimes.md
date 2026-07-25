@@ -2,6 +2,8 @@
 
 Milim can use signed-in Codex, bring-your-own Claude CLI, OpenCode, and Pi as chat runtimes. These are separate from saved provider records. Each runtime can be enabled or disabled independently in Providers; disabled runtimes remain authenticated but are not queried for the desktop model catalog, shown in model pickers, or allowed to start a desktop turn. The privacy gate scans, redacts, or blocks text before any account runtime receives it. Image pixels cannot be scanned or redacted, so account-runtime images require Privacy Off.
 
+The Providers panel shows each detected CLI version. Its Update action requires a second confirmation, then invokes that runtime's own updater (`codex update`, `claude update`, `opencode upgrade --pure`, or `pi update self --no-approve`) and rechecks the installed version. Finish active turns first. Milim does not replace these tools' installers, credentials, or standalone configuration.
+
 After a Milim chat has a native Codex thread id, Claude session id, OpenCode session id, or Pi session id, Milim lets that runtime own prior context. Later turns send the current per-turn context plus the latest user message instead of replaying the visible Milim transcript or auto-compacting it first. Manual `/compact` still creates a visible Milim checkpoint, but its summary call is ephemeral and the stored native runtime id is cleared afterward.
 
 ## OpenCode
@@ -17,6 +19,8 @@ Milim invokes the separately installed `pi` CLI in offline JSONL RPC mode. `GET 
 Install Pi separately and authenticate inside Pi with `/login`. Pi owns its credentials and provider configuration; Milim neither reads nor stores them. Pi is useful as a distinct lean agent experience with its own detailed multi-provider catalog and subscription-backed providers such as GitHub Copilot, even where individual models overlap OpenCode or saved Milim providers.
 
 Embedded runs always pass `--offline --no-extensions`. This prevents user or project extensions from executing startup code outside Milim's approval boundary while leaving Pi's context files, prompt templates, and skills on their normal discovery path. Plan and Guarded expose only `read`, `grep`, `find`, and `ls`. Review loads one temporary Milim-owned extension that pauses `bash`, `write`, `edit`, and any unknown tool call and forwards the exact generated arguments to Milim's one-shot approval broker. Open exposes Pi's built-in tools without prompts. The temporary extension is removed after the run; standalone Pi settings are never modified.
+
+Pi also supports chats without a workspace folder. Those runs disable all tools and project context files; selecting a folder restores the approval-mode behavior above.
 
 Images are sent as native RPC image blocks and require Privacy Off. Text uses the same server-side scan/redact/block gate as the other account runtimes. Pi discovery and startup failures are isolated from the other provider and account-runtime lanes.
 

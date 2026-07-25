@@ -38,6 +38,7 @@ import {
 } from "../lib/goals.js";
 import { recordPerfMeasure, startPerfMeasure } from "../lib/perf.js";
 import { previewRuntimeKeyForThread } from "../lib/previewRuntimeKeys.js";
+import type { PullRequestSnapshot } from "../lib/pullRequests.js";
 import {
   normalizeQuickSummarySectionIds,
   type QuickSummarySectionId,
@@ -1701,6 +1702,7 @@ interface SessionState {
   workerRuns: SessionWorkerRunRecord[];
   projects: Project[];
   previewRuntimesByKey: Record<string, SessionPreviewRuntime>;
+  pullRequestsBySession: Record<string, PullRequestSnapshot>;
   activeId: string;
   archiveRetentionDays: ArchiveRetentionDays;
   generatingSessionIds: string[];
@@ -1841,6 +1843,10 @@ interface SessionState {
     key: string,
     runtime: SessionPreviewRuntime | undefined,
   ) => void;
+  setSessionPullRequest: (
+    id: string,
+    snapshot: PullRequestSnapshot | undefined,
+  ) => void;
   setAccountRuntime: (
     id: string,
     runtime: Partial<NonNullable<Session["accountRuntime"]>>,
@@ -1866,6 +1872,7 @@ export const useSessions = create<SessionState>()(
         workerRuns: [],
         projects: [],
         previewRuntimesByKey: {},
+        pullRequestsBySession: {},
         activeId: first.id,
         archiveRetentionDays: DEFAULT_ARCHIVE_RETENTION_DAYS,
         generatingSessionIds: [],
@@ -3263,6 +3270,14 @@ export const useSessions = create<SessionState>()(
             return { previewRuntimesByKey };
           }),
 
+        setSessionPullRequest: (id, snapshot) =>
+          set((st) => {
+            const pullRequestsBySession = { ...st.pullRequestsBySession };
+            if (snapshot) pullRequestsBySession[id] = snapshot;
+            else delete pullRequestsBySession[id];
+            return { pullRequestsBySession };
+          }),
+
         setAccountRuntime: (id, runtime) =>
           set((st) => ({
             sessions: st.sessions.map((s) => {
@@ -3501,6 +3516,7 @@ export const useSessions = create<SessionState>()(
           workerRuns,
           projects: liveProjects,
           previewRuntimesByKey,
+          pullRequestsBySession: {},
           activeId: active.activeId,
           archiveRetentionDays,
           generatingSessionIds: [],

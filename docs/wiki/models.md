@@ -19,7 +19,7 @@ Worker routing is a separate thread setting. A thread may choose an optional Wor
 
 ## Favorites and reasoning effort
 
-Favorites are the only model shortcut. Every picker row keeps its provider or runtime identity visible, including nested routes such as `OpenCode · OpenAI` and `Pi · GitHub Copilot`, so overlapping model names remain distinct in Favorites, search results, and provider groups. Search matches model names, route ids, runtimes, and providers. Each model keeps its own persisted reasoning-effort choice. Agents do not pin models, so changing the thread model keeps the active Agent enabled and changes the model used by its next interactive run.
+Favorites are the only model shortcut. Every picker row keeps its provider or runtime identity visible, including nested routes such as `OpenCode · OpenAI` and `Pi · GitHub Copilot`, so overlapping model names remain distinct in Favorites, search results, and provider groups. Primary model labels omit redundant account-runtime and nested-provider prefixes while keeping creator namespaces. Search matches model names, route ids, runtimes, and providers. Each model keeps its own persisted reasoning-effort choice. Agents do not pin models, so changing the thread model keeps the active Agent enabled and changes the model used by its next interactive run.
 
 Every provider and runtime group can be collapsed. The layout is shared by the chat, Hot Swap, and Worker model pickers and persists across restarts. Favorites stays expanded, while search and Favorites-only filtering temporarily reveal matches without changing the saved collapsed groups.
 

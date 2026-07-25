@@ -45,7 +45,8 @@ pub(crate) struct PiRunRequest {
     #[serde(default)]
     pub images: Vec<AccountImage>,
     pub model: String,
-    pub cwd: String,
+    #[serde(default)]
+    pub cwd: Option<String>,
     #[serde(default)]
     pub reasoning_effort: Option<String>,
     #[serde(default)]
@@ -406,7 +407,9 @@ fn run_arguments(
         || (req.tool_approval_policy.as_deref() == Some("review")
             && !req.interactive_tool_approval
             && !req.tool_approval_grant);
-    if restrictive {
+    if req.cwd.is_none() {
+        args.extend(["--no-tools".into(), "--no-context-files".into()]);
+    } else if restrictive {
         args.extend(["--tools".into(), SAFE_TOOLS.into()]);
     }
     if let Some(path) = extension {
@@ -458,7 +461,7 @@ impl PiProcess {
             None
         };
         let args = run_arguments(req, provider, model, session_id, extension.as_deref());
-        Self::start(&args, Some(Path::new(&req.cwd)), extension).await
+        Self::start(&args, req.cwd.as_deref().map(Path::new), extension).await
     }
 
     async fn start(
@@ -695,7 +698,7 @@ mod tests {
             prompt: "test".into(),
             images: vec![],
             model: "openai-codex/gpt".into(),
-            cwd: ".".into(),
+            cwd: Some(".".into()),
             reasoning_effort: Some("high".into()),
             session_id: None,
             persist_session: Some(true),
@@ -803,6 +806,12 @@ mod tests {
             .windows(2)
             .any(|pair| pair == ["--extension", "milim-review.mjs"]));
         assert!(!review.contains(&"--tools".to_string()));
+
+        let mut no_workspace = request("open");
+        no_workspace.cwd = None;
+        let args = run_arguments(&no_workspace, "openai-codex", "gpt", "session-3", None);
+        assert!(args.contains(&"--no-tools".to_string()));
+        assert!(args.contains(&"--no-context-files".to_string()));
     }
 
     #[test]

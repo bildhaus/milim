@@ -119,6 +119,8 @@ try {
   assert(!markup.includes(">Models<") && !markup.includes(">Presets<"), "Picker should not render redundant model or preset views");
   assert(markup.includes('aria-label="Collapse OpenAI models"'), "Provider headers should render accessible collapse controls");
   assert(markup.includes('aria-expanded="true"'), "Provider headers should expose their expanded state");
+  assert(markup.includes('data-hover-scroll-text="true"'), "Model names should use the shared truncated-label hover reveal");
+  assert(markup.includes('data-hover-scroll-inner="true"'), "Model hover reveal should animate only its inner text");
 
   const overlappingModels: ModelInfo[] = [
     { ...models[0], display_id: "Shared model" },
@@ -146,8 +148,8 @@ try {
     assert(overlapMarkup.includes(`data-provider-brand="${brand}"`), `Favorites should show the ${brand} route icon`);
   }
   assert(
-    overlapMarkup.match(/Shared model/g)?.length === overlappingModels.length * 2,
-    "Overlapping favorite names should remain present in visible and accessible labels",
+    overlapMarkup.match(/Shared model/g)?.length === overlappingModels.length * 3,
+    "Overlapping favorite names should remain present in visible text, native titles, and accessible labels",
   );
 
   const mediaMarkup = renderToStaticMarkup(

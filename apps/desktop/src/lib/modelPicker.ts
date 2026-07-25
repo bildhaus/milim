@@ -75,7 +75,16 @@ export function rawModelId(model: string): string {
 }
 
 export function modelDisplayName(model: Pick<ModelInfo, "id" | "display_id">): string {
-  return model.display_id || model.id;
+  if (model.display_id) return model.display_id;
+  if (model.id.startsWith(CODEX_MODEL_PREFIX)) return model.id.slice(CODEX_MODEL_PREFIX.length);
+  if (model.id.startsWith(CLAUDE_MODEL_PREFIX)) return model.id.slice(CLAUDE_MODEL_PREFIX.length);
+  for (const prefix of [OPENCODE_MODEL_PREFIX, PI_MODEL_PREFIX]) {
+    if (model.id.startsWith(prefix)) {
+      const routed = model.id.slice(prefix.length);
+      return routed.slice(routed.indexOf("/") + 1) || routed;
+    }
+  }
+  return model.id;
 }
 
 export function modelPickerKey(model: Pick<ModelInfo, "id" | "owned_by" | "provider_id">): string {

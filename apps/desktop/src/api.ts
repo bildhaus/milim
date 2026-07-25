@@ -2094,6 +2094,24 @@ export interface PiStatusResponse {
   error?: string | null;
 }
 
+export interface AccountRuntimeUpdateStatus {
+  available: boolean;
+  version?: string | null;
+  error?: string | null;
+}
+
+export interface AccountRuntimeUpdatesResponse {
+  runtimes: Record<AccountRuntimeKind, AccountRuntimeUpdateStatus>;
+}
+
+export interface AccountRuntimeUpdateResult {
+  runtime: AccountRuntimeKind;
+  previous_version: string;
+  version: string;
+  updated: boolean;
+  message?: string;
+}
+
 export type CodexLoginEvent =
   | { type: "browser"; login_id: string; auth_url: string }
   | {
@@ -2360,6 +2378,25 @@ export async function getPiStatus(
   return await parseJsonResponse<PiStatusResponse>(
     await authFetch(`${BASE}/pi/status`, signal ? { signal } : undefined),
     "Pi CLI status check failed",
+  );
+}
+
+export async function getAccountRuntimeUpdates(): Promise<AccountRuntimeUpdatesResponse> {
+  return await parseJsonResponse<AccountRuntimeUpdatesResponse>(
+    await authFetch(`${BASE}/account-runtimes/updates`),
+    "Account runtime version check failed",
+  );
+}
+
+export async function updateAccountRuntime(
+  runtime: AccountRuntimeKind,
+): Promise<AccountRuntimeUpdateResult> {
+  return await parseJsonResponse<AccountRuntimeUpdateResult>(
+    await authFetch(
+      `${BASE}/account-runtimes/${encodeURIComponent(runtime)}/update`,
+      { method: "POST" },
+    ),
+    `${runtime} update failed`,
   );
 }
 
@@ -3862,7 +3899,11 @@ export type WorkspaceGitAction =
   | "create_thread_worktree"
   | "remove_thread_worktree"
   | "pr_status"
-  | "pr_create";
+  | "pr_create"
+  | "pr_ready"
+  | "pr_comment"
+  | "pr_review"
+  | "pr_merge";
 
 export type WorkspaceGitDiffScope =
   | "all"
@@ -3887,9 +3928,41 @@ export interface WorkspaceGitActionResult {
   worktree?: string;
   undo_checkpoint?: string;
   conflicts?: string[];
+  pull_request?: PullRequestDetails | null;
 }
 
-export interface PullRequestSummary {
+export interface PullRequestActor {
+  login: string;
+  name?: string;
+}
+
+export interface PullRequestCheck {
+  bucket: "pass" | "fail" | "pending" | "skipping" | "cancel" | string;
+  name: string;
+  state: string;
+  workflow?: string;
+  description?: string;
+  link?: string;
+  startedAt?: string;
+  completedAt?: string;
+}
+
+export interface PullRequestReview {
+  author?: PullRequestActor;
+  state: string;
+  body?: string;
+  submittedAt?: string;
+}
+
+export interface PullRequestComment {
+  author?: PullRequestActor;
+  body: string;
+  createdAt?: string;
+  url?: string;
+}
+
+export interface PullRequestDetails {
+  exists: true;
   number: number;
   title: string;
   url: string;
@@ -3897,6 +3970,21 @@ export interface PullRequestSummary {
   isDraft: boolean;
   baseRefName: string;
   headRefName: string;
+  headRefOid: string;
+  body: string;
+  author?: PullRequestActor;
+  reviewRequests?: Array<{ login?: string; name?: string }>;
+  latestReviews?: PullRequestReview[];
+  reviewDecision?: string;
+  mergeStateStatus?: string;
+  mergeable?: string;
+  comments?: PullRequestComment[];
+  checks?: PullRequestCheck[];
+  checksError?: string;
+  additions: number;
+  deletions: number;
+  changedFiles: number;
+  updatedAt?: string;
 }
 
 export async function getWorkspaceGitStatus(): Promise<WorkspaceGitStatus | null> {
@@ -3947,6 +4035,11 @@ export async function runWorkspaceGitAction(
     body?: string;
     base?: string;
     draft?: boolean;
+    folder?: string;
+    pull_request?: number;
+    review_action?: "approve" | "request_changes" | "comment";
+    merge_method?: "merge" | "squash" | "rebase";
+    expected_head?: string;
   } = {},
 ): Promise<WorkspaceGitActionResult> {
   const r = await authFetch(`${BASE}/workspace/git/action`, {

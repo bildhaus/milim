@@ -1,0 +1,47 @@
+{
+  "0.2.0": {
+    "version": "0.2.0",
+    "summary": "Milim 0.2.0 brings GitHub pull requests, clearer account runtimes, and editable Google Workspace files into the local development workflow.",
+    "items": [
+      {
+        "id": "pull-requests",
+        "eyebrow": "GitHub pull requests",
+        "title": "Review and merge GitHub pull requests in Milim",
+        "description": "Open a pull request from the Git inspector and keep the review beside your coding thread.",
+        "details": [
+          "Track checks, approvals, and merge readiness",
+          "Read and reply to review comments",
+          "Merge without switching to GitHub"
+        ],
+        "accent": "var(--accent)",
+        "icon": "github"
+      },
+      {
+        "id": "account-runtimes",
+        "eyebrow": "Agent runtimes",
+        "title": "Update coding-agent CLIs from Milim",
+        "description": "Manage Codex, Claude, OpenCode, and Pi from the Providers screen.",
+        "details": [
+          "See installed and available versions",
+          "Run CLI updates without opening a terminal",
+          "Use the same approval modes across runtimes"
+        ],
+        "accent": "var(--accent)",
+        "icon": "plug"
+      },
+      {
+        "id": "google-workspace",
+        "eyebrow": "Google Workspace",
+        "title": "Open and edit Google Workspace files",
+        "description": "Keep selected Docs, Sheets, and Slides beside the conversation.",
+        "details": [
+          "Edit Docs text and Sheets cells in place",
+          "Preview Slides without leaving Milim",
+          "Autosave supported changes back to Google"
+        ],
+        "accent": "var(--accent)",
+        "icon": "google"
+      }
+    ]
+  }
+}

@@ -41,7 +41,8 @@ assert.match(
   /current\?\.thread_id === activePreviewRuntimeKey[\s\S]*?\{ \.\.\.current, stale: true \}/,
 );
 assert.match(chatView, /artifactSelectionsByThreadRef\.current\.get\(activeId\)/);
-assert.match(chatView, /browserSessionsByThreadRef\.current\.get\(activeId\)/);
+assert.match(chatView, /activeSession\?\.browserSession \?\? emptyBrowserSession\(\)/);
+assert.match(chatView, /setSessionBrowserSession\(activeId, restoredBrowser\)/);
 assert.match(chatView, /previewSourcesByThreadRef\.current\.get\(activeId\)/);
 assert.match(chatView, /title=\{inspectorLauncherLabel\}/);
 assert.match(chatView, /`Open Code: \$\{/);

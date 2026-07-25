@@ -31,15 +31,27 @@ jobs:
       - name: Validate release tag
         working-directory: apps/desktop
         run: node scripts/validate-release-tag.mjs
-      - name: Ensure draft release exists
+      - name: Checkout release tag
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ env.MILIM_RELEASE_TAG }}
+      - name: Generate release notes
+        working-directory: apps/desktop
+        run: node scripts/generate-release-notes.mjs --output release-notes.md
+      - name: Create or update draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release view "${MILIM_RELEASE_TAG}" >/dev/null 2>&1 || \
+          if gh release view "${MILIM_RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release edit "${MILIM_RELEASE_TAG}" \
+              --notes-file apps/desktop/release-notes.md
+          else
             gh release create "${MILIM_RELEASE_TAG}" \
               --draft \
               --title "milim ${MILIM_RELEASE_TAG}" \
+              --notes-file apps/desktop/release-notes.md \
               --verify-tag
+          fi
 
   desktop:
     needs: create-draft-release

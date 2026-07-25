@@ -71,6 +71,14 @@ export function shouldRunAutoUpdateCheck(
   return !lastCheckedAt || now - lastCheckedAt >= intervalMs;
 }
 
+export function shouldShowUpdateCards(
+  currentVersion: string | null,
+  releaseVersion: string,
+  seenVersion: string | null,
+): boolean {
+  return currentVersion === releaseVersion && seenVersion !== currentVersion;
+}
+
 export function getAssetConfigForPlatform(os: string): AssetConfig {
   if (os === "darwin") {
     return {

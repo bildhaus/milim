@@ -365,7 +365,11 @@ import { AssistantMessage } from "./AssistantMessage";
 import { ArtifactList } from "./ArtifactList";
 import { CommandPalette, type RuntimeCommand } from "./ChatSearchPopover";
 import { useContextMenu, type ContextMenuItem } from "./ContextMenu";
-import { GitWorkspacePanel, type GitPanelDiffRequest } from "./GitPanel";
+import {
+  GitWorkspacePanel,
+  type GitPanelDiffRequest,
+  type GitPanelView,
+} from "./GitPanel";
 import { PreviewPanel } from "./PreviewPanel";
 import { QuickSummaryPanel } from "./QuickSummaryPanel";
 import { RunTimeline } from "./RunTimeline";
@@ -3147,7 +3151,7 @@ export function ChatView({
   onOpenSchedules,
   onOpenSettings,
   composerDraft,
-  gitPanelRequest = 0,
+  gitPanelRequest = null,
   mcpManagerRequest = 0,
   onComposerDraftConsumed,
   skillsRevision = 0,
@@ -3156,7 +3160,11 @@ export function ChatView({
   onOpenSchedules: () => void;
   onOpenSettings: () => void;
   composerDraft?: { id: number; text: string } | null;
-  gitPanelRequest?: number;
+  gitPanelRequest?: {
+    id: number;
+    sessionId?: string;
+    view: GitPanelView;
+  } | null;
   mcpManagerRequest?: number;
   onComposerDraftConsumed?: (id: number) => void;
   skillsRevision?: number;
@@ -3214,6 +3222,7 @@ export function ChatView({
   );
   const [gitStatus, setGitStatus] = useState<WorkspaceGitStatus | null>(null);
   const [gitStatusLoading, setGitStatusLoading] = useState(false);
+  const [gitPanelView, setGitPanelView] = useState<GitPanelView>("changes");
   const [turnChanges, setTurnChanges] = useState<TurnChanges | null>(null);
   const [gitDiffRequest, setGitDiffRequest] = useState<
     (GitPanelDiffRequest & { sessionId: string; folder: string }) | null
@@ -4357,8 +4366,10 @@ export function ChatView({
 
   useEffect(() => {
     if (!gitPanelRequest) return;
-    openGitPanel();
-  }, [gitPanelRequest]);
+    if (gitPanelRequest.sessionId && gitPanelRequest.sessionId !== activeId)
+      return;
+    openGitPanel(gitPanelRequest.view);
+  }, [activeId, gitPanelRequest]);
 
   useEffect(() => {
     if (!mcpManagerRequest) return;
@@ -4729,12 +4740,13 @@ export function ChatView({
     activeArtifactSelection?.revision?.totalRevisions,
   ]);
 
-  function openGitPanel() {
+  function openGitPanel(view: GitPanelView = "changes") {
     if (!folder.trim() || (gitStatus && !canOpenGitPanel)) return;
     rememberInspectorInvoker();
     clearPreviewCloseTimer();
     setPreviewPanelClosing(false);
     setDismissedPreviewKey(latestPreviewSelection?.autoOpenKey ?? null);
+    setGitPanelView(view);
     setSessionInspectorTab(activeId, "git");
   }
 
@@ -9328,7 +9340,7 @@ export function ChatView({
           aria-selected={inspectorTab === "git"}
           aria-controls="inspector-panel-git"
           tabIndex={inspectorTab === "git" ? 0 : -1}
-          onClick={openGitPanel}
+          onClick={() => openGitPanel()}
         >
           <GitBranch size={14} />
           <span>Git</span>
@@ -9754,9 +9766,11 @@ export function ChatView({
                 aria-labelledby="inspector-tab-git"
               >
                 <GitWorkspacePanel
+                  sessionId={activeId}
                   folder={folder}
                   model={effectiveModel}
                   onDraftAction={loadGitActionDraft}
+                  requestedView={gitPanelView}
                   diffRequest={
                     gitDiffRequest?.sessionId === activeId &&
                     previewRuntimeFoldersEqual(gitDiffRequest.folder, folder)

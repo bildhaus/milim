@@ -24,8 +24,11 @@ for (const artifact of expectedArtifacts) {
 
 for (const needle of [
   "create-draft-release:",
-  "Ensure draft release exists",
+  "Create or update draft release",
   'gh release create "${MILIM_RELEASE_TAG}"',
+  'gh release edit "${MILIM_RELEASE_TAG}"',
+  "node scripts/generate-release-notes.mjs --output release-notes.md",
+  "--notes-file apps/desktop/release-notes.md",
   "--verify-tag",
   "needs: create-draft-release",
   "Checkout release tag",
@@ -77,6 +80,7 @@ for (const needle of [
 }
 
 assertBefore(releaseWorkflow, "Validate release tag", checkoutReleaseTagRef, "release workflow checkout");
+assertBefore(releaseWorkflow, "Generate release notes", "Create or update draft release", "release workflow notes");
 assertBefore(releaseWorkflow, checkoutReleaseTagRef, "Require macOS signing secrets", "release workflow signing preflight");
 assertBefore(releaseWorkflow, "Require macOS signing secrets", verifyCommand, "release workflow signing preflight");
 assertBefore(releaseWorkflow, "Require macOS signing secrets", "Build macOS app and DMG", "release workflow signing preflight");

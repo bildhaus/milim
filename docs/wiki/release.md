@@ -6,7 +6,7 @@ title: Release and verification
 summary: Release artifacts, updater behavior, verification commands, and site build checks.
 group: Reference
 order: 110
-updated: 2026-07-14
+updated: 2026-07-25
 ---
 
 Release work should verify the Rust workspace, desktop app, site docs, and platform artifacts without reintroducing Linux packaging as a release target.
@@ -24,6 +24,8 @@ Release builds run desktop verification on both macOS and Windows. macOS release
 ## Updater behavior
 
 The desktop app checks GitHub Releases for the latest platform artifact on startup unless it checked within the last 120 minutes, then keeps the existing 12-hour background check cadence. When an update is available, the top bar shows an Update button; confirming it downloads the selected package and checksum through a native Tauri command, verifies SHA-256, stages the package in the local update directory, and hands it to the existing Windows portable EXE or macOS app replacement flow. The top-bar dialog and Settings update panel show byte-based download progress, falling back to an indeterminate bar when the server does not provide a total size. The top-bar action restarts automatically after verification, while Settings keeps its separate Restart action.
+
+Each release entry in `apps/desktop/src/update/releases.json` supplies both the bundled in-app update-card deck and the Markdown body created for its GitHub Release. Desktop verification fails when `VERSION` has no matching, valid entry. After onboarding is complete, the deck appears on the first startup of that exact installed version and records dismissal in machine-local storage; Developer → Release UI can replay it without changing that state. The deck uses the installed version already loaded by the updater and does not fetch release notes at startup.
 
 ## Checks
 

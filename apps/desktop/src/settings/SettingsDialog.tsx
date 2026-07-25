@@ -142,6 +142,12 @@ const SETTINGS_SECTIONS: SettingsSection[] = [
     icon: Archive,
   },
   {
+    id: "google",
+    label: "Google Workspace",
+    detail: "Connection and authorized Drive files",
+    icon: FileText,
+  },
+  {
     id: "mobile",
     label: "Mobile",
     detail: "Phone companion relay and pairing",
@@ -170,7 +176,7 @@ const SETTINGS_SECTIONS: SettingsSection[] = [
 const SETTINGS_SECTION_GROUPS: Array<{ label: string; sections: SettingsSectionId[] }> = [
   { label: "Preferences", sections: ["app", "chat", "appearance"] },
   { label: "Workflows", sections: ["models", "workspace"] },
-  { label: "Data & devices", sections: ["history", "mobile"] },
+  { label: "Data & devices", sections: ["history", "google", "mobile"] },
   { label: "Application", sections: ["system", "about", "developer"] },
 ];
 function onboardingSetupLabel(value: string | null): string {
@@ -1299,10 +1305,10 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
         </section>
             )}
 
-            {activeSection === "history" && (
-        <section className="settings-section" id="settings-panel-history" role="tabpanel" aria-labelledby="settings-tab-history" tabIndex={-1}>
+            {activeSection === "google" && (
+        <section className="settings-section" id="settings-panel-google" role="tabpanel" aria-labelledby="settings-tab-google" tabIndex={-1}>
           <SettingsPanel>
-            <SettingsBlock title="Google Workspace" data-setting-id="google-workspace" className={settingHighlightClass("google-workspace").trim()}>
+            <SettingsBlock data-setting-id="google-workspace" className={settingHighlightClass("google-workspace").trim()}>
               <div className="setting-stack">
                 <div className="google-workspace-connect-card">
                   <div className="google-workspace-connect-copy">
@@ -1407,6 +1413,13 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                 {googleWorkspaceMessage ? <p className={googleWorkspaceMessage.includes("failed") ? "sheet-hint error" : "sheet-hint"} role="status">{googleWorkspaceMessage}</p> : null}
               </div>
             </SettingsBlock>
+          </SettingsPanel>
+        </section>
+            )}
+
+            {activeSection === "history" && (
+        <section className="settings-section" id="settings-panel-history" role="tabpanel" aria-labelledby="settings-tab-history" tabIndex={-1}>
+          <SettingsPanel>
             <SettingsBlock title="Browser data" data-setting-id="browser-data" className={settingHighlightClass("browser-data").trim()}>
               <div className="setting-stack">
                 <SettingsChoiceGroup
@@ -1940,6 +1953,28 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                     testId="developer-hashline-patch-toggle"
                   />
                 </div>
+              </div>
+            </SettingsBlock>
+            )}
+
+            {developerMode && (
+            <SettingsBlock title="Release UI" data-setting-id="developer-update-cards" className={settingHighlightClass("developer-update-cards").trim()}>
+              <div className="settings-action-row">
+                <div>
+                  <strong>Update cards</strong>
+                  <span>Preview the bundled cards for the current version without changing their viewed state.</span>
+                </div>
+                <button
+                  className="btn-ghost"
+                  type="button"
+                  data-testid="developer-show-update-cards"
+                  onClick={() => {
+                    onClose();
+                    void import("../components/UpdateCards").then(({ showUpdateCardsForDebug }) => showUpdateCardsForDebug());
+                  }}
+                >
+                  Show cards
+                </button>
               </div>
             </SettingsBlock>
             )}

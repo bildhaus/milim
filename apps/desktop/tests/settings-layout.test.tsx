@@ -15,14 +15,15 @@ function equal<T>(actual: T, expected: T, message: string): void {
 const source = readFileSync(resolve(process.cwd(), "src/settings/SettingsDialog.tsx"), "utf8");
 assert(source.includes('{ label: "Preferences", sections: ["app", "chat", "appearance"] }'), "Settings should group preferences");
 assert(source.includes('{ label: "Workflows", sections: ["models", "workspace"] }'), "Settings should group workflow defaults");
-assert(source.includes('{ label: "Data & devices", sections: ["history", "mobile"] }'), "Settings should group data and devices");
+assert(source.includes('{ label: "Data & devices", sections: ["history", "google", "mobile"] }'), "Settings should group data and devices");
 assert(source.includes('{ label: "Application", sections: ["system", "about", "developer"] }'), "Settings should group application sections");
 assert(source.includes('label: "General"'), "App should be labeled General");
 assert(source.includes('label: "Shortcuts"'), "System should be labeled Shortcuts");
 assert(source.includes('label: "Data"'), "History should be labeled Data");
+assert(source.includes('label: "Google Workspace"'), "Google Workspace should have a dedicated section");
 assert(source.includes('label: "Models & agents"'), "Models and agents should have a workflow section");
 assert(source.includes('title="Browser data"'), "Data settings should expose browser profile controls");
-assert(source.includes('title="Google Workspace"'), "Data settings should expose Google Workspace controls");
+assert(source.includes('activeSection === "google"'), "Google Workspace controls should render in their dedicated section");
 assert(source.includes("chooseGoogleFilesFromSettings"), "Google Workspace settings should start the system-browser Picker");
 assert(source.includes('className="btn-accent google-workspace-connect-button"'), "Google Workspace connection should be a prominent primary action");
 assert(source.includes('new URL("../assets/google.svg", import.meta.url).href'), "Google Workspace settings should use the bundled Google logo");
@@ -30,6 +31,7 @@ assert(source.includes('" · Managed folder"'), "Google Workspace settings shoul
 assert(source.includes("Removed Milim access. The Drive file was not deleted."), "Removing access must not imply deleting Drive files");
 assert(source.includes('testIdPrefix="browser-storage"'), "Browser storage should use the accessible choice control");
 assert(source.includes('data-testid="browser-data-clear"'), "Browser data should have an explicit clear action");
+assert(source.includes('data-testid="developer-show-update-cards"'), "Developer settings should preview update cards");
 assert(!source.includes("filteredSettingsSections"), "Search should not switch the active section while typing");
 assert(!source.includes("settings-status-pill"), "Decorative section status pills should stay removed");
 

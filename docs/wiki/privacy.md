@@ -3,10 +3,10 @@ id: privacy
 path: privacy
 label: Privacy
 title: Privacy and security
-summary: Remote-provider privacy modes, redaction, blocking, deterministic scanning, bearer auth, and CORS boundaries.
+summary: Local and remote data boundaries, Google Workspace access, privacy modes, redaction, blocking, bearer auth, and CORS boundaries.
 group: Local data
 order: 70
-updated: 2026-07-23
+updated: 2026-07-25
 ---
 
 Privacy settings are easiest to reason about as a routing question: what stays local, what goes to a provider, and which gate runs before a remote send.
@@ -48,6 +48,18 @@ The gate is process-global. The desktop syncs the active setting through `POST /
 | Mobile companion | Paired phone text, files, and photos enter the active desktop thread; the desktop still controls the final model send and privacy gate. |
 | MCP tools | External MCP servers run as configured local child processes or remotes; treat each configured server as its own trust boundary. |
 | MCP Apps | App HTML comes from its configured MCP server, is re-fetched rather than persisted, and runs in an opaque-origin iframe. Validated HTML is held briefly in memory behind a random expiring capability URL; it receives no bearer token. Network access is denied by default and limited to valid `_meta.ui.csp` origins; host calls remain authenticated, same-server, visibility-checked, and approval-gated. |
+
+## Google Workspace data
+
+Google Workspace is optional. Milim requests the non-sensitive `drive.file` scope, which limits access to Drive files and folders that you explicitly choose with Google Picker or that Milim creates for you. Milim does not receive general access to your Drive, Gmail, Calendar, Contacts, password, or Google account credentials.
+
+Milim uses authorized Google data only to provide user-facing features that you request: listing authorized files, rendering local previews, reading or editing Docs, Sheets, and Slides, transferring files, organizing Drive items, and applying explicitly approved sharing or trash/restore actions. Milim does not sell Google user data, use it for advertising, or use it to train generalized AI models.
+
+The OAuth refresh token and authorized-file registry are AES-GCM encrypted in Milim's local application data and excluded from backups. File content is fetched directly from Google when needed and may appear in local previews, tool results, or chat history. If you deliberately use a remote model or external tool with Google file content in context, that content is sent to the selected provider under Milim's visible approval and privacy controls; Milim does not operate an intermediary cloud service for the Google connection.
+
+Milim shares Google data only when necessary to perform an action you request—for example, with Google APIs, with a remote provider you selected for a tool-capable task, or with an exact Drive recipient you approved. Removing a file from Milim deletes its local authorization record but never deletes the Drive file. Disconnecting Google Workspace revokes the connection and removes the locally stored token and registry. You can also revoke Milim from your Google Account permissions.
+
+Milim's use and transfer of information received from Google APIs adheres to the [Google API Services User Data Policy](https://developers.google.com/terms/api-services-user-data-policy), including its Limited Use requirements.
 
 ## Auth and CORS
 

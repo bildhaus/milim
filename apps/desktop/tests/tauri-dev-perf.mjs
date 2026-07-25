@@ -266,7 +266,7 @@ async function selectModel(page, model) {
 async function screenshotProviders(page) {
   await page.getByTestId("model-picker-trigger").click();
   await page.getByTestId("manage-providers").click();
-  await page.getByTestId("provider-readiness").waitFor();
+  await page.getByTestId("provider-overview").waitFor();
   await page.getByText("Perf Mock").waitFor();
   await page.screenshot({ path: screenshotPaths.providers, fullPage: false });
   await page.getByTestId("close-providers").click();

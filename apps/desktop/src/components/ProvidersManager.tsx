@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   deleteProvider,
   discoverLocalProviders,
+  getAccountRuntimeUpdates,
   getClaudeStatus,
   getCodexAccount,
   getOpenCodeStatus,
@@ -16,6 +17,8 @@ import {
   recoverCodexThread,
   saveProvider,
   streamCodexDeviceLogin,
+  updateAccountRuntime,
+  type AccountRuntimeUpdateStatus,
   type ClaudeStatusResponse,
   type AccountRuntimeKind,
   type CodexAccountResponse,
@@ -54,6 +57,13 @@ const KIND_LABEL: Record<ProviderKind, string> = {
   gemini: "Gemini API",
   replicate: "Replicate media",
   fal: "fal media",
+};
+
+const ACCOUNT_RUNTIME_LABEL: Record<AccountRuntimeKind, string> = {
+  codex: "Codex",
+  claude: "Claude",
+  opencode: "OpenCode",
+  pi: "Pi",
 };
 
 function isMediaProvider(
@@ -190,6 +200,13 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
   const [piStatus, setPiStatus] = useState<PiStatusResponse | null>(null);
   const [piBusy, setPiBusy] = useState(false);
   const [piNote, setPiNote] = useState<{ tone: StatusTone; message: string } | null>(null);
+  const [runtimeUpdates, setRuntimeUpdates] = useState<
+    Partial<Record<AccountRuntimeKind, AccountRuntimeUpdateStatus>>
+  >({});
+  const [confirmRuntimeUpdate, setConfirmRuntimeUpdate] =
+    useState<AccountRuntimeKind | null>(null);
+  const [updatingRuntime, setUpdatingRuntime] =
+    useState<AccountRuntimeKind | null>(null);
   const [discoveries, setDiscoveries] = useState<ProviderDiscovery[]>([]);
   const [note, setNote] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
@@ -205,6 +222,7 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
     if (accountRuntimeEnabled.claude) void refreshClaudeStatus();
     if (accountRuntimeEnabled.opencode) void refreshOpenCodeStatus();
     if (accountRuntimeEnabled.pi) void refreshPiStatus();
+    void refreshRuntimeUpdates();
   }, []);
 
   function updateAccountRuntimeEnabled(
@@ -345,6 +363,86 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
     } finally {
       setPiBusy(false);
     }
+  }
+
+  async function refreshRuntimeUpdates() {
+    try {
+      setRuntimeUpdates((await getAccountRuntimeUpdates()).runtimes);
+    } catch {
+      setRuntimeUpdates({});
+    }
+  }
+
+  function setRuntimeNote(
+    runtime: AccountRuntimeKind,
+    next: { tone: StatusTone; message: string },
+  ) {
+    if (runtime === "codex") setCodexNote(next);
+    else if (runtime === "claude") setClaudeNote(next);
+    else if (runtime === "opencode") setOpenCodeNote(next);
+    else setPiNote(next);
+  }
+
+  async function runRuntimeUpdate(runtime: AccountRuntimeKind) {
+    if (confirmRuntimeUpdate !== runtime) {
+      setConfirmRuntimeUpdate(runtime);
+      setRuntimeNote(runtime, {
+        tone: "warning",
+        message: `Finish active ${ACCOUNT_RUNTIME_LABEL[runtime]} turns, then click Confirm update.`,
+      });
+      return;
+    }
+    setUpdatingRuntime(runtime);
+    try {
+      const result = await updateAccountRuntime(runtime);
+      await refreshRuntimeUpdates();
+      if (runtime === "codex") await refreshCodexAccount();
+      else if (runtime === "claude") await refreshClaudeStatus();
+      else if (runtime === "opencode") await refreshOpenCodeStatus();
+      else await refreshPiStatus();
+      setRuntimeNote(runtime, {
+        tone: "ready",
+        message: result.updated
+          ? `${ACCOUNT_RUNTIME_LABEL[runtime]} updated from ${result.previous_version} to ${result.version}.`
+          : `${ACCOUNT_RUNTIME_LABEL[runtime]} is current at ${result.version}.`,
+      });
+    } catch (error) {
+      setRuntimeNote(runtime, {
+        tone: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : `${ACCOUNT_RUNTIME_LABEL[runtime]} update failed.`,
+      });
+    } finally {
+      setConfirmRuntimeUpdate(null);
+      setUpdatingRuntime(null);
+    }
+  }
+
+  function runtimeVersion(runtime: AccountRuntimeKind): string {
+    const version = runtimeUpdates[runtime]?.version?.trim();
+    return version ? ` · v${version}` : "";
+  }
+
+  function runtimeUpdateButton(runtime: AccountRuntimeKind, available: boolean) {
+    const updating = updatingRuntime === runtime;
+    const confirming = confirmRuntimeUpdate === runtime;
+    return (
+      <button
+        className="btn-ghost"
+        data-testid={`${runtime}-update`}
+        type="button"
+        onClick={() => void runRuntimeUpdate(runtime)}
+        disabled={
+          updatingRuntime !== null ||
+          !accountRuntimeEnabled[runtime] ||
+          !(runtimeUpdates[runtime]?.available ?? available)
+        }
+      >
+        {updating ? "Updating..." : confirming ? "Confirm update" : "Update"}
+      </button>
+    );
   }
 
   async function detectLocal() {
@@ -757,8 +855,7 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                     <span>
                       {!accountRuntimeEnabled.codex
                         ? "Disabled"
-                        : codexAccount?.account?.email ??
-                        "ChatGPT account runtime"}
+                        : `${codexAccount?.account?.email ?? "ChatGPT account runtime"}${runtimeVersion("codex")}`}
                     </span>
                   </div>
                 </div>
@@ -781,6 +878,7 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                       Recover chats
                     </button>
                   )}
+                  {runtimeUpdateButton("codex", codexReady)}
                   <button
                     className="btn-ghost"
                     data-testid="codex-connect"
@@ -807,7 +905,7 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                     <span>{!accountRuntimeEnabled.opencode
                       ? "Disabled"
                       : openCodeStatus?.available
-                      ? `${openCodeStatus.models?.length ?? 0} configured model${openCodeStatus.models?.length === 1 ? "" : "s"}`
+                      ? `${openCodeStatus.models?.length ?? 0} configured model${openCodeStatus.models?.length === 1 ? "" : "s"}${runtimeVersion("opencode")}`
                       : "Install OpenCode separately and configure its providers."}</span>
                   </div>
                 </div>
@@ -820,6 +918,7 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                     ariaLabel="Enable OpenCode runtime"
                     testId="opencode-enabled-toggle"
                   />
+                  {runtimeUpdateButton("opencode", Boolean(openCodeStatus?.available))}
                   <button className="btn-ghost" type="button" onClick={() => void refreshOpenCodeStatus(true)} disabled={openCodeBusy || !accountRuntimeEnabled.opencode}>
                     {openCodeBusy ? "Checking..." : "Refresh"}
                   </button>
@@ -842,10 +941,10 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                     <span>
                       {!accountRuntimeEnabled.claude
                         ? "Disabled"
-                        : claudeAccountLabel ??
-                          (claudeStatus?.available
-                          ? "Run `claude auth login`, then refresh."
-                          : "Install Anthropic's official Claude CLI separately.")}
+                        : `${claudeAccountLabel ??
+                            (claudeStatus?.available
+                              ? "Run `claude auth login`, then refresh."
+                              : "Install Anthropic's official Claude CLI separately.")}${runtimeVersion("claude")}`}
                     </span>
                   </div>
                 </div>
@@ -858,6 +957,7 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                     ariaLabel="Enable Claude runtime"
                     testId="claude-enabled-toggle"
                   />
+                  {runtimeUpdateButton("claude", Boolean(claudeStatus?.available))}
                   <button
                     className="btn-ghost"
                     data-testid="claude-code-status"
@@ -878,7 +978,7 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                     <span>{!accountRuntimeEnabled.pi
                       ? "Disabled"
                       : piStatus?.available
-                      ? `${piStatus.provider_count ?? 0} provider${piStatus.provider_count === 1 ? "" : "s"} / ${piStatus.models?.length ?? 0} model${piStatus.models?.length === 1 ? "" : "s"}`
+                      ? `${piStatus.provider_count ?? 0} provider${piStatus.provider_count === 1 ? "" : "s"} / ${piStatus.models?.length ?? 0} model${piStatus.models?.length === 1 ? "" : "s"}${runtimeVersion("pi")}`
                       : "Install Pi separately and use /login in its terminal."}</span>
                   </div>
                 </div>
@@ -891,6 +991,7 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                     ariaLabel="Enable Pi runtime"
                     testId="pi-enabled-toggle"
                   />
+                  {runtimeUpdateButton("pi", Boolean(piStatus?.available))}
                   <button className="btn-ghost" data-testid="pi-status" type="button" onClick={() => void refreshPiStatus(true)} disabled={piBusy || !accountRuntimeEnabled.pi}>
                     {piBusy ? "Checking..." : "Refresh"}
                   </button>

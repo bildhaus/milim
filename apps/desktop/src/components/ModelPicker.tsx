@@ -11,6 +11,7 @@ import {
 } from "../lib/modelPicker";
 import { hasReasoningEffortChoices, normalizeReasoningEffortForModel, REASONING_EFFORT_LABEL, reasoningEffortDisplay, reasoningEffortOptions } from "../lib/reasoningEffort";
 import { useSettings } from "../settings/store";
+import { HoverScrollText } from "./HoverScrollText";
 import { Bolt, Check, ChevronDown, Eye, Image, Plug, PlusSquare, Search, Sparkles, Volume2 } from "./icons";
 import { ProviderIcon, providerBrandForModel } from "./ProviderIcon";
 
@@ -192,7 +193,7 @@ export function ModelPicker({
                   >
                     <span className="mp-title">
                       <ProviderIcon brand={rowBrand} className="mp-row-provider" size={13} />
-                      <span className="mp-name">{modelDisplayName(m)}</span>
+                      <HoverScrollText className="mp-name" text={modelDisplayName(m)} />
                       {effort !== "auto" && <span className="mp-effort-label">{REASONING_EFFORT_LABEL[effort]}</span>}
                       <span className="mp-route" title={profile.routeLabel}>{profile.routeLabel}</span>
                     </span>

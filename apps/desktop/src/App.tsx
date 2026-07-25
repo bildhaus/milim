@@ -25,6 +25,7 @@ import {
 import { AutoUpdater } from "./components/AutoUpdater";
 import { ChatView } from "./components/ChatView";
 import { ContextMenuProvider, useContextMenu, type ContextMenuItem } from "./components/ContextMenu";
+import type { GitPanelView } from "./components/GitPanel";
 import { FolderOpen, Gear, Globe, Pencil, Plus, Refresh, Sidebar as SidebarIcon, X } from "./components/icons";
 import { Logo } from "./components/Logo";
 import { ResizeHandles } from "./components/ResizeHandles";
@@ -84,6 +85,11 @@ const MediaManager = lazy(() =>
 const OnboardingFlow = lazy(() =>
   import("./components/OnboardingFlow").then((mod) => ({
     default: mod.OnboardingFlow,
+  })),
+);
+const UpdateCards = lazy(() =>
+  import("./components/UpdateCards").then((mod) => ({
+    default: mod.UpdateCards,
   })),
 );
 
@@ -178,7 +184,7 @@ function OnboardingGate() {
       dismissedAt,
     )
   )
-    return null;
+    return <UpdateCards />;
   return <OnboardingFlow onModelsChanged={refreshModelReadiness} />;
 }
 
@@ -412,7 +418,11 @@ function AppContent() {
     id: number;
     text: string;
   } | null>(null);
-  const [gitPanelRequest, setGitPanelRequest] = useState(0);
+  const [gitPanelRequest, setGitPanelRequest] = useState<{
+    id: number;
+    sessionId?: string;
+    view: GitPanelView;
+  } | null>(null);
   const sidebarOpen = useUiPreferences((s) => s.sidebarOpen);
   const toggleSidebar = useUiPreferences((s) => s.toggleSidebar);
   const appShortcuts = useUiPreferences((s) => s.appShortcuts);
@@ -614,7 +624,9 @@ function AppContent() {
           onManageMedia={() => setMediaOpen(true)}
           onManageMcp={() => setMcpManagerRequest((value) => value + 1)}
           onGitAction={(text) => setComposerDraft({ id: Date.now(), text })}
-          onOpenGitPanel={() => setGitPanelRequest((value) => value + 1)}
+          onOpenGitPanel={(sessionId, view = "changes") =>
+            setGitPanelRequest({ id: Date.now(), sessionId, view })
+          }
         />
         <div className="content">
           <TopBar onOpenAppMenu={openAppMenu} />
