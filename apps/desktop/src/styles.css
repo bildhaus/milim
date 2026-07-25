@@ -10976,6 +10976,9 @@ span.provider-brand-icon {
 .setting-stack:has(> .shortcut-recorder-row) {
   gap: 0;
 }
+[data-setting-id="browser-data"] .setting-stack {
+  gap: 12px;
+}
 .setting-stack > .setting-toggle-row:first-child {
   padding-top: 0;
   border-top-color: transparent;
