@@ -929,7 +929,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                           onKeyDown={onSettingsNavKeyDown}
                         >
                           <span className="settings-nav-icon" aria-hidden="true">
-                            <Icon size={15} />
+                            {section.id === "google" ? <img src={googleLogo} alt="" /> : <Icon size={15} />}
                           </span>
                           <span className="settings-nav-copy">
                             <span className="settings-nav-label">{section.label}</span>

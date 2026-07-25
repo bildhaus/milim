@@ -10118,6 +10118,10 @@ span.provider-brand-icon {
   background: transparent;
   color: var(--secondary-text);
 }
+.settings-nav-icon img {
+  width: 15px;
+  height: 15px;
+}
 .settings-nav-item.active .settings-nav-icon {
   background: var(--chip-hover);
   color: var(--primary-text);
