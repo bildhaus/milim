@@ -885,10 +885,10 @@ fn claude_session_registry_dirs() -> Vec<PathBuf> {
 
 #[cfg(windows)]
 async fn terminate_process_id(pid: u32) -> bool {
-    Command::new("taskkill")
-        .arg("/PID")
-        .arg(pid.to_string())
-        .arg("/F")
+    let mut command = Command::new("taskkill");
+    command.arg("/PID").arg(pid.to_string()).arg("/F");
+    command.creation_flags(milim_core::proc::CREATE_NO_WINDOW);
+    command
         .status()
         .await
         .map(|status| status.success())

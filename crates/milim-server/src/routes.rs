@@ -6042,17 +6042,17 @@ fn workspace_git_remove_thread_worktree_action(
 }
 
 fn gh_output(root: &FsPath, args: &[&str]) -> Result<Output, String> {
-    Command::new("gh")
-        .current_dir(root)
-        .args(args)
+    let mut command = Command::new("gh");
+    command.current_dir(root).args(args);
+    milim_core::proc::hide_console(&mut command)
         .output()
         .map_err(|error| format!("Failed to run GitHub CLI: {error}"))
 }
 
 fn gh_output_owned(root: &FsPath, args: &[String]) -> Result<Output, String> {
-    Command::new("gh")
-        .current_dir(root)
-        .args(args)
+    let mut command = Command::new("gh");
+    command.current_dir(root).args(args);
+    milim_core::proc::hide_console(&mut command)
         .output()
         .map_err(|error| format!("Failed to run GitHub CLI: {error}"))
 }

@@ -1993,13 +1993,14 @@ fn preview_command(name: &str) -> Command {
 
 #[cfg(windows)]
 async fn kill_process_tree(pid: u32) -> Result<()> {
-    let status = Command::new("taskkill")
+    let mut command = Command::new("taskkill");
+    command
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await?;
+        .stderr(Stdio::null());
+    command.creation_flags(milim_core::proc::CREATE_NO_WINDOW);
+    let status = command.status().await?;
     if status.success() {
         Ok(())
     } else {

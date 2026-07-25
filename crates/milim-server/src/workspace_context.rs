@@ -302,12 +302,9 @@ fn project_chain(root: &Path, folder: &Path) -> Vec<PathBuf> {
 }
 
 fn git(cwd: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(args)
-        .output()
-        .ok()?;
+    let mut command = Command::new("git");
+    command.arg("-C").arg(cwd).args(args);
+    let output = milim_core::proc::hide_console(&mut command).output().ok()?;
     output
         .status
         .success()
