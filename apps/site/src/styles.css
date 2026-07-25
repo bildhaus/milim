@@ -1654,6 +1654,19 @@ main {
   margin-bottom: 14px;
 }
 
+/* Docs keep a cool cast so they stay visually distinct from the marketing site. */
+.docs-shell .eyebrow {
+  color: color-mix(in srgb, var(--muted) 72%, var(--cool));
+}
+
+.docs-shell .eyebrow-index {
+  color: color-mix(in srgb, var(--text) 84%, var(--cool));
+}
+
+.docs-shell .eyebrow-index::after {
+  background: color-mix(in srgb, var(--cool) 46%, transparent);
+}
+
 .quickstart-strip h2 {
   max-width: 420px;
   margin: 0;
@@ -2769,17 +2782,11 @@ main {
   text-transform: lowercase;
 }
 
-.docs-updated {
-  display: block;
+.docs-page-head > .eyebrow {
   margin: 0 0 18px;
-  color: color-mix(in srgb, var(--muted) 72%, var(--cool));
-  font-family: "JetBrains Mono", monospace;
-  font-size: 11px;
-  line-height: 1.4;
-  text-transform: lowercase;
 }
 
-.docs-hero-copy .docs-updated {
+.docs-hero-copy > .eyebrow {
   margin-bottom: 20px;
 }
 
@@ -2861,13 +2868,8 @@ main {
   transform: none !important;
 }
 
-.docs-snapshot span {
+.docs-snapshot .eyebrow {
   position: relative;
-  color: color-mix(in srgb, var(--muted) 76%, var(--cool));
-  font-family: "JetBrains Mono", monospace;
-  font-size: 10px;
-  line-height: 1;
-  text-transform: lowercase;
 }
 
 .docs-snapshot strong {
@@ -2886,7 +2888,6 @@ main {
   line-height: 0.84;
 }
 
-.docs-snapshot-feature span,
 .docs-snapshot-feature em {
   color: var(--muted);
 }
@@ -3076,10 +3077,11 @@ main {
   justify-content: space-between;
   min-height: 28px;
   padding: 0 4px 5px;
-  color: color-mix(in srgb, var(--muted) 70%, var(--cool));
+  color: color-mix(in srgb, var(--muted) 72%, var(--cool));
   font-family: "JetBrains Mono", monospace;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
+  letter-spacing: 0.09em;
   line-height: 1;
   text-transform: uppercase;
 }
@@ -3100,14 +3102,8 @@ main {
   gap: 3px;
 }
 
-.docs-toc-group span {
+.docs-toc-group .eyebrow {
   margin: 8px 0 2px;
-  color: color-mix(in srgb, var(--muted) 72%, var(--cool));
-  font-family: "JetBrains Mono", monospace;
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1;
-  text-transform: uppercase;
 }
 
 .docs-toc a {
@@ -3154,7 +3150,7 @@ main {
   line-height: 1.12;
 }
 
-.docs-search-results span,
+.docs-search-results span:not(.eyebrow):not(.eyebrow-label),
 .docs-search-results p {
   margin: 0;
   color: var(--muted);
@@ -3163,18 +3159,11 @@ main {
   line-height: 1.42;
 }
 
-.docs-search-results a > span:not(.docs-search-kicker) {
+.docs-search-results a > span:not(.eyebrow) {
   display: -webkit-box;
   overflow: hidden;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
-}
-
-.docs-search-results .docs-search-kicker {
-  color: color-mix(in srgb, var(--muted) 72%, var(--cool));
-  font-family: "JetBrains Mono", monospace;
-  font-size: 10px;
-  line-height: 1;
 }
 
 .docs-content {
@@ -4426,7 +4415,7 @@ h4:hover > .doc-anchor,
     padding: 5px 0;
   }
 
-  .docs-toc-group span {
+  .docs-toc-group .eyebrow {
     margin-top: 0;
   }
 

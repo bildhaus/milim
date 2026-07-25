@@ -3,6 +3,7 @@ import { useGSAP } from "@gsap/react";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 import Lenis from "lenis";
+import { Eyebrow } from "./Eyebrow";
 import { HeroAsciiField } from "./HeroAsciiField";
 import { ShaderField } from "./ShaderField";
 import { SiteMobileNav } from "./SiteMobileNav";
@@ -716,15 +717,6 @@ function formatBytes(size?: number) {
   if (!size || !Number.isFinite(size)) return undefined;
   const megabytes = size / 1024 / 1024;
   return `${megabytes >= 10 ? Math.round(megabytes) : megabytes.toFixed(1)} MB`;
-}
-
-function Eyebrow({ index, label }: { index?: string; label: string }) {
-  return (
-    <span className="eyebrow">
-      {index ? <span className="eyebrow-index">{index}</span> : null}
-      <span className="eyebrow-label">{label}</span>
-    </span>
-  );
 }
 
 function ReviewGlyph() {

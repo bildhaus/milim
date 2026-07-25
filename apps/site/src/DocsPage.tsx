@@ -3,6 +3,7 @@ import { useGSAP } from "@gsap/react";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 import versionRaw from "../../../VERSION?raw";
+import { Eyebrow } from "./Eyebrow";
 import { HeroAsciiField } from "./HeroAsciiField";
 import { ShaderField } from "./ShaderField";
 import { SiteMobileNav } from "./SiteMobileNav";
@@ -549,7 +550,7 @@ export function DocsPage({ pathname }: { pathname?: string } = {}) {
             <HeroAsciiField />
             <div className="docs-hero-inner">
               <div className="docs-hero-copy">
-                <span className="docs-updated">Last updated {formatUpdated(currentPage.updated)} - v{DOCS_VERSION}</span>
+                <Eyebrow index={`v${DOCS_VERSION}`} label={`updated ${formatUpdated(currentPage.updated)}`} />
                 <h1>
                   milim{" "}
                   <br />
@@ -564,25 +565,25 @@ export function DocsPage({ pathname }: { pathname?: string } = {}) {
               </div>
               <nav className="docs-snapshot" aria-label="Docs map">
               <a className="docs-snapshot-feature" href={docsHref("quickstart")}>
-                <span>start with</span>
+                <Eyebrow label="start with" />
                 <strong>quickstart</strong>
                 <em>connect a model, pick a folder, send a useful prompt</em>
               </a>
               <div className="docs-snapshot-paths">
                 <a href={docsHref("desktop")}>
-                  <span>operate</span>
+                  <Eyebrow label="operate" />
                   <strong>desktop</strong>
                 </a>
                 <a href={docsHref("models")}>
-                  <span>route</span>
+                  <Eyebrow label="route" />
                   <strong>models</strong>
                 </a>
                 <a href={docsHref("privacy")}>
-                  <span>contain</span>
+                  <Eyebrow label="contain" />
                   <strong>privacy</strong>
                 </a>
                 <a href={docsHref("api")}>
-                  <span>build</span>
+                  <Eyebrow label="build" />
                   <strong>api</strong>
                 </a>
               </div>
@@ -592,7 +593,7 @@ export function DocsPage({ pathname }: { pathname?: string } = {}) {
         ) : (
           <section className="docs-page-head">
             <a href={docsHref("")}>docs</a>
-            <span className="docs-updated">Last updated {formatUpdated(currentPage.updated)} - v{DOCS_VERSION}</span>
+            <Eyebrow index={`v${DOCS_VERSION}`} label={`updated ${formatUpdated(currentPage.updated)}`} />
             <h1>{currentPage.title}</h1>
             <p>{currentPage.summary}</p>
           </section>
@@ -610,7 +611,7 @@ export function DocsPage({ pathname }: { pathname?: string } = {}) {
               <strong>Contents</strong>
               {tocGroups.map(([group, items]) => (
                 <div className="docs-toc-group" key={group}>
-                  <span>{group}</span>
+                  <Eyebrow label={group} />
                   {items.map((id) => {
                     const page = docsPageById.get(id)!;
                     return (
@@ -663,7 +664,7 @@ function DocsSearch({ index, variant }: { index: SearchIndex; variant?: "nav" })
             const page = docsPageById.get(result.pageId)!;
             return (
               <a href={docsHref(page.path, result.anchor)} key={result.id}>
-                <span className="docs-search-kicker">docs / {page.label}</span>
+                <Eyebrow label={`docs / ${page.label}`} />
                 <strong>{result.title}</strong>
                 <span>{result.summary}</span>
               </a>
