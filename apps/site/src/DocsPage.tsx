@@ -716,7 +716,7 @@ function MarkdownHeading({ block }: { block: Extract<MarkdownBlock, { type: "hea
 
 function Table({ headers, rows }: { headers: string[]; rows: string[][] }) {
   return (
-    <div className="doc-table-wrap" data-lenis-prevent>
+    <div className="doc-table-wrap">
       <table className={`doc-table doc-table-${headers.length}`}>
         <thead>
           <tr>{headers.map((header) => <th key={header}>{header}</th>)}</tr>
