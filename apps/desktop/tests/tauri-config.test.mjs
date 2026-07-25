@@ -130,8 +130,17 @@ if (repoVersion !== packageJson.version) {
 }
 
 const csp = config.app?.security?.csp ?? "";
-if (!csp.includes("img-src 'self' asset: http://asset.localhost data: blob: https://drive-thirdparty.googleusercontent.com")) {
-  throw new Error("Tauri CSP must allow Google Drive's unauthenticated file icons");
+if (!csp.includes("img-src 'self' asset: http://asset.localhost data: blob: https: http://127.0.0.1:* http://localhost:* http://[::1]:*")) {
+  throw new Error("Tauri CSP must allow HTTPS and localhost images");
+}
+
+if (!csp.includes("media-src 'self' blob: data: https: http://127.0.0.1:* http://localhost:* http://[::1]:*")) {
+  throw new Error("Tauri CSP must allow generated HTTPS, data, blob, and localhost media");
+}
+
+for (const directive of ["img-src", "media-src"]) {
+  const sources = csp.split(";").find((value) => value.trim().startsWith(`${directive} `))?.trim().split(/\s+/) ?? [];
+  if (sources.includes("http:")) throw new Error(`Tauri CSP must not allow arbitrary public HTTP ${directive === "img-src" ? "images" : "media"}`);
 }
 
 if (!csp.includes("frame-src blob: data:")) {

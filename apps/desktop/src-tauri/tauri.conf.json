@@ -24,7 +24,7 @@
     ],
     "macOSPrivateApi": true,
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data: blob: https://drive-thirdparty.googleusercontent.com; font-src 'self' data:; media-src 'self' blob:; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:* http://localhost:* https://api.github.com https://github.com https://objects.githubusercontent.com ws://localhost:5180 ws://127.0.0.1:5180; frame-src blob: data: https: http://127.0.0.1:* http://localhost:* http://[::1]:*; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data: blob: https: http://127.0.0.1:* http://localhost:* http://[::1]:*; font-src 'self' data:; media-src 'self' blob: data: https: http://127.0.0.1:* http://localhost:* http://[::1]:*; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:* http://localhost:* https://api.github.com https://github.com https://objects.githubusercontent.com ws://localhost:5180 ws://127.0.0.1:5180; frame-src blob: data: https: http://127.0.0.1:* http://localhost:* http://[::1]:*; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
     }
   },
   "bundle": {
