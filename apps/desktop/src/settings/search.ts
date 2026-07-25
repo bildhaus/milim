@@ -18,6 +18,7 @@ export const SETTINGS_SEARCH_ENTRIES: SettingSearchEntry[] = [
   { id: "chat-ai-completion", label: "AI composer completion", section: "chat", aliases: ["ghost text", "local provider", "privacy", "tab"] },
   { id: "appearance-theme", label: "Theme", section: "appearance", aliases: ["custom", "edit", "delete", "palette"] },
   { id: "appearance-chat-surface", label: "Chat surface", section: "appearance", aliases: ["layout", "message width", "avatars"] },
+  { id: "appearance-sidebar-colors", label: "Sidebar project colors", section: "appearance", aliases: ["thread colors", "thread names", "automatic color", "folders", "icons"] },
   { id: "appearance-empty-chat-ridgeline", label: "Empty-chat ridgeline", section: "appearance", aliases: ["usage", "activity", "chart", "composer", "empty thread"] },
   { id: "appearance-code-blocks", label: "Code blocks", section: "appearance", aliases: ["theme", "syntax"] },
   { id: "appearance-interface-sounds", label: "Interface sounds", section: "appearance", aliases: ["sound", "audio", "feedback", "cuelume", "finished", "completion", "attention", "approval", "alert"] },

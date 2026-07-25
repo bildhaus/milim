@@ -38,6 +38,7 @@ import {
 } from "../lib/goals.js";
 import { recordPerfMeasure, startPerfMeasure } from "../lib/perf.js";
 import { previewRuntimeKeyForThread } from "../lib/previewRuntimeKeys.js";
+import { normalizeProjectColor } from "../lib/projectColors.js";
 import type { PullRequestSnapshot } from "../lib/pullRequests.js";
 import {
   normalizeQuickSummarySectionIds,
@@ -277,10 +278,29 @@ export interface SessionPreviewRuntime {
 
 export type ArchiveRetentionDays = 7 | 14 | 30;
 
+export const PROJECT_ICON_IDS = [
+  "folder",
+  "code",
+  "terminal",
+  "cube",
+  "git-branch",
+  "globe",
+  "lightbulb",
+  "image",
+  "calendar",
+  "file",
+  "bolt",
+  "star",
+] as const;
+
+export type ProjectIconId = (typeof PROJECT_ICON_IDS)[number];
+
 export interface Project {
   id: string;
   name: string;
   folder: string;
+  icon?: ProjectIconId;
+  color?: string;
   createdAt: number;
   updatedAt: number;
   archivedAt?: number;
@@ -687,6 +707,13 @@ function folderLabel(folder: string): string {
   return folder.split(/[\\/]/).filter(Boolean).pop() || folder || "Project";
 }
 
+function normalizeProjectIcon(value: unknown): ProjectIconId | undefined {
+  return typeof value === "string" &&
+    PROJECT_ICON_IDS.includes(value as ProjectIconId)
+    ? value as ProjectIconId
+    : undefined;
+}
+
 export function projectSectionId(folder?: string): string {
   const normalized = normalizeProjectFolder(folder);
   return normalized
@@ -804,6 +831,8 @@ function projectFromFolder(
         ? existing.name.trim()
         : folderLabel(normalized),
     folder: normalized,
+    icon: normalizeProjectIcon(existing?.icon),
+    color: normalizeProjectColor(existing?.color),
     createdAt,
     updatedAt: timestamp(existing?.updatedAt) ?? createdAt,
     archivedAt: timestamp(existing?.archivedAt),
@@ -1725,6 +1754,10 @@ interface SessionState {
   archiveProject: (id: string) => void;
   restoreProject: (id: string) => void;
   removeProject: (id: string) => void;
+  updateProject: (
+    id: string,
+    patch: Partial<Pick<Project, "name" | "icon" | "color">>,
+  ) => void;
   purgeExpiredArchives: (now?: number) => void;
   setArchiveRetentionDays: (days: ArchiveRetentionDays) => void;
   setSessionGenerating: (id: string, generating: boolean) => void;
@@ -2261,6 +2294,34 @@ export const useSessions = create<SessionState>()(
               sessions: active.sessions,
               activeId: active.activeId,
               sidebar: normalizeSidebarState(st.sidebar, active.sessions),
+            };
+          }),
+
+        updateProject: (id, patch) =>
+          set((st) => {
+            const project = st.projects.find((item) => item.id === id);
+            if (!project) return {};
+            const icon = Object.prototype.hasOwnProperty.call(patch, "icon")
+              ? normalizeProjectIcon(patch.icon)
+              : project.icon;
+            const color = Object.prototype.hasOwnProperty.call(patch, "color")
+              ? normalizeProjectColor(patch.color)
+              : project.color;
+            const name = Object.prototype.hasOwnProperty.call(patch, "name")
+              ? patch.name?.trim() || folderLabel(project.folder)
+              : project.name;
+            return {
+              projects: st.projects.map((item) =>
+                item.id === id
+                  ? {
+                      ...item,
+                      name,
+                      icon,
+                      color,
+                      updatedAt: Date.now(),
+                    }
+                  : item,
+              ),
             };
           }),
 

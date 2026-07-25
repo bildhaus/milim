@@ -9,6 +9,7 @@ import type {
   CodeBlockTheme,
   MessageWidth,
 } from "../src/ui/store.js";
+import type { Project } from "../src/sessions/store.js";
 
 type ChoiceProps<T extends string> = {
   value: T;
@@ -57,6 +58,13 @@ try {
     AppearanceChatLayoutChoices: ComponentType<ChoiceProps<ChatLayoutStyle>>;
     AppearanceCodeBlockThemeChoices: ComponentType<ChoiceProps<CodeBlockTheme>>;
     AppearanceMessageWidthChoices: ComponentType<ChoiceProps<MessageWidth>>;
+  };
+  const { ProjectCustomizationDialog } = (await server.ssrLoadModule("/src/components/Sidebar.tsx")) as {
+    ProjectCustomizationDialog: ComponentType<{
+      project: Project;
+      onClose: () => void;
+      onSave: () => void;
+    }>;
   };
 
   const markup = [
@@ -108,6 +116,26 @@ try {
     onTreatmentChange: () => {},
   }));
   equal(noBackgroundMarkup, "", "Background controls should not render when the active theme has no image");
+
+  const projectMarkup = renderToStaticMarkup(createElement(ProjectCustomizationDialog, {
+    project: {
+      id: "project:C:\\workspace",
+      name: "Workspace",
+      folder: "C:\\workspace",
+      icon: "terminal",
+      color: "#22aa88",
+      createdAt: 1,
+      updatedAt: 1,
+    },
+    onClose: () => {},
+    onSave: () => {},
+  }));
+  assert(projectMarkup.includes('role="dialog"'), "Project customization should render as an accessible dialog");
+  assert(projectMarkup.includes('aria-label="Project name"'), "Project customization should label its name field");
+  equal(count(projectMarkup, 'role="radio"'), 12, "Project customization should offer the curated icon set");
+  equal(count(projectMarkup, 'aria-checked="true"'), 1, "Project customization should expose the selected icon");
+  assert(projectMarkup.includes("Use default"), "Project customization should provide a default-color reset");
+  assert(projectMarkup.includes('aria-label="Project preview"'), "Project customization should render a live preview");
 } finally {
   await server.close();
 }

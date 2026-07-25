@@ -12,7 +12,7 @@
     "test:copy": "node tests/copy-lint.test.mjs",
     "test:brand-cleanup": "node tests/brand-cleanup.test.mjs",
     "test:selectors": "node tests/zustand-selector-lint.test.mjs",
-    "test:store": "node tests/run-ts-test.mjs tests/session-store.test.ts tests/session-startup-hydration.test.ts tests/new-thread-preferences.test.ts tests/thread-titles.test.ts tests/sidebar-groups.test.ts tests/thread-export.test.ts tests/preview-runtime-keys.test.ts",
+    "test:store": "node tests/run-ts-test.mjs tests/session-store.test.ts tests/session-startup-hydration.test.ts tests/new-thread-preferences.test.ts tests/thread-titles.test.ts tests/sidebar-groups.test.ts tests/project-colors.test.ts tests/thread-export.test.ts tests/preview-runtime-keys.test.ts",
     "test:settings": "node tests/run-ts-test.mjs tests/settings-store.test.ts tests/settings-appearance-rendering.test.tsx tests/settings-layout.test.tsx tests/agent-avatar.test.tsx tests/worker-retry.test.tsx tests/worker-run-lifecycle.test.ts && node tests/agent-schedule-models.test.mjs",
     "test:assistant-stream": "node tests/run-ts-test.mjs tests/assistant-stream-grouping.test.ts tests/assistant-stream-summary.test.ts tests/attachment-input.test.ts tests/attachment-wire.test.ts tests/codex-runtime.test.ts tests/codex-runtime-rendering.test.tsx tests/request-body.test.ts tests/hot-swap.test.ts tests/mcp-apps.test.ts tests/preview-activity.test.ts tests/turn-events.test.ts tests/turn-queue.test.ts tests/turn-prompt.test.ts tests/turn-runtime.test.ts tests/turn-stream.test.ts",
     "test:context-compaction": "node tests/run-ts-test.mjs tests/context-compaction.test.ts tests/turn-context.test.ts",

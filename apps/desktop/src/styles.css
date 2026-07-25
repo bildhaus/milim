@@ -1678,6 +1678,9 @@ body.sidebar-pointer-dragging .session-section-title {
   height: 18px;
   color: color-mix(in srgb, var(--tertiary-text) 78%, var(--accent));
 }
+.session-section .section-type-icon.project-colored {
+  color: var(--project-color);
+}
 .section-type-icon.chat-toggle-icon svg {
   transition: transform var(--motion-fast) var(--motion-ease-out);
 }
@@ -1838,6 +1841,12 @@ body.sidebar-pointer-dragging .session-section-title {
   min-width: 0;
   color: var(--primary-text);
   line-height: 1.25;
+}
+.session-item.project-colored .session-title {
+  color: var(--project-color);
+}
+.session-item.project-colored .shiny-text {
+  color: color-mix(in srgb, var(--project-color) 76%, var(--primary-text));
 }
 .session-side {
   position: relative;
@@ -12946,6 +12955,82 @@ span.provider-brand-icon {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+.project-customization-sheet {
+  width: min(560px, 94vw);
+  height: auto;
+  max-height: 88vh;
+}
+.project-customization-header {
+  align-items: flex-start;
+}
+.project-customization-header p {
+  max-width: 310px;
+  margin: 4px 0 0;
+  overflow: hidden;
+  color: var(--tertiary-text);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-customization-body {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+  overflow: auto;
+}
+.project-customization-name {
+  display: grid;
+  gap: 8px;
+  color: var(--secondary-text);
+  font-size: 12px;
+}
+.project-customization-name .name-input {
+  width: 100%;
+}
+.project-icon-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 7px;
+}
+.project-icon-option {
+  min-height: 42px;
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  background: var(--input-bg);
+  color: var(--secondary-text);
+}
+.project-icon-option:hover {
+  border-color: var(--border-secondary);
+  background: var(--chip-hover);
+  color: var(--primary-text);
+}
+.project-icon-option.active {
+  border-color: color-mix(in srgb, var(--accent) 68%, var(--border-primary));
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.project-color-section .ui-color {
+  min-height: 34px;
+}
+.project-customization-preview {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  background: var(--sidebar-bg);
+  color: var(--primary-text);
+  font-size: 13px;
+}
+.project-customization-preview-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.project-customization-preview > span {
+  padding-left: 21px;
 }
 .btn-ghost, .btn-accent, .btn-file {
   border: 1px solid var(--border-primary);

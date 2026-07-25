@@ -101,6 +101,8 @@ const persistedSessions = JSON.stringify({
         id: "project:C:\\keep",
         name: "Keep",
         folder: "C:\\keep",
+        icon: "star",
+        color: "#33AACC",
         createdAt: 1,
         updatedAt: 1,
       },
@@ -229,6 +231,11 @@ assert(
 assert(
   stored.state.projects[0]?.folder === "C:\\keep",
   "startup archive cleanup should preserve hydrated projects",
+);
+assert(
+  useSessions.getState().projects[0]?.icon === "star" &&
+    useSessions.getState().projects[0]?.color === "#33aacc",
+  "startup hydration should preserve and normalize project customization",
 );
 assert(
   stored.state.sessions[0]?.messages[0]?.content === "keep me",

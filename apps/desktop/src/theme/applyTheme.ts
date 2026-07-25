@@ -85,6 +85,7 @@ export function themeCssVariables(t: Theme): Record<string, string> {
 
 /** Write a theme onto `:root` as CSS variables. */
 export function applyTheme(t: Theme): void {
+  if (typeof document === "undefined") return;
   const s = document.documentElement.style;
   for (const [key, value] of Object.entries(themeCssVariables(t))) {
     s.setProperty(key, value);

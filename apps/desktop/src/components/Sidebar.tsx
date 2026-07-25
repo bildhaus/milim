@@ -7,6 +7,7 @@ import {
   projectSectionId,
   useSessions,
   type Project,
+  type ProjectIconId,
   type Session,
   type SessionPreviewRuntime,
   type SessionSidebarState,
@@ -17,16 +18,23 @@ import { GIT_STATUS_REFRESH_INTERVAL_MS } from "../lib/gitRefresh";
 import { markPerfRender } from "../lib/perf";
 import { previewRuntimeKeyForThread } from "../lib/previewRuntimeKeys";
 import {
+  effectiveProjectColor,
+  normalizeProjectColor,
+} from "../lib/projectColors";
+import {
   pullRequestAccessibleLabel,
   pullRequestReadiness,
 } from "../lib/pullRequests";
 import { sessionRecencyLabel } from "../lib/sessionRecency.js";
 import { chatExportFilename, sessionExportPayload, sessionMarkdownExport } from "../lib/threadExport";
 import { DEFAULT_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, normalizeSidebarWidth, useUiPreferences } from "../ui/store";
+import { useTheme } from "../theme/store";
 import { GitPanel, type GitPanelView } from "./GitPanel";
 import { useContextMenu } from "./ContextMenu";
 import { HoverScrollText } from "./HoverScrollText";
-import { Archive, ArrowUp, Bolt, Calendar, ChevronDown, Cube, Download, Folder, FolderOpen, Gear, GitBranch, GitPullRequest, Image, Lightbulb, MoreHorizontal, Pin, Plus, Search, Sidebar as PanelIcon } from "./icons";
+import { SheetDialog } from "./SheetDialog";
+import { ColorField } from "./ui";
+import { Archive, ArrowUp, Bolt, Calendar, ChevronDown, Code, Cube, Download, FileText, Folder, FolderOpen, Gear, GitBranch, GitPullRequest, Globe, Image, Lightbulb, MoreHorizontal, Pin, Plus, Search, Sidebar as PanelIcon, Star, Terminal } from "./icons";
 
 const SIDEBAR_KEYBOARD_STEP = 32;
 const SIDEBAR_COLLAPSE_OVERSHOOT = 96;
@@ -85,6 +93,7 @@ export type SidebarSessionLike = {
   retryWorkspace?: { originalFolder: string };
   threadWorkspace?: {
     mode: "current" | "worktree";
+    projectFolder?: string;
     branch?: string;
   };
   worker?: unknown;
@@ -97,6 +106,7 @@ type SessionGroup<T extends SidebarSessionLike = SidebarSession> = {
   label: string;
   subtitle?: string;
   projectId?: string;
+  project?: Project;
   sessions: T[];
 };
 
@@ -124,7 +134,12 @@ function uniqueFolders(folders: string[]): string[] {
 }
 
 function projectFolderForSession(session: SidebarSessionLike): string {
-  return session.retryWorkspace?.originalFolder || session.settings?.folder?.trim() || "";
+  return session.retryWorkspace?.originalFolder ||
+    (session.threadWorkspace?.mode === "worktree"
+      ? session.threadWorkspace.projectFolder?.trim()
+      : session.settings?.folder?.trim()) ||
+    session.settings?.folder?.trim() ||
+    "";
 }
 
 function sortBySidebarOrder<T extends SidebarSessionLike>(sessions: T[], sidebar: SessionSidebarState): T[] {
@@ -206,7 +221,7 @@ export function groupSessionsByProjects<T extends SidebarSessionLike>(sessions: 
       folderLabel(folder).toLowerCase().includes(needle) ||
       (project?.name ?? "").toLowerCase().includes(needle);
     if (projectSessions.length > 0 || folderMatches) {
-      projectGroups.push({ id: sectionId, projectId: project?.id ?? sectionId, label: project?.name ?? folderLabel(folder), subtitle: folder, sessions: withChildren(projectSessions) });
+      projectGroups.push({ id: sectionId, projectId: project?.id ?? sectionId, project, label: project?.name ?? folderLabel(folder), subtitle: folder, sessions: withChildren(projectSessions) });
     }
   }
 
@@ -224,6 +239,176 @@ export function groupSessionsByProjects<T extends SidebarSessionLike>(sessions: 
     return (sectionOrder.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (sectionOrder.get(b.id) ?? Number.MAX_SAFE_INTEGER);
   });
   return [...pinnedGroups, ...projectGroups, ...chatGroups];
+}
+
+const PROJECT_ICON_OPTIONS: Array<{ id: ProjectIconId; label: string }> = [
+  { id: "folder", label: "Folder" },
+  { id: "code", label: "Code" },
+  { id: "terminal", label: "Terminal" },
+  { id: "cube", label: "Cube" },
+  { id: "git-branch", label: "Git branch" },
+  { id: "globe", label: "Globe" },
+  { id: "lightbulb", label: "Lightbulb" },
+  { id: "image", label: "Image" },
+  { id: "calendar", label: "Calendar" },
+  { id: "file", label: "File" },
+  { id: "bolt", label: "Bolt" },
+  { id: "star", label: "Star" },
+];
+
+function ProjectIcon({
+  icon,
+  collapsed = false,
+  size = 14,
+}: {
+  icon?: ProjectIconId;
+  collapsed?: boolean;
+  size?: number;
+}) {
+  if (!icon || icon === "folder") {
+    return collapsed ? <Folder size={size} /> : <FolderOpen size={size} />;
+  }
+  if (icon === "code") return <Code size={size} />;
+  if (icon === "terminal") return <Terminal size={size} />;
+  if (icon === "cube") return <Cube size={size} />;
+  if (icon === "git-branch") return <GitBranch size={size} />;
+  if (icon === "globe") return <Globe size={size} />;
+  if (icon === "lightbulb") return <Lightbulb size={size} />;
+  if (icon === "image") return <Image size={size} />;
+  if (icon === "calendar") return <Calendar size={size} />;
+  if (icon === "file") return <FileText size={size} />;
+  if (icon === "bolt") return <Bolt size={size} />;
+  return <Star size={size} />;
+}
+
+export function ProjectCustomizationDialog({
+  project,
+  onClose,
+  onSave,
+}: {
+  project: Project;
+  onClose: () => void;
+  onSave: (patch: Partial<Pick<Project, "name" | "icon" | "color">>) => void;
+}) {
+  const theme = useTheme((state) => state.theme);
+  const autoColorThreadNames = useUiPreferences((state) => state.autoColorThreadNames);
+  const [name, setName] = useState(project.name);
+  const [icon, setIcon] = useState<ProjectIconId | undefined>(project.icon);
+  const [color, setColor] = useState<string | undefined>(project.color);
+  const normalizedColor = color == null ? undefined : normalizeProjectColor(color);
+  const colorValid = color == null || Boolean(normalizedColor);
+  const previewColor = effectiveProjectColor(
+    { folder: project.folder, color: normalizedColor },
+    {
+      accent: theme.colors.accent,
+      sidebarBackground: theme.colors.sidebarBg,
+      auto: autoColorThreadNames,
+    },
+  );
+
+  function reset() {
+    setName(folderLabel(project.folder));
+    setIcon(undefined);
+    setColor(undefined);
+  }
+
+  return (
+    <SheetDialog
+      title="Customize project"
+      className="sheet project-customization-sheet"
+      testId="project-customization-dialog"
+      onClose={onClose}
+    >
+      <div className="sheet-header project-customization-header">
+        <div>
+          <h2>Customize project</h2>
+          <p title={project.folder}>{project.folder}</p>
+        </div>
+        <div className="editor-actions">
+          <button className="btn-ghost" type="button" onClick={reset}>Reset</button>
+          <button className="btn-ghost" type="button" onClick={onClose}>Cancel</button>
+          <button
+            className="btn-accent"
+            type="button"
+            disabled={!colorValid}
+            onClick={() => {
+              onSave({ name, icon, color: normalizedColor });
+              onClose();
+            }}
+          >
+            Save
+          </button>
+        </div>
+      </div>
+
+      <div className="project-customization-body">
+        <section className="editor-section">
+          <label className="project-customization-name">
+            <span>Name</span>
+            <input
+              className="name-input"
+              value={name}
+              onChange={(event) => setName(event.currentTarget.value)}
+              placeholder={folderLabel(project.folder)}
+              aria-label="Project name"
+              autoFocus
+            />
+          </label>
+        </section>
+
+        <section className="editor-section">
+          <div className="editor-section-head">
+            <h3>Icon</h3>
+            <span>{PROJECT_ICON_OPTIONS.find((option) => option.id === (icon ?? "folder"))?.label}</span>
+          </div>
+          <div className="project-icon-grid" role="radiogroup" aria-label="Project icon">
+            {PROJECT_ICON_OPTIONS.map((option) => {
+              const selected = option.id === (icon ?? "folder");
+              return (
+                <button
+                  key={option.id}
+                  className={"project-icon-option" + (selected ? " active" : "")}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  aria-label={option.label}
+                  title={option.label}
+                  onClick={() => setIcon(option.id === "folder" ? undefined : option.id)}
+                >
+                  <ProjectIcon icon={option.id} />
+                </button>
+              );
+            })}
+          </div>
+        </section>
+
+        <section className="editor-section project-color-section">
+          <div className="editor-section-head">
+            <h3>Icon and thread color</h3>
+            <button className="btn-ghost compact" type="button" disabled={color == null} onClick={() => setColor(undefined)}>
+              Use default
+            </button>
+          </div>
+          <ColorField
+            value={color ?? previewColor ?? theme.colors.tertiaryText}
+            onChange={setColor}
+            label={color == null ? "Default" : color}
+          />
+          {!colorValid && <p className="sheet-hint error">Enter a 3- or 6-digit hex color.</p>}
+        </section>
+
+        <section className="project-customization-preview" aria-label="Project preview">
+          <div className="project-customization-preview-head">
+            <span style={previewColor ? { color: previewColor } : undefined}>
+              <ProjectIcon icon={icon} />
+            </span>
+            <strong>{name.trim() || folderLabel(project.folder)}</strong>
+          </div>
+          <span style={previewColor ? { color: previewColor } : undefined}>Example thread name</span>
+        </section>
+      </div>
+    </SheetDialog>
+  );
 }
 
 function WorkingSessionLoader() {
@@ -313,6 +498,7 @@ export function Sidebar({
   const switchTo = useSessions((s) => s.switchTo);
   const archiveSession = useSessions((s) => s.archiveSession);
   const archiveProject = useSessions((s) => s.archiveProject);
+  const updateProject = useSessions((s) => s.updateProject);
   const rename = useSessions((s) => s.rename);
   const addProjectFolder = useSessions((s) => s.addProjectFolder);
   const toggleSessionPinned = useSessions((s) => s.toggleSessionPinned);
@@ -323,10 +509,13 @@ export function Sidebar({
   const sidebarWidth = useUiPreferences((s) => s.sidebarWidth);
   const setSidebarWidth = useUiPreferences((s) => s.setSidebarWidth);
   const newChatButtonAtBottom = useUiPreferences((s) => s.newChatButtonAtBottom);
+  const autoColorThreadNames = useUiPreferences((s) => s.autoColorThreadNames);
   const toolsExpanded = useUiPreferences((s) => s.toolsExpanded);
   const setToolsExpanded = useUiPreferences((s) => s.setToolsExpanded);
+  const theme = useTheme((s) => s.theme);
 
   const [editing, setEditing] = useState<string | null>(null);
+  const [customizingProjectId, setCustomizingProjectId] = useState<string | null>(null);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [confirmArchiveId, setConfirmArchiveId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -401,6 +590,26 @@ export function Sidebar({
   }
 
   const groupedSessions = useMemo(() => groupSessionsByProjects(sessions, projects, sidebarState, query), [projects, query, sessions, sidebarState]);
+  const projectByFolder = useMemo(
+    () => new Map(projects.filter((project) => !project.archivedAt).map((project) => [project.folder, project])),
+    [projects],
+  );
+  const projectColorsByFolder = useMemo(
+    () => new Map(
+      [...projectByFolder.entries()].map(([folder, project]) => [
+        folder,
+        effectiveProjectColor(project, {
+          accent: theme.colors.accent,
+          sidebarBackground: theme.colors.sidebarBg,
+          auto: autoColorThreadNames,
+        }),
+      ]),
+    ),
+    [autoColorThreadNames, projectByFolder, theme.colors.accent, theme.colors.sidebarBg],
+  );
+  const customizingProject = customizingProjectId
+    ? projects.find((project) => project.id === customizingProjectId) ?? null
+    : null;
   const runningWorkerParentThreads = useMemo(
     () => new Set(runningWorkerParentIdsKey ? runningWorkerParentIdsKey.split("\0") : []),
     [runningWorkerParentIdsKey],
@@ -680,6 +889,12 @@ export function Sidebar({
         label: `New chat${projectSection ? " in project" : ""}`,
         icon: <Plus size={13} />,
         action: () => createChatInSection(group.id),
+      }] : []),
+      ...(group.project ? [{
+        id: "customize-project",
+        label: "Customize project...",
+        icon: <Gear size={13} />,
+        action: () => setCustomizingProjectId(group.project!.id),
       }] : []),
       ...(projectSection ? [{
         id: "pin",
@@ -1047,6 +1262,7 @@ export function Sidebar({
   }
 
   return (
+    <>
     <aside ref={sidebarElementRef} className={"sidebar" + (sidebarResizing ? " resizing" : "")} aria-label="Chats" style={sidebarStyle}>
       <div className="sidebar-inner">
         <div className="sidebar-head">
@@ -1104,6 +1320,12 @@ export function Sidebar({
               const sectionRuntimeState = projectSection
                 ? runtimePreviewState(previewRuntimesByKey[previewRuntimeKeyForThread("", group.subtitle ?? folderFromSectionId(group.id))])
                 : null;
+              const sectionProjectColor = group.subtitle
+                ? projectColorsByFolder.get(group.subtitle)
+                : undefined;
+              const sectionProjectStyle = sectionProjectColor
+                ? { "--project-color": sectionProjectColor } as CSSProperties
+                : undefined;
               const searchActive = Boolean(query.trim());
               const totalSessions = group.sessions.length;
               const visibleLimit = searchActive
@@ -1171,6 +1393,7 @@ export function Sidebar({
                     (sectionDragging ? " dragging" : "") +
                     sectionDropClass
                   }
+                  style={sectionProjectStyle}
                 >
                   <div
                     className={"session-section-title" + (!projectSection ? " fixed" : "") + (sectionRuntimeState ? " runtime-preview runtime-" + sectionRuntimeState : "")}
@@ -1187,8 +1410,12 @@ export function Sidebar({
                         toggleSidebarSectionCollapsed(group.id);
                       }}
                     >
-                      <span className={"section-type-icon" + (group.id === SIDEBAR_CHATS_SECTION_ID ? " chat-toggle-icon" : "")} aria-hidden="true">
-                        {group.id === SIDEBAR_PINNED_SECTION_ID ? <Pin size={12} /> : group.id === SIDEBAR_CHATS_SECTION_ID ? <ChevronDown size={12} /> : collapsed ? <Folder size={12} /> : <FolderOpen size={12} />}
+                      <span className={"section-type-icon" + (group.id === SIDEBAR_CHATS_SECTION_ID ? " chat-toggle-icon" : "") + (sectionProjectColor ? " project-colored" : "")} aria-hidden="true">
+                        {group.id === SIDEBAR_PINNED_SECTION_ID
+                          ? <Pin size={12} />
+                          : group.id === SIDEBAR_CHATS_SECTION_ID
+                            ? <ChevronDown size={12} />
+                            : <ProjectIcon icon={group.project?.icon} collapsed={collapsed} size={12} />}
                       </span>
                       <span className="section-copy" title={group.subtitle ?? group.label}>
                         <span className="section-label-row">
@@ -1235,6 +1462,10 @@ export function Sidebar({
                   const unread = unreadSessions.has(s.id);
                   const runtimeState = projectSection ? null : runtimePreviewSidebarState(s);
                   const pinned = !s.parentId && sidebarState.pinnedSessionIds.includes(s.id);
+                  const sessionProjectColor = projectColorsByFolder.get(projectFolderForSession(s));
+                  const sessionProjectStyle = sessionProjectColor
+                    ? { "--project-color": sessionProjectColor } as CSSProperties
+                    : undefined;
                   const showStatus = generating || unread;
                   const statusLabel = parentWorkersRunning ? "Workers running" : s.worker ? `Worker ${s.worker.status}` : generating ? "Working" : unread ? "Unread update" : "Ready";
                   const pullRequestSnapshot = pullRequestsBySession[s.id];
@@ -1267,10 +1498,12 @@ export function Sidebar({
                         (generating ? " generating" : "") +
                         (runtimeState ? " runtime-preview runtime-" + runtimeState : "") +
                         (pinned ? " pinned" : "") +
+                        (sessionProjectColor ? " project-colored" : "") +
                         (confirmArchiveId === s.id ? " delete-pending" : "") +
                         (sessionDragging ? " dragging" : "") +
                         sessionDropClass
                       }
+                      style={sessionProjectStyle}
                       onPointerDown={s.parentId ? undefined : (event) => startPointerDrag(event, { type: "session", id: s.id })}
                       onContextMenu={(event) => openSessionContextMenu(event, s, pinned)}
                       onClick={(event) => {
@@ -1456,5 +1689,13 @@ export function Sidebar({
         onDoubleClick={() => resizeSidebar(DEFAULT_SIDEBAR_WIDTH)}
       />
     </aside>
+    {customizingProject && (
+      <ProjectCustomizationDialog
+        project={customizingProject}
+        onClose={() => setCustomizingProjectId(null)}
+        onSave={(patch) => updateProject(customizingProject.id, patch)}
+      />
+    )}
+    </>
   );
 }

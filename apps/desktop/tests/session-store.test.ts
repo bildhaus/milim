@@ -1485,6 +1485,32 @@ assert(
   useSessions.getState().sidebar.projectFolders.includes("C:\\workspace-c"),
   "sidebar should persist explicitly added project folders",
 );
+useSessions.getState().updateProject(projectC, {
+  name: "  Workspace C  ",
+  icon: "code",
+  color: "#A3C",
+});
+let customizedProject = useSessions.getState().projects.find((project) => project.id === projectC);
+equal(customizedProject?.name, "Workspace C", "project customization should trim names");
+equal(customizedProject?.icon, "code", "project customization should store whitelisted icons");
+equal(customizedProject?.color, "#aa33cc", "project customization should normalize colors");
+useSessions.getState().addProjectFolder("C:\\workspace-c");
+customizedProject = useSessions.getState().projects.find((project) => project.id === projectC);
+equal(customizedProject?.icon, "code", "project upserts should preserve custom icons");
+equal(customizedProject?.color, "#aa33cc", "project upserts should preserve custom colors");
+useSessions.getState().archiveProject(projectC);
+useSessions.getState().restoreProject(projectC);
+customizedProject = useSessions.getState().projects.find((project) => project.id === projectC);
+equal(customizedProject?.name, "Workspace C", "archive restore should preserve project customization");
+useSessions.getState().updateProject(projectC, {
+  name: " ",
+  icon: "invalid" as never,
+  color: "nope",
+});
+customizedProject = useSessions.getState().projects.find((project) => project.id === projectC);
+equal(customizedProject?.name, "workspace-c", "empty project names should reset to the folder basename");
+equal(customizedProject?.icon, undefined, "invalid project icons should reset to default");
+equal(customizedProject?.color, undefined, "invalid project colors should reset to default");
 deepEqual(
   useSessions
     .getState()

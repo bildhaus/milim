@@ -255,6 +255,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const experimentalHashlinePatch = useUiPreferences((s) => s.experimentalHashlinePatch);
   const chatLayoutStyle = useUiPreferences((s) => s.chatLayoutStyle);
   const showEmptyChatRidgeline = useUiPreferences((s) => s.showEmptyChatRidgeline);
+  const autoColorThreadNames = useUiPreferences((s) => s.autoColorThreadNames);
   const messageWidth = useUiPreferences((s) => s.messageWidth);
   const avatarStyle = useUiPreferences((s) => s.avatarStyle);
   const codeBlockTheme = useUiPreferences((s) => s.codeBlockTheme);
@@ -300,6 +301,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const setExperimentalHashlinePatch = useUiPreferences((s) => s.setExperimentalHashlinePatch);
   const setChatLayoutStyle = useUiPreferences((s) => s.setChatLayoutStyle);
   const setShowEmptyChatRidgeline = useUiPreferences((s) => s.setShowEmptyChatRidgeline);
+  const setAutoColorThreadNames = useUiPreferences((s) => s.setAutoColorThreadNames);
   const setMessageWidth = useUiPreferences((s) => s.setMessageWidth);
   const setAvatarStyle = useUiPreferences((s) => s.setAvatarStyle);
   const setCodeBlockTheme = useUiPreferences((s) => s.setCodeBlockTheme);
@@ -1716,6 +1718,20 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                     onChange={setAvatarStyle}
                   />
                 </div>
+              </div>
+            </SettingsBlock>
+            <SettingsBlock title="Sidebar" data-setting-id="appearance-sidebar-colors" className={settingHighlightClass("appearance-sidebar-colors").trim()}>
+              <div className="setting-toggle-row">
+                <div>
+                  <strong>Automatically color project thread names</strong>
+                  <span>Derive one stable color per project from the active theme accent. Custom project colors take priority.</span>
+                </div>
+                <Toggle
+                  checked={autoColorThreadNames}
+                  onChange={setAutoColorThreadNames}
+                  ariaLabel="Automatically color project thread names"
+                  testId="auto-color-thread-names-toggle"
+                />
               </div>
             </SettingsBlock>
             <SettingsBlock title="Empty chat" data-setting-id="appearance-empty-chat-ridgeline" className={settingHighlightClass("appearance-empty-chat-ridgeline").trim()}>

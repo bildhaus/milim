@@ -86,6 +86,7 @@ interface UiPreferencesState {
   experimentalHashlinePatch: boolean;
   chatLayoutStyle: ChatLayoutStyle;
   showEmptyChatRidgeline: boolean;
+  autoColorThreadNames: boolean;
   messageWidth: MessageWidth;
   avatarStyle: AvatarStyle;
   codeBlockTheme: CodeBlockTheme;
@@ -139,6 +140,7 @@ interface UiPreferencesState {
   setExperimentalHashlinePatch: (experimentalHashlinePatch: boolean) => void;
   setChatLayoutStyle: (chatLayoutStyle: ChatLayoutStyle) => void;
   setShowEmptyChatRidgeline: (showEmptyChatRidgeline: boolean) => void;
+  setAutoColorThreadNames: (autoColorThreadNames: boolean) => void;
   setMessageWidth: (messageWidth: MessageWidth) => void;
   setAvatarStyle: (avatarStyle: AvatarStyle) => void;
   setCodeBlockTheme: (codeBlockTheme: CodeBlockTheme) => void;
@@ -377,6 +379,7 @@ export const useUiPreferences = create<UiPreferencesState>()(
       experimentalHashlinePatch: false,
       chatLayoutStyle: "transcript",
       showEmptyChatRidgeline: true,
+      autoColorThreadNames: false,
       messageWidth: "standard",
       avatarStyle: "none",
       codeBlockTheme: "match",
@@ -437,6 +440,7 @@ export const useUiPreferences = create<UiPreferencesState>()(
       setExperimentalHashlinePatch: (experimentalHashlinePatch) => set({ experimentalHashlinePatch }),
       setChatLayoutStyle: (chatLayoutStyle) => set({ chatLayoutStyle: normalizeChatLayoutStyle(chatLayoutStyle) }),
       setShowEmptyChatRidgeline: (showEmptyChatRidgeline) => set({ showEmptyChatRidgeline }),
+      setAutoColorThreadNames: (autoColorThreadNames) => set({ autoColorThreadNames }),
       setMessageWidth: (messageWidth) => set({ messageWidth: normalizeMessageWidth(messageWidth) }),
       setAvatarStyle: (avatarStyle) => set({ avatarStyle: normalizeAvatarStyle(avatarStyle) }),
       setCodeBlockTheme: (codeBlockTheme) => set({ codeBlockTheme: normalizeCodeBlockTheme(codeBlockTheme) }),
@@ -578,6 +582,7 @@ export const useUiPreferences = create<UiPreferencesState>()(
           experimentalHashlinePatch: typeof saved?.experimentalHashlinePatch === "boolean" ? saved.experimentalHashlinePatch : current.experimentalHashlinePatch,
           chatLayoutStyle: normalizeChatLayoutStyle(saved?.chatLayoutStyle),
           showEmptyChatRidgeline: typeof saved?.showEmptyChatRidgeline === "boolean" ? saved.showEmptyChatRidgeline : true,
+          autoColorThreadNames: typeof saved?.autoColorThreadNames === "boolean" ? saved.autoColorThreadNames : false,
           messageWidth: normalizeMessageWidth(saved?.messageWidth),
           avatarStyle: normalizeAvatarStyle(saved?.avatarStyle),
           codeBlockTheme: normalizeCodeBlockTheme(saved?.codeBlockTheme),
@@ -640,6 +645,7 @@ export const useUiPreferences = create<UiPreferencesState>()(
         experimentalHashlinePatch: state.experimentalHashlinePatch,
         chatLayoutStyle: normalizeChatLayoutStyle(state.chatLayoutStyle),
         showEmptyChatRidgeline: state.showEmptyChatRidgeline,
+        autoColorThreadNames: state.autoColorThreadNames,
         messageWidth: normalizeMessageWidth(state.messageWidth),
         avatarStyle: normalizeAvatarStyle(state.avatarStyle),
         codeBlockTheme: normalizeCodeBlockTheme(state.codeBlockTheme),

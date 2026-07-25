@@ -79,6 +79,7 @@ equal(useUiPreferences.getState().composerDensity, "comfortable", "composer shou
 equal(useUiPreferences.getState().autoTitleChats, true, "new chats should auto-title by default");
 equal(useUiPreferences.getState().aiThreadNames, false, "AI thread names should default off");
 equal(useUiPreferences.getState().aiThreadNameModel, "", "AI thread naming should default to the chat model");
+equal(useUiPreferences.getState().autoColorThreadNames, false, "automatic thread colors should default off");
 equal(useUiPreferences.getState().newChatButtonAtBottom, false, "new chat button should default to top");
 equal("interfaceMode" in useUiPreferences.getState(), false, "obsolete interface mode should not be exposed");
 equal(useUiPreferences.getState().developerMode, false, "developer mode should default off");
@@ -247,6 +248,10 @@ useUiPreferences.getState().setShowEmptyChatRidgeline(false);
 equal(useUiPreferences.getState().showEmptyChatRidgeline, false, "empty-chat ridgeline should update");
 equal(persistedUiState().showEmptyChatRidgeline, false, "empty-chat ridgeline should be persisted");
 
+useUiPreferences.getState().setAutoColorThreadNames(true);
+equal(useUiPreferences.getState().autoColorThreadNames, true, "automatic thread colors should update");
+equal(persistedUiState().autoColorThreadNames, true, "automatic thread colors should be persisted");
+
 useUiPreferences.getState().setMessageWidth("wide");
 equal(useUiPreferences.getState().messageWidth, "wide", "message width should update");
 
@@ -311,6 +316,7 @@ useUiPreferences.setState({
   experimentalHashlinePatch: false,
   chatLayoutStyle: "transcript",
   showEmptyChatRidgeline: true,
+  autoColorThreadNames: false,
   messageWidth: "standard",
   avatarStyle: "none",
   codeBlockTheme: "match",
@@ -321,7 +327,7 @@ useUiPreferences.setState({
 });
 localStorage.setItem(
   "milim.ui",
-  '{"state":{"sidebarOpen":false,"sidebarWidth":384,"previewPanelWidth":512,"mediaStudioWidth":1040,"mediaStudioHeight":740,"uiSize":130,"windowAlwaysOnTop":true,"interfaceSounds":"loud","soundOnFinished":"yes","soundOnAttention":0,"soundOnInteractions":"sometimes","finishedSound":"error","attentionSound":"ready","composerSendShortcut":"modEnter","composerDensity":"compact","autoTitleChats":false,"aiThreadNames":true,"aiThreadNameModel":"persisted-title-model","newChatButtonAtBottom":true,"interfaceMode":"workbench","developerMode":true,"experimentalHashlinePatch":true,"chatLayoutStyle":"compact","messageWidth":"full","avatarStyle":"role","codeBlockTheme":"high-contrast","backgroundFit":"contain","backgroundTreatment":"blur","thinkingBlocksOpen":true,"gitPanelExpanded":true,"appShortcuts":{"newChat":"Mod+Shift+N","focusSearch":"Mod+Shift+N","focusComposer":"x","stopGeneration":"F2","toggleSidebar":"Mod+B","previousThread":"Mod+Tab"}},"version":0}',
+  '{"state":{"sidebarOpen":false,"sidebarWidth":384,"previewPanelWidth":512,"mediaStudioWidth":1040,"mediaStudioHeight":740,"uiSize":130,"windowAlwaysOnTop":true,"interfaceSounds":"loud","soundOnFinished":"yes","soundOnAttention":0,"soundOnInteractions":"sometimes","finishedSound":"error","attentionSound":"ready","composerSendShortcut":"modEnter","composerDensity":"compact","autoTitleChats":false,"aiThreadNames":true,"aiThreadNameModel":"persisted-title-model","newChatButtonAtBottom":true,"interfaceMode":"workbench","developerMode":true,"experimentalHashlinePatch":true,"chatLayoutStyle":"compact","autoColorThreadNames":true,"messageWidth":"full","avatarStyle":"role","codeBlockTheme":"high-contrast","backgroundFit":"contain","backgroundTreatment":"blur","thinkingBlocksOpen":true,"gitPanelExpanded":true,"appShortcuts":{"newChat":"Mod+Shift+N","focusSearch":"Mod+Shift+N","focusComposer":"x","stopGeneration":"F2","toggleSidebar":"Mod+B","previousThread":"Mod+Tab"}},"version":0}',
 );
 await useUiPreferences.persist.rehydrate();
 equal(useUiPreferences.getState().sidebarOpen, false, "sidebar should rehydrate persisted closed state");
@@ -349,6 +355,7 @@ equal(useUiPreferences.getState().developerMode, true, "developer mode should re
 equal(useUiPreferences.getState().experimentalHashlinePatch, true, "hashline patching should rehydrate");
 equal(useUiPreferences.getState().chatLayoutStyle, "compact", "chat layout should rehydrate");
 equal(useUiPreferences.getState().showEmptyChatRidgeline, true, "missing empty-chat ridgeline preference should keep its enabled default");
+equal(useUiPreferences.getState().autoColorThreadNames, true, "automatic thread colors should rehydrate");
 equal(useUiPreferences.getState().messageWidth, "full", "message width should rehydrate");
 equal(useUiPreferences.getState().avatarStyle, "role", "avatar style should rehydrate");
 equal(useUiPreferences.getState().codeBlockTheme, "high-contrast", "code theme should rehydrate");

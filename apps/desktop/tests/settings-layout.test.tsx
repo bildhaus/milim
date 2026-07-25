@@ -87,6 +87,7 @@ equal(matchingSettingsEntries("sound")[0]?.id, "appearance-interface-sounds", "S
 equal(matchingSettingsEntries("worktree")[0]?.id, "workspace-new-chat", "Search should find workspace policies");
 equal(matchingSettingsEntries("ghost text")[0]?.id, "chat-ai-completion", "Search should find composer completion");
 equal(matchingSettingsEntries("ridgeline")[0]?.id, "appearance-empty-chat-ridgeline", "Search should find the empty-chat ridgeline preference");
+equal(matchingSettingsEntries("thread colors")[0]?.id, "appearance-sidebar-colors", "Search should find automatic project thread colors");
 equal(matchingSettingsEntries("cookies")[0]?.id, "browser-data", "Search should find browser data controls");
 equal(matchingSettingsEntries("sheets")[0]?.id, "google-workspace", "Search should find Google Workspace controls");
 equal(matchingSettingsEntries("keychain")[0]?.id, "system-secret-storage", "Search should find credential storage");

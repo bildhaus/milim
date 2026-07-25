@@ -50,7 +50,7 @@ type SidebarSession = {
   createdAt: number;
   updatedAt: number;
 };
-type SessionGroup = { id: string; sessions: SidebarSession[] };
+type SessionGroup = { id: string; project?: Project; sessions: SidebarSession[] };
 
 const server = await createServer({
   root: process.cwd(),
@@ -102,6 +102,8 @@ try {
       id: projectSectionId(folder),
       name: "Workspace A",
       folder,
+      icon: "terminal",
+      color: "#22aa88",
       createdAt: now,
       updatedAt: now,
     }],
@@ -111,6 +113,8 @@ try {
 
   const projectGroup = groups.find((group) => group.id === projectSectionId(folder));
   assert(projectGroup?.sessions.some((session) => session.id === "retry-chat"), "retry worktrees should stay grouped under the original project");
+  assert(projectGroup?.project?.icon === "terminal", "project groups should retain custom icons");
+  assert(projectGroup?.project?.color === "#22aa88", "project groups should retain custom colors");
 
   const chats = groups.find((group) => group.id === SIDEBAR_CHATS_SECTION_ID);
   assert(chats, "empty Chats section should render when unfiltered");
