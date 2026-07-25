@@ -27,7 +27,7 @@ assert(source.includes('activeSection === "google"'), "Google Workspace controls
 assert(source.includes("chooseGoogleFilesFromSettings"), "Google Workspace settings should start the system-browser Picker");
 assert(source.includes('className="btn-accent google-workspace-connect-button"'), "Google Workspace connection should be a prominent primary action");
 assert(source.includes('new URL("../assets/google.svg", import.meta.url).href'), "Google Workspace settings should use the bundled Google logo");
-assert(source.includes('section.id === "google" ? <img src={googleLogo}'), "Google Workspace should use the bundled Google logo in the settings sidebar");
+assert(source.includes('section.id === "google" ? <span className="settings-google-nav-icon"'), "Google Workspace should use the themed Google logo in the settings sidebar");
 assert(source.includes('" · Managed folder"'), "Google Workspace settings should identify Milim's managed Drive folder");
 assert(source.includes("GOOGLE_CONNECT_DISCLOSURE"), "Fresh Google connections should disclose remote-provider transfer");
 assert(source.includes("GOOGLE_REMOVE_MESSAGE"), "Removing a file must use the local-registry-only copy");

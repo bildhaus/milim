@@ -10177,12 +10177,12 @@ span.provider-brand-icon {
   background: transparent;
   color: var(--secondary-text);
 }
-.settings-nav-icon img {
+.settings-google-nav-icon {
   width: 15px;
   height: 15px;
-}
-html[data-dark="true"] .settings-nav-icon img {
-  filter: invert(1);
+  background: currentColor;
+  -webkit-mask: url("./assets/google.svg") center / contain no-repeat;
+  mask: url("./assets/google.svg") center / contain no-repeat;
 }
 .settings-nav-item.active .settings-nav-icon {
   background: var(--chip-hover);
