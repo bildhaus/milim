@@ -130,6 +130,10 @@ if (repoVersion !== packageJson.version) {
 }
 
 const csp = config.app?.security?.csp ?? "";
+if (!csp.includes("img-src 'self' asset: http://asset.localhost data: blob: https://drive-thirdparty.googleusercontent.com")) {
+  throw new Error("Tauri CSP must allow Google Drive's unauthenticated file icons");
+}
+
 if (!csp.includes("frame-src blob: data:")) {
   throw new Error(
     "Tauri CSP must allow sandboxed blob/data artifact preview frames",

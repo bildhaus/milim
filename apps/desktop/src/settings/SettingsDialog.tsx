@@ -1397,20 +1397,33 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                                 </span>
                               </div>
                               <div className="google-workspace-file-actions">
-                                <button className="btn-ghost" type="button" onClick={() => openGoogleFileInMilim(url)}>
-                                  Open in Milim
-                                </button>
-                                <button className="btn-ghost" type="button" onClick={() => void openExternalUrl(url)}>
-                                  <ExternalLink size={12} />
-                                  Open in Google
+                                <button
+                                  className="btn-ghost google-workspace-file-action"
+                                  type="button"
+                                  title={`Open ${file.name} in Milim`}
+                                  aria-label={`Open ${file.name} in Milim`}
+                                  onClick={() => openGoogleFileInMilim(url)}
+                                >
+                                  <span className="topbar-logo" aria-hidden="true" />
                                 </button>
                                 <button
-                                  className="btn-ghost danger"
+                                  className="btn-ghost google-workspace-file-action"
                                   type="button"
+                                  title={`Open ${file.name} in Google`}
+                                  aria-label={`Open ${file.name} in Google`}
+                                  onClick={() => void openExternalUrl(url)}
+                                >
+                                  <ExternalLink size={13} aria-hidden="true" />
+                                </button>
+                                <button
+                                  className="btn-ghost danger google-workspace-file-action"
+                                  type="button"
+                                  title={`Remove ${file.name} from Milim`}
+                                  aria-label={`Remove ${file.name} from Milim`}
                                   disabled={googleWorkspaceBusy}
                                   onClick={() => void removeGoogleFileFromSettings(file.id)}
                                 >
-                                  Remove from Milim
+                                  <Trash size={13} aria-hidden="true" />
                                 </button>
                               </div>
                             </div>

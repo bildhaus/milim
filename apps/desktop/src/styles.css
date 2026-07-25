@@ -10181,6 +10181,9 @@ span.provider-brand-icon {
   width: 15px;
   height: 15px;
 }
+html[data-dark="true"] .settings-nav-icon img {
+  filter: invert(1);
+}
 .settings-nav-item.active .settings-nav-icon {
   background: var(--chip-hover);
   color: var(--primary-text);
@@ -11399,15 +11402,19 @@ span.provider-brand-icon {
 }
 .google-workspace-file-actions {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   justify-content: flex-end;
   gap: 5px;
 }
 .google-workspace-file-actions .btn-ghost {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  white-space: nowrap;
+  justify-content: center;
+}
+.google-workspace-file-actions .google-workspace-file-action {
+  width: 30px;
+  height: 30px;
+  padding: 0;
 }
 .archive-row {
   grid-template-columns: minmax(0, 1fr) auto;
