@@ -1,3 +1,4 @@
+#[cfg(windows)]
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
