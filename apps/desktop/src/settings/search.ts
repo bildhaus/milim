@@ -36,6 +36,7 @@ export const SETTINGS_SEARCH_ENTRIES: SettingSearchEntry[] = [
   { id: "app-notifications", label: "Notifications", section: "app", aliases: ["run finished", "needs attention", "thread title", "unfocused"] },
   { id: "app-update-policy", label: "Update policy", section: "app", aliases: ["automatic check", "automatic download"] },
   { id: "mobile-companion", label: "Mobile companion", section: "mobile", aliases: ["phone", "pairing", "qr", "tailscale", "relay"] },
+  { id: "system-secret-storage", label: "Credential storage", section: "system", aliases: ["keychain", "credential manager", "secrets", "encryption", "fallback"] },
   { id: "system-shortcuts", label: "Keyboard shortcuts", section: "system", aliases: ["hotkey", "command", "reset"] },
   { id: "about-version", label: "Version", section: "about", aliases: ["current", "latest"] },
   { id: "about-updates", label: "Updates", section: "about", aliases: ["github release", "download", "restart"] },

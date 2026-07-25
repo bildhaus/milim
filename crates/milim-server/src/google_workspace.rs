@@ -18,7 +18,7 @@ use axum::{Json, Router};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use milim_core::{Error, Result};
-use milim_storage::EncryptedStore;
+use milim_storage::{create_private_file, EncryptedStore};
 use milim_tools::{atomic_write, resolve_workspace_path, Tool, ToolEffect};
 use reqwest::{Method, Url};
 use serde::{Deserialize, Serialize};
@@ -39,6 +39,10 @@ pub const GOOGLE_FOLDER_MIME: &str = "application/vnd.google-apps.folder";
 const MILIM_DRIVE_FOLDER_NAME: &str = "Milim";
 
 const PICKER_TTL: Duration = Duration::from_secs(5 * 60);
+#[cfg(not(test))]
+const REVOCATION_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const REVOCATION_TIMEOUT: Duration = Duration::from_millis(100);
 const MODEL_TEXT_LIMIT: usize = 100_000;
 const PREVIEW_BYTE_LIMIT: usize = 25 * 1024 * 1024;
 const TRANSFER_BYTE_LIMIT: usize = 100 * 1024 * 1024;
@@ -163,13 +167,18 @@ impl GoogleWorkspaceStore {
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let key = EncryptedStore::random_key();
-                atomic_write(&key_path, &key)?;
+                create_private_file(&key_path, &key)?;
                 key
             }
             Err(error) => return Err(error.into()),
         };
+        Self::open_with_encryption(root, EncryptedStore::from_key(&key))
+    }
+
+    fn open_with_encryption(root: &Path, enc: EncryptedStore) -> Result<Self> {
+        std::fs::create_dir_all(root)?;
         Ok(Self {
-            enc: EncryptedStore::from_key(&key),
+            enc,
             path: root.join("google-workspace.enc"),
         })
     }
@@ -216,6 +225,21 @@ pub struct GoogleWorkspaceStatus {
     pub unavailable_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoogleRevocationStatus {
+    Confirmed,
+    Unconfirmed,
+    NotNeeded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleDisconnectResult {
+    pub local_authorization_removed: bool,
+    pub revocation: GoogleRevocationStatus,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -354,6 +378,24 @@ impl GoogleWorkspaceConnection {
         workspace: Arc<StdRwLock<Option<PathBuf>>>,
     ) -> Result<Self> {
         let store = GoogleWorkspaceStore::open(root.as_ref())?;
+        Self::open_with_store(store, config, workspace)
+    }
+
+    pub fn open_with_encryption(
+        root: impl AsRef<Path>,
+        config: GoogleWorkspaceConfig,
+        workspace: Arc<StdRwLock<Option<PathBuf>>>,
+        encryption: EncryptedStore,
+    ) -> Result<Self> {
+        let store = GoogleWorkspaceStore::open_with_encryption(root.as_ref(), encryption)?;
+        Self::open_with_store(store, config, workspace)
+    }
+
+    fn open_with_store(
+        store: GoogleWorkspaceStore,
+        config: GoogleWorkspaceConfig,
+        workspace: Arc<StdRwLock<Option<PathBuf>>>,
+    ) -> Result<Self> {
         let (stored, state_error) = match store.load() {
             Ok(stored) => (stored, None),
             Err(error) => {
@@ -692,23 +734,35 @@ impl GoogleWorkspaceConnection {
         Ok(removed)
     }
 
-    pub async fn disconnect(&self) -> Result<()> {
+    pub async fn disconnect(&self) -> Result<GoogleDisconnectResult> {
         let refresh = self.stored.read().await.refresh_token.clone();
-        if let Some(token) = refresh {
-            let _ = self
-                .client
-                .post(&self.config.revoke_url)
-                .form(&[("token", token)])
-                .send()
-                .await;
-        }
+        let revocation = match refresh {
+            Some(token) => match tokio::time::timeout(
+                REVOCATION_TIMEOUT,
+                self.client
+                    .post(&self.config.revoke_url)
+                    .form(&[("token", token)])
+                    .send(),
+            )
+            .await
+            {
+                Ok(Ok(response)) if response.status().is_success() => {
+                    GoogleRevocationStatus::Confirmed
+                }
+                _ => GoogleRevocationStatus::Unconfirmed,
+            },
+            None => GoogleRevocationStatus::NotNeeded,
+        };
+        self.store.clear()?;
         *self.stored.write().await = StoredWorkspace::default();
         *self.access_token.lock().await = None;
-        self.store.clear()?;
         if let Ok(mut error) = self.state_error.lock() {
             *error = None;
         }
-        Ok(())
+        Ok(GoogleDisconnectResult {
+            local_authorization_removed: true,
+            revocation,
+        })
     }
 
     async fn access_token(&self, force_refresh: bool) -> Result<String> {
@@ -1931,10 +1985,13 @@ pub(crate) async fn disconnect_route(
     State(st): State<AppState>,
     headers: HeaderMap,
     peer: Peer,
-) -> ApiResult<StatusCode> {
+) -> ApiResult<Json<GoogleDisconnectResult>> {
     authorize(&st, &headers, Some(peer.0))?;
-    connection(&st)?.disconnect().await.map_err(ApiError)?;
-    Ok(StatusCode::NO_CONTENT)
+    connection(&st)?
+        .disconnect()
+        .await
+        .map(Json)
+        .map_err(ApiError)
 }
 
 #[derive(Default, Deserialize)]
@@ -4202,6 +4259,193 @@ mod tests {
             Some("folder_1")
         );
         assert!(!query.contains_key("allow_folder_selection"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn disconnect_reports_confirmed_revocation_and_clears_local_state() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/revoke", axum::routing::post(|| async { StatusCode::OK })),
+            )
+            .await
+            .unwrap();
+        });
+        let root = test_root();
+        let mut config = test_config();
+        config.revoke_url = format!("http://{address}/revoke");
+        let connection =
+            GoogleWorkspaceConnection::open(&root, config, Arc::new(StdRwLock::new(None))).unwrap();
+        {
+            let mut stored = connection.stored.write().await;
+            stored.refresh_token = Some("refresh".into());
+            connection.store.save(&stored).unwrap();
+        }
+        *connection.access_token.lock().await = Some(CachedAccessToken {
+            value: "access".into(),
+            expires_at: u64::MAX,
+        });
+
+        let result = connection.disconnect().await.unwrap();
+        assert_eq!(result.revocation, GoogleRevocationStatus::Confirmed);
+        assert!(result.local_authorization_removed);
+        assert!(!root.join("google-workspace.enc").exists());
+        assert!(connection.stored.read().await.refresh_token.is_none());
+        assert!(connection.access_token.lock().await.is_none());
+        server.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn disconnect_reports_unconfirmed_when_google_is_unreachable() {
+        let root = test_root();
+        let mut config = test_config();
+        config.revoke_url = "http://127.0.0.1:9/revoke".into();
+        let connection =
+            GoogleWorkspaceConnection::open(&root, config, Arc::new(StdRwLock::new(None))).unwrap();
+        {
+            let mut stored = connection.stored.write().await;
+            stored.refresh_token = Some("refresh".into());
+            connection.store.save(&stored).unwrap();
+        }
+
+        let result = connection.disconnect().await.unwrap();
+        assert_eq!(result.revocation, GoogleRevocationStatus::Unconfirmed);
+        assert!(!root.join("google-workspace.enc").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn disconnect_reports_unconfirmed_when_google_times_out() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/revoke",
+                    axum::routing::post(|| async {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        StatusCode::OK
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let root = test_root();
+        let mut config = test_config();
+        config.revoke_url = format!("http://{address}/revoke");
+        let connection =
+            GoogleWorkspaceConnection::open(&root, config, Arc::new(StdRwLock::new(None))).unwrap();
+        {
+            let mut stored = connection.stored.write().await;
+            stored.refresh_token = Some("refresh".into());
+            connection.store.save(&stored).unwrap();
+        }
+
+        let result = connection.disconnect().await.unwrap();
+        assert_eq!(result.revocation, GoogleRevocationStatus::Unconfirmed);
+        assert!(!root.join("google-workspace.enc").exists());
+        server.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn disconnect_reports_unconfirmed_for_google_error_status() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/revoke",
+                    axum::routing::post(|| async { StatusCode::BAD_REQUEST }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let root = test_root();
+        let mut config = test_config();
+        config.revoke_url = format!("http://{address}/revoke");
+        let connection =
+            GoogleWorkspaceConnection::open(&root, config, Arc::new(StdRwLock::new(None))).unwrap();
+        {
+            let mut stored = connection.stored.write().await;
+            stored.refresh_token = Some("refresh".into());
+            connection.store.save(&stored).unwrap();
+        }
+
+        let result = connection.disconnect().await.unwrap();
+        assert_eq!(result.revocation, GoogleRevocationStatus::Unconfirmed);
+        assert!(!root.join("google-workspace.enc").exists());
+        server.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn disconnect_without_refresh_token_needs_no_revocation() {
+        let root = test_root();
+        let connection =
+            GoogleWorkspaceConnection::open(&root, test_config(), Arc::new(StdRwLock::new(None)))
+                .unwrap();
+        let result = connection.disconnect().await.unwrap();
+        assert_eq!(result.revocation, GoogleRevocationStatus::NotNeeded);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn disconnect_does_not_claim_local_removal_when_clear_fails() {
+        let root = test_root();
+        let connection =
+            GoogleWorkspaceConnection::open(&root, test_config(), Arc::new(StdRwLock::new(None)))
+                .unwrap();
+        let data_path = root.join("google-workspace.enc");
+        std::fs::create_dir_all(&data_path).unwrap();
+        {
+            let mut stored = connection.stored.write().await;
+            stored.account_id = Some("account".into());
+        }
+
+        assert!(connection.disconnect().await.is_err());
+        assert_eq!(
+            connection.stored.read().await.account_id.as_deref(),
+            Some("account")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn removing_file_only_changes_the_local_registry() {
+        let root = test_root();
+        let connection =
+            GoogleWorkspaceConnection::open(&root, test_config(), Arc::new(StdRwLock::new(None)))
+                .unwrap();
+        {
+            let mut stored = connection.stored.write().await;
+            stored.files.insert(
+                "file_1".into(),
+                GoogleFileSummary {
+                    id: "file_1".into(),
+                    name: "Sheet".into(),
+                    mime_type: GOOGLE_SHEET_MIME.into(),
+                    ..GoogleFileSummary::default()
+                },
+            );
+            connection.store.save(&stored).unwrap();
+        }
+        assert!(connection.remove_file("file_1").await.unwrap());
+        assert!(!connection.stored.read().await.files.contains_key("file_1"));
         std::fs::remove_dir_all(root).unwrap();
     }
 

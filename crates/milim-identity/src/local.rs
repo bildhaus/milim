@@ -5,6 +5,7 @@ use std::path::Path;
 use rand::RngCore;
 
 use milim_core::Result;
+use milim_storage::create_private_file;
 
 use crate::access_key::{mint_access_key, AccessKeyPayload};
 use crate::crypto::{derive_address, generate_secret};
@@ -39,24 +40,23 @@ impl LocalIdentity {
 
     /// Load the secret from `path`, generating and persisting one if absent.
     pub fn load_or_create(path: &Path) -> Result<Self> {
-        if let Ok(bytes) = std::fs::read(path) {
-            if bytes.len() == 32 {
+        match std::fs::read(path) {
+            Ok(bytes) if bytes.len() == 32 => {
                 let mut secret = [0u8; 32];
                 secret.copy_from_slice(&bytes);
                 return Ok(Self { secret });
             }
+            Ok(bytes) => {
+                return Err(milim_core::Error::Other(format!(
+                    "invalid identity key length: expected 32 bytes, got {}",
+                    bytes.len()
+                )))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
         let secret = generate_secret();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(path, secret)?;
-        // Best-effort: restrict permissions on Unix (no-op on Windows).
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-        }
+        create_private_file(path, &secret)?;
         Ok(Self { secret })
     }
 

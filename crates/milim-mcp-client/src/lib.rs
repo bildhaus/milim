@@ -22,7 +22,7 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{oneshot, Mutex};
 
 use milim_core::{Error, Result};
-use milim_storage::EncryptedStore;
+use milim_storage::{create_private_file, EncryptedStore};
 use milim_tools::{atomic_write, Tool, ToolEffect, ToolUiDescriptor};
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -131,11 +131,14 @@ struct McpSecretStore {
 impl McpSecretStore {
     fn open(dir: &Path) -> Result<Self> {
         let key_path = dir.join("mcp-secrets.key");
-        let data_path = dir.join("mcp-secrets.enc");
         let key = read_or_make_key(&key_path)?;
+        Self::open_with_encryption(dir, EncryptedStore::from_key(&key))
+    }
+
+    fn open_with_encryption(dir: &Path, enc: EncryptedStore) -> Result<Self> {
         Ok(Self {
-            data_path,
-            enc: EncryptedStore::from_key(&key),
+            data_path: dir.join("mcp-secrets.enc"),
+            enc,
             lock: StdMutex::new(()),
         })
     }
@@ -232,11 +235,8 @@ fn read_or_make_key(path: &Path) -> Result<[u8; 32]> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let key = EncryptedStore::random_key();
-    atomic_write(path, &key)?;
+    create_private_file(path, &key)?;
     Ok(key)
 }
 
@@ -1083,6 +1083,22 @@ impl McpHub {
     /// Open the hub, loading any persisted server configs (does not connect).
     pub fn open(dir: impl AsRef<Path>) -> Self {
         let dir = dir.as_ref();
+        let secrets = McpSecretStore::open(dir);
+        Self::open_with_secrets(dir, secrets)
+    }
+
+    pub fn open_with_encryption(dir: impl AsRef<Path>, encryption: EncryptedStore) -> Self {
+        let dir = dir.as_ref();
+        let secrets = McpSecretStore::open_with_encryption(dir, encryption);
+        Self::open_with_secrets(dir, secrets)
+    }
+
+    pub fn open_without_secrets(dir: impl AsRef<Path>, reason: impl Into<String>) -> Self {
+        let error = Error::Other(reason.into());
+        Self::open_with_secrets(dir.as_ref(), Err(error))
+    }
+
+    fn open_with_secrets(dir: &Path, secrets: Result<McpSecretStore>) -> Self {
         let path = dir.join("mcp.json");
         let (configs, load_error) = match std::fs::read_to_string(&path) {
             Ok(data) => match serde_json::from_str::<Value>(&data).and_then(|value| {
@@ -1108,7 +1124,7 @@ impl McpHub {
                 cfg
             })
             .collect();
-        let secrets = match McpSecretStore::open(dir) {
+        let secrets = match secrets {
             Ok(store) => Some(store),
             Err(e) => {
                 tracing::warn!("MCP secret store unavailable: {e}");

@@ -14,6 +14,7 @@ mod diagnostics;
 mod host_tools;
 mod preview_tools;
 mod preview_webview;
+mod secret_storage;
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -48,7 +49,7 @@ use milim_core::{Error, Result};
 use milim_inference::{remote::RemoteBackend, unavailable::UnavailableBackend, SharedService};
 use milim_sandbox::{DockerBackend, RunOpts};
 use milim_server::AppState;
-use milim_storage::{Database, DatabaseOptions, JournalMode, SessionsDelta};
+use milim_storage::{Database, DatabaseOptions, EncryptedStore, JournalMode, SessionsDelta};
 use milim_tools::{atomic_write, Tool, ToolEffect, ToolRegistry};
 
 /// Simple Rust/JS bridge example.
@@ -74,11 +75,20 @@ fn restart_app(app: tauri::AppHandle) {
     restart_after_preview_cleanup(app);
 }
 
+#[tauri::command]
+fn secret_storage_status(
+    state: tauri::State<'_, DesktopSecretStorage>,
+) -> secret_storage::SecretStorageStatus {
+    state.0.clone()
+}
+
 struct DesktopApiToken(String);
 
 struct DesktopApiBaseUrl(String);
 
 struct DesktopProviders(Option<Arc<milim_server::providers::ProviderRegistry>>);
+
+struct DesktopSecretStorage(secret_storage::SecretStorageStatus);
 
 struct MobileRelayLocalTarget(String);
 
@@ -3437,6 +3447,7 @@ fn desktop_google_oauth_value(name: &str, compiled: Option<&'static str>) -> Opt
 fn build_state(
     api_key: String,
     preview_tools_state: preview_tools::SharedPreviewToolState,
+    encryption: Option<EncryptedStore>,
 ) -> (
     AppState,
     SocketAddr,
@@ -3464,34 +3475,37 @@ fn build_state(
         tools.register(tool);
     }
 
-    let google_workspace = match milim_server::google_workspace::GoogleWorkspaceConnection::open(
-        paths.root(),
-        milim_server::google_workspace::GoogleWorkspaceConfig::desktop(
-            desktop_google_oauth_value(
-                "MILIM_GOOGLE_OAUTH_CLIENT_ID",
-                option_env!("MILIM_GOOGLE_OAUTH_CLIENT_ID"),
+    let google_workspace = encryption.as_ref().and_then(|encryption| {
+        match milim_server::google_workspace::GoogleWorkspaceConnection::open_with_encryption(
+            paths.root(),
+            milim_server::google_workspace::GoogleWorkspaceConfig::desktop(
+                desktop_google_oauth_value(
+                    "MILIM_GOOGLE_OAUTH_CLIENT_ID",
+                    option_env!("MILIM_GOOGLE_OAUTH_CLIENT_ID"),
+                ),
+                desktop_google_oauth_value(
+                    "MILIM_GOOGLE_OAUTH_CLIENT_SECRET",
+                    option_env!("MILIM_GOOGLE_OAUTH_CLIENT_SECRET"),
+                ),
             ),
-            desktop_google_oauth_value(
-                "MILIM_GOOGLE_OAUTH_CLIENT_SECRET",
-                option_env!("MILIM_GOOGLE_OAUTH_CLIENT_SECRET"),
-            ),
-        ),
-        workspace.clone(),
-    ) {
-        Ok(connection) => {
-            let connection = Arc::new(connection);
-            if connection.available() {
-                for tool in milim_server::google_workspace::tools(connection.clone()) {
-                    tools.register(tool);
+            workspace.clone(),
+            encryption.clone(),
+        ) {
+            Ok(connection) => {
+                let connection = Arc::new(connection);
+                if connection.available() {
+                    for tool in milim_server::google_workspace::tools(connection.clone()) {
+                        tools.register(tool);
+                    }
                 }
+                Some(connection)
             }
-            Some(connection)
+            Err(error) => {
+                tracing::warn!("Google Workspace connector unavailable: {error}");
+                None
+            }
         }
-        Err(error) => {
-            tracing::warn!("Google Workspace connector unavailable: {error}");
-            None
-        }
-    };
+    });
 
     // Computer-use tools (screen capture + mouse/keyboard). Registered when
     // built with the feature; dormant until the runtime gate is enabled.
@@ -3507,24 +3521,49 @@ fn build_state(
     // The default backend (configured remote / explicit unavailable) is the
     // fallback; configured providers route by model on top of it.
     let local = pick_backend();
-    let registry =
-        match milim_server::providers::ProviderRegistry::open(paths.root(), local.clone()) {
+    let registry = encryption.as_ref().and_then(|encryption| {
+        match milim_server::providers::ProviderRegistry::open_with_encryption(
+            paths.root(),
+            local.clone(),
+            encryption.clone(),
+        ) {
             Ok(registry) => Some(Arc::new(registry)),
             Err(e) => {
                 tracing::warn!("provider registry unavailable: {e}");
                 None
             }
-        };
+        }
+    });
 
     // External MCP servers (their tools merge into the agent registry per-run).
-    let mcp = Arc::new(milim_mcp_client::McpHub::open(paths.root()));
+    let mcp = Arc::new(match encryption.as_ref() {
+        Some(encryption) => {
+            milim_mcp_client::McpHub::open_with_encryption(paths.root(), encryption.clone())
+        }
+        None => milim_mcp_client::McpHub::open_without_secrets(
+            paths.root(),
+            "desktop secret storage is unavailable",
+        ),
+    });
 
     // Outbound privacy gate: shared between the provider router (enforcement)
     // and the `/privacy/mode` endpoint (the desktop's active thread setting).
     let privacy = Arc::new(milim_server::privacy::PrivacyGate::from_env());
-    let mobile_companion = Arc::new(milim_server::companion::MobileCompanionBridge::persistent(
-        paths.config_dir().join("mobile-companion.json"),
-    ));
+    let mobile_companion = Arc::new(
+        encryption
+            .as_ref()
+            .and_then(|encryption| {
+                milim_server::companion::MobileCompanionBridge::persistent_encrypted(
+                    paths.config_dir().join("mobile-companion.enc"),
+                    encryption.clone(),
+                )
+                .map_err(|error| {
+                    tracing::warn!("mobile companion persistence unavailable: {error}")
+                })
+                .ok()
+            })
+            .unwrap_or_default(),
+    );
     let service: SharedService = registry
         .as_ref()
         .map(|registry| Arc::new(registry.router(privacy.clone())) as SharedService)
@@ -3852,8 +3891,13 @@ pub fn run() {
     }
     let api_key = milim_server::gen_id("desktop");
     let preview_tools_state = Arc::new(preview_tools::PreviewToolState::default());
-    let (state, preferred_addr, mcp, providers) =
-        build_state(api_key.clone(), preview_tools_state.clone());
+    let secret_storage = secret_storage::initialize(Paths::resolve().root());
+    let storage_status = secret_storage.status.clone();
+    let (state, preferred_addr, mcp, providers) = build_state(
+        api_key.clone(),
+        preview_tools_state.clone(),
+        secret_storage.encryption,
+    );
     let (server_listener, addr) =
         bind_desktop_server_listener(preferred_addr).expect("bind embedded milim server");
     let (mobile_listener, mobile_addr) = bind_desktop_server_listener(
@@ -3874,6 +3918,7 @@ pub fn run() {
         .manage(DesktopApiToken(api_key))
         .manage(DesktopApiBaseUrl(api_base))
         .manage(DesktopProviders(providers))
+        .manage(DesktopSecretStorage(storage_status))
         .manage(MobileRelayLocalTarget(mobile_local_target))
         .manage(UserDataState(user_data))
         .manage(DesktopPreviewRuntime(preview_runtime))
@@ -3968,6 +4013,7 @@ pub fn run() {
             record_frontend_error,
             diagnostics_path,
             restart_app,
+            secret_storage_status,
             request_desktop_quit,
             api_base_url,
             api_token,

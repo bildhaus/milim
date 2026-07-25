@@ -22,7 +22,8 @@ use milim_inference::anthropic::AnthropicBackend;
 use milim_inference::gemini::GeminiBackend;
 use milim_inference::remote::RemoteBackend;
 use milim_inference::{CompletionRequest, EventStream, ModelService, SharedService};
-use milim_storage::EncryptedStore;
+use milim_storage::{create_private_file, EncryptedStore};
+use milim_tools::atomic_write;
 
 use crate::privacy::{self, PrivacyGate, PrivacyMode};
 
@@ -139,43 +140,52 @@ impl ProviderStore {
     fn open(dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(dir)?;
         let key = read_or_make_key(&dir.join("providers.key"))?;
+        Self::open_with_encryption(dir, EncryptedStore::from_key(&key))
+    }
+
+    fn open_with_encryption(dir: &Path, enc: EncryptedStore) -> Result<Self> {
+        std::fs::create_dir_all(dir)?;
         Ok(Self {
-            enc: EncryptedStore::from_key(&key),
+            enc,
             path: dir.join("providers.enc"),
         })
     }
 
-    fn load(&self) -> Vec<Provider> {
-        let Ok(blob) = std::fs::read(&self.path) else {
-            return Vec::new();
+    fn load(&self) -> Result<Vec<Provider>> {
+        let blob = match std::fs::read(&self.path) {
+            Ok(blob) => blob,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
         };
-        let Ok(plain) = self.enc.decrypt(&blob) else {
-            return Vec::new();
-        };
-        serde_json::from_slice(&plain).unwrap_or_default()
+        let plain = self.enc.decrypt(&blob)?;
+        serde_json::from_slice(&plain).map_err(Into::into)
     }
 
     fn save(&self, providers: &[Provider]) -> Result<()> {
         let plain = serde_json::to_vec(providers)?;
         let blob = self.enc.encrypt(&plain)?;
-        std::fs::write(&self.path, blob)?;
-        Ok(())
+        atomic_write(&self.path, &blob)
     }
 }
 
 fn read_or_make_key(path: &Path) -> Result<[u8; 32]> {
-    if let Ok(b) = std::fs::read(path) {
-        if b.len() == 32 {
+    match std::fs::read(path) {
+        Ok(b) if b.len() == 32 => {
             let mut k = [0u8; 32];
             k.copy_from_slice(&b);
             return Ok(k);
         }
+        Ok(b) => {
+            return Err(Error::Other(format!(
+                "invalid provider encryption key length: expected 32 bytes, got {}",
+                b.len()
+            )))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     let k = EncryptedStore::random_key();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, k)?;
+    create_private_file(path, &k)?;
     Ok(k)
 }
 
@@ -191,8 +201,21 @@ impl ProviderRegistry {
     /// Cheap + synchronous: model lists are refreshed on upsert, not here.
     pub fn open(dir: &Path, local: SharedService) -> Result<Self> {
         let store = ProviderStore::open(dir)?;
+        Self::open_with_store(store, local)
+    }
+
+    pub fn open_with_encryption(
+        dir: &Path,
+        local: SharedService,
+        encryption: EncryptedStore,
+    ) -> Result<Self> {
+        let store = ProviderStore::open_with_encryption(dir, encryption)?;
+        Self::open_with_store(store, local)
+    }
+
+    fn open_with_store(store: ProviderStore, local: SharedService) -> Result<Self> {
         let runtimes = store
-            .load()
+            .load()?
             .into_iter()
             .map(|cfg| Runtime {
                 backend: backend_for(&cfg),

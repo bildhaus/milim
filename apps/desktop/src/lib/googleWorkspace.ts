@@ -3,6 +3,24 @@ export type GoogleWorkspaceUrl = {
   kind: "sheet" | "document" | "presentation" | "folder" | "drive-file";
 };
 
+export type GoogleRevocationStatus = "confirmed" | "unconfirmed" | "not_needed";
+
+export const GOOGLE_ACCOUNT_CONNECTIONS_URL = "https://myaccount.google.com/connections";
+export const GOOGLE_CONNECT_DISCLOSURE =
+  "Google files stay local until you use them in a chat or external tool. If you use a remote model, selected file content may be sent to that provider to fulfill your request. That provider’s terms apply.";
+export const GOOGLE_REMOVE_MESSAGE =
+  "Removed from Milim’s selected-file list. The Drive file and Google authorization were not changed.";
+
+export function googleDisconnectMessage(revocation: GoogleRevocationStatus): string {
+  if (revocation === "confirmed") {
+    return "Google Workspace disconnected. Google confirmed revocation and local authorization was removed.";
+  }
+  if (revocation === "unconfirmed") {
+    return "Disconnected locally, but Google did not confirm revocation.";
+  }
+  return "Google Workspace local authorization was removed.";
+}
+
 const GOOGLE_ID = /^[A-Za-z0-9_-]{1,256}$/;
 
 export function googleWorkspaceUrl(value: string | null | undefined): GoogleWorkspaceUrl | null {

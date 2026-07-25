@@ -9,7 +9,7 @@ order: 100
 updated: 2026-07-13
 ---
 
-Configuration is intentionally local. The desktop app embeds the server, stores secrets encrypted on disk, and keeps optional native runtimes behind explicit build flags.
+Configuration is intentionally local. The desktop app embeds the server, encrypts provider, Google, MCP, and mobile-companion credentials with a master key held in the OS credential vault, and keeps optional native runtimes behind explicit build flags. If the vault is unavailable, Settings > System reports the permission-restricted local-key fallback.
 
 ## Default locations
 
@@ -18,7 +18,8 @@ Configuration is intentionally local. The desktop app embeds the server, stores 
 | Milim home | OS app-data location resolved by `milim-core` paths. |
 | Server config | `~/.milim/config/server.json` for standalone CLI/server use. |
 | Identity key | `~/.milim/identity/master.key`. |
-| Provider records | SQLite storage with encrypted secret fields. |
+| Desktop credential key | Windows Credential Manager or macOS Keychain; `desktop-storage.key` is the reported restricted fallback. |
+| Provider records | AES-GCM encrypted provider records under the Milim data root. |
 | Runtime assets | Milim runtime directory for downloaded model and media-related assets. Previously downloaded voice assets are left untouched but no longer used. |
 | Schedules | `schedules.db` under the Milim root. |
 | Agents and Worker Runs | `agents.db` and `threads.db` under the Milim root. `threads.db` retains legacy child rows and stores Run batches in `worker_runs`. |
@@ -44,6 +45,8 @@ The remaining storage work is:
 | Expose | `milim serve --expose` binds beyond loopback and auto-enables `msk-v1` auth when no auth is configured. |
 | CORS | Empty allow-list means no browser origins are allowed. |
 | Auth | `authRequired: true` accepts locally minted `msk-v1` keys; `apiKeys` accepts static bearer secrets; `accessKeyIssuers` trusts additional signed-key issuers. |
+
+Standalone CLI/server identity and configuration remain file-based for headless compatibility. Milim creates key-bearing files with owner-only permissions on Unix. Desktop upgrades re-encrypt legacy provider, Google, MCP, and mobile-companion credentials with the OS-backed master key and remove the old key/plaintext files only after verification. This migration is one-way; an older desktop build requires those integrations to be reconnected or re-entered.
 
 ## Build variants
 

@@ -29,6 +29,9 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+      - name: Tauri native credential backend
+        if: matrix.os != 'ubuntu-latest'
+        run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features
 
   frontend:
     name: Desktop frontend

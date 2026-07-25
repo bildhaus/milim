@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use uuid::Uuid;
 
+use milim_storage::EncryptedStore;
+use milim_tools::atomic_write;
+
 const PAIRING_TTL_SECS: u64 = 10 * 60;
 const MAX_DEVICE_NAME_CHARS: usize = 60;
 const MAX_RELAY_TEXT_BYTES: usize = 20 * 1024;
@@ -33,6 +36,7 @@ const MAX_THEME_BACKGROUND_MODE_CHARS: usize = 20;
 pub struct MobileCompanionBridge {
     inner: Arc<RwLock<MobileCompanionInner>>,
     persistence_path: Option<Arc<PathBuf>>,
+    persistence_encryption: Option<EncryptedStore>,
     thread_updates: watch::Sender<u64>,
 }
 
@@ -41,6 +45,7 @@ impl Default for MobileCompanionBridge {
         Self {
             inner: Arc::new(RwLock::new(MobileCompanionInner::default())),
             persistence_path: None,
+            persistence_encryption: None,
             thread_updates: watch::channel(0).0,
         }
     }
@@ -316,8 +321,23 @@ impl MobileCompanionBridge {
         Self {
             inner: Arc::new(RwLock::new(inner)),
             persistence_path: Some(Arc::new(path)),
+            persistence_encryption: None,
             thread_updates: watch::channel(0).0,
         }
+    }
+
+    pub fn persistent_encrypted(
+        path: impl Into<PathBuf>,
+        encryption: EncryptedStore,
+    ) -> Result<Self, String> {
+        let path = path.into();
+        let inner = MobileCompanionInner::load_encrypted(&path, &encryption)?;
+        Ok(Self {
+            inner: Arc::new(RwLock::new(inner)),
+            persistence_path: Some(Arc::new(path)),
+            persistence_encryption: Some(encryption),
+            thread_updates: watch::channel(0).0,
+        })
     }
 
     pub fn status(&self, now: u64) -> MobileCompanionStatus {
@@ -555,7 +575,11 @@ impl MobileCompanionBridge {
         let Some(path) = self.persistence_path.as_deref() else {
             return;
         };
-        if let Err(err) = write_mobile_companion_persistence(path, &inner.persisted()) {
+        if let Err(err) = write_mobile_companion_persistence(
+            path,
+            &inner.persisted(),
+            self.persistence_encryption.as_ref(),
+        ) {
             tracing::warn!(
                 target: "milim_desktop::server",
                 "mobile companion persistence write failed: {err}"
@@ -572,6 +596,24 @@ impl MobileCompanionInner {
         let data =
             fs::read(path).map_err(|err| format!("failed to read {}: {err}", path.display()))?;
         let persisted: MobileCompanionPersisted = serde_json::from_slice(&data)
+            .map_err(|err| format!("failed to parse {}: {err}", path.display()))?;
+        Ok(Self {
+            enabled: persisted.enabled,
+            devices: persisted.devices,
+            ..Self::default()
+        })
+    }
+
+    fn load_encrypted(path: &Path, encryption: &EncryptedStore) -> Result<Self, String> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let encrypted =
+            fs::read(path).map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+        let data = encryption
+            .decrypt(&encrypted)
+            .map_err(|err| format!("failed to decrypt {}: {err}", path.display()))?;
+        let persisted = parse_mobile_companion_persistence(&data)
             .map_err(|err| format!("failed to parse {}: {err}", path.display()))?;
         Ok(Self {
             enabled: persisted.enabled,
@@ -840,17 +882,38 @@ fn trim_limited(input: &str, max_chars: usize) -> String {
     input.trim().chars().take(max_chars).collect()
 }
 
+pub fn validate_mobile_companion_persistence(data: &[u8]) -> Result<(), String> {
+    parse_mobile_companion_persistence(data).map(|_| ())
+}
+
+fn parse_mobile_companion_persistence(data: &[u8]) -> Result<MobileCompanionPersisted, String> {
+    let value: serde_json::Value =
+        serde_json::from_slice(data).map_err(|error| error.to_string())?;
+    if !value.is_object() {
+        return Err("expected a JSON object".into());
+    }
+    serde_json::from_value(value).map_err(|error| error.to_string())
+}
+
 fn write_mobile_companion_persistence(
     path: &Path,
     persisted: &MobileCompanionPersisted,
+    encryption: Option<&EncryptedStore>,
 ) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
     }
-    let temp = path.with_extension("json.tmp");
     let data = serde_json::to_vec_pretty(persisted)
         .map_err(|err| format!("failed to encode mobile companion state: {err}"))?;
+    if let Some(encryption) = encryption {
+        let data = encryption
+            .encrypt(&data)
+            .map_err(|err| format!("failed to encrypt mobile companion state: {err}"))?;
+        return atomic_write(path, &data)
+            .map_err(|err| format!("failed to write {}: {err}", path.display()));
+    }
+    let temp = path.with_extension("json.tmp");
     fs::write(&temp, data).map_err(|err| format!("failed to write {}: {err}", temp.display()))?;
     match fs::rename(&temp, path) {
         Ok(()) => Ok(()),
@@ -932,6 +995,39 @@ mod tests {
         let revoked = MobileCompanionBridge::persistent(path.clone());
         assert!(revoked.status(13).devices.is_empty());
 
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn encrypted_mobile_companion_reloads_device_credentials() {
+        let path = unique_persistence_path("milim-mobile-companion-encrypted");
+        let encryption = EncryptedStore::from_key(&[8_u8; 32]);
+        let bridge =
+            MobileCompanionBridge::persistent_encrypted(path.clone(), encryption.clone()).unwrap();
+        bridge.set_enabled(true, 2);
+        let pairing = bridge.start_pairing(3).unwrap();
+        let secret = pairing.path.split("secret=").nth(1).unwrap().to_string();
+        let paired = bridge
+            .pair_device(
+                MobilePairRequest {
+                    pair_id: pairing.id,
+                    secret,
+                    device_name: Some("Encrypted phone".to_string()),
+                },
+                4,
+                None,
+            )
+            .unwrap();
+        let persisted = fs::read(&path).unwrap();
+        assert!(!persisted
+            .windows(paired.device_key.len())
+            .any(|window| window == paired.device_key.as_bytes()));
+
+        let reloaded =
+            MobileCompanionBridge::persistent_encrypted(path.clone(), encryption).unwrap();
+        assert!(reloaded
+            .authenticate_device(&paired.device_key, 5)
+            .is_some());
         let _ = fs::remove_file(path);
     }
 }

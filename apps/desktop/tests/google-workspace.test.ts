@@ -2,12 +2,25 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  GOOGLE_ACCOUNT_CONNECTIONS_URL,
+  GOOGLE_CONNECT_DISCLOSURE,
+  GOOGLE_REMOVE_MESSAGE,
   googleDocEditableParagraph,
+  googleDisconnectMessage,
   googleSheetCellRange,
   googleWorkspaceFileUrl,
   googleWorkspaceUrl,
   parseGoogleSheetClipboard,
 } from "../src/lib/googleWorkspace.js";
+
+test("uses honest connection and revocation copy", () => {
+  assert.match(GOOGLE_CONNECT_DISCLOSURE, /remote model/);
+  assert.match(GOOGLE_REMOVE_MESSAGE, /authorization were not changed/);
+  assert.equal(GOOGLE_ACCOUNT_CONNECTIONS_URL, "https://myaccount.google.com/connections");
+  assert.match(googleDisconnectMessage("confirmed"), /confirmed revocation/);
+  assert.match(googleDisconnectMessage("unconfirmed"), /did not confirm revocation/);
+  assert.match(googleDisconnectMessage("not_needed"), /local authorization was removed/);
+});
 
 test("recognizes supported Google Workspace URLs", () => {
   assert.deepEqual(

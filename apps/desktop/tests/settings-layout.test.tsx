@@ -18,7 +18,7 @@ assert(source.includes('{ label: "Workflows", sections: ["models", "workspace"] 
 assert(source.includes('{ label: "Data & devices", sections: ["history", "google", "mobile"] }'), "Settings should group data and devices");
 assert(source.includes('{ label: "Application", sections: ["system", "about", "developer"] }'), "Settings should group application sections");
 assert(source.includes('label: "General"'), "App should be labeled General");
-assert(source.includes('label: "Shortcuts"'), "System should be labeled Shortcuts");
+assert(source.includes('label: "System"'), "System should be labeled System");
 assert(source.includes('label: "Data"'), "History should be labeled Data");
 assert(source.includes('label: "Google Workspace"'), "Google Workspace should have a dedicated section");
 assert(source.includes('label: "Models & agents"'), "Models and agents should have a workflow section");
@@ -29,7 +29,9 @@ assert(source.includes('className="btn-accent google-workspace-connect-button"')
 assert(source.includes('new URL("../assets/google.svg", import.meta.url).href'), "Google Workspace settings should use the bundled Google logo");
 assert(source.includes('section.id === "google" ? <img src={googleLogo}'), "Google Workspace should use the bundled Google logo in the settings sidebar");
 assert(source.includes('" · Managed folder"'), "Google Workspace settings should identify Milim's managed Drive folder");
-assert(source.includes("Removed Milim access. The Drive file was not deleted."), "Removing access must not imply deleting Drive files");
+assert(source.includes("GOOGLE_CONNECT_DISCLOSURE"), "Fresh Google connections should disclose remote-provider transfer");
+assert(source.includes("GOOGLE_REMOVE_MESSAGE"), "Removing a file must use the local-registry-only copy");
+assert(source.includes('data-setting-id="system-secret-storage"'), "System settings should report credential storage");
 assert(source.includes('testIdPrefix="browser-storage"'), "Browser storage should use the accessible choice control");
 assert(source.includes('data-testid="browser-data-clear"'), "Browser data should have an explicit clear action");
 assert(source.includes('data-testid="developer-show-update-cards"'), "Developer settings should preview update cards");
@@ -87,5 +89,6 @@ equal(matchingSettingsEntries("ghost text")[0]?.id, "chat-ai-completion", "Searc
 equal(matchingSettingsEntries("ridgeline")[0]?.id, "appearance-empty-chat-ridgeline", "Search should find the empty-chat ridgeline preference");
 equal(matchingSettingsEntries("cookies")[0]?.id, "browser-data", "Search should find browser data controls");
 equal(matchingSettingsEntries("sheets")[0]?.id, "google-workspace", "Search should find Google Workspace controls");
+equal(matchingSettingsEntries("keychain")[0]?.id, "system-secret-storage", "Search should find credential storage");
 
 export {};

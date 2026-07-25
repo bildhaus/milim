@@ -3,6 +3,7 @@
 //! `<root>/config/server.json` with atomic writes.
 
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::Path;
 
 /// How aggressively idle models are unloaded from memory.
@@ -106,7 +107,17 @@ impl ServerConfiguration {
         }
         let json = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, &json)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp)?;
+        file.write_all(&json)?;
+        file.sync_all()?;
+        drop(file);
         std::fs::rename(&tmp, path)?;
         Ok(())
     }

@@ -5,6 +5,7 @@ import { qualifyDuplicateProviderModels } from "./lib/modelPicker.js";
 import { wireMessages } from "./lib/attachmentWire.js";
 import { assertValidImageAttachment } from "./lib/attachmentInput.js";
 import { assertDesktopRequestBodyFits } from "./lib/requestBody.js";
+import type { GoogleRevocationStatus } from "./lib/googleWorkspace.js";
 export {
   attachmentsToPromptContext,
   wireMessageContent,
@@ -727,6 +728,11 @@ export async function openExternalUrl(url: string): Promise<void> {
   window.open(url, "_blank", "noopener,noreferrer");
 }
 
+export async function getSecretStorageStatus(): Promise<SecretStorageStatus | null> {
+  if (!inTauri) return null;
+  return await invoke<SecretStorageStatus>("secret_storage_status");
+}
+
 export async function setActivePreviewTarget(
   target: PreviewSurfaceTarget | null,
 ): Promise<void> {
@@ -976,6 +982,16 @@ export interface GooglePickerFlow {
   files: GoogleFileSummary[];
 }
 
+export interface GoogleDisconnectResult {
+  localAuthorizationRemoved: boolean;
+  revocation: GoogleRevocationStatus;
+}
+
+export interface SecretStorageStatus {
+  mode: "native" | "restricted_file" | "unavailable";
+  detail: string;
+}
+
 export type GoogleFilePreview =
   | { kind: "sheet"; file: GoogleFileSummary; range: string; sheets: unknown[]; values: unknown[][]; formulas: unknown[][] }
   | { kind: "document"; file: GoogleFileSummary; document: Record<string, unknown>; text: string }
@@ -1095,13 +1111,14 @@ export async function removeGoogleWorkspaceFile(id: string): Promise<void> {
   }
 }
 
-export async function disconnectGoogleWorkspace(): Promise<void> {
+export async function disconnectGoogleWorkspace(): Promise<GoogleDisconnectResult> {
   const response = await authFetch(`${BASE}/google-workspace/disconnect`, {
     method: "POST",
   });
-  if (!response.ok) {
-    throw new Error(await responseErrorMessage(response, "Disconnecting Google failed"));
-  }
+  return await parseJsonResponse<GoogleDisconnectResult>(
+    response,
+    "Disconnecting Google failed",
+  );
 }
 
 export async function getGoogleFilePreview(

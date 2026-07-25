@@ -10,15 +10,23 @@ import {
   chooseGoogleWorkspaceFiles,
   disconnectGoogleWorkspace,
   getGoogleWorkspaceStatus,
+  getSecretStorageStatus,
   openExternalUrl,
   removeGoogleWorkspaceFile,
   type GoogleWorkspaceStatus,
   type ModelInfo,
+  type SecretStorageStatus,
   type WorkspaceLauncher,
 } from "../api";
 import { flushDeferredUserStateWrites } from "../persistence/userStateStorage";
 import { clearPreviewWebviewData } from "../lib/previewWebview";
-import { googleWorkspaceFileUrl } from "../lib/googleWorkspace";
+import {
+  GOOGLE_ACCOUNT_CONNECTIONS_URL,
+  GOOGLE_CONNECT_DISCLOSURE,
+  GOOGLE_REMOVE_MESSAGE,
+  googleDisconnectMessage,
+  googleWorkspaceFileUrl,
+} from "../lib/googleWorkspace";
 import { useAgents } from "../agents/store";
 import { useSettings, type ConfiguredThreadDefaults } from "./store";
 import { BUILTIN_QUICK_ACTIONS } from "../lib/emptyStarterSuggestions";
@@ -155,8 +163,8 @@ const SETTINGS_SECTIONS: SettingsSection[] = [
   },
   {
     id: "system",
-    label: "Shortcuts",
-    detail: "Keyboard shortcuts and app commands",
+    label: "System",
+    detail: "Credential storage, shortcuts, and app commands",
     icon: Gear,
   },
   {
@@ -382,7 +390,10 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const [googleWorkspace, setGoogleWorkspace] = useState<GoogleWorkspaceStatus | null>(null);
   const [googleWorkspaceBusy, setGoogleWorkspaceBusy] = useState(false);
   const [googleWorkspaceMessage, setGoogleWorkspaceMessage] = useState<string | null>(null);
+  const [confirmGoogleConnect, setConfirmGoogleConnect] = useState(false);
   const [confirmGoogleDisconnect, setConfirmGoogleDisconnect] = useState(false);
+  const [googleRevocationUnconfirmed, setGoogleRevocationUnconfirmed] = useState(false);
+  const [secretStorage, setSecretStorage] = useState<SecretStorageStatus | null>(null);
   const [selectedBuiltinAction, setSelectedBuiltinAction] = useState(BUILTIN_QUICK_ACTIONS[0]?.id ?? "");
   const [editProjectQuickActions, setEditProjectQuickActions] = useState(false);
   const [recordingShortcut, setRecordingShortcut] = useState<ShortcutRecordingTarget | null>(null);
@@ -437,6 +448,12 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     void refreshGoogleWorkspace();
+    void getSecretStorageStatus()
+      .then(setSecretStorage)
+      .catch(() => setSecretStorage({
+        mode: "unavailable",
+        detail: "Credential-storage status could not be read.",
+      }));
   }, []);
 
   useEffect(() => {
@@ -643,6 +660,12 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   }
 
   async function chooseGoogleFilesFromSettings() {
+    setGoogleRevocationUnconfirmed(false);
+    if (!googleWorkspace?.connected && !confirmGoogleConnect) {
+      setConfirmGoogleConnect(true);
+      setGoogleWorkspaceMessage(null);
+      return;
+    }
     setGoogleWorkspaceBusy(true);
     setGoogleWorkspaceMessage("Finish choosing files in your browser.");
     try {
@@ -659,6 +682,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
       );
     } finally {
       setGoogleWorkspaceBusy(false);
+      setConfirmGoogleConnect(false);
     }
   }
 
@@ -666,7 +690,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     setGoogleWorkspaceBusy(true);
     try {
       await removeGoogleWorkspaceFile(id);
-      setGoogleWorkspaceMessage("Removed Milim access. The Drive file was not deleted.");
+      setGoogleWorkspaceMessage(GOOGLE_REMOVE_MESSAGE);
       await refreshGoogleWorkspace();
     } catch (error) {
       setGoogleWorkspaceMessage(
@@ -684,8 +708,9 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     }
     setGoogleWorkspaceBusy(true);
     try {
-      await disconnectGoogleWorkspace();
-      setGoogleWorkspaceMessage("Google Workspace disconnected and local authorization removed.");
+      const result = await disconnectGoogleWorkspace();
+      setGoogleWorkspaceMessage(googleDisconnectMessage(result.revocation));
+      setGoogleRevocationUnconfirmed(result.revocation === "unconfirmed");
       setConfirmGoogleDisconnect(false);
       await refreshGoogleWorkspace();
     } catch (error) {
@@ -1332,11 +1357,16 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                         ? "Loading..."
                         : !googleWorkspace.available
                           ? "Unavailable"
-                          : googleWorkspace.connected
-                            ? "Choose more files"
-                            : "Connect Google Workspace"}
+                          : confirmGoogleConnect && !googleWorkspace.connected
+                            ? "Continue to Google"
+                            : googleWorkspace.connected
+                              ? "Choose more files"
+                              : "Connect Google Workspace"}
                   </button>
                 </div>
+                {confirmGoogleConnect && !googleWorkspace?.connected ? (
+                  <p className="sheet-hint" role="note">{GOOGLE_CONNECT_DISCLOSURE}</p>
+                ) : null}
                 {!googleWorkspace ? (
                   <p className="sheet-hint">{googleWorkspaceMessage || "Loading Google Workspace status..."}</p>
                 ) : !googleWorkspace.available ? (
@@ -1380,7 +1410,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                                   disabled={googleWorkspaceBusy}
                                   onClick={() => void removeGoogleFileFromSettings(file.id)}
                                 >
-                                  Remove
+                                  Remove from Milim
                                 </button>
                               </div>
                             </div>
@@ -1394,7 +1424,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                       <div className="settings-action-row">
                         <div>
                           <strong>Disconnect Google Workspace</strong>
-                          <span>Revoke Milim's token and remove the local selected-file registry. Drive files are never deleted.</span>
+                          <span>Ask Google to revoke Milim, then remove the local token and selected-file registry. Drive files are never deleted.</span>
                         </div>
                         <button
                           className={"btn-ghost danger" + (confirmGoogleDisconnect ? " confirm" : "")}
@@ -1411,6 +1441,12 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                 )}
                 <p className="sheet-hint">Read access follows Guarded mode. Changes follow the chat's Review or Open approval mode. Tokens and the selected-file registry are encrypted locally and excluded from backups.</p>
                 {googleWorkspaceMessage ? <p className={googleWorkspaceMessage.includes("failed") ? "sheet-hint error" : "sheet-hint"} role="status">{googleWorkspaceMessage}</p> : null}
+                {googleRevocationUnconfirmed ? (
+                  <button className="btn-ghost" type="button" onClick={() => void openExternalUrl(GOOGLE_ACCOUNT_CONNECTIONS_URL)}>
+                    <ExternalLink size={12} />
+                    Open Google Account
+                  </button>
+                ) : null}
               </div>
             </SettingsBlock>
           </SettingsPanel>
@@ -1776,6 +1812,22 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             {activeSection === "system" && (
         <section className="settings-section" id="settings-panel-system" role="tabpanel" aria-labelledby="settings-tab-system" tabIndex={-1}>
           <SettingsPanel>
+            <SettingsBlock title="Credential storage" data-setting-id="system-secret-storage" className={settingHighlightClass("system-secret-storage").trim()}>
+              <div className="settings-action-row">
+                <div>
+                  <strong>
+                    {!secretStorage
+                      ? "Checking credential storage"
+                      : secretStorage.mode === "native"
+                        ? "OS credential vault"
+                        : secretStorage.mode === "restricted_file"
+                          ? "Restricted local fallback"
+                          : "Credential storage unavailable"}
+                  </strong>
+                  <span>{secretStorage?.detail ?? "Reading the desktop credential-storage status."}</span>
+                </div>
+              </div>
+            </SettingsBlock>
             <SettingsBlock data-setting-id="system-shortcuts" className={settingHighlightClass("system-shortcuts").trim()}>
               <div className="setting-stack">
                 {APP_SHORTCUT_ACTIONS.map((action) => (
