@@ -67,6 +67,9 @@ interface UiPreferencesState {
   previewPanelWidth: number;
   mediaStudioWidth: number;
   mediaStudioHeight: number;
+  pullRequestsWidth: number;
+  pullRequestsHeight: number;
+  pullRequestsListWidth: number;
   uiSize: number;
   showAccountUsageInTitleBar: boolean;
   windowAlwaysOnTop: boolean;
@@ -121,6 +124,8 @@ interface UiPreferencesState {
   setSidebarWidth: (sidebarWidth: number) => void;
   setPreviewPanelWidth: (previewPanelWidth: number) => void;
   setMediaStudioSize: (width: number, height: number) => void;
+  setPullRequestsSize: (width: number, height: number) => void;
+  setPullRequestsListWidth: (width: number) => void;
   setUiSize: (uiSize: number) => void;
   setShowAccountUsageInTitleBar: (showAccountUsageInTitleBar: boolean) => void;
   setWindowAlwaysOnTop: (windowAlwaysOnTop: boolean) => void;
@@ -188,6 +193,8 @@ export const DEFAULT_MEDIA_STUDIO_WIDTH = 1120;
 export const DEFAULT_MEDIA_STUDIO_HEIGHT = 820;
 export const MIN_MEDIA_STUDIO_WIDTH = 560;
 export const MIN_MEDIA_STUDIO_HEIGHT = 480;
+export const DEFAULT_PULL_REQUESTS_LIST_WIDTH = 520;
+export const MIN_PULL_REQUESTS_LIST_WIDTH = 240;
 const MAX_MEDIA_STUDIO_WIDTH = 2400;
 const MAX_MEDIA_STUDIO_HEIGHT = 1600;
 export const DEFAULT_UI_SIZE = 100;
@@ -198,6 +205,11 @@ export const UI_SIZE_STEP = 10;
 export function normalizeSidebarWidth(width: number): number {
   if (!Number.isFinite(width)) return DEFAULT_SIDEBAR_WIDTH;
   return Math.round(Math.min(Math.max(width, MIN_SIDEBAR_WIDTH), MAX_SIDEBAR_WIDTH));
+}
+
+export function normalizePullRequestsListWidth(width: number): number {
+  if (!Number.isFinite(width)) return DEFAULT_PULL_REQUESTS_LIST_WIDTH;
+  return Math.round(Math.max(width, MIN_PULL_REQUESTS_LIST_WIDTH));
 }
 
 function normalizePreviewPanelWidth(width: number): number {
@@ -360,6 +372,9 @@ export const useUiPreferences = create<UiPreferencesState>()(
       previewPanelWidth: DEFAULT_PREVIEW_PANEL_WIDTH,
       mediaStudioWidth: DEFAULT_MEDIA_STUDIO_WIDTH,
       mediaStudioHeight: DEFAULT_MEDIA_STUDIO_HEIGHT,
+      pullRequestsWidth: DEFAULT_MEDIA_STUDIO_WIDTH,
+      pullRequestsHeight: DEFAULT_MEDIA_STUDIO_HEIGHT,
+      pullRequestsListWidth: DEFAULT_PULL_REQUESTS_LIST_WIDTH,
       uiSize: DEFAULT_UI_SIZE,
       showAccountUsageInTitleBar: true,
       windowAlwaysOnTop: false,
@@ -417,6 +432,12 @@ export const useUiPreferences = create<UiPreferencesState>()(
         const size = normalizeMediaStudioSize(width, height);
         set({ mediaStudioWidth: size.width, mediaStudioHeight: size.height });
       },
+      setPullRequestsSize: (width, height) => {
+        const size = normalizeMediaStudioSize(width, height);
+        set({ pullRequestsWidth: size.width, pullRequestsHeight: size.height });
+      },
+      setPullRequestsListWidth: (width) =>
+        set({ pullRequestsListWidth: normalizePullRequestsListWidth(width) }),
       setUiSize: (uiSize) => set({ uiSize: normalizeUiSize(uiSize) }),
       setShowAccountUsageInTitleBar: (showAccountUsageInTitleBar) => set({ showAccountUsageInTitleBar }),
       setWindowAlwaysOnTop: (windowAlwaysOnTop) => {
@@ -537,6 +558,9 @@ export const useUiPreferences = create<UiPreferencesState>()(
           previewPanelWidth: DEFAULT_PREVIEW_PANEL_WIDTH,
           mediaStudioWidth: DEFAULT_MEDIA_STUDIO_WIDTH,
           mediaStudioHeight: DEFAULT_MEDIA_STUDIO_HEIGHT,
+          pullRequestsWidth: DEFAULT_MEDIA_STUDIO_WIDTH,
+          pullRequestsHeight: DEFAULT_MEDIA_STUDIO_HEIGHT,
+          pullRequestsListWidth: DEFAULT_PULL_REQUESTS_LIST_WIDTH,
         }),
       toggleSidebar: () => set((state) => ({ sidebarOpen: !state.sidebarOpen })),
     }),
@@ -563,6 +587,17 @@ export const useUiPreferences = create<UiPreferencesState>()(
             saved?.mediaStudioWidth ?? current.mediaStudioWidth,
             saved?.mediaStudioHeight ?? current.mediaStudioHeight,
           ).height,
+          pullRequestsWidth: normalizeMediaStudioSize(
+            saved?.pullRequestsWidth ?? current.pullRequestsWidth,
+            saved?.pullRequestsHeight ?? current.pullRequestsHeight,
+          ).width,
+          pullRequestsHeight: normalizeMediaStudioSize(
+            saved?.pullRequestsWidth ?? current.pullRequestsWidth,
+            saved?.pullRequestsHeight ?? current.pullRequestsHeight,
+          ).height,
+          pullRequestsListWidth: normalizePullRequestsListWidth(
+            saved?.pullRequestsListWidth ?? current.pullRequestsListWidth,
+          ),
           uiSize: normalizeUiSize(saved?.uiSize ?? current.uiSize),
           showAccountUsageInTitleBar: typeof saved?.showAccountUsageInTitleBar === "boolean" ? saved.showAccountUsageInTitleBar : current.showAccountUsageInTitleBar,
           windowAlwaysOnTop: typeof saved?.windowAlwaysOnTop === "boolean" ? saved.windowAlwaysOnTop : current.windowAlwaysOnTop,
@@ -626,6 +661,9 @@ export const useUiPreferences = create<UiPreferencesState>()(
         previewPanelWidth: normalizePreviewPanelWidth(state.previewPanelWidth),
         mediaStudioWidth: normalizeMediaStudioSize(state.mediaStudioWidth, state.mediaStudioHeight).width,
         mediaStudioHeight: normalizeMediaStudioSize(state.mediaStudioWidth, state.mediaStudioHeight).height,
+        pullRequestsWidth: normalizeMediaStudioSize(state.pullRequestsWidth, state.pullRequestsHeight).width,
+        pullRequestsHeight: normalizeMediaStudioSize(state.pullRequestsWidth, state.pullRequestsHeight).height,
+        pullRequestsListWidth: normalizePullRequestsListWidth(state.pullRequestsListWidth),
         uiSize: normalizeUiSize(state.uiSize),
         showAccountUsageInTitleBar: state.showAccountUsageInTitleBar,
         windowAlwaysOnTop: state.windowAlwaysOnTop,

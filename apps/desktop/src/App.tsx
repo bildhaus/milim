@@ -82,6 +82,11 @@ const MediaManager = lazy(() =>
     default: mod.MediaManager,
   })),
 );
+const PullRequestsManager = lazy(() =>
+  import("./components/PullRequestsManager").then((mod) => ({
+    default: mod.PullRequestsManager,
+  })),
+);
 const OnboardingFlow = lazy(() =>
   import("./components/OnboardingFlow").then((mod) => ({
     default: mod.OnboardingFlow,
@@ -413,6 +418,7 @@ function AppContent() {
   const [skillsRevision, setSkillsRevision] = useState(0);
   const [schedulesOpen, setSchedulesOpen] = useState(false);
   const [mediaOpen, setMediaOpen] = useState(false);
+  const [pullRequestsOpen, setPullRequestsOpen] = useState(false);
   const [mcpManagerRequest, setMcpManagerRequest] = useState(0);
   const [composerDraft, setComposerDraft] = useState<{
     id: number;
@@ -622,6 +628,7 @@ function AppContent() {
           onManageSkills={() => setSkillsOpen(true)}
           onManageSchedules={() => setSchedulesOpen(true)}
           onManageMedia={() => setMediaOpen(true)}
+          onManagePullRequests={() => setPullRequestsOpen(true)}
           onManageMcp={() => setMcpManagerRequest((value) => value + 1)}
           onGitAction={(text) => setComposerDraft({ id: Date.now(), text })}
           onOpenGitPanel={(sessionId, view = "changes") =>
@@ -669,6 +676,9 @@ function AppContent() {
               setSettingsOpen(true);
             }}
           />
+        )}
+        {pullRequestsOpen && (
+          <PullRequestsManager onClose={() => setPullRequestsOpen(false)} />
         )}
       </Suspense>
       <AppNoticeHost />

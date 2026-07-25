@@ -3915,6 +3915,8 @@ export type WorkspaceGitAction =
   | "remove_retry_worktree"
   | "create_thread_worktree"
   | "remove_thread_worktree"
+  | "pr_list"
+  | "pr_view"
   | "pr_status"
   | "pr_create"
   | "pr_ready"
@@ -3951,6 +3953,7 @@ export interface WorkspaceGitActionResult {
 export interface PullRequestActor {
   login: string;
   name?: string;
+  avatarUrl?: string;
 }
 
 export interface PullRequestCheck {
@@ -3978,6 +3981,27 @@ export interface PullRequestComment {
   url?: string;
 }
 
+export interface PullRequestFile {
+  path: string;
+  additions: number;
+  deletions: number;
+}
+
+export interface PullRequestListItem {
+  number: number;
+  title: string;
+  url: string;
+  state: string;
+  isDraft: boolean;
+  body?: string;
+  author?: PullRequestActor;
+  repository: string;
+  updatedAt?: string;
+  commentsCount: number;
+  authored: boolean;
+  reviewing: boolean;
+}
+
 export interface PullRequestDetails {
   exists: true;
   number: number;
@@ -4002,6 +4026,8 @@ export interface PullRequestDetails {
   deletions: number;
   changedFiles: number;
   updatedAt?: string;
+  repository?: string;
+  files?: PullRequestFile[];
 }
 
 export async function getWorkspaceGitStatus(): Promise<WorkspaceGitStatus | null> {
@@ -4057,6 +4083,7 @@ export async function runWorkspaceGitAction(
     review_action?: "approve" | "request_changes" | "comment";
     merge_method?: "merge" | "squash" | "rebase";
     expected_head?: string;
+    repository?: string;
   } = {},
 ): Promise<WorkspaceGitActionResult> {
   const r = await authFetch(`${BASE}/workspace/git/action`, {

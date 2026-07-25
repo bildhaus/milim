@@ -4,6 +4,7 @@ import {
   pullRequestAccessibleLabel,
   pullRequestReadiness,
 } from "../src/lib/pullRequests.js";
+import { upsertPullRequestItems } from "../src/lib/pullRequestCache.js";
 
 function pullRequest(patch: Partial<PullRequestDetails> = {}): PullRequestDetails {
   return {
@@ -63,4 +64,41 @@ assert.equal(pullRequestReadiness(pullRequest(), true).tone, "stale");
 assert.match(
   pullRequestAccessibleLabel(pullRequest({ reviewDecision: "APPROVED" })),
   /PR #12.*1 of 1 checks passing.*approved/,
+);
+
+const cached = {
+  number: 1,
+  title: "Cached",
+  url: "https://github.com/acme/repo/pull/1",
+  state: "OPEN",
+  isDraft: false,
+  repository: "acme/repo",
+  commentsCount: 0,
+  authored: true,
+  reviewing: false,
+  updatedAt: "2026-01-01T00:00:00Z",
+};
+const refreshed = {
+  ...cached,
+  title: "Refreshed",
+  commentsCount: 2,
+  updatedAt: "2026-01-02T00:00:00Z",
+};
+const added = {
+  ...cached,
+  number: 2,
+  title: "New",
+  url: "https://github.com/acme/repo/pull/2",
+  updatedAt: "2026-01-03T00:00:00Z",
+};
+assert.deepEqual(
+  upsertPullRequestItems([cached], [refreshed, added]).map((item) => [
+    item.number,
+    item.title,
+    item.commentsCount,
+  ]),
+  [
+    [2, "New", 0],
+    [1, "Refreshed", 2],
+  ],
 );

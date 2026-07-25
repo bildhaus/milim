@@ -4203,6 +4203,8 @@ pub(crate) struct WorkspaceGitActionRequest {
     merge_method: Option<String>,
     #[serde(default)]
     expected_head: Option<String>,
+    #[serde(default)]
+    repository: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -4438,6 +4440,8 @@ pub(crate) async fn workspace_git_action(
             | "remove_retry_worktree"
             | "create_thread_worktree"
             | "remove_thread_worktree"
+            | "pr_list"
+            | "pr_view"
             | "pr_status"
             | "pr_create"
             | "pr_ready"
@@ -4881,7 +4885,30 @@ fn workspace_git_action_blocking(
         review_action,
         merge_method,
         expected_head,
+        repository,
     } = request;
+
+    if action == "pr_list" {
+        return workspace_git_pr_list_action();
+    }
+    if action == "pr_view" {
+        return workspace_git_pr_view_action(repository, pull_request);
+    }
+    if matches!(
+        action.as_str(),
+        "pr_ready" | "pr_comment" | "pr_review" | "pr_merge"
+    ) && repository.is_some()
+    {
+        return workspace_git_pr_mutation_action_global(
+            repository,
+            &action,
+            pull_request,
+            body,
+            review_action,
+            merge_method,
+            expected_head,
+        );
+    }
 
     let status = workspace_git_status_blocking(folder);
     let Some(root) = status.root.as_ref().map(PathBuf::from) else {
@@ -6057,6 +6084,227 @@ fn gh_output_owned(root: &FsPath, args: &[String]) -> Result<Output, String> {
         .map_err(|error| format!("Failed to run GitHub CLI: {error}"))
 }
 
+fn gh_output_global(args: &[String]) -> Result<Output, String> {
+    let mut command = Command::new("gh");
+    command.args(args);
+    milim_core::proc::hide_console(&mut command)
+        .output()
+        .map_err(|error| format!("Failed to run GitHub CLI: {error}"))
+}
+
+fn github_repository(value: Option<String>) -> Result<String, String> {
+    let value = value.unwrap_or_default().trim().to_string();
+    let mut parts = value.split('/');
+    let valid_part = |part: &str| {
+        !part.is_empty()
+            && part != "."
+            && part != ".."
+            && part
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+    };
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(owner), Some(repository), None) if valid_part(owner) && valid_part(repository) => {
+            Ok(value)
+        }
+        _ => Err("A GitHub repository in owner/name format is required.".to_string()),
+    }
+}
+
+fn workspace_git_pr_list_action() -> WorkspaceGitActionResponse {
+    let fields = "number,title,url,state,isDraft,author,repository,updatedAt,commentsCount,body";
+    let mut pull_requests = HashMap::<String, Value>::new();
+    let mut errors = Vec::new();
+    let mut successes = 0;
+
+    for (flag, filter) in [
+        ("authored", ["--author", "@me"]),
+        ("reviewing", ["--review-requested", "@me"]),
+    ] {
+        let args = vec![
+            "search".to_string(),
+            "prs".to_string(),
+            filter[0].to_string(),
+            filter[1].to_string(),
+            "--state".to_string(),
+            "open".to_string(),
+            "--sort".to_string(),
+            "updated".to_string(),
+            "--order".to_string(),
+            "desc".to_string(),
+            "--limit".to_string(),
+            "100".to_string(),
+            "--json".to_string(),
+            fields.to_string(),
+        ];
+        let output = match gh_output_global(&args) {
+            Ok(output) => output,
+            Err(error) => {
+                errors.push(error);
+                continue;
+            }
+        };
+        if !output.status.success() {
+            errors.push(output_error_text(&output));
+            continue;
+        }
+        let items = match serde_json::from_slice::<Vec<Value>>(&output.stdout) {
+            Ok(items) => items,
+            Err(error) => {
+                errors.push(format!("GitHub CLI returned invalid PR data: {error}"));
+                continue;
+            }
+        };
+        successes += 1;
+        for mut item in items {
+            let repository = item
+                .get("repository")
+                .and_then(|value| value.get("nameWithOwner"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let key = item
+                .get("url")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if key.is_empty() || repository.is_empty() {
+                continue;
+            }
+            if let Some(existing) = pull_requests.get_mut(&key) {
+                existing[flag] = Value::Bool(true);
+                continue;
+            }
+            item["repository"] = Value::String(repository);
+            item["authored"] = Value::Bool(flag == "authored");
+            item["reviewing"] = Value::Bool(flag == "reviewing");
+            pull_requests.insert(key, item);
+        }
+    }
+
+    if successes == 0 {
+        return workspace_git_action_message("pr_list", "gh search prs", false, &errors.join("\n"));
+    }
+
+    let mut pull_requests = pull_requests.into_values().collect::<Vec<_>>();
+    pull_requests.sort_by(|left, right| {
+        right
+            .get("updatedAt")
+            .and_then(Value::as_str)
+            .cmp(&left.get("updatedAt").and_then(Value::as_str))
+    });
+    let mut response = workspace_git_combined_response(
+        "pr_list",
+        "gh search prs",
+        true,
+        Value::Array(pull_requests).to_string(),
+        errors.join("\n"),
+        Some(0),
+        if errors.is_empty() {
+            "Pull requests loaded.".to_string()
+        } else {
+            "Pull requests loaded with one unavailable filter.".to_string()
+        },
+    );
+    response.truncated = false;
+    response
+}
+
+fn workspace_git_pr_view_action(
+    repository: Option<String>,
+    pull_request: Option<u64>,
+) -> WorkspaceGitActionResponse {
+    let repository = match github_repository(repository) {
+        Ok(repository) => repository,
+        Err(message) => {
+            return workspace_git_action_message("pr_view", "gh pr view", false, &message)
+        }
+    };
+    let number = match pull_request.filter(|number| *number > 0) {
+        Some(number) => number,
+        None => {
+            return workspace_git_action_message(
+                "pr_view",
+                "gh pr view",
+                false,
+                "Pull request number is required.",
+            )
+        }
+    };
+    let fields = "number,title,url,state,isDraft,baseRefName,headRefName,headRefOid,body,author,reviewRequests,latestReviews,reviewDecision,mergeStateStatus,mergeable,comments,additions,deletions,changedFiles,updatedAt,files";
+    let args = vec![
+        "pr".to_string(),
+        "view".to_string(),
+        number.to_string(),
+        "--repo".to_string(),
+        repository.clone(),
+        "--json".to_string(),
+        fields.to_string(),
+    ];
+    let command = format!("gh {}", args.join(" "));
+    let output = match gh_output_global(&args) {
+        Ok(output) => output,
+        Err(error) => return workspace_git_action_message("pr_view", &command, false, &error),
+    };
+    if !output.status.success() {
+        return workspace_git_combined_response(
+            "pr_view",
+            &command,
+            false,
+            String::from_utf8_lossy(&output.stdout).to_string(),
+            String::from_utf8_lossy(&output.stderr).to_string(),
+            output.status.code(),
+            output_error_text(&output),
+        );
+    }
+    let mut pull_request = match serde_json::from_slice::<Value>(&output.stdout) {
+        Ok(pull_request) => pull_request,
+        Err(error) => {
+            return workspace_git_action_message(
+                "pr_view",
+                &command,
+                false,
+                &format!("GitHub CLI returned invalid PR data: {error}"),
+            )
+        }
+    };
+    let check_args = vec![
+        "pr".to_string(),
+        "checks".to_string(),
+        number.to_string(),
+        "--repo".to_string(),
+        repository.clone(),
+        "--json".to_string(),
+        "bucket,completedAt,description,event,link,name,startedAt,state,workflow".to_string(),
+    ];
+    match gh_output_global(&check_args) {
+        Ok(checks) if checks.status.success() || checks.status.code() == Some(8) => {
+            if let Ok(value) = serde_json::from_slice::<Value>(&checks.stdout) {
+                pull_request["checks"] = value;
+            }
+        }
+        Ok(checks) => {
+            pull_request["checksError"] = Value::String(output_error_text(&checks));
+        }
+        Err(error) => {
+            pull_request["checksError"] = Value::String(error);
+        }
+    }
+    pull_request["exists"] = Value::Bool(true);
+    pull_request["repository"] = Value::String(repository);
+    let mut response = workspace_git_combined_response(
+        "pr_view",
+        &command,
+        true,
+        pull_request.to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+        output.status.code(),
+        "Pull request found.".to_string(),
+    );
+    response.pull_request = Some(pull_request);
+    response
+}
+
 fn workspace_git_pr_prerequisite(
     root: &FsPath,
     status: &WorkspaceGitStatus,
@@ -6291,6 +6539,60 @@ fn workspace_git_pr_action_args(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn workspace_git_pr_mutation_action_global(
+    repository: Option<String>,
+    action: &str,
+    pull_request: Option<u64>,
+    body: Option<String>,
+    review_action: Option<String>,
+    merge_method: Option<String>,
+    expected_head: Option<String>,
+) -> WorkspaceGitActionResponse {
+    let repository = match github_repository(repository) {
+        Ok(repository) => repository,
+        Err(message) => return workspace_git_action_message(action, "gh pr", false, &message),
+    };
+    let mut args = match workspace_git_pr_action_args(
+        action,
+        pull_request,
+        body.as_deref(),
+        review_action.as_deref(),
+        merge_method.as_deref(),
+        expected_head.as_deref(),
+    ) {
+        Ok(args) => args,
+        Err(message) => return workspace_git_action_message(action, "gh pr", false, &message),
+    };
+    args.extend(["--repo".to_string(), repository]);
+    let command = format!("gh {}", args.join(" "));
+    let output = match gh_output_global(&args) {
+        Ok(output) => output,
+        Err(error) => return workspace_git_action_message(action, &command, false, &error),
+    };
+    let ok = output.status.success();
+    workspace_git_combined_response(
+        action,
+        &command,
+        ok,
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+        output.status.code(),
+        if ok {
+            match action {
+                "pr_ready" => "Pull request marked ready for review.",
+                "pr_comment" => "Comment added.",
+                "pr_review" => "Review submitted.",
+                "pr_merge" => "Pull request merged.",
+                _ => "Pull request updated.",
+            }
+            .to_string()
+        } else {
+            output_error_text(&output)
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn workspace_git_pr_mutation_action(
     root: &FsPath,
     status: &WorkspaceGitStatus,
@@ -6442,6 +6744,11 @@ mod git_control_plane_tests {
 
     #[test]
     fn pull_request_actions_validate_review_and_guard_merge_head() {
+        assert_eq!(
+            github_repository(Some("openai/codex".to_string())).as_deref(),
+            Ok("openai/codex")
+        );
+        assert!(github_repository(Some("../codex".to_string())).is_err());
         assert!(
             workspace_git_pr_action_args("pr_comment", Some(12), Some(" "), None, None, None,)
                 .is_err()

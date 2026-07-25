@@ -468,6 +468,7 @@ export function Sidebar({
   onManageSkills,
   onManageSchedules,
   onManageMedia,
+  onManagePullRequests,
   onManageMcp,
   onGitAction,
   onOpenGitPanel,
@@ -478,6 +479,7 @@ export function Sidebar({
   onManageSkills: () => void;
   onManageSchedules: () => void;
   onManageMedia: () => void;
+  onManagePullRequests: () => void;
   onManageMcp: () => void;
   onGitAction: (text: string) => void;
   onOpenGitPanel: (sessionId?: string, view?: GitPanelView) => void;
@@ -572,6 +574,7 @@ export function Sidebar({
       { key: "skills", label: "Skills", icon: <Lightbulb size={iconSize} />, action: onManageSkills, visible: true },
       { key: "schedules", label: "Schedules", icon: <Calendar size={iconSize} />, action: onManageSchedules, visible: true },
       { key: "media", label: "Media", icon: <Image size={iconSize} />, action: onManageMedia, visible: true },
+      { key: "pull-requests", label: "Pull requests", icon: <GitPullRequest size={iconSize} />, action: onManagePullRequests, visible: true },
     ];
     return actions.filter((item) => item.visible).map((item) => (
       <button
