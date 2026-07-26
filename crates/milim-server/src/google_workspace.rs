@@ -1558,7 +1558,8 @@ fn google_slide_scene_elements(value: &Value, page_size: Option<(f64, f64)>) -> 
         .enumerate()
         .filter_map(|(order, element)| {
             let object_id = element.get("objectId")?.as_str()?;
-            let rect = page_size.and_then(|page_size| google_slide_element_rect(element, page_size));
+            let rect =
+                page_size.and_then(|page_size| google_slide_element_rect(element, page_size));
             let kind = [
                 ("shape", "shape"),
                 ("image", "image"),
