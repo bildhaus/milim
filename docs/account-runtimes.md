@@ -10,6 +10,8 @@ After a Milim chat has a native Codex thread id, Claude session id, OpenCode ses
 
 Milim invokes the user-installed `opencode acp` process once per turn and speaks ACP v1 JSON-RPC over stdio. `GET /opencode/status` and `GET /opencode/models` discover configured models without refreshing OpenCode's network cache; `POST /opencode/run` creates or resumes the native session, applies the exact selected model, streams normalized events, and forwards permission requests to Milim's one-shot approval cards. Plan, Guarded, Review, and Open map to a Milim-owned permission overlay. Guarded and Review refuse to run when `opencode debug config` shows that higher-precedence configuration weakened the promised policy.
 
+OpenCode also supports chats without a workspace folder. Milim supplies a private managed ACP directory for protocol compatibility and disables OpenCode's native filesystem tools; Milim-owned tools remain available.
+
 OpenCode remains responsible for its providers, credentials, instructions, and plugins. Milim does not bundle the CLI or read its credentials. Images use the existing outbound privacy gate and require Privacy Off.
 
 ## Pi
