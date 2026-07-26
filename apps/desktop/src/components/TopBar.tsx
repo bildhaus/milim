@@ -23,7 +23,7 @@ import {
 } from "../ui/store";
 import { useUpdateStore } from "../update/store";
 import { UpdateProgress } from "../update/UpdateProgress";
-import { Download, Pin } from "./icons";
+import { Download, Pin, Refresh } from "./icons";
 import { WindowControls } from "./WindowControls";
 
 const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -77,6 +77,9 @@ export function TopBar({ onOpenAppMenu }: { onOpenAppMenu: (event: MouseEvent<HT
   const updateBusy = updateActionRunning || updateStatus === "downloading" || updateStatus === "installing";
   const showUpdateButton = !!updateInfo && (updateStatus === "available" || updateStatus === "ready" || updateBusy);
   const updateVersionLabel = updateInfo ? `v${updateInfo.version.replace(/^v/i, "")}` : "";
+  const updateButtonLabel = updateBusy
+    ? updateStatus === "downloading" ? `Downloading milim ${updateVersionLabel}` : `Installing milim ${updateVersionLabel}`
+    : updateStatus === "ready" ? `Restart to update milim ${updateVersionLabel}` : `Install milim ${updateVersionLabel}`;
   const visibleUpdateProgress = updateProgress ?? {
     phase: updateStatus === "installing" ? "restarting" as const : "downloading" as const,
     downloadedBytes: 0,
@@ -181,8 +184,18 @@ export function TopBar({ onOpenAppMenu }: { onOpenAppMenu: (event: MouseEvent<HT
     revealZoomChip();
   }
 
-  function runTopBarUpdate() {
+  async function runTopBarUpdate() {
     if (!updateInfo || updateBusy) return;
+    if (updateStatus === "ready") {
+      setConfirmingUpdate(true);
+      setUpdateActionRunning(true);
+      try {
+        await installNow();
+      } finally {
+        setUpdateActionRunning(false);
+      }
+      return;
+    }
     setConfirmingUpdate(true);
   }
 
@@ -258,12 +271,12 @@ export function TopBar({ onOpenAppMenu }: { onOpenAppMenu: (event: MouseEvent<HT
             type="button"
             className={"topbar-update-btn" + (updateBusy ? " busy" : "")}
             data-testid="topbar-update"
-            title={updateBusy ? "Installing update" : `Install milim ${updateVersionLabel}`}
-            aria-label={updateBusy ? "Installing update" : `Install milim ${updateVersionLabel}`}
+            title={updateButtonLabel}
+            aria-label={updateButtonLabel}
             disabled={updateBusy}
             onClick={() => void runTopBarUpdate()}
           >
-            <Download size={14} />
+            {updateStatus === "ready" || updateStatus === "installing" ? <Refresh size={14} /> : <Download size={14} />}
           </button>
         )}
         {zoomChipVisible && (
