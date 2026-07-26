@@ -31,6 +31,7 @@ import { Logo } from "./components/Logo";
 import { ResizeHandles } from "./components/ResizeHandles";
 import { Sidebar } from "./components/Sidebar";
 import { TopBar } from "./components/TopBar";
+import { UpdateCards } from "./components/UpdateCards";
 import {
   shouldCheckOnboardingModels,
   shouldShowOnboarding,
@@ -92,12 +93,6 @@ const OnboardingFlow = lazy(() =>
     default: mod.OnboardingFlow,
   })),
 );
-const UpdateCards = lazy(() =>
-  import("./components/UpdateCards").then((mod) => ({
-    default: mod.UpdateCards,
-  })),
-);
-
 const inTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const DOCS_URL = "https://docs.milim.ai/";

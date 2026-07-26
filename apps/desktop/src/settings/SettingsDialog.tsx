@@ -56,6 +56,7 @@ import { useOnboarding } from "../onboarding/store";
 import { DAY_MS, useSessions, type ArchiveRetentionDays, type Project, type Session } from "../sessions/store";
 import { useUpdateStore, type UpdateStatus } from "../update/store";
 import { UpdateProgress } from "../update/UpdateProgress";
+import { showUpdateCardsForDebug } from "../components/UpdateCards";
 import {
   APP_SHORTCUT_ACTIONS,
   APP_SHORTCUT_LABELS,
@@ -2051,7 +2052,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                   data-testid="developer-show-update-cards"
                   onClick={() => {
                     onClose();
-                    void import("../components/UpdateCards").then(({ showUpdateCardsForDebug }) => showUpdateCardsForDebug());
+                    showUpdateCardsForDebug();
                   }}
                 >
                   Show cards
