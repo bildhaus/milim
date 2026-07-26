@@ -1,4 +1,23 @@
 {
+  "0.2.1": {
+    "version": "0.2.1",
+    "summary": "Milim 0.2.1 fixes GitHub pull request avatars and conversation rendering in packaged desktop builds.",
+    "items": [
+      {
+        "id": "github-pr-rendering",
+        "eyebrow": "GitHub pull requests",
+        "title": "See complete pull request conversations",
+        "description": "GitHub App identities and rich review content now render correctly in the PR cockpit.",
+        "details": [
+          "Show GitHub App avatars when GitHub CLI omits the bot suffix",
+          "Render sanitized GitHub HTML in descriptions, reviews, and comments",
+          "Keep linked badges and attachment images inside conversation cards"
+        ],
+        "accent": "var(--accent)",
+        "icon": "github"
+      }
+    ]
+  },
   "0.2.0": {
     "version": "0.2.0",
     "summary": "Milim 0.2.0 brings GitHub pull requests, clearer account runtimes, and editable Google Workspace files into the local development workflow.",

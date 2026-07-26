@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import type { PullRequestDetails } from "../src/api.js";
 import {
+  pullRequestActorAvatarUrls,
   pullRequestAccessibleLabel,
   pullRequestReadiness,
 } from "../src/lib/pullRequests.js";
@@ -27,6 +28,28 @@ function pullRequest(patch: Partial<PullRequestDetails> = {}): PullRequestDetail
     ...patch,
   };
 }
+
+assert.deepEqual(
+  pullRequestActorAvatarUrls({
+    login: "tripwire-dev",
+    avatarUrl: "https://avatars.githubusercontent.com/in/3162576?v=4",
+  }),
+  [
+    "https://avatars.githubusercontent.com/in/3162576?v=4",
+    "https://github.com/tripwire-dev.png?size=40",
+    "https://avatars.githubusercontent.com/tripwire-dev%5Bbot%5D?size=40",
+  ],
+);
+assert.deepEqual(pullRequestActorAvatarUrls({ login: "oshtz" }), [
+  "https://github.com/oshtz.png?size=40",
+  "https://avatars.githubusercontent.com/oshtz%5Bbot%5D?size=40",
+]);
+assert.equal(
+  pullRequestActorAvatarUrls({ login: "comp-ai-code-review" })[2],
+  undefined,
+  "exhausting user and GitHub App avatar candidates should render the fallback icon",
+);
+assert.deepEqual(pullRequestActorAvatarUrls(), []);
 
 assert.equal(pullRequestReadiness(pullRequest({ isDraft: true })).tone, "draft");
 assert.equal(

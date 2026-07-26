@@ -24,7 +24,10 @@ import {
   type PullRequestFilter,
   type PullRequestTab,
 } from "../lib/pullRequestCache";
-import { pullRequestReadiness } from "../lib/pullRequests";
+import {
+  pullRequestActorAvatarUrls,
+  pullRequestReadiness,
+} from "../lib/pullRequests";
 import { sessionRecencyLabel } from "../lib/sessionRecency";
 import {
   DEFAULT_MEDIA_STUDIO_HEIGHT,
@@ -60,13 +63,21 @@ type ReviewAction = "approve" | "request_changes" | "comment";
 type MergeMethod = "merge" | "squash" | "rebase";
 
 function Actor({ actor }: { actor?: PullRequestActor }) {
-  const avatarUrl =
-    actor?.avatarUrl ||
-    (actor?.login
-      ? `https://github.com/${encodeURIComponent(actor.login)}.png?size=40`
-      : "");
+  const avatarUrls = useMemo(
+    () => pullRequestActorAvatarUrls(actor),
+    [actor?.avatarUrl, actor?.login],
+  );
+  const [avatarIndex, setAvatarIndex] = useState(0);
+  useEffect(() => setAvatarIndex(0), [avatarUrls]);
+  const avatarUrl = avatarUrls[avatarIndex];
   return avatarUrl ? (
-    <img src={avatarUrl} alt="" loading="lazy" referrerPolicy="no-referrer" />
+    <img
+      src={avatarUrl}
+      alt=""
+      loading="lazy"
+      referrerPolicy="no-referrer"
+      onError={() => setAvatarIndex((index) => index + 1)}
+    />
   ) : (
     <GitHub size={15} aria-hidden="true" />
   );
@@ -836,7 +847,7 @@ export function PullRequestsManager({ onClose }: { onClose: () => void }) {
                     <div className="git-pr-markdown">
                       {details.body.trim() ? (
                         <Suspense fallback={<p>Loading...</p>}>
-                          <Markdown content={details.body} collapseArtifacts={false} />
+                          <Markdown content={details.body} collapseArtifacts={false} allowHtml />
                         </Suspense>
                       ) : (
                         <p>No description.</p>
@@ -974,7 +985,7 @@ export function PullRequestsManager({ onClose }: { onClose: () => void }) {
             </header>
             {review.body?.trim() && (
               <Suspense fallback={<p>Loading...</p>}>
-                <Markdown content={review.body} collapseArtifacts={false} />
+                <Markdown content={review.body} collapseArtifacts={false} allowHtml />
               </Suspense>
             )}
           </article>
@@ -989,7 +1000,7 @@ export function PullRequestsManager({ onClose }: { onClose: () => void }) {
               <span>{item.createdAt ? new Date(item.createdAt).toLocaleString() : ""}</span>
             </header>
             <Suspense fallback={<p>Loading...</p>}>
-              <Markdown content={item.body} collapseArtifacts={false} />
+              <Markdown content={item.body} collapseArtifacts={false} allowHtml />
             </Suspense>
           </article>
         ))}

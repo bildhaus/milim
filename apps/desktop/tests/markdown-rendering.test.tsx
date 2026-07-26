@@ -8,6 +8,7 @@ type MarkdownProps = {
   previewArtifacts?: ChatArtifact[];
   onOpenPreview?: (artifact: ChatArtifact) => void;
   highlight?: boolean;
+  allowHtml?: boolean;
   previewArtifactsStreaming?: boolean;
   collapseArtifacts?: boolean;
 };
@@ -68,12 +69,14 @@ try {
     previewArtifacts?: ChatArtifact[],
     previewArtifactsStreaming = false,
     collapseArtifacts = true,
+    allowHtml = false,
   ): string {
     return renderToStaticMarkup(createElement(Markdown, {
       content,
       previewArtifacts,
       onOpenPreview: () => {},
       highlight: false,
+      allowHtml,
       previewArtifactsStreaming,
       collapseArtifacts,
     }));
@@ -180,6 +183,30 @@ try {
   assert(streamingMarkdown.includes("<table>"), "streaming markdown should render tables");
   assert(streamingMarkdown.includes("<pre>"), "streaming markdown should render code fences");
   assert(!streamingMarkdown.includes("hljs"), "streaming markdown should skip syntax highlighting");
+
+  const escapedHtml = renderMarkdown("<sub>Posted by a GitHub App.</sub>");
+  assert(escapedHtml.includes("&lt;sub&gt;"), "raw HTML should remain escaped outside opted-in surfaces");
+
+  const safeGitHubHtml = renderMarkdown([
+    "<!-- compai-review-progress -->",
+    '<sub>Posted by <a href="https://trycomp.ai">Comp AI Code Reviews</a>.</sub>',
+    "",
+    '<a href="https://app.tripwire.sh/runs/example"><img src="https://app.tripwire.sh/badges/view-run.png" width="185" height="40" alt="View on Tripwire" onerror="alert(1)" /></a>',
+    "",
+    '<img src="https://github.com/user-attachments/assets/example" width="500" height="410" alt="Screenshot" />',
+    "",
+    '<script>alert("unsafe")</script>',
+    '<a href="javascript:alert(1)">Unsafe link</a>',
+  ].join("\n"), undefined, false, true, true);
+  assert(safeGitHubHtml.includes("<sub>Posted by"), "opted-in GitHub HTML should render subscript text");
+  assert(safeGitHubHtml.includes('href="https://trycomp.ai"'), "safe HTML links should render");
+  assert(safeGitHubHtml.includes('src="https://app.tripwire.sh/badges/view-run.png"'), "linked badge images should render");
+  assert(safeGitHubHtml.includes('width="185"'), "safe image width should be preserved");
+  assert(safeGitHubHtml.includes('height="410"'), "safe attachment height should be preserved");
+  assert(!safeGitHubHtml.includes("compai-review-progress"), "HTML comments should not render");
+  assert(!safeGitHubHtml.includes("<script"), "scripts should be removed");
+  assert(!safeGitHubHtml.includes("onerror"), "event handlers should be removed");
+  assert(!safeGitHubHtml.includes('href="javascript:'), "unsafe link protocols should be removed");
 
   const streamingGeneratedCode = renderMemoizedMarkdown([
     "```html",
