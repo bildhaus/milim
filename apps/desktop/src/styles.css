@@ -5883,7 +5883,9 @@ button.quick-summary-row:disabled {
   text-align: center;
 }
 .google-slide-rail-thumbnail {
+  position: relative;
   display: block;
+  container-type: inline-size;
   aspect-ratio: 16 / 9;
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--border-primary) 72%, transparent);
@@ -5897,11 +5899,44 @@ button.quick-summary-row:disabled {
   height: 100%;
   object-fit: cover;
 }
-.google-slide-rail-thumbnail > span {
+.google-slide-rail-thumbnail > .google-slide-rail-placeholder {
   display: block;
   width: 100%;
   height: 100%;
   background: var(--bg-tertiary);
+}
+.google-slide-rail-origin-mask,
+.google-slide-rail-text-preview,
+.google-slide-rail-element-proxy {
+  position: absolute;
+  box-sizing: border-box;
+}
+.google-slide-rail-origin-mask {
+  z-index: 1;
+  background: #fff;
+}
+.google-slide-rail-text-preview {
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  overflow: hidden;
+  padding: 0.2cqw 0.3cqw;
+  background: #fff;
+  color: #202124;
+  font: 1.944cqw/1.2 Arial, sans-serif;
+  white-space: pre-wrap;
+}
+.google-slide-rail-text-preview[data-content-alignment="MIDDLE"] { justify-content: center; }
+.google-slide-rail-text-preview[data-content-alignment="BOTTOM"] { justify-content: flex-end; }
+.google-slide-rail-element-proxy {
+  z-index: 2;
+  overflow: hidden;
+}
+.google-slide-rail-element-proxy img {
+  max-width: none;
+  max-height: none;
+  object-fit: fill;
 }
 .google-slide-rail-actions {
   position: absolute;

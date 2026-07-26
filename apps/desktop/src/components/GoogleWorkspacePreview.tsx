@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
   useMemo,
@@ -2269,8 +2270,6 @@ export function SlidesPreview({
   queueSlideTextRef.current = queueSlideText;
   const navigateToSlide = useCallback((next: number) => {
     queueSlideTextRef.current();
-    setGeometryOverrides({});
-    setGeometrySourceRects({});
     setSelectedElementIds([]);
     setSelected(Math.min(visibleSlides.length - 1, Math.max(0, next)));
   }, [visibleSlides.length]);
@@ -2953,6 +2952,11 @@ export function SlidesPreview({
                 optimistic={item.optimistic === true}
                 revision={thumbnailRequest.generation}
                 selectedSource={index === selected ? thumbnail : null}
+                slide={item}
+                drafts={index === selected ? drafts : draftCacheRef.current[item.objectId ?? String(index)]?.drafts}
+                optimisticTextFieldIds={optimisticTextFieldIds}
+                geometryOverrides={geometryOverrides}
+                geometrySourceRects={geometrySourceRects}
               />
             </button>
             {canEdit ? (
@@ -3060,7 +3064,7 @@ export function SlidesPreview({
               />
             ) : null
           )) : null}
-          {thumbnail ? selectedElements.map((element) => {
+          {thumbnail ? sceneElements.map((element) => {
             const rect = geometryOverrides[element.objectId];
             const sourceRect = geometrySourceRects[element.objectId];
             return rect && sourceRect && !shapeFields.some((field) => field.id === element.objectId) ? (
@@ -3280,6 +3284,11 @@ function SlideRailThumbnail({
   optimistic,
   revision,
   selectedSource,
+  slide,
+  drafts,
+  optimisticTextFieldIds,
+  geometryOverrides,
+  geometrySourceRects,
 }: {
   fileId: string;
   objectId?: string | null;
@@ -3287,6 +3296,11 @@ function SlideRailThumbnail({
   optimistic?: boolean;
   revision: number;
   selectedSource: string | null;
+  slide: LocalGoogleSlide;
+  drafts?: Record<string, string>;
+  optimisticTextFieldIds: Set<string>;
+  geometryOverrides: Record<string, GoogleSlideRect>;
+  geometrySourceRects: Record<string, GoogleSlideRect>;
 }) {
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const [visible, setVisible] = useState(false);
@@ -3340,9 +3354,66 @@ function SlideRailThumbnail({
   }, []);
 
   const thumbnailSource = selectedSource || source;
+  const textIds = new Set(slide.textElements?.map((field) => field.objectId));
   return (
     <span className="google-slide-rail-thumbnail" ref={rootRef}>
-      {thumbnailSource ? <img src={thumbnailSource} alt="" /> : <span aria-hidden="true" />}
+      {thumbnailSource ? <img src={thumbnailSource} alt="" /> : <span className="google-slide-rail-placeholder" aria-hidden="true" />}
+      {slide.textElements?.map((field, index) => {
+        const rect = geometryOverrides[field.objectId] ?? (
+          field.x == null || field.y == null || field.width == null || field.height == null
+            ? null
+            : { x: field.x, y: field.y, width: field.width, height: field.height }
+        );
+        if (!rect || (!optimisticTextFieldIds.has(field.objectId) && !geometryOverrides[field.objectId])) return null;
+        const previewField: GoogleSlideEditableField = {
+          ...field,
+          id: field.objectId,
+          label: `Text ${index + 1}`,
+          kind: "shape",
+          text: drafts?.[field.objectId] ?? field.text,
+        };
+        return <Fragment key={`${field.objectId}-optimistic-thumbnail`}>
+          {geometrySourceRects[field.objectId] ? (
+            <span className="google-slide-rail-origin-mask" style={googleSlideRectStyle(geometrySourceRects[field.objectId])} />
+          ) : null}
+          <span
+            className="google-slide-rail-text-preview"
+            data-content-alignment={field.contentAlignment ?? undefined}
+            style={{
+              ...googleSlideRectStyle(rect),
+              textAlign: googleTextFormatCss(googleSlideTextFormat(previewField, 0)).textAlign,
+            }}
+          >
+            {googleSlideTextSegments(previewField).map((segment) => (
+              <span
+                key={`${segment.start}-${segment.end}`}
+                style={{
+                  color: segment.format.color,
+                  fontSize: `${segment.format.fontSize * (field.fontScale ?? 1) / 7.2}cqw`,
+                  fontFamily: segment.format.fontFamily,
+                  fontWeight: segment.format.bold ? "700" : undefined,
+                  fontStyle: segment.format.italic ? "italic" : undefined,
+                  textDecoration: segment.format.underline ? "underline" : undefined,
+                }}
+              >
+                {segment.text}
+              </span>
+            ))}
+          </span>
+        </Fragment>;
+      })}
+      {thumbnailSource ? slide.elements?.map((element) => {
+        const rect = geometryOverrides[element.objectId];
+        const sourceRect = geometrySourceRects[element.objectId];
+        return rect && sourceRect && !textIds.has(element.objectId) ? (
+          <Fragment key={`${element.objectId}-optimistic-thumbnail`}>
+            <span className="google-slide-rail-origin-mask" style={googleSlideRectStyle(sourceRect)} />
+            <span className="google-slide-rail-element-proxy" style={googleSlideRectStyle(rect)}>
+              <img src={thumbnailSource} alt="" style={googleSlideCropStyle(sourceRect)} />
+            </span>
+          </Fragment>
+        ) : null;
+      }) : null}
     </span>
   );
 }
