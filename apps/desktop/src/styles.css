@@ -5589,19 +5589,18 @@ button.quick-summary-row:disabled {
   white-space: pre-wrap;
 }
 .google-doc-editable-block {
+  cursor: text;
   border-radius: 2px;
   outline: 1px solid transparent;
 }
 .google-doc-editable-block:hover {
-  outline-color: color-mix(in srgb, #1a73e8 28%, transparent);
+  outline-color: color-mix(in srgb, var(--accent) 28%, transparent);
 }
-.google-doc-editable-block:focus-visible {
-  outline: 2px solid #1a73e8;
+.google-doc-editable-block:focus {
+  outline: 1px solid color-mix(in srgb, var(--accent) 72%, transparent);
 }
-.google-doc-inline-editor {
-  position: relative;
-  display: block;
-  margin-bottom: calc(8px * var(--doc-zoom));
+.google-doc-editable-block[data-active="true"] {
+  caret-color: var(--accent);
 }
 .google-text-format-toolbar {
   display: flex;
@@ -5609,18 +5608,43 @@ button.quick-summary-row:disabled {
   align-items: center;
   gap: 3px;
 }
-.google-doc-format-toolbar {
-  margin-bottom: 4px;
+.google-doc-paragraph-toolbar {
+  flex: none;
+  min-height: 38px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border-primary);
+  background: color-mix(in srgb, var(--bg-secondary) 94%, transparent);
+}
+.google-doc-toolbar-status {
+  min-width: 0;
+  margin-left: auto;
+  color: var(--tertiary-text);
+  font-size: 9px;
+}
+.google-doc-selection-toolbar {
+  position: fixed;
+  z-index: 140;
+  display: block;
+  max-width: calc(100vw - 16px);
+  visibility: hidden;
+  padding: 4px;
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-secondary) 96%, transparent);
+  box-shadow: 0 8px 24px color-mix(in srgb, #000 34%, transparent);
+}
+.google-doc-selection-toolbar[style] {
+  visibility: visible;
 }
 .google-text-format-toolbar select,
 .google-text-format-toolbar button,
 .google-text-format-toolbar input {
   min-height: 28px;
-  border: 1px solid #dadce0;
-  border-radius: 3px;
-  background: #fff;
-  color: #3c4043;
-  font: 11px/1 Arial, sans-serif;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--chip-radius);
+  background: var(--bg-tertiary);
+  color: var(--primary-text);
+  font: 10px/1 var(--font-ui);
 }
 .google-text-format-toolbar select {
   max-width: 112px;
@@ -5630,9 +5654,15 @@ button.quick-summary-row:disabled {
   padding: 0 7px;
 }
 .google-text-format-toolbar button.active {
-  border-color: #8ab4f8;
-  background: #e8f0fe;
-  color: #174ea6;
+  border-color: color-mix(in srgb, var(--accent) 72%, var(--border-primary));
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg-tertiary));
+  color: var(--accent);
+}
+.google-text-format-toolbar button:hover:not(:disabled),
+.google-text-format-toolbar select:hover:not(:disabled),
+.google-text-format-toolbar input:hover:not(:disabled) {
+  border-color: var(--border-secondary);
+  background: var(--panel-row-active);
 }
 .google-text-color-control {
   display: inline-flex;
@@ -5645,32 +5675,8 @@ button.quick-summary-row:disabled {
 .google-text-format-toolbar button:focus-visible,
 .google-text-format-toolbar select:focus-visible,
 .google-text-format-toolbar input:focus-visible {
-  outline: 2px solid #1a73e8;
+  outline: 2px solid var(--focus-border);
   outline-offset: 1px;
-}
-.google-doc-inline-editor textarea {
-  box-sizing: border-box;
-  width: 100%;
-  min-height: calc(3.2em * var(--doc-zoom));
-  padding: 3px;
-  resize: vertical;
-  border: 1px solid #1a73e8;
-  border-radius: 2px;
-  outline: 0;
-  background: #fff;
-  color: #202124;
-  font: inherit;
-  line-height: inherit;
-}
-.google-doc-inline-editor small {
-  display: block;
-  margin-top: 2px;
-  text-align: right;
-  color: #5f6368;
-  font: 9px/1.2 Arial, sans-serif;
-}
-.google-doc-inline-editor small.error {
-  color: #d93025;
 }
 .google-doc-preview h1 {
   font-size: calc(26pt * var(--doc-zoom));
@@ -5914,6 +5920,21 @@ button.quick-summary-row:disabled {
 .google-slide-layout-hint {
   color: var(--tertiary-text);
   font-size: 9px;
+}
+.google-autosave-error {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--error);
+  font-size: 9px;
+}
+.google-autosave-error button {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
 }
 .google-slide-counter {
   min-width: 40px;

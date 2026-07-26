@@ -310,7 +310,10 @@ try {
   assert(documentMarkup.includes("font-family:Roboto"), "Docs preview should inherit named-style fonts");
   assert(documentMarkup.includes("font-weight:500"), "Docs preview should preserve named-style font weights");
   assert(documentMarkup.includes("font-variant-caps:small-caps"), "Docs preview should preserve small caps");
-  assert(documentMarkup.includes("Double-click to edit this paragraph"), "Editable Docs previews should expose paragraph editing");
+  assert(documentMarkup.includes('contenteditable="plaintext-only"'), "Editable Docs previews should edit rendered paragraphs directly");
+  assert(documentMarkup.includes('aria-label="Edit document paragraph"'), "Inline Docs editors should expose textbox semantics");
+  assert(documentMarkup.includes('aria-label="Paragraph formatting"'), "Docs should keep paragraph and list controls in a fixed toolbar");
+  assert(documentMarkup.includes("Click text to edit"), "Editable Docs previews should expose paragraph editing");
   const formatToolbarMarkup = renderToStaticMarkup(createElement(GoogleTextFormatToolbar, {
     format: { bold: true, italic: false, underline: false, fontSize: 18, color: "#336699", alignment: "CENTER" },
     onChange: () => {},
@@ -326,7 +329,7 @@ try {
     ...sheetPreview.file,
     mime_type: "application/vnd.google-apps.document",
   };
-  assert(googleFileKindDetail(documentFile).includes("Double-click text to edit"), "Editable Docs should explain inline editing");
+  assert(googleFileKindDetail(documentFile).includes("Click text to edit"), "Editable Docs should explain inline editing");
   assert(
     googleFileKindDetail({
       ...documentFile,
