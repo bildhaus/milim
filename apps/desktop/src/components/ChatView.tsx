@@ -9762,6 +9762,13 @@ export function ChatView({
                 }}
               />
             )}
+            <div
+              id={inspectorTab === "git" ? "inspector-panel-git" : undefined}
+              className={`inspector-shell${previewPanelClosing ? " closing" : ""}${sidePanelAlreadyOpen ? " no-enter" : ""}`}
+              data-testid="inspector-shell"
+              role={inspectorTab === "git" ? "tabpanel" : undefined}
+              aria-labelledby={inspectorTab === "git" ? "inspector-tab-git" : undefined}
+            >
             {inspectorTab === "workers" ? (
               <WorkersInspector
                 records={activeWorkerRuns}
@@ -9796,52 +9803,45 @@ export function ChatView({
                 onClose={closePreview}
               />
             ) : inspectorTab === "git" ? (
-              <div
-                id="inspector-panel-git"
-                className="inspector-git-panel"
-                role="tabpanel"
-                aria-labelledby="inspector-tab-git"
-              >
-                <GitWorkspacePanel
-                  sessionId={activeId}
-                  folder={folder}
-                  model={effectiveModel}
-                  onDraftAction={loadGitActionDraft}
-                  requestedView={gitPanelView}
-                  diffRequest={
-                    gitDiffRequest?.sessionId === activeId &&
-                    previewRuntimeFoldersEqual(gitDiffRequest.folder, folder)
-                      ? gitDiffRequest
-                      : null
-                  }
-                  closing={previewPanelClosing}
-                  noEnterMotion={sidePanelAlreadyOpen}
-                  onClose={closeGitPanel}
-                  modeSwitcher={inspectorTabSwitcher}
-                  headerNotice={
-                    activeSession?.retryWorkspace ? (
-                      <div className="hot-swap-retry-banner">
-                        <div>
-                          <strong>Isolated Hot Swap retry</strong>
-                          <span>
-                            {activeSession.retryWorkspace.adoptedAt
-                              ? "Applied to the original workspace; the retry remains available."
-                              : "Review this diff before applying it to the original workspace."}
-                          </span>
-                        </div>
-                        <div className="hot-swap-retry-actions">
-                          <button className="btn-accent" type="button" disabled={busy} onClick={() => void applyRetryWorkspace()}>
-                            Apply to original
-                          </button>
-                          <button className="btn-ghost" type="button" disabled={busy} onClick={() => void discardRetryWorkspace()}>
-                            Discard retry
-                          </button>
-                        </div>
+              <GitWorkspacePanel
+                sessionId={activeId}
+                folder={folder}
+                model={effectiveModel}
+                onDraftAction={loadGitActionDraft}
+                requestedView={gitPanelView}
+                diffRequest={
+                  gitDiffRequest?.sessionId === activeId &&
+                  previewRuntimeFoldersEqual(gitDiffRequest.folder, folder)
+                    ? gitDiffRequest
+                    : null
+                }
+                closing={previewPanelClosing}
+                noEnterMotion={sidePanelAlreadyOpen}
+                onClose={closeGitPanel}
+                modeSwitcher={inspectorTabSwitcher}
+                headerNotice={
+                  activeSession?.retryWorkspace ? (
+                    <div className="hot-swap-retry-banner">
+                      <div>
+                        <strong>Isolated Hot Swap retry</strong>
+                        <span>
+                          {activeSession.retryWorkspace.adoptedAt
+                            ? "Applied to the original workspace; the retry remains available."
+                            : "Review this diff before applying it to the original workspace."}
+                        </span>
                       </div>
-                    ) : undefined
-                  }
-                />
-              </div>
+                      <div className="hot-swap-retry-actions">
+                        <button className="btn-accent" type="button" disabled={busy} onClick={() => void applyRetryWorkspace()}>
+                          Apply to original
+                        </button>
+                        <button className="btn-ghost" type="button" disabled={busy} onClick={() => void discardRetryWorkspace()}>
+                          Discard retry
+                        </button>
+                      </div>
+                    </div>
+                  ) : undefined
+                }
+              />
             ) : (
               visiblePreviewSelection && (
                 <PreviewPanel
@@ -9894,6 +9894,7 @@ export function ChatView({
                 />
               )
             )}
+            </div>
           </>
         )}
       </div>
