@@ -68,3 +68,19 @@ assert(toolOnly[0].kind === "toolGroup", "tool-only group should keep the compac
 const liveToolOnly = groupCompletedStreamActivity([tool("read_file"), tool("list_dir")], true);
 equal(liveToolOnly.length, 1, "streaming tool-only rows should collapse to one live work group");
 assert(liveToolOnly[0].kind === "workGroup", "streaming tool-only group should use the live work summary");
+
+const approvalSummary: ChatStreamPart = {
+  kind: "event",
+  eventType: "status",
+  label: "google_docs_edit approved",
+  status: "done",
+  approvalId: "approval-1",
+  approvalStatus: "approved",
+};
+const toolsWithApproval = groupCompletedStreamActivity([
+  tool("google_docs_edit"),
+  approvalSummary,
+  tool("google_docs_edit"),
+], false);
+equal(toolsWithApproval.length, 1, "approval history should not split collapsed tool activity");
+assert(toolsWithApproval[0].kind === "workGroup", "approval history should remain inside the work group");

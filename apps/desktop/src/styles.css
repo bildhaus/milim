@@ -7852,13 +7852,6 @@ html[data-dark="true"] .preview-control-cursor {
   opacity: 0.55;
   cursor: default;
 }
-.stream-approval-card {
-  flex-wrap: wrap;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--surface-raised) 82%, transparent);
-}
 .stream-approval-body {
   display: grid;
   flex: 1 0 100%;
@@ -9312,6 +9305,7 @@ html[data-dark="true"] .preview-control-cursor {
 .run-pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .run-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--border-secondary); }
 .run-dot-running { background: var(--accent-light); animation: run-pulse 1.2s ease-in-out infinite; }
+.run-dot-waiting { background: #d29922; }
 .run-dot-done { background: #3fb950; }
 .run-dot-stopped, .run-dot-aborted { background: #d29922; }
 .run-dot-error { background: #f85149; }
@@ -9544,6 +9538,103 @@ html[data-dark="true"] .preview-control-cursor {
 .dock-surface:focus-within {
   border-color: var(--focus-border);
   box-shadow: inset 0 1px 0 var(--glass-edge), 0 0 0 3px var(--accent-soft);
+}
+.composer-approval {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px 13px;
+  border-bottom: 1px solid var(--border-primary);
+  color: var(--secondary-text);
+  font-size: 12.5px;
+}
+.composer-approval-header {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.composer-approval-icon {
+  display: grid;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border-primary));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  color: var(--accent);
+}
+.composer-approval-heading {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+.composer-approval-heading small {
+  color: var(--tertiary-text);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+}
+.composer-approval-heading strong {
+  overflow: hidden;
+  color: var(--primary-text);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-approval-details {
+  overflow: hidden;
+  border: 1px solid var(--border-primary);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--surface) 72%, transparent);
+}
+.composer-approval-details summary {
+  padding: 7px 9px;
+  color: var(--secondary-text);
+  font-size: 11.5px;
+  cursor: pointer;
+  user-select: none;
+}
+.composer-approval-details summary:hover {
+  color: var(--primary-text);
+}
+.composer-approval-details[open] summary {
+  border-bottom: 1px solid var(--border-primary);
+}
+.composer-approval-details > .stream-approval-arguments {
+  max-height: 160px;
+  margin: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.composer-approval .stream-approval-actions {
+  width: 100%;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-left: 0;
+}
+.composer-approval .stream-approval-actions .stream-approval-error {
+  min-width: 0;
+  margin-right: auto;
+  overflow-wrap: anywhere;
+}
+.composer-approval .stream-approval-actions .approval-btn {
+  justify-content: center;
+  min-width: 76px;
+  min-height: 30px;
+  padding: 0 11px;
+  font-weight: 600;
+}
+.composer-approval .stream-approval-actions .approval-btn.approve {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+.composer-approval .stream-approval-actions .approval-btn.approve:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--accent-contrast);
+  filter: brightness(1.08);
 }
 .empty-starter-strip {
   width: min(100%, var(--chat-content-width));

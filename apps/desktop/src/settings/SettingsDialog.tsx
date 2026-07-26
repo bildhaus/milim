@@ -1160,8 +1160,8 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                       { value: "block", label: "Block", detail: "Stop risky outbound prompts." },
                     ]} /></div>
                     <div className="setting-field"><span className="setting-mini-title">Tool approval</span><SettingsChoiceGroup value={configuredThreadDefaults.toolApproval} onChange={(toolApproval) => updateConfiguredDefaults({ toolApproval })} testIdPrefix="default-approval" options={[
-                      { value: "guarded", label: "Guarded", detail: "Read-only tools run without prompts." },
                       { value: "review", label: "Review", detail: "Approve each mutating action." },
+                      { value: "guarded", label: "Guarded", detail: "Only read-only tools are available." },
                     ]} /></div>
                     <div className="setting-field"><span className="setting-mini-title">Delegation</span><SettingsChoiceGroup value={configuredThreadDefaults.delegationPolicy} onChange={(delegationPolicy) => updateConfiguredDefaults({ delegationPolicy })} testIdPrefix="default-delegation" options={[
                       { value: "off", label: "Off", detail: "Do not delegate." },

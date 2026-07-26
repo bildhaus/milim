@@ -337,7 +337,7 @@ export const DEFAULT_THREAD_SETTINGS: ThreadSettings = {
   memory: true,
   activeAgentId: null,
   privacy: "off",
-  toolApproval: "guarded",
+  toolApproval: "review",
   delegationPolicy: "ask",
   workerModel: "",
   planMode: false,
@@ -1130,6 +1130,24 @@ function completeEventStreamPart(
   callId?: string,
 ): ChatStreamPart[] {
   const next = parts ? parts.slice() : [];
+  if (part.approvalId) {
+    for (let i = next.length - 1; i >= 0; i -= 1) {
+      const current = next[i];
+      if (
+        current.kind === "event" &&
+        current.approvalId === part.approvalId &&
+        current.approvalStatus === "pending"
+      ) {
+        next[i] = {
+          ...current,
+          ...part,
+          detail: part.detail ?? current.detail,
+          approvalRequest: part.approvalRequest ?? current.approvalRequest,
+        };
+        return next;
+      }
+    }
+  }
   if (callId) {
     for (let i = next.length - 1; i >= 0; i -= 1) {
       const current = next[i];

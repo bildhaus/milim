@@ -64,7 +64,7 @@ deepEqual(
 );
 equal(useSettings.getState().newThreadBehavior, "inherit", "new chats should preserve inheritance by default");
 equal(useSettings.getState().unavailableModelPolicy, "ask", "unavailable defaults should ask by default");
-equal(useSettings.getState().configuredThreadDefaults.toolApproval, "guarded", "configured approval should default guarded");
+equal(useSettings.getState().configuredThreadDefaults.toolApproval, "review", "configured approval should default review");
 equal(useSettings.getState().browserStorageMode, "persistent", "sidepanel browser should remember sign-ins by default");
 equal(useSettings.getState().browserSetupSeen, false, "browser persistence disclosure should start unseen");
 assert(!("modelPresets" in useSettings.getState()), "obsolete model presets should not be exposed");
@@ -175,7 +175,7 @@ useSettings.getState().setConfiguredThreadDefaults({ model: "provider:model", to
 equal(useSettings.getState().configuredThreadDefaults.model, "provider:model", "configured model should persist");
 equal(useSettings.getState().configuredThreadDefaults.toolApproval, "review", "review should be a valid configured approval");
 useSettings.getState().setConfiguredThreadDefaults({ toolApproval: "open" as never });
-equal(useSettings.getState().configuredThreadDefaults.toolApproval, "guarded", "open should never persist as a global approval default");
+equal(useSettings.getState().configuredThreadDefaults.toolApproval, "review", "open should never persist as a global approval default");
 useSettings.getState().setUnavailableModelPolicy("blocked");
 equal(useSettings.getState().unavailableModelPolicy, "blocked", "blocked fallback should persist");
 

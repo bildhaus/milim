@@ -262,6 +262,7 @@ import {
 import { mergeModelListsForPicker, providerOwnsModel } from "../lib/modelPicker";
 import { assessHotSwap, nativeRuntimeIsStale, type HotSwapAssessment } from "../lib/hotSwap";
 import {
+  approvalWaitDuration,
   estimateResponseCostUsd,
   formatResponseMetrics,
   responseMetricsForTurn,
@@ -307,10 +308,12 @@ import {
   createTurnRunTraceState,
   finalizeTurnRuntime,
   handleTurnRuntimeError,
+  isGoogleWorkspaceEditTool,
   runModelChatTurn,
   runSelectedAccountRuntimeTurn,
   runToolAgentTurn,
 } from "../lib/turnRuntime";
+import { dismissToolApproval, pendingToolApprovals } from "../lib/toolApproval";
 import {
   drainQueuedMessages as drainQueuedMessagesFromQueue,
   hasQueuedMessages,
@@ -362,6 +365,7 @@ import { InlineMediaControls } from "./InlineMediaControls";
 import { GeneratedMedia } from "./GeneratedMedia";
 import { WorkersInspector, WorkersSummary } from "./WorkersInspector";
 import { AssistantMessage } from "./AssistantMessage";
+import { ToolApprovalPrompt } from "./ToolApprovalPrompt";
 import { ArtifactList } from "./ArtifactList";
 import { CommandPalette, type RuntimeCommand } from "./ChatSearchPopover";
 import { useContextMenu, type ContextMenuItem } from "./ContextMenu";
@@ -3278,6 +3282,10 @@ export function ChatView({
   const sessionSummaries = useSessions(sessionSummariesSelector);
   const messages = useSessions(
     (s) => s.sessions.find((x) => x.id === s.activeId)?.messages ?? EMPTY,
+  );
+  const pendingApprovals = useMemo(
+    () => pendingToolApprovals(messages),
+    [messages],
   );
   const artifactRevisionGroupsForThread = useMemo(
     () => artifactRevisionGroups(messages),
@@ -7961,6 +7969,7 @@ export function ChatView({
         responseMetricsForTurn({
           startedAt,
           endedAt: Date.now(),
+          pausedMs: approvalWaitDuration(runRef.current),
           model: turnModel,
           providers,
           codexModel,
@@ -7969,6 +7978,11 @@ export function ChatView({
           limits: metricsCapture.state.limits,
         }),
       );
+    };
+    const onToolCompleted = (name: string) => {
+      if (isGoogleWorkspaceEditTool(name)) {
+        window.dispatchEvent(new Event("milim-google-workspace-refresh"));
+      }
     };
     const onEvent = createAgentRunEventHandler({
       runRef,
@@ -7987,6 +8001,7 @@ export function ChatView({
         store.upsertWorkerRun(record);
         startWorkerRunEvents(record);
       },
+      onToolCompleted,
       captureUsage: metricsCapture.captureUsage,
       captureUsageDelta: captureAgentUsageDelta,
       snapshot,
@@ -7995,9 +8010,6 @@ export function ChatView({
       onEvent(event);
       if (event.type === "tool_result" && event.name === "mcp_server_save") {
         void listTools().then(setComposerTools).catch(() => {});
-      }
-      if (event.type === "tool_result" && event.name?.startsWith("google_")) {
-        window.dispatchEvent(new Event("milim-google-workspace-refresh"));
       }
     };
     const prepareOutbound = (
@@ -8054,6 +8066,7 @@ export function ChatView({
             store.completeStreamEvent(id, assistantMessageId, name, part),
           captureRuntimeMetrics: metricsCapture.captureRuntimeMetrics,
           captureProviderLimit: metricsCapture.captureProviderLimit,
+          onToolCompleted,
           onNativeWorker:
             turnDelegationPolicy === "auto" &&
             (turnToolApproval === "guarded" || turnPlanMode)
@@ -8234,6 +8247,7 @@ export function ChatView({
         ? responseMetricsForTurn({
             startedAt,
             endedAt,
+            pausedMs: approvalWaitDuration(runRef.current, endedAt),
             model: turnModel,
             providers,
             codexModel,
@@ -9523,6 +9537,20 @@ export function ChatView({
               </div>
             )}
             <ComposerSurface>
+              {pendingApprovals.map((approval) => (
+                <ToolApprovalPrompt
+                  key={approval.approvalId}
+                  part={approval}
+                  onDismiss={() => {
+                    if (!approval.approvalId) return;
+                    setMessages(
+                      activeId,
+                      dismissToolApproval(messages, approval.approvalId),
+                      { autoTitle: false },
+                    );
+                  }}
+                />
+              ))}
               <ControlBar
                 models={pickerModels}
                 model={model}

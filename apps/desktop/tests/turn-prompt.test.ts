@@ -225,6 +225,7 @@ assert.equal(googlePreview.useTools, false);
 assert.equal(googlePreview.accountRuntimeMayUseTools, true);
 assert.equal(googlePreview.toolContext.preview_tools_enabled, false);
 assert.match(googlePreview.browserMessages[0].content, /docs\.google\.com/);
+assert.match(googlePreview.browserMessages[0].content, /switch the thread to Review or Open/);
 
 const virtualProject = buildTurnPromptContext({
   sessionId: "s1",

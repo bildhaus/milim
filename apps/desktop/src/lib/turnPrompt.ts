@@ -193,6 +193,9 @@ export function buildTurnPromptContext({
         status: previewSurface.status,
       }),
       "This identifies what the user has open. Do not claim to have inspected page contents unless you successfully use an appropriate Milim tool.",
+      ...(googleWorkspaceOpen && toolApproval === "guarded"
+        ? ["Tool approval is Guarded, so only read-only tools are available. If the user asks to edit this Google Workspace file, explain that they must switch the thread to Review or Open; do not claim Google Workspace lacks editing support."]
+        : []),
     ].join("\n"),
   }] : [];
   const runMemoryContext: AgentMemoryContext = {

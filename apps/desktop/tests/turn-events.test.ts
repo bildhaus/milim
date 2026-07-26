@@ -81,6 +81,18 @@ const runtime = accountRuntimeToolPart({
 } as never);
 equal(runtime.name, "tool-1", "account runtime tool should prefer runtime id");
 equal(runtime.label, "Using shell", "account runtime tool should default running label");
+equal(accountRuntimeToolPart({
+  type: "tool",
+  id: "tool-2",
+  name: "edit",
+  status: "completed",
+} as never).status, "done", "ACP completed tools should normalize to done");
+equal(accountRuntimeToolPart({
+  type: "tool",
+  id: "tool-3",
+  name: "edit",
+  status: "in_progress",
+} as never).status, "running", "ACP in-progress tools should normalize to running");
 
 const warning = runtimeWarningMessage("Codex not on PATH", "Install Codex");
 assert(warning.streamParts?.[0]?.kind === "event", "runtime warning should be an event part");
