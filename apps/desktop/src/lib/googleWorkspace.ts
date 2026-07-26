@@ -116,3 +116,28 @@ export function googleDocEditableParagraph(value: unknown): GoogleDocEditablePar
   const text = (runs as string[]).join("").replace(/\n$/, "");
   return { start, end: Math.max(start, end - 1), text };
 }
+
+export function googleDocTextReplacement(
+  start: number,
+  previous: string,
+  next: string,
+): GoogleDocEditableParagraph | null {
+  if (previous === next) return null;
+  const before = Array.from(previous);
+  const after = Array.from(next);
+  let prefix = 0;
+  while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix += 1;
+  let suffix = 0;
+  while (
+    suffix < before.length - prefix
+    && suffix < after.length - prefix
+    && before[before.length - suffix - 1] === after[after.length - suffix - 1]
+  ) suffix += 1;
+  const unchangedPrefixLength = before.slice(0, prefix).join("").length;
+  const replacedLength = before.slice(prefix, before.length - suffix).join("").length;
+  return {
+    start: start + unchangedPrefixLength,
+    end: start + unchangedPrefixLength + replacedLength,
+    text: after.slice(prefix, after.length - suffix).join(""),
+  };
+}

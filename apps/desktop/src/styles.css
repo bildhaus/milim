@@ -5603,6 +5603,51 @@ button.quick-summary-row:disabled {
   display: block;
   margin-bottom: calc(8px * var(--doc-zoom));
 }
+.google-text-format-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px;
+}
+.google-doc-format-toolbar {
+  margin-bottom: 4px;
+}
+.google-text-format-toolbar select,
+.google-text-format-toolbar button,
+.google-text-format-toolbar input {
+  min-height: 28px;
+  border: 1px solid #dadce0;
+  border-radius: 3px;
+  background: #fff;
+  color: #3c4043;
+  font: 11px/1 Arial, sans-serif;
+}
+.google-text-format-toolbar select {
+  max-width: 112px;
+}
+.google-text-format-toolbar button {
+  min-width: 28px;
+  padding: 0 7px;
+}
+.google-text-format-toolbar button.active {
+  border-color: #8ab4f8;
+  background: #e8f0fe;
+  color: #174ea6;
+}
+.google-text-color-control {
+  display: inline-flex;
+}
+.google-text-color-control input {
+  box-sizing: border-box;
+  width: 30px;
+  padding: 4px;
+}
+.google-text-format-toolbar button:focus-visible,
+.google-text-format-toolbar select:focus-visible,
+.google-text-format-toolbar input:focus-visible {
+  outline: 2px solid #1a73e8;
+  outline-offset: 1px;
+}
 .google-doc-inline-editor textarea {
   box-sizing: border-box;
   width: 100%;
@@ -5618,9 +5663,9 @@ button.quick-summary-row:disabled {
   line-height: inherit;
 }
 .google-doc-inline-editor small {
-  position: absolute;
-  top: 3px;
-  right: 5px;
+  display: block;
+  margin-top: 2px;
+  text-align: right;
   color: #5f6368;
   font: 9px/1.2 Arial, sans-serif;
 }
@@ -5788,8 +5833,21 @@ button.quick-summary-row:disabled {
   object-fit: contain;
 }
 .google-slide-stage {
+  position: relative;
   align-content: start;
   background: radial-gradient(circle at center, color-mix(in srgb, var(--bg-tertiary) 88%, transparent), var(--bg-primary));
+}
+.google-slide-format-toolbar {
+  position: sticky;
+  z-index: 3;
+  top: 0;
+  justify-self: center;
+  margin-bottom: -34px;
+  padding: 4px;
+  border: 1px solid color-mix(in srgb, var(--border-primary) 75%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--bg-secondary) 94%, transparent);
+  box-shadow: 0 5px 16px color-mix(in srgb, #000 30%, transparent);
 }
 .google-slide-canvas {
   position: relative;
@@ -5820,6 +5878,11 @@ button.quick-summary-row:disabled {
   background: color-mix(in srgb, #fff 88%, transparent);
   color: #202124;
   font: clamp(8px, 1.2vw, 18px)/1.2 Arial, sans-serif;
+}
+.google-slide-inline-editor[data-active="true"] {
+  z-index: 2;
+  outline: 2px solid color-mix(in srgb, #1a73e8 70%, transparent);
+  outline-offset: 1px;
 }
 .google-slide-inline-notes {
   display: grid;

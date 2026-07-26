@@ -1549,6 +1549,8 @@ fn google_slide_text_elements(
             Some(json!({
                 "objectId": object_id,
                 "text": take_chars_from_budget(&extract_google_text(text), remaining),
+                "styleRuns": google_slide_style_runs(text, "textRun"),
+                "paragraphRuns": google_slide_style_runs(text, "paragraphMarker"),
                 "x": rect.map(|value| value.0),
                 "y": rect.map(|value| value.1),
                 "width": rect.map(|value| value.2),
@@ -1556,6 +1558,23 @@ fn google_slide_text_elements(
             }))
         })
         .take(49)
+        .collect()
+}
+
+fn google_slide_style_runs(text: &Value, kind: &str) -> Vec<Value> {
+    text.get("textElements")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|element| {
+            let style = element.get(kind)?.get("style")?;
+            Some(json!({
+                "start": element.get("startIndex").and_then(Value::as_i64).unwrap_or(0),
+                "end": element.get("endIndex").and_then(Value::as_i64).unwrap_or(0),
+                "style": style,
+            }))
+        })
+        .take(200)
         .collect()
 }
 
@@ -3293,7 +3312,7 @@ impl Tool for GoogleDocsEditTool {
                                 "type": "string",
                                 "enum": [
                                     "insert_text", "replace_all_text", "delete_range",
-                                    "set_text_style", "set_paragraph_style", "create_bullets",
+                                    "set_text_style", "clear_text_style", "set_paragraph_style", "create_bullets",
                                     "delete_bullets", "insert_page_break", "insert_table"
                                 ]
                             },
@@ -3307,6 +3326,12 @@ impl Tool for GoogleDocsEditTool {
                             "bold": { "type": "boolean" },
                             "italic": { "type": "boolean" },
                             "underline": { "type": "boolean" },
+                            "font_size": { "type": "number", "minimum": 6, "maximum": 200 },
+                            "foreground_color": { "type": "string", "pattern": "^#?[0-9A-Fa-f]{6}$" },
+                            "alignment": {
+                                "type": "string",
+                                "enum": ["START", "CENTER", "END", "JUSTIFIED"]
+                            },
                             "named_style_type": { "type": "string" },
                             "bullet_preset": { "type": "string" },
                             "rows": { "type": "integer", "minimum": 1, "maximum": 50 },
@@ -3385,6 +3410,15 @@ impl Tool for GoogleDocsEditTool {
                             fields.push(field);
                         }
                     }
+                    if let Some(value) = optional_font_size(operation)? {
+                        style["fontSize"] = json!({ "magnitude": value, "unit": "PT" });
+                        fields.push("fontSize");
+                    }
+                    if let Some(value) = operation.get("foreground_color").and_then(Value::as_str) {
+                        style["foregroundColor"] =
+                            json!({ "color": { "rgbColor": parse_hex_color(value)? } });
+                        fields.push("foregroundColor");
+                    }
                     if fields.is_empty() {
                         return Err(Error::InvalidRequest(
                             "set_text_style requires a style field".into(),
@@ -3398,34 +3432,52 @@ impl Tool for GoogleDocsEditTool {
                         }
                     })
                 }
+                "clear_text_style" => json!({
+                    "updateTextStyle": {
+                        "range": doc_range(operation)?,
+                        "textStyle": {},
+                        "fields": "*"
+                    }
+                }),
                 "set_paragraph_style" => {
-                    let style = operation
-                        .get("named_style_type")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| {
-                            Error::InvalidRequest(
-                                "set_paragraph_style requires named_style_type".into(),
-                            )
-                        })?;
-                    if !matches!(
-                        style,
-                        "NORMAL_TEXT"
-                            | "TITLE"
-                            | "SUBTITLE"
-                            | "HEADING_1"
-                            | "HEADING_2"
-                            | "HEADING_3"
-                            | "HEADING_4"
-                            | "HEADING_5"
-                            | "HEADING_6"
-                    ) {
-                        return Err(Error::InvalidRequest("Unsupported Docs named style".into()));
+                    let mut style = json!({});
+                    let mut fields = Vec::new();
+                    if let Some(named_style) =
+                        operation.get("named_style_type").and_then(Value::as_str)
+                    {
+                        if !matches!(
+                            named_style,
+                            "NORMAL_TEXT"
+                                | "TITLE"
+                                | "SUBTITLE"
+                                | "HEADING_1"
+                                | "HEADING_2"
+                                | "HEADING_3"
+                                | "HEADING_4"
+                                | "HEADING_5"
+                                | "HEADING_6"
+                        ) {
+                            return Err(Error::InvalidRequest(
+                                "Unsupported Docs named style".into(),
+                            ));
+                        }
+                        style["namedStyleType"] = json!(named_style);
+                        fields.push("namedStyleType");
+                    }
+                    if let Some(alignment) = operation.get("alignment").and_then(Value::as_str) {
+                        style["alignment"] = json!(validate_text_alignment(alignment)?);
+                        fields.push("alignment");
+                    }
+                    if fields.is_empty() {
+                        return Err(Error::InvalidRequest(
+                            "set_paragraph_style requires a style field".into(),
+                        ));
                     }
                     json!({
                         "updateParagraphStyle": {
                             "range": doc_range(operation)?,
-                            "paragraphStyle": { "namedStyleType": style },
-                            "fields": "namedStyleType"
+                            "paragraphStyle": style,
+                            "fields": fields.join(",")
                         }
                     })
                 }
@@ -3513,7 +3565,8 @@ impl Tool for GoogleSlidesEditTool {
                                 "enum": [
                                     "create_slide", "duplicate_slide", "delete_slide",
                                     "reorder_slides", "replace_all_text", "insert_text",
-                                    "delete_text", "create_shape", "create_table", "insert_image"
+                                    "delete_text", "set_text_style", "set_paragraph_style",
+                                    "create_shape", "create_table", "insert_image"
                                 ]
                             },
                             "object_id": { "type": "string" },
@@ -3528,6 +3581,15 @@ impl Tool for GoogleSlidesEditTool {
                             "offset": { "type": "integer", "minimum": 0 },
                             "start": { "type": "integer", "minimum": 0 },
                             "end": { "type": "integer", "minimum": 0 },
+                            "bold": { "type": "boolean" },
+                            "italic": { "type": "boolean" },
+                            "underline": { "type": "boolean" },
+                            "font_size": { "type": "number", "minimum": 6, "maximum": 200 },
+                            "foreground_color": { "type": "string", "pattern": "^#?[0-9A-Fa-f]{6}$" },
+                            "alignment": {
+                                "type": "string",
+                                "enum": ["START", "CENTER", "END", "JUSTIFIED"]
+                            },
                             "shape_type": { "type": "string" },
                             "rows": { "type": "integer", "minimum": 1, "maximum": 50 },
                             "columns": { "type": "integer", "minimum": 1, "maximum": 20 },
@@ -3646,24 +3708,55 @@ impl Tool for GoogleSlidesEditTool {
                     })
                 }
                 "delete_text" => {
-                    let mut request = json!({ "objectId": operation_id(operation, "object_id")? });
-                    if operation.get("start").is_some() || operation.get("end").is_some() {
-                        let start = required_index(operation, "start")?;
-                        let end = required_index(operation, "end")?;
-                        if end <= start {
-                            return Err(Error::InvalidRequest(
-                                "delete_text end must be greater than start".into(),
-                            ));
+                    json!({ "deleteText": {
+                        "objectId": operation_id(operation, "object_id")?,
+                        "textRange": slide_text_range(operation)?
+                    }})
+                }
+                "set_text_style" => {
+                    let mut style = json!({});
+                    let mut fields = Vec::new();
+                    for field in ["bold", "italic", "underline"] {
+                        if let Some(value) = operation.get(field).and_then(Value::as_bool) {
+                            style[field] = json!(value);
+                            fields.push(field);
                         }
-                        request["textRange"] = json!({
-                            "type": "FIXED_RANGE",
-                            "startIndex": start,
-                            "endIndex": end
-                        });
-                    } else {
-                        request["textRange"] = json!({ "type": "ALL" });
                     }
-                    json!({ "deleteText": request })
+                    if let Some(value) = optional_font_size(operation)? {
+                        style["fontSize"] = json!({ "magnitude": value, "unit": "PT" });
+                        fields.push("fontSize");
+                    }
+                    if let Some(value) = operation.get("foreground_color").and_then(Value::as_str) {
+                        style["foregroundColor"] = json!({
+                            "opaqueColor": { "rgbColor": parse_hex_color(value)? }
+                        });
+                        fields.push("foregroundColor");
+                    }
+                    if fields.is_empty() {
+                        return Err(Error::InvalidRequest(
+                            "set_text_style requires a style field".into(),
+                        ));
+                    }
+                    json!({ "updateTextStyle": {
+                        "objectId": operation_id(operation, "object_id")?,
+                        "textRange": slide_text_range(operation)?,
+                        "style": style,
+                        "fields": fields.join(",")
+                    }})
+                }
+                "set_paragraph_style" => {
+                    let alignment = operation
+                        .get("alignment")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            Error::InvalidRequest("set_paragraph_style requires alignment".into())
+                        })?;
+                    json!({ "updateParagraphStyle": {
+                        "objectId": operation_id(operation, "object_id")?,
+                        "textRange": slide_text_range(operation)?,
+                        "style": { "alignment": validate_text_alignment(alignment)? },
+                        "fields": "alignment"
+                    }})
                 }
                 "create_shape" => {
                     let page_id = operation_id(operation, "page_id")?;
@@ -3839,20 +3932,37 @@ fn ensure_index_order(range: &Value) -> Result<()> {
 fn parse_hex_color(value: &str) -> Result<Value> {
     let hex = value.strip_prefix('#').unwrap_or(value);
     if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(Error::InvalidRequest(
-            "background_color must be #RRGGBB".into(),
-        ));
+        return Err(Error::InvalidRequest("Color must be #RRGGBB".into()));
     }
     let channel = |offset| {
         u8::from_str_radix(&hex[offset..offset + 2], 16)
             .map(|value| value as f64 / 255.0)
-            .map_err(|_| Error::InvalidRequest("Invalid background color".into()))
+            .map_err(|_| Error::InvalidRequest("Invalid color".into()))
     };
     Ok(json!({
         "red": channel(0)?,
         "green": channel(2)?,
         "blue": channel(4)?,
     }))
+}
+
+fn optional_font_size(operation: &Value) -> Result<Option<f64>> {
+    operation
+        .get("font_size")
+        .map(|value| {
+            value
+                .as_f64()
+                .filter(|value| (6.0..=200.0).contains(value))
+                .ok_or_else(|| Error::InvalidRequest("font_size must be between 6 and 200".into()))
+        })
+        .transpose()
+}
+
+fn validate_text_alignment(value: &str) -> Result<&str> {
+    match value {
+        "START" | "CENTER" | "END" | "JUSTIFIED" => Ok(value),
+        _ => Err(Error::InvalidRequest("Unsupported text alignment".into())),
+    }
 }
 
 fn doc_range(operation: &Value) -> Result<Value> {
@@ -3864,6 +3974,24 @@ fn doc_range(operation: &Value) -> Result<Value> {
         ));
     }
     Ok(json!({ "startIndex": start, "endIndex": end }))
+}
+
+fn slide_text_range(operation: &Value) -> Result<Value> {
+    if operation.get("start").is_none() && operation.get("end").is_none() {
+        return Ok(json!({ "type": "ALL" }));
+    }
+    let start = required_index(operation, "start")?;
+    let end = required_index(operation, "end")?;
+    if end <= start {
+        return Err(Error::InvalidRequest(
+            "Slides text range end must be greater than start".into(),
+        ));
+    }
+    Ok(json!({
+        "type": "FIXED_RANGE",
+        "startIndex": start,
+        "endIndex": end
+    }))
 }
 
 fn validate_slide_layout(value: &str) -> Result<&str> {
@@ -3964,7 +4092,13 @@ mod tests {
         let slide = json!({
             "objectId": "slide_1",
             "pageElements": [{ "objectId": "title_1", "shape": { "text": { "textElements": [
-                { "textRun": { "content": "Visible title" } }
+                { "startIndex": 0, "endIndex": 14, "paragraphMarker": {
+                    "style": { "alignment": "CENTER" }
+                }},
+                { "startIndex": 0, "endIndex": 14, "textRun": {
+                    "content": "Visible title",
+                    "style": { "bold": true, "fontSize": { "magnitude": 24, "unit": "PT" } }
+                }}
             ]}}}],
             "slideProperties": { "notesPage": {
                 "notesProperties": { "speakerNotesObjectId": "notes_1" },
@@ -3982,6 +4116,14 @@ mod tests {
         assert_eq!(preview["text"], "Visible title");
         assert_eq!(preview["notes"], "Private speaker note");
         assert_eq!(preview["textElements"][0]["objectId"], "title_1");
+        assert_eq!(
+            preview["textElements"][0]["styleRuns"][0]["style"]["bold"],
+            true
+        );
+        assert_eq!(
+            preview["textElements"][0]["paragraphRuns"][0]["style"]["alignment"],
+            "CENTER"
+        );
         assert_eq!(preview["notesObjectId"], "notes_1");
 
         let mut remaining = 100;
@@ -4474,6 +4616,13 @@ mod tests {
         assert!(manage.contains("\"group\""));
         assert!(!manage.contains("\"anyone\""));
         assert!(!manage.contains("\"owner\""));
+        let docs = tools
+            .iter()
+            .find(|tool| tool.name() == "google_docs_edit")
+            .unwrap()
+            .input_schema()
+            .to_string();
+        assert!(docs.contains("\"clear_text_style\""));
         drop(tools);
         std::fs::remove_dir_all(root).unwrap();
     }

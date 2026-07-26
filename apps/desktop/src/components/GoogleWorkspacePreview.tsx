@@ -27,11 +27,13 @@ import {
   type GoogleFilePreview,
   type GoogleFileSummary,
   type GoogleSlidesEditOperation,
+  type GoogleTextAlignment,
   type GoogleWorkspaceStatus,
   type PreviewSurfaceTarget,
 } from "../api";
 import {
   googleDocEditableParagraph,
+  googleDocTextReplacement,
   googleSheetCellRange,
   googleWorkspaceFileUrl,
   parseGoogleSheetClipboard,
@@ -825,6 +827,116 @@ export function SheetPreview({
   );
 }
 
+type GoogleTextFormat = {
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+  fontSize: number;
+  color: string;
+  alignment: GoogleTextAlignment;
+};
+
+type GoogleTextFormatChange =
+  | { field: "bold" | "italic" | "underline"; value: boolean }
+  | { field: "fontSize"; value: number }
+  | { field: "color"; value: string }
+  | { field: "alignment"; value: GoogleTextAlignment };
+
+export function GoogleTextFormatToolbar({
+  format,
+  disabled,
+  before,
+  after,
+  className = "",
+  onChange,
+}: {
+  format: GoogleTextFormat;
+  disabled?: boolean;
+  before?: ReactNode;
+  after?: ReactNode;
+  className?: string;
+  onChange: (change: GoogleTextFormatChange) => void;
+}) {
+  return (
+    <span
+      className={`google-text-format-toolbar ${className}`.trim()}
+      role="toolbar"
+      aria-label="Text formatting"
+      data-google-format-toolbar="true"
+    >
+      {before}
+      {(["bold", "italic", "underline"] as const).map((field) => (
+        <button
+          type="button"
+          key={field}
+          className={format[field] ? "active" : ""}
+          aria-label={field[0].toUpperCase() + field.slice(1)}
+          aria-pressed={format[field]}
+          disabled={disabled}
+          onClick={() => onChange({ field, value: !format[field] })}
+        >
+          {field === "bold" ? <strong>B</strong> : field === "italic" ? <em>I</em> : <u>U</u>}
+        </button>
+      ))}
+      <label>
+        <span className="sr-only">Font size</span>
+        <select
+          aria-label="Font size"
+          value={format.fontSize}
+          disabled={disabled}
+          onChange={(event) => onChange({ field: "fontSize", value: Number(event.currentTarget.value) })}
+        >
+          {[8, 10, 11, 12, 14, 18, 24, 32, 48, 72].map((value) => (
+            <option value={value} key={value}>{value}</option>
+          ))}
+        </select>
+      </label>
+      <label>
+        <span className="sr-only">Text alignment</span>
+        <select
+          aria-label="Text alignment"
+          value={format.alignment}
+          disabled={disabled}
+          onChange={(event) => onChange({
+            field: "alignment",
+            value: event.currentTarget.value as GoogleTextAlignment,
+          })}
+        >
+          <option value="START">Align start</option>
+          <option value="CENTER">Center</option>
+          <option value="END">Align end</option>
+          <option value="JUSTIFIED">Justify</option>
+        </select>
+      </label>
+      <label className="google-text-color-control" title="Text color">
+        <span className="sr-only">Text color</span>
+        <input
+          type="color"
+          aria-label="Text color"
+          value={format.color}
+          disabled={disabled}
+          onChange={(event) => onChange({ field: "color", value: event.currentTarget.value })}
+        />
+      </label>
+      {after}
+    </span>
+  );
+}
+
+type GoogleDocParagraphFormat = GoogleTextFormat & {
+  namedStyleType: string;
+  listKind: "ordered" | "unordered" | null;
+};
+
+type GoogleDocEditorState = GoogleDocEditableParagraph & GoogleDocParagraphFormat & {
+  blockIndex: number;
+};
+
+type GoogleDocNamedStyleMap = Record<string, {
+  paragraphStyle: Record<string, unknown>;
+  textStyle: Record<string, unknown>;
+}>;
+
 export function DocumentPreview({
   fileId,
   canEdit,
@@ -844,9 +956,12 @@ export function DocumentPreview({
   const [zoom, setZoom] = useState<"fit" | number>("fit");
   const [fitScale, setFitScale] = useState(1);
   const [outlineOpen, setOutlineOpen] = useState(false);
-  const [editing, setEditing] = useState<(GoogleDocEditableParagraph & { blockIndex: number }) | null>(null);
+  const [editing, setEditing] = useState<GoogleDocEditorState | null>(null);
   const [editorText, setEditorText] = useState("");
   const [savedEditorText, setSavedEditorText] = useState("");
+  const [editorSelection, setEditorSelection] = useState({ start: 0, end: 0 });
+  const [formatStatus, setFormatStatus] = useState<AutosaveStatus>("idle");
+  const [formatError, setFormatError] = useState<string | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const body = isRecord(document.body) && Array.isArray(document.body.content)
     ? document.body.content
@@ -855,6 +970,7 @@ export function DocumentPreview({
     ? document.inlineObjects
     : {};
   const lists = isRecord(document.lists) ? document.lists : {};
+  const namedStyles = useMemo(() => googleDocNamedStyleMap(document), [document]);
   const outline = useMemo(() => googleDocOutline(body), [body]);
   const normalizedQuery = query.trim();
 
@@ -888,11 +1004,14 @@ export function DocumentPreview({
     setActiveMatch((current) => (current + delta + matchCount) % matchCount);
   }
 
-  function editParagraph(paragraph: GoogleDocEditableParagraph, blockIndex: number) {
+  function editParagraph(paragraph: GoogleDocEditableParagraph, blockIndex: number, format: GoogleDocParagraphFormat) {
     if (!canEdit || docAutosave.saving) return;
-    setEditing({ ...paragraph, blockIndex });
+    setEditing({ ...paragraph, blockIndex, ...format });
     setEditorText(paragraph.text);
     setSavedEditorText(paragraph.text);
+    setEditorSelection({ start: 0, end: 0 });
+    setFormatStatus("idle");
+    setFormatError(null);
   }
 
   const docAutosave = useAutosave(
@@ -901,12 +1020,14 @@ export function DocumentPreview({
     async () => {
       if (!editing) return;
       const snapshot = editorText;
+      const replacement = googleDocTextReplacement(editing.start, savedEditorText, snapshot);
+      if (!replacement) return;
       const operations: Parameters<typeof editGoogleDoc>[1] = [];
-      if (editing.end > editing.start) {
-        operations.push({ action: "delete_range", start: editing.start, end: editing.end });
+      if (replacement.end > replacement.start) {
+        operations.push({ action: "delete_range", start: replacement.start, end: replacement.end });
       }
-      if (snapshot) {
-        operations.push({ action: "insert_text", index: editing.start, text: snapshot });
+      if (replacement.text) {
+        operations.push({ action: "insert_text", index: replacement.start, text: replacement.text });
       }
       await editGoogleDoc(fileId, operations);
       setSavedEditorText(snapshot);
@@ -919,6 +1040,74 @@ export function DocumentPreview({
     },
     `${fileId}\0${editing?.blockIndex ?? ""}`,
   );
+
+  async function applyParagraphFormat(
+    operations: Parameters<typeof editGoogleDoc>[1],
+    patch: Partial<GoogleDocParagraphFormat>,
+  ) {
+    if (!editing || docAutosave.saving || formatStatus === "saving") return;
+    if (editorText !== savedEditorText && !await docAutosave.flush()) return;
+    setFormatStatus("saving");
+    setFormatError(null);
+    try {
+      await editGoogleDoc(fileId, operations);
+      setEditing((current) => current ? { ...current, ...patch } : current);
+      setFormatStatus("saved");
+      onSaved();
+    } catch (cause) {
+      setFormatStatus("error");
+      setFormatError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  function editorBlur(event: FocusEvent<HTMLElement>) {
+    if (
+      event.relatedTarget instanceof Node
+      && (event.currentTarget.contains(event.relatedTarget)
+        || event.relatedTarget instanceof HTMLElement && event.relatedTarget.closest("[data-google-format-toolbar]"))
+    ) return;
+    if (editorBusy) return;
+    if (editorText === savedEditorText) setEditing(null);
+    else void docAutosave.flush().then((saved) => {
+      if (saved) setEditing(null);
+    });
+  }
+
+  const selectedEditorRange = editorSelection.end > editorSelection.start
+    ? editorSelection
+    : { start: 0, end: editorText.length };
+  const editorRange = editing && selectedEditorRange.end > selectedEditorRange.start
+    ? {
+      start: editing.start + selectedEditorRange.start,
+      end: editing.start + selectedEditorRange.end,
+    }
+    : null;
+  const editorBusy = docAutosave.saving || formatStatus === "saving";
+
+  function applyDocumentTextFormat(change: GoogleTextFormatChange) {
+    if (!editorRange) return;
+    if (change.field === "alignment") {
+      void applyParagraphFormat(
+        [{ action: "set_paragraph_style", ...editorRange, alignment: change.value }],
+        { alignment: change.value },
+      );
+    } else if (change.field === "fontSize") {
+      void applyParagraphFormat(
+        [{ action: "set_text_style", ...editorRange, font_size: change.value }],
+        { fontSize: change.value },
+      );
+    } else if (change.field === "color") {
+      void applyParagraphFormat(
+        [{ action: "set_text_style", ...editorRange, foreground_color: change.value }],
+        { color: change.value },
+      );
+    } else {
+      void applyParagraphFormat(
+        [{ action: "set_text_style", ...editorRange, [change.field]: change.value }],
+        { [change.field]: change.value },
+      );
+    }
+  }
 
   return (
     <div className="google-doc-viewer">
@@ -996,18 +1185,111 @@ export function DocumentPreview({
             style={{ "--doc-zoom": zoom === "fit" ? fitScale : zoom / 100 } as CSSProperties}
           >
             {body.length ? body.map((item, index) => editing?.blockIndex === index ? (
-              <span className="google-doc-inline-editor" key={index}>
+              <span className="google-doc-inline-editor" onBlur={editorBlur} key={index}>
+                <GoogleTextFormatToolbar
+                  className="google-doc-format-toolbar"
+                  format={editing}
+                  disabled={editorBusy || !editorRange}
+                  onChange={applyDocumentTextFormat}
+                  before={(
+                    <select
+                      aria-label="Paragraph style"
+                      value={editing.namedStyleType}
+                      disabled={editorBusy || !editorRange}
+                      onChange={(event) => {
+                        const namedStyleType = event.currentTarget.value;
+                        if (!editorRange) return;
+                        void applyParagraphFormat(
+                          [{ action: "set_paragraph_style", ...editorRange, named_style_type: namedStyleType }],
+                          { namedStyleType },
+                        );
+                      }}
+                    >
+                      <option value="NORMAL_TEXT">Normal text</option>
+                      <option value="TITLE">Title</option>
+                      <option value="SUBTITLE">Subtitle</option>
+                      {[1, 2, 3, 4, 5, 6].map((level) => (
+                        <option value={`HEADING_${level}`} key={level}>Heading {level}</option>
+                      ))}
+                    </select>
+                  )}
+                  after={(
+                    <>
+                      {(["unordered", "ordered"] as const).map((kind) => (
+                        <button
+                          type="button"
+                          key={kind}
+                          className={editing.listKind === kind ? "active" : ""}
+                          aria-label={kind === "unordered" ? "Bulleted list" : "Numbered list"}
+                          aria-pressed={editing.listKind === kind}
+                          disabled={editorBusy || !editorRange}
+                          onClick={() => {
+                            if (!editorRange) return;
+                            const active = editing.listKind === kind;
+                            void applyParagraphFormat(
+                              active
+                                ? [{ action: "delete_bullets", ...editorRange }]
+                                : [{
+                                  action: "create_bullets",
+                                  ...editorRange,
+                                  bullet_preset: kind === "unordered"
+                                    ? "BULLET_DISC_CIRCLE_SQUARE"
+                                    : "NUMBERED_DECIMAL_ALPHA_ROMAN",
+                                }],
+                              { listKind: active ? null : kind },
+                            );
+                          }}
+                        >
+                          {kind === "unordered" ? "Bullets" : "Numbering"}
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        aria-label="Clear formatting"
+                        disabled={editorBusy || !editorRange}
+                        onClick={() => {
+                          if (!editorRange) return;
+                          const operations: Parameters<typeof editGoogleDoc>[1] = [
+                            { action: "clear_text_style", ...editorRange },
+                            { action: "set_paragraph_style", ...editorRange, named_style_type: "NORMAL_TEXT", alignment: "START" },
+                          ];
+                          if (editing.listKind) operations.push({ action: "delete_bullets", ...editorRange });
+                          void applyParagraphFormat(operations, {
+                            namedStyleType: "NORMAL_TEXT",
+                            bold: false,
+                            italic: false,
+                            underline: false,
+                            fontSize: 11,
+                            color: "#000000",
+                            alignment: "START",
+                            listKind: null,
+                          });
+                        }}
+                      >
+                        Clear
+                      </button>
+                    </>
+                  )}
+                />
                 <textarea
                   aria-label="Edit document paragraph"
                   value={editorText}
                   autoFocus
-                  onChange={(event) => setEditorText(event.currentTarget.value)}
-                  onBlur={() => {
-                    if (editorText === savedEditorText) setEditing(null);
-                    else void docAutosave.flush().then((saved) => {
-                      if (saved) setEditing(null);
-                    });
+                  style={{
+                    color: editing.color,
+                    fontSize: `calc(${editing.fontSize}pt * var(--doc-zoom))`,
+                    fontWeight: editing.bold ? 700 : undefined,
+                    fontStyle: editing.italic ? "italic" : undefined,
+                    textDecoration: editing.underline ? "underline" : undefined,
+                    textAlign: editing.alignment === "JUSTIFIED"
+                      ? "justify"
+                      : editing.alignment.toLocaleLowerCase() as CSSProperties["textAlign"],
                   }}
+                  onChange={(event) => setEditorText(event.currentTarget.value)}
+                  onSelect={(event) => setEditorSelection({
+                    start: event.currentTarget.selectionStart,
+                    end: event.currentTarget.selectionEnd,
+                  })}
                   onKeyDown={(event) => {
                     if (event.key === "Escape") {
                       setEditorText(savedEditorText);
@@ -1016,15 +1298,18 @@ export function DocumentPreview({
                   }}
                 />
                 <small aria-live="polite">
-                  {docAutosave.status === "saving" ? "Saving..." : docAutosave.status === "saved" ? "Saved" : ""}
+                  {editorBusy ? "Saving..." : docAutosave.status === "saved" || formatStatus === "saved" ? "Saved" : ""}
                 </small>
-                {docAutosave.error ? <small className="error" role="alert">{docAutosave.error}</small> : null}
+                {docAutosave.error || formatError
+                  ? <small className="error" role="alert">{docAutosave.error || formatError}</small>
+                  : null}
               </span>
             ) : (
               <DocStructuralElement
                 value={item}
                 inlineObjects={inlineObjects}
                 lists={lists}
+                namedStyles={namedStyles}
                 query={normalizedQuery}
                 blockIndex={index}
                 onEditParagraph={canEdit ? editParagraph : undefined}
@@ -1044,6 +1329,7 @@ function DocStructuralElement({
   value,
   inlineObjects,
   lists,
+  namedStyles,
   query,
   blockIndex,
   onEditParagraph,
@@ -1051,16 +1337,20 @@ function DocStructuralElement({
   value: unknown;
   inlineObjects: Record<string, unknown>;
   lists: Record<string, unknown>;
+  namedStyles: GoogleDocNamedStyleMap;
   query: string;
   blockIndex?: number;
-  onEditParagraph?: (paragraph: GoogleDocEditableParagraph, blockIndex: number) => void;
+  onEditParagraph?: (paragraph: GoogleDocEditableParagraph, blockIndex: number, format: GoogleDocParagraphFormat) => void;
 }): ReactNode {
   if (!isRecord(value)) return null;
   if (isRecord(value.paragraph) && Array.isArray(value.paragraph.elements)) {
-    const style = isRecord(value.paragraph.paragraphStyle) ? value.paragraph.paragraphStyle : {};
-    const namedStyle = typeof style.namedStyleType === "string" ? style.namedStyleType : "";
+    const directStyle = isRecord(value.paragraph.paragraphStyle) ? value.paragraph.paragraphStyle : {};
+    const namedStyle = typeof directStyle.namedStyleType === "string" ? directStyle.namedStyleType : "NORMAL_TEXT";
+    const inherited = namedStyles[namedStyle] ?? namedStyles.NORMAL_TEXT;
+    const style = { ...(namedStyles.NORMAL_TEXT?.paragraphStyle ?? {}), ...(inherited?.paragraphStyle ?? {}), ...directStyle };
+    const textStyle = { ...(namedStyles.NORMAL_TEXT?.textStyle ?? {}), ...(inherited?.textStyle ?? {}) };
     const content = value.paragraph.elements.map((element, index) => (
-      <DocParagraphElement value={element} inlineObjects={inlineObjects} query={query} key={index} />
+      <DocParagraphElement value={element} inlineObjects={inlineObjects} inheritedStyle={textStyle} query={query} key={index} />
     ));
     const paragraphStyle = googleDocParagraphStyle(style);
     const headingProps = blockIndex === undefined ? {} : { "data-doc-heading": blockIndex };
@@ -1083,7 +1373,7 @@ function DocStructuralElement({
         <p
           className="google-doc-list-item"
           data-list-kind={googleDocListKind(bullet, lists)}
-          style={{ ...paragraphStyle, paddingLeft: `${18 + nestingLevel * 18}px` }}
+          style={{ ...paragraphStyle, paddingInlineStart: `${18 + nestingLevel * 18}px` }}
         >
           {content}
         </p>
@@ -1099,9 +1389,9 @@ function DocStructuralElement({
         role="button"
         tabIndex={0}
         title="Double-click to edit this paragraph"
-        onDoubleClick={() => edit(editable, blockIndex)}
+        onDoubleClick={() => edit(editable, blockIndex, googleDocParagraphFormat(value.paragraph, style, textStyle, namedStyle, lists))}
         onKeyDown={(event) => {
-          if (event.key === "Enter") edit(editable, blockIndex);
+          if (event.key === "Enter") edit(editable, blockIndex, googleDocParagraphFormat(value.paragraph, style, textStyle, namedStyle, lists));
         }}
       >
         {paragraphNode}
@@ -1118,7 +1408,7 @@ function DocStructuralElement({
                 <td key={cellIndex}>
                   {isRecord(cell) && Array.isArray(cell.content)
                     ? cell.content.map((item, index) => (
-                      <DocStructuralElement value={item} inlineObjects={inlineObjects} lists={lists} query={query} key={index} />
+                      <DocStructuralElement value={item} inlineObjects={inlineObjects} lists={lists} namedStyles={namedStyles} query={query} key={index} />
                     ))
                     : null}
                 </td>
@@ -1135,10 +1425,12 @@ function DocStructuralElement({
 function DocParagraphElement({
   value,
   inlineObjects,
+  inheritedStyle,
   query,
 }: {
   value: unknown;
   inlineObjects: Record<string, unknown>;
+  inheritedStyle: Record<string, unknown>;
   query: string;
 }): ReactNode {
   if (!isRecord(value)) return null;
@@ -1161,7 +1453,8 @@ function DocParagraphElement({
       : null;
   }
   if (!isRecord(value.textRun) || typeof value.textRun.content !== "string") return null;
-  const style = isRecord(value.textRun.textStyle) ? value.textRun.textStyle : {};
+  const directStyle = isRecord(value.textRun.textStyle) ? value.textRun.textStyle : {};
+  const style = { ...inheritedStyle, ...directStyle };
   const textStyle = googleDocTextStyle(style);
   return (
     <span className={isRecord(style.link) ? "google-doc-link" : undefined} style={textStyle}>
@@ -1169,6 +1462,19 @@ function DocParagraphElement({
     </span>
   );
 }
+
+export type GoogleSlideEditableField = {
+  id: string;
+  label: string;
+  text: string;
+  kind: "shape" | "notes";
+  styleRuns?: Array<{ start: number; end: number; style: Record<string, unknown> }>;
+  paragraphRuns?: Array<{ start: number; end: number; style: Record<string, unknown> }>;
+  x?: number | null;
+  y?: number | null;
+  width?: number | null;
+  height?: number | null;
+};
 
 export function SlidesPreview({
   fileId,
@@ -1201,24 +1507,22 @@ export function SlidesPreview({
   const [presenting, setPresenting] = useState(false);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [savedDrafts, setSavedDrafts] = useState<Record<string, string>>({});
+  const [activeTextFieldId, setActiveTextFieldId] = useState<string | null>(null);
+  const [textSelection, setTextSelection] = useState({ start: 0, end: 0 });
+  const [slideFormat, setSlideFormat] = useState<GoogleTextFormat | null>(null);
+  const [slideFormatStatus, setSlideFormatStatus] = useState<AutosaveStatus>("idle");
+  const [slideFormatError, setSlideFormatError] = useState<string | null>(null);
   const draftSlideRef = useRef<string | null>(null);
   const savedDraftsRef = useRef<Record<string, string>>({});
   const editableFields = useMemo(() => {
     if (!slide) return [];
-    const fields: Array<{
-      id: string;
-      label: string;
-      text: string;
-      kind: "shape" | "notes";
-      x?: number | null;
-      y?: number | null;
-      width?: number | null;
-      height?: number | null;
-    }> = (slide.textElements ?? []).map((element, index) => ({
+    const fields: GoogleSlideEditableField[] = (slide.textElements ?? []).map((element, index) => ({
       id: element.objectId,
       label: `Text ${index + 1}`,
       text: element.text,
       kind: "shape" as const,
+      styleRuns: element.styleRuns,
+      paragraphRuns: element.paragraphRuns,
       x: element.x,
       y: element.y,
       width: element.width,
@@ -1256,6 +1560,9 @@ export function SlidesPreview({
       draftSlideRef.current = slideKey;
       setDrafts(next);
       setSavedDrafts(next);
+      setActiveTextFieldId(null);
+      setSlideFormat(null);
+      setSlideFormatError(null);
       savedDraftsRef.current = next;
       return;
     }
@@ -1397,14 +1704,22 @@ export function SlidesPreview({
       for (const field of editableFields) {
         const draft = snapshot[field.id] ?? "";
         const saved = savedDrafts[field.id] ?? "";
-        if (draft === saved) continue;
-        if (saved) operations.push({ action: "delete_text", object_id: field.id });
-        if (draft) {
+        const replacement = googleDocTextReplacement(0, saved, draft);
+        if (!replacement) continue;
+        if (replacement.end > replacement.start) {
+          operations.push({
+            action: "delete_text",
+            object_id: field.id,
+            start: replacement.start,
+            end: replacement.end,
+          });
+        }
+        if (replacement.text) {
           operations.push({
             action: "insert_text",
             object_id: field.id,
-            offset: 0,
-            text: draft,
+            offset: replacement.start,
+            text: replacement.text,
           });
         }
       }
@@ -1420,6 +1735,50 @@ export function SlidesPreview({
   );
   const shapeFields = editableFields.filter((field) => field.kind === "shape");
   const notesField = editableFields.find((field) => field.kind === "notes");
+  const activeTextField = shapeFields.find((field) => field.id === activeTextFieldId);
+  const activeText = activeTextField ? drafts[activeTextField.id] ?? "" : "";
+  const selectedTextRange = textSelection.end > textSelection.start
+    ? textSelection
+    : { start: 0, end: activeText.length };
+  const activeTextRange = activeTextField && selectedTextRange.end > selectedTextRange.start
+    ? selectedTextRange
+    : null;
+  const activeTextFormat = slideFormat
+    ?? (activeTextField ? googleSlideTextFormat(activeTextField, textSelection.start) : null);
+  const slideEditorBusy = slideAutosave.saving || slideFormatStatus === "saving";
+
+  async function applySlideTextFormat(change: GoogleTextFormatChange) {
+    if (!activeTextField || !activeTextRange || !activeTextFormat || slideEditorBusy) return;
+    if (hasSlideChanges && !await slideAutosave.flush()) return;
+    const operation: GoogleSlidesEditOperation = change.field === "alignment"
+      ? {
+        action: "set_paragraph_style",
+        object_id: activeTextField.id,
+        ...activeTextRange,
+        alignment: change.value,
+      }
+      : {
+        action: "set_text_style",
+        object_id: activeTextField.id,
+        ...activeTextRange,
+        ...(change.field === "fontSize"
+          ? { font_size: change.value }
+          : change.field === "color"
+            ? { foreground_color: change.value }
+            : { [change.field]: change.value }),
+      };
+    setSlideFormatStatus("saving");
+    setSlideFormatError(null);
+    try {
+      await editGoogleSlides(fileId, [operation]);
+      setSlideFormat({ ...activeTextFormat, [change.field]: change.value });
+      setSlideFormatStatus("saved");
+      onSaved();
+    } catch (cause) {
+      setSlideFormatStatus("error");
+      setSlideFormatError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
 
   if (!slides.length) return <div className="google-workspace-state"><strong>This presentation is empty.</strong></div>;
 
@@ -1493,9 +1852,9 @@ export function SlidesPreview({
             Notes
           </button>
         ) : null}
-        {slideAutosave.status === "saving" || slideAutosave.status === "saved" ? (
+        {slideAutosave.status === "saving" || slideAutosave.status === "saved" || slideFormatStatus === "saving" || slideFormatStatus === "saved" ? (
           <small className="google-autosave-status" aria-live="polite">
-            {slideAutosave.status === "saving" ? "Saving..." : "Saved"}
+            {slideAutosave.status === "saving" || slideFormatStatus === "saving" ? "Saving..." : "Saved"}
           </small>
         ) : null}
         <button
@@ -1543,6 +1902,14 @@ export function SlidesPreview({
         ))}
       </nav> : null}
       <div className="google-slide-stage">
+        {editorOpen && activeTextFormat ? (
+          <GoogleTextFormatToolbar
+            className="google-slide-format-toolbar"
+            format={activeTextFormat}
+            disabled={slideEditorBusy || !activeTextRange}
+            onChange={(change) => void applySlideTextFormat(change)}
+          />
+        ) : null}
         <div
           className="google-slide-canvas"
           style={{
@@ -1563,17 +1930,47 @@ export function SlidesPreview({
                 aria-label={`Edit ${field.label.toLocaleLowerCase()}`}
                 key={field.id}
                 value={drafts[field.id] ?? ""}
+                data-active={field.id === activeTextFieldId ? "true" : undefined}
                 style={{
                   left: `${field.x * 100}%`,
                   top: `${field.y * 100}%`,
                   width: `${field.width * 100}%`,
                   height: `${field.height * 100}%`,
+                  ...(field.id === activeTextFieldId && activeTextFormat ? {
+                    color: activeTextFormat.color,
+                    fontSize: `${activeTextFormat.fontSize}px`,
+                    fontWeight: activeTextFormat.bold ? 700 : undefined,
+                    fontStyle: activeTextFormat.italic ? "italic" : undefined,
+                    textDecoration: activeTextFormat.underline ? "underline" : undefined,
+                    textAlign: activeTextFormat.alignment === "JUSTIFIED"
+                      ? "justify"
+                      : activeTextFormat.alignment.toLocaleLowerCase() as CSSProperties["textAlign"],
+                  } : {}),
+                }}
+                onFocus={(event) => {
+                  setActiveTextFieldId(field.id);
+                  setTextSelection({
+                    start: event.currentTarget.selectionStart,
+                    end: event.currentTarget.selectionEnd,
+                  });
+                  setSlideFormat(googleSlideTextFormat(field, event.currentTarget.selectionStart));
+                  setSlideFormatError(null);
                 }}
                 onChange={(event) => setDrafts((current) => ({
                   ...current,
                   [field.id]: event.currentTarget.value,
                 }))}
-                onBlur={() => void slideAutosave.flush()}
+                onSelect={(event) => {
+                  setTextSelection({
+                    start: event.currentTarget.selectionStart,
+                    end: event.currentTarget.selectionEnd,
+                  });
+                  setSlideFormat(null);
+                }}
+                onBlur={(event) => {
+                  if (!(event.relatedTarget instanceof HTMLElement && event.relatedTarget.closest("[data-google-format-toolbar]")))
+                    void slideAutosave.flush();
+                }}
               />
             ) : null
           )) : null}
@@ -1598,7 +1995,9 @@ export function SlidesPreview({
             ) : <p>{slide?.notes?.trim() || "No speaker notes on this slide."}</p>}
           </label>
         ) : null}
-        {slideAutosave.error ? <p className="sheet-hint error" role="alert">{slideAutosave.error}</p> : null}
+        {slideAutosave.error || slideFormatError
+          ? <p className="sheet-hint error" role="alert">{slideAutosave.error || slideFormatError}</p>
+          : null}
       </div>
       </div>
       {presenting && typeof document !== "undefined" ? createPortal(
@@ -1660,6 +2059,21 @@ export function googleSlidesNavigationAction(key: string): GoogleSlidesNavigatio
   if (key === "End") return "last";
   if (key === "Escape") return "exit";
   return null;
+}
+
+export function googleSlideTextFormat(field: GoogleSlideEditableField, index: number): GoogleTextFormat {
+  const runAt = (runs: GoogleSlideEditableField["styleRuns"]) =>
+    runs?.find((run) => run.start <= index && index < run.end) ?? runs?.[runs.length - 1];
+  const textStyle = runAt(field.styleRuns)?.style ?? {};
+  const paragraphStyle = runAt(field.paragraphRuns)?.style ?? {};
+  return {
+    bold: textStyle.bold === true,
+    italic: textStyle.italic === true,
+    underline: textStyle.underline === true,
+    fontSize: googleFontSize(textStyle.fontSize, 14),
+    color: googleColorHex(textStyle.foregroundColor),
+    alignment: googleTextAlignment(paragraphStyle.alignment),
+  };
 }
 
 function GoogleSlideVisual({
@@ -1772,6 +2186,48 @@ function googleDocOutline(body: unknown[]): Array<{ index: number; level: number
   });
 }
 
+function googleDocNamedStyleMap(document: Record<string, unknown>): GoogleDocNamedStyleMap {
+  const namedStyles = isRecord(document.namedStyles) && Array.isArray(document.namedStyles.styles)
+    ? document.namedStyles.styles
+    : [];
+  return Object.fromEntries(namedStyles.flatMap((value) => {
+    if (!isRecord(value) || typeof value.namedStyleType !== "string") return [];
+    return [[value.namedStyleType, {
+      paragraphStyle: isRecord(value.paragraphStyle) ? value.paragraphStyle : {},
+      textStyle: isRecord(value.textStyle) ? value.textStyle : {},
+    }]];
+  }));
+}
+
+function googleDocParagraphFormat(
+  paragraph: Record<string, unknown>,
+  paragraphStyle: Record<string, unknown>,
+  inheritedStyle: Record<string, unknown>,
+  namedStyleType: string,
+  lists: Record<string, unknown>,
+): GoogleDocParagraphFormat {
+  const elements = Array.isArray(paragraph.elements) ? paragraph.elements : [];
+  const runStyles = elements.flatMap((element) => {
+    if (!isRecord(element) || !isRecord(element.textRun)) return [];
+    const direct = isRecord(element.textRun.textStyle) ? element.textRun.textStyle : {};
+    return [{ ...inheritedStyle, ...direct }];
+  });
+  const enabledForAllRuns = (field: "bold" | "italic" | "underline") =>
+    (runStyles.length ? runStyles : [inheritedStyle]).every((style) => style[field] === true);
+  const bullet = isRecord(paragraph.bullet) ? paragraph.bullet : null;
+  const firstStyle = runStyles[0] ?? inheritedStyle;
+  return {
+    namedStyleType,
+    bold: enabledForAllRuns("bold"),
+    italic: enabledForAllRuns("italic"),
+    underline: enabledForAllRuns("underline"),
+    fontSize: googleFontSize(firstStyle.fontSize, 11),
+    color: googleColorHex(firstStyle.foregroundColor),
+    alignment: googleTextAlignment(paragraphStyle.alignment),
+    listKind: bullet ? googleDocListKind(bullet, lists) : null,
+  };
+}
+
 function googleDocParagraphStyle(style: Record<string, unknown>): CSSProperties {
   const alignment = typeof style.alignment === "string" ? style.alignment.toLocaleLowerCase() : undefined;
   const direction = style.contentDirection === "RIGHT_TO_LEFT" ? "rtl" : undefined;
@@ -1782,14 +2238,16 @@ function googleDocParagraphStyle(style: Record<string, unknown>): CSSProperties 
     lineHeight: lineSpacing,
     marginTop: googleDocDimension(style.spaceAbove),
     marginBottom: googleDocDimension(style.spaceBelow),
-    paddingLeft: googleDocDimension(style.indentStart),
-    paddingRight: googleDocDimension(style.indentEnd),
+    paddingInlineStart: googleDocDimension(style.indentStart),
+    paddingInlineEnd: googleDocDimension(style.indentEnd),
   };
 }
 
 function googleDocTextStyle(style: Record<string, unknown>): CSSProperties {
-  const fontSize = googleDocDimension(style.fontSize);
+  let fontSize = googleDocDimension(style.fontSize);
   const weightedFont = isRecord(style.weightedFontFamily) ? style.weightedFontFamily : {};
+  const fontFamily = typeof weightedFont.fontFamily === "string" ? weightedFont.fontFamily : undefined;
+  const weight = typeof weightedFont.weight === "number" ? weightedFont.weight : undefined;
   const decorations = [
     style.underline === true ? "underline" : "",
     style.strikethrough === true ? "line-through" : "",
@@ -1799,13 +2257,15 @@ function googleDocTextStyle(style: Record<string, unknown>): CSSProperties {
     : style.baselineOffset === "SUBSCRIPT"
       ? "sub"
       : undefined;
+  if (baseline) fontSize = fontSize ? `calc(${fontSize} * .83)` : "0.83em";
   return {
     color: googleDocColor(style.foregroundColor),
     backgroundColor: googleDocColor(style.backgroundColor),
-    fontFamily: typeof weightedFont.fontFamily === "string" ? weightedFont.fontFamily : undefined,
+    fontFamily: fontFamily ? `${fontFamily}, Arial, sans-serif` : undefined,
     fontSize,
-    fontWeight: style.bold === true ? 700 : undefined,
+    fontWeight: style.bold === true ? Math.max(700, weight ?? 400) : weight,
     fontStyle: style.italic === true ? "italic" : undefined,
+    fontVariantCaps: style.smallCaps === true ? "small-caps" : undefined,
     textDecoration: decorations || undefined,
     verticalAlign: baseline,
   };
@@ -1827,6 +2287,30 @@ function googleDocColor(value: unknown): string | undefined {
     return Math.round(Math.min(1, Math.max(0, typeof value === "number" ? value : 0)) * 255);
   };
   return `rgb(${channel("red")} ${channel("green")} ${channel("blue")})`;
+}
+
+function googleColorHex(value: unknown): string {
+  const choice = isRecord(value) && isRecord(value.color)
+    ? value.color
+    : isRecord(value) && isRecord(value.opaqueColor)
+      ? value.opaqueColor
+      : value;
+  const rgb = isRecord(choice) && isRecord(choice.rgbColor) ? choice.rgbColor : choice;
+  if (!isRecord(rgb)) return "#000000";
+  const channel = (key: string) => Math.round(
+    Math.min(1, Math.max(0, typeof rgb[key] === "number" ? rgb[key] : 0)) * 255,
+  ).toString(16).padStart(2, "0");
+  return `#${channel("red")}${channel("green")}${channel("blue")}`;
+}
+
+function googleFontSize(value: unknown, fallback: number): number {
+  return isRecord(value) && typeof value.magnitude === "number"
+    ? Math.round(value.magnitude)
+    : fallback;
+}
+
+function googleTextAlignment(value: unknown): GoogleTextAlignment {
+  return value === "CENTER" || value === "END" || value === "JUSTIFIED" ? value : "START";
 }
 
 function googleDocListKind(bullet: Record<string, unknown>, lists: Record<string, unknown>): "ordered" | "unordered" {

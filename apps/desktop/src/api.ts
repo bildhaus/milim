@@ -1009,6 +1009,8 @@ export type GoogleFilePreview =
         textElements: Array<{
           objectId: string;
           text: string;
+          styleRuns?: Array<{ start: number; end: number; style: Record<string, unknown> }>;
+          paragraphRuns?: Array<{ start: number; end: number; style: Record<string, unknown> }>;
           x?: number | null;
           y?: number | null;
           width?: number | null;
@@ -1036,11 +1038,20 @@ export type GoogleSheetEditOperation =
 
 export type GoogleDocEditOperation =
   | { action: "delete_range"; start: number; end: number }
-  | { action: "insert_text"; index: number; text: string };
+  | { action: "insert_text"; index: number; text: string }
+  | { action: "set_text_style"; start: number; end: number; bold?: boolean; italic?: boolean; underline?: boolean; font_size?: number; foreground_color?: string }
+  | { action: "clear_text_style"; start: number; end: number }
+  | { action: "set_paragraph_style"; start: number; end: number; named_style_type?: string; alignment?: GoogleTextAlignment }
+  | { action: "create_bullets"; start: number; end: number; bullet_preset: "BULLET_DISC_CIRCLE_SQUARE" | "NUMBERED_DECIMAL_ALPHA_ROMAN" }
+  | { action: "delete_bullets"; start: number; end: number };
+
+export type GoogleTextAlignment = "START" | "CENTER" | "END" | "JUSTIFIED";
 
 export type GoogleSlidesEditOperation =
-  | { action: "delete_text"; object_id: string }
-  | { action: "insert_text"; object_id: string; offset?: number; text: string };
+  | { action: "delete_text"; object_id: string; start?: number; end?: number }
+  | { action: "insert_text"; object_id: string; offset?: number; text: string }
+  | { action: "set_text_style"; object_id: string; start: number; end: number; bold?: boolean; italic?: boolean; underline?: boolean; font_size?: number; foreground_color?: string }
+  | { action: "set_paragraph_style"; object_id: string; start: number; end: number; alignment: GoogleTextAlignment };
 
 export async function getGoogleWorkspaceStatus(): Promise<GoogleWorkspaceStatus> {
   return await parseJsonResponse<GoogleWorkspaceStatus>(

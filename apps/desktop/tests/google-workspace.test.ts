@@ -6,6 +6,7 @@ import {
   GOOGLE_CONNECT_DISCLOSURE,
   GOOGLE_REMOVE_MESSAGE,
   googleDocEditableParagraph,
+  googleDocTextReplacement,
   googleDisconnectMessage,
   googleSheetCellRange,
   googleWorkspaceFileUrl,
@@ -85,6 +86,21 @@ test("extracts only safe top-level Docs paragraphs for editing", () => {
       endIndex: 6,
       paragraph: { elements: [{ inlineObjectElement: { inlineObjectId: "image" } }] },
     }),
+    null,
+  );
+});
+
+test("replaces only the changed Docs text range", () => {
+  assert.deepEqual(
+    googleDocTextReplacement(10, "Hello styled world", "Hello edited world"),
+    { start: 16, end: 20, text: "edit" },
+  );
+  assert.deepEqual(
+    googleDocTextReplacement(10, "A😀B", "A🙂B"),
+    { start: 11, end: 13, text: "🙂" },
+  );
+  assert.deepEqual(
+    googleDocTextReplacement(10, "same", "same"),
     null,
   );
 });

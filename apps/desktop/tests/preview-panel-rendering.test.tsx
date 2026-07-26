@@ -172,7 +172,7 @@ try {
   const { ContextMenuProvider } = await server.ssrLoadModule("/src/components/ContextMenu.tsx") as {
     ContextMenuProvider: ComponentType<{ children: ReactNode }>;
   };
-  const { DocumentPreview, FolderPreview, SheetPreview, SlidesPreview, browserLinkOpensNewTab, googleDocFitScale, googleFileKindDetail, googleSlidesNavigationAction, googleWorkspacePreviewNeedsLoad } = await server.ssrLoadModule("/src/components/GoogleWorkspacePreview.tsx") as {
+  const { DocumentPreview, FolderPreview, GoogleTextFormatToolbar, SheetPreview, SlidesPreview, browserLinkOpensNewTab, googleDocFitScale, googleFileKindDetail, googleSlideTextFormat, googleSlidesNavigationAction, googleWorkspacePreviewNeedsLoad } = await server.ssrLoadModule("/src/components/GoogleWorkspacePreview.tsx") as {
     DocumentPreview: ComponentType<{
       fileId: string;
       canEdit: boolean;
@@ -203,9 +203,21 @@ try {
       canEdit: boolean;
       onSaved: () => void;
     }>;
+    GoogleTextFormatToolbar: ComponentType<{
+      format: { bold: boolean; italic: boolean; underline: boolean; fontSize: number; color: string; alignment: "START" | "CENTER" | "END" | "JUSTIFIED" };
+      onChange: () => void;
+    }>;
     browserLinkOpensNewTab: (event: { button: number; ctrlKey: boolean; metaKey: boolean }) => boolean;
     googleDocFitScale: (width: number, paddingLeft: number, paddingRight: number) => number;
     googleFileKindDetail: (file: GoogleFileSummary) => string;
+    googleSlideTextFormat: (field: {
+      id: string;
+      label: string;
+      text: string;
+      kind: "shape";
+      styleRuns: Array<{ start: number; end: number; style: Record<string, unknown> }>;
+      paragraphRuns: Array<{ start: number; end: number; style: Record<string, unknown> }>;
+    }, index: number) => { bold: boolean; fontSize: number; color: string; alignment: string };
     googleSlidesNavigationAction: (key: string) => "previous" | "next" | "first" | "last" | "exit" | null;
     googleWorkspacePreviewNeedsLoad: (active: boolean, loadedRequest: string | null, request: string) => boolean;
   };
@@ -269,6 +281,13 @@ try {
     fileId: "doc_123",
     canEdit: true,
     document: {
+      namedStyles: { styles: [{
+        namedStyleType: "NORMAL_TEXT",
+        textStyle: {
+          weightedFontFamily: { fontFamily: "Roboto", weight: 500 },
+          smallCaps: true,
+        },
+      }] },
       body: { content: [
         { startIndex: 1, endIndex: 15, paragraph: {
           paragraphStyle: { namedStyleType: "TITLE", alignment: "CENTER" },
@@ -288,7 +307,18 @@ try {
   assert(documentMarkup.includes('<option value="fit" selected="">Fit width</option>'), "Docs preview should default to one unambiguous fit-width zoom mode");
   assert(documentMarkup.includes('aria-label="Show document outline"'), "Docs preview should expose a heading outline control");
   assert(documentMarkup.includes("text-align:center"), "Docs preview should preserve paragraph alignment");
+  assert(documentMarkup.includes("font-family:Roboto"), "Docs preview should inherit named-style fonts");
+  assert(documentMarkup.includes("font-weight:500"), "Docs preview should preserve named-style font weights");
+  assert(documentMarkup.includes("font-variant-caps:small-caps"), "Docs preview should preserve small caps");
   assert(documentMarkup.includes("Double-click to edit this paragraph"), "Editable Docs previews should expose paragraph editing");
+  const formatToolbarMarkup = renderToStaticMarkup(createElement(GoogleTextFormatToolbar, {
+    format: { bold: true, italic: false, underline: false, fontSize: 18, color: "#336699", alignment: "CENTER" },
+    onChange: () => {},
+  }));
+  assert(formatToolbarMarkup.includes('role="toolbar"'), "Docs and Slides should share an accessible formatting toolbar");
+  assert(formatToolbarMarkup.includes('aria-label="Font size"'), "Formatting toolbar should expose font size");
+  assert(formatToolbarMarkup.includes('aria-label="Text alignment"'), "Formatting toolbar should expose alignment");
+  assert(formatToolbarMarkup.includes('aria-label="Text color"'), "Formatting toolbar should expose text color");
   assert(googleDocFitScale(860, 22, 22) === 1, "Docs fit width should preserve a full-size page");
   assert(googleDocFitScale(452, 22, 22) === 0.5, "Docs fit width should scale to half width");
   assert(googleDocFitScale(0, 22, 22) === 0.1, "Docs fit width should retain a visible minimum scale");
@@ -344,6 +374,20 @@ try {
   assert(googleSlidesNavigationAction("End") === "last", "Slides should jump to the last slide with End");
   assert(googleSlidesNavigationAction("Escape") === "exit", "Slides should exit presentation mode with Escape");
   assert(googleSlidesNavigationAction("Enter") === null, "Slides should ignore unrelated keys");
+  const slideFormat = googleSlideTextFormat({
+    id: "title_1",
+    label: "Title",
+    text: "Opening",
+    kind: "shape",
+    styleRuns: [{ start: 0, end: 7, style: {
+      bold: true,
+      fontSize: { magnitude: 24, unit: "PT" },
+      foregroundColor: { opaqueColor: { rgbColor: { red: 0.2, green: 0.4, blue: 0.6 } } },
+    } }],
+    paragraphRuns: [{ start: 0, end: 7, style: { alignment: "CENTER" } }],
+  }, 2);
+  assert(slideFormat.bold && slideFormat.fontSize === 24, "Slides toolbar should read the selected text style");
+  assert(slideFormat.color === "#336699" && slideFormat.alignment === "CENTER", "Slides toolbar should read color and alignment");
   const folderMarkup = renderToStaticMarkup(createElement(
     ContextMenuProvider,
     null,
