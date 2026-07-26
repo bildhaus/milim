@@ -432,6 +432,7 @@ function AppContent() {
   const interfaceSounds = useUiPreferences((s) => s.interfaceSounds);
   const soundOnInteractions = useUiPreferences((s) => s.soundOnInteractions);
   const chatLayoutStyle = useUiPreferences((s) => s.chatLayoutStyle);
+  const sidebarRailStyle = useUiPreferences((s) => s.sidebarRailStyle);
   const messageWidth = useUiPreferences((s) => s.messageWidth);
   const avatarStyle = useUiPreferences((s) => s.avatarStyle);
   const codeBlockTheme = useUiPreferences((s) => s.codeBlockTheme);
@@ -440,6 +441,7 @@ function AppContent() {
   const appClassName = [
     "app",
     `chat-layout-${chatLayoutStyle}`,
+    `sidebar-rail-${sidebarRailStyle}`,
     `message-width-${messageWidth}`,
     `avatar-style-${avatarStyle}`,
     `code-theme-${codeBlockTheme}`,

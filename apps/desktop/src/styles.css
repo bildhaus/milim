@@ -1238,7 +1238,6 @@ body.sidebar-pointer-dragging .session-section-title {
 }
 .sidebar.resizing { transition: none; }
 .sidebar.collapsed { width: 48px; }
-.sidebar.collapsed::before { content: none; }
 .sidebar-inner { width: 100%; height: 100%; display: flex; flex-direction: column; padding: 18px 15px 16px; }
 .sidebar-rail {
   width: 48px;
@@ -1246,7 +1245,7 @@ body.sidebar-pointer-dragging .session-section-title {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 6px;
+  padding: 16px 6px;
 }
 .sidebar-rail-main,
 .sidebar-rail-bottom {
@@ -1254,8 +1253,25 @@ body.sidebar-pointer-dragging .session-section-title {
   flex-direction: column;
   align-items: center;
   gap: 8px;
+}
+.sidebar-rail-bottom {
+  margin-top: auto;
+}
+.app.sidebar-rail-split .sidebar.collapsed::before,
+.app.sidebar-rail-centered .sidebar.collapsed::before {
+  content: none;
+}
+.app.sidebar-rail-split .sidebar-rail {
+  padding: 6px;
+}
+.app.sidebar-rail-split .sidebar-rail-main,
+.app.sidebar-rail-split .sidebar-rail-bottom {
   width: 100%;
   padding: 10px 0;
+}
+.app.sidebar-rail-split .sidebar-rail-main,
+.app.sidebar-rail-split .sidebar-rail-bottom,
+.app.sidebar-rail-centered .sidebar-rail {
   border: 1px solid var(--border-primary);
   border-radius: var(--card-radius);
   background: var(--sidebar-bg);
@@ -1264,8 +1280,19 @@ body.sidebar-pointer-dragging .session-section-title {
     0 8px 28px color-mix(in srgb, #000 7%, transparent);
   backdrop-filter: blur(var(--blur));
 }
-.sidebar-rail-bottom {
-  margin-top: auto;
+.app.sidebar-rail-centered .sidebar.collapsed {
+  display: flex;
+  align-items: center;
+}
+.app.sidebar-rail-centered .sidebar-rail {
+  width: 36px;
+  height: auto;
+  margin: 0 6px;
+  padding: 10px 2px;
+  gap: 8px;
+}
+.app.sidebar-rail-centered .sidebar-rail-bottom {
+  margin-top: 0;
 }
 .sidebar-rail-status {
   display: flex;
@@ -11259,6 +11286,9 @@ span.provider-brand-icon {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
+}
+.sidebar-rail-style-field .settings-choice-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 .settings-choice-button {
   display: grid;

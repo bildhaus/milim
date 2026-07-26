@@ -33,6 +33,7 @@ assert(source.includes("GOOGLE_CONNECT_DISCLOSURE"), "Fresh Google connections s
 assert(source.includes("GOOGLE_REMOVE_MESSAGE"), "Removing a file must use the local-registry-only copy");
 assert(source.includes('data-setting-id="system-secret-storage"'), "System settings should report credential storage");
 assert(source.includes('testIdPrefix="browser-storage"'), "Browser storage should use the accessible choice control");
+assert(source.includes('testIdPrefix="sidebar-rail-style"'), "Appearance settings should expose collapsed sidebar rail styles");
 assert(source.includes('data-testid="browser-data-clear"'), "Browser data should have an explicit clear action");
 assert(source.includes('data-testid="developer-show-update-cards"'), "Developer settings should preview update cards");
 assert(!source.includes("filteredSettingsSections"), "Search should not switch the active section while typing");
@@ -87,6 +88,7 @@ equal(matchingSettingsEntries("sound")[0]?.id, "appearance-interface-sounds", "S
 equal(matchingSettingsEntries("worktree")[0]?.id, "workspace-new-chat", "Search should find workspace policies");
 equal(matchingSettingsEntries("ghost text")[0]?.id, "chat-ai-completion", "Search should find composer completion");
 equal(matchingSettingsEntries("ridgeline")[0]?.id, "appearance-empty-chat-ridgeline", "Search should find the empty-chat ridgeline preference");
+equal(matchingSettingsEntries("split rail")[0]?.id, "appearance-sidebar-colors", "Search should find collapsed sidebar rail styles");
 equal(matchingSettingsEntries("thread colors")[0]?.id, "appearance-sidebar-colors", "Search should find automatic project thread colors");
 equal(matchingSettingsEntries("cookies")[0]?.id, "browser-data", "Search should find browser data controls");
 equal(matchingSettingsEntries("sheets")[0]?.id, "google-workspace", "Search should find Google Workspace controls");

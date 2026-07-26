@@ -255,6 +255,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const developerMode = useUiPreferences((s) => s.developerMode);
   const experimentalHashlinePatch = useUiPreferences((s) => s.experimentalHashlinePatch);
   const chatLayoutStyle = useUiPreferences((s) => s.chatLayoutStyle);
+  const sidebarRailStyle = useUiPreferences((s) => s.sidebarRailStyle);
   const showEmptyChatRidgeline = useUiPreferences((s) => s.showEmptyChatRidgeline);
   const autoColorThreadNames = useUiPreferences((s) => s.autoColorThreadNames);
   const messageWidth = useUiPreferences((s) => s.messageWidth);
@@ -301,6 +302,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const setDeveloperMode = useUiPreferences((s) => s.setDeveloperMode);
   const setExperimentalHashlinePatch = useUiPreferences((s) => s.setExperimentalHashlinePatch);
   const setChatLayoutStyle = useUiPreferences((s) => s.setChatLayoutStyle);
+  const setSidebarRailStyle = useUiPreferences((s) => s.setSidebarRailStyle);
   const setShowEmptyChatRidgeline = useUiPreferences((s) => s.setShowEmptyChatRidgeline);
   const setAutoColorThreadNames = useUiPreferences((s) => s.setAutoColorThreadNames);
   const setMessageWidth = useUiPreferences((s) => s.setMessageWidth);
@@ -1722,17 +1724,33 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
               </div>
             </SettingsBlock>
             <SettingsBlock title="Sidebar" data-setting-id="appearance-sidebar-colors" className={settingHighlightClass("appearance-sidebar-colors").trim()}>
-              <div className="setting-toggle-row">
-                <div>
-                  <strong>Automatically color project thread names</strong>
-                  <span>Derive one stable color per project from the active theme accent. Custom project colors take priority.</span>
+              <div className="setting-stack">
+                <div className="setting-field sidebar-rail-style-field">
+                  <span className="setting-mini-title">Collapsed rail</span>
+                  <SettingsChoiceGroup
+                    value={sidebarRailStyle}
+                    onChange={setSidebarRailStyle}
+                    testIdPrefix="sidebar-rail-style"
+                    ariaLabel="Collapsed sidebar rail style"
+                    options={[
+                      { value: "regular", label: "Regular", detail: "One full-height rail." },
+                      { value: "split", label: "Split", detail: "Actions at the top and bottom." },
+                      { value: "centered", label: "Centered", detail: "One compact group in the middle." },
+                    ]}
+                  />
                 </div>
-                <Toggle
-                  checked={autoColorThreadNames}
-                  onChange={setAutoColorThreadNames}
-                  ariaLabel="Automatically color project thread names"
-                  testId="auto-color-thread-names-toggle"
-                />
+                <div className="setting-toggle-row">
+                  <div>
+                    <strong>Automatically color project thread names</strong>
+                    <span>Derive one stable color per project from the active theme accent. Custom project colors take priority.</span>
+                  </div>
+                  <Toggle
+                    checked={autoColorThreadNames}
+                    onChange={setAutoColorThreadNames}
+                    ariaLabel="Automatically color project thread names"
+                    testId="auto-color-thread-names-toggle"
+                  />
+                </div>
               </div>
             </SettingsBlock>
             <SettingsBlock title="Empty chat" data-setting-id="appearance-empty-chat-ridgeline" className={settingHighlightClass("appearance-empty-chat-ridgeline").trim()}>
