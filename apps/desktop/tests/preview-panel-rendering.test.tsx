@@ -172,7 +172,7 @@ try {
   const { ContextMenuProvider } = await server.ssrLoadModule("/src/components/ContextMenu.tsx") as {
     ContextMenuProvider: ComponentType<{ children: ReactNode }>;
   };
-  const { DocumentPreview, FolderPreview, GoogleTextFormatToolbar, SheetPreview, SlidesPreview, browserLinkOpensNewTab, googleDocFitScale, googleFileKindDetail, googleSlideTextFormat, googleSlidesNavigationAction, googleWorkspacePreviewNeedsLoad } = await server.ssrLoadModule("/src/components/GoogleWorkspacePreview.tsx") as {
+  const { DocumentPreview, FolderPreview, GoogleTextFormatToolbar, SheetPreview, SlidesPreview, browserLinkOpensNewTab, googleDocFitScale, googleFileKindDetail, googleSlideGestureRect, googleSlideGroupBounds, googleSlideMarqueeRect, googleSlideRectsIntersect, googleSlideSnapRect, googleSlideTextFormat, googleSlideTextSegments, googleSlideThumbnailRequestKey, googleSlideTransformGroup, googleSlidesNavigationAction, googleWorkspacePreviewNeedsLoad } = await server.ssrLoadModule("/src/components/GoogleWorkspacePreview.tsx") as {
     DocumentPreview: ComponentType<{
       fileId: string;
       canEdit: boolean;
@@ -199,6 +199,8 @@ try {
       fileId: string;
       slides: Extract<GoogleFilePreview, { kind: "presentation" }>["slides"];
       pageAspectRatio: number;
+      pageWidth: number;
+      pageHeight: number;
       active: boolean;
       canEdit: boolean;
       onSaved: () => void;
@@ -210,6 +212,13 @@ try {
     browserLinkOpensNewTab: (event: { button: number; ctrlKey: boolean; metaKey: boolean }) => boolean;
     googleDocFitScale: (width: number, paddingLeft: number, paddingRight: number) => number;
     googleFileKindDetail: (file: GoogleFileSummary) => string;
+    googleSlideGestureRect: (rect: { x: number; y: number; width: number; height: number }, deltaX: number, deltaY: number, handle: "move" | "ne" | "se" | "sw" | "nw") => { x: number; y: number; width: number; height: number };
+    googleSlideGroupBounds: (rects: Array<{ x: number; y: number; width: number; height: number }>) => { x: number; y: number; width: number; height: number } | null;
+    googleSlideMarqueeRect: (startX: number, startY: number, endX: number, endY: number) => { x: number; y: number; width: number; height: number };
+    googleSlideRectsIntersect: (a: { x: number; y: number; width: number; height: number }, b: { x: number; y: number; width: number; height: number }) => boolean;
+    googleSlideSnapRect: (rect: { x: number; y: number; width: number; height: number }, others: Array<{ x: number; y: number; width: number; height: number }>, handle: "move" | "ne" | "se" | "sw" | "nw", thresholdX: number, thresholdY: number) => { rect: { x: number; y: number; width: number; height: number }; guideX?: number; guideY?: number };
+    googleSlideThumbnailRequestKey: (fileId: string, slideId: string, generation: number) => string;
+    googleSlideTransformGroup: (rect: { x: number; y: number; width: number; height: number }, from: { x: number; y: number; width: number; height: number }, to: { x: number; y: number; width: number; height: number }) => { x: number; y: number; width: number; height: number };
     googleSlideTextFormat: (field: {
       id: string;
       label: string;
@@ -218,6 +227,14 @@ try {
       styleRuns: Array<{ start: number; end: number; style: Record<string, unknown> }>;
       paragraphRuns: Array<{ start: number; end: number; style: Record<string, unknown> }>;
     }, index: number) => { bold: boolean; fontSize: number; color: string; alignment: string };
+    googleSlideTextSegments: (field: {
+      id: string;
+      label: string;
+      text: string;
+      kind: "shape";
+      styleRuns: Array<{ start: number; end: number; style: Record<string, unknown> }>;
+      paragraphRuns: Array<{ start: number; end: number; style: Record<string, unknown> }>;
+    }) => Array<{ start: number; end: number; text: string; format: { bold: boolean; italic: boolean; color: string } }>;
     googleSlidesNavigationAction: (key: string) => "previous" | "next" | "first" | "last" | "exit" | null;
     googleWorkspacePreviewNeedsLoad: (active: boolean, loadedRequest: string | null, request: string) => boolean;
   };
@@ -310,9 +327,15 @@ try {
   assert(documentMarkup.includes("font-family:Roboto"), "Docs preview should inherit named-style fonts");
   assert(documentMarkup.includes("font-weight:500"), "Docs preview should preserve named-style font weights");
   assert(documentMarkup.includes("font-variant-caps:small-caps"), "Docs preview should preserve small caps");
-  assert(documentMarkup.includes('contenteditable="plaintext-only"'), "Editable Docs previews should edit rendered paragraphs directly");
-  assert(documentMarkup.includes('aria-label="Edit document paragraph"'), "Inline Docs editors should expose textbox semantics");
+  assert(documentMarkup.includes('contenteditable="true"'), "Editable Docs previews should use a native document editing surface");
+  assert(documentMarkup.includes('aria-label="Edit document text"'), "Inline Docs editors should expose document textbox semantics");
+  assert(
+    documentMarkup.match(/contenteditable="true"/g)?.length === 1,
+    "Adjacent Docs paragraphs should share one editing surface",
+  );
   assert(documentMarkup.includes('aria-label="Paragraph formatting"'), "Docs should keep paragraph and list controls in a fixed toolbar");
+  assert(documentMarkup.includes("google-doc-unified-toolbar"), "Docs should consolidate search and formatting into one command bar");
+  assert(!documentMarkup.includes("google-doc-selection-toolbar"), "Docs should not render a separate floating selection toolbar");
   assert(documentMarkup.includes("Click text to edit"), "Editable Docs previews should expose paragraph editing");
   const formatToolbarMarkup = renderToStaticMarkup(createElement(GoogleTextFormatToolbar, {
     format: { bold: true, italic: false, underline: false, fontSize: 18, color: "#336699", alignment: "CENTER" },
@@ -342,6 +365,8 @@ try {
     active: true,
     canEdit: true,
     pageAspectRatio: 16 / 9,
+    pageWidth: 720,
+    pageHeight: 405,
     onSaved: () => {},
     slides: [
       {
@@ -349,7 +374,32 @@ try {
         text: "Opening",
         notes: "Welcome everyone",
         notesObjectId: "notes_1",
-        textElements: [{ objectId: "title_1", text: "Opening", x: 0.1, y: 0.1, width: 0.8, height: 0.2 }],
+        textElements: [{
+          objectId: "title_1",
+          text: "Opening",
+          styleRuns: [{ start: 0, end: 7, style: {
+            fontFamily: "Aptos",
+            fontSize: { magnitude: 32, unit: "PT" },
+          } }],
+          paragraphRuns: [{ start: 0, end: 7, style: { alignment: "CENTER" } }],
+          contentAlignment: "MIDDLE",
+          fontScale: 0.9,
+          x: 0.1,
+          y: 0.1,
+          width: 0.8,
+          height: 0.2,
+        }],
+        elements: [{
+          objectId: "title_1",
+          kind: "shape",
+          order: 0,
+          x: 0.1,
+          y: 0.1,
+          width: 0.8,
+          height: 0.2,
+          baseWidth: 576,
+          baseHeight: 81,
+        }],
       },
       {
         objectId: "slide_2",
@@ -365,10 +415,25 @@ try {
   assert(slidesMarkup.includes('aria-label="Slide zoom"'), "Slides preview should expose zoom");
   assert(slidesMarkup.includes('<option value="fit" selected="">Fit</option>'), "Slides preview should default to one unambiguous fit zoom mode");
   assert(slidesMarkup.includes('aria-label="Hide slide thumbnails"'), "Slides preview should expose a thumbnail-rail toggle");
+  assert(slidesMarkup.includes('aria-label="New slide"'), "Editable Slides previews should create slides inline");
+  assert(slidesMarkup.includes('aria-label="Duplicate slide"'), "Editable Slides previews should duplicate slides inline");
+  assert(slidesMarkup.includes('aria-label="Delete slide"'), "Editable Slides previews should delete slides inline");
+  assert(slidesMarkup.includes('aria-label="Slide 1"'), "Slide thumbnails should expose number-only navigation labels");
+  assert(slidesMarkup.includes('aria-label="Duplicate slide 1"'), "Slide thumbnail actions should expose duplication on hover and focus");
+  assert(slidesMarkup.includes('aria-label="Delete slide 1"'), "Slide thumbnail actions should expose deletion on hover and focus");
+  assert(!slidesMarkup.includes("<small>Opening</small>"), "Slide thumbnails should not repeat slide text beneath the preview");
   assert(slidesMarkup.includes('aria-haspopup="dialog"'), "Slides preview should expose presentation mode");
   assert(slidesMarkup.includes(">Present<"), "Slides preview should label the presentation action");
   assert(slidesMarkup.includes(">Notes<"), "Slides preview should expose available speaker notes");
-  assert(slidesMarkup.includes(">Edit slide text<"), "Editable Slides previews should clearly label shape-text editing");
+  assert(!slidesMarkup.includes(">Edit slide text<"), "Slides text should not require a separate edit-mode toggle");
+  assert(slidesMarkup.includes('class="google-slide-inline-editor"'), "Editable slide text boxes should always be directly interactive");
+  assert(slidesMarkup.includes('contenteditable="true"'), "Slides should edit text in place without textarea overlays");
+  assert(slidesMarkup.includes('data-content-alignment="MIDDLE"'), "Slides editors should preserve vertical text alignment");
+  assert(slidesMarkup.includes("text-align:center"), "Slides editors should preserve paragraph alignment");
+  assert(!slidesMarkup.includes("google-slide-format-toolbar"), "Slides should not render a floating selection toolbar");
+  assert(slidesMarkup.includes("google-slides-unified-toolbar"), "Slides should keep contextual formatting in the top command bar");
+  assert(slidesMarkup.includes('aria-label="Loading slide preview"'), "Slides should use a neutral thumbnail loading state");
+  assert(!slidesMarkup.includes("<strong>Slide "), "Slides should not render flattened text as a fake slide preview");
   assert(slidesMarkup.includes('aria-current="page"'), "Slides preview should mark the active slide");
   assert(googleSlidesNavigationAction("ArrowLeft") === "previous", "Slides should move backward with ArrowLeft");
   assert(googleSlidesNavigationAction("PageDown") === "next", "Slides should move forward with PageDown");
@@ -377,6 +442,37 @@ try {
   assert(googleSlidesNavigationAction("End") === "last", "Slides should jump to the last slide with End");
   assert(googleSlidesNavigationAction("Escape") === "exit", "Slides should exit presentation mode with Escape");
   assert(googleSlidesNavigationAction("Enter") === null, "Slides should ignore unrelated keys");
+  assert(
+    googleSlideThumbnailRequestKey("deck", "slide", 1) !== googleSlideThumbnailRequestKey("deck", "slide", 2),
+    "Slides should refresh thumbnails in the background after each reconciled save",
+  );
+  const movedRect = googleSlideGestureRect({ x: 0.1, y: 0.1, width: 0.2, height: 0.2 }, 0.9, 0.9, "move");
+  assert(movedRect.x === 0.8 && movedRect.y === 0.8, "Slide movement should remain inside the canvas");
+  const resizedRect = googleSlideGestureRect({ x: 0.2, y: 0.2, width: 0.3, height: 0.3 }, -0.1, -0.1, "nw");
+  assert(resizedRect.x === 0.1 && resizedRect.y === 0.1 && resizedRect.width === 0.4 && resizedRect.height === 0.4, "Slide corner handles should resize from the selected edge");
+  const marqueeRect = googleSlideMarqueeRect(0.8, 0.7, 0.2, 0.1);
+  assert(marqueeRect.x === 0.2 && marqueeRect.y === 0.1 && Math.abs(marqueeRect.width - 0.6) < 1e-9 && Math.abs(marqueeRect.height - 0.6) < 1e-9, "Slide marquee selection should work in every drag direction");
+  assert(googleSlideRectsIntersect(marqueeRect, { x: 0.4, y: 0.3, width: 0.1, height: 0.1 }), "Slide marquee selection should include intersecting elements");
+  assert(!googleSlideRectsIntersect(marqueeRect, { x: 0.85, y: 0.8, width: 0.1, height: 0.1 }), "Slide marquee selection should exclude outside elements");
+  const groupBounds = googleSlideGroupBounds([
+    { x: 0.1, y: 0.2, width: 0.2, height: 0.2 },
+    { x: 0.5, y: 0.4, width: 0.1, height: 0.3 },
+  ]);
+  assert(groupBounds?.x === 0.1 && groupBounds.y === 0.2 && groupBounds.width === 0.5 && Math.abs(groupBounds.height - 0.5) < 1e-9, "Slide group bounds should contain every selected element");
+  const groupedRect = googleSlideTransformGroup(
+    { x: 0.5, y: 0.4, width: 0.1, height: 0.3 },
+    groupBounds!,
+    { x: 0.2, y: 0.1, width: 0.25, height: 0.25 },
+  );
+  assert(Math.abs(groupedRect.x - 0.4) < 1e-9 && Math.abs(groupedRect.y - 0.2) < 1e-9 && Math.abs(groupedRect.width - 0.05) < 1e-9 && Math.abs(groupedRect.height - 0.15) < 1e-9, "Slide group resizing should preserve each element's relative position and size");
+  const snappedRect = googleSlideSnapRect(
+    { x: 0.29, y: 0.19, width: 0.2, height: 0.2 },
+    [{ x: 0.5, y: 0.4, width: 0.2, height: 0.2 }],
+    "move",
+    0.02,
+    0.02,
+  );
+  assert(snappedRect.rect.x === 0.3 && snappedRect.rect.y === 0.2 && snappedRect.guideX === 0.5 && snappedRect.guideY === 0.4, "Slide elements should snap matching edges and expose alignment guides");
   const slideFormat = googleSlideTextFormat({
     id: "title_1",
     label: "Title",
@@ -391,6 +487,27 @@ try {
   }, 2);
   assert(slideFormat.bold && slideFormat.fontSize === 24, "Slides toolbar should read the selected text style");
   assert(slideFormat.color === "#336699" && slideFormat.alignment === "CENTER", "Slides toolbar should read color and alignment");
+  const slideSegments = googleSlideTextSegments({
+    id: "title_2",
+    label: "Title",
+    text: "A😀BC",
+    kind: "shape",
+    styleRuns: [
+      { start: 0, end: 3, style: { bold: true } },
+      { start: 3, end: 5, style: { italic: true } },
+    ],
+    paragraphRuns: [{ start: 0, end: 5, style: { alignment: "CENTER" } }],
+  });
+  assert(
+    slideSegments.length === 2
+      && slideSegments[0].text === "A😀"
+      && slideSegments[0].end === 3
+      && slideSegments[0].format.bold
+      && slideSegments[1].text === "BC"
+      && slideSegments[1].start === 3
+      && slideSegments[1].format.italic,
+    "Slides editors should preserve mixed UTF-16 character runs while editing",
+  );
   const folderMarkup = renderToStaticMarkup(createElement(
     ContextMenuProvider,
     null,

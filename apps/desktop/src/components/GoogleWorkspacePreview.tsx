@@ -36,18 +36,39 @@ import {
   applyGoogleSheetValues,
   createGoogleSaveQueue,
   googleDocEditableParagraph,
+  googleDocEditableRegions,
   googleDocSelectionRange,
   googleDocTextReplacement,
-  googleFloatingToolbarPosition,
   googleSheetCellRange,
   googleWorkspaceFileUrl,
   parseGoogleSheetClipboard,
   type GoogleDocEditableParagraph,
-  type GoogleFloatingToolbarPosition,
+  type GoogleDocEditableRegion,
   type GoogleSaveQueueState,
 } from "../lib/googleWorkspace";
 import { useContextMenu } from "./ContextMenu";
-import { ArrowLeft, ArrowRight, Copy, ExternalLink, FileText, Folder, MoreHorizontal, Plus, Refresh, Search, Sidebar, Trash } from "./icons";
+import {
+  AlignCenter,
+  AlignJustify,
+  AlignLeft,
+  AlignRight,
+  ArrowLeft,
+  ArrowRight,
+  ChevronDown,
+  Copy,
+  Eraser,
+  ExternalLink,
+  FileText,
+  Folder,
+  ListBullets,
+  ListNumbers,
+  MoreHorizontal,
+  Plus,
+  Refresh,
+  Search,
+  Sidebar,
+  Trash,
+} from "./icons";
 
 export function GoogleWorkspacePreview({
   fileId,
@@ -249,6 +270,8 @@ export function GoogleWorkspacePreview({
           fileId={preview.file.id}
           slides={preview.slides}
           pageAspectRatio={preview.pageAspectRatio ?? 16 / 9}
+          pageWidth={preview.pageWidth ?? 720}
+          pageHeight={preview.pageHeight ?? 405}
           active={active}
           canEdit={preview.file.capabilities.can_edit}
           onSaved={refresh}
@@ -282,6 +305,10 @@ export function googleWorkspacePreviewNeedsLoad(
   request: string,
 ): boolean {
   return active && loadedRequest !== request;
+}
+
+export function googleSlideThumbnailRequestKey(fileId: string, slideId: string, generation: number) {
+  return `${fileId}\0${slideId}\0${generation}`;
 }
 
 function useGoogleSaveQueue(onDrained: () => void) {
@@ -819,6 +846,7 @@ type GoogleTextFormat = {
   italic: boolean;
   underline: boolean;
   fontSize: number;
+  fontFamily?: string;
   color: string;
   alignment: GoogleTextAlignment;
 };
@@ -827,6 +855,7 @@ function googleTextFormatCss(format: GoogleTextFormat | null): CSSProperties {
   return format ? {
     color: format.color,
     fontSize: `${format.fontSize}px`,
+    fontFamily: format.fontFamily,
     fontWeight: format.bold ? 700 : undefined,
     fontStyle: format.italic ? "italic" : undefined,
     textDecoration: format.underline ? "underline" : undefined,
@@ -845,18 +874,21 @@ type GoogleTextFormatChange =
 export function GoogleTextFormatToolbar({
   format,
   disabled,
-  before,
-  after,
   className = "",
   onChange,
 }: {
   format: GoogleTextFormat;
   disabled?: boolean;
-  before?: ReactNode;
-  after?: ReactNode;
   className?: string;
   onChange: (change: GoogleTextFormatChange) => void;
 }) {
+  const AlignmentIcon = format.alignment === "CENTER"
+    ? AlignCenter
+    : format.alignment === "END"
+      ? AlignRight
+      : format.alignment === "JUSTIFIED"
+        ? AlignJustify
+        : AlignLeft;
   return (
     <span
       className={`google-text-format-toolbar ${className}`.trim()}
@@ -864,22 +896,26 @@ export function GoogleTextFormatToolbar({
       aria-label="Text formatting"
       data-google-format-toolbar="true"
     >
-      {before}
-      {(["bold", "italic", "underline"] as const).map((field) => (
-        <button
-          type="button"
-          key={field}
-          className={format[field] ? "active" : ""}
-          aria-label={field[0].toUpperCase() + field.slice(1)}
-          aria-pressed={format[field]}
-          disabled={disabled}
-          onClick={() => onChange({ field, value: !format[field] })}
-        >
-          {field === "bold" ? <strong>B</strong> : field === "italic" ? <em>I</em> : <u>U</u>}
-        </button>
-      ))}
-      <label>
-        <span className="sr-only">Font size</span>
+      <span className="google-toolbar-group">
+        {(["bold", "italic", "underline"] as const).map((field) => (
+          <button
+            type="button"
+            key={field}
+            className={format[field] ? "active" : ""}
+            title={field[0].toUpperCase() + field.slice(1)}
+            aria-label={field[0].toUpperCase() + field.slice(1)}
+            aria-pressed={format[field]}
+            disabled={disabled}
+            onClick={() => onChange({ field, value: !format[field] })}
+          >
+            {field === "bold" ? <strong>B</strong> : field === "italic" ? <em>I</em> : <u>U</u>}
+          </button>
+        ))}
+      </span>
+      <span className="google-toolbar-divider" aria-hidden="true" />
+      <label className="google-toolbar-value-select" title="Font size">
+        <span aria-hidden="true">{format.fontSize}</span>
+        <ChevronDown size={10} aria-hidden="true" />
         <select
           aria-label="Font size"
           value={format.fontSize}
@@ -891,8 +927,9 @@ export function GoogleTextFormatToolbar({
           ))}
         </select>
       </label>
-      <label>
-        <span className="sr-only">Text alignment</span>
+      <label className="google-toolbar-icon-select" title="Text alignment">
+        <AlignmentIcon size={15} aria-hidden="true" />
+        <ChevronDown size={9} aria-hidden="true" />
         <select
           aria-label="Text alignment"
           value={format.alignment}
@@ -909,7 +946,13 @@ export function GoogleTextFormatToolbar({
         </select>
       </label>
       <label className="google-text-color-control" title="Text color">
-        <span className="sr-only">Text color</span>
+        <span
+          className="google-text-color-glyph"
+          style={{ "--google-text-color": format.color } as CSSProperties}
+          aria-hidden="true"
+        >
+          A
+        </span>
         <input
           type="color"
           aria-label="Text color"
@@ -918,7 +961,6 @@ export function GoogleTextFormatToolbar({
           onChange={(event) => onChange({ field: "color", value: event.currentTarget.value })}
         />
       </label>
-      {after}
     </span>
   );
 }
@@ -929,12 +971,9 @@ type GoogleDocParagraphFormat = GoogleTextFormat & {
 };
 
 type GoogleDocEditorState = GoogleDocEditableParagraph & GoogleDocParagraphFormat & {
-  blockIndex: number;
-};
-
-type GoogleDocOverride = {
-  text: string;
-  format: GoogleDocParagraphFormat;
+  regionBlockIndex: number;
+  paragraphStart: number;
+  paragraphEnd: number;
 };
 
 type GoogleDocNamedStyleMap = Record<string, {
@@ -965,19 +1004,18 @@ export function DocumentPreview({
   const [editorText, setEditorText] = useState("");
   const [savedEditorText, setSavedEditorText] = useState("");
   const [editorSelection, setEditorSelection] = useState({ start: 0, end: 0 });
-  const [overrides, setOverrides] = useState<Record<number, GoogleDocOverride>>({});
-  const [floatingToolbar, setFloatingToolbar] = useState<GoogleFloatingToolbarPosition | null>(null);
   const [hasTextSelection, setHasTextSelection] = useState(false);
-  const saveQueue = useGoogleSaveQueue(onSaved);
-  const documentSourceRef = useRef(document);
-  const viewerRef = useRef<HTMLDivElement | null>(null);
+  const dirtyDocumentRef = useRef(false);
+  const editorTextRef = useRef("");
+  const savedEditorTextRef = useRef("");
+  const saveQueue = useGoogleSaveQueue(() => {
+    if (!dirtyDocumentRef.current) onSaved();
+  });
   const contentRef = useRef<HTMLDivElement | null>(null);
   const editorElementRef = useRef<HTMLDivElement | null>(null);
-  const activeOverrideRef = useRef<GoogleDocOverride | undefined>(undefined);
   const savedEditorHtmlRef = useRef("");
   const cancelEditorBlurRef = useRef(false);
   const selectedRangeRef = useRef<Range | null>(null);
-  const floatingToolbarRef = useRef<HTMLSpanElement | null>(null);
   const body = isRecord(document.body) && Array.isArray(document.body.content)
     ? document.body.content
     : [];
@@ -987,13 +1025,17 @@ export function DocumentPreview({
   const lists = isRecord(document.lists) ? document.lists : {};
   const namedStyles = useMemo(() => googleDocNamedStyleMap(document), [document]);
   const outline = useMemo(() => googleDocOutline(body), [body]);
+  const editableRegions = useMemo(() => googleDocEditableRegions(body), [body]);
+  const editableRegionByBlock = useMemo(() => {
+    const regions = new Map<number, { region: GoogleDocEditableRegion; first: boolean }>();
+    editableRegions.forEach((region) => {
+      region.blockIndexes.forEach((blockIndex, index) => {
+        regions.set(blockIndex, { region, first: index === 0 });
+      });
+    });
+    return regions;
+  }, [editableRegions]);
   const normalizedQuery = query.trim();
-
-  useEffect(() => {
-    if (documentSourceRef.current === document || saveQueue.pending > 0) return;
-    documentSourceRef.current = document;
-    setOverrides({});
-  }, [document, saveQueue.pending]);
 
   useEffect(() => {
     const canvas = contentRef.current;
@@ -1020,89 +1062,125 @@ export function DocumentPreview({
     matches[nextActive]?.scrollIntoView({ block: "center" });
   }, [activeMatch, document, normalizedQuery]);
 
-  const positionFloatingToolbar = useCallback(() => {
-    const range = selectedRangeRef.current;
-    const toolbar = floatingToolbarRef.current;
-    const viewer = viewerRef.current;
-    if (!range || !toolbar || !viewer) return;
-    setFloatingToolbar(googleFloatingToolbarPosition(
-      range.getBoundingClientRect(),
-      viewer.getBoundingClientRect(),
-      toolbar.getBoundingClientRect(),
-    ));
-  }, []);
-
-  useEffect(() => {
-    if (!hasTextSelection) {
-      setFloatingToolbar(null);
-      return;
-    }
-    const frame = window.requestAnimationFrame(positionFloatingToolbar);
-    const canvas = contentRef.current;
-    canvas?.addEventListener("scroll", positionFloatingToolbar);
-    window.addEventListener("resize", positionFloatingToolbar);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      canvas?.removeEventListener("scroll", positionFloatingToolbar);
-      window.removeEventListener("resize", positionFloatingToolbar);
-    };
-  }, [hasTextSelection, positionFloatingToolbar]);
-
   function moveSearchMatch(delta: -1 | 1) {
     if (!matchCount) return;
     setActiveMatch((current) => (current + delta + matchCount) % matchCount);
   }
 
-  function editParagraph(
-    paragraph: GoogleDocEditableParagraph,
-    blockIndex: number,
-    format: GoogleDocParagraphFormat,
+  function paragraphFormat(blockIndex: number): GoogleDocParagraphFormat {
+    const value = body[blockIndex];
+    if (!isRecord(value) || !isRecord(value.paragraph)) {
+      return {
+        namedStyleType: "NORMAL_TEXT",
+        listKind: null,
+        bold: false,
+        italic: false,
+        underline: false,
+        fontSize: 11,
+        color: "#000000",
+        alignment: "START",
+      };
+    }
+    const directStyle = isRecord(value.paragraph.paragraphStyle) ? value.paragraph.paragraphStyle : {};
+    const namedStyle = typeof directStyle.namedStyleType === "string" ? directStyle.namedStyleType : "NORMAL_TEXT";
+    const inherited = namedStyles[namedStyle] ?? namedStyles.NORMAL_TEXT;
+    const style = { ...(namedStyles.NORMAL_TEXT?.paragraphStyle ?? {}), ...(inherited?.paragraphStyle ?? {}), ...directStyle };
+    const textStyle = { ...(namedStyles.NORMAL_TEXT?.textStyle ?? {}), ...(inherited?.textStyle ?? {}) };
+    return googleDocParagraphFormat(value.paragraph, style, textStyle, namedStyle, lists);
+  }
+
+  function editRegion(
+    region: GoogleDocEditableRegion,
     element: HTMLDivElement,
   ) {
     if (!canEdit) return;
-    if (editorElementRef.current === element && editing?.blockIndex === blockIndex) return;
+    if (editorElementRef.current === element && editing?.regionBlockIndex === region.blockIndexes[0]) return;
     if (editorElementRef.current !== element) {
       queueDocumentText();
       editorElementRef.current = element;
     }
-    const override = overrides[blockIndex];
-    activeOverrideRef.current = override;
-    const text = override?.text ?? paragraph.text;
-    const nextFormat = override?.format ?? format;
-    setEditing({ ...paragraph, end: paragraph.start + text.length, blockIndex, ...nextFormat });
-    setEditorText(text);
-    setSavedEditorText(text);
+    const firstParagraph = googleDocEditableParagraph(body[region.blockIndexes[0]]) ?? region;
+    setEditing({
+      ...region,
+      regionBlockIndex: region.blockIndexes[0],
+      paragraphStart: firstParagraph.start,
+      paragraphEnd: firstParagraph.end,
+      ...paragraphFormat(region.blockIndexes[0]),
+    });
+    setEditorText(region.text);
+    setSavedEditorText(region.text);
+    editorTextRef.current = region.text;
+    savedEditorTextRef.current = region.text;
+    dirtyDocumentRef.current = false;
     savedEditorHtmlRef.current = element.innerHTML;
-    setEditorSelection({ start: 0, end: 0 });
+    setEditorSelection({ start: region.start, end: region.start });
     selectedRangeRef.current = null;
     setHasTextSelection(false);
   }
 
   function updateEditorText(element: HTMLDivElement) {
-    setEditorText(element.innerText.replace(/\r\n?/g, "\n"));
+    const next = Array.from(element.childNodes, (node) => node.textContent ?? "").join("\n").replace(/\r\n?/g, "\n");
+    editorTextRef.current = next;
+    dirtyDocumentRef.current = next !== savedEditorTextRef.current;
+    setEditorText(next);
   }
 
-  function updateEditorSelection(element: HTMLDivElement) {
+  function updateEditorSelection(element: HTMLDivElement, region: GoogleDocEditableRegion) {
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0) return;
     const range = selection.getRangeAt(0);
     if (!element.contains(range.startContainer) || !element.contains(range.endContainer)) return;
-    const prefix = range.cloneRange();
-    prefix.selectNodeContents(element);
-    prefix.setEnd(range.startContainer, range.startOffset);
-    const selected = range.toString();
-    setEditorSelection(googleDocSelectionRange(0, prefix.toString(), selected));
-    selectedRangeRef.current = selected ? range.cloneRange() : null;
-    setHasTextSelection(Boolean(selected));
-    if (selected) window.requestAnimationFrame(positionFloatingToolbar);
+    const surfaceOffset = (container: Node, offset: number) => {
+      const children = Array.from(element.childNodes);
+      if (container === element) {
+        const before = children.slice(0, offset);
+        return before.reduce((total, node) => total + (node.textContent?.length ?? 0), 0)
+          + Math.min(offset, Math.max(0, children.length - 1));
+      }
+      let total = 0;
+      for (const child of children) {
+        if (child === container || child.contains(container)) {
+          const prefix = range.cloneRange();
+          prefix.selectNodeContents(child);
+          prefix.setEnd(container, offset);
+          return total + prefix.toString().length;
+        }
+        total += (child.textContent?.length ?? 0) + 1;
+      }
+      return null;
+    };
+    const startOffset = surfaceOffset(range.startContainer, range.startOffset);
+    const endOffset = surfaceOffset(range.endContainer, range.endOffset);
+    if (startOffset === null || endOffset === null) return;
+    const nextSelection = {
+      start: region.start + startOffset,
+      end: region.start + endOffset,
+    };
+    setEditorSelection(nextSelection);
+    selectedRangeRef.current = range.cloneRange();
+    setHasTextSelection(!range.collapsed);
+    const paragraphNode = (range.startContainer instanceof Element
+      ? range.startContainer
+      : range.startContainer.parentElement)?.closest<HTMLElement>("[data-doc-block-index]");
+    const blockIndex = Number(paragraphNode?.dataset.docBlockIndex);
+    const paragraph = Number.isInteger(blockIndex) ? googleDocEditableParagraph(body[blockIndex]) : null;
+    if (paragraph) {
+      setEditing((current) => current ? {
+        ...current,
+        paragraphStart: paragraph.start,
+        paragraphEnd: paragraph.end,
+        ...paragraphFormat(blockIndex),
+      } : current);
+    }
   }
 
   const docDirty = Boolean(editing) && editorText !== savedEditorText;
 
   function queueDocumentText() {
-    if (!editing || editorText === savedEditorText) return;
-    const snapshot = editorText;
-    const replacement = googleDocTextReplacement(editing.start, savedEditorText, snapshot);
+    const snapshot = editorTextRef.current;
+    const saved = savedEditorTextRef.current;
+    if (!editing || snapshot === saved) return;
+    const replacement = googleDocTextReplacement(editing.start, saved, snapshot);
     if (!replacement) return;
     const operations: Parameters<typeof editGoogleDoc>[1] = [];
     if (replacement.end > replacement.start) {
@@ -1111,17 +1189,10 @@ export function DocumentPreview({
     if (replacement.text) {
       operations.push({ action: "insert_text", index: replacement.start, text: replacement.text });
     }
-    const nextEditing = {
-      ...editing,
-      end: editing.start + snapshot.length,
-      text: snapshot,
-    };
     setSavedEditorText(snapshot);
-    setEditing(nextEditing);
-    setOverrides((current) => ({
-      ...current,
-      [editing.blockIndex]: { text: snapshot, format: nextEditing },
-    }));
+    savedEditorTextRef.current = snapshot;
+    dirtyDocumentRef.current = false;
+    setEditing((current) => current ? { ...current, end: current.start + snapshot.length, text: snapshot } : current);
     if (editorElementRef.current) savedEditorHtmlRef.current = editorElementRef.current.innerHTML;
     saveQueue.enqueue(() => editGoogleDoc(fileId, operations));
   }
@@ -1130,7 +1201,7 @@ export function DocumentPreview({
     if (!docDirty) return;
     const timeout = window.setTimeout(queueDocumentText, 800);
     return () => window.clearTimeout(timeout);
-  }, [docDirty, editorText, editing?.blockIndex]);
+  }, [docDirty, editorText, editing?.regionBlockIndex]);
 
   function applyParagraphFormat(
     operations: Parameters<typeof editGoogleDoc>[1],
@@ -1140,10 +1211,7 @@ export function DocumentPreview({
     queueDocumentText();
     const nextEditing = { ...editing, ...patch };
     setEditing(nextEditing);
-    setOverrides((current) => ({
-      ...current,
-      [editing.blockIndex]: { text: editorText, format: nextEditing },
-    }));
+    if (editorElementRef.current) savedEditorHtmlRef.current = editorElementRef.current.innerHTML;
     saveQueue.enqueue(() => editGoogleDoc(fileId, operations));
   }
 
@@ -1160,22 +1228,61 @@ export function DocumentPreview({
     queueDocumentText();
     setEditing(null);
     editorElementRef.current = null;
-    activeOverrideRef.current = undefined;
     selectedRangeRef.current = null;
     setHasTextSelection(false);
   }
 
-  const selectedEditorRange = editorSelection.end > editorSelection.start
-    ? editorSelection
-    : { start: 0, end: editorText.length };
-  const editorRange = editing && selectedEditorRange.end > selectedEditorRange.start
-    ? {
-      start: editing.start + selectedEditorRange.start,
-      end: editing.start + selectedEditorRange.end,
-    }
+  const editorRange = editing
+    ? editorSelection.end > editorSelection.start
+      ? editorSelection
+      : { start: editing.paragraphStart, end: editing.paragraphEnd }
     : null;
+
+  function restoreDocumentSelection() {
+    const range = selectedRangeRef.current;
+    if (!range) return;
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  }
+
+  function selectedDocumentBlocks() {
+    const editor = editorElementRef.current;
+    const range = selectedRangeRef.current;
+    if (!editor || !range) return [];
+    return Array.from(editor.children).filter((element): element is HTMLElement => (
+      element instanceof HTMLElement && range.intersectsNode(element)
+    ));
+  }
+
+  function applyNativeTextFormat(change: GoogleTextFormatChange) {
+    restoreDocumentSelection();
+    if (change.field === "fontSize") {
+      window.document.execCommand("fontSize", false, "7");
+      editorElementRef.current?.querySelectorAll<HTMLElement>('font[size="7"]').forEach((element) => {
+        element.removeAttribute("size");
+        element.style.fontSize = `${change.value}pt`;
+      });
+    } else if (change.field === "color") {
+      window.document.execCommand("foreColor", false, change.value);
+    } else if (change.field === "alignment") {
+      const command = change.value === "CENTER"
+        ? "justifyCenter"
+        : change.value === "END"
+          ? "justifyRight"
+          : change.value === "JUSTIFIED"
+            ? "justifyFull"
+            : "justifyLeft";
+      window.document.execCommand(command);
+    } else {
+      window.document.execCommand(change.field);
+    }
+    if (editorElementRef.current) savedEditorHtmlRef.current = editorElementRef.current.innerHTML;
+  }
+
   function applyDocumentTextFormat(change: GoogleTextFormatChange) {
     if (!editorRange) return;
+    applyNativeTextFormat(change);
     if (change.field === "alignment") {
       void applyParagraphFormat(
         [{ action: "set_paragraph_style", ...editorRange, alignment: change.value }],
@@ -1201,6 +1308,13 @@ export function DocumentPreview({
 
   function applyDocumentNamedStyle(namedStyleType: string) {
     if (!editorRange) return;
+    restoreDocumentSelection();
+    const tag = namedStyleType === "TITLE"
+      ? "h1"
+      : namedStyleType.startsWith("HEADING_")
+        ? `h${Math.min(6, Number(namedStyleType.slice(-1)) + 1)}`
+        : "p";
+    window.document.execCommand("formatBlock", false, tag);
     applyParagraphFormat(
       [{ action: "set_paragraph_style", ...editorRange, named_style_type: namedStyleType }],
       { namedStyleType },
@@ -1210,6 +1324,16 @@ export function DocumentPreview({
   function toggleDocumentList(kind: "unordered" | "ordered") {
     if (!editing || !editorRange) return;
     const active = editing.listKind === kind;
+    selectedDocumentBlocks().forEach((element) => {
+      element.classList.toggle("google-doc-list-item", !active);
+      if (active) {
+        element.removeAttribute("data-list-kind");
+        element.style.removeProperty("padding-inline-start");
+      } else {
+        element.dataset.listKind = kind;
+        element.style.paddingInlineStart = "18px";
+      }
+    });
     applyParagraphFormat(
       active
         ? [{ action: "delete_bullets", ...editorRange }]
@@ -1226,6 +1350,14 @@ export function DocumentPreview({
 
   function clearDocumentFormatting() {
     if (!editing || !editorRange) return;
+    const blocks = selectedDocumentBlocks();
+    restoreDocumentSelection();
+    window.document.execCommand("removeFormat");
+    blocks.forEach((element) => {
+      element.classList.remove("google-doc-list-item");
+      element.removeAttribute("data-list-kind");
+      element.removeAttribute("style");
+    });
     const operations: Parameters<typeof editGoogleDoc>[1] = [
       { action: "clear_text_style", ...editorRange },
       { action: "set_paragraph_style", ...editorRange, named_style_type: "NORMAL_TEXT", alignment: "START" },
@@ -1244,8 +1376,8 @@ export function DocumentPreview({
   }
 
   return (
-    <div className="google-doc-viewer" ref={viewerRef}>
-      <div className="google-viewer-toolbar">
+    <div className="google-doc-viewer">
+      <div className="google-viewer-toolbar google-doc-unified-toolbar" role="toolbar" aria-label="Document controls">
         <label className="google-viewer-search">
           <Search size={13} aria-hidden="true" />
           <input
@@ -1273,6 +1405,68 @@ export function DocumentPreview({
         <button className="preview-browser-action" type="button" aria-label="Next document match" disabled={!matchCount} onClick={() => moveSearchMatch(1)}>
           <ArrowRight size={13} />
         </button>
+        {canEdit ? (
+          hasTextSelection && editing ? (
+            <GoogleTextFormatToolbar
+              format={editing}
+              disabled={!editorRange}
+              className="google-doc-contextual-tools"
+              onChange={applyDocumentTextFormat}
+            />
+          ) : (
+            <span
+              className="google-text-format-toolbar google-doc-contextual-tools"
+              role="toolbar"
+              aria-label="Paragraph formatting"
+              data-google-format-toolbar="true"
+            >
+              <label className="google-paragraph-style-control" title="Paragraph style">
+                <select
+                  aria-label="Paragraph style"
+                  value={editing?.namedStyleType ?? "NORMAL_TEXT"}
+                  disabled={!editorRange}
+                  onChange={(event) => applyDocumentNamedStyle(event.currentTarget.value)}
+                >
+                  <option value="NORMAL_TEXT">Normal text</option>
+                  <option value="TITLE">Title</option>
+                  <option value="SUBTITLE">Subtitle</option>
+                  {[1, 2, 3, 4, 5, 6].map((level) => (
+                    <option value={`HEADING_${level}`} key={level}>Heading {level}</option>
+                  ))}
+                </select>
+              </label>
+              <span className="google-toolbar-divider" aria-hidden="true" />
+              {(["unordered", "ordered"] as const).map((kind) => (
+                <button
+                  type="button"
+                  key={kind}
+                  className={editing?.listKind === kind ? "active" : ""}
+                  aria-label={kind === "unordered" ? "Bulleted list" : "Numbered list"}
+                  aria-pressed={editing?.listKind === kind}
+                  disabled={!editorRange}
+                  title={kind === "unordered" ? "Bulleted list" : "Numbered list"}
+                  onClick={() => toggleDocumentList(kind)}
+                >
+                  {kind === "unordered"
+                    ? <ListBullets size={15} aria-hidden="true" />
+                    : <ListNumbers size={15} aria-hidden="true" />}
+                </button>
+              ))}
+              <button
+                type="button"
+                aria-label="Clear formatting"
+                disabled={!editorRange}
+                title="Clear formatting"
+                onClick={clearDocumentFormatting}
+              >
+                <Eraser size={15} aria-hidden="true" />
+              </button>
+            </span>
+          )
+        ) : null}
+        <span className="google-doc-toolbar-status">
+          <GoogleAutosaveStatus queue={saveQueue} dirty={docDirty} />
+        </span>
         <span className="google-viewer-toolbar-spacer" />
         <button
           className={`preview-browser-action${outlineOpen ? " active" : ""}`}
@@ -1297,52 +1491,6 @@ export function DocumentPreview({
           </select>
         </label>
       </div>
-      {canEdit ? (
-        <div
-          className="google-text-format-toolbar google-doc-paragraph-toolbar"
-          role="toolbar"
-          aria-label="Paragraph formatting"
-          data-google-format-toolbar="true"
-        >
-          <select
-            aria-label="Paragraph style"
-            value={editing?.namedStyleType ?? "NORMAL_TEXT"}
-            disabled={!editorRange}
-            onChange={(event) => applyDocumentNamedStyle(event.currentTarget.value)}
-          >
-            <option value="NORMAL_TEXT">Normal text</option>
-            <option value="TITLE">Title</option>
-            <option value="SUBTITLE">Subtitle</option>
-            {[1, 2, 3, 4, 5, 6].map((level) => (
-              <option value={`HEADING_${level}`} key={level}>Heading {level}</option>
-            ))}
-          </select>
-          {(["unordered", "ordered"] as const).map((kind) => (
-            <button
-              type="button"
-              key={kind}
-              className={editing?.listKind === kind ? "active" : ""}
-              aria-label={kind === "unordered" ? "Bulleted list" : "Numbered list"}
-              aria-pressed={editing?.listKind === kind}
-              disabled={!editorRange}
-              onClick={() => toggleDocumentList(kind)}
-            >
-              {kind === "unordered" ? "Bullets" : "Numbering"}
-            </button>
-          ))}
-          <button
-            type="button"
-            aria-label="Clear formatting"
-            disabled={!editorRange}
-            onClick={clearDocumentFormatting}
-          >
-            Clear
-          </button>
-          <span className="google-doc-toolbar-status">
-            <GoogleAutosaveStatus queue={saveQueue} dirty={docDirty} />
-          </span>
-        </div>
-      ) : null}
       <div className={`google-doc-body${outlineOpen && outline.length ? " with-outline" : ""}`}>
         {outlineOpen && outline.length ? (
           <nav className="google-doc-outline" aria-label="Document outline">
@@ -1364,57 +1512,84 @@ export function DocumentPreview({
             className="google-doc-preview"
             style={{ "--doc-zoom": zoom === "fit" ? fitScale : zoom / 100 } as CSSProperties}
           >
-            {body.length ? body.map((item, index) => (
-              <DocStructuralElement
-                value={item}
-                inlineObjects={inlineObjects}
-                lists={lists}
-                namedStyles={namedStyles}
-                query={normalizedQuery}
-                blockIndex={index}
-                override={editing?.blockIndex === index ? activeOverrideRef.current : overrides[index]}
-                active={editing?.blockIndex === index}
-                onEditParagraph={canEdit ? editParagraph : undefined}
-                onEditorInput={updateEditorText}
-                onEditorSelection={updateEditorSelection}
-                onEditorBlur={editorBlur}
-                onEditorEscape={(element) => {
-                  cancelEditorBlurRef.current = true;
-                  element.innerHTML = savedEditorHtmlRef.current;
-                  setEditorText(savedEditorText);
-                  setEditing(null);
-                  editorElementRef.current = null;
-                  activeOverrideRef.current = undefined;
-                  selectedRangeRef.current = null;
-                  setHasTextSelection(false);
-                }}
-                key={index}
-              />
-            )) : (
+            {body.length ? body.map((item, index) => {
+              const editableRegion = canEdit ? editableRegionByBlock.get(index) : undefined;
+              if (editableRegion && !editableRegion.first) return null;
+              if (editableRegion) {
+                const { region } = editableRegion;
+                return (
+                  <div
+                    className="google-doc-editable-region"
+                    contentEditable
+                    suppressContentEditableWarning
+                    role="textbox"
+                    aria-label="Edit document text"
+                    aria-multiline="true"
+                    title="Click text to edit"
+                    data-active={editing?.regionBlockIndex === region.blockIndexes[0] ? "true" : undefined}
+                    onFocus={(event) => {
+                      editRegion(region, event.currentTarget);
+                      window.requestAnimationFrame(() => updateEditorSelection(event.currentTarget, region));
+                    }}
+                    onInput={(event) => updateEditorText(event.currentTarget)}
+                    onSelect={(event) => updateEditorSelection(event.currentTarget, region)}
+                    onKeyUp={(event) => updateEditorSelection(event.currentTarget, region)}
+                    onPaste={(event) => {
+                      event.preventDefault();
+                      window.document.execCommand("insertText", false, event.clipboardData.getData("text/plain"));
+                    }}
+                    onBlur={editorBlur}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        window.document.execCommand("insertText", false, "\n");
+                      } else if (event.key === "Escape") {
+                        event.preventDefault();
+                        cancelEditorBlurRef.current = true;
+                        event.currentTarget.innerHTML = savedEditorHtmlRef.current;
+                        editorTextRef.current = savedEditorTextRef.current;
+                        dirtyDocumentRef.current = false;
+                        setEditorText(savedEditorTextRef.current);
+                        setEditing(null);
+                        editorElementRef.current = null;
+                        selectedRangeRef.current = null;
+                        setHasTextSelection(false);
+                        event.currentTarget.blur();
+                      }
+                    }}
+                    key={`editable-${region.start}`}
+                  >
+                    {region.blockIndexes.map((blockIndex) => (
+                      <DocStructuralElement
+                        value={body[blockIndex]}
+                        inlineObjects={inlineObjects}
+                        lists={lists}
+                        namedStyles={namedStyles}
+                        query={normalizedQuery}
+                        blockIndex={blockIndex}
+                        key={blockIndex}
+                      />
+                    ))}
+                  </div>
+                );
+              }
+              return (
+                <DocStructuralElement
+                  value={item}
+                  inlineObjects={inlineObjects}
+                  lists={lists}
+                  namedStyles={namedStyles}
+                  query={normalizedQuery}
+                  blockIndex={index}
+                  key={index}
+                />
+              );
+            }) : (
               <p>{fallbackText || "This document is empty."}</p>
             )}
           </article>
         </div>
       </div>
-      {editing && hasTextSelection && typeof window !== "undefined" ? createPortal(
-        <span
-          className="google-doc-selection-toolbar"
-          data-google-format-toolbar="true"
-          ref={floatingToolbarRef}
-          style={floatingToolbar ? {
-            left: floatingToolbar.left,
-            top: floatingToolbar.top,
-          } : undefined}
-          data-placement={floatingToolbar?.placement}
-        >
-          <GoogleTextFormatToolbar
-            format={editing}
-            disabled={!editorRange}
-            onChange={applyDocumentTextFormat}
-          />
-        </span>,
-        window.document.body,
-      ) : null}
     </div>
   );
 }
@@ -1426,13 +1601,6 @@ function DocStructuralElement({
   namedStyles,
   query,
   blockIndex,
-  override,
-  active,
-  onEditParagraph,
-  onEditorInput,
-  onEditorSelection,
-  onEditorBlur,
-  onEditorEscape,
 }: {
   value: unknown;
   inlineObjects: Record<string, unknown>;
@@ -1440,18 +1608,6 @@ function DocStructuralElement({
   namedStyles: GoogleDocNamedStyleMap;
   query: string;
   blockIndex?: number;
-  override?: GoogleDocOverride;
-  active?: boolean;
-  onEditParagraph?: (
-    paragraph: GoogleDocEditableParagraph,
-    blockIndex: number,
-    format: GoogleDocParagraphFormat,
-    element: HTMLDivElement,
-  ) => void;
-  onEditorInput?: (element: HTMLDivElement) => void;
-  onEditorSelection?: (element: HTMLDivElement) => void;
-  onEditorBlur?: (event: FocusEvent<HTMLDivElement>) => void;
-  onEditorEscape?: (element: HTMLDivElement) => void;
 }): ReactNode {
   if (!isRecord(value)) return null;
   if (isRecord(value.paragraph) && Array.isArray(value.paragraph.elements)) {
@@ -1460,44 +1616,34 @@ function DocStructuralElement({
     const inherited = namedStyles[namedStyle] ?? namedStyles.NORMAL_TEXT;
     const style = { ...(namedStyles.NORMAL_TEXT?.paragraphStyle ?? {}), ...(inherited?.paragraphStyle ?? {}), ...directStyle };
     const textStyle = { ...(namedStyles.NORMAL_TEXT?.textStyle ?? {}), ...(inherited?.textStyle ?? {}) };
-    const content = override
-      ? (
-        <span style={{
-          color: override.format.color,
-          fontSize: `${override.format.fontSize}pt`,
-          fontWeight: override.format.bold ? 700 : undefined,
-          fontStyle: override.format.italic ? "italic" : undefined,
-          textDecoration: override.format.underline ? "underline" : undefined,
-        }}>
-          {highlightGoogleDocText(override.text, query)}
-        </span>
-      )
-      : value.paragraph.elements.map((element, index) => (
-        <DocParagraphElement value={element} inlineObjects={inlineObjects} inheritedStyle={textStyle} query={query} key={index} />
-      ));
+    const content = value.paragraph.elements.map((element, index) => (
+      <DocParagraphElement
+        value={element}
+        inlineObjects={inlineObjects}
+        inheritedStyle={textStyle}
+        query={query}
+        trimTrailingNewline={index === value.paragraph.elements.length - 1}
+        key={index}
+      />
+    ));
     const paragraphStyle = googleDocParagraphStyle(style);
-    if (override) {
-      paragraphStyle.textAlign = override.format.alignment === "JUSTIFIED"
-        ? "justify"
-        : override.format.alignment.toLocaleLowerCase() as CSSProperties["textAlign"];
-    }
-    const headingProps = blockIndex === undefined ? {} : { "data-doc-heading": blockIndex };
+    const paragraphProps = blockIndex === undefined ? {} : {
+      "data-doc-heading": blockIndex,
+      "data-doc-block-index": blockIndex,
+    };
     let paragraphNode: ReactNode;
-    const visibleStyle = override?.format.namedStyleType ?? namedStyle;
-    const visibleList = override
-      ? override.format.listKind
-      : isRecord(value.paragraph.bullet) ? googleDocListKind(value.paragraph.bullet, lists) : null;
-    if (visibleStyle === "TITLE") {
-      paragraphNode = <h1 style={paragraphStyle} {...headingProps}>{content}</h1>;
-    } else if (visibleStyle === "SUBTITLE") {
-      paragraphNode = <p className="google-doc-subtitle" style={paragraphStyle}>{content}</p>;
-    } else if (visibleStyle.startsWith("HEADING_")) {
-      const level = Math.min(6, Math.max(2, Number(visibleStyle.slice(-1)) + 1));
-      if (level === 2) paragraphNode = <h2 style={paragraphStyle} {...headingProps}>{content}</h2>;
-      else if (level === 3) paragraphNode = <h3 style={paragraphStyle} {...headingProps}>{content}</h3>;
-      else if (level === 4) paragraphNode = <h4 style={paragraphStyle} {...headingProps}>{content}</h4>;
-      else if (level === 5) paragraphNode = <h5 style={paragraphStyle} {...headingProps}>{content}</h5>;
-      else paragraphNode = <h6 style={paragraphStyle} {...headingProps}>{content}</h6>;
+    const visibleList = isRecord(value.paragraph.bullet) ? googleDocListKind(value.paragraph.bullet, lists) : null;
+    if (namedStyle === "TITLE") {
+      paragraphNode = <h1 style={paragraphStyle} {...paragraphProps}>{content}</h1>;
+    } else if (namedStyle === "SUBTITLE") {
+      paragraphNode = <p className="google-doc-subtitle" style={paragraphStyle} {...paragraphProps}>{content}</p>;
+    } else if (namedStyle.startsWith("HEADING_")) {
+      const level = Math.min(6, Math.max(2, Number(namedStyle.slice(-1)) + 1));
+      if (level === 2) paragraphNode = <h2 style={paragraphStyle} {...paragraphProps}>{content}</h2>;
+      else if (level === 3) paragraphNode = <h3 style={paragraphStyle} {...paragraphProps}>{content}</h3>;
+      else if (level === 4) paragraphNode = <h4 style={paragraphStyle} {...paragraphProps}>{content}</h4>;
+      else if (level === 5) paragraphNode = <h5 style={paragraphStyle} {...paragraphProps}>{content}</h5>;
+      else paragraphNode = <h6 style={paragraphStyle} {...paragraphProps}>{content}</h6>;
     } else if (visibleList) {
       const bullet = isRecord(value.paragraph.bullet) ? value.paragraph.bullet : {};
       const nestingLevel = typeof bullet.nestingLevel === "number" ? bullet.nestingLevel : 0;
@@ -1505,49 +1651,16 @@ function DocStructuralElement({
         <p
           className="google-doc-list-item"
           data-list-kind={visibleList}
+          {...paragraphProps}
           style={{ ...paragraphStyle, paddingInlineStart: `${18 + nestingLevel * 18}px` }}
         >
           {content}
         </p>
       );
     } else {
-      paragraphNode = <p style={paragraphStyle}>{content}</p>;
+      paragraphNode = <p style={paragraphStyle} {...paragraphProps}>{content}</p>;
     }
-    const edit = onEditParagraph;
-    const sourceEditable = edit ? googleDocEditableParagraph(value) : null;
-    const editable = sourceEditable && override
-      ? { ...sourceEditable, end: sourceEditable.start + override.text.length, text: override.text }
-      : sourceEditable;
-    return editable && edit && blockIndex !== undefined ? (
-      <div
-        className="google-doc-editable-block"
-        contentEditable="plaintext-only"
-        suppressContentEditableWarning
-        role="textbox"
-        aria-label="Edit document paragraph"
-        aria-multiline="true"
-        data-active={active ? "true" : undefined}
-        title="Click text to edit"
-        onFocus={(event) => edit(
-          editable,
-          blockIndex,
-          override?.format ?? googleDocParagraphFormat(value.paragraph, style, textStyle, namedStyle, lists),
-          event.currentTarget,
-        )}
-        onInput={(event) => onEditorInput?.(event.currentTarget)}
-        onSelect={(event) => onEditorSelection?.(event.currentTarget)}
-        onBlur={onEditorBlur}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            event.preventDefault();
-            onEditorEscape?.(event.currentTarget);
-            event.currentTarget.blur();
-          }
-        }}
-      >
-        {paragraphNode}
-      </div>
-    ) : paragraphNode;
+    return paragraphNode;
   }
   if (isRecord(value.table) && Array.isArray(value.table.tableRows)) {
     return (
@@ -1578,11 +1691,13 @@ function DocParagraphElement({
   inlineObjects,
   inheritedStyle,
   query,
+  trimTrailingNewline = false,
 }: {
   value: unknown;
   inlineObjects: Record<string, unknown>;
   inheritedStyle: Record<string, unknown>;
   query: string;
+  trimTrailingNewline?: boolean;
 }): ReactNode {
   if (!isRecord(value)) return null;
   if (isRecord(value.pageBreak)) {
@@ -1607,9 +1722,10 @@ function DocParagraphElement({
   const directStyle = isRecord(value.textRun.textStyle) ? value.textRun.textStyle : {};
   const style = { ...inheritedStyle, ...directStyle };
   const textStyle = googleDocTextStyle(style);
+  const content = trimTrailingNewline ? value.textRun.content.replace(/\n$/, "") : value.textRun.content;
   return (
     <span className={isRecord(style.link) ? "google-doc-link" : undefined} style={textStyle}>
-      {highlightGoogleDocText(value.textRun.content, query)}
+      {highlightGoogleDocText(content, query)}
     </span>
   );
 }
@@ -1621,29 +1737,282 @@ export type GoogleSlideEditableField = {
   kind: "shape" | "notes";
   styleRuns?: Array<{ start: number; end: number; style: Record<string, unknown> }>;
   paragraphRuns?: Array<{ start: number; end: number; style: Record<string, unknown> }>;
+  contentAlignment?: string | null;
+  fontScale?: number | null;
   x?: number | null;
   y?: number | null;
   width?: number | null;
   height?: number | null;
 };
 
+export type GoogleSlideRect = { x: number; y: number; width: number; height: number };
+export type GoogleSlideResizeHandle = "move" | "ne" | "se" | "sw" | "nw";
+type GoogleSlidePreviewItem = Extract<GoogleFilePreview, { kind: "presentation" }>["slides"][number];
+type GoogleSlideSceneElement = NonNullable<GoogleSlidePreviewItem["elements"]>[number];
+type LocalGoogleSlide = GoogleSlidePreviewItem & {
+  optimistic?: boolean;
+  optimisticThumbnail?: string | null;
+};
+
+function googleSlideObjectId(prefix: string) {
+  return `milim_${prefix}_${crypto.randomUUID().replace(/-/g, "")}`;
+}
+
+export function googleSlideMarqueeRect(startX: number, startY: number, endX: number, endY: number): GoogleSlideRect {
+  return {
+    x: Math.min(startX, endX),
+    y: Math.min(startY, endY),
+    width: Math.abs(endX - startX),
+    height: Math.abs(endY - startY),
+  };
+}
+
+export function googleSlideRectsIntersect(a: GoogleSlideRect, b: GoogleSlideRect): boolean {
+  return a.x <= b.x + b.width
+    && a.x + a.width >= b.x
+    && a.y <= b.y + b.height
+    && a.y + a.height >= b.y;
+}
+
+export function googleSlideGroupBounds(rects: GoogleSlideRect[]): GoogleSlideRect | null {
+  if (!rects.length) return null;
+  const left = Math.min(...rects.map((rect) => rect.x));
+  const top = Math.min(...rects.map((rect) => rect.y));
+  const right = Math.max(...rects.map((rect) => rect.x + rect.width));
+  const bottom = Math.max(...rects.map((rect) => rect.y + rect.height));
+  return { x: left, y: top, width: right - left, height: bottom - top };
+}
+
+export function googleSlideTransformGroup(rect: GoogleSlideRect, from: GoogleSlideRect, to: GoogleSlideRect): GoogleSlideRect {
+  const scaleX = to.width / from.width;
+  const scaleY = to.height / from.height;
+  return {
+    x: to.x + (rect.x - from.x) * scaleX,
+    y: to.y + (rect.y - from.y) * scaleY,
+    width: rect.width * scaleX,
+    height: rect.height * scaleY,
+  };
+}
+
+export function googleSlideGestureRect(
+  rect: GoogleSlideRect,
+  deltaX: number,
+  deltaY: number,
+  handle: GoogleSlideResizeHandle,
+): GoogleSlideRect {
+  const minimum = 0.02;
+  if (handle === "move") {
+    return {
+      ...rect,
+      x: Math.min(1 - rect.width, Math.max(0, rect.x + deltaX)),
+      y: Math.min(1 - rect.height, Math.max(0, rect.y + deltaY)),
+    };
+  }
+  const left = handle.includes("w")
+    ? Math.min(rect.x + rect.width - minimum, Math.max(0, rect.x + deltaX))
+    : rect.x;
+  const right = handle.includes("e")
+    ? Math.max(rect.x + minimum, Math.min(1, rect.x + rect.width + deltaX))
+    : rect.x + rect.width;
+  const top = handle.includes("n")
+    ? Math.min(rect.y + rect.height - minimum, Math.max(0, rect.y + deltaY))
+    : rect.y;
+  const bottom = handle.includes("s")
+    ? Math.max(rect.y + minimum, Math.min(1, rect.y + rect.height + deltaY))
+    : rect.y + rect.height;
+  return { x: left, y: top, width: right - left, height: bottom - top };
+}
+
+export function googleSlideSnapRect(
+  rect: GoogleSlideRect,
+  otherRects: GoogleSlideRect[],
+  handle: GoogleSlideResizeHandle,
+  thresholdX: number,
+  thresholdY: number,
+): { rect: GoogleSlideRect; guideX?: number; guideY?: number } {
+  const targetsX = [0, 0.5, 1, ...otherRects.flatMap((item) => [item.x, item.x + item.width / 2, item.x + item.width])];
+  const targetsY = [0, 0.5, 1, ...otherRects.flatMap((item) => [item.y, item.y + item.height / 2, item.y + item.height])];
+  const nearest = (anchors: number[], targets: number[], threshold: number) => {
+    let match: { delta: number; guide: number } | null = null;
+    for (const anchor of anchors) {
+      for (const target of targets) {
+        const delta = target - anchor;
+        if (Math.abs(delta) <= threshold && (!match || Math.abs(delta) < Math.abs(match.delta)))
+          match = { delta, guide: target };
+      }
+    }
+    return match;
+  };
+  const xAnchors = handle === "move"
+    ? [rect.x, rect.x + rect.width / 2, rect.x + rect.width]
+    : handle.includes("w") ? [rect.x] : [rect.x + rect.width];
+  const yAnchors = handle === "move"
+    ? [rect.y, rect.y + rect.height / 2, rect.y + rect.height]
+    : handle.includes("n") ? [rect.y] : [rect.y + rect.height];
+  const snapX = handle === "move" || handle.includes("e") || handle.includes("w")
+    ? nearest(xAnchors, targetsX, thresholdX)
+    : null;
+  const snapY = handle === "move" || handle.includes("n") || handle.includes("s")
+    ? nearest(yAnchors, targetsY, thresholdY)
+    : null;
+  const next = { ...rect };
+  if (snapX) {
+    if (handle === "move") next.x += snapX.delta;
+    else if (handle.includes("w")) {
+      next.x += snapX.delta;
+      next.width -= snapX.delta;
+    } else next.width += snapX.delta;
+  }
+  if (snapY) {
+    if (handle === "move") next.y += snapY.delta;
+    else if (handle.includes("n")) {
+      next.y += snapY.delta;
+      next.height -= snapY.delta;
+    } else next.height += snapY.delta;
+  }
+  return {
+    rect: next,
+    ...(snapX ? { guideX: snapX.guide } : {}),
+    ...(snapY ? { guideY: snapY.guide } : {}),
+  };
+}
+
+function googleSlideElementRect(element: GoogleSlideSceneElement): GoogleSlideRect | null {
+  return element.x == null || element.y == null || element.width == null || element.height == null
+    ? null
+    : { x: element.x, y: element.y, width: element.width, height: element.height };
+}
+
+function googleSlideRectStyle(rect: GoogleSlideRect): CSSProperties {
+  return {
+    left: `${rect.x * 100}%`,
+    top: `${rect.y * 100}%`,
+    width: `${rect.width * 100}%`,
+    height: `${rect.height * 100}%`,
+  };
+}
+
+function googleSlideCropStyle(rect: GoogleSlideRect): CSSProperties {
+  return {
+    position: "absolute",
+    left: `${-rect.x / rect.width * 100}%`,
+    top: `${-rect.y / rect.height * 100}%`,
+    width: `${100 / rect.width}%`,
+    height: `${100 / rect.height}%`,
+  };
+}
+
+function GoogleSlideInlineEditor({
+  field,
+  value,
+  active,
+  optimistic,
+  style,
+  onFocus,
+  onInput,
+  onSelection,
+  onBlur,
+  onEscape,
+}: {
+  field: GoogleSlideEditableField;
+  value: string;
+  active: boolean;
+  optimistic: boolean;
+  style: CSSProperties;
+  onFocus: (element: HTMLDivElement) => void;
+  onInput: (value: string) => void;
+  onSelection: (element: HTMLDivElement) => void;
+  onBlur: (event: FocusEvent<HTMLDivElement>) => void;
+  onEscape: (element: HTMLDivElement) => void;
+}) {
+  const editorRef = useRef<HTMLDivElement | null>(null);
+  const renderedStyleKeyRef = useRef("");
+  const styleKey = JSON.stringify([
+    field.styleRuns,
+    field.paragraphRuns,
+    field.contentAlignment,
+    field.fontScale,
+  ]);
+
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor || active || (editor.textContent === value && renderedStyleKeyRef.current === styleKey)) return;
+    editor.replaceChildren(...googleSlideTextSegments({ ...field, text: value }).map((segment) => {
+      const span = document.createElement("span");
+      span.textContent = segment.text;
+      span.style.color = segment.format.color;
+      span.style.fontSize = `${segment.format.fontSize * (field.fontScale ?? 1) / 7.2}cqw`;
+      span.style.fontFamily = segment.format.fontFamily ?? "";
+      span.style.fontWeight = segment.format.bold ? "700" : "";
+      span.style.fontStyle = segment.format.italic ? "italic" : "";
+      span.style.textDecoration = segment.format.underline ? "underline" : "";
+      return span;
+    }));
+    const content = document.createElement("div");
+    content.className = "google-slide-inline-editor-content";
+    content.append(...editor.childNodes);
+    editor.replaceChildren(content);
+    renderedStyleKeyRef.current = styleKey;
+  }, [active, field, styleKey, value]);
+
+  return (
+    <div
+      ref={editorRef}
+      className="google-slide-inline-editor"
+      contentEditable
+      suppressContentEditableWarning
+      role="textbox"
+      aria-label={`Edit ${field.label.toLocaleLowerCase()}`}
+      aria-multiline="true"
+      data-active={active ? "true" : undefined}
+      data-optimistic={optimistic ? "true" : undefined}
+      data-content-alignment={field.contentAlignment ?? undefined}
+      style={style}
+      onFocus={(event) => onFocus(event.currentTarget)}
+      onInput={(event) => onInput(event.currentTarget.textContent?.replace(/\r\n?/g, "\n") ?? "")}
+      onSelect={(event) => onSelection(event.currentTarget)}
+      onKeyUp={(event) => onSelection(event.currentTarget)}
+      onMouseUp={(event) => onSelection(event.currentTarget)}
+      onPaste={(event) => {
+        event.preventDefault();
+        window.document.execCommand("insertText", false, event.clipboardData.getData("text/plain"));
+      }}
+      onBlur={onBlur}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          window.document.execCommand("insertText", false, "\n");
+        } else if (event.key === "Escape") {
+          event.preventDefault();
+          onEscape(event.currentTarget);
+          event.currentTarget.blur();
+        }
+      }}
+    />
+  );
+}
+
 export function SlidesPreview({
   fileId,
   slides,
   pageAspectRatio,
+  pageWidth,
+  pageHeight,
   active,
   canEdit,
-  onSaved,
 }: {
   fileId: string;
   slides: Extract<GoogleFilePreview, { kind: "presentation" }>["slides"];
   pageAspectRatio: number;
+  pageWidth: number;
+  pageHeight: number;
   active: boolean;
   canEdit: boolean;
   onSaved: () => void;
 }) {
   const [selected, setSelected] = useState(0);
-  const slide = slides[selected] ?? slides[0];
+  const [visibleSlides, setVisibleSlides] = useState<LocalGoogleSlide[]>(slides);
+  const slide = visibleSlides[selected] ?? visibleSlides[0];
   const [thumbnail, setThumbnail] = useState<string | null>(null);
   const [thumbnailError, setThumbnailError] = useState<string | null>(null);
   const thumbnailObjectUrlRef = useRef<string | null>(null);
@@ -1654,7 +2023,6 @@ export function SlidesPreview({
   const [zoom, setZoom] = useState<"fit" | number>("fit");
   const [railOpen, setRailOpen] = useState(true);
   const [notesOpen, setNotesOpen] = useState(false);
-  const [editorOpen, setEditorOpen] = useState(false);
   const [presenting, setPresenting] = useState(false);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [savedDrafts, setSavedDrafts] = useState<Record<string, string>>({});
@@ -1662,9 +2030,26 @@ export function SlidesPreview({
   const [activeTextFieldId, setActiveTextFieldId] = useState<string | null>(null);
   const [textSelection, setTextSelection] = useState({ start: 0, end: 0 });
   const [slideFormat, setSlideFormat] = useState<GoogleTextFormat | null>(null);
-  const saveQueue = useGoogleSaveQueue(onSaved);
+  const [selectedElementIds, setSelectedElementIds] = useState<string[]>([]);
+  const [geometryOverrides, setGeometryOverrides] = useState<Record<string, GoogleSlideRect>>({});
+  const [geometrySourceRects, setGeometrySourceRects] = useState<Record<string, GoogleSlideRect>>({});
+  const [optimisticTextFieldIds, setOptimisticTextFieldIds] = useState<Set<string>>(() => new Set());
+  const [snapGuides, setSnapGuides] = useState<{ x?: number; y?: number }>({});
+  const [marqueeRect, setMarqueeRect] = useState<GoogleSlideRect | null>(null);
+  const [thumbnailRequest, setThumbnailRequest] = useState({ generation: 0, reconcileRevision: 0 });
+  const optimisticRevisionRef = useRef(0);
+  const queuedRevisionRef = useRef(0);
+  const reconciledRevisionRef = useRef(0);
+  const pendingReconcileRevisionRef = useRef(0);
+  const serverSlidesRef = useRef(slides);
+  const saveQueue = useGoogleSaveQueue(() => {
+    pendingReconcileRevisionRef.current = queuedRevisionRef.current;
+  });
+  const canvasRef = useRef<HTMLDivElement | null>(null);
   const draftSlideRef = useRef<string | null>(null);
   const savedDraftsRef = useRef<Record<string, string>>({});
+  const activeSlideEditorRef = useRef<HTMLDivElement | null>(null);
+  const slideSelectionRangeRef = useRef<Range | null>(null);
   const slidesSourceRef = useRef(slides);
   const draftCacheRef = useRef<Record<string, {
     drafts: Record<string, string>;
@@ -1680,6 +2065,8 @@ export function SlidesPreview({
       kind: "shape" as const,
       styleRuns: element.styleRuns,
       paragraphRuns: element.paragraphRuns,
+      contentAlignment: element.contentAlignment,
+      fontScale: element.fontScale,
       x: element.x,
       y: element.y,
       width: element.width,
@@ -1702,18 +2089,40 @@ export function SlidesPreview({
   const matchingSlides = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
     if (!normalized) return [];
-    return slides.flatMap((item, index) => `${item.text}\n${item.notes ?? ""}`.toLocaleLowerCase().includes(normalized) ? [index] : []);
-  }, [query, slides]);
+    return visibleSlides.flatMap((item, index) => `${item.text}\n${item.notes ?? ""}`.toLocaleLowerCase().includes(normalized) ? [index] : []);
+  }, [query, visibleSlides]);
 
   useEffect(() => {
-    if (selected < slides.length) return;
-    setSelected(Math.max(0, slides.length - 1));
-  }, [selected, slides.length]);
+    if (selected < visibleSlides.length) return;
+    setSelected(Math.max(0, visibleSlides.length - 1));
+  }, [selected, visibleSlides.length]);
 
   useEffect(() => {
-    if (slidesSourceRef.current === slides || saveQueue.pending > 0) return;
+    if (slidesSourceRef.current === slides) return;
     slidesSourceRef.current = slides;
-    draftCacheRef.current = {};
+    serverSlidesRef.current = slides;
+    if (saveQueue.pending > 0) return;
+    const pendingRevision = pendingReconcileRevisionRef.current;
+    if (pendingRevision > reconciledRevisionRef.current) {
+      setVisibleSlides((current) => current.map((item) => (
+        item.optimistic
+          ? slides.find((candidate) => candidate.objectId === item.objectId) ?? item
+          : item
+      )));
+      setThumbnailRequest((current) => ({
+        generation: current.generation + 1,
+        reconcileRevision: pendingRevision,
+      }));
+      return;
+    }
+    if (optimisticRevisionRef.current === reconciledRevisionRef.current) {
+      setVisibleSlides(slides);
+      setThumbnailRequest((current) => ({
+        generation: current.generation + 1,
+        reconcileRevision: reconciledRevisionRef.current,
+      }));
+      draftCacheRef.current = {};
+    }
   }, [saveQueue.pending, slides]);
 
   useEffect(() => {
@@ -1743,26 +2152,43 @@ export function SlidesPreview({
   useEffect(() => {
     thumbnailRequestRef.current = null;
     setThumbnail(null);
-  }, [slides]);
+  }, [slide?.objectId]);
 
   useEffect(() => {
     if (!slide?.objectId) return;
-    const requestKey = `${fileId}\0${slide.objectId}`;
+    if (slide.optimistic) {
+      setThumbnail(slide.optimisticThumbnail ?? null);
+      setThumbnailError(null);
+      return;
+    }
+    const requestKey = googleSlideThumbnailRequestKey(fileId, slide.objectId, thumbnailRequest.generation);
     if (!googleWorkspacePreviewNeedsLoad(active, thumbnailRequestRef.current, requestKey))
       return;
     thumbnailRequestRef.current = requestKey;
     let cancelled = false;
     let objectUrl: string | null = null;
-    setThumbnail(null);
     setThumbnailError(null);
     getGoogleFileContent(fileId, slide.objectId)
       .then((blob) => {
         if (cancelled) return;
         objectUrl = URL.createObjectURL(blob);
+        if (thumbnailRequest.reconcileRevision !== optimisticRevisionRef.current) {
+          URL.revokeObjectURL(objectUrl);
+          objectUrl = null;
+          return;
+        }
         if (thumbnailObjectUrlRef.current)
           URL.revokeObjectURL(thumbnailObjectUrlRef.current);
         thumbnailObjectUrlRef.current = objectUrl;
         setThumbnail(objectUrl);
+        reconciledRevisionRef.current = thumbnailRequest.reconcileRevision;
+        if (pendingReconcileRevisionRef.current <= thumbnailRequest.reconcileRevision)
+          pendingReconcileRevisionRef.current = 0;
+        setVisibleSlides(serverSlidesRef.current);
+        setGeometryOverrides({});
+        setGeometrySourceRects({});
+        setOptimisticTextFieldIds(new Set());
+        draftCacheRef.current = {};
       })
       .catch((cause) => {
         if (!cancelled) setThumbnailError(cause instanceof Error ? cause.message : String(cause));
@@ -1772,7 +2198,7 @@ export function SlidesPreview({
       if (!objectUrl && thumbnailRequestRef.current === requestKey)
         thumbnailRequestRef.current = null;
     };
-  }, [active, fileId, slide?.objectId]);
+  }, [active, fileId, slide?.objectId, slide?.optimistic, slide?.optimisticThumbnail, thumbnailRequest]);
 
   useEffect(() => () => {
     if (thumbnailObjectUrlRef.current)
@@ -1780,6 +2206,11 @@ export function SlidesPreview({
   }, []);
 
   const hasSlideChanges = editableFields.some((field) => (drafts[field.id] ?? "") !== (savedDrafts[field.id] ?? ""));
+
+  function enqueueSlideSave(task: () => Promise<void>) {
+    queuedRevisionRef.current = optimisticRevisionRef.current;
+    saveQueue.enqueue(task);
+  }
 
   function queueSlideText() {
     const snapshot = { ...drafts };
@@ -1813,10 +2244,19 @@ export function SlidesPreview({
       savedDrafts: nextSaved,
       formats: { ...formatOverrides },
     };
-    if (!operations.length) return;
+    if (!operations.length) {
+      if (
+        optimisticTextFieldIds.size === 0
+        && Object.keys(geometryOverrides).length === 0
+        && pendingReconcileRevisionRef.current === 0
+        && saveQueue.pending === 0
+      )
+        reconciledRevisionRef.current = optimisticRevisionRef.current;
+      return;
+    }
     setSavedDrafts(snapshot);
     savedDraftsRef.current = snapshot;
-    saveQueue.enqueue(() => editGoogleSlides(fileId, operations));
+    enqueueSlideSave(() => editGoogleSlides(fileId, operations));
   }
 
   useEffect(() => {
@@ -1829,8 +2269,11 @@ export function SlidesPreview({
   queueSlideTextRef.current = queueSlideText;
   const navigateToSlide = useCallback((next: number) => {
     queueSlideTextRef.current();
-    setSelected(Math.min(slides.length - 1, Math.max(0, next)));
-  }, [slides.length]);
+    setGeometryOverrides({});
+    setGeometrySourceRects({});
+    setSelectedElementIds([]);
+    setSelected(Math.min(visibleSlides.length - 1, Math.max(0, next)));
+  }, [visibleSlides.length]);
 
   function selectRelative(delta: -1 | 1) {
     navigateToSlide(selected + delta);
@@ -1840,8 +2283,8 @@ export function SlidesPreview({
     if (action === "previous") navigateToSlide(selected - 1);
     else if (action === "next") navigateToSlide(selected + 1);
     else if (action === "first") navigateToSlide(0);
-    else if (action === "last") navigateToSlide(slides.length - 1);
-  }, [navigateToSlide, selected, slides.length]);
+    else if (action === "last") navigateToSlide(visibleSlides.length - 1);
+  }, [navigateToSlide, selected, visibleSlides.length]);
 
   useEffect(() => {
     if (!presenting) return;
@@ -1914,19 +2357,117 @@ export function SlidesPreview({
   const shapeFields = editableFields.filter((field) => field.kind === "shape");
   const notesField = editableFields.find((field) => field.kind === "notes");
   const activeTextField = shapeFields.find((field) => field.id === activeTextFieldId);
-  const activeText = activeTextField ? drafts[activeTextField.id] ?? "" : "";
-  const selectedTextRange = textSelection.end > textSelection.start
+  const activeTextRange = activeTextField && textSelection.end > textSelection.start
     ? textSelection
-    : { start: 0, end: activeText.length };
-  const activeTextRange = activeTextField && selectedTextRange.end > selectedTextRange.start
-    ? selectedTextRange
     : null;
   const activeTextFormat = slideFormat
     ?? (activeTextField ? formatOverrides[activeTextField.id] ?? googleSlideTextFormat(activeTextField, textSelection.start) : null);
+  const sceneElements: GoogleSlideSceneElement[] = slide?.elements?.length
+    ? slide.elements
+    : shapeFields.flatMap((field, order) => (
+      field.x == null || field.y == null || field.width == null || field.height == null
+        ? []
+        : [{
+          objectId: field.id,
+          kind: "shape" as const,
+          order,
+          x: field.x,
+          y: field.y,
+          width: field.width,
+          height: field.height,
+          baseWidth: field.width * pageWidth,
+          baseHeight: field.height * pageHeight,
+        }]
+    ));
+  const selectedElements = sceneElements.filter((element) => selectedElementIds.includes(element.objectId));
+  const selectedElementRects = selectedElements.flatMap((element) => {
+    const rect = geometryOverrides[element.objectId] ?? googleSlideElementRect(element);
+    return rect ? [{ element, rect }] : [];
+  });
+  const selectedGroupRect = selectedElementRects.length > 1
+    ? googleSlideGroupBounds(selectedElementRects.map(({ rect }) => rect))
+    : null;
+  const selectedElement = selectedElements[0];
+  const selectedElementRect = selectedElement
+    ? geometryOverrides[selectedElement.objectId] ?? googleSlideElementRect(selectedElement)
+    : null;
+
+  function updateSlideSelection(field: GoogleSlideEditableField, element: HTMLDivElement) {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) return;
+    const range = selection.getRangeAt(0);
+    if (!element.contains(range.startContainer) || !element.contains(range.endContainer)) return;
+    const prefix = range.cloneRange();
+    prefix.selectNodeContents(element);
+    prefix.setEnd(range.startContainer, range.startOffset);
+    const nextRange = googleDocSelectionRange(0, prefix.toString(), range.toString());
+    setTextSelection(nextRange);
+    slideSelectionRangeRef.current = range.cloneRange();
+    setSlideFormat(googleSlideTextFormat(field, nextRange.start));
+  }
+
+  function restoreSlideSelection() {
+    const range = slideSelectionRangeRef.current;
+    if (!range) return;
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  }
+
+  function markSlideOptimistic(textFieldId?: string) {
+    optimisticRevisionRef.current += 1;
+    if (textFieldId) {
+      setOptimisticTextFieldIds((current) => {
+        if (current.has(textFieldId)) return current;
+        const next = new Set(current);
+        next.add(textFieldId);
+        return next;
+      });
+    }
+  }
+
+  function clearOptimisticTextField(textFieldId: string) {
+    setOptimisticTextFieldIds((current) => {
+      if (!current.has(textFieldId)) return current;
+      const next = new Set(current);
+      next.delete(textFieldId);
+      if (
+        next.size === 0
+        && Object.keys(geometryOverrides).length === 0
+        && pendingReconcileRevisionRef.current === 0
+        && saveQueue.pending === 0
+      )
+        reconciledRevisionRef.current = optimisticRevisionRef.current;
+      return next;
+    });
+  }
 
   function applySlideTextFormat(change: GoogleTextFormatChange) {
     if (!activeTextField || !activeTextRange || !activeTextFormat) return;
     queueSlideText();
+    markSlideOptimistic(activeTextField.id);
+    restoreSlideSelection();
+    if (change.field === "fontSize") {
+      window.document.execCommand("fontSize", false, "7");
+      activeSlideEditorRef.current?.querySelectorAll<HTMLElement>('font[size="7"]').forEach((element) => {
+        element.removeAttribute("size");
+        element.style.fontSize = `${change.value * (activeTextField.fontScale ?? 1) / 7.2}cqw`;
+      });
+    } else if (change.field === "color") {
+      window.document.execCommand("foreColor", false, change.value);
+    } else if (change.field === "alignment") {
+      window.document.execCommand(
+        change.value === "CENTER"
+          ? "justifyCenter"
+          : change.value === "END"
+            ? "justifyRight"
+            : change.value === "JUSTIFIED"
+              ? "justifyFull"
+              : "justifyLeft",
+      );
+    } else {
+      window.document.execCommand(change.field);
+    }
     const operation: GoogleSlidesEditOperation = change.field === "alignment"
       ? {
         action: "set_paragraph_style",
@@ -1947,10 +2488,319 @@ export function SlidesPreview({
     const nextFormat = { ...activeTextFormat, [change.field]: change.value } as GoogleTextFormat;
     setSlideFormat(nextFormat);
     setFormatOverrides((current) => ({ ...current, [activeTextField.id]: nextFormat }));
-    saveQueue.enqueue(() => editGoogleSlides(fileId, [operation]));
+    enqueueSlideSave(() => editGoogleSlides(fileId, [operation]));
   }
 
-  if (!slides.length) return <div className="google-workspace-state"><strong>This presentation is empty.</strong></div>;
+  function updateCurrentSlide(update: (item: LocalGoogleSlide) => LocalGoogleSlide) {
+    setVisibleSlides((current) => current.map((item, index) => index === selected ? update(item) : item));
+  }
+
+  function createSlide() {
+    queueSlideText();
+    markSlideOptimistic();
+    const objectId = googleSlideObjectId("slide");
+    const insertionIndex = selected + 1;
+    const next: LocalGoogleSlide = {
+      objectId,
+      text: "",
+      notes: "",
+      notesObjectId: null,
+      textElements: [],
+      elements: [],
+      optimistic: true,
+      optimisticThumbnail: null,
+    };
+    setVisibleSlides((current) => [...current.slice(0, insertionIndex), next, ...current.slice(insertionIndex)]);
+    setSelected(insertionIndex);
+    enqueueSlideSave(() => editGoogleSlides(fileId, [{
+      action: "create_slide",
+      object_id: objectId,
+      layout: "BLANK",
+      insertion_index: insertionIndex,
+    }]));
+  }
+
+  function duplicateSlide(index = selected) {
+    const source = visibleSlides[index];
+    if (!source?.objectId) return;
+    queueSlideText();
+    markSlideOptimistic();
+    const objectId = googleSlideObjectId("slide");
+    const insertionIndex = index + 1;
+    const next: LocalGoogleSlide = {
+      ...source,
+      objectId,
+      textElements: [],
+      elements: [],
+      optimistic: true,
+      optimisticThumbnail: index === selected ? thumbnail : null,
+    };
+    setVisibleSlides((current) => [...current.slice(0, insertionIndex), next, ...current.slice(insertionIndex)]);
+    setSelected(index === selected ? insertionIndex : insertionIndex <= selected ? selected + 1 : selected);
+    enqueueSlideSave(() => editGoogleSlides(fileId, [{
+      action: "duplicate_slide",
+      object_id: source.objectId!,
+      new_object_id: objectId,
+    }]));
+  }
+
+  function deleteSlide(index = selected) {
+    const target = visibleSlides[index];
+    if (!target?.objectId || visibleSlides.length <= 1 || !window.confirm(`Delete slide ${index + 1}?`)) return;
+    queueSlideText();
+    markSlideOptimistic();
+    const objectId = target.objectId;
+    setVisibleSlides((current) => current.filter((_, itemIndex) => itemIndex !== index));
+    setSelected(index < selected ? selected - 1 : index === selected ? Math.min(selected, visibleSlides.length - 2) : selected);
+    enqueueSlideSave(() => editGoogleSlides(fileId, [{ action: "delete_slide", object_id: objectId }]));
+  }
+
+  function moveSlide(delta: -1 | 1) {
+    const destination = selected + delta;
+    if (!slide?.objectId || destination < 0 || destination >= visibleSlides.length) return;
+    queueSlideText();
+    markSlideOptimistic();
+    setVisibleSlides((current) => {
+      const next = [...current];
+      const [moved] = next.splice(selected, 1);
+      next.splice(destination, 0, moved);
+      return next;
+    });
+    setSelected(destination);
+    enqueueSlideSave(() => editGoogleSlides(fileId, [{
+      action: "reorder_slides",
+      slide_object_ids: [slide.objectId!],
+      insertion_index: destination > selected ? destination + 1 : destination,
+    }]));
+  }
+
+  function commitElementRects(entries: Array<{ element: GoogleSlideSceneElement; rect: GoogleSlideRect }>) {
+    const rects = Object.fromEntries(entries.map(({ element, rect }) => [element.objectId, rect]));
+    updateCurrentSlide((item) => ({
+      ...item,
+      elements: item.elements?.map((candidate) => rects[candidate.objectId] ? { ...candidate, ...rects[candidate.objectId] } : candidate),
+      textElements: item.textElements?.map((candidate) => rects[candidate.objectId] ? { ...candidate, ...rects[candidate.objectId] } : candidate),
+    }));
+    enqueueSlideSave(() => editGoogleSlides(fileId, entries.map(({ element, rect }) => ({
+      action: "update_element_transform",
+      object_id: element.objectId,
+      x: rect.x * pageWidth,
+      y: rect.y * pageHeight,
+      width: rect.width * pageWidth,
+      height: rect.height * pageHeight,
+      base_width: element.baseWidth!,
+      base_height: element.baseHeight!,
+    }))));
+  }
+
+  function commitElementRect(element: GoogleSlideSceneElement, rect: GoogleSlideRect) {
+    if (!element.baseWidth || !element.baseHeight) return;
+    commitElementRects([{ element, rect }]);
+  }
+
+  function startElementGesture(
+    event: ReactPointerEvent<HTMLButtonElement>,
+    element: GoogleSlideSceneElement,
+    handle: GoogleSlideResizeHandle,
+  ) {
+    if (event.button !== 0 || !canvasRef.current) return;
+    const startRect = geometryOverrides[element.objectId] ?? googleSlideElementRect(element);
+    if (!startRect || !element.baseWidth || !element.baseHeight) return;
+    event.preventDefault();
+    event.stopPropagation();
+    queueSlideText();
+    activeSlideEditorRef.current?.blur();
+    setSelectedElementIds([element.objectId]);
+    setGeometrySourceRects((current) => current[element.objectId]
+      ? current
+      : { ...current, [element.objectId]: googleSlideElementRect(element)! });
+    const bounds = canvasRef.current.getBoundingClientRect();
+    const origin = { x: event.clientX, y: event.clientY };
+    const otherRects = sceneElements.flatMap((item) => {
+      if (item.objectId === element.objectId) return [];
+      const rect = geometryOverrides[item.objectId] ?? googleSlideElementRect(item);
+      return rect ? [rect] : [];
+    });
+    let latest = startRect;
+    const onMove = (moveEvent: globalThis.PointerEvent) => {
+      const raw = googleSlideGestureRect(
+        startRect,
+        (moveEvent.clientX - origin.x) / bounds.width,
+        (moveEvent.clientY - origin.y) / bounds.height,
+        handle,
+      );
+      const snapped = googleSlideSnapRect(raw, otherRects, handle, 6 / bounds.width, 6 / bounds.height);
+      latest = snapped.rect;
+      setGeometryOverrides((current) => ({ ...current, [element.objectId]: latest }));
+      setSnapGuides({ x: snapped.guideX, y: snapped.guideY });
+    };
+    const onEnd = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onEnd);
+      window.removeEventListener("pointercancel", onEnd);
+      setSnapGuides({});
+      if (latest !== startRect) {
+        markSlideOptimistic();
+        commitElementRect(element, latest);
+      }
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onEnd);
+    window.addEventListener("pointercancel", onEnd);
+  }
+
+  function startGroupGesture(event: ReactPointerEvent<HTMLButtonElement>, handle: GoogleSlideResizeHandle) {
+    if (event.button !== 0 || !canvasRef.current || !selectedGroupRect || selectedElementRects.some(({ element }) => !element.baseWidth || !element.baseHeight))
+      return;
+    event.preventDefault();
+    event.stopPropagation();
+    queueSlideText();
+    activeSlideEditorRef.current?.blur();
+    const bounds = canvasRef.current.getBoundingClientRect();
+    const origin = { x: event.clientX, y: event.clientY };
+    const startRects = selectedElementRects;
+    const selectedIds = new Set(selectedElementIds);
+    const otherRects = sceneElements.flatMap((element) => {
+      if (selectedIds.has(element.objectId)) return [];
+      const rect = geometryOverrides[element.objectId] ?? googleSlideElementRect(element);
+      return rect ? [rect] : [];
+    });
+    setGeometrySourceRects((current) => ({
+      ...Object.fromEntries(startRects.map(({ element }) => [
+        element.objectId,
+        current[element.objectId] ?? googleSlideElementRect(element),
+      ]).filter((entry): entry is [string, GoogleSlideRect] => Boolean(entry[1]))),
+      ...current,
+    }));
+    let latest = startRects;
+    let changed = false;
+    const onMove = (moveEvent: globalThis.PointerEvent) => {
+      const raw = googleSlideGestureRect(
+        selectedGroupRect,
+        (moveEvent.clientX - origin.x) / bounds.width,
+        (moveEvent.clientY - origin.y) / bounds.height,
+        handle,
+      );
+      const snapped = googleSlideSnapRect(raw, otherRects, handle, 6 / bounds.width, 6 / bounds.height);
+      latest = startRects.map(({ element, rect }) => ({
+        element,
+        rect: googleSlideTransformGroup(rect, selectedGroupRect, snapped.rect),
+      }));
+      changed = true;
+      setGeometryOverrides((current) => ({
+        ...current,
+        ...Object.fromEntries(latest.map(({ element, rect }) => [element.objectId, rect])),
+      }));
+      setSnapGuides({ x: snapped.guideX, y: snapped.guideY });
+    };
+    const onEnd = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onEnd);
+      window.removeEventListener("pointercancel", onEnd);
+      setSnapGuides({});
+      if (changed) {
+        markSlideOptimistic();
+        commitElementRects(latest);
+      }
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onEnd);
+    window.addEventListener("pointercancel", onEnd);
+  }
+
+  function startMarquee(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!canEdit || event.button !== 0 || !canvasRef.current) return;
+    const target = event.target;
+    if (target instanceof Element && target.closest(".google-slide-inline-editor, .google-slide-element-hit-target, .google-slide-selection-frame"))
+      return;
+    event.preventDefault();
+    const bounds = canvasRef.current.getBoundingClientRect();
+    const point = (clientX: number, clientY: number) => ({
+      x: Math.min(1, Math.max(0, (clientX - bounds.left) / bounds.width)),
+      y: Math.min(1, Math.max(0, (clientY - bounds.top) / bounds.height)),
+    });
+    const origin = point(event.clientX, event.clientY);
+    let latest = googleSlideMarqueeRect(origin.x, origin.y, origin.x, origin.y);
+    setSelectedElementIds([]);
+    setMarqueeRect(latest);
+    const onMove = (moveEvent: globalThis.PointerEvent) => {
+      const current = point(moveEvent.clientX, moveEvent.clientY);
+      latest = googleSlideMarqueeRect(origin.x, origin.y, current.x, current.y);
+      setMarqueeRect(latest);
+    };
+    const onEnd = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onEnd);
+      window.removeEventListener("pointercancel", onCancel);
+      setMarqueeRect(null);
+      if (latest.width * bounds.width < 3 && latest.height * bounds.height < 3) return;
+      setSelectedElementIds(sceneElements.flatMap((element) => {
+        const rect = geometryOverrides[element.objectId] ?? googleSlideElementRect(element);
+        return rect && googleSlideRectsIntersect(latest, rect) ? [element.objectId] : [];
+      }));
+    };
+    const onCancel = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onEnd);
+      window.removeEventListener("pointercancel", onCancel);
+      setMarqueeRect(null);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onEnd);
+    window.addEventListener("pointercancel", onCancel);
+  }
+
+  function duplicateElement() {
+    if (!selectedElement || !selectedElementRect || !selectedElement.baseWidth || !selectedElement.baseHeight) return;
+    markSlideOptimistic();
+    const objectId = googleSlideObjectId("element");
+    const rect = googleSlideGestureRect(selectedElementRect, 0.02, 0.02, "move");
+    const selectedTextElement = slide?.textElements?.find((element) => element.objectId === selectedElement.objectId);
+    if (selectedTextElement) {
+      setDrafts((current) => ({ ...current, [objectId]: current[selectedElement.objectId] ?? selectedTextElement.text }));
+      setSavedDrafts((current) => ({ ...current, [objectId]: current[selectedElement.objectId] ?? selectedTextElement.text }));
+      savedDraftsRef.current[objectId] = savedDraftsRef.current[selectedElement.objectId] ?? selectedTextElement.text;
+    }
+    updateCurrentSlide((item) => ({
+      ...item,
+      elements: [...sceneElements, { ...selectedElement, objectId, order: sceneElements.length }],
+      textElements: selectedTextElement
+        ? [...(item.textElements ?? []), { ...selectedTextElement, objectId }]
+        : item.textElements,
+    }));
+    setGeometryOverrides((current) => ({ ...current, [objectId]: rect }));
+    setSelectedElementIds([objectId]);
+    enqueueSlideSave(() => editGoogleSlides(fileId, [
+      { action: "duplicate_element", object_id: selectedElement.objectId, new_object_id: objectId },
+      {
+        action: "update_element_transform",
+        object_id: objectId,
+        x: rect.x * pageWidth,
+        y: rect.y * pageHeight,
+        width: rect.width * pageWidth,
+        height: rect.height * pageHeight,
+        base_width: selectedElement.baseWidth!,
+        base_height: selectedElement.baseHeight!,
+      },
+    ]));
+  }
+
+  function deleteElement() {
+    if (!selectedElement || !window.confirm(`Delete selected ${selectedElement.kind}?`)) return;
+    markSlideOptimistic();
+    updateCurrentSlide((item) => ({
+      ...item,
+      elements: item.elements?.filter((element) => element.objectId !== selectedElement.objectId),
+      textElements: item.textElements?.filter((element) => element.objectId !== selectedElement.objectId),
+    }));
+    setSelectedElementIds([]);
+    enqueueSlideSave(() => editGoogleSlides(fileId, [{
+      action: "delete_element",
+      object_id: selectedElement.objectId,
+    }]));
+  }
+
+  if (!visibleSlides.length) return <div className="google-workspace-state"><strong>This presentation is empty.</strong></div>;
 
   return (
     <div
@@ -1965,7 +2815,7 @@ export function SlidesPreview({
         applyNavigationAction(action);
       }}
     >
-      <div className="google-viewer-toolbar">
+      <div className="google-viewer-toolbar google-slides-unified-toolbar" role="toolbar" aria-label="Presentation controls">
         <button
           className={`preview-browser-action${railOpen ? " active" : ""}`}
           type="button"
@@ -1979,10 +2829,29 @@ export function SlidesPreview({
         <button className="preview-browser-action" type="button" aria-label="Previous slide" disabled={selected === 0} onClick={() => selectRelative(-1)}>
           <ArrowLeft size={13} />
         </button>
-        <strong className="google-slide-counter">{selected + 1} / {slides.length}</strong>
-        <button className="preview-browser-action" type="button" aria-label="Next slide" disabled={selected === slides.length - 1} onClick={() => selectRelative(1)}>
+        <strong className="google-slide-counter">{selected + 1} / {visibleSlides.length}</strong>
+        <button className="preview-browser-action" type="button" aria-label="Next slide" disabled={selected === visibleSlides.length - 1} onClick={() => selectRelative(1)}>
           <ArrowRight size={13} />
         </button>
+        {canEdit ? (
+          <span className="google-slides-structure-tools">
+            <button className="preview-browser-action" type="button" title="New slide" aria-label="New slide" onClick={createSlide}>
+              <Plus size={13} />
+            </button>
+            <button className="preview-browser-action" type="button" title="Duplicate slide" aria-label="Duplicate slide" onClick={() => duplicateSlide()}>
+              <Copy size={13} />
+            </button>
+            <button className="preview-browser-action" type="button" title="Move slide earlier" aria-label="Move slide earlier" disabled={selected === 0} onClick={() => moveSlide(-1)}>
+              <ArrowLeft size={13} />
+            </button>
+            <button className="preview-browser-action" type="button" title="Move slide later" aria-label="Move slide later" disabled={selected === visibleSlides.length - 1} onClick={() => moveSlide(1)}>
+              <ArrowRight size={13} />
+            </button>
+            <button className="preview-browser-action danger" type="button" title="Delete slide" aria-label="Delete slide" disabled={visibleSlides.length <= 1} onClick={() => deleteSlide()}>
+              <Trash size={13} />
+            </button>
+          </span>
+        ) : null}
         <label className="google-viewer-search">
           <Search size={13} aria-hidden="true" />
           <input
@@ -1992,7 +2861,7 @@ export function SlidesPreview({
             onChange={(event) => {
               setQuery(event.target.value);
               const normalized = event.target.value.trim().toLocaleLowerCase();
-              const firstMatch = slides.findIndex((item) => `${item.text}\n${item.notes ?? ""}`.toLocaleLowerCase().includes(normalized));
+              const firstMatch = visibleSlides.findIndex((item) => `${item.text}\n${item.notes ?? ""}`.toLocaleLowerCase().includes(normalized));
               if (normalized && firstMatch >= 0) navigateToSlide(firstMatch);
             }}
             onKeyDown={(event) => {
@@ -2006,21 +2875,25 @@ export function SlidesPreview({
         <span className="google-viewer-match-count" aria-live="polite">
           {query.trim() ? `${matchingSlides.length} match${matchingSlides.length === 1 ? "" : "es"}` : ""}
         </span>
-        <span className="google-viewer-toolbar-spacer" />
-        {canEdit && editableFields.length ? (
-          <button
-            className={`google-viewer-text-button${editorOpen ? " active" : ""}`}
-            type="button"
-            aria-pressed={editorOpen}
-            onClick={() => {
-              if (editorOpen) queueSlideText();
-              setEditorOpen((value) => !value);
-            }}
-          >
-            Edit slide text
-          </button>
+        {canEdit && activeTextRange && activeTextFormat ? (
+          <GoogleTextFormatToolbar
+            format={activeTextFormat}
+            className="google-slides-contextual-tools"
+            onChange={applySlideTextFormat}
+          />
         ) : null}
-        {slides.some((item) => item.notesObjectId || item.notes?.trim()) ? (
+        {canEdit && selectedElements.length === 1 && selectedElement ? (
+          <span className="google-slides-element-tools">
+            <button className="preview-browser-action" type="button" title="Duplicate selected element" aria-label="Duplicate selected element" onClick={duplicateElement}>
+              <Copy size={13} />
+            </button>
+            <button className="preview-browser-action danger" type="button" title="Delete selected element" aria-label="Delete selected element" onClick={deleteElement}>
+              <Trash size={13} />
+            </button>
+          </span>
+        ) : canEdit && selectedElements.length > 1 ? <span className="google-viewer-match-count">{selectedElements.length} selected</span> : null}
+        <span className="google-viewer-toolbar-spacer" />
+        {visibleSlides.some((item) => item.notesObjectId || item.notes?.trim()) ? (
           <button
             className={`google-viewer-text-button${notesOpen ? " active" : ""}`}
             type="button"
@@ -2060,95 +2933,201 @@ export function SlidesPreview({
       </div>
       <div className={`google-slides-preview${railOpen ? "" : " rail-collapsed"}`}>
       {railOpen ? <nav className="google-slide-rail" aria-label="Slides">
-        {slides.map((item, index) => (
-          <button
-            className={`${index === selected ? "active" : ""}${matchingSlides.includes(index) ? " match" : ""}`.trim()}
-            type="button"
+        {visibleSlides.map((item, index) => (
+          <div
+            className={`google-slide-rail-item${index === selected ? " active" : ""}${matchingSlides.includes(index) ? " match" : ""}`}
             key={item.objectId ?? index}
-            aria-current={index === selected ? "page" : undefined}
-            onClick={() => navigateToSlide(index)}
           >
-            <span className="google-slide-rail-number">{index + 1}</span>
-            <SlideRailThumbnail
-              fileId={fileId}
-              objectId={item.objectId}
-              active={active}
-              selectedSource={index === selected ? thumbnail : null}
-            />
-            <small>{item.text.trim().split("\n")[0]?.slice(0, 64) || "Untitled slide"}</small>
-          </button>
+            <button
+              className="google-slide-rail-main"
+              type="button"
+              aria-current={index === selected ? "page" : undefined}
+              aria-label={`Slide ${index + 1}`}
+              onClick={() => navigateToSlide(index)}
+            >
+              <span className="google-slide-rail-number">{index + 1}</span>
+              <SlideRailThumbnail
+                fileId={fileId}
+                objectId={item.objectId}
+                active={active}
+                optimistic={item.optimistic === true}
+                revision={thumbnailRequest.generation}
+                selectedSource={index === selected ? thumbnail : null}
+              />
+            </button>
+            {canEdit ? (
+              <span className="google-slide-rail-actions">
+                <button type="button" title={`Duplicate slide ${index + 1}`} aria-label={`Duplicate slide ${index + 1}`} onClick={() => duplicateSlide(index)}>
+                  <Copy size={11} />
+                </button>
+                <button className="danger" type="button" title={`Delete slide ${index + 1}`} aria-label={`Delete slide ${index + 1}`} disabled={visibleSlides.length <= 1} onClick={() => deleteSlide(index)}>
+                  <Trash size={11} />
+                </button>
+              </span>
+            ) : null}
+          </div>
         ))}
       </nav> : null}
       <div className="google-slide-stage">
-        {editorOpen && activeTextFormat ? (
-          <GoogleTextFormatToolbar
-            className="google-slide-format-toolbar"
-            format={activeTextFormat}
-            disabled={!activeTextRange}
-            onChange={(change) => void applySlideTextFormat(change)}
-          />
-        ) : null}
         <div
+          ref={canvasRef}
           className="google-slide-canvas"
           style={{
             aspectRatio: pageAspectRatio,
             width: zoom === "fit" ? undefined : `${zoom}%`,
           }}
+          onPointerDown={startMarquee}
         >
           <GoogleSlideVisual
             source={thumbnail}
             error={thumbnailError}
             slideNumber={selected + 1}
-            text={slide?.text}
           />
-          {editorOpen ? shapeFields.map((field) => (
+          {canEdit ? sceneElements.map((element) => {
+            if (shapeFields.some((field) => field.id === element.objectId)) return null;
+            const rect = geometryOverrides[element.objectId] ?? googleSlideElementRect(element);
+            return rect ? (
+              <button
+                className="google-slide-element-hit-target"
+                type="button"
+                key={element.objectId}
+                aria-label={`Select ${element.kind}`}
+                style={googleSlideRectStyle(rect)}
+                onClick={() => setSelectedElementIds([element.objectId])}
+                onPointerDown={(event) => startElementGesture(event, element, "move")}
+              />
+            ) : null;
+          }) : null}
+          {canEdit ? shapeFields.map((field) => (
+            geometrySourceRects[field.id]
+              ? <span
+                  className="google-slide-text-origin-mask"
+                  key={`${field.id}-origin`}
+                  style={googleSlideRectStyle(geometrySourceRects[field.id])}
+                  aria-hidden="true"
+                />
+              : null
+          )) : null}
+          {canEdit ? shapeFields.map((field) => (
             field.x != null && field.y != null && field.width != null && field.height != null ? (
-              <textarea
-                className="google-slide-inline-editor"
-                aria-label={`Edit ${field.label.toLocaleLowerCase()}`}
+              <GoogleSlideInlineEditor
+                field={field}
                 key={field.id}
                 value={drafts[field.id] ?? ""}
-                data-active={field.id === activeTextFieldId ? "true" : undefined}
+                active={field.id === activeTextFieldId}
+                optimistic={optimisticTextFieldIds.has(field.id) || geometryOverrides[field.id] != null}
                 style={{
-                  left: `${field.x * 100}%`,
-                  top: `${field.y * 100}%`,
-                  width: `${field.width * 100}%`,
-                  height: `${field.height * 100}%`,
-                  ...googleTextFormatCss(
-                    field.id === activeTextFieldId
-                      ? activeTextFormat
-                      : formatOverrides[field.id] ?? null,
-                  ),
+                  ...googleSlideRectStyle(geometryOverrides[field.id] ?? {
+                    x: field.x,
+                    y: field.y,
+                    width: field.width,
+                    height: field.height,
+                  }),
+                  textAlign: googleTextFormatCss(googleSlideTextFormat(field, 0)).textAlign,
                 }}
-                onFocus={(event) => {
+                onFocus={(element) => {
+                  activeSlideEditorRef.current = element;
                   setActiveTextFieldId(field.id);
-                  setTextSelection({
-                    start: event.currentTarget.selectionStart,
-                    end: event.currentTarget.selectionEnd,
-                  });
-                  setSlideFormat(formatOverrides[field.id] ?? googleSlideTextFormat(field, event.currentTarget.selectionStart));
+                  setSelectedElementIds([field.id]);
+                  setSlideFormat(formatOverrides[field.id] ?? googleSlideTextFormat(field, 0));
+                  window.requestAnimationFrame(() => updateSlideSelection(field, element));
                 }}
-                onChange={(event) => setDrafts((current) => ({
-                  ...current,
-                  [field.id]: event.currentTarget.value,
-                }))}
-                onSelect={(event) => {
-                  setTextSelection({
-                    start: event.currentTarget.selectionStart,
-                    end: event.currentTarget.selectionEnd,
-                  });
+                onInput={(value) => {
+                  if (value === (savedDraftsRef.current[field.id] ?? "")) clearOptimisticTextField(field.id);
+                  else markSlideOptimistic(field.id);
+                  setDrafts((current) => ({
+                    ...current,
+                    [field.id]: value,
+                  }));
+                }}
+                onSelection={(element) => updateSlideSelection(field, element)}
+                onBlur={(event) => {
+                  if (event.relatedTarget instanceof HTMLElement && event.relatedTarget.closest("[data-google-format-toolbar]"))
+                    return;
+                  queueSlideText();
+                  activeSlideEditorRef.current = null;
+                  slideSelectionRangeRef.current = null;
+                  setActiveTextFieldId(null);
+                  setTextSelection({ start: 0, end: 0 });
                   setSlideFormat(null);
                 }}
-                onBlur={(event) => {
-                  if (!(event.relatedTarget instanceof HTMLElement && event.relatedTarget.closest("[data-google-format-toolbar]")))
-                    queueSlideText();
+                onEscape={(element) => {
+                  const saved = savedDraftsRef.current[field.id] ?? "";
+                  element.textContent = saved;
+                  setDrafts((current) => ({ ...current, [field.id]: saved }));
+                  clearOptimisticTextField(field.id);
                 }}
               />
             ) : null
           )) : null}
+          {thumbnail ? selectedElements.map((element) => {
+            const rect = geometryOverrides[element.objectId];
+            const sourceRect = geometrySourceRects[element.objectId];
+            return rect && sourceRect && !shapeFields.some((field) => field.id === element.objectId) ? (
+              <div className="google-slide-element-proxy" style={googleSlideRectStyle(rect)} key={`${element.objectId}-proxy`} aria-hidden="true">
+                <img src={thumbnail} alt="" style={googleSlideCropStyle(sourceRect)} />
+              </div>
+            ) : null;
+          }) : null}
+          {snapGuides.x != null ? <span className="google-slide-snap-guide vertical" style={{ left: `${snapGuides.x * 100}%` }} /> : null}
+          {snapGuides.y != null ? <span className="google-slide-snap-guide horizontal" style={{ top: `${snapGuides.y * 100}%` }} /> : null}
+          {marqueeRect ? <span className="google-slide-marquee" style={googleSlideRectStyle(marqueeRect)} aria-hidden="true" /> : null}
+          {canEdit && selectedElements.length > 1 ? <>
+            {selectedElementRects.map(({ element, rect }) => (
+              <span className="google-slide-selection-frame multi" style={googleSlideRectStyle(rect)} key={element.objectId} aria-hidden="true" />
+            ))}
+            {selectedGroupRect ? (
+              <div className="google-slide-selection-frame group" style={googleSlideRectStyle(selectedGroupRect)}>
+                {(["top", "right", "bottom", "left"] as const).map((edge, index) => (
+                  <button
+                    className={`google-slide-drag-edge ${edge}`}
+                    type="button"
+                    key={edge}
+                    tabIndex={index === 0 ? 0 : -1}
+                    aria-hidden={index === 0 ? undefined : true}
+                    aria-label={index === 0 ? `Move ${selectedElements.length} selected elements` : undefined}
+                    onPointerDown={(event) => startGroupGesture(event, "move")}
+                  />
+                ))}
+                {(["nw", "ne", "se", "sw"] as const).map((handle) => (
+                  <button
+                    className={`google-slide-resize-handle ${handle}`}
+                    type="button"
+                    key={handle}
+                    aria-label={`Resize ${selectedElements.length} selected elements from ${handle}`}
+                    onPointerDown={(event) => startGroupGesture(event, handle)}
+                  />
+                ))}
+              </div>
+            ) : null}
+          </> : null}
+          {canEdit && selectedElements.length === 1 && selectedElement && selectedElementRect ? (
+            <div className="google-slide-selection-frame" style={googleSlideRectStyle(selectedElementRect)}>
+              {(["top", "right", "bottom", "left"] as const).map((edge, index) => (
+                <button
+                  className={`google-slide-drag-edge ${edge}`}
+                  type="button"
+                  key={edge}
+                  tabIndex={index === 0 ? 0 : -1}
+                  aria-hidden={index === 0 ? undefined : true}
+                  aria-label={index === 0 ? `Move selected ${selectedElement.kind}` : undefined}
+                  onPointerDown={(event) => startElementGesture(event, selectedElement, "move")}
+                />
+              ))}
+              {(["nw", "ne", "se", "sw"] as const).map((handle) => (
+                <button
+                  className={`google-slide-resize-handle ${handle}`}
+                  type="button"
+                  key={handle}
+                  aria-label={`Resize selected ${selectedElement.kind} from ${handle}`}
+                  onPointerDown={(event) => startElementGesture(event, selectedElement, handle)}
+                />
+              ))}
+            </div>
+          ) : null}
         </div>
         {thumbnailError ? <p className="sheet-hint error">{thumbnailError}</p> : null}
-        {editorOpen && shapeFields.some((field) => field.x == null || field.y == null || field.width == null || field.height == null) ? (
+        {canEdit && shapeFields.some((field) => field.x == null || field.y == null || field.width == null || field.height == null) ? (
           <small className="google-slide-layout-hint">Some unsupported rotated text boxes remain view-only.</small>
         ) : null}
         {notesOpen ? (
@@ -2158,10 +3137,13 @@ export function SlidesPreview({
               <textarea
                 aria-label="Edit speaker notes"
                 value={drafts[notesField.id] ?? ""}
-                onChange={(event) => setDrafts((current) => ({
-                  ...current,
-                  [notesField.id]: event.currentTarget.value,
-                }))}
+                onChange={(event) => {
+                  markSlideOptimistic();
+                  setDrafts((current) => ({
+                    ...current,
+                    [notesField.id]: event.currentTarget.value,
+                  }));
+                }}
                 onBlur={queueSlideText}
               />
             ) : <p>{slide?.notes?.trim() || "No speaker notes on this slide."}</p>}
@@ -2174,7 +3156,7 @@ export function SlidesPreview({
           className="google-slides-presentation"
           role="dialog"
           aria-modal="true"
-          aria-label={`Presenting slide ${selected + 1} of ${slides.length}`}
+          aria-label={`Presenting slide ${selected + 1} of ${visibleSlides.length}`}
           tabIndex={-1}
           ref={presentationRef}
         >
@@ -2197,7 +3179,6 @@ export function SlidesPreview({
                 source={thumbnail}
                 error={thumbnailError}
                 slideNumber={selected + 1}
-                text={slide?.text}
               />
             </div>
           </div>
@@ -2205,10 +3186,10 @@ export function SlidesPreview({
             <button type="button" disabled={selected === 0} onClick={() => selectRelative(-1)}>
               <ArrowLeft size={16} aria-hidden="true" /> Previous
             </button>
-            <output aria-label={`Slide ${selected + 1} of ${slides.length}`} aria-live="polite">
-              {selected + 1} / {slides.length}
+            <output aria-label={`Slide ${selected + 1} of ${visibleSlides.length}`} aria-live="polite">
+              {selected + 1} / {visibleSlides.length}
             </output>
-            <button type="button" disabled={selected === slides.length - 1} onClick={() => selectRelative(1)}>
+            <button type="button" disabled={selected === visibleSlides.length - 1} onClick={() => selectRelative(1)}>
               Next <ArrowRight size={16} aria-hidden="true" />
             </button>
           </div>
@@ -2238,32 +3219,56 @@ export function googleSlideTextFormat(field: GoogleSlideEditableField, index: nu
   };
   const textStyle = runAt(field.styleRuns)?.style ?? {};
   const paragraphStyle = runAt(field.paragraphRuns)?.style ?? {};
+  const weightedFont = isRecord(textStyle.weightedFontFamily) ? textStyle.weightedFontFamily : {};
   return {
-    bold: textStyle.bold === true,
+    bold: textStyle.bold === true
+      || (typeof weightedFont.weight === "number" && weightedFont.weight >= 600),
     italic: textStyle.italic === true,
     underline: textStyle.underline === true,
     fontSize: googleFontSize(textStyle.fontSize, 14),
+    fontFamily: typeof weightedFont.fontFamily === "string"
+      ? weightedFont.fontFamily
+      : typeof textStyle.fontFamily === "string"
+        ? textStyle.fontFamily
+        : undefined,
     color: googleColorHex(textStyle.foregroundColor),
     alignment: googleTextAlignment(paragraphStyle.alignment),
   };
+}
+
+export function googleSlideTextSegments(field: GoogleSlideEditableField) {
+  const boundaries = new Set([0, field.text.length]);
+  for (const run of [...(field.styleRuns ?? []), ...(field.paragraphRuns ?? [])]) {
+    boundaries.add(Math.max(0, Math.min(field.text.length, run.start)));
+    boundaries.add(Math.max(0, Math.min(field.text.length, run.end)));
+  }
+  const offsets = [...boundaries].sort((left, right) => left - right);
+  return offsets.slice(0, -1).flatMap((start, index) => {
+    const end = offsets[index + 1];
+    return end > start
+      ? [{ start, end, text: field.text.slice(start, end), format: googleSlideTextFormat(field, start) }]
+      : [];
+  });
 }
 
 function GoogleSlideVisual({
   source,
   error,
   slideNumber,
-  text,
 }: {
   source: string | null;
   error: string | null;
   slideNumber: number;
-  text?: string | null;
 }) {
   return source ? <img src={source} alt={`Slide ${slideNumber}`} /> : (
-    <div className="google-slide-fallback">
+    <div
+      className="google-slide-fallback"
+      role="status"
+      aria-label={error ? "Slide preview unavailable" : "Loading slide preview"}
+      data-error={error ? "true" : undefined}
+    >
       {!error ? <span className="spinner" aria-hidden="true" /> : null}
-      <strong>Slide {slideNumber}</strong>
-      <p>{text || "No text on this slide."}</p>
+      {error ? <small>Preview unavailable</small> : null}
     </div>
   );
 }
@@ -2272,11 +3277,15 @@ function SlideRailThumbnail({
   fileId,
   objectId,
   active,
+  optimistic,
+  revision,
   selectedSource,
 }: {
   fileId: string;
   objectId?: string | null;
   active: boolean;
+  optimistic?: boolean;
+  revision: number;
   selectedSource: string | null;
 }) {
   const rootRef = useRef<HTMLSpanElement | null>(null);
@@ -2303,8 +3312,8 @@ function SlideRailThumbnail({
   }, [visible]);
 
   useEffect(() => {
-    if (!visible || !objectId || selectedSource) return;
-    const requestKey = `${fileId}\0${objectId}`;
+    if (!visible || !objectId || optimistic || selectedSource) return;
+    const requestKey = googleSlideThumbnailRequestKey(fileId, objectId, revision);
     if (!googleWorkspacePreviewNeedsLoad(active, requestRef.current, requestKey))
       return;
     requestRef.current = requestKey;
@@ -2324,7 +3333,7 @@ function SlideRailThumbnail({
       if (!objectUrl && requestRef.current === requestKey)
         requestRef.current = null;
     };
-  }, [active, fileId, objectId, selectedSource, visible]);
+  }, [active, fileId, objectId, optimistic, revision, selectedSource, visible]);
 
   useEffect(() => () => {
     if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);

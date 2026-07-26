@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! `milim-server` — the axum HTTP server exposing the public API contract.
 //!
 //! Mirrors milim's OpenAI/Ollama-compatible surface so existing clients work

@@ -214,6 +214,10 @@ export type GoogleDocEditableParagraph = {
   text: string;
 };
 
+export type GoogleDocEditableRegion = GoogleDocEditableParagraph & {
+  blockIndexes: number[];
+};
+
 export function googleDocEditableParagraph(value: unknown): GoogleDocEditableParagraph | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const item = value as Record<string, unknown>;
@@ -234,6 +238,23 @@ export function googleDocEditableParagraph(value: unknown): GoogleDocEditablePar
   if (typeof start !== "number" || typeof end !== "number" || start < 1 || end <= start) return null;
   const text = (runs as string[]).join("").replace(/\n$/, "");
   return { start, end: Math.max(start, end - 1), text };
+}
+
+export function googleDocEditableRegions(values: unknown[]): GoogleDocEditableRegion[] {
+  const regions: GoogleDocEditableRegion[] = [];
+  values.forEach((value, blockIndex) => {
+    const paragraph = googleDocEditableParagraph(value);
+    if (!paragraph) return;
+    const current = regions[regions.length - 1];
+    if (current && paragraph.start === current.end + 1) {
+      current.end = paragraph.end;
+      current.text += `\n${paragraph.text}`;
+      current.blockIndexes.push(blockIndex);
+      return;
+    }
+    regions.push({ ...paragraph, blockIndexes: [blockIndex] });
+  });
+  return regions;
 }
 
 export function googleDocTextReplacement(
@@ -268,34 +289,4 @@ export function googleDocSelectionRange(
 ): { start: number; end: number } {
   const start = paragraphStart + textBeforeSelection.length;
   return { start, end: start + selectedText.length };
-}
-
-export type GoogleFloatingToolbarPosition = {
-  left: number;
-  top: number;
-  placement: "above" | "below";
-};
-
-export function googleFloatingToolbarPosition(
-  selection: { left: number; top: number; right: number; bottom: number },
-  bounds: { left: number; top: number; right: number; bottom: number },
-  toolbar: { width: number; height: number },
-  gap = 8,
-): GoogleFloatingToolbarPosition {
-  const inset = 8;
-  const minimumLeft = bounds.left + inset;
-  const maximumLeft = Math.max(minimumLeft, bounds.right - toolbar.width - inset);
-  const centeredLeft = selection.left + (selection.right - selection.left - toolbar.width) / 2;
-  const left = Math.min(maximumLeft, Math.max(minimumLeft, centeredLeft));
-  const minimumTop = bounds.top + inset;
-  const maximumTop = Math.max(minimumTop, bounds.bottom - toolbar.height - inset);
-  const above = selection.top - toolbar.height - gap;
-  if (above >= minimumTop) {
-    return { left, top: Math.min(maximumTop, above), placement: "above" };
-  }
-  return {
-    left,
-    top: Math.min(maximumTop, Math.max(minimumTop, selection.bottom + gap)),
-    placement: "below",
-  };
 }

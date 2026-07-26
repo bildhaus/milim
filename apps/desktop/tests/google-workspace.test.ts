@@ -9,10 +9,10 @@ import {
   applyGoogleSheetValues,
   createGoogleSaveQueue,
   googleDocEditableParagraph,
+  googleDocEditableRegions,
   googleDocSelectionRange,
   googleDocTextReplacement,
   googleDisconnectMessage,
-  googleFloatingToolbarPosition,
   googleSheetCellRange,
   googleWorkspaceFileUrl,
   googleWorkspaceUrl,
@@ -157,6 +157,33 @@ test("extracts only safe top-level Docs paragraphs for editing", () => {
   );
 });
 
+test("groups adjacent Docs paragraphs into a multi-line editing surface", () => {
+  assert.deepEqual(
+    googleDocEditableRegions([
+      {
+        startIndex: 1,
+        endIndex: 5,
+        paragraph: { elements: [{ textRun: { content: "One\n" } }] },
+      },
+      {
+        startIndex: 5,
+        endIndex: 11,
+        paragraph: { elements: [{ textRun: { content: "Two😀\n" } }] },
+      },
+      { startIndex: 11, endIndex: 20, table: { tableRows: [] } },
+      {
+        startIndex: 20,
+        endIndex: 26,
+        paragraph: { elements: [{ textRun: { content: "Three\n" } }] },
+      },
+    ]),
+    [
+      { start: 1, end: 10, text: "One\nTwo😀", blockIndexes: [0, 1] },
+      { start: 20, end: 25, text: "Three", blockIndexes: [3] },
+    ],
+  );
+});
+
 test("replaces only the changed Docs text range", () => {
   assert.deepEqual(
     googleDocTextReplacement(10, "Hello styled world", "Hello edited world"),
@@ -176,24 +203,5 @@ test("maps Docs selections with Google UTF-16 indices", () => {
   assert.deepEqual(
     googleDocSelectionRange(10, "A😀", "selected"),
     { start: 13, end: 21 },
-  );
-});
-
-test("positions the Docs selection toolbar within the viewer", () => {
-  assert.deepEqual(
-    googleFloatingToolbarPosition(
-      { left: 180, top: 120, right: 220, bottom: 140 },
-      { left: 100, top: 50, right: 500, bottom: 400 },
-      { width: 200, height: 40 },
-    ),
-    { left: 108, top: 72, placement: "above" },
-  );
-  assert.deepEqual(
-    googleFloatingToolbarPosition(
-      { left: 460, top: 60, right: 490, bottom: 80 },
-      { left: 100, top: 50, right: 500, bottom: 400 },
-      { width: 200, height: 40 },
-    ),
-    { left: 292, top: 88, placement: "below" },
   );
 });

@@ -1173,6 +1173,8 @@ impl GoogleWorkspaceConnection {
         let presentation = self.request(Method::GET, url, None).await?;
         let presentation = response_json_bounded(presentation, PREVIEW_BYTE_LIMIT).await?;
         let page_size = google_slide_page_size(&presentation);
+        let placeholder_shapes = google_slide_placeholder_shapes(&presentation);
+        let theme_colors = google_slide_theme_colors(&presentation);
         let mut remaining = MODEL_TEXT_LIMIT;
         let mut slides = Vec::new();
         for slide in presentation
@@ -1184,13 +1186,21 @@ impl GoogleWorkspaceConnection {
             if remaining == 0 {
                 break;
             }
-            slides.push(google_slide_preview_item(slide, &mut remaining, page_size));
+            slides.push(google_slide_preview_item(
+                slide,
+                &mut remaining,
+                page_size,
+                &placeholder_shapes,
+                &theme_colors,
+            ));
         }
         Ok(json!({
             "kind": "presentation",
             "file": file,
             "title": presentation.get("title"),
             "pageAspectRatio": page_size.map(|(width, height)| width / height),
+            "pageWidth": page_size.map(|(width, _)| width / 12_700.0),
+            "pageHeight": page_size.map(|(_, height)| height / 12_700.0),
             "slides": slides,
         }))
     }
@@ -1503,11 +1513,15 @@ fn google_slide_preview_item(
     slide: &Value,
     remaining: &mut usize,
     page_size: Option<(f64, f64)>,
+    placeholder_shapes: &HashMap<String, Value>,
+    theme_colors: &HashMap<String, Value>,
 ) -> Value {
     let text_elements = google_slide_text_elements(
         slide.get("pageElements").unwrap_or(&Value::Null),
         remaining,
         page_size,
+        placeholder_shapes,
+        theme_colors,
     );
     let notes_element = google_slide_notes_element(
         slide
@@ -1529,13 +1543,60 @@ fn google_slide_preview_item(
         "notesObjectId": notes_element.as_ref()
             .and_then(|element| element.get("objectId"))
             .cloned(),
+        "elements": google_slide_scene_elements(
+            slide.get("pageElements").unwrap_or(&Value::Null),
+            page_size,
+        ),
     })
+}
+
+fn google_slide_scene_elements(value: &Value, page_size: Option<(f64, f64)>) -> Vec<Value> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(order, element)| {
+            let object_id = element.get("objectId")?.as_str()?;
+            let rect = page_size.and_then(|page_size| google_slide_element_rect(element, page_size));
+            let kind = [
+                ("shape", "shape"),
+                ("image", "image"),
+                ("table", "table"),
+                ("video", "video"),
+                ("line", "line"),
+                ("group", "group"),
+                ("sheetsChart", "chart"),
+            ]
+            .into_iter()
+            .find_map(|(field, kind)| element.get(field).map(|_| kind))
+            .unwrap_or("element");
+            Some(json!({
+                "objectId": object_id,
+                "kind": kind,
+                "order": order,
+                "x": rect.map(|value| value.0),
+                "y": rect.map(|value| value.1),
+                "width": rect.map(|value| value.2),
+                "height": rect.map(|value| value.3),
+                "baseWidth": element.pointer("/size/width")
+                    .and_then(google_slide_dimension)
+                    .map(|value| value / 12_700.0),
+                "baseHeight": element.pointer("/size/height")
+                    .and_then(google_slide_dimension)
+                    .map(|value| value / 12_700.0),
+            }))
+        })
+        .take(200)
+        .collect()
 }
 
 fn google_slide_text_elements(
     value: &Value,
     remaining: &mut usize,
     page_size: Option<(f64, f64)>,
+    placeholder_shapes: &HashMap<String, Value>,
+    theme_colors: &HashMap<String, Value>,
 ) -> Vec<Value> {
     value
         .as_array()
@@ -1546,11 +1607,30 @@ fn google_slide_text_elements(
             let text = element.pointer("/shape/text")?;
             let rect =
                 page_size.and_then(|page_size| google_slide_element_rect(element, page_size));
+            let parent_chain = google_slide_parent_chain(element, placeholder_shapes);
+            let text_style = google_slide_inherited_text_style(&parent_chain, "textRun");
+            let paragraph_style =
+                google_slide_inherited_text_style(&parent_chain, "paragraphMarker");
             Some(json!({
                 "objectId": object_id,
                 "text": take_chars_from_budget(&extract_google_text(text), remaining),
-                "styleRuns": google_slide_style_runs(text, "textRun"),
-                "paragraphRuns": google_slide_style_runs(text, "paragraphMarker"),
+                "styleRuns": google_slide_style_runs(text, "textRun", &text_style, theme_colors),
+                "paragraphRuns": google_slide_style_runs(
+                    text,
+                    "paragraphMarker",
+                    &paragraph_style,
+                    theme_colors,
+                ),
+                "contentAlignment": google_slide_inherited_shape_value(
+                    element,
+                    &parent_chain,
+                    "/shape/shapeProperties/contentAlignment",
+                ),
+                "fontScale": google_slide_inherited_shape_value(
+                    element,
+                    &parent_chain,
+                    "/shape/shapeProperties/autofit/fontScale",
+                ),
                 "x": rect.map(|value| value.0),
                 "y": rect.map(|value| value.1),
                 "width": rect.map(|value| value.2),
@@ -1561,21 +1641,139 @@ fn google_slide_text_elements(
         .collect()
 }
 
-fn google_slide_style_runs(text: &Value, kind: &str) -> Vec<Value> {
+fn google_slide_style_runs(
+    text: &Value,
+    kind: &str,
+    inherited_style: &serde_json::Map<String, Value>,
+    theme_colors: &HashMap<String, Value>,
+) -> Vec<Value> {
     text.get("textElements")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(|element| {
-            let style = element.get(kind)?.get("style")?;
+            let run = element.get(kind)?;
+            let mut resolved_style = inherited_style.clone();
+            if let Some(style) = run.get("style").and_then(Value::as_object) {
+                resolved_style.extend(style.clone());
+            }
+            if let Some(theme) = resolved_style
+                .get("foregroundColor")
+                .and_then(|value| value.pointer("/opaqueColor/themeColor"))
+                .and_then(Value::as_str)
+                .and_then(|theme| theme_colors.get(theme))
+            {
+                resolved_style.insert("foregroundColor".into(), json!({ "opaqueColor": theme }));
+            }
             Some(json!({
                 "start": element.get("startIndex").and_then(Value::as_i64).unwrap_or(0),
                 "end": element.get("endIndex").and_then(Value::as_i64).unwrap_or(0),
-                "style": style,
+                "style": resolved_style,
             }))
         })
         .take(200)
         .collect()
+}
+
+fn google_slide_theme_colors(presentation: &Value) -> HashMap<String, Value> {
+    presentation
+        .get("masters")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .flat_map(|master| {
+            master
+                .pointer("/pageProperties/colorScheme/colors")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|pair| {
+            Some((
+                pair.get("type")?.as_str()?.to_string(),
+                pair.get("color")?.clone(),
+            ))
+        })
+        .collect()
+}
+
+fn google_slide_placeholder_shapes(presentation: &Value) -> HashMap<String, Value> {
+    ["layouts", "masters"]
+        .into_iter()
+        .flat_map(|kind| {
+            presentation
+                .get(kind)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .flat_map(|page| {
+            page.get("pageElements")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|element| {
+            Some((
+                element.get("objectId")?.as_str()?.to_string(),
+                element.clone(),
+            ))
+        })
+        .collect()
+}
+
+fn google_slide_parent_chain(
+    element: &Value,
+    placeholder_shapes: &HashMap<String, Value>,
+) -> Vec<Value> {
+    let mut chain = Vec::new();
+    let mut current = element;
+    while let Some(parent) = current
+        .pointer("/shape/placeholder/parentObjectId")
+        .and_then(Value::as_str)
+        .and_then(|id| placeholder_shapes.get(id))
+    {
+        chain.push(parent.clone());
+        current = parent;
+    }
+    chain
+}
+
+fn google_slide_inherited_text_style(
+    parent_chain: &[Value],
+    kind: &str,
+) -> serde_json::Map<String, Value> {
+    let mut style = serde_json::Map::new();
+    for parent in parent_chain.iter().rev() {
+        if let Some(parent_style) = parent
+            .pointer("/shape/text/textElements")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find_map(|element| element.get(kind)?.get("style")?.as_object())
+        {
+            style.extend(parent_style.clone());
+        }
+    }
+    style
+}
+
+fn google_slide_inherited_shape_value(
+    element: &Value,
+    parent_chain: &[Value],
+    pointer: &str,
+) -> Value {
+    std::iter::once(element)
+        .chain(parent_chain.iter())
+        .filter_map(|shape| shape.pointer(pointer))
+        .find(|value| {
+            !value.is_null()
+                && value.as_str().is_none_or(|value| {
+                    value != "CONTENT_ALIGNMENT_UNSPECIFIED" && value != "AUTOFIT_TYPE_UNSPECIFIED"
+                })
+        })
+        .cloned()
+        .unwrap_or(Value::Null)
 }
 
 fn google_slide_page_size(presentation: &Value) -> Option<(f64, f64)> {
@@ -2272,7 +2470,7 @@ impl Tool for GoogleSlidesReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read slide ids and bounded text from an authorized Google Slides presentation."
+        "Read slide and element ids, geometry, and bounded text from an authorized Google Slides presentation."
     }
 
     fn input_schema(&self) -> Value {
@@ -3566,10 +3764,12 @@ impl Tool for GoogleSlidesEditTool {
                                     "create_slide", "duplicate_slide", "delete_slide",
                                     "reorder_slides", "replace_all_text", "insert_text",
                                     "delete_text", "set_text_style", "set_paragraph_style",
-                                    "create_shape", "create_table", "insert_image"
+                                    "create_shape", "create_table", "insert_image",
+                                    "update_element_transform", "duplicate_element", "delete_element"
                                 ]
                             },
                             "object_id": { "type": "string" },
+                            "new_object_id": { "type": "string" },
                             "page_id": { "type": "string" },
                             "layout": { "type": "string" },
                             "slide_object_ids": { "type": "array", "items": { "type": "string" } },
@@ -3597,6 +3797,8 @@ impl Tool for GoogleSlidesEditTool {
                             "y": { "type": "number" },
                             "width": { "type": "number", "exclusiveMinimum": 0 },
                             "height": { "type": "number", "exclusiveMinimum": 0 },
+                            "base_width": { "type": "number", "exclusiveMinimum": 0 },
+                            "base_height": { "type": "number", "exclusiveMinimum": 0 },
                             "url": { "type": "string" }
                         },
                         "required": ["action"],
@@ -3634,12 +3836,18 @@ impl Tool for GoogleSlidesEditTool {
                         create["slideLayoutReference"] =
                             json!({ "predefinedLayout": validate_slide_layout(layout)? });
                     }
+                    if let Some(index) = optional_index(operation, "insertion_index")? {
+                        create["insertionIndex"] = json!(index);
+                    }
                     json!({ "createSlide": create })
                 }
-                "duplicate_slide" => json!({
-                    "duplicateObject": { "objectId": operation_id(operation, "object_id")? }
-                }),
+                "duplicate_slide" | "duplicate_element" => {
+                    json!({ "duplicateObject": duplicate_slide_object(operation)? })
+                }
                 "delete_slide" => json!({
+                    "deleteObject": { "objectId": operation_id(operation, "object_id")? }
+                }),
+                "delete_element" => json!({
                     "deleteObject": { "objectId": operation_id(operation, "object_id")? }
                 }),
                 "reorder_slides" => {
@@ -3808,6 +4016,13 @@ impl Tool for GoogleSlidesEditTool {
                         }
                     })
                 }
+                "update_element_transform" => json!({
+                    "updatePageElementTransform": {
+                        "objectId": operation_id(operation, "object_id")?,
+                        "transform": slide_absolute_transform(operation)?,
+                        "applyMode": "ABSOLUTE"
+                    }
+                }),
                 _ => {
                     return Err(Error::InvalidRequest(format!(
                         "Unsupported Google Slides operation: {action}"
@@ -4013,6 +4228,46 @@ fn validate_slide_layout(value: &str) -> Result<&str> {
     }
 }
 
+fn duplicate_slide_object(operation: &Value) -> Result<Value> {
+    let object_id = operation_id(operation, "object_id")?;
+    let mut duplicate = json!({ "objectId": object_id });
+    if let Some(new_object_id) = operation.get("new_object_id").and_then(Value::as_str) {
+        validate_google_id(new_object_id)?;
+        let mut ids = serde_json::Map::new();
+        ids.insert(object_id.to_string(), json!(new_object_id));
+        duplicate["objectIds"] = Value::Object(ids);
+    }
+    Ok(duplicate)
+}
+
+fn slide_absolute_transform(operation: &Value) -> Result<Value> {
+    let number = |field: &str| {
+        operation
+            .get(field)
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| Error::InvalidRequest(format!("{field} is required and must be finite")))
+    };
+    let x = number("x")?;
+    let y = number("y")?;
+    let width = number("width")?;
+    let height = number("height")?;
+    let base_width = number("base_width")?;
+    let base_height = number("base_height")?;
+    if width <= 0.0 || height <= 0.0 || base_width <= 0.0 || base_height <= 0.0 {
+        return Err(Error::InvalidRequest(
+            "Slide element dimensions must be positive".into(),
+        ));
+    }
+    Ok(json!({
+        "scaleX": width / base_width,
+        "scaleY": height / base_height,
+        "translateX": x,
+        "translateY": y,
+        "unit": "PT"
+    }))
+}
+
 fn slide_element_properties(operation: &Value, page_id: &str) -> Result<Value> {
     let number = |field: &str| {
         operation
@@ -4111,8 +4366,13 @@ mod tests {
             ]}}
         });
         let mut remaining = 100;
-        let preview =
-            google_slide_preview_item(&slide, &mut remaining, Some((9_144_000.0, 5_143_500.0)));
+        let preview = google_slide_preview_item(
+            &slide,
+            &mut remaining,
+            Some((9_144_000.0, 5_143_500.0)),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         assert_eq!(preview["text"], "Visible title");
         assert_eq!(preview["notes"], "Private speaker note");
         assert_eq!(preview["textElements"][0]["objectId"], "title_1");
@@ -4136,9 +4396,86 @@ mod tests {
             }),
             &mut remaining,
             None,
+            &HashMap::new(),
+            &HashMap::new(),
         );
         assert_eq!(empty_notes["notesObjectId"], "notes_2");
         assert_eq!(empty_notes["notes"], "");
+    }
+
+    #[test]
+    fn resolves_inherited_slide_placeholder_text_layout() {
+        let presentation = json!({
+            "masters": [{
+                "pageProperties": { "colorScheme": { "colors": [{
+                    "type": "DARK1",
+                    "color": { "rgbColor": { "red": 0.2, "green": 0.3, "blue": 0.4 } }
+                }]}},
+                "pageElements": [{
+                "objectId": "master_title",
+                "shape": {
+                    "text": { "textElements": [
+                        { "paragraphMarker": { "style": { "alignment": "START" } } },
+                        { "textRun": { "style": {
+                            "fontFamily": "Aptos",
+                            "fontSize": { "magnitude": 32, "unit": "PT" },
+                            "foregroundColor": { "opaqueColor": { "themeColor": "DARK1" } }
+                        }}}
+                    ]}
+                }
+            }]}],
+            "layouts": [{ "pageElements": [{
+                "objectId": "layout_title",
+                "shape": {
+                    "placeholder": { "parentObjectId": "master_title" },
+                    "shapeProperties": {
+                        "contentAlignment": "MIDDLE",
+                        "autofit": { "fontScale": 0.9 }
+                    },
+                    "text": { "textElements": [
+                        { "paragraphMarker": { "style": { "alignment": "CENTER" } } },
+                        { "textRun": { "style": { "bold": true } } }
+                    ]}
+                }
+            }]}],
+            "slides": [{
+                "objectId": "slide_1",
+                "pageElements": [{
+                    "objectId": "title_1",
+                    "shape": {
+                        "placeholder": { "parentObjectId": "layout_title" },
+                        "text": { "textElements": [
+                            { "startIndex": 0, "endIndex": 3, "paragraphMarker": {} },
+                            { "startIndex": 0, "endIndex": 3, "textRun": {
+                                "content": "123",
+                                "style": { "italic": true }
+                            }}
+                        ]}
+                    }
+                }]
+            }]
+        });
+        let placeholders = google_slide_placeholder_shapes(&presentation);
+        let mut remaining = 100;
+        let preview = google_slide_preview_item(
+            &presentation["slides"][0],
+            &mut remaining,
+            None,
+            &placeholders,
+            &google_slide_theme_colors(&presentation),
+        );
+        let field = &preview["textElements"][0];
+        assert_eq!(field["styleRuns"][0]["style"]["fontSize"]["magnitude"], 32);
+        assert_eq!(field["styleRuns"][0]["style"]["fontFamily"], "Aptos");
+        assert_eq!(field["styleRuns"][0]["style"]["bold"], true);
+        assert_eq!(field["styleRuns"][0]["style"]["italic"], true);
+        assert_eq!(
+            field["styleRuns"][0]["style"]["foregroundColor"]["opaqueColor"]["rgbColor"]["green"],
+            0.3
+        );
+        assert_eq!(field["paragraphRuns"][0]["style"]["alignment"], "CENTER");
+        assert_eq!(field["contentAlignment"], "MIDDLE");
+        assert_eq!(field["fontScale"], 0.9);
     }
 
     #[test]
@@ -4150,6 +4487,8 @@ mod tests {
             }
         });
         let element = json!({
+            "objectId": "image_1",
+            "image": {},
             "size": {
                 "width": { "magnitude": 360.0, "unit": "PT" },
                 "height": { "magnitude": 81.0, "unit": "PT" }
@@ -4165,9 +4504,46 @@ mod tests {
             google_slide_element_rect(&element, page_size),
             Some((0.25, 0.1, 0.5, 0.2))
         );
+        let scene = google_slide_scene_elements(&json!([element.clone()]), Some(page_size));
+        assert_eq!(scene[0]["kind"], "image");
+        assert_eq!(scene[0]["baseWidth"], 360.0);
+        assert_eq!(scene[0]["x"], 0.25);
         let mut rotated = element;
         rotated["transform"]["shearX"] = json!(0.25);
         assert_eq!(google_slide_element_rect(&rotated, page_size), None);
+    }
+
+    #[test]
+    fn builds_absolute_slide_element_transforms() {
+        let transform = slide_absolute_transform(&json!({
+            "x": 72.0,
+            "y": 40.5,
+            "width": 360.0,
+            "height": 81.0,
+            "base_width": 180.0,
+            "base_height": 81.0
+        }))
+        .unwrap();
+        assert_eq!(transform["translateX"], 72.0);
+        assert_eq!(transform["translateY"], 40.5);
+        assert_eq!(transform["scaleX"], 2.0);
+        assert_eq!(transform["scaleY"], 1.0);
+        assert!(slide_absolute_transform(&json!({
+            "x": 0, "y": 0, "width": 1, "height": 1,
+            "base_width": 0, "base_height": 1
+        }))
+        .is_err());
+        assert_eq!(
+            duplicate_slide_object(&json!({
+                "object_id": "element_1",
+                "new_object_id": "element_2"
+            }))
+            .unwrap(),
+            json!({
+                "objectId": "element_1",
+                "objectIds": { "element_1": "element_2" }
+            })
+        );
     }
 
     #[test]
@@ -4623,6 +4999,15 @@ mod tests {
             .input_schema()
             .to_string();
         assert!(docs.contains("\"clear_text_style\""));
+        let slides = tools
+            .iter()
+            .find(|tool| tool.name() == "google_slides_edit")
+            .unwrap()
+            .input_schema()
+            .to_string();
+        assert!(slides.contains("\"update_element_transform\""));
+        assert!(slides.contains("\"duplicate_element\""));
+        assert!(slides.contains("\"create_slide\""));
         drop(tools);
         std::fs::remove_dir_all(root).unwrap();
     }

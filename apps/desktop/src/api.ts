@@ -1001,16 +1001,31 @@ export type GoogleFilePreview =
       file: GoogleFileSummary;
       title?: string | null;
       pageAspectRatio?: number | null;
+      pageWidth?: number | null;
+      pageHeight?: number | null;
       slides: Array<{
         objectId?: string | null;
         text: string;
         notes?: string | null;
         notesObjectId?: string | null;
+        elements?: Array<{
+          objectId: string;
+          kind: "shape" | "image" | "table" | "video" | "line" | "group" | "chart" | "element";
+          order: number;
+          x?: number | null;
+          y?: number | null;
+          width?: number | null;
+          height?: number | null;
+          baseWidth?: number | null;
+          baseHeight?: number | null;
+        }>;
         textElements: Array<{
           objectId: string;
           text: string;
           styleRuns?: Array<{ start: number; end: number; style: Record<string, unknown> }>;
           paragraphRuns?: Array<{ start: number; end: number; style: Record<string, unknown> }>;
+          contentAlignment?: string | null;
+          fontScale?: number | null;
           x?: number | null;
           y?: number | null;
           width?: number | null;
@@ -1048,10 +1063,17 @@ export type GoogleDocEditOperation =
 export type GoogleTextAlignment = "START" | "CENTER" | "END" | "JUSTIFIED";
 
 export type GoogleSlidesEditOperation =
+  | { action: "create_slide"; object_id: string; layout?: string; insertion_index?: number }
+  | { action: "duplicate_slide"; object_id: string; new_object_id?: string }
+  | { action: "delete_slide"; object_id: string }
+  | { action: "reorder_slides"; slide_object_ids: string[]; insertion_index: number }
   | { action: "delete_text"; object_id: string; start?: number; end?: number }
   | { action: "insert_text"; object_id: string; offset?: number; text: string }
   | { action: "set_text_style"; object_id: string; start: number; end: number; bold?: boolean; italic?: boolean; underline?: boolean; font_size?: number; foreground_color?: string }
-  | { action: "set_paragraph_style"; object_id: string; start: number; end: number; alignment: GoogleTextAlignment };
+  | { action: "set_paragraph_style"; object_id: string; start: number; end: number; alignment: GoogleTextAlignment }
+  | { action: "update_element_transform"; object_id: string; x: number; y: number; width: number; height: number; base_width: number; base_height: number }
+  | { action: "duplicate_element"; object_id: string; new_object_id?: string }
+  | { action: "delete_element"; object_id: string };
 
 export async function getGoogleWorkspaceStatus(): Promise<GoogleWorkspaceStatus> {
   return await parseJsonResponse<GoogleWorkspaceStatus>(
