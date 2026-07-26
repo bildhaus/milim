@@ -7868,6 +7868,15 @@ export function ChatView({
         turnId,
         codexModel,
         claudeModel,
+        accountRuntimeKind: codexModel
+          ? "codex"
+          : claudeModel
+            ? "claude"
+            : opencodeModel
+              ? "opencode"
+              : piModel
+                ? "pi"
+                : undefined,
         model: turnModel,
         sandbox: turnSandbox,
         computerUse: turnComputerUse,

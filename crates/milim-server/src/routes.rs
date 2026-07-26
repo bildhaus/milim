@@ -3368,12 +3368,23 @@ pub(crate) async fn codex_run(
         account_runtime_prompt_for_remote(&st, &req.prompt, "Codex").map_err(ApiError)?;
     account_runtime_images_for_remote(&st, &req.images, "Codex").map_err(ApiError)?;
     req.prompt = prompt;
+    let endpoint = account_runtime_tool_endpoint(
+        &st,
+        &headers,
+        req.milim_context.as_ref(),
+        req.model.as_deref().unwrap_or_default(),
+        &req.prompt,
+    )?;
+    req.milim_mcp = endpoint.clone();
     let approvals = Some(st.tool_approvals.clone());
-    Ok(
-        Sse::new(crate::codex_bridge::run_stream(req, redactions, approvals))
-            .keep_alive(KeepAlive::default())
-            .into_response(),
-    )
+    Ok(Sse::new(account_runtime_stream(
+        crate::codex_bridge::run_stream(req, redactions, approvals),
+        &st,
+        endpoint.as_ref(),
+        true,
+    ))
+    .keep_alive(KeepAlive::default())
+    .into_response())
 }
 
 /// `GET /claude/status` - current installed Claude CLI auth/runtime state.
@@ -3415,25 +3426,34 @@ pub(crate) async fn opencode_run(
     Json(mut req): Json<crate::opencode_bridge::OpenCodeRunRequest>,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
-    if req.cwd.trim().is_empty() {
-        return Err(ApiError(Error::InvalidRequest(
-            "OpenCode requires a workspace folder".to_string(),
-        )));
-    }
     if req.prompt.trim().is_empty() && req.images.is_empty() {
         return Err(ApiError(Error::InvalidRequest(
             "OpenCode requires a prompt or at least one image".to_string(),
         )));
     }
-    req.prompt = account_runtime_workspace_prompt(&st, Some(&req.cwd), &req.prompt, "agents");
+    req.prompt = account_runtime_workspace_prompt(
+        &st,
+        req.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()),
+        &req.prompt,
+        "agents",
+    );
     let (prompt, redactions) =
         account_runtime_prompt_for_remote(&st, &req.prompt, "OpenCode").map_err(ApiError)?;
     account_runtime_images_for_remote(&st, &req.images, "OpenCode").map_err(ApiError)?;
     req.prompt = prompt;
-    Ok(Sse::new(crate::opencode_bridge::run_stream(
-        req,
-        redactions,
-        Some(st.tool_approvals.clone()),
+    let endpoint = account_runtime_tool_endpoint(
+        &st,
+        &headers,
+        req.milim_context.as_ref(),
+        &req.model,
+        &req.prompt,
+    )?;
+    req.milim_mcp = endpoint.clone();
+    Ok(Sse::new(account_runtime_stream(
+        crate::opencode_bridge::run_stream(req, redactions, Some(st.tool_approvals.clone())),
+        &st,
+        endpoint.as_ref(),
+        true,
     ))
     .keep_alive(KeepAlive::default())
     .into_response())
@@ -3478,10 +3498,19 @@ pub(crate) async fn pi_run(
         account_runtime_prompt_for_remote(&st, &req.prompt, "Pi").map_err(ApiError)?;
     account_runtime_images_for_remote(&st, &req.images, "Pi").map_err(ApiError)?;
     req.prompt = prompt;
-    Ok(Sse::new(crate::pi_bridge::run_stream(
-        req,
-        redactions,
-        Some(st.tool_approvals.clone()),
+    let endpoint = account_runtime_tool_endpoint(
+        &st,
+        &headers,
+        req.milim_context.as_ref(),
+        &req.model,
+        &req.prompt,
+    )?;
+    req.milim_mcp = endpoint.clone();
+    Ok(Sse::new(account_runtime_stream(
+        crate::pi_bridge::run_stream(req, redactions, Some(st.tool_approvals.clone())),
+        &st,
+        endpoint.as_ref(),
+        true,
     ))
     .keep_alive(KeepAlive::default())
     .into_response())
@@ -3533,8 +3562,19 @@ pub(crate) async fn claude_run(
         account_runtime_prompt_for_remote(&st, &req.prompt, "Claude").map_err(ApiError)?;
     account_runtime_images_for_remote(&st, &req.images, "Claude").map_err(ApiError)?;
     req.prompt = prompt;
+    let endpoint = account_runtime_tool_endpoint(
+        &st,
+        &headers,
+        req.milim_context.as_ref(),
+        req.model.as_deref().unwrap_or_default(),
+        &req.prompt,
+    )?;
+    req.milim_mcp = endpoint.clone();
     let approvals = if req.interactive_tool_approval {
-        let run_id = uuid::Uuid::new_v4().to_string();
+        let run_id = endpoint
+            .as_ref()
+            .map(|endpoint| endpoint.run_id.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let host = headers
             .get(HOST)
             .and_then(|value| value.to_str().ok())
@@ -3556,11 +3596,14 @@ pub(crate) async fn claude_run(
     } else {
         None
     };
-    Ok(
-        Sse::new(crate::claude_bridge::run_stream(req, redactions, approvals))
-            .keep_alive(KeepAlive::default())
-            .into_response(),
-    )
+    Ok(Sse::new(account_runtime_stream(
+        crate::claude_bridge::run_stream(req, redactions, approvals),
+        &st,
+        endpoint.as_ref(),
+        false,
+    ))
+    .keep_alive(KeepAlive::default())
+    .into_response())
 }
 
 fn loopback_host(value: &str) -> Option<String> {
@@ -3652,6 +3695,118 @@ pub(crate) async fn claude_approval_mcp(
     Ok(Json(json!({ "jsonrpc": "2.0", "id": id, "result": result })).into_response())
 }
 
+pub(crate) async fn account_runtime_tool_mcp(
+    State(st): State<AppState>,
+    Path(run_id): Path<String>,
+    headers: HeaderMap,
+    peer: Peer,
+    Json(request): Json<Value>,
+) -> Result<Response, ApiError> {
+    if !peer_addr(peer).is_some_and(|addr| addr.ip().is_loopback()) {
+        return Ok(StatusCode::FORBIDDEN.into_response());
+    }
+    let authorization = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let session = st
+        .account_runtime_tools
+        .lock()
+        .expect("account runtime tool store poisoned")
+        .get(&run_id)
+        .cloned();
+    let Some(session) = session else {
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    };
+    if authorization != format!("Bearer {}", session.token) {
+        return Ok(StatusCode::UNAUTHORIZED.into_response());
+    }
+    let id = request.get("id").cloned().unwrap_or(Value::Null);
+    let method = request
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if method.starts_with("notifications/") {
+        return Ok(StatusCode::ACCEPTED.into_response());
+    }
+    let result = match method {
+        "initialize" => json!({
+            "protocolVersion": "2025-06-18",
+            "capabilities": { "tools": {} },
+            "serverInfo": { "name": "milim", "version": env!("CARGO_PKG_VERSION") }
+        }),
+        "tools/list" => json!({
+            "tools": session.registry.list().into_iter().map(|tool| json!({
+                "name": tool.name,
+                "description": tool.description,
+                "inputSchema": tool.input_schema,
+                "annotations": { "readOnlyHint": tool.effect == ToolEffect::ReadOnly },
+            })).collect::<Vec<_>>()
+        }),
+        "tools/call" => {
+            let params = request.get("params").unwrap_or(&Value::Null);
+            let name = params
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let args = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            let Some(effect) = session.registry.effect(name) else {
+                return Ok(Json(json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "error": { "code": -32601, "message": format!("unknown tool: {name}") }
+                }))
+                .into_response());
+            };
+            if session.review && effect != ToolEffect::ReadOnly {
+                let mut pending = st.tool_approvals.request_external(
+                    run_id.clone(),
+                    request
+                        .pointer("/params/_meta/toolCallId")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    name.to_string(),
+                    serde_json::to_string(&args).unwrap_or_else(|_| "{}".into()),
+                    effect,
+                );
+                if !pending.wait().await.approved {
+                    json!({
+                        "content": [{ "type": "text", "text": "Tool call denied by user." }],
+                        "isError": true
+                    })
+                } else {
+                    account_runtime_mcp_call(&session.registry, name, args).await
+                }
+            } else {
+                account_runtime_mcp_call(&session.registry, name, args).await
+            }
+        }
+        _ => {
+            return Ok(Json(json!({
+                "jsonrpc": "2.0", "id": id,
+                "error": { "code": -32601, "message": "method not found" }
+            }))
+            .into_response())
+        }
+    };
+    Ok(Json(json!({ "jsonrpc": "2.0", "id": id, "result": result })).into_response())
+}
+
+async fn account_runtime_mcp_call(registry: &ToolRegistry, name: &str, args: Value) -> Value {
+    match registry.call_for_agent(name, args).await {
+        Ok(result) => json!({
+            "content": [{ "type": "text", "text": serde_json::to_string(&result.result).unwrap_or_else(|_| "null".into()) }],
+            "isError": false
+        }),
+        Err(error) => json!({
+            "content": [{ "type": "text", "text": error.to_string() }],
+            "isError": true
+        }),
+    }
+}
+
 fn account_runtime_workspace_prompt(
     st: &AppState,
     cwd: Option<&str>,
@@ -3712,6 +3867,7 @@ fn account_runtime_images_for_remote(
 
 fn mcp_registry(st: &AppState) -> ToolRegistry {
     let mut reg = static_registry_for_run(st);
+    register_skill_tools(&mut reg, st, "auto", &[]);
     if let Some(hub) = &st.mcp {
         register_mcp_server_tools(&mut reg, hub.clone());
         for tool in hub.tools() {
@@ -3721,6 +3877,183 @@ fn mcp_registry(st: &AppState) -> ToolRegistry {
         }
     }
     reg.without(HASHLINE_TOOL_NAMES)
+}
+
+const MAX_SKILL_READ_CHARS: usize = 40_000;
+
+#[derive(Clone)]
+struct MilimSkillScope {
+    allowed_ids: Option<Arc<HashSet<String>>>,
+}
+
+struct MilimSkillSearchTool {
+    store: Arc<milim_skills::SkillStore>,
+    scope: MilimSkillScope,
+}
+
+struct MilimSkillReadTool {
+    store: Arc<milim_skills::SkillStore>,
+    scope: MilimSkillScope,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MilimSkillSearchArgs {
+    query: String,
+    #[serde(default = "default_skill_select_limit")]
+    limit: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MilimSkillReadArgs {
+    id: String,
+}
+
+fn register_skill_tools(
+    registry: &mut ToolRegistry,
+    st: &AppState,
+    skill_mode: &str,
+    enabled_skills: &[String],
+) {
+    let Some(store) = st.skills.as_ref().cloned() else {
+        return;
+    };
+    let allowed_ids = match skill_mode {
+        "none" => return,
+        "custom" if enabled_skills.is_empty() => return,
+        "custom" => Some(Arc::new(enabled_skills.iter().cloned().collect())),
+        _ => None,
+    };
+    let scope = MilimSkillScope { allowed_ids };
+    registry.register(Arc::new(MilimSkillSearchTool {
+        store: store.clone(),
+        scope: scope.clone(),
+    }));
+    registry.register(Arc::new(MilimSkillReadTool { store, scope }));
+}
+
+fn skill_allowed(scope: &MilimSkillScope, skill: &milim_skills::SkillDef) -> bool {
+    skill.enabled
+        && scope
+            .allowed_ids
+            .as_ref()
+            .is_none_or(|ids| ids.contains(&skill.id))
+}
+
+fn compact_skill_description(value: &str) -> String {
+    const MAX_CHARS: usize = 220;
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= MAX_CHARS {
+        return normalized;
+    }
+    format!(
+        "{}...",
+        normalized
+            .chars()
+            .take(MAX_CHARS)
+            .collect::<String>()
+            .trim_end()
+    )
+}
+
+#[async_trait]
+impl Tool for MilimSkillSearchTool {
+    fn name(&self) -> &str {
+        "milim_skill_search"
+    }
+
+    fn description(&self) -> &str {
+        "Find relevant enabled Milim skills without loading their instruction bodies."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Current task or capability to match." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 10, "default": 3 }
+            },
+            "required": ["query"],
+            "additionalProperties": false
+        })
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
+    }
+
+    async fn invoke(&self, args: Value) -> milim_core::Result<Value> {
+        let args: MilimSkillSearchArgs = serde_json::from_value(args).map_err(|error| {
+            Error::InvalidRequest(format!("invalid milim_skill_search arguments: {error}"))
+        })?;
+        let query = trim_required_tool_arg(args.query, "query")?;
+        let allowed = self
+            .scope
+            .allowed_ids
+            .as_ref()
+            .map(|ids| ids.iter().cloned().collect::<Vec<_>>());
+        let skills =
+            self.store
+                .select_filtered(&query, args.limit.clamp(1, 10), allowed.as_deref())?;
+        Ok(json!({
+            "skills": skills.into_iter().map(|skill| json!({
+                "id": skill.id,
+                "name": skill.name,
+                "description": compact_skill_description(&skill.description),
+            })).collect::<Vec<_>>()
+        }))
+    }
+}
+
+#[async_trait]
+impl Tool for MilimSkillReadTool {
+    fn name(&self) -> &str {
+        "milim_skill_read"
+    }
+
+    fn description(&self) -> &str {
+        "Load the complete instructions for one enabled Milim skill selected by id."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "Skill id returned by milim_skill_search or the turn's skill candidates." }
+            },
+            "required": ["id"],
+            "additionalProperties": false
+        })
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
+    }
+
+    async fn invoke(&self, args: Value) -> milim_core::Result<Value> {
+        let args: MilimSkillReadArgs = serde_json::from_value(args).map_err(|error| {
+            Error::InvalidRequest(format!("invalid milim_skill_read arguments: {error}"))
+        })?;
+        let id = trim_required_tool_arg(args.id, "id")?;
+        let skill = self
+            .store
+            .get(&id)?
+            .filter(|skill| skill_allowed(&self.scope, skill))
+            .ok_or_else(|| Error::ModelNotFound(format!("skill {id}")))?;
+        if skill.instructions.chars().count() > MAX_SKILL_READ_CHARS {
+            return Err(Error::InvalidRequest(format!(
+                "skill {} exceeds the {} character read limit; move detailed material into referenced files",
+                skill.name, MAX_SKILL_READ_CHARS
+            )));
+        }
+        Ok(json!({
+            "id": skill.id,
+            "name": skill.name,
+            "description": skill.description,
+            "instructions": skill.instructions,
+        }))
+    }
 }
 
 fn mcp_catalog_registry(st: &AppState) -> ToolRegistry {
@@ -10899,6 +11232,288 @@ struct AgentMemoryContext {
     worker_context: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct AccountRuntimeMilimContext {
+    #[serde(default)]
+    tool_context: AccountRuntimeToolContext,
+    #[serde(default)]
+    memory_context: AccountRuntimeMemoryContext,
+    #[serde(default = "default_tool_mode")]
+    tool_mode: String,
+    #[serde(default)]
+    enabled_tools: Vec<String>,
+    #[serde(default = "default_skill_mode")]
+    skill_mode: String,
+    #[serde(default)]
+    enabled_skills: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct AccountRuntimeToolContext {
+    tool_approval_policy: Option<String>,
+    #[serde(default)]
+    tool_approval_grant: bool,
+    #[serde(default)]
+    interactive_tool_approval: bool,
+    #[serde(default)]
+    sandbox_enabled: bool,
+    #[serde(default)]
+    computer_use_enabled: bool,
+    #[serde(default)]
+    preview_tools_enabled: bool,
+    #[serde(default)]
+    experimental_hashline_patch: bool,
+    #[serde(default)]
+    plan_mode: bool,
+    delegation_policy: Option<String>,
+    worker_model: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct AccountRuntimeMemoryContext {
+    #[serde(default)]
+    memory_enabled: bool,
+    thread_id: Option<String>,
+    project_locator: Option<String>,
+    project_label: Option<String>,
+    message_id: Option<String>,
+}
+
+fn default_tool_mode() -> String {
+    "all".to_string()
+}
+
+fn default_skill_mode() -> String {
+    "auto".to_string()
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AccountRuntimeToolEndpoint {
+    pub run_id: String,
+    pub url: String,
+    pub authorization: String,
+    pub tools: Vec<milim_tools::ToolSpec>,
+}
+
+fn account_runtime_tool_endpoint(
+    st: &AppState,
+    headers: &HeaderMap,
+    context: Option<&AccountRuntimeMilimContext>,
+    model: &str,
+    prompt: &str,
+) -> Result<Option<AccountRuntimeToolEndpoint>, ApiError> {
+    let Some(context) = context else {
+        return Ok(None);
+    };
+    let approval = match context.tool_context.tool_approval_policy.as_deref() {
+        Some("review") => ToolApprovalPolicy::Review,
+        Some("open") => ToolApprovalPolicy::Open,
+        _ => ToolApprovalPolicy::Guarded,
+    };
+    let policy = ToolRunPolicy {
+        approval,
+        approval_granted: context.tool_context.tool_approval_grant,
+        interactive_approval: context.tool_context.interactive_tool_approval,
+        sandbox_enabled: context.tool_context.sandbox_enabled,
+        computer_use_enabled: context.tool_context.computer_use_enabled,
+        preview_tools_enabled: context.tool_context.preview_tools_enabled,
+        experimental_hashline_patch: context.tool_context.experimental_hashline_patch,
+        plan_mode: context.tool_context.plan_mode,
+    };
+    let memory = AgentMemoryContext {
+        enabled: context.memory_context.memory_enabled,
+        model: model.to_string(),
+        thread_id: context.memory_context.thread_id.clone(),
+        project_locator: context.memory_context.project_locator.clone(),
+        project_label: context.memory_context.project_label.clone(),
+        message_id: context.memory_context.message_id.clone(),
+        delegation_policy: match context.tool_context.delegation_policy.as_deref() {
+            Some("off") => milim_agents::DelegationPolicy::Off,
+            Some("auto") => milim_agents::DelegationPolicy::Auto,
+            _ => milim_agents::DelegationPolicy::Ask,
+        },
+        worker_model: context.tool_context.worker_model.clone(),
+        worker_context: Some(prompt.chars().take(32_000).collect()),
+    };
+    let mut registry = agent_registry_for_mode(
+        st,
+        &context.tool_mode,
+        &context.enabled_tools,
+        Some(memory),
+        &policy,
+    )
+    .without(DESKTOP_WORKSPACE_TOOL_NAMES);
+    if !policy.plan_mode {
+        register_skill_tools(
+            &mut registry,
+            st,
+            &context.skill_mode,
+            &context.enabled_skills,
+        );
+    }
+    if registry.is_empty() {
+        return Ok(None);
+    }
+    let host = headers
+        .get(HOST)
+        .and_then(|value| value.to_str().ok())
+        .and_then(loopback_host)
+        .ok_or_else(|| {
+            ApiError(Error::InvalidRequest(
+                "Milim account-runtime tools require a loopback server address".into(),
+            ))
+        })?;
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let token = uuid::Uuid::new_v4().to_string();
+    let endpoint = AccountRuntimeToolEndpoint {
+        run_id: run_id.clone(),
+        url: format!("http://{host}/internal/account-runtime-tools/{run_id}/mcp"),
+        authorization: format!("Bearer {token}"),
+        tools: registry.list(),
+    };
+    st.account_runtime_tools
+        .lock()
+        .expect("account runtime tool store poisoned")
+        .insert(
+            run_id,
+            crate::state::AccountRuntimeToolSession {
+                token,
+                registry,
+                review: approval == ToolApprovalPolicy::Review && !policy.approval_granted,
+            },
+        );
+    Ok(Some(endpoint))
+}
+
+struct AccountRuntimeToolLease {
+    sessions: Arc<Mutex<HashMap<String, crate::state::AccountRuntimeToolSession>>>,
+    run_id: Option<String>,
+}
+
+impl Drop for AccountRuntimeToolLease {
+    fn drop(&mut self) {
+        if let Some(run_id) = &self.run_id {
+            self.sessions
+                .lock()
+                .expect("account runtime tool store poisoned")
+                .remove(run_id);
+        }
+    }
+}
+
+fn account_runtime_stream<S>(
+    stream: S,
+    st: &AppState,
+    endpoint: Option<&AccountRuntimeToolEndpoint>,
+    relay_notices: bool,
+) -> impl futures::Stream<Item = std::result::Result<Event, Infallible>>
+where
+    S: futures::Stream<Item = std::result::Result<Event, Infallible>>,
+{
+    let run_id = endpoint.map(|endpoint| endpoint.run_id.clone());
+    let sessions = st.account_runtime_tools.clone();
+    let mut notices = st.tool_approvals.subscribe();
+    async_stream::stream! {
+        let _lease = AccountRuntimeToolLease { sessions, run_id: run_id.clone() };
+        futures::pin_mut!(stream);
+        loop {
+            tokio::select! {
+                event = stream.next() => match event {
+                    Some(event) => yield event,
+                    None => break,
+                },
+                notice = notices.recv(), if relay_notices && run_id.is_some() => match notice {
+                    Ok(notice) if Some(notice.run_id.as_str()) == run_id.as_deref() => {
+                        let value = if let Some(decision) = notice.decision {
+                            json!({
+                                "type": "tool_approval_resolved",
+                                "approval_id": notice.approval_id,
+                                "call_id": notice.call_id.unwrap_or_else(|| notice.approval_id.clone()),
+                                "decision": decision,
+                            })
+                        } else {
+                            json!({
+                                "type": "tool_approval_required",
+                                "approval_id": notice.approval_id,
+                                "call_id": notice.call_id.unwrap_or_else(|| notice.approval_id.clone()),
+                                "name": notice.name,
+                                "arguments": notice.arguments,
+                                "effect": notice.effect,
+                            })
+                        };
+                        yield Ok(Event::default().data(value.to_string()));
+                    }
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod account_runtime_tool_tests {
+    use super::*;
+    use milim_storage::Database;
+
+    #[test]
+    fn gateway_requires_loopback_and_removes_finished_sessions() {
+        assert_eq!(
+            loopback_host("127.0.0.1:1234").as_deref(),
+            Some("127.0.0.1:1234")
+        );
+        assert!(loopback_host("example.com:1234").is_none());
+
+        let sessions = Arc::new(Mutex::new(HashMap::from([(
+            "run".to_string(),
+            crate::state::AccountRuntimeToolSession {
+                token: "token".into(),
+                registry: ToolRegistry::new(),
+                review: false,
+            },
+        )])));
+        drop(AccountRuntimeToolLease {
+            sessions: sessions.clone(),
+            run_id: Some("run".into()),
+        });
+        assert!(sessions.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn lazy_skill_tools_enforce_custom_agent_scope() {
+        let store =
+            Arc::new(milim_skills::SkillStore::new(Database::open_in_memory().unwrap()).unwrap());
+        let allowed = store
+            .create(
+                "Code Review",
+                "Review source changes",
+                "List findings first.",
+            )
+            .unwrap();
+        let blocked = store
+            .create("Deployment", "Deploy releases", "Push the release.")
+            .unwrap();
+        let scope = MilimSkillScope {
+            allowed_ids: Some(Arc::new(HashSet::from([allowed.id.clone()]))),
+        };
+        let search = MilimSkillSearchTool {
+            store: store.clone(),
+            scope: scope.clone(),
+        };
+        let found = search
+            .invoke(json!({ "query": "review source changes", "limit": 10 }))
+            .await
+            .unwrap();
+        assert_eq!(found["skills"].as_array().unwrap().len(), 1);
+        assert_eq!(found["skills"][0]["id"], allowed.id);
+
+        let read = MilimSkillReadTool { store, scope };
+        let loaded = read.invoke(json!({ "id": allowed.id })).await.unwrap();
+        assert_eq!(loaded["instructions"], "List findings first.");
+        assert!(read.invoke(json!({ "id": blocked.id })).await.is_err());
+    }
+}
+
 const DESKTOP_WORKSPACE_TOOL_NAMES: &[&str] = &[
     "read_file",
     "read_file_anchors",
@@ -10994,6 +11609,17 @@ fn string_extra(req: &ChatCompletionRequest, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
+}
+
+fn string_list_extra(req: &ChatCompletionRequest, key: &str) -> Vec<String> {
+    req.extra
+        .get(key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
 }
 
 fn bool_extra(req: &ChatCompletionRequest, key: &str) -> bool {
@@ -11296,13 +11922,15 @@ pub(crate) fn scheduled_agent_registry(
     st: &AppState,
     agent: &milim_agents::AgentDef,
 ) -> ToolRegistry {
-    agent_registry_for_mode(
+    let mut registry = agent_registry_for_mode(
         st,
         &agent.tool_mode,
         &agent.enabled_tools,
         None,
         &ToolRunPolicy::default(),
-    )
+    );
+    register_skill_tools(&mut registry, st, &agent.skill_mode, &agent.enabled_skills);
+    registry
 }
 
 struct MemoryRegisterTool {
@@ -12376,14 +13004,19 @@ pub(crate) async fn agents_run(
         agent_config.approval_broker = Some(st.tool_approvals.clone());
     }
     let memory = memory_context_from_request(&req, model.clone());
+    let skill_mode = string_extra(&req, "skill_mode").unwrap_or_else(|| "auto".to_string());
+    let enabled_skills = string_list_extra(&req, "enabled_skills");
     let workspace_unavailable = desktop_workspace_unavailable(&st);
     let mut messages = req.messages;
     add_workspace_instructions(&mut messages, &st);
     add_workspace_notice_if_needed(&mut messages, workspace_unavailable);
 
     if want_stream {
-        let tools =
-            std::sync::Arc::new(agent_registry_with_memory(&st, Some(memory), &tool_policy));
+        let mut registry = agent_registry_with_memory(&st, Some(memory), &tool_policy);
+        if !tool_policy.plan_mode {
+            register_skill_tools(&mut registry, &st, &skill_mode, &enabled_skills);
+        }
+        let tools = std::sync::Arc::new(registry);
         let stream = milim_agents::run_agent_stream_with_config(
             st.service.clone(),
             tools,
@@ -12397,7 +13030,10 @@ pub(crate) async fn agents_run(
             .into_response());
     }
 
-    let tools = agent_registry_with_memory(&st, Some(memory), &tool_policy);
+    let mut tools = agent_registry_with_memory(&st, Some(memory), &tool_policy);
+    if !tool_policy.plan_mode {
+        register_skill_tools(&mut tools, &st, &skill_mode, &enabled_skills);
+    }
     let outcome = milim_agents::run_agent_with_config(
         st.service.as_ref(),
         &tools,
@@ -12532,7 +13168,9 @@ pub(crate) async fn agent_run_by_id(
         .find(|m| m.role == "user")
         .map(ChatMessage::text_content)
         .unwrap_or_default();
-    messages.extend(crate::agent_skill_messages(&st, &agent, &skill_query));
+    if !bool_extra(&req, "skills_resolved") {
+        messages.extend(crate::agent_skill_messages(&st, &agent, &skill_query));
+    }
     let resolved_role = messages
         .iter()
         .filter(|message| message.role == "system")
@@ -12562,13 +13200,17 @@ pub(crate) async fn agent_run_by_id(
     add_workspace_notice_if_needed(&mut messages, desktop_workspace_unavailable(&st));
 
     if want_stream {
-        let tools = std::sync::Arc::new(agent_registry_for_mode(
+        let mut registry = agent_registry_for_mode(
             &st,
             &agent.tool_mode,
             &agent.enabled_tools,
             Some(memory),
             &tool_policy,
-        ));
+        );
+        if !tool_policy.plan_mode {
+            register_skill_tools(&mut registry, &st, &agent.skill_mode, &agent.enabled_skills);
+        }
+        let tools = std::sync::Arc::new(registry);
         let stream = milim_agents::run_agent_stream_with_config(
             st.service.clone(),
             tools,
@@ -12582,13 +13224,16 @@ pub(crate) async fn agent_run_by_id(
             .into_response());
     }
 
-    let tools = agent_registry_for_mode(
+    let mut tools = agent_registry_for_mode(
         &st,
         &agent.tool_mode,
         &agent.enabled_tools,
         Some(memory),
         &tool_policy,
     );
+    if !tool_policy.plan_mode {
+        register_skill_tools(&mut tools, &st, &agent.skill_mode, &agent.enabled_skills);
+    }
     let outcome = milim_agents::run_agent_with_config(
         st.service.as_ref(),
         &tools,
@@ -13471,6 +14116,8 @@ pub(crate) struct SelectSkillsRequest {
     query: String,
     #[serde(default = "default_skill_select_limit")]
     limit: usize,
+    #[serde(default)]
+    ids: Option<Vec<String>>,
 }
 
 fn default_skill_select_limit() -> usize {
@@ -13537,7 +14184,7 @@ pub(crate) async fn skills_select(
         .as_deref()
         .ok_or_else(|| ApiError(Error::InvalidRequest("skills are not enabled".to_string())))?;
     let skills = store
-        .select(&req.query, req.limit.clamp(1, 10))
+        .select_filtered(&req.query, req.limit.clamp(1, 10), req.ids.as_deref())
         .map_err(ApiError)?;
     Ok(Json(json!({ "skills": skills })).into_response())
 }

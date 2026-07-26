@@ -536,6 +536,10 @@ const accountPromptContext = {
   useScheduleTools: false,
   useTools: false,
   accountRuntimeMayUseTools: true,
+  toolMode: "none",
+  enabledTools: ["milim_skill_search", "milim_skill_read"],
+  skillMode: "custom",
+  enabledSkills: ["review"],
   runMemoryContext: {},
   toolContext: {},
 } satisfies Parameters<typeof runAccountRuntimeTurn>[0]["promptContext"];
@@ -599,6 +603,9 @@ const codexResult = await runAccountRuntimeTurn({
     assert.equal(request.persist_thread, true);
     assert.equal(request.tool_approval_grant, true);
     assert.deepEqual(request.images, [{ media_type: "image/png", data: "AAAA" }]);
+    assert.deepEqual(request.milim_context?.enabled_tools, ["milim_skill_search", "milim_skill_read"]);
+    assert.equal(request.milim_context?.skill_mode, "custom");
+    assert.deepEqual(request.milim_context?.enabled_skills, ["review"]);
     codexPrompt = request.prompt;
     onEvent({ type: "thread", thread_id: "codex-thread-2", model: "gpt-5" });
     onEvent({

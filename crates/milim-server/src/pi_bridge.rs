@@ -25,19 +25,6 @@ const STATUS_TIMEOUT: Duration = Duration::from_secs(10);
 const CANCEL_GRACE: Duration = Duration::from_millis(750);
 const SAFE_TOOLS: &str = "read,grep,find,ls";
 const APPROVAL_PREFIX: &str = "milim-tool-approval:";
-const APPROVAL_EXTENSION: &str = r#"
-export default function (pi) {
-  const safe = new Set(["read", "grep", "find", "ls"]);
-  pi.on("tool_call", async (event, ctx) => {
-    if (safe.has(event.toolName)) return;
-    const approved = await ctx.ui.confirm(
-      "milim-tool-approval:" + event.toolCallId,
-      "Approve this " + event.toolName + " call?",
-    );
-    if (!approved) return { block: true, reason: "Denied by user" };
-  });
-}
-"#;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct PiRunRequest {
@@ -61,6 +48,10 @@ pub(crate) struct PiRunRequest {
     pub interactive_tool_approval: bool,
     #[serde(default)]
     pub plan_mode: bool,
+    #[serde(default)]
+    pub milim_context: Option<crate::routes::AccountRuntimeMilimContext>,
+    #[serde(skip)]
+    pub milim_mcp: Option<crate::routes::AccountRuntimeToolEndpoint>,
 }
 
 pub(crate) async fn status() -> Result<Value> {
@@ -407,10 +398,30 @@ fn run_arguments(
         || (req.tool_approval_policy.as_deref() == Some("review")
             && !req.interactive_tool_approval
             && !req.tool_approval_grant);
+    let proxy_tools = req
+        .milim_mcp
+        .as_ref()
+        .map(|endpoint| {
+            endpoint
+                .tools
+                .iter()
+                .map(|tool| format!("milim_{}", tool.name))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     if req.cwd.is_none() {
-        args.extend(["--no-tools".into(), "--no-context-files".into()]);
+        args.push("--no-context-files".into());
+        if proxy_tools.is_empty() {
+            args.push("--no-tools".into());
+        } else if restrictive {
+            args.extend(["--tools".into(), proxy_tools.join(",")]);
+        } else {
+            args.push("--no-builtin-tools".into());
+        }
     } else if restrictive {
-        args.extend(["--tools".into(), SAFE_TOOLS.into()]);
+        let mut tools = vec![SAFE_TOOLS.to_string()];
+        tools.extend(proxy_tools);
+        args.extend(["--tools".into(), tools.join(",")]);
     }
     if let Some(path) = extension {
         args.extend(["--extension".into(), path.to_string_lossy().into_owned()]);
@@ -455,8 +466,8 @@ impl PiProcess {
             && req.interactive_tool_approval
             && !req.tool_approval_grant
             && !req.plan_mode;
-        let extension = if review {
-            Some(write_approval_extension()?)
+        let extension = if review || req.milim_mcp.is_some() {
+            Some(write_runtime_extension(req, review)?)
         } else {
             None
         };
@@ -642,13 +653,59 @@ fn pi_thinking(effort: Option<&str>) -> Option<String> {
     }
 }
 
-fn write_approval_extension() -> Result<PathBuf> {
+fn write_runtime_extension(req: &PiRunRequest, review: bool) -> Result<PathBuf> {
     let path = std::env::temp_dir().join(format!("milim-pi-approval-{}.mjs", uuid::Uuid::new_v4()));
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&path)?;
-    file.write_all(APPROVAL_EXTENSION.as_bytes())?;
+    let endpoint = req.milim_mcp.as_ref();
+    let config = endpoint
+        .map(|endpoint| {
+            json!({
+                "url": endpoint.url,
+                "authorization": endpoint.authorization,
+                "tools": endpoint.tools,
+            })
+        })
+        .unwrap_or(Value::Null);
+    let source = format!(
+        r#"
+const config = {config};
+export default function (pi) {{
+  if (config) for (const tool of config.tools) {{
+    pi.registerTool({{
+      name: "milim_" + tool.name,
+      label: tool.name,
+      description: tool.description,
+      parameters: tool.input_schema,
+      async execute(toolCallId, params, signal) {{
+        const response = await fetch(config.url, {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json", "Authorization": config.authorization }},
+          body: JSON.stringify({{ jsonrpc: "2.0", id: toolCallId, method: "tools/call", params: {{ name: tool.name, arguments: params, _meta: {{ toolCallId }} }} }}),
+          signal,
+        }});
+        const body = await response.json();
+        if (!response.ok || body.error) throw new Error(body.error?.message || "Milim tool call failed");
+        return {{ content: body.result.content, details: {{}} }};
+      }},
+    }});
+  }}
+  if ({review}) pi.on("tool_call", async (event, ctx) => {{
+    if (event.toolName.startsWith("milim_") || ["read", "grep", "find", "ls"].includes(event.toolName)) return;
+    const approved = await ctx.ui.confirm(
+      "milim-tool-approval:" + event.toolCallId,
+      "Approve this " + event.toolName + " call?",
+    );
+    if (!approved) return {{ block: true, reason: "Denied by user" }};
+  }});
+}}
+"#,
+        config = config,
+        review = review
+    );
+    file.write_all(source.as_bytes())?;
     Ok(path)
 }
 
@@ -706,6 +763,8 @@ mod tests {
             tool_approval_grant: false,
             interactive_tool_approval: policy == "review",
             plan_mode: false,
+            milim_context: None,
+            milim_mcp: None,
         }
     }
 

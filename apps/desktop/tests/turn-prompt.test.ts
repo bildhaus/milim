@@ -191,6 +191,40 @@ const blankPreview = buildTurnPromptContext({
 assert.equal(blankPreview.useTools, false, "non-inspectable preview surfaces should not expose tools");
 assert.equal(blankPreview.toolContext.preview_tools_enabled, false);
 assert.deepEqual(blankPreview.toolContext.preview_surface, blankPreviewSurface);
+assert.match(contextMessagesForTurn(blankPreview, "model").at(-1)?.content ?? "", /untrusted UI metadata/);
+assert.match(contextMessagesForTurn(blankPreview, "agent").at(-1)?.content ?? "", /\"kind\":\"blank\"/);
+
+const googlePreview = buildTurnPromptContext({
+  sessionId: "s-preview-google",
+  threadTitle: "Sheet",
+  folder: "",
+  instructions: "",
+  planMode: false,
+  memory: false,
+  conversation: [user("read column C")],
+  memoryHits: [],
+  selectedSkills: [],
+  turnId: "turn-preview-google",
+  accountRuntimeKind: "opencode",
+  sandbox: false,
+  computerUse: false,
+  previewSurface: {
+    kind: "google_workspace",
+    title: "Costs",
+    url: "https://docs.google.com/spreadsheets/d/file-id/edit",
+    native: false,
+    status: "ready",
+    capabilities: [],
+  },
+  activeAgentId: null,
+  toolApproval: "guarded",
+  toolApprovalGrant: false,
+  experimentalHashlinePatch: false,
+});
+assert.equal(googlePreview.useTools, false);
+assert.equal(googlePreview.accountRuntimeMayUseTools, true);
+assert.equal(googlePreview.toolContext.preview_tools_enabled, false);
+assert.match(googlePreview.browserMessages[0].content, /docs\.google\.com/);
 
 const virtualProject = buildTurnPromptContext({
   sessionId: "s1",
@@ -251,6 +285,7 @@ const memory = buildTurnPromptContext({
   conversation: [user("continue")],
   memoryHits: [{ node: { scope_kind: "project", kind: "decision", title: "Use SQLite", body: "Local first.", source: "user", updated_at: "2026-07-20 08:30:00" } }],
   selectedSkills: [{ id: "sk1", name: "Skill", description: "Useful", instructions: "Do it.", enabled: true, source_kind: "local" }],
+  explicitSkillIds: ["sk1"],
   turnId: "turn-3",
   sandbox: false,
   computerUse: false,
@@ -404,7 +439,7 @@ assert.equal(planModeAccountRuntime.useTools, false);
 assert.equal(planModeAccountRuntime.accountRuntimeMayUseTools, false, "plan mode should not start account-runtime tools");
 
 const searched: Array<{ query: string; scopes: unknown[]; limit: number; model?: string }> = [];
-const selectedQueries: Array<{ query: string; limit: number }> = [];
+const selectedQueries: Array<{ query: string; limit: number; ids?: string[] }> = [];
 const prepared = await prepareTurnPromptContext({
   sessionId: "s5",
   threadTitle: "Prepared",
@@ -431,9 +466,9 @@ const prepared = await prepareTurnPromptContext({
     searched.push({ query, scopes, limit, model });
     return [{ node: { scope_kind: "thread", kind: "note", title: "Saved", body: "Memory body" } }];
   },
-  selectSkills: async (query, limit) => {
-    selectedQueries.push({ query, limit });
-    return [];
+  selectSkills: async (query, limit, ids) => {
+    selectedQueries.push({ query, limit, ids });
+    return [{ id: "custom-skill", name: "Custom", description: "", instructions: "Use custom.", enabled: true, source_kind: "local" }];
   },
 });
 assert.equal(searched[0].query, "remember this with attachments");
@@ -444,10 +479,58 @@ assert.deepEqual(searched[0].scopes, [
   { kind: "project", locator: "C:\\repo" },
   { kind: "thread", locator: "s5" },
 ]);
-assert.equal(selectedQueries.length, 0, "custom agent skills should not call auto skill selection");
+assert.equal(selectedQueries.length, 1, "custom agent skills should select within their allowlist");
+assert.deepEqual(selectedQueries[0].ids, ["custom-skill"]);
 assert.match(prepared.memoryMessages[0].content, /Memory body/);
 assert.match(prepared.skillMessages[0].content, /Custom/);
+assert.doesNotMatch(prepared.skillMessages[0].content, /Use custom/);
 assert.equal(prepared.useTools, true);
+
+const skillOnlyPrepared = await prepareTurnPromptContext({
+  sessionId: "s-skill-only",
+  threadTitle: "Skill only",
+  folder: "",
+  instructions: "",
+  planMode: false,
+  memory: false,
+  conversation: [user("review this source change")],
+  activeAgent: { tool_mode: "none", skill_mode: "custom", enabled_skills: ["review"] },
+  skills: [],
+  turnId: "turn-skill-only",
+  model: "local-model",
+  sandbox: false,
+  computerUse: false,
+  activeAgentId: "agent-skill-only",
+  toolApproval: "guarded",
+  toolApprovalGrant: false,
+  experimentalHashlinePatch: false,
+  messageContent: (message) => message.content,
+  searchMemory: async () => [],
+  selectSkills: async () => [{
+    id: "review",
+    name: "Review",
+    description: "Review source changes",
+    instructions: "List findings first.",
+    enabled: true,
+    source_kind: "local",
+  }],
+  tools: [
+    { name: "shell", description: "Run commands", effect: "command" },
+    { name: "milim_skill_search", description: "Find skills", effect: "read_only" },
+    { name: "milim_skill_read", description: "Read a skill", effect: "read_only" },
+  ],
+});
+assert.equal(skillOnlyPrepared.useTools, true, "lazy skill loading should work when regular Agent tools are disabled");
+assert.deepEqual(
+  skillOnlyPrepared.enabledTools,
+  ["milim_skill_search", "milim_skill_read"],
+  "skill-only turns should expose only the lazy skill tools",
+);
+assert.doesNotMatch(
+  skillOnlyPrepared.toolDefinitionMessages?.[0]?.content ?? "",
+  /"shell"/,
+  "skill-only turns should not re-enable host tools",
+);
 
 let planMemorySearches = 0;
 const plannedWithMemoryEnabled = await prepareTurnPromptContext({

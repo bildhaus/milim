@@ -21,6 +21,13 @@ use crate::media_library::MediaLibrary;
 use crate::preview_runtime::PreviewRuntimeManager;
 use crate::threads::ThreadSupervisor;
 
+#[derive(Clone)]
+pub(crate) struct AccountRuntimeToolSession {
+    pub token: String,
+    pub registry: ToolRegistry,
+    pub review: bool,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ScheduleRunEvent {
     pub id: String,
@@ -152,6 +159,7 @@ pub struct AppState {
     pub workspace: Arc<RwLock<Option<PathBuf>>>,
     /// One-shot user decisions for consequential streamed tool calls.
     pub tool_approvals: Arc<milim_agents::ToolApprovalBroker>,
+    pub(crate) account_runtime_tools: Arc<Mutex<HashMap<String, AccountRuntimeToolSession>>>,
     /// Optional MCP client hub: external MCP servers whose tools are merged
     /// into the agent's registry. Managed via `/mcp/servers`.
     pub mcp: Option<Arc<milim_mcp_client::McpHub>>,
@@ -192,6 +200,7 @@ impl AppState {
             media_library: None,
             workspace: Arc::new(RwLock::new(None)),
             tool_approvals: Arc::new(milim_agents::ToolApprovalBroker::default()),
+            account_runtime_tools: Arc::new(Mutex::new(HashMap::new())),
             mcp: None,
             mcp_app_views: Arc::new(McpAppViewStore::default()),
             computer_use: Arc::new(AtomicBool::new(false)),

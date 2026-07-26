@@ -6,6 +6,7 @@ import {
   type AccountRuntimeImage,
 } from "./attachmentInput.js";
 import type {
+  AccountRuntimeMilimContext,
   AgentEvent,
   AgentMemoryContext,
   AgentToolContext,
@@ -138,6 +139,7 @@ type StreamCodexRunFn = (
     interactive_tool_approval?: boolean;
     plan_mode?: boolean;
     images?: AccountRuntimeImage[];
+    milim_context?: AccountRuntimeMilimContext;
   },
   onEvent: (event: CodexRunEvent) => void,
   signal?: AbortSignal,
@@ -155,6 +157,7 @@ type StreamClaudeRunFn = (
     plan_mode?: boolean;
     allow_session_recovery?: boolean;
     images?: AccountRuntimeImage[];
+    milim_context?: AccountRuntimeMilimContext;
   },
   onEvent: (event: ClaudeRunEvent) => void,
   signal?: AbortSignal,
@@ -170,6 +173,7 @@ type StreamOpenCodeRunFn = (
     interactive_tool_approval?: boolean;
     plan_mode?: boolean;
     images?: AccountRuntimeImage[];
+    milim_context?: AccountRuntimeMilimContext;
   },
   onEvent: (event: OpenCodeRunEvent) => void,
   signal?: AbortSignal,
@@ -187,6 +191,7 @@ type StreamPiRunFn = (
     interactive_tool_approval?: boolean;
     plan_mode?: boolean;
     images?: AccountRuntimeImage[];
+    milim_context?: AccountRuntimeMilimContext;
   },
   onEvent: (event: PiRunEvent) => void,
   signal?: AbortSignal,
@@ -894,6 +899,17 @@ export async function runAccountRuntimeTurn(
     appendImage: params.kind === "codex" ? params.appendImage : undefined,
   });
   const input = accountRuntimeInputFromMessages(outbound);
+  const milimContext: AccountRuntimeMilimContext = {
+    tool_context: {
+      ...promptContext.toolContext,
+      tool_approval_grant: toolApprovalGrant,
+    },
+    memory_context: promptContext.runMemoryContext,
+    tool_mode: promptContext.toolMode ?? "all",
+    enabled_tools: promptContext.enabledTools ?? [],
+    skill_mode: promptContext.skillMode ?? "auto",
+    enabled_skills: promptContext.enabledSkills ?? [],
+  };
   if (runRef?.current) {
     runRef.current.context = contextSnapshot(promptContext, contextMessages, outbound, model, models, reservedRules, toolDefinitions);
     snapshot?.();
@@ -913,6 +929,7 @@ export async function runAccountRuntimeTurn(
         tool_approval_grant: toolApprovalGrant,
         interactive_tool_approval: toolApproval === "review" && !planMode && !toolApprovalGrant,
         plan_mode: planMode,
+        milim_context: milimContext,
       },
       events.handle,
       signal,
@@ -931,6 +948,7 @@ export async function runAccountRuntimeTurn(
         interactive_tool_approval: toolApproval === "review" && !planMode && !toolApprovalGrant,
         plan_mode: planMode,
         allow_session_recovery: allowClaudeSessionRecovery,
+        milim_context: milimContext,
       },
       events.handle,
       signal,
@@ -947,6 +965,7 @@ export async function runAccountRuntimeTurn(
         tool_approval_grant: toolApprovalGrant,
         interactive_tool_approval: toolApproval === "review" && !planMode && !toolApprovalGrant,
         plan_mode: planMode,
+        milim_context: milimContext,
       },
       events.handle,
       signal,
@@ -966,6 +985,7 @@ export async function runAccountRuntimeTurn(
         interactive_tool_approval:
           toolApproval === "review" && !planMode && !toolApprovalGrant,
         plan_mode: planMode,
+        milim_context: milimContext,
       },
       events.handle,
       signal,

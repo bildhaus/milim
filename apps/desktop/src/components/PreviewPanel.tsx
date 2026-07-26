@@ -1454,6 +1454,7 @@ export function PreviewPanel({
                         fallbackUrl={tab.url}
                         active={active && !closing}
                         onMetadata={(title, faviconUrl) => syncNativeTitle(tab.id, title, faviconUrl)}
+                        onSurfaceChange={active ? onSurfaceChange : undefined}
                         onOpenFile={openBrowserUrl}
                         onOpenFileInNewTab={openBrowserTab}
                       />

@@ -172,7 +172,7 @@ try {
   const { ContextMenuProvider } = await server.ssrLoadModule("/src/components/ContextMenu.tsx") as {
     ContextMenuProvider: ComponentType<{ children: ReactNode }>;
   };
-  const { DocumentPreview, FolderPreview, SheetPreview, SlidesPreview, browserLinkOpensNewTab, googleWorkspacePreviewNeedsLoad } = await server.ssrLoadModule("/src/components/GoogleWorkspacePreview.tsx") as {
+  const { DocumentPreview, FolderPreview, SheetPreview, SlidesPreview, browserLinkOpensNewTab, googleDocFitScale, googleFileKindDetail, googleSlidesNavigationAction, googleWorkspacePreviewNeedsLoad } = await server.ssrLoadModule("/src/components/GoogleWorkspacePreview.tsx") as {
     DocumentPreview: ComponentType<{
       fileId: string;
       canEdit: boolean;
@@ -204,6 +204,9 @@ try {
       onSaved: () => void;
     }>;
     browserLinkOpensNewTab: (event: { button: number; ctrlKey: boolean; metaKey: boolean }) => boolean;
+    googleDocFitScale: (width: number, paddingLeft: number, paddingRight: number) => number;
+    googleFileKindDetail: (file: GoogleFileSummary) => string;
+    googleSlidesNavigationAction: (key: string) => "previous" | "next" | "first" | "last" | "exit" | null;
     googleWorkspacePreviewNeedsLoad: (active: boolean, loadedRequest: string | null, request: string) => boolean;
   };
   const renderPreviewPanel = (props: PreviewPanelProps) => renderToStaticMarkup(
@@ -232,21 +235,36 @@ try {
     values: [["Venue", "Status"], ["Noor", "Completed"]],
     formulas: [["Venue", "Status"], ["Noor", "=UPPER(\"completed\")"]],
   };
-  const sheetMarkup = renderToStaticMarkup(createElement(SheetPreview, {
-    preview: sheetPreview,
-    range: sheetPreview.range,
-    setRange: () => {},
-    loadRange: () => {},
-    submitRange: () => {},
-    onSaved: () => {},
-  }));
+  const renderSheet = (preview: typeof sheetPreview) => renderToStaticMarkup(
+    createElement(ContextMenuProvider, null, createElement(SheetPreview, {
+      preview,
+      range: preview.range,
+      setRange: () => {},
+      loadRange: () => {},
+      submitRange: () => {},
+      onSaved: () => {},
+    })),
+  );
+  const sheetMarkup = renderSheet(sheetPreview);
   assert(sheetMarkup.includes('aria-current="page"'), "Sheets preview should mark the active worksheet");
   assert(sheetMarkup.includes('aria-label="Active cell">B2'), "Sheets preview should expose the active cell address");
+  assert(sheetMarkup.includes('aria-label="Edit active cell B2"'), "Sheets preview should expose formula-bar editing");
   assert(sheetMarkup.includes('aria-label="Search this sheet range"'), "Sheets preview should expose range search");
   assert(sheetMarkup.includes('aria-label="Sheet zoom"'), "Sheets preview should expose zoom");
   assert(sheetMarkup.includes('aria-label="Resize column B"'), "Sheets preview should expose keyboard-accessible column resizing");
-  assert(sheetMarkup.includes("Double-click a cell to edit"), "Editable Sheets previews should expose inline cell editing");
-  assert(sheetMarkup.includes('aria-label="Row and column actions"'), "Editable Sheets previews should expose dimension actions");
+  assert(sheetMarkup.includes('aria-haspopup="menu"'), "Editable Sheets previews should expose dimension actions in a menu");
+  assert(
+    sheetMarkup.indexOf('class="google-sheet-grid-wrap"') < sheetMarkup.indexOf('class="google-sheet-tabs"'),
+    "Sheets preview should place worksheet tabs below the grid",
+  );
+  const viewOnlySheetMarkup = renderSheet({
+    ...sheetPreview,
+    file: {
+      ...sheetPreview.file,
+      capabilities: { ...sheetPreview.file.capabilities, can_edit: false },
+    },
+  });
+  assert(viewOnlySheetMarkup.includes('readonly=""'), "View-only Sheets previews should keep the formula bar read-only");
   const documentMarkup = renderToStaticMarkup(createElement(DocumentPreview, {
     fileId: "doc_123",
     canEdit: true,
@@ -267,9 +285,25 @@ try {
   }));
   assert(documentMarkup.includes('aria-label="Search document"'), "Docs preview should expose document search");
   assert(documentMarkup.includes('aria-label="Document zoom"'), "Docs preview should expose zoom");
+  assert(documentMarkup.includes('<option value="fit" selected="">Fit width</option>'), "Docs preview should default to one unambiguous fit-width zoom mode");
   assert(documentMarkup.includes('aria-label="Show document outline"'), "Docs preview should expose a heading outline control");
   assert(documentMarkup.includes("text-align:center"), "Docs preview should preserve paragraph alignment");
   assert(documentMarkup.includes("Double-click to edit this paragraph"), "Editable Docs previews should expose paragraph editing");
+  assert(googleDocFitScale(860, 22, 22) === 1, "Docs fit width should preserve a full-size page");
+  assert(googleDocFitScale(452, 22, 22) === 0.5, "Docs fit width should scale to half width");
+  assert(googleDocFitScale(0, 22, 22) === 0.1, "Docs fit width should retain a visible minimum scale");
+  const documentFile = {
+    ...sheetPreview.file,
+    mime_type: "application/vnd.google-apps.document",
+  };
+  assert(googleFileKindDetail(documentFile).includes("Double-click text to edit"), "Editable Docs should explain inline editing");
+  assert(
+    googleFileKindDetail({
+      ...documentFile,
+      capabilities: { ...documentFile.capabilities, can_edit: false },
+    }) === "Google Docs",
+    "View-only Docs should omit the editing hint",
+  );
   const slidesMarkup = renderToStaticMarkup(createElement(SlidesPreview, {
     fileId: "slides_123",
     active: true,
@@ -296,9 +330,20 @@ try {
   assert(slidesMarkup.includes('aria-label="Next slide"'), "Slides preview should expose next-slide navigation");
   assert(slidesMarkup.includes('aria-label="Search slides"'), "Slides preview should expose presentation search");
   assert(slidesMarkup.includes('aria-label="Slide zoom"'), "Slides preview should expose zoom");
+  assert(slidesMarkup.includes('<option value="fit" selected="">Fit</option>'), "Slides preview should default to one unambiguous fit zoom mode");
+  assert(slidesMarkup.includes('aria-label="Hide slide thumbnails"'), "Slides preview should expose a thumbnail-rail toggle");
+  assert(slidesMarkup.includes('aria-haspopup="dialog"'), "Slides preview should expose presentation mode");
+  assert(slidesMarkup.includes(">Present<"), "Slides preview should label the presentation action");
   assert(slidesMarkup.includes(">Notes<"), "Slides preview should expose available speaker notes");
-  assert(slidesMarkup.includes(">Edit text<"), "Editable Slides previews should expose shape-text editing");
+  assert(slidesMarkup.includes(">Edit slide text<"), "Editable Slides previews should clearly label shape-text editing");
   assert(slidesMarkup.includes('aria-current="page"'), "Slides preview should mark the active slide");
+  assert(googleSlidesNavigationAction("ArrowLeft") === "previous", "Slides should move backward with ArrowLeft");
+  assert(googleSlidesNavigationAction("PageDown") === "next", "Slides should move forward with PageDown");
+  assert(googleSlidesNavigationAction(" ") === "next", "Slides should move forward with Space");
+  assert(googleSlidesNavigationAction("Home") === "first", "Slides should jump to the first slide with Home");
+  assert(googleSlidesNavigationAction("End") === "last", "Slides should jump to the last slide with End");
+  assert(googleSlidesNavigationAction("Escape") === "exit", "Slides should exit presentation mode with Escape");
+  assert(googleSlidesNavigationAction("Enter") === null, "Slides should ignore unrelated keys");
   const folderMarkup = renderToStaticMarkup(createElement(
     ContextMenuProvider,
     null,

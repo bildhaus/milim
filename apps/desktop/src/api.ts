@@ -129,6 +129,7 @@ export type PreviewSurfaceKind =
   | "artifact_iframe"
   | "native_browser"
   | "runtime_browser"
+  | "google_workspace"
   | "blank"
   | "markdown"
   | "code"
@@ -2458,6 +2459,7 @@ export async function streamCodexRun(
     interactive_tool_approval?: boolean;
     plan_mode?: boolean;
     images?: AccountRuntimeImageInput[];
+    milim_context?: AccountRuntimeMilimContext;
   },
   onEvent: (ev: CodexRunEvent) => void,
   signal?: AbortSignal,
@@ -2488,6 +2490,7 @@ export async function streamClaudeRun(
     plan_mode?: boolean;
     allow_session_recovery?: boolean;
     images?: AccountRuntimeImageInput[];
+    milim_context?: AccountRuntimeMilimContext;
   },
   onEvent: (ev: ClaudeRunEvent) => void,
   signal?: AbortSignal,
@@ -2516,6 +2519,7 @@ export async function streamOpenCodeRun(
     interactive_tool_approval?: boolean;
     plan_mode?: boolean;
     images?: AccountRuntimeImageInput[];
+    milim_context?: AccountRuntimeMilimContext;
   },
   onEvent: (ev: OpenCodeRunEvent) => void,
   signal?: AbortSignal,
@@ -2546,6 +2550,7 @@ export async function streamPiRun(
     interactive_tool_approval?: boolean;
     plan_mode?: boolean;
     images?: AccountRuntimeImageInput[];
+    milim_context?: AccountRuntimeMilimContext;
   },
   onEvent: (ev: PiRunEvent) => void,
   signal?: AbortSignal,
@@ -2965,6 +2970,18 @@ export interface AgentToolContext {
   plan_mode?: boolean;
   delegation_policy?: DelegationPolicy;
   worker_model?: string;
+  skill_mode?: AgentSkillMode;
+  enabled_skills?: string[];
+  skills_resolved?: boolean;
+}
+
+export interface AccountRuntimeMilimContext {
+  tool_context: AgentToolContext;
+  memory_context: AgentMemoryContext;
+  tool_mode: "all" | "custom" | "none";
+  enabled_tools: string[];
+  skill_mode: AgentSkillMode;
+  enabled_skills: string[];
 }
 
 export type ChildThreadStatus =
@@ -4780,13 +4797,14 @@ export async function deleteSkill(id: string): Promise<boolean> {
 export async function selectSkills(
   query: string,
   limit = 3,
+  ids?: string[],
 ): Promise<SkillInfo[]> {
   try {
     if (!query.trim()) return [];
     const r = await authFetch(`${BASE}/skills/select`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query, limit }),
+      body: JSON.stringify({ query, limit, ids }),
     });
     if (!r.ok) return [];
     const j = await r.json();

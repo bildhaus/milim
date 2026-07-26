@@ -131,6 +131,10 @@ pub(crate) struct CodexRunRequest {
     pub interactive_tool_approval: bool,
     #[serde(default)]
     pub plan_mode: bool,
+    #[serde(default)]
+    pub milim_context: Option<crate::routes::AccountRuntimeMilimContext>,
+    #[serde(skip)]
+    pub milim_mcp: Option<crate::routes::AccountRuntimeToolEndpoint>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1534,6 +1538,17 @@ fn codex_thread_request(req: &CodexRunRequest, model: &str) -> (&'static str, Va
     if let Some(cwd) = cwd {
         params["cwd"] = Value::String(cwd);
     }
+    if let Some(endpoint) = &req.milim_mcp {
+        params["config"] = json!({
+            "mcp_servers": {
+                "milim": {
+                    "url": endpoint.url,
+                    "http_headers": { "Authorization": endpoint.authorization },
+                    "required": true
+                }
+            }
+        });
+    }
     if let Some(thread_id) = clean_optional(req.thread_id.as_deref()) {
         params["threadId"] = Value::String(thread_id);
         ("thread/resume", params)
@@ -2516,6 +2531,8 @@ mod tests {
             tool_approval_grant: false,
             interactive_tool_approval: false,
             plan_mode: false,
+            milim_context: None,
+            milim_mcp: None,
         };
         let materialized = CodexTurnImages::materialize(&req.images).unwrap().unwrap();
         let path = materialized.paths[0].clone();
@@ -2558,6 +2575,8 @@ mod tests {
             tool_approval_grant: true,
             interactive_tool_approval: false,
             plan_mode: false,
+            milim_context: None,
+            milim_mcp: None,
         };
         let (method, params) = codex_thread_request(&req, "gpt-5.4");
         assert_eq!(method, "thread/resume");
@@ -2597,6 +2616,8 @@ mod tests {
             tool_approval_grant: false,
             interactive_tool_approval: false,
             plan_mode: false,
+            milim_context: None,
+            milim_mcp: None,
         };
         assert_eq!(codex_approval_policy(&req), "on-request");
         assert_eq!(codex_sandbox_mode(&req, req.cwd.as_deref()), "read-only");

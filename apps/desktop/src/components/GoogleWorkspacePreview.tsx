@@ -6,12 +6,14 @@ import {
   useState,
   type ClipboardEvent,
   type CSSProperties,
+  type FocusEvent,
   type FormEvent,
   type KeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 
 import {
   chooseGoogleWorkspaceFiles,
@@ -26,6 +28,7 @@ import {
   type GoogleFileSummary,
   type GoogleSlidesEditOperation,
   type GoogleWorkspaceStatus,
+  type PreviewSurfaceTarget,
 } from "../api";
 import {
   googleDocEditableParagraph,
@@ -35,13 +38,14 @@ import {
   type GoogleDocEditableParagraph,
 } from "../lib/googleWorkspace";
 import { useContextMenu } from "./ContextMenu";
-import { ArrowLeft, ArrowRight, Copy, ExternalLink, FileText, Folder, Plus, Refresh, Search, Sidebar } from "./icons";
+import { ArrowLeft, ArrowRight, Copy, ExternalLink, FileText, Folder, MoreHorizontal, Plus, Refresh, Search, Sidebar, Trash } from "./icons";
 
 export function GoogleWorkspacePreview({
   fileId,
   fallbackUrl,
   active,
   onMetadata,
+  onSurfaceChange,
   onOpenFile,
   onOpenFileInNewTab,
 }: {
@@ -49,6 +53,7 @@ export function GoogleWorkspacePreview({
   fallbackUrl: string;
   active: boolean;
   onMetadata?: (title: string, faviconUrl?: string) => void;
+  onSurfaceChange?: (surface: PreviewSurfaceTarget | null) => void;
   onOpenFile: (url: string) => void;
   onOpenFileInNewTab: (url: string) => void;
 }) {
@@ -64,6 +69,23 @@ export function GoogleWorkspacePreview({
   const onMetadataRef = useRef(onMetadata);
   onMetadataRef.current = onMetadata;
   const isFolderUrl = /drive\.google\.com\/drive\/(?:u\/\d+\/)?folders\//i.test(fallbackUrl);
+
+  useEffect(() => {
+    if (!active) {
+      onSurfaceChange?.(null);
+      return;
+    }
+    onSurfaceChange?.({
+      kind: "google_workspace",
+      title: preview?.file.name ?? fallbackUrl,
+      url: fallbackUrl,
+      message: error,
+      native: false,
+      status: loading ? "loading" : error ? "error" : preview ? "ready" : "not_inspectable",
+      capabilities: [],
+    });
+    return () => onSurfaceChange?.(null);
+  }, [active, error, fallbackUrl, loading, onSurfaceChange, preview?.file.name]);
 
   const refresh = useCallback(() => setRefreshKey((value) => value + 1), []);
 
@@ -180,7 +202,7 @@ export function GoogleWorkspacePreview({
           <GoogleFileIcon file={preview.file} />
           <span>
             <strong>{preview.file.name}</strong>
-            <small>{googleFileKindLabel(preview.file)}</small>
+            <small>{googleFileKindDetail(preview.file)}</small>
           </span>
         </div>
         <div className="google-workspace-actions">
@@ -349,6 +371,7 @@ export function SheetPreview({
     ...preview.formulas.map((row) => row.length),
   );
   const gridRef = useRef<HTMLDivElement>(null);
+  const editSourceRef = useRef<"cell" | "formula">("cell");
   const [selectedCell, setSelectedCell] = useState<[number, number]>([0, 0]);
   const [editingCell, setEditingCell] = useState<[number, number] | null>(null);
   const [columnWidths, setColumnWidths] = useState(() => sheetColumnWidths(preview, width));
@@ -360,6 +383,7 @@ export function SheetPreview({
   const [operationSaving, setOperationSaving] = useState(false);
   const saving = operationSaving;
   const [editError, setEditError] = useState<string | null>(null);
+  const { openMenuAt } = useContextMenu();
   const activeSheet = sheetTitleFromRange(preview.range);
   const activeSheetId = sheets.find((sheet) => sheet.title === activeSheet)?.id ?? null;
   const rangeOrigin = sheetRangeOrigin(preview.range);
@@ -476,8 +500,10 @@ export function SheetPreview({
     }
   }
 
-  function startCellEdit(row: number, column: number) {
+  function startCellEdit(row: number, column: number, source: "cell" | "formula" = "cell") {
     if (!preview.file.capabilities.can_edit || operationSaving || cellAutosave.saving) return;
+    editSourceRef.current = source;
+    if (editingCell?.[0] === row && editingCell[1] === column) return;
     const value = displayCell(preview.values[row]?.[column]);
     const formula = displayCell(preview.formulas[row]?.[column]);
     const content = formula.startsWith("=") ? formula : value;
@@ -509,6 +535,36 @@ export function SheetPreview({
     },
     `${preview.file.id}\0${preview.range}\0${editingAddress}`,
   );
+
+  async function finishCellEdit(moveDown = false, focusGrid = false) {
+    if (!editingCell) return;
+    const [row, column] = editingCell;
+    if (editValue !== savedEditValue && !await cellAutosave.flush()) return;
+    setEditingCell(null);
+    if (moveDown) selectCell(row + 1, column);
+    if (focusGrid) gridRef.current?.focus();
+  }
+
+  function cancelCellEdit() {
+    setEditValue(savedEditValue);
+    setEditingCell(null);
+    gridRef.current?.focus();
+  }
+
+  function handleEditorBlur(event: FocusEvent<HTMLInputElement>) {
+    if (event.relatedTarget instanceof HTMLElement && event.relatedTarget.dataset.sheetEditor === "true") return;
+    void finishCellEdit();
+  }
+
+  function handleEditorKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancelCellEdit();
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      void finishCellEdit(true, true);
+    }
+  }
 
   function pasteCells(event: ClipboardEvent<HTMLDivElement>) {
     if (!preview.file.capabilities.can_edit || operationSaving) return;
@@ -549,30 +605,63 @@ export function SheetPreview({
     }]);
   }
 
+  function openDimensionMenu(event: ReactMouseEvent<HTMLButtonElement>) {
+    const trigger = event.currentTarget;
+    const rect = trigger.getBoundingClientRect();
+    const disabled = activeSheetId === null || saving || !preview.file.capabilities.can_edit;
+    openMenuAt({ x: rect.left, y: rect.bottom + 4 }, [
+      {
+        id: "insert-sheet-row",
+        label: "Insert row below",
+        detail: `${rangeOrigin.row + selectedRow}`,
+        icon: <Plus size={13} />,
+        disabled,
+        action: () => editDimension("insert_rows"),
+      },
+      {
+        id: "delete-sheet-row",
+        label: `Delete row ${rangeOrigin.row + selectedRow}`,
+        icon: <Trash size={13} />,
+        disabled,
+        danger: true,
+        action: () => editDimension("delete_rows"),
+      },
+      {
+        id: "insert-sheet-column",
+        label: "Insert column right",
+        detail: columnLabel(rangeOrigin.column + selectedColumn),
+        icon: <Plus size={13} />,
+        disabled,
+        separatorBefore: true,
+        action: () => editDimension("insert_columns"),
+      },
+      {
+        id: "delete-sheet-column",
+        label: `Delete column ${columnLabel(rangeOrigin.column + selectedColumn)}`,
+        icon: <Trash size={13} />,
+        disabled,
+        danger: true,
+        action: () => editDimension("delete_columns"),
+      },
+    ], "Row and column actions", trigger);
+  }
+
   return (
     <div className="google-sheet-preview">
-      <form className="google-sheet-range" onSubmit={submitRange}>
-        <label>
-          <span>Range</span>
-          <input value={range} onChange={(event) => setRange(event.currentTarget.value)} aria-label="Google Sheets range" />
-        </label>
-        <button className="btn-ghost" type="submit">Load</button>
-      </form>
-      <div className="google-sheet-tabs" aria-label="Worksheets">
-        {sheets.map(({ title }) => (
-          <button
-            type="button"
-            key={title}
-            className={title === activeSheet ? "active" : ""}
-            aria-current={title === activeSheet ? "page" : undefined}
-            onClick={() => loadRange(`'${title.split("'").join("''")}'!A1:Z100`)}
-          >
-            {title}
+      <form className="google-sheet-toolbar" aria-label="Sheet controls" onSubmit={submitRange}>
+        <label className="google-sheet-range">
+          <input
+            value={range}
+            title="Google Sheets range"
+            aria-label="Google Sheets range"
+            onChange={(event) => setRange(event.currentTarget.value)}
+          />
+          <button type="submit" title="Load range" aria-label="Load range">
+            <ArrowRight size={13} />
           </button>
-        ))}
-      </div>
-      <div className="google-sheet-toolbar">
+        </label>
         <label className="google-sheet-search">
+          <Search size={13} aria-hidden="true" />
           <input
             type="search"
             value={search}
@@ -591,23 +680,41 @@ export function SheetPreview({
         <button className={wrapCells ? "active" : ""} type="button" aria-pressed={wrapCells} onClick={() => setWrapCells((value) => !value)}>
           Wrap
         </button>
-        <span className="google-sheet-edit-actions" aria-label="Row and column actions">
-          <button type="button" disabled={activeSheetId === null || saving || !preview.file.capabilities.can_edit} onClick={() => editDimension("insert_rows")}>+ Row</button>
-          <button type="button" disabled={activeSheetId === null || saving || !preview.file.capabilities.can_edit} onClick={() => editDimension("delete_rows")}>− Row</button>
-          <button type="button" disabled={activeSheetId === null || saving || !preview.file.capabilities.can_edit} onClick={() => editDimension("insert_columns")}>+ Col</button>
-          <button type="button" disabled={activeSheetId === null || saving || !preview.file.capabilities.can_edit} onClick={() => editDimension("delete_columns")}>− Col</button>
-        </span>
         <label className="google-sheet-zoom">
           <select value={zoom} aria-label="Sheet zoom" onChange={(event) => setZoom(Number(event.currentTarget.value))}>
             {[75, 100, 125, 150].map((value) => <option key={value} value={value}>{value}%</option>)}
           </select>
         </label>
-      </div>
+        <button
+          className="google-sheet-actions-trigger"
+          type="button"
+          title="Row and column actions"
+          aria-label="Row and column actions"
+          aria-haspopup="menu"
+          disabled={activeSheetId === null || saving || !preview.file.capabilities.can_edit}
+          onClick={openDimensionMenu}
+        >
+          <MoreHorizontal size={14} />
+        </button>
+      </form>
       <div className="google-sheet-formula-bar" aria-live="polite">
         <output aria-label="Active cell">{activeAddress}</output>
-        <span className="google-sheet-formula-value" aria-label="Active cell formula">{editingCell ? editValue : activeContent}</span>
+        <span className="google-sheet-formula-symbol" aria-hidden="true">fx</span>
+        <input
+          className="google-sheet-formula-input"
+          data-sheet-editor="true"
+          aria-label={`Edit active cell ${activeAddress}`}
+          readOnly={!preview.file.capabilities.can_edit}
+          value={editingCell ? editValue : activeContent}
+          onFocus={() => {
+            if (preview.file.capabilities.can_edit) startCellEdit(selectedRow, selectedColumn, "formula");
+          }}
+          onChange={(event) => setEditValue(event.currentTarget.value)}
+          onBlur={handleEditorBlur}
+          onKeyDown={handleEditorKeyDown}
+        />
         <small>{preview.file.capabilities.can_edit
-          ? cellAutosave.status === "saving" ? "Saving..." : cellAutosave.status === "saved" ? "Saved" : "Double-click a cell to edit"
+          ? cellAutosave.status === "saving" ? "Saving..." : cellAutosave.status === "saved" ? "Saved" : "Editable"
           : "View only"}</small>
       </div>
       {editError || cellAutosave.error ? <div className="google-sheet-edit-error" role="alert">{editError || cellAutosave.error}</div> : null}
@@ -675,34 +782,15 @@ export function SheetPreview({
                       {editing ? (
                         <input
                           className="google-sheet-cell-editor"
+                          data-sheet-editor="true"
                           aria-label={`Edit cell ${editingAddress}`}
                           value={editValue}
-                          autoFocus
+                          autoFocus={editSourceRef.current === "cell"}
                           onClick={(event) => event.stopPropagation()}
                           onDoubleClick={(event) => event.stopPropagation()}
                           onChange={(event) => setEditValue(event.currentTarget.value)}
-                          onBlur={() => {
-                            if (editValue === savedEditValue) setEditingCell(null);
-                            else void cellAutosave.flush().then((saved) => {
-                              if (saved) setEditingCell(null);
-                            });
-                          }}
-                          onKeyDown={(event) => {
-                            if (event.key === "Escape") {
-                              setEditValue(savedEditValue);
-                              setEditingCell(null);
-                              gridRef.current?.focus();
-                            } else if (event.key === "Enter") {
-                              event.preventDefault();
-                              void cellAutosave.flush().then((saved) => {
-                                if (saved) {
-                                  setEditingCell(null);
-                                  selectCell(rowIndex + 1, columnIndex);
-                                  gridRef.current?.focus();
-                                }
-                              });
-                            }
-                          }}
+                          onBlur={handleEditorBlur}
+                          onKeyDown={handleEditorKeyDown}
                         />
                       ) : (
                         <>
@@ -719,6 +807,19 @@ export function SheetPreview({
             )}
           </tbody>
         </table>
+      </div>
+      <div className="google-sheet-tabs" aria-label="Worksheets">
+        {sheets.map(({ title }) => (
+          <button
+            type="button"
+            key={title}
+            className={title === activeSheet ? "active" : ""}
+            aria-current={title === activeSheet ? "page" : undefined}
+            onClick={() => loadRange(`'${title.split("'").join("''")}'!A1:Z100`)}
+          >
+            {title}
+          </button>
+        ))}
       </div>
     </div>
   );
@@ -740,8 +841,8 @@ export function DocumentPreview({
   const [query, setQuery] = useState("");
   const [matchCount, setMatchCount] = useState(0);
   const [activeMatch, setActiveMatch] = useState(0);
-  const [zoom, setZoom] = useState(100);
-  const [fitWidth, setFitWidth] = useState(true);
+  const [zoom, setZoom] = useState<"fit" | number>("fit");
+  const [fitScale, setFitScale] = useState(1);
   const [outlineOpen, setOutlineOpen] = useState(false);
   const [editing, setEditing] = useState<(GoogleDocEditableParagraph & { blockIndex: number }) | null>(null);
   const [editorText, setEditorText] = useState("");
@@ -756,6 +857,23 @@ export function DocumentPreview({
   const lists = isRecord(document.lists) ? document.lists : {};
   const outline = useMemo(() => googleDocOutline(body), [body]);
   const normalizedQuery = query.trim();
+
+  useEffect(() => {
+    const canvas = contentRef.current;
+    if (!canvas) return;
+    const updateScale = () => {
+      const style = window.getComputedStyle(canvas);
+      setFitScale(googleDocFitScale(
+        canvas.clientWidth,
+        Number.parseFloat(style.paddingLeft) || 0,
+        Number.parseFloat(style.paddingRight) || 0,
+      ));
+    };
+    const observer = new ResizeObserver(updateScale);
+    updateScale();
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     const matches = Array.from(contentRef.current?.querySelectorAll<HTMLElement>("[data-doc-search-match]") ?? []);
@@ -836,6 +954,7 @@ export function DocumentPreview({
         <button
           className={`preview-browser-action${outlineOpen ? " active" : ""}`}
           type="button"
+          title={outlineOpen ? "Hide document outline" : "Show document outline"}
           aria-label={outlineOpen ? "Hide document outline" : "Show document outline"}
           aria-pressed={outlineOpen}
           disabled={!outline.length}
@@ -843,17 +962,19 @@ export function DocumentPreview({
         >
           <Sidebar size={13} />
         </button>
-        <button className={`google-viewer-text-button${fitWidth ? " active" : ""}`} type="button" aria-pressed={fitWidth} onClick={() => setFitWidth((value) => !value)}>
-          Fit width
-        </button>
         <label className="google-viewer-zoom">
           <span>Zoom</span>
-          <select aria-label="Document zoom" value={zoom} onChange={(event) => setZoom(Number(event.target.value))}>
+          <select
+            aria-label="Document zoom"
+            value={zoom}
+            onChange={(event) => setZoom(event.target.value === "fit" ? "fit" : Number(event.target.value))}
+          >
+            <option value="fit">Fit width</option>
             {[75, 90, 100, 110, 125, 150].map((value) => <option value={value} key={value}>{value}%</option>)}
           </select>
         </label>
       </div>
-      <div className="google-doc-body">
+      <div className={`google-doc-body${outlineOpen && outline.length ? " with-outline" : ""}`}>
         {outlineOpen && outline.length ? (
           <nav className="google-doc-outline" aria-label="Document outline">
             <strong>Outline</strong>
@@ -871,8 +992,8 @@ export function DocumentPreview({
         ) : null}
         <div className="google-doc-canvas" ref={contentRef}>
           <article
-            className={`google-doc-preview${fitWidth ? " fit-width" : ""}`}
-            style={{ "--doc-zoom": zoom / 100 } as CSSProperties}
+            className="google-doc-preview"
+            style={{ "--doc-zoom": zoom === "fit" ? fitScale : zoom / 100 } as CSSProperties}
           >
             {body.length ? body.map((item, index) => editing?.blockIndex === index ? (
               <span className="google-doc-inline-editor" key={index}>
@@ -1070,11 +1191,14 @@ export function SlidesPreview({
   const [thumbnailError, setThumbnailError] = useState<string | null>(null);
   const thumbnailObjectUrlRef = useRef<string | null>(null);
   const thumbnailRequestRef = useRef<string | null>(null);
+  const presentationReturnFocusRef = useRef<HTMLElement | null>(null);
+  const presentationRef = useRef<HTMLDivElement | null>(null);
   const [query, setQuery] = useState("");
-  const [zoom, setZoom] = useState(100);
-  const [fit, setFit] = useState(true);
+  const [zoom, setZoom] = useState<"fit" | number>("fit");
+  const [railOpen, setRailOpen] = useState(true);
   const [notesOpen, setNotesOpen] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
+  const [presenting, setPresenting] = useState(false);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [savedDrafts, setSavedDrafts] = useState<Record<string, string>>({});
   const draftSlideRef = useRef<string | null>(null);
@@ -1185,6 +1309,74 @@ export function SlidesPreview({
     setSelected((current) => Math.min(slides.length - 1, Math.max(0, current + delta)));
   }
 
+  const applyNavigationAction = useCallback((action: GoogleSlidesNavigationAction) => {
+    if (action === "previous")
+      setSelected((current) => Math.max(0, current - 1));
+    else if (action === "next")
+      setSelected((current) => Math.min(slides.length - 1, current + 1));
+    else if (action === "first") setSelected(0);
+    else if (action === "last") setSelected(slides.length - 1);
+  }, [slides.length]);
+
+  useEffect(() => {
+    if (!presenting) return;
+    const appRoot = document.querySelector<HTMLElement>(".app");
+    const appWasInert = appRoot?.inert ?? false;
+    const appAriaHidden = appRoot?.getAttribute("aria-hidden") ?? null;
+    if (appRoot) {
+      appRoot.inert = true;
+      appRoot.setAttribute("aria-hidden", "true");
+    }
+    presentationRef.current?.focus();
+
+    let cancelled = false;
+    let fullscreenWindow: {
+      isFullscreen: () => Promise<boolean>;
+      setFullscreen: (fullscreen: boolean) => Promise<void>;
+    } | null = null;
+    let changedFullscreen = false;
+    void (async () => {
+      if (!("__TAURI_INTERNALS__" in window)) return;
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        fullscreenWindow = getCurrentWindow();
+        const wasFullscreen = await fullscreenWindow.isFullscreen();
+        if (cancelled || wasFullscreen) return;
+        await fullscreenWindow.setFullscreen(true);
+        if (cancelled) {
+          await fullscreenWindow.setFullscreen(false);
+          return;
+        }
+        changedFullscreen = true;
+      } catch {
+        // The fixed overlay remains usable when native fullscreen is unavailable.
+      }
+    })();
+
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      const action = googleSlidesNavigationAction(event.key);
+      if (!action) return;
+      if (action === "next" && event.key === " " && event.target instanceof HTMLButtonElement)
+        return;
+      event.preventDefault();
+      if (action === "exit") setPresenting(false);
+      else applyNavigationAction(action);
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      cancelled = true;
+      document.removeEventListener("keydown", onKeyDown);
+      if (changedFullscreen && fullscreenWindow)
+        void fullscreenWindow.setFullscreen(false).catch(() => {});
+      if (appRoot) {
+        appRoot.inert = appWasInert;
+        if (appAriaHidden === null) appRoot.removeAttribute("aria-hidden");
+        else appRoot.setAttribute("aria-hidden", appAriaHidden);
+      }
+      presentationReturnFocusRef.current?.focus();
+    };
+  }, [applyNavigationAction, presenting]);
+
   function selectNextMatch(reverse = false) {
     if (!matchingSlides.length) return;
     const current = matchingSlides.indexOf(selected);
@@ -1238,22 +1430,23 @@ export function SlidesPreview({
       aria-label="Presentation viewer. Use arrow keys to change slides."
       onKeyDown={(event) => {
         if (["INPUT", "SELECT", "TEXTAREA", "BUTTON"].includes((event.target as HTMLElement).tagName)) return;
-        if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
-          event.preventDefault();
-          selectRelative(-1);
-        } else if (event.key === "ArrowRight" || event.key === "ArrowDown") {
-          event.preventDefault();
-          selectRelative(1);
-        } else if (event.key === "Home") {
-          event.preventDefault();
-          setSelected(0);
-        } else if (event.key === "End") {
-          event.preventDefault();
-          setSelected(slides.length - 1);
-        }
+        const action = googleSlidesNavigationAction(event.key);
+        if (!action || action === "exit") return;
+        event.preventDefault();
+        applyNavigationAction(action);
       }}
     >
       <div className="google-viewer-toolbar">
+        <button
+          className={`preview-browser-action${railOpen ? " active" : ""}`}
+          type="button"
+          title={railOpen ? "Hide slide thumbnails" : "Show slide thumbnails"}
+          aria-label={railOpen ? "Hide slide thumbnails" : "Show slide thumbnails"}
+          aria-pressed={railOpen}
+          onClick={() => setRailOpen((value) => !value)}
+        >
+          <Sidebar size={13} />
+        </button>
         <button className="preview-browser-action" type="button" aria-label="Previous slide" disabled={selected === 0} onClick={() => selectRelative(-1)}>
           <ArrowLeft size={13} />
         </button>
@@ -1292,7 +1485,7 @@ export function SlidesPreview({
             aria-pressed={editorOpen}
             onClick={() => setEditorOpen((value) => !value)}
           >
-            Edit text
+            Edit slide text
           </button>
         ) : null}
         {slides.some((item) => item.notesObjectId || item.notes?.trim()) ? (
@@ -1305,18 +1498,31 @@ export function SlidesPreview({
             {slideAutosave.status === "saving" ? "Saving..." : "Saved"}
           </small>
         ) : null}
-        <button className={`google-viewer-text-button${fit ? " active" : ""}`} type="button" aria-pressed={fit} onClick={() => setFit((value) => !value)}>
-          Fit
+        <button
+          className="google-viewer-present-button"
+          type="button"
+          aria-haspopup="dialog"
+          onClick={(event) => {
+            presentationReturnFocusRef.current = event.currentTarget;
+            setPresenting(true);
+          }}
+        >
+          Present
         </button>
         <label className="google-viewer-zoom">
           <span>Zoom</span>
-          <select aria-label="Slide zoom" value={zoom} disabled={fit} onChange={(event) => setZoom(Number(event.target.value))}>
+          <select
+            aria-label="Slide zoom"
+            value={zoom}
+            onChange={(event) => setZoom(event.target.value === "fit" ? "fit" : Number(event.target.value))}
+          >
+            <option value="fit">Fit</option>
             {[75, 100, 125, 150, 200].map((value) => <option value={value} key={value}>{value}%</option>)}
           </select>
         </label>
       </div>
-      <div className="google-slides-preview">
-      <div className="google-slide-rail">
+      <div className={`google-slides-preview${railOpen ? "" : " rail-collapsed"}`}>
+      {railOpen ? <nav className="google-slide-rail" aria-label="Slides">
         {slides.map((item, index) => (
           <button
             className={`${index === selected ? "active" : ""}${matchingSlides.includes(index) ? " match" : ""}`.trim()}
@@ -1335,22 +1541,21 @@ export function SlidesPreview({
             <small>{item.text.trim().split("\n")[0]?.slice(0, 64) || "Untitled slide"}</small>
           </button>
         ))}
-      </div>
+      </nav> : null}
       <div className="google-slide-stage">
         <div
-          className={`google-slide-canvas${fit ? " fit" : ""}`}
+          className="google-slide-canvas"
           style={{
             aspectRatio: pageAspectRatio,
-            width: fit ? undefined : `${zoom}%`,
+            width: zoom === "fit" ? undefined : `${zoom}%`,
           }}
         >
-          {thumbnail ? <img src={thumbnail} alt={`Slide ${selected + 1}`} /> : (
-            <div className="google-slide-fallback">
-              {!thumbnailError ? <span className="spinner" aria-hidden="true" /> : null}
-              <strong>Slide {selected + 1}</strong>
-              <p>{slide?.text || "No text on this slide."}</p>
-            </div>
-          )}
+          <GoogleSlideVisual
+            source={thumbnail}
+            error={thumbnailError}
+            slideNumber={selected + 1}
+            text={slide?.text}
+          />
           {editorOpen ? shapeFields.map((field) => (
             field.x != null && field.y != null && field.width != null && field.height != null ? (
               <textarea
@@ -1396,6 +1601,83 @@ export function SlidesPreview({
         {slideAutosave.error ? <p className="sheet-hint error" role="alert">{slideAutosave.error}</p> : null}
       </div>
       </div>
+      {presenting && typeof document !== "undefined" ? createPortal(
+        <div
+          className="google-slides-presentation"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Presenting slide ${selected + 1} of ${slides.length}`}
+          tabIndex={-1}
+          ref={presentationRef}
+        >
+          <button
+            className="google-slides-presentation-exit"
+            type="button"
+            onClick={() => setPresenting(false)}
+          >
+            Exit <kbd>Esc</kbd>
+          </button>
+          <div className="google-slides-presentation-stage">
+            <div
+              className="google-slides-presentation-frame"
+              style={{
+                "--slide-aspect": pageAspectRatio,
+                aspectRatio: pageAspectRatio,
+              } as CSSProperties}
+            >
+              <GoogleSlideVisual
+                source={thumbnail}
+                error={thumbnailError}
+                slideNumber={selected + 1}
+                text={slide?.text}
+              />
+            </div>
+          </div>
+          <div className="google-slides-presentation-controls">
+            <button type="button" disabled={selected === 0} onClick={() => selectRelative(-1)}>
+              <ArrowLeft size={16} aria-hidden="true" /> Previous
+            </button>
+            <output aria-label={`Slide ${selected + 1} of ${slides.length}`} aria-live="polite">
+              {selected + 1} / {slides.length}
+            </output>
+            <button type="button" disabled={selected === slides.length - 1} onClick={() => selectRelative(1)}>
+              Next <ArrowRight size={16} aria-hidden="true" />
+            </button>
+          </div>
+        </div>,
+        document.body,
+      ) : null}
+    </div>
+  );
+}
+
+type GoogleSlidesNavigationAction = "previous" | "next" | "first" | "last" | "exit";
+
+export function googleSlidesNavigationAction(key: string): GoogleSlidesNavigationAction | null {
+  if (key === "ArrowLeft" || key === "ArrowUp" || key === "PageUp") return "previous";
+  if (key === "ArrowRight" || key === "ArrowDown" || key === "PageDown" || key === " " || key === "Spacebar") return "next";
+  if (key === "Home") return "first";
+  if (key === "End") return "last";
+  if (key === "Escape") return "exit";
+  return null;
+}
+
+function GoogleSlideVisual({
+  source,
+  error,
+  slideNumber,
+  text,
+}: {
+  source: string | null;
+  error: string | null;
+  slideNumber: number;
+  text?: string | null;
+}) {
+  return source ? <img src={source} alt={`Slide ${slideNumber}`} /> : (
+    <div className="google-slide-fallback">
+      {!error ? <span className="spinner" aria-hidden="true" /> : null}
+      <strong>Slide {slideNumber}</strong>
+      <p>{text || "No text on this slide."}</p>
     </div>
   );
 }
@@ -1732,6 +2014,17 @@ function googleFileKindLabel(file: GoogleFileSummary): string {
     case "application/vnd.google-apps.folder": return "Google Drive folder";
     default: return file.mime_type;
   }
+}
+
+export function googleFileKindDetail(file: GoogleFileSummary): string {
+  const label = googleFileKindLabel(file);
+  return file.mime_type === "application/vnd.google-apps.document" && file.capabilities.can_edit
+    ? `${label} · Double-click text to edit`
+    : label;
+}
+
+export function googleDocFitScale(width: number, paddingLeft: number, paddingRight: number): number {
+  return Math.max(0.1, (width - paddingLeft - paddingRight) / 816);
 }
 
 function columnLabel(index: number): string {

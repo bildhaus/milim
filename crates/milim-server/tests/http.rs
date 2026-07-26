@@ -6900,6 +6900,20 @@ async fn skills_create_list_get() {
         .unwrap();
     assert_eq!(selected["skills"].as_array().unwrap().len(), 1);
 
+    let selected_outside_allowlist: Value = client
+        .post(format!("{base}/skills/select"))
+        .json(&json!({"query":"git version control", "limit": 3, "ids": ["other"]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(selected_outside_allowlist["skills"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
     let updated: Value = client
         .put(format!("{base}/skills/{id}"))
         .json(&json!({

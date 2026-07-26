@@ -48,6 +48,10 @@ pub(crate) struct ClaudeRunRequest {
     pub plan_mode: bool,
     #[serde(default)]
     pub allow_session_recovery: bool,
+    #[serde(default)]
+    pub milim_context: Option<crate::routes::AccountRuntimeMilimContext>,
+    #[serde(skip)]
+    pub milim_mcp: Option<crate::routes::AccountRuntimeToolEndpoint>,
     #[serde(skip)]
     pub approval_run_id: Option<String>,
     #[serde(skip)]
@@ -246,27 +250,41 @@ struct ClaudeApprovalConfig {
 
 impl ClaudeApprovalConfig {
     fn materialize(req: &ClaudeRunRequest) -> Result<Option<Self>> {
-        if !req.interactive_tool_approval
-            || account_runtime_policy(req.tool_approval_policy.as_deref()) != "review"
-        {
+        let needs_approval = req.interactive_tool_approval
+            && account_runtime_policy(req.tool_approval_policy.as_deref()) == "review";
+        if !needs_approval && req.milim_mcp.is_none() {
             return Ok(None);
         }
-        let url = req.approval_mcp_url.as_deref().ok_or_else(|| {
-            Error::InvalidRequest(
-                "Claude Review mode requires Milim's interactive approval endpoint".to_string(),
-            )
-        })?;
         let path = std::env::temp_dir().join(format!(
             "milim-claude-approval-{}.json",
             uuid::Uuid::new_v4()
         ));
-        let mut server = json!({ "type": "http", "url": url });
-        if let Some(authorization) = clean_optional(req.approval_mcp_authorization.as_deref()) {
-            server["headers"] = json!({ "Authorization": authorization });
+        let mut servers = serde_json::Map::new();
+        if let Some(endpoint) = &req.milim_mcp {
+            servers.insert(
+                "milim".into(),
+                json!({
+                    "type": "http",
+                    "url": endpoint.url,
+                    "headers": { "Authorization": endpoint.authorization }
+                }),
+            );
+        }
+        if needs_approval {
+            let url = req.approval_mcp_url.as_deref().ok_or_else(|| {
+                Error::InvalidRequest(
+                    "Claude Review mode requires Milim's interactive approval endpoint".to_string(),
+                )
+            })?;
+            let mut server = json!({ "type": "http", "url": url });
+            if let Some(authorization) = clean_optional(req.approval_mcp_authorization.as_deref()) {
+                server["headers"] = json!({ "Authorization": authorization });
+            }
+            servers.insert("milim_approval".into(), server);
         }
         std::fs::write(
             &path,
-            serde_json::to_vec(&json!({ "mcpServers": { "milim_approval": server } }))?,
+            serde_json::to_vec(&json!({ "mcpServers": servers }))?,
         )
         .map_err(|error| {
             Error::Other(format!(
@@ -1045,9 +1063,16 @@ fn claude_run_args(req: &ClaudeRunRequest) -> Vec<String> {
         args.extend([
             "--mcp-config".to_string(),
             path.to_string_lossy().into_owned(),
-            "--permission-prompt-tool".to_string(),
-            "mcp__milim_approval__request_tool_approval".to_string(),
         ]);
+        if req.milim_mcp.is_some() {
+            args.extend(["--allowedTools".to_string(), "mcp__milim__*".to_string()]);
+        }
+        if req.approval_mcp_url.is_some() {
+            args.extend([
+                "--permission-prompt-tool".to_string(),
+                "mcp__milim_approval__request_tool_approval".to_string(),
+            ]);
+        }
     }
     for denied in claude_denied_tools(req) {
         args.extend(["--disallowedTools".to_string(), denied.to_string()]);
@@ -1458,6 +1483,8 @@ mod tests {
             interactive_tool_approval: false,
             plan_mode: false,
             allow_session_recovery: false,
+            milim_context: None,
+            milim_mcp: None,
             approval_run_id: None,
             approval_mcp_url: None,
             approval_mcp_authorization: None,
@@ -1485,6 +1512,8 @@ mod tests {
             interactive_tool_approval: false,
             plan_mode: false,
             allow_session_recovery: false,
+            milim_context: None,
+            milim_mcp: None,
             approval_run_id: None,
             approval_mcp_url: None,
             approval_mcp_authorization: None,
@@ -1514,6 +1543,8 @@ mod tests {
             interactive_tool_approval: false,
             plan_mode: false,
             allow_session_recovery: false,
+            milim_context: None,
+            milim_mcp: None,
             approval_run_id: None,
             approval_mcp_url: None,
             approval_mcp_authorization: None,
@@ -1555,6 +1586,8 @@ mod tests {
             interactive_tool_approval: false,
             plan_mode: false,
             allow_session_recovery: false,
+            milim_context: None,
+            milim_mcp: None,
             approval_run_id: None,
             approval_mcp_url: None,
             approval_mcp_authorization: None,
