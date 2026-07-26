@@ -2062,8 +2062,11 @@ export function googleSlidesNavigationAction(key: string): GoogleSlidesNavigatio
 }
 
 export function googleSlideTextFormat(field: GoogleSlideEditableField, index: number): GoogleTextFormat {
-  const runAt = (runs: GoogleSlideEditableField["styleRuns"]) =>
-    runs?.find((run) => run.start <= index && index < run.end) ?? runs?.[runs.length - 1];
+  const runAt = (runs: GoogleSlideEditableField["styleRuns"]) => {
+    const last = runs?.[runs.length - 1];
+    return runs?.find((run) => run.start <= index && index < run.end)
+      ?? (last && index >= last.end ? last : runs?.[0]);
+  };
   const textStyle = runAt(field.styleRuns)?.style ?? {};
   const paragraphStyle = runAt(field.paragraphRuns)?.style ?? {};
   return {
