@@ -12,6 +12,8 @@ import typescript from "highlight.js/lib/languages/typescript";
 import xml from "highlight.js/lib/languages/xml";
 import yaml from "highlight.js/lib/languages/yaml";
 import ReactMarkdown from "react-markdown";
+import rehypeRaw from "rehype-raw";
+import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import { openExternalUrl, type ChatArtifact } from "../api";
 import { extractArtifactsFromContent, isPreviewableArtifact } from "../lib/artifacts";
@@ -24,6 +26,7 @@ type MarkdownProps = {
   previewArtifacts?: ChatArtifact[];
   onOpenPreview?: (artifact: ChatArtifact) => void;
   highlight?: boolean;
+  allowHtml?: boolean;
   previewArtifactsStreaming?: boolean;
   collapseArtifacts?: boolean;
 };
@@ -129,6 +132,12 @@ function selectedHighlightPlugin() {
 }
 
 const highlightRehypePlugins = [selectedHighlightPlugin as MarkdownRehypePlugin] satisfies MarkdownRehypePlugins;
+const safeHtmlRehypePlugins = [rehypeRaw, rehypeSanitize] satisfies MarkdownRehypePlugins;
+const safeHtmlHighlightRehypePlugins = [
+  rehypeRaw,
+  rehypeSanitize,
+  selectedHighlightPlugin as MarkdownRehypePlugin,
+] satisfies MarkdownRehypePlugins;
 
 export function parseMarkdownIntoBlocks(content: string): string[] {
   const lines = content.match(/[^\n]*(?:\n|$)/g)?.filter(Boolean) ?? [];
@@ -166,6 +175,7 @@ function MarkdownBody({
   previewArtifacts,
   onOpenPreview,
   highlight = true,
+  allowHtml = false,
   previewArtifactsStreaming = false,
   collapseArtifacts = true,
 }: MarkdownProps) {
@@ -182,7 +192,15 @@ function MarkdownBody({
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
-      rehypePlugins={highlight ? highlightRehypePlugins : undefined}
+      rehypePlugins={
+        allowHtml
+          ? highlight
+            ? safeHtmlHighlightRehypePlugins
+            : safeHtmlRehypePlugins
+          : highlight
+            ? highlightRehypePlugins
+            : undefined
+      }
       components={{
         pre: ({ children }) => {
           const text = normalizedCodeText(codeBlockText(children));

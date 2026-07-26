@@ -1,4 +1,4 @@
-import type { PullRequestDetails } from "../api";
+import type { PullRequestActor, PullRequestDetails } from "../api";
 
 export type PullRequestTone =
   | "draft"
@@ -21,6 +21,21 @@ export interface PullRequestSnapshot {
   checkedAt: number;
   stale: boolean;
   error?: string;
+}
+
+export function pullRequestActorAvatarUrls(actor?: PullRequestActor): string[] {
+  const login = actor?.login.trim();
+  return Array.from(
+    new Set(
+      [
+        actor?.avatarUrl?.trim(),
+        login ? `https://github.com/${encodeURIComponent(login)}.png?size=40` : "",
+        login
+          ? `https://avatars.githubusercontent.com/${encodeURIComponent(`${login}[bot]`)}?size=40`
+          : "",
+      ].filter((url): url is string => Boolean(url)),
+    ),
+  );
 }
 
 export function pullRequestReadiness(

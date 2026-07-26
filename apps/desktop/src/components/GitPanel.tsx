@@ -92,7 +92,7 @@ const PullRequestMarkdown = lazy(() =>
 function PullRequestMarkdownContent({ content }: { content: string }) {
   return (
     <Suspense fallback={<p>Loading...</p>}>
-      <PullRequestMarkdown content={content} collapseArtifacts={false} />
+      <PullRequestMarkdown content={content} collapseArtifacts={false} allowHtml />
     </Suspense>
   );
 }

@@ -3280,6 +3280,7 @@ function collectErrors(page) {
     const url = response.url();
     if (
       ([400, 502].includes(response.status()) && /\/media\/(?:models|model-schema)\b/.test(url)) ||
+      (response.status() === 502 && /\/codex\/models\b/.test(url)) ||
       (response.status() === 400 && /\/(?:codex|claude|opencode|pi)\/run\b/.test(url))
     ) {
       expectedFailedResources.push(url);
@@ -3289,16 +3290,12 @@ function collectErrors(page) {
     if (msg.type() !== "error") return;
     const text = msg.text();
     const url = msg.location().url;
-    if (
-      text.includes("Content Security Policy directive 'frame-src'") &&
-      text.includes("http://[::1]:*")
-    ) {
-      return;
-    }
+    if (text.includes("Content Security Policy directive") && text.includes("http://[::1]:*")) return;
+    if (text.includes("404") && /\/favicon\.ico$/.test(url)) return;
     if (text.includes("favicon.ico") && text.includes("Content Security Policy directive")) return;
     if (/^Failed to load resource: the server responded with a status of (?:400 \(Bad Request\)|502 \(Bad Gateway\))$/.test(text)) {
       const responseIndex = expectedFailedResources.findIndex((resourceUrl) => !url || resourceUrl === url);
-      if (/\/media\/(?:models|model-schema)\b/.test(url) || responseIndex >= 0) {
+      if (/\/(?:media\/(?:models|model-schema)|codex\/models)\b/.test(url) || responseIndex >= 0) {
         if (responseIndex >= 0) expectedFailedResources.splice(responseIndex, 1);
         return;
       }

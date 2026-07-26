@@ -8554,6 +8554,7 @@ html[data-dark="true"] .preview-control-cursor {
 .md li { margin: 3px 0; }
 .md a { color: var(--accent-light); text-decoration: none; }
 .md a:hover { text-decoration: underline; }
+.md img { max-width: 100%; height: auto; }
 .md blockquote { margin: 0 0 10px; padding: 2px 12px; border-left: 3px solid var(--border-secondary); color: var(--secondary-text); }
 .md hr { border: none; border-top: 1px solid var(--border-primary); margin: 14px 0; }
 .md table { border-collapse: collapse; margin: 0 0 10px; font-size: 13px; display: block; overflow-x: auto; }
