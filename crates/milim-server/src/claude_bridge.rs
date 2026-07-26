@@ -564,7 +564,6 @@ fn handle_line(
                 match delta.get("type").and_then(Value::as_str) {
                     Some("text_delta") => {
                         if let Some(text) = delta.get("text").and_then(Value::as_str) {
-                            out.extend(close_claude_tools(tools, false));
                             let text = content.push(text);
                             if !text.is_empty() {
                                 out.push(ClaudeStreamEvent::Token { text });
@@ -573,7 +572,6 @@ fn handle_line(
                     }
                     Some("thinking_delta") => {
                         if let Some(text) = delta.get("thinking").and_then(Value::as_str) {
-                            out.extend(close_claude_tools(tools, false));
                             let text = reasoning.push(text);
                             if !text.is_empty() {
                                 out.push(ClaudeStreamEvent::Reasoning { text });
@@ -584,6 +582,32 @@ fn handle_line(
                 }
             }
             _ => {}
+        }
+    } else if value.get("type").and_then(Value::as_str) == Some("user") {
+        if let Some(blocks) = value
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array)
+        {
+            for block in blocks {
+                if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                    continue;
+                }
+                let Some(id) = string_field(block, "tool_use_id") else {
+                    continue;
+                };
+                let Some(tool) = tools.remove(&id) else {
+                    continue;
+                };
+                out.push(claude_tool_end_event(
+                    id,
+                    tool,
+                    block
+                        .get("is_error")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                ));
+            }
         }
     } else if value.get("type").and_then(Value::as_str) == Some("result") {
         *saw_terminal_event = true;
@@ -696,19 +720,23 @@ fn close_claude_tools(
 ) -> Vec<ClaudeStreamEvent> {
     std::mem::take(tools)
         .into_iter()
-        .map(|(id, tool)| ClaudeStreamEvent::Tool {
-            id,
-            name: tool.name.clone(),
-            status: if is_error { "error" } else { "done" }.to_string(),
-            label: Some(if is_error {
-                format!("{} failed", tool.name)
-            } else {
-                format!("Used {}", tool.name)
-            }),
-            detail: tool.detail,
-            icon: Some(claude_tool_icon(&tool.name).to_string()),
-        })
+        .map(|(id, tool)| claude_tool_end_event(id, tool, is_error))
         .collect()
+}
+
+fn claude_tool_end_event(id: String, tool: ClaudeToolState, is_error: bool) -> ClaudeStreamEvent {
+    ClaudeStreamEvent::Tool {
+        id,
+        name: tool.name.clone(),
+        status: if is_error { "error" } else { "done" }.to_string(),
+        label: Some(if is_error {
+            format!("{} failed", tool.name)
+        } else {
+            format!("Used {}", tool.name)
+        }),
+        detail: tool.detail,
+        icon: Some(claude_tool_icon(&tool.name).to_string()),
+    }
 }
 
 fn claude_tool_icon(name: &str) -> &'static str {
@@ -1361,7 +1389,7 @@ mod tests {
     }
 
     #[test]
-    fn closes_open_tool_before_text_delta() {
+    fn text_delta_does_not_close_open_tool() {
         let mut content = Unredactor::new(BTreeMap::new());
         let mut reasoning = Unredactor::new(BTreeMap::new());
         let mut tools = BTreeMap::new();
@@ -1385,11 +1413,98 @@ mod tests {
             &mut done,
         );
         assert!(
-            matches!(events.first(), Some(ClaudeStreamEvent::Tool { status, label: Some(label), .. }) if status == "done" && label == "Used Read")
+            matches!(events.first(), Some(ClaudeStreamEvent::Token { text }) if text == "I'll continue")
         );
+        assert!(tools.contains_key("toolu_1"));
+
+        let events = handle_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"still working"}}}"#,
+            &mut content,
+            &mut reasoning,
+            &mut tools,
+            &mut done,
+        );
+        assert!(matches!(
+            events.first(),
+            Some(ClaudeStreamEvent::Reasoning { text }) if text == "still working"
+        ));
+        assert!(tools.contains_key("toolu_1"));
+    }
+
+    #[test]
+    fn tool_results_close_only_the_matching_call() {
+        let mut content = Unredactor::new(BTreeMap::new());
+        let mut reasoning = Unredactor::new(BTreeMap::new());
+        let mut tools = BTreeMap::from([
+            (
+                "toolu_1".to_string(),
+                ClaudeToolState {
+                    name: "Read".to_string(),
+                    detail: None,
+                },
+            ),
+            (
+                "toolu_2".to_string(),
+                ClaudeToolState {
+                    name: "Edit".to_string(),
+                    detail: None,
+                },
+            ),
+        ]);
+        let mut done = false;
+        let success = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}}"#;
+        let failure = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_2","content":"failed","is_error":true}]}}"#;
+
+        let events = handle_line(success, &mut content, &mut reasoning, &mut tools, &mut done);
+        assert!(matches!(
+            events.first(),
+            Some(ClaudeStreamEvent::Tool { id, status, .. })
+                if id == "toolu_1" && status == "done"
+        ));
+        assert_eq!(events.len(), 1);
+        assert!(tools.contains_key("toolu_2"));
+
+        let events = handle_line(failure, &mut content, &mut reasoning, &mut tools, &mut done);
+        assert!(matches!(
+            events.first(),
+            Some(ClaudeStreamEvent::Tool { id, status, .. })
+                if id == "toolu_2" && status == "error"
+        ));
+        assert!(tools.is_empty());
         assert!(
-            matches!(events.get(1), Some(ClaudeStreamEvent::Token { text }) if text == "I'll continue")
+            handle_line(failure, &mut content, &mut reasoning, &mut tools, &mut done,).is_empty()
         );
+    }
+
+    #[test]
+    fn final_result_closes_tools_without_structured_results() {
+        let mut content = Unredactor::new(BTreeMap::new());
+        let mut reasoning = Unredactor::new(BTreeMap::new());
+        let mut tools = BTreeMap::from([(
+            "toolu_1".to_string(),
+            ClaudeToolState {
+                name: "Read".to_string(),
+                detail: None,
+            },
+        )]);
+        let mut done = false;
+        let events = handle_line(
+            r#"{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn"}"#,
+            &mut content,
+            &mut reasoning,
+            &mut tools,
+            &mut done,
+        );
+
+        assert!(matches!(
+            events.first(),
+            Some(ClaudeStreamEvent::Tool { id, status, .. })
+                if id == "toolu_1" && status == "done"
+        ));
+        assert!(matches!(
+            events.last(),
+            Some(ClaudeStreamEvent::Done { .. })
+        ));
         assert!(tools.is_empty());
     }
 

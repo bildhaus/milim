@@ -72,10 +72,12 @@ Milim does not include Claude Code, does not provide Anthropic credentials, and 
 Claude CLI integration boundaries:
 
 - Milim invokes the local `claude` executable.
+- Milim uses Claude's documented `claude -p` stream-JSON interface and matches structured tool results to their originating calls.
 - Milim does not bundle Claude Code, proxy Claude access, or sell Claude access.
-- Authentication is handled by the official Claude CLI.
+- Authentication and direct Anthropic communication are handled by the official Claude CLI; Milim does not offer Claude.ai login.
 - Milim does not read Claude credentials.
 - Claude CLI usage remains subject to Anthropic's terms.
+- Anthropic documents API-key or supported cloud-provider authentication as the unambiguous path for third-party and commercial integrations; Milim does not represent subscription compatibility as an Anthropic partnership or entitlement.
 - Open mode for Claude CLI maps to Claude's `bypassPermissions` mode, which may run tools and commands without additional Claude prompts; use it only in trusted workspaces.
 - Stale-session recovery asks before stopping a matching local Claude CLI process and does not delete Claude session registry files by default.
 
