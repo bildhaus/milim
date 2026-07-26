@@ -31,6 +31,7 @@ import { Logo } from "./components/Logo";
 import { ResizeHandles } from "./components/ResizeHandles";
 import { Sidebar } from "./components/Sidebar";
 import { TopBar } from "./components/TopBar";
+import { UpdateCards } from "./components/UpdateCards";
 import {
   shouldCheckOnboardingModels,
   shouldShowOnboarding,
@@ -92,12 +93,6 @@ const OnboardingFlow = lazy(() =>
     default: mod.OnboardingFlow,
   })),
 );
-const UpdateCards = lazy(() =>
-  import("./components/UpdateCards").then((mod) => ({
-    default: mod.UpdateCards,
-  })),
-);
-
 const inTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const DOCS_URL = "https://docs.milim.ai/";
@@ -437,6 +432,7 @@ function AppContent() {
   const interfaceSounds = useUiPreferences((s) => s.interfaceSounds);
   const soundOnInteractions = useUiPreferences((s) => s.soundOnInteractions);
   const chatLayoutStyle = useUiPreferences((s) => s.chatLayoutStyle);
+  const sidebarRailStyle = useUiPreferences((s) => s.sidebarRailStyle);
   const messageWidth = useUiPreferences((s) => s.messageWidth);
   const avatarStyle = useUiPreferences((s) => s.avatarStyle);
   const codeBlockTheme = useUiPreferences((s) => s.codeBlockTheme);
@@ -445,6 +441,7 @@ function AppContent() {
   const appClassName = [
     "app",
     `chat-layout-${chatLayoutStyle}`,
+    `sidebar-rail-${sidebarRailStyle}`,
     `message-width-${messageWidth}`,
     `avatar-style-${avatarStyle}`,
     `code-theme-${codeBlockTheme}`,

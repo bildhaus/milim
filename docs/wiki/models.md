@@ -35,7 +35,7 @@ Hot Swap assesses the selected target before committing the change. Full-parity 
 | Replicate | Remote image/video/music provider | Media model catalog, schemas, generation status polling, and normalized URL-returning music results. |
 | fal | Remote image/video/music provider | Queued generation, status polling, and normalized media results. |
 | Local API runtimes | Ollama and LM Studio on this machine | Chat, prompt generation, Ollama `keep_alive` lifecycle calls, Responses or completions where the runtime exposes them, model list, embeddings, structured output, native vision/tool-use labels where available, and reasoning effort for supported local reasoning models. |
-| Account runtimes | Installed Codex, Claude, OpenCode, and Pi CLIs, not saved provider API keys | Resumable agent-style turns with real image input, visible tool events, and Milim approval modes. |
+| Account runtimes | Installed Codex, Claude, OpenCode, and Pi CLIs, not saved provider API keys | Resumable agent-style turns with real image input, visible tool events, active Milim browser context, Milim-owned tools, and Milim approval modes. |
 
 Requests to OpenRouter include its app-attribution headers with `https://milim.ai/` as the identifier and `milim` as the display title.
 
@@ -63,17 +63,19 @@ Requests to OpenRouter include its app-attribution headers with `https://milim.a
 OpenRouter video uses its asynchronous `/videos` submission and polling workflow; completed bytes are fetched through Milim's authenticated content proxy so provider credentials never enter the webview. OpenRouter music buffers streamed audio chunks into a completed MP3 result. fal and Replicate keep their provider job URLs and polling behavior. Discovery includes text-to-music generators only, excluding TTS, transcription, generic voice, and conversational audio models.
 
 Verification is recorded per provider and modality. OpenRouter image is live-verified. OpenRouter video/music and fal/Replicate music are covered by mocked adapter tests but are not described as live-verified until separate credentialed, potentially billable smoke tests pass.
-| Development coding loop | Any capable provider model or account runtime | Use provider models for Milim's tool loop, or account runtimes when you want their native resumable agent bridge. |
+| Development coding loop | Any capable provider model or account runtime | Every lane receives the visible Milim browser URL/title and Milim-owned tools; account runtimes additionally keep their native resumable bridge, filesystem, and shell. |
 
 ## Account runtimes
 
 Codex, the installed Claude CLI, OpenCode, and Pi are separate from saved provider records. They are backed by user-installed CLIs, appear in the model picker after authentication/configuration, and reuse the active Milim chat session when the runtime exposes a native session id. Milim does not read or store their credentials.
 
+Each account runtime keeps its native skill catalog. Milim does not copy all enabled skill bodies into every turn: it supplies compact ranked candidates and read-only lazy search/read tools through the authenticated per-turn gateway. Explicitly tagged Milim skills are resolved immediately, while a saved Agent's Custom skill selection acts as an allowlist.
+
 | Runtime | Setup | Session behavior |
 |---|---|---|
 | Codex | Use `/codex/login/device`, `/codex/login/chatgpt-device`, or `/codex/login/api-key`. | Milim stores the returned Codex thread id on the Milim chat when persistence is enabled. |
 | Installed Claude CLI | Install Anthropic's official `claude` CLI separately and run `claude auth login` outside Milim. | Milim stores one Claude session id per Milim chat, uses `--session-id` for new native sessions and `--resume` for existing project transcripts, and asks before stopping a matching local Claude CLI process if Claude reports the session is already in use. |
-| OpenCode | Install and configure OpenCode separately. | Milim stores the native ACP session id and applies its approval overlay. |
+| OpenCode | Install and configure OpenCode separately. | Milim stores the native ACP session id and applies its approval overlay; no-folder chats use a private managed ACP directory without native filesystem tools. |
 | Pi | Install Pi separately and authenticate with Pi's `/login`. | Milim stores one Pi session id and sync cursor per chat; side calls use `--no-session`. Embedded runs disable discovered extensions, while normal Pi context, prompt, and skill discovery remains active. |
 
 Codex model metadata is authoritative when `inputModalities` is present. Claude aliases advertise image input. For OpenAI, Anthropic, Gemini, and Groq families without explicit metadata, the picker uses conservative current-family Vision labels; custom compatible servers with unknown metadata are allowed to attempt standard `image_url` parts but cannot be guaranteed.

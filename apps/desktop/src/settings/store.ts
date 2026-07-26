@@ -51,7 +51,7 @@ export const DEFAULT_CONFIGURED_THREAD_DEFAULTS: ConfiguredThreadDefaults = {
   memory: true,
   privacy: "off",
   sandbox: false,
-  toolApproval: "guarded",
+  toolApproval: "review",
   workerModel: "",
   delegationPolicy: "ask",
 };
@@ -184,7 +184,7 @@ function normalizeConfiguredThreadDefaults(value: unknown): ConfiguredThreadDefa
     memory: typeof settings.memory === "boolean" ? settings.memory : true,
     privacy: privacy === "redact" || privacy === "block" ? privacy : "off",
     sandbox: typeof settings.sandbox === "boolean" ? settings.sandbox : false,
-    toolApproval: settings.toolApproval === "review" ? "review" : "guarded",
+    toolApproval: settings.toolApproval === "guarded" ? "guarded" : "review",
     workerModel: typeof settings.workerModel === "string" && settings.workerModel.trim().toLowerCase() !== "mock-echo" ? settings.workerModel.trim() : "",
     delegationPolicy: delegationPolicy === "off" || delegationPolicy === "auto" ? delegationPolicy : "ask",
   };

@@ -1,4 +1,62 @@
 {
+  "0.2.2": {
+    "version": "0.2.2",
+    "summary": "Milim 0.2.2 keeps Google Workspace edits fluid, clarifies tool approvals, and adds more control over the desktop layout.",
+    "items": [
+      {
+        "id": "google-workspace-editing",
+        "eyebrow": "Google Workspace",
+        "title": "Keep editing while previews refresh",
+        "description": "Docs and Slides now preserve optimistic edits while saves, previews, and thumbnails reconcile in the background.",
+        "details": [
+          "Edit contiguous Docs paragraphs in one native surface",
+          "Preserve mixed formatting while editing Slides text",
+          "Keep transformed elements visible across slide navigation"
+        ],
+        "accent": "var(--accent)",
+        "icon": "google"
+      },
+      {
+        "id": "tool-approvals",
+        "eyebrow": "Agent runtimes",
+        "title": "Review tool approvals with clearer context",
+        "description": "Structured approval cards make runtime requests easier to inspect and act on.",
+        "details": [
+          "Match Claude structured tool results reliably",
+          "Show approval details in a dedicated desktop prompt",
+          "Keep runtime behavior consistent across supported agents"
+        ],
+        "accent": "var(--accent)",
+        "icon": "plug"
+      },
+      {
+        "id": "desktop-layout",
+        "eyebrow": "Desktop layout",
+        "title": "Choose the collapsed sidebar rail",
+        "description": "Appearance settings now offer regular, split, and compact centered collapsed sidebar layouts.",
+        "details": [
+          "Keep the familiar full-height rail by default",
+          "Separate top and bottom actions into floating surfaces",
+          "Use the unified inspector shell across preview surfaces"
+        ],
+        "accent": "var(--accent)",
+        "icon": "file-text"
+      },
+      {
+        "id": "staged-updates",
+        "eyebrow": "Updates",
+        "title": "Stage app updates automatically",
+        "description": "Available desktop updates can prepare in the background so installation is ready when you are.",
+        "details": [
+          "Download update payloads without interrupting active work",
+          "Keep update progress visible in the desktop UI",
+          "Apply the staged update from the normal update flow"
+        ],
+        "accent": "var(--accent)",
+        "icon": "file-text"
+      }
+    ]
+  },
   "0.2.1": {
     "version": "0.2.1",
     "summary": "Milim 0.2.1 fixes GitHub pull request avatars and conversation rendering in packaged desktop builds.",

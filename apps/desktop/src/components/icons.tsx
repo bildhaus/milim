@@ -87,6 +87,27 @@ export const Sidebar = (p: P) => (
 export const ChevronDown = (p: P) => (
   <Svg {...p}><path d="m6 9 6 6 6-6" /></Svg>
 );
+export const AlignLeft = (p: P) => (
+  <Svg {...p}><path d="M4 6h16M4 10h11M4 14h16M4 18h9" /></Svg>
+);
+export const AlignCenter = (p: P) => (
+  <Svg {...p}><path d="M4 6h16M7 10h10M4 14h16M8 18h8" /></Svg>
+);
+export const AlignRight = (p: P) => (
+  <Svg {...p}><path d="M4 6h16M9 10h11M4 14h16M11 18h9" /></Svg>
+);
+export const AlignJustify = (p: P) => (
+  <Svg {...p}><path d="M4 6h16M4 10h16M4 14h16M4 18h16" /></Svg>
+);
+export const ListBullets = (p: P) => (
+  <Svg {...p}><path d="M9 6h11M9 12h11M9 18h11" /><circle cx="4" cy="6" r="1" fill="currentColor" stroke="none" /><circle cx="4" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="4" cy="18" r="1" fill="currentColor" stroke="none" /></Svg>
+);
+export const ListNumbers = (p: P) => (
+  <Svg {...p}><path d="M10 6h10M10 12h10M10 18h10M4 4v4M3 8h3M3 11.5c.3-.4.8-.7 1.4-.7.9 0 1.6.5 1.6 1.2 0 1.5-3 1.3-3 3h3M3 17h1.6c.8 0 1.4.4 1.4 1s-.6 1-1.4 1H3M5.5 19c.4.2.7.6.7 1 0 .7-.7 1.2-1.7 1.2-.6 0-1.2-.2-1.5-.6" /></Svg>
+);
+export const Eraser = (p: P) => (
+  <Svg {...p}><path d="m7 21-4-4L14 6a2.8 2.8 0 0 1 4 0l1 1a2.8 2.8 0 0 1 0 4L9 21Z" /><path d="m10 10 6 6M7 21h14" /></Svg>
+);
 export const Folder = (p: P) => (
   <Svg {...p}><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" /></Svg>
 );

@@ -10,6 +10,8 @@ After a Milim chat has a native Codex thread id, Claude session id, OpenCode ses
 
 Milim invokes the user-installed `opencode acp` process once per turn and speaks ACP v1 JSON-RPC over stdio. `GET /opencode/status` and `GET /opencode/models` discover configured models without refreshing OpenCode's network cache; `POST /opencode/run` creates or resumes the native session, applies the exact selected model, streams normalized events, and forwards permission requests to Milim's one-shot approval cards. Plan, Guarded, Review, and Open map to a Milim-owned permission overlay. Guarded and Review refuse to run when `opencode debug config` shows that higher-precedence configuration weakened the promised policy.
 
+OpenCode also supports chats without a workspace folder. Milim supplies a private managed ACP directory for protocol compatibility and disables OpenCode's native filesystem tools; Milim-owned tools remain available.
+
 OpenCode remains responsible for its providers, credentials, instructions, and plugins. Milim does not bundle the CLI or read its credentials. Images use the existing outbound privacy gate and require Privacy Off.
 
 ## Pi
@@ -72,10 +74,12 @@ Milim does not include Claude Code, does not provide Anthropic credentials, and 
 Claude CLI integration boundaries:
 
 - Milim invokes the local `claude` executable.
+- Milim uses Claude's documented `claude -p` stream-JSON interface and matches each structured `tool_result` to its `tool_use_id`.
 - Milim does not bundle Claude Code, proxy Claude access, or sell Claude access.
-- Authentication is handled by the official Claude CLI, for example with `claude auth login`.
+- Authentication and direct Anthropic communication are handled by the official Claude CLI; Milim does not offer Claude.ai login.
 - Milim does not manage, store, or receive Claude credentials.
 - Claude CLI usage remains subject to Anthropic's terms.
+- Anthropic documents API-key or supported cloud-provider authentication as the unambiguous path for third-party and commercial integrations; Milim does not represent subscription compatibility as an Anthropic partnership or entitlement.
 - Some permission modes may allow Claude to run local tools and commands.
 - Stale-session recovery asks before stopping a matching local Claude CLI process.
 

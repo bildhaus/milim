@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! `milim-server` — the axum HTTP server exposing the public API contract.
 //!
 //! Mirrors milim's OpenAI/Ollama-compatible surface so existing clients work
@@ -244,6 +246,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/internal/claude-approvals/{run_id}/mcp",
             post(routes::claude_approval_mcp),
+        )
+        .route(
+            "/internal/account-runtime-tools/{run_id}/mcp",
+            post(routes::account_runtime_tool_mcp),
         )
         // MCP tools (server bridge: exposes our tools to MCP clients)
         .route("/mcp/tools", get(routes::mcp_tools))
@@ -525,29 +531,42 @@ pub(crate) fn agent_skill_messages(
         .as_str()
     {
         "none" => Vec::new(),
-        "custom" => agent
-            .enabled_skills
-            .iter()
-            .filter_map(|id| store.get(id).ok().flatten())
-            .filter(|skill| skill.enabled)
-            .collect(),
+        "custom" => store
+            .select_filtered(query, 3, Some(&agent.enabled_skills))
+            .unwrap_or_default(),
         _ => store.select(query, 3).unwrap_or_default(),
     };
     skill_instruction_message(&skills).into_iter().collect()
 }
 
 fn skill_instruction_message(skills: &[milim_skills::SkillDef]) -> Option<ChatMessage> {
-    let body = skills
+    const MAX_SKILL_CHARS: usize = 12_000;
+    let enabled = skills
         .iter()
         .filter(|skill| skill.enabled)
-        .map(|skill| {
-            format!(
-                "## {}\nWhen to use: {}\nInstructions:\n{}",
-                skill.name, skill.description, skill.instructions
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n");
+        .collect::<Vec<_>>();
+    let mut blocks = Vec::new();
+    for skill in &enabled {
+        let block = format!(
+            "## {}\nWhen to use: {}\nInstructions:\n{}",
+            skill.name, skill.description, skill.instructions
+        );
+        if !blocks.is_empty()
+            && blocks.iter().map(String::len).sum::<usize>() + (blocks.len() * 2) + block.len()
+                > MAX_SKILL_CHARS
+        {
+            continue;
+        }
+        blocks.push(block);
+    }
+    let omitted = enabled.len().saturating_sub(blocks.len());
+    let mut body = blocks.join("\n\n");
+    if omitted > 0 {
+        body.push_str(&format!(
+            "\n\n[{omitted} additional skill{} omitted by the prompt budget]",
+            if omitted == 1 { "" } else { "s" }
+        ));
+    }
     if body.trim().is_empty() {
         return None;
     }

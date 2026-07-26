@@ -55,6 +55,15 @@ const server = await createServer({
 });
 
 try {
+  const { formatRunDuration } = (await server.ssrLoadModule(
+    "/src/components/RunTimeline.tsx",
+  )) as {
+    formatRunDuration: (ms: number) => string;
+  };
+  assert.equal(formatRunDuration(5_500), "5s");
+  assert.equal(formatRunDuration(65_500), "1m 5s");
+  assert.equal(formatRunDuration(3_665_500), "1h 1m 5s");
+
   const { AssistantMessage } = (await server.ssrLoadModule(
     "/src/components/AssistantMessage.tsx",
   )) as {

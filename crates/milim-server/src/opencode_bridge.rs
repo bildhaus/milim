@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
-#[cfg(windows)]
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
@@ -39,7 +38,8 @@ pub(crate) struct OpenCodeRunRequest {
     #[serde(default)]
     pub images: Vec<AccountImage>,
     pub model: String,
-    pub cwd: String,
+    #[serde(default)]
+    pub cwd: Option<String>,
     #[serde(default)]
     pub session_id: Option<String>,
     #[serde(default)]
@@ -50,6 +50,10 @@ pub(crate) struct OpenCodeRunRequest {
     pub interactive_tool_approval: bool,
     #[serde(default)]
     pub plan_mode: bool,
+    #[serde(default)]
+    pub milim_context: Option<crate::routes::AccountRuntimeMilimContext>,
+    #[serde(skip)]
+    pub milim_mcp: Option<crate::routes::AccountRuntimeToolEndpoint>,
 }
 
 pub(crate) async fn status() -> Result<Value> {
@@ -275,21 +279,26 @@ struct OpenCodeProcess {
     stdout: Lines<BufReader<ChildStdout>>,
     next_id: u64,
     active_session: Option<String>,
+    cwd: PathBuf,
     finished: bool,
 }
 
 impl OpenCodeProcess {
     async fn start(req: &OpenCodeRunRequest) -> Result<Self> {
+        let cwd = opencode_cwd(req)?;
         let overlay = merged_policy_overlay(req)?;
-        if req.tool_approval_policy.as_deref() != Some("open") || req.plan_mode {
-            preflight_policy(&req.cwd, &overlay).await?;
+        if req.tool_approval_policy.as_deref() != Some("open")
+            || req.plan_mode
+            || !has_workspace(req)
+        {
+            preflight_policy(&cwd, &overlay).await?;
         }
         let mut command = opencode_command();
         command
             .arg("acp")
             .arg("--cwd")
-            .arg(&req.cwd)
-            .current_dir(&req.cwd)
+            .arg(&cwd)
+            .current_dir(&cwd)
             .env("OPENCODE_CONFIG_CONTENT", serde_json::to_string(&overlay)?)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -314,6 +323,7 @@ impl OpenCodeProcess {
             stdout: BufReader::new(stdout).lines(),
             next_id: 1,
             active_session: None,
+            cwd,
             finished: false,
         };
         let initialized = process
@@ -345,15 +355,30 @@ impl OpenCodeProcess {
     }
 
     async fn open_session(&mut self, req: &OpenCodeRunRequest) -> Result<String> {
+        let mcp_servers = req
+            .milim_mcp
+            .as_ref()
+            .map(|endpoint| {
+                vec![json!({
+                    "type": "http",
+                    "name": "milim",
+                    "url": endpoint.url,
+                    "headers": [{ "name": "Authorization", "value": endpoint.authorization }]
+                })]
+            })
+            .unwrap_or_default();
         let (method, params) = if let Some(session_id) =
             req.session_id.as_deref().filter(|id| !id.trim().is_empty())
         {
             (
                 "session/resume",
-                json!({ "sessionId": session_id, "cwd": req.cwd, "mcpServers": [] }),
+                json!({ "sessionId": session_id, "cwd": self.cwd, "mcpServers": mcp_servers }),
             )
         } else {
-            ("session/new", json!({ "cwd": req.cwd, "mcpServers": [] }))
+            (
+                "session/new",
+                json!({ "cwd": self.cwd, "mcpServers": mcp_servers }),
+            )
         };
         let result = self.request(method, Some(params)).await?;
         let session_id = req
@@ -516,7 +541,7 @@ async fn command_output(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-async fn preflight_policy(cwd: &str, overlay: &Value) -> Result<()> {
+async fn preflight_policy(cwd: &std::path::Path, overlay: &Value) -> Result<()> {
     let expected = overlay.get("permission").cloned().unwrap_or(Value::Null);
     let mut command = opencode_command();
     command
@@ -554,19 +579,42 @@ async fn preflight_policy(cwd: &str, overlay: &Value) -> Result<()> {
 }
 
 fn policy_overlay(req: &OpenCodeRunRequest) -> Value {
-    let restrictive = req.plan_mode || req.tool_approval_policy.as_deref() == Some("guarded");
+    let has_workspace = has_workspace(req);
+    let restrictive =
+        !has_workspace || req.plan_mode || req.tool_approval_policy.as_deref() == Some("guarded");
     let mut permissions = serde_json::Map::new();
-    if req.tool_approval_policy.as_deref() == Some("open") && !req.plan_mode {
+    if req.tool_approval_policy.as_deref() == Some("open") && !req.plan_mode && has_workspace {
         return json!({ "permission": "allow", "default_agent": "build" });
     }
     permissions.insert("*".into(), json!(if restrictive { "deny" } else { "ask" }));
-    for name in SAFE_PERMISSIONS {
-        permissions.insert((*name).into(), json!("allow"));
+    if has_workspace {
+        for name in SAFE_PERMISSIONS {
+            permissions.insert((*name).into(), json!("allow"));
+        }
+    }
+    if req.milim_mcp.is_some() {
+        permissions.insert("milim_*".into(), json!("allow"));
     }
     json!({
         "permission": permissions,
         "default_agent": if req.plan_mode { "plan" } else { "build" },
     })
+}
+
+fn opencode_cwd(req: &OpenCodeRunRequest) -> Result<PathBuf> {
+    if let Some(cwd) = req.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()) {
+        return Ok(PathBuf::from(cwd));
+    }
+    let cwd = milim_core::paths::Paths::resolve()
+        .root()
+        .join("runtime")
+        .join("opencode");
+    std::fs::create_dir_all(&cwd)?;
+    Ok(cwd)
+}
+
+fn has_workspace(req: &OpenCodeRunRequest) -> bool {
+    req.cwd.as_deref().is_some_and(|cwd| !cwd.trim().is_empty())
 }
 
 fn merged_policy_overlay(req: &OpenCodeRunRequest) -> Result<Value> {
@@ -673,13 +721,24 @@ mod tests {
             prompt: "test".into(),
             images: vec![],
             model: "provider/model".into(),
-            cwd: ".".into(),
+            cwd: Some(".".into()),
             session_id: None,
             tool_approval_policy: Some(policy.into()),
             tool_approval_grant: false,
             interactive_tool_approval: false,
             plan_mode,
+            milim_context: None,
+            milim_mcp: None,
         }
+    }
+
+    #[test]
+    fn no_folder_request_deserializes_and_denies_native_tools() {
+        let req: OpenCodeRunRequest =
+            serde_json::from_value(json!({ "prompt": "test", "model": "provider/model" })).unwrap();
+        assert!(req.cwd.is_none());
+        assert_eq!(policy_overlay(&req)["permission"]["*"], "deny");
+        assert!(policy_overlay(&req)["permission"].get("read").is_none());
     }
 
     #[test]

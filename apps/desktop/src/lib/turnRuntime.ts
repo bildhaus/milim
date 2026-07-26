@@ -6,6 +6,7 @@ import {
   type AccountRuntimeImage,
 } from "./attachmentInput.js";
 import type {
+  AccountRuntimeMilimContext,
   AgentEvent,
   AgentMemoryContext,
   AgentToolContext,
@@ -138,6 +139,7 @@ type StreamCodexRunFn = (
     interactive_tool_approval?: boolean;
     plan_mode?: boolean;
     images?: AccountRuntimeImage[];
+    milim_context?: AccountRuntimeMilimContext;
   },
   onEvent: (event: CodexRunEvent) => void,
   signal?: AbortSignal,
@@ -155,6 +157,7 @@ type StreamClaudeRunFn = (
     plan_mode?: boolean;
     allow_session_recovery?: boolean;
     images?: AccountRuntimeImage[];
+    milim_context?: AccountRuntimeMilimContext;
   },
   onEvent: (event: ClaudeRunEvent) => void,
   signal?: AbortSignal,
@@ -170,6 +173,7 @@ type StreamOpenCodeRunFn = (
     interactive_tool_approval?: boolean;
     plan_mode?: boolean;
     images?: AccountRuntimeImage[];
+    milim_context?: AccountRuntimeMilimContext;
   },
   onEvent: (event: OpenCodeRunEvent) => void,
   signal?: AbortSignal,
@@ -187,6 +191,7 @@ type StreamPiRunFn = (
     interactive_tool_approval?: boolean;
     plan_mode?: boolean;
     images?: AccountRuntimeImage[];
+    milim_context?: AccountRuntimeMilimContext;
   },
   onEvent: (event: PiRunEvent) => void,
   signal?: AbortSignal,
@@ -374,6 +379,10 @@ export function createTurnRunTraceState(
   };
 }
 
+export function isGoogleWorkspaceEditTool(name: string | null | undefined): boolean {
+  return /(?:^|_)google_(?:sheets|docs|slides)_edit$/.test(name ?? "");
+}
+
 export type TurnAssistantStarter = {
   state: {
     activeConversation: ChatMessage[];
@@ -547,6 +556,7 @@ export function createAccountRuntimeEventHandler({
   setPiSessionId = () => {},
   appendImage,
   onNativeWorker,
+  onToolCompleted,
   runRef,
   snapshot,
   now = () => Date.now(),
@@ -566,6 +576,7 @@ export function createAccountRuntimeEventHandler({
   setPiSessionId?: (sessionId: string) => void;
   appendImage?: (event: AccountRuntimeImageEvent) => void;
   onNativeWorker?: (lifecycle: AccountNativeWorkerLifecycle) => void;
+  onToolCompleted?: (name: string) => void;
   runRef?: { current: RunTrace | null };
   snapshot?: () => void;
   now?: () => number;
@@ -578,6 +589,8 @@ export function createAccountRuntimeEventHandler({
     error: null,
     sessionRecoveryRequired: null,
   };
+  const activeToolIds = new Set<string>();
+  const settledToolIds = new Set<string>();
   return {
     state,
     handle(event) {
@@ -589,13 +602,28 @@ export function createAccountRuntimeEventHandler({
         flush();
         const part = accountRuntimeToolPart(event);
         const run = runRef?.current;
-        if (event.status === "running") {
-          run?.steps.push({ callId: event.id ?? undefined, name: event.name ?? "tool", arguments: event.detail ?? undefined, startedAt: now() });
-          appendStreamEvent(part);
-        } else {
+        const toolId = event.id || event.name;
+        if (part.status === "running") {
           const step = run && lastOpenStep(run.steps, event.name ?? undefined, event.id);
-          if (step) step.endedAt = now();
-          completeStreamEvent(event.id || event.name, part);
+          if (activeToolIds.has(toolId)) {
+            if (step && event.detail) step.arguments = event.detail;
+            completeStreamEvent(toolId, part);
+          } else {
+            activeToolIds.add(toolId);
+            run?.steps.push({ callId: event.id ?? undefined, name: event.name ?? "tool", arguments: event.detail ?? undefined, startedAt: now() });
+            appendStreamEvent(part);
+          }
+        } else {
+          if (settledToolIds.has(toolId)) return;
+          settledToolIds.add(toolId);
+          activeToolIds.delete(toolId);
+          const step = run && lastOpenStep(run.steps, event.name ?? undefined, event.id);
+          if (step) {
+            if (part.status === "error") step.error = event.detail || `${event.name ?? "Tool"} failed`;
+            step.endedAt = now();
+          }
+          completeStreamEvent(toolId, part);
+          if (part.status === "done") onToolCompleted?.(event.name);
         }
         snapshot?.();
       } else if (event.type === "tool_approval_required") {
@@ -624,7 +652,14 @@ export function createAccountRuntimeEventHandler({
           step.approval.status = event.decision === "approve" ? "approved" : "denied";
           step.approval.resolvedAt = now();
         }
-        completeStreamEvent(`approval:${event.approval_id}`, toolApprovalPart(event));
+        completeStreamEvent(
+          `approval:${event.approval_id}`,
+          toolApprovalPart({
+            ...event,
+            name: step?.name,
+            arguments: step?.arguments,
+          }),
+        );
         snapshot?.();
       } else if (event.type === "thread") {
         setCodexThreadId?.(event.thread_id);
@@ -775,6 +810,7 @@ type RunAccountRuntimeTurnParams = {
   }) => void;
   captureProviderLimit?: (limit?: ProviderLimitInfo) => void;
   onNativeWorker?: (lifecycle: AccountNativeWorkerLifecycle) => void;
+  onToolCompleted?: (name: string) => void;
   signal?: AbortSignal;
   models?: ModelInfo[];
   runRef?: { current: RunTrace | null };
@@ -834,6 +870,7 @@ export async function runAccountRuntimeTurn(
     captureRuntimeMetrics,
     captureProviderLimit,
     onNativeWorker,
+    onToolCompleted,
     signal,
     models = [],
     runRef,
@@ -888,12 +925,24 @@ export async function runAccountRuntimeTurn(
     captureRuntimeMetrics,
     captureProviderLimit,
     onNativeWorker,
+    onToolCompleted,
     setCodexThreadId: params.kind === "codex" ? params.setThreadId : undefined,
     setOpenCodeSessionId: params.kind === "opencode" ? params.setSessionId : undefined,
     setPiSessionId: params.kind === "pi" ? params.setSessionId : undefined,
     appendImage: params.kind === "codex" ? params.appendImage : undefined,
   });
   const input = accountRuntimeInputFromMessages(outbound);
+  const milimContext: AccountRuntimeMilimContext = {
+    tool_context: {
+      ...promptContext.toolContext,
+      tool_approval_grant: toolApprovalGrant,
+    },
+    memory_context: promptContext.runMemoryContext,
+    tool_mode: promptContext.toolMode ?? "all",
+    enabled_tools: promptContext.enabledTools ?? [],
+    skill_mode: promptContext.skillMode ?? "auto",
+    enabled_skills: promptContext.enabledSkills ?? [],
+  };
   if (runRef?.current) {
     runRef.current.context = contextSnapshot(promptContext, contextMessages, outbound, model, models, reservedRules, toolDefinitions);
     snapshot?.();
@@ -913,6 +962,7 @@ export async function runAccountRuntimeTurn(
         tool_approval_grant: toolApprovalGrant,
         interactive_tool_approval: toolApproval === "review" && !planMode && !toolApprovalGrant,
         plan_mode: planMode,
+        milim_context: milimContext,
       },
       events.handle,
       signal,
@@ -931,6 +981,7 @@ export async function runAccountRuntimeTurn(
         interactive_tool_approval: toolApproval === "review" && !planMode && !toolApprovalGrant,
         plan_mode: planMode,
         allow_session_recovery: allowClaudeSessionRecovery,
+        milim_context: milimContext,
       },
       events.handle,
       signal,
@@ -947,6 +998,7 @@ export async function runAccountRuntimeTurn(
         tool_approval_grant: toolApprovalGrant,
         interactive_tool_approval: toolApproval === "review" && !planMode && !toolApprovalGrant,
         plan_mode: planMode,
+        milim_context: milimContext,
       },
       events.handle,
       signal,
@@ -966,6 +1018,7 @@ export async function runAccountRuntimeTurn(
         interactive_tool_approval:
           toolApproval === "review" && !planMode && !toolApprovalGrant,
         plan_mode: planMode,
+        milim_context: milimContext,
       },
       events.handle,
       signal,
@@ -1345,6 +1398,7 @@ export function createAgentRunEventHandler({
   upsertChildThread,
   updateChildThread,
   upsertWorkerRun,
+  onToolCompleted,
   captureUsage,
   captureUsageDelta,
   snapshot,
@@ -1364,6 +1418,7 @@ export function createAgentRunEventHandler({
   upsertChildThread: (thread: ChildThreadInfo) => void;
   updateChildThread: (thread: ChildThreadInfo) => void;
   upsertWorkerRun?: (record: WorkerRunRecord) => void;
+  onToolCompleted?: (name: string) => void;
   captureUsage: (usage?: TokenUsage) => void;
   captureUsageDelta: (usage?: TokenUsage) => void;
   snapshot: () => void;
@@ -1412,6 +1467,7 @@ export function createAgentRunEventHandler({
           toolCompletedPart({ ...event, arguments: step?.arguments }),
           event.call_id,
         );
+        if (!error) onToolCompleted?.(step?.name ?? event.name ?? "tool");
         break;
       }
       case "tool_approval_required": {
@@ -1434,7 +1490,11 @@ export function createAgentRunEventHandler({
         }
         completeStreamEvent(
           `approval:${event.approval_id}`,
-          toolApprovalPart(event),
+          toolApprovalPart({
+            ...event,
+            name: step?.name,
+            arguments: step?.arguments,
+          }),
         );
         break;
       }

@@ -51,6 +51,7 @@ const {
   parseGoalDecision,
 } = await import("../src/lib/goals.js");
 const {
+  approvalWaitDuration,
   codexLimitsFromRateLimitPayload,
   estimateResponseCostUsd,
   formatCompactProviderLimits,
@@ -120,8 +121,8 @@ useSessions.getState().updateSettings(first, {
 });
 equal(
   useSessions.getState().getSettings(first).toolApproval,
-  "guarded",
-  "changing folders should ignore inherited Open approval",
+  "review",
+  "changing folders should reset inherited Open approval to Review",
 );
 useSessions.getState().updateSettings(first, { toolApproval: "open" });
 useSessions.getState().setMessages(first, [{ role: "user", content: "hello" }]);
@@ -833,6 +834,33 @@ equal(
   "running",
   "same-name later tool call should remain running",
 );
+useSessions.getState().appendStreamEvent(first, {
+  kind: "event",
+  eventType: "status",
+  label: "Approve google_docs_edit",
+  detail: "{\"file_id\":\"doc\"}",
+  name: "approval:approval-1",
+  status: "done",
+  approvalId: "approval-1",
+  approvalStatus: "pending",
+});
+useSessions.getState().completeStreamEvent(first, "approval:approval-1", {
+  kind: "event",
+  eventType: "status",
+  label: "google_docs_edit approved",
+  name: "approval:approval-1",
+  status: "done",
+  approvalId: "approval-1",
+  approvalStatus: "approved",
+});
+const approvalParts = (
+  useSessions.getState().sessions.find((session) => session.id === first)
+    ?.messages[1].streamParts ?? []
+).filter((part) => part.kind === "event" && part.approvalId === "approval-1");
+equal(approvalParts.length, 1, "resolved approvals should replace their pending transcript event");
+assert(approvalParts[0]?.kind === "event", "resolved approval should remain an event");
+equal(approvalParts[0].label, "google_docs_edit approved", "approval history should record the decision");
+equal(approvalParts[0].detail, "{\"file_id\":\"doc\"}", "approval history should retain the request summary");
 useSessions.getState().commitResponseMetrics(first, {
   startedAt: 1_000,
   endedAt: 4_200,
@@ -1142,6 +1170,43 @@ deepEqual(
     costUsd: 0.5,
   },
   "account-runtime turn metrics should use runtime provider and explicit cost only",
+);
+equal(
+  approvalWaitDuration({
+    model: "test",
+    startedAt: 0,
+    status: "running",
+    steps: [
+      { name: "first", startedAt: 10, approval: { id: "a", status: "approved", requestedAt: 20, resolvedAt: 50 } },
+      { name: "second", startedAt: 30, approval: { id: "b", status: "pending", requestedAt: 40 } },
+    ],
+  }, 70),
+  50,
+  "overlapping approval waits should be merged instead of double counted",
+);
+equal(
+  approvalWaitDuration({
+    model: "test",
+    startedAt: 0,
+    status: "running",
+    steps: [
+      { name: "first", startedAt: 10, approval: { id: "a", status: "approved", requestedAt: 20, resolvedAt: 50 } },
+      { name: "second", startedAt: 30, approval: { id: "b", status: "pending", requestedAt: 40 } },
+    ],
+  }, 40),
+  20,
+  "live approval waits should be clamped to the display clock",
+);
+equal(
+  responseMetricsForTurn({
+    startedAt: 10,
+    endedAt: 100,
+    pausedMs: 50,
+    model: "openrouter/test",
+    providers: pricedProviders,
+  }).durationMs,
+  40,
+  "turn duration should exclude approval wait time",
 );
 const usageSummary = summarizeMilimUsage(
   [
@@ -1781,7 +1846,7 @@ deepEqual(
     computerUse: false,
     memory: true,
     privacy: "off",
-    toolApproval: "guarded",
+    toolApproval: "review",
     delegationPolicy: "ask",
     workerModel: "",
     planMode: false,
@@ -2241,8 +2306,8 @@ equal(
 equal(
   useSessions.getState().getSettings(useSessions.getState().activeId)
     .toolApproval,
-  "guarded",
-  "starting a chat in another project should reset Open approval",
+  "review",
+  "starting a chat in another project should reset Open approval to Review",
 );
 assert(
   useSessions
@@ -2271,8 +2336,8 @@ equal(
 equal(
   useSessions.getState().getSettings(useSessions.getState().activeId)
     .toolApproval,
-  "guarded",
-  "moving to a scratch project should reset Open approval",
+  "review",
+  "moving to a scratch project should reset Open approval to Review",
 );
 equal(
   useSessions.getState().projects.length,
@@ -2304,8 +2369,8 @@ useSessions
   .setSessionFolder(archiveSession, "C:\\workspace-archive-moved");
 equal(
   useSessions.getState().getSettings(archiveSession).toolApproval,
-  "guarded",
-  "setting a different session folder should reset Open approval",
+  "review",
+  "setting a different session folder should reset Open approval to Review",
 );
 useSessions.getState().updateSettings(archiveSession, {
   toolApproval: "open",
@@ -2315,8 +2380,8 @@ useSessions
   .moveSessionInSidebar(archiveSession, null, archiveProject, "inside");
 equal(
   useSessions.getState().getSettings(archiveSession).toolApproval,
-  "guarded",
-  "moving a session between project sections should reset Open approval",
+  "review",
+  "moving a session between project sections should reset Open approval to Review",
 );
 useSessions
   .getState()

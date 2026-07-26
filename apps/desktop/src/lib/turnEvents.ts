@@ -260,14 +260,19 @@ export function toolCompletedPart(ev: AgentEvent): ChatStreamEventPart {
 }
 
 export function accountRuntimeToolPart(ev: AccountRuntimeToolEvent): ChatStreamEventPart {
+  const status = ev.status === "done" || (ev.status as string) === "completed"
+    ? "done"
+    : ev.status === "error" || (ev.status as string) === "failed"
+      ? "error"
+      : "running";
   return {
     kind: "event",
     eventType: "tool",
-    label: ev.label || (ev.status === "running" ? `Using ${ev.name}` : ev.status === "error" ? `${ev.name} failed` : `Used ${ev.name}`),
+    label: ev.label || (status === "running" ? `Using ${ev.name}` : status === "error" ? `${ev.name} failed` : `Used ${ev.name}`),
     detail: ev.detail || undefined,
     icon: ev.icon || toolEventIcon(ev.name),
     name: ev.id || ev.name,
-    status: ev.status,
+    status,
   };
 }
 
@@ -305,7 +310,7 @@ export function toolApprovalPart(
     kind: "event",
     eventType: "status",
     label: resolved
-      ? event.decision === "approve" ? "Tool approved" : "Tool denied"
+      ? `${event.name ?? "Tool"} ${event.decision === "approve" ? "approved" : "denied"}`
       : requestLabel,
     detail: approvalRequest && approvalRequest.kind !== "command" && approvalRequest.kind !== "file_change"
       ? "message" in approvalRequest ? approvalRequest.message : "reason" in approvalRequest ? approvalRequest.reason ?? undefined : undefined

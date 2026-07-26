@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { RunStatus, RunTrace } from "../api";
 import { isNearScrollBottom } from "../lib/scroll";
+import { approvalWaitDuration } from "../lib/usageMetrics";
 
 const STATUS_LABEL: Record<RunStatus, string> = {
   running: "Running",
@@ -11,11 +12,11 @@ const STATUS_LABEL: Record<RunStatus, string> = {
 };
 const MUTATING_TOOLS = new Set(["write_file", "edit_file", "patch_file"]);
 
-function fmtDuration(ms: number): string {
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  const m = Math.floor(ms / 60_000);
-  return `${m}m ${Math.round((ms % 60_000) / 1000)}s`;
+export function formatRunDuration(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m ${seconds % 60}s`;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -94,11 +95,16 @@ export function RunTimeline({ run }: { run: RunTrace }) {
   const [now, setNow] = useState(() => Date.now());
   const bodyRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
+  const waitingSince = run.steps
+    .flatMap((step) => step.approval?.status === "pending" ? [step.approval.requestedAt] : [])
+    .sort((left, right) => left - right)[0];
+  const waiting = waitingSince != null;
   useEffect(() => {
-    if (run.status !== "running") return;
-    const t = setInterval(() => setNow(Date.now()), 500);
+    if (run.status !== "running" || waiting) return;
+    setNow(Date.now());
+    const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
-  }, [run.status]);
+  }, [run.status, waiting]);
 
   function scrollToLatest() {
     stickToBottomRef.current = true;
@@ -115,10 +121,16 @@ export function RunTimeline({ run }: { run: RunTrace }) {
     if (stickToBottomRef.current) scrollToLatest();
   }, [run.steps]);
 
-  const elapsed = Math.max(0, (run.endedAt ?? now) - run.startedAt);
+  const clock = run.endedAt ?? waitingSince ?? now;
+  const elapsed = Math.max(0, clock - run.startedAt - approvalWaitDuration(run, clock));
   const doneSteps = run.steps.filter((step) => step.endedAt != null).length;
   const activeStep = run.status === "running" ? Math.max(1, doneSteps + 1) : doneSteps;
-  const stepLabel = run.steps.length ? `Step ${Math.min(activeStep, run.steps.length)} / ${run.steps.length}` : STATUS_LABEL[run.status];
+  const statusLabel = waiting ? "Waiting for approval" : STATUS_LABEL[run.status];
+  const stepLabel = waiting
+    ? statusLabel
+    : run.steps.length
+      ? `Step ${Math.min(activeStep, run.steps.length)} / ${run.steps.length}`
+      : statusLabel;
   const files = fileChangeSummary(run);
   const steps = run.steps.map((step) => ({ step, detail: stepDetail(step) }));
 
@@ -131,10 +143,10 @@ export function RunTimeline({ run }: { run: RunTrace }) {
       onMouseEnter={scrollToLatest}
     >
       <button className="run-pill" type="button" aria-label="Show run steps">
-        <span className={`run-dot run-dot-${run.status}`} />
-        <span className={"run-status" + (run.status === "running" ? " shiny-text" : "")}>{stepLabel}</span>
+        <span className={`run-dot run-dot-${waiting ? "waiting" : run.status}`} />
+        <span className={"run-status" + (run.status === "running" && !waiting ? " shiny-text" : "")}>{stepLabel}</span>
         {files && <span className="run-files">{files}</span>}
-        <span className="run-meta run-elapsed">{fmtDuration(elapsed)}</span>
+        <span className="run-meta run-elapsed">{formatRunDuration(elapsed)}</span>
       </button>
       <div
         className="run-body"
@@ -143,9 +155,9 @@ export function RunTimeline({ run }: { run: RunTrace }) {
         onScroll={updateAutoScrollCoupling}
       >
         <div className="run-popover-head">
-          <span className={"run-status" + (run.status === "running" ? " shiny-text" : "")}>{STATUS_LABEL[run.status]}</span>
+          <span className={"run-status" + (run.status === "running" && !waiting ? " shiny-text" : "")}>{statusLabel}</span>
           {run.model && <span className="run-model">{run.model}</span>}
-          <span className="run-meta run-elapsed">{fmtDuration(elapsed)}</span>
+          <span className="run-meta run-elapsed">{formatRunDuration(elapsed)}</span>
         </div>
         {steps.map(({ step: s, detail }, i) => (
           <div className="run-step" key={i}>
@@ -153,7 +165,7 @@ export function RunTimeline({ run }: { run: RunTrace }) {
             <div className="run-step-head">
               <span className="run-step-name">{s.name}</span>
               <span className="run-meta">
-                {s.endedAt != null ? fmtDuration(s.endedAt - s.startedAt) : "..."}
+                {s.endedAt != null ? formatRunDuration(s.endedAt - s.startedAt) : "..."}
               </span>
             </div>
             {detail && <div className="run-step-detail">{detail}</div>}

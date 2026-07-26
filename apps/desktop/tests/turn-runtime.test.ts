@@ -22,6 +22,7 @@ import {
   createTurnRunTraceState,
   finalizeTurnRuntime,
   handleTurnRuntimeError,
+  isGoogleWorkspaceEditTool,
   runAccountRuntimeTurn,
   runModelChatTurn,
   runSelectedAccountRuntimeTurn,
@@ -184,6 +185,11 @@ assert.equal(traceState.runRef.current, trace);
 assert.equal(committedRuns.length, 1);
 assert.notEqual(committedRuns[0].steps[0], trace.steps[0]);
 assert.deepEqual(committedRuns[0], trace);
+assert.equal(isGoogleWorkspaceEditTool("google_docs_edit"), true);
+assert.equal(isGoogleWorkspaceEditTool("milim_google_sheets_edit"), true);
+assert.equal(isGoogleWorkspaceEditTool("mcp__milim__google_slides_edit"), true);
+assert.equal(isGoogleWorkspaceEditTool("google_slides_edit"), true);
+assert.equal(isGoogleWorkspaceEditTool("google_docs_read"), false);
 
 const text: string[] = [];
 const thinking: string[] = [];
@@ -194,6 +200,7 @@ const metrics: Array<{ usage?: TokenUsage; cost_usd?: number }> = [];
 const limits: ProviderLimitInfo[] = [];
 const threads: string[] = [];
 const images: Extract<CodexRunEvent, { type: "image" }>[] = [];
+const accountCompletedTools: string[] = [];
 
 const handler = createAccountRuntimeEventHandler({
   append: (value) => text.push(value),
@@ -209,6 +216,7 @@ const handler = createAccountRuntimeEventHandler({
   },
   setCodexThreadId: (threadId) => threads.push(threadId),
   appendImage: (event) => images.push(event),
+  onToolCompleted: (name) => accountCompletedTools.push(name),
 });
 
 handler.handle({ type: "token", text: "hello" });
@@ -270,6 +278,26 @@ assert.equal(metrics[0].cost_usd, 0.01);
 assert.equal(metrics[1].usage?.total_tokens, 9);
 assert.equal(handler.state.warning, "CLI missing");
 assert.equal(handler.state.error, "boom");
+assert.deepEqual(accountCompletedTools, ["shell"]);
+
+const acpAppended: ChatStreamPart[] = [];
+const acpCompleted: ChatStreamPart[] = [];
+const acpTools: string[] = [];
+const acpHandler = createAccountRuntimeEventHandler({
+  append: () => {},
+  appendThinking: () => {},
+  flush: () => {},
+  appendStreamEvent: (part) => acpAppended.push(part),
+  completeStreamEvent: (_name, part) => acpCompleted.push(part),
+  captureRuntimeMetrics: () => {},
+  onToolCompleted: (name) => acpTools.push(name),
+});
+acpHandler.handle({ type: "tool", id: "edit-1", name: "milim_google_docs_edit", status: "pending" } as never);
+acpHandler.handle({ type: "tool", id: "edit-1", name: "milim_google_docs_edit", status: "in_progress" } as never);
+acpHandler.handle({ type: "tool", id: "edit-1", name: "milim_google_docs_edit", status: "completed" } as never);
+assert.equal(acpAppended.length, 1);
+assert.equal(acpCompleted.length, 2);
+assert.deepEqual(acpTools, ["milim_google_docs_edit"]);
 
 const run: RunTrace = {
   model: "old",
@@ -292,6 +320,7 @@ const childUpserts: string[] = [];
 const childUpdates: string[] = [];
 let agentUsage: TokenUsage | undefined;
 let agentUsageDelta: TokenUsage | undefined;
+const agentCompletedTools: string[] = [];
 const agentHandler = createAgentRunEventHandler({
   runRef: { current: run },
   append: (value) => agentText.push(value),
@@ -311,6 +340,7 @@ const agentHandler = createAgentRunEventHandler({
   captureUsageDelta: (usage) => {
     agentUsageDelta = usage;
   },
+  onToolCompleted: (name) => agentCompletedTools.push(name),
   snapshot: () => {
     snapshots += 1;
   },
@@ -390,6 +420,7 @@ assert.equal(run.steps[0].startedAt, 123);
 assert.equal(run.steps[0].endedAt, 123);
 assert.deepEqual(run.steps[0].result, { ok: true });
 assert.equal(agentCompleted[0].callId, "tool-1");
+assert.deepEqual(agentCompletedTools, ["shell"]);
 assert.equal(memoryNotices[0].summary, "Remember this");
 assert.deepEqual(childUpserts, ["child-1"]);
 assert.deepEqual(childUpdates, ["child-1"]);
@@ -536,6 +567,10 @@ const accountPromptContext = {
   useScheduleTools: false,
   useTools: false,
   accountRuntimeMayUseTools: true,
+  toolMode: "none",
+  enabledTools: ["milim_skill_search", "milim_skill_read"],
+  skillMode: "custom",
+  enabledSkills: ["review"],
   runMemoryContext: {},
   toolContext: {},
 } satisfies Parameters<typeof runAccountRuntimeTurn>[0]["promptContext"];
@@ -599,6 +634,9 @@ const codexResult = await runAccountRuntimeTurn({
     assert.equal(request.persist_thread, true);
     assert.equal(request.tool_approval_grant, true);
     assert.deepEqual(request.images, [{ media_type: "image/png", data: "AAAA" }]);
+    assert.deepEqual(request.milim_context?.enabled_tools, ["milim_skill_search", "milim_skill_read"]);
+    assert.equal(request.milim_context?.skill_mode, "custom");
+    assert.deepEqual(request.milim_context?.enabled_skills, ["review"]);
     codexPrompt = request.prompt;
     onEvent({ type: "thread", thread_id: "codex-thread-2", model: "gpt-5" });
     onEvent({

@@ -262,6 +262,7 @@ import {
 import { mergeModelListsForPicker, providerOwnsModel } from "../lib/modelPicker";
 import { assessHotSwap, nativeRuntimeIsStale, type HotSwapAssessment } from "../lib/hotSwap";
 import {
+  approvalWaitDuration,
   estimateResponseCostUsd,
   formatResponseMetrics,
   responseMetricsForTurn,
@@ -307,10 +308,12 @@ import {
   createTurnRunTraceState,
   finalizeTurnRuntime,
   handleTurnRuntimeError,
+  isGoogleWorkspaceEditTool,
   runModelChatTurn,
   runSelectedAccountRuntimeTurn,
   runToolAgentTurn,
 } from "../lib/turnRuntime";
+import { dismissToolApproval, pendingToolApprovals } from "../lib/toolApproval";
 import {
   drainQueuedMessages as drainQueuedMessagesFromQueue,
   hasQueuedMessages,
@@ -362,6 +365,7 @@ import { InlineMediaControls } from "./InlineMediaControls";
 import { GeneratedMedia } from "./GeneratedMedia";
 import { WorkersInspector, WorkersSummary } from "./WorkersInspector";
 import { AssistantMessage } from "./AssistantMessage";
+import { ToolApprovalPrompt } from "./ToolApprovalPrompt";
 import { ArtifactList } from "./ArtifactList";
 import { CommandPalette, type RuntimeCommand } from "./ChatSearchPopover";
 import { useContextMenu, type ContextMenuItem } from "./ContextMenu";
@@ -3278,6 +3282,10 @@ export function ChatView({
   const sessionSummaries = useSessions(sessionSummariesSelector);
   const messages = useSessions(
     (s) => s.sessions.find((x) => x.id === s.activeId)?.messages ?? EMPTY,
+  );
+  const pendingApprovals = useMemo(
+    () => pendingToolApprovals(messages),
+    [messages],
   );
   const artifactRevisionGroupsForThread = useMemo(
     () => artifactRevisionGroups(messages),
@@ -7868,6 +7876,15 @@ export function ChatView({
         turnId,
         codexModel,
         claudeModel,
+        accountRuntimeKind: codexModel
+          ? "codex"
+          : claudeModel
+            ? "claude"
+            : opencodeModel
+              ? "opencode"
+              : piModel
+                ? "pi"
+                : undefined,
         model: turnModel,
         sandbox: turnSandbox,
         computerUse: turnComputerUse,
@@ -7952,6 +7969,7 @@ export function ChatView({
         responseMetricsForTurn({
           startedAt,
           endedAt: Date.now(),
+          pausedMs: approvalWaitDuration(runRef.current),
           model: turnModel,
           providers,
           codexModel,
@@ -7960,6 +7978,11 @@ export function ChatView({
           limits: metricsCapture.state.limits,
         }),
       );
+    };
+    const onToolCompleted = (name: string) => {
+      if (isGoogleWorkspaceEditTool(name)) {
+        window.dispatchEvent(new Event("milim-google-workspace-refresh"));
+      }
     };
     const onEvent = createAgentRunEventHandler({
       runRef,
@@ -7978,6 +8001,7 @@ export function ChatView({
         store.upsertWorkerRun(record);
         startWorkerRunEvents(record);
       },
+      onToolCompleted,
       captureUsage: metricsCapture.captureUsage,
       captureUsageDelta: captureAgentUsageDelta,
       snapshot,
@@ -7986,9 +8010,6 @@ export function ChatView({
       onEvent(event);
       if (event.type === "tool_result" && event.name === "mcp_server_save") {
         void listTools().then(setComposerTools).catch(() => {});
-      }
-      if (event.type === "tool_result" && event.name?.startsWith("google_")) {
-        window.dispatchEvent(new Event("milim-google-workspace-refresh"));
       }
     };
     const prepareOutbound = (
@@ -8045,6 +8066,7 @@ export function ChatView({
             store.completeStreamEvent(id, assistantMessageId, name, part),
           captureRuntimeMetrics: metricsCapture.captureRuntimeMetrics,
           captureProviderLimit: metricsCapture.captureProviderLimit,
+          onToolCompleted,
           onNativeWorker:
             turnDelegationPolicy === "auto" &&
             (turnToolApproval === "guarded" || turnPlanMode)
@@ -8225,6 +8247,7 @@ export function ChatView({
         ? responseMetricsForTurn({
             startedAt,
             endedAt,
+            pausedMs: approvalWaitDuration(runRef.current, endedAt),
             model: turnModel,
             providers,
             codexModel,
@@ -9514,6 +9537,20 @@ export function ChatView({
               </div>
             )}
             <ComposerSurface>
+              {pendingApprovals.map((approval) => (
+                <ToolApprovalPrompt
+                  key={approval.approvalId}
+                  part={approval}
+                  onDismiss={() => {
+                    if (!approval.approvalId) return;
+                    setMessages(
+                      activeId,
+                      dismissToolApproval(messages, approval.approvalId),
+                      { autoTitle: false },
+                    );
+                  }}
+                />
+              ))}
               <ControlBar
                 models={pickerModels}
                 model={model}
@@ -9725,6 +9762,13 @@ export function ChatView({
                 }}
               />
             )}
+            <div
+              id={inspectorTab === "git" ? "inspector-panel-git" : undefined}
+              className={`inspector-shell${previewPanelClosing ? " closing" : ""}${sidePanelAlreadyOpen ? " no-enter" : ""}`}
+              data-testid="inspector-shell"
+              role={inspectorTab === "git" ? "tabpanel" : undefined}
+              aria-labelledby={inspectorTab === "git" ? "inspector-tab-git" : undefined}
+            >
             {inspectorTab === "workers" ? (
               <WorkersInspector
                 records={activeWorkerRuns}
@@ -9759,52 +9803,45 @@ export function ChatView({
                 onClose={closePreview}
               />
             ) : inspectorTab === "git" ? (
-              <div
-                id="inspector-panel-git"
-                className="inspector-git-panel"
-                role="tabpanel"
-                aria-labelledby="inspector-tab-git"
-              >
-                <GitWorkspacePanel
-                  sessionId={activeId}
-                  folder={folder}
-                  model={effectiveModel}
-                  onDraftAction={loadGitActionDraft}
-                  requestedView={gitPanelView}
-                  diffRequest={
-                    gitDiffRequest?.sessionId === activeId &&
-                    previewRuntimeFoldersEqual(gitDiffRequest.folder, folder)
-                      ? gitDiffRequest
-                      : null
-                  }
-                  closing={previewPanelClosing}
-                  noEnterMotion={sidePanelAlreadyOpen}
-                  onClose={closeGitPanel}
-                  modeSwitcher={inspectorTabSwitcher}
-                  headerNotice={
-                    activeSession?.retryWorkspace ? (
-                      <div className="hot-swap-retry-banner">
-                        <div>
-                          <strong>Isolated Hot Swap retry</strong>
-                          <span>
-                            {activeSession.retryWorkspace.adoptedAt
-                              ? "Applied to the original workspace; the retry remains available."
-                              : "Review this diff before applying it to the original workspace."}
-                          </span>
-                        </div>
-                        <div className="hot-swap-retry-actions">
-                          <button className="btn-accent" type="button" disabled={busy} onClick={() => void applyRetryWorkspace()}>
-                            Apply to original
-                          </button>
-                          <button className="btn-ghost" type="button" disabled={busy} onClick={() => void discardRetryWorkspace()}>
-                            Discard retry
-                          </button>
-                        </div>
+              <GitWorkspacePanel
+                sessionId={activeId}
+                folder={folder}
+                model={effectiveModel}
+                onDraftAction={loadGitActionDraft}
+                requestedView={gitPanelView}
+                diffRequest={
+                  gitDiffRequest?.sessionId === activeId &&
+                  previewRuntimeFoldersEqual(gitDiffRequest.folder, folder)
+                    ? gitDiffRequest
+                    : null
+                }
+                closing={previewPanelClosing}
+                noEnterMotion={sidePanelAlreadyOpen}
+                onClose={closeGitPanel}
+                modeSwitcher={inspectorTabSwitcher}
+                headerNotice={
+                  activeSession?.retryWorkspace ? (
+                    <div className="hot-swap-retry-banner">
+                      <div>
+                        <strong>Isolated Hot Swap retry</strong>
+                        <span>
+                          {activeSession.retryWorkspace.adoptedAt
+                            ? "Applied to the original workspace; the retry remains available."
+                            : "Review this diff before applying it to the original workspace."}
+                        </span>
                       </div>
-                    ) : undefined
-                  }
-                />
-              </div>
+                      <div className="hot-swap-retry-actions">
+                        <button className="btn-accent" type="button" disabled={busy} onClick={() => void applyRetryWorkspace()}>
+                          Apply to original
+                        </button>
+                        <button className="btn-ghost" type="button" disabled={busy} onClick={() => void discardRetryWorkspace()}>
+                          Discard retry
+                        </button>
+                      </div>
+                    </div>
+                  ) : undefined
+                }
+              />
             ) : (
               visiblePreviewSelection && (
                 <PreviewPanel
@@ -9857,6 +9894,7 @@ export function ChatView({
                 />
               )
             )}
+            </div>
           </>
         )}
       </div>

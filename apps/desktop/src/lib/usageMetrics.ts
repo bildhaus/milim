@@ -3,6 +3,7 @@ import type {
   ProviderInfo,
   ProviderLimitInfo,
   ResponseMetrics,
+  RunTrace,
   TokenUsage,
 } from "../api";
 import { providerOwnsModel, rawModelId } from "./modelPicker.js";
@@ -46,6 +47,34 @@ export interface MilimUsageSession {
   settings?: { folder?: string };
   updatedAt: number;
   archivedAt?: number;
+}
+
+export function approvalWaitDuration(
+  run: RunTrace | null | undefined,
+  endedAt = Date.now(),
+): number {
+  const intervals = (run?.steps ?? [])
+    .flatMap((step) => step.approval
+      ? [[
+          step.approval.requestedAt,
+          Math.min(step.approval.resolvedAt ?? endedAt, endedAt),
+        ] as const]
+      : [])
+    .filter(([start, end]) => end > start)
+    .sort(([left], [right]) => left - right);
+  let total = 0;
+  let intervalStart = 0;
+  let intervalEnd = 0;
+  for (const [start, end] of intervals) {
+    if (start > intervalEnd) {
+      total += intervalEnd - intervalStart;
+      intervalStart = start;
+      intervalEnd = end;
+    } else {
+      intervalEnd = Math.max(intervalEnd, end);
+    }
+  }
+  return total + intervalEnd - intervalStart;
 }
 
 export interface MilimUsageProject {
@@ -98,6 +127,7 @@ export function estimateResponseCostUsd(
 export function responseMetricsForTurn({
   startedAt,
   endedAt,
+  pausedMs = 0,
   model,
   providers,
   codexModel,
@@ -108,6 +138,7 @@ export function responseMetricsForTurn({
 }: {
   startedAt: number;
   endedAt: number;
+  pausedMs?: number;
   model: string;
   providers: ProviderInfo[];
   codexModel?: string | null;
@@ -119,7 +150,7 @@ export function responseMetricsForTurn({
   return {
     startedAt,
     endedAt,
-    durationMs: endedAt - startedAt,
+    durationMs: Math.max(0, endedAt - startedAt - pausedMs),
     model,
     provider: codexModel
       ? "Codex"

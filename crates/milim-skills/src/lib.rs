@@ -324,6 +324,16 @@ impl SkillStore {
 
     /// Select up to `limit` skills most relevant to `query` (keyword scoring).
     pub fn select(&self, query: &str, limit: usize) -> Result<Vec<SkillDef>> {
+        self.select_filtered(query, limit, None)
+    }
+
+    /// Select enabled skills, optionally restricted to an Agent allowlist.
+    pub fn select_filtered(
+        &self,
+        query: &str,
+        limit: usize,
+        allowed_ids: Option<&[String]>,
+    ) -> Result<Vec<SkillDef>> {
         let terms: Vec<String> = query
             .to_lowercase()
             .split_whitespace()
@@ -333,7 +343,7 @@ impl SkillStore {
         let mut scored: Vec<(usize, SkillDef)> = self
             .list()?
             .into_iter()
-            .filter(|s| s.enabled)
+            .filter(|s| s.enabled && allowed_ids.is_none_or(|ids| ids.iter().any(|id| id == &s.id)))
             .map(|s| {
                 let hay = format!("{} {} {}", s.name, s.description, s.instructions).to_lowercase();
                 let score = terms.iter().filter(|t| hay.contains(t.as_str())).count();
@@ -455,6 +465,20 @@ mod tests {
         assert_eq!(updated.source_kind, "github");
         assert!(updated.instructions.contains("carefully"));
         assert_eq!(s.select("git version control", 5).unwrap().len(), 1);
+        assert!(s
+            .select_filtered("git version control", 5, Some(&["other".to_string()]))
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            s.select_filtered(
+                "git version control",
+                5,
+                Some(std::slice::from_ref(&skill.id))
+            )
+            .unwrap()
+            .len(),
+            1
+        );
         assert!(s.delete(&skill.id).unwrap());
         assert!(s.get(&skill.id).unwrap().is_none());
         assert!(s

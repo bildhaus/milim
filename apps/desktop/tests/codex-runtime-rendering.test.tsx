@@ -2,6 +2,7 @@ import { createElement, type ComponentType } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
 import type { ChatStreamPart } from "../src/api.js";
+import { dismissToolApproval, pendingToolApprovals } from "../src/lib/toolApproval.js";
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -18,20 +19,39 @@ try {
   const { AssistantMessage } = (await server.ssrLoadModule(
     "/src/components/AssistantMessage.tsx",
   )) as { AssistantMessage: ComponentType<{ content: string; streamParts: ChatStreamPart[] }> };
+  const { ToolApprovalPrompt } = (await server.ssrLoadModule(
+    "/src/components/ToolApprovalPrompt.tsx",
+  )) as { ToolApprovalPrompt: ComponentType<{ part: Extract<ChatStreamPart, { kind: "event" }> }> };
 
+  const approvalPart = (
+    approvalRequest: Extract<ChatStreamPart, { kind: "event" }>["approvalRequest"],
+  ): Extract<ChatStreamPart, { kind: "event" }> => ({
+    kind: "event",
+    eventType: "status",
+    label: "Approval",
+    detail: "{\"command\":\"test\"}",
+    status: "done",
+    approvalId: "approval-1",
+    approvalStatus: "pending",
+    approvalRequest,
+  });
   const renderApproval = (approvalRequest: Extract<ChatStreamPart, { kind: "event" }>["approvalRequest"]) =>
-    renderToStaticMarkup(createElement(AssistantMessage, {
-      content: "",
-      streamParts: [{
-        kind: "event",
-        eventType: "status",
-        label: "Approval",
-        status: "done",
-        approvalId: "approval-1",
-        approvalStatus: "pending",
-        approvalRequest,
-      }],
+    renderToStaticMarkup(createElement(ToolApprovalPrompt, {
+      part: approvalPart(approvalRequest),
     }));
+
+  const googleEdit = renderToStaticMarkup(createElement(ToolApprovalPrompt, {
+    part: {
+      ...approvalPart({ kind: "file_change" }),
+      label: "Approve google_docs_edit",
+      detail: "{\"file_id\":\"document-1\",\"operations\":[{\"action\":\"replace_text\"}]}",
+    },
+  }));
+  assert(googleEdit.includes("Approval required"), "approval prompt should explain why the run is paused");
+  assert(googleEdit.includes("Google Docs edit"), "approval prompt should present tool names readably");
+  assert(googleEdit.includes("<summary>Review exact request</summary>"), "exact arguments should use a compact disclosure");
+  assert(googleEdit.includes("replace_text"), "the exact request should remain reviewable");
+  assert(googleEdit.indexOf(">Deny<") < googleEdit.indexOf(">Approve<"), "the primary approval action should be last");
 
   const form = renderApproval({
     kind: "mcp_form",
@@ -66,6 +86,29 @@ try {
   assert(unsupported.includes("Nested objects are unsupported."), "unsupported reason should render");
   assert(unsupported.includes(">Decline<"), "unsupported MCP requests should be declineable");
   assert(!unsupported.includes(">Approve<") && !unsupported.includes(">Submit<"), "unsupported MCP requests should be decline-only");
+
+  const transcript = renderToStaticMarkup(createElement(AssistantMessage, {
+    content: "",
+    streamParts: [approvalPart({ kind: "command" })],
+  }));
+  assert(transcript.includes("Approval"), "approval transcript should keep the request summary");
+  assert(transcript.includes("command"), "approval transcript should keep the requested arguments");
+  assert(!transcript.includes(">Approve<") && !transcript.includes(">Deny<"), "approval actions should render only by the composer");
+
+  const pending = approvalPart({ kind: "command" });
+  const secondPending = { ...pending, approvalId: "approval-2", label: "Approval 2" };
+  const resolved = { ...pending, label: "shell approved", approvalStatus: "approved" as const };
+  assert(
+    pendingToolApprovals([{ role: "assistant", content: "", streamParts: [pending, secondPending] }]).length === 2,
+    "every pending approval should attach to the composer",
+  );
+  assert(pendingToolApprovals([{ role: "assistant", content: "", streamParts: [pending, resolved] }]).length === 0, "resolved legacy approvals should not reappear by the composer");
+  const dismissed = dismissToolApproval([{ role: "assistant", content: "", streamParts: [pending] }], "approval-1", 42);
+  assert(pendingToolApprovals(dismissed).length === 0, "dismissed stale approvals should leave the composer");
+  assert(
+    dismissed[0].streamParts?.some((part) => part.kind === "event" && part.approvalStatus === "canceled"),
+    "dismissed stale approvals should remain in transcript history",
+  );
 } finally {
   await server.close();
 }

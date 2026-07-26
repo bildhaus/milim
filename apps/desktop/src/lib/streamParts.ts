@@ -46,11 +46,15 @@ function isCompletedToolEvent(part: ChatStreamPart): part is ChatStreamEventPart
 }
 
 function isCompletedInternalPart(part: ChatStreamPart): boolean {
-  return part.kind === "thinking" || isCompletedToolEvent(part);
+  return part.kind === "thinking" ||
+    (part.kind === "event" && part.approvalId != null && (part.status ?? "done") === "done") ||
+    isCompletedToolEvent(part);
 }
 
 function isLiveInternalPart(part: ChatStreamPart): boolean {
-  return part.kind === "thinking" || (part.kind === "event" && part.eventType === "tool" && !part.mcpApp && (part.status ?? "done") !== "error");
+  return part.kind === "thinking" ||
+    (part.kind === "event" && part.approvalId != null && (part.status ?? "done") !== "error") ||
+    (part.kind === "event" && part.eventType === "tool" && !part.mcpApp && (part.status ?? "done") !== "error");
 }
 
 export function groupCompletedStreamActivity(parts: ChatStreamPart[], streaming: boolean): ChatStreamDisplayPart[] {

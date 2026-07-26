@@ -2,7 +2,7 @@ import { artifactDisposition, artifactPreviewAutoOpenKey, defaultArtifactTargetP
 import { artifactOccurrenceKey, artifactRevisionChoiceByOccurrence, artifactRevisionGroups } from "../src/lib/artifactRevisions.js";
 import { buildArtifactPreviewDocument } from "../src/lib/artifactPreview.js";
 import { planModeInstructionMessages, threadArtifactInstructionMessages } from "../src/lib/chatInstructions.js";
-import { skillInstructionMessage } from "../src/lib/skills.js";
+import { skillDiscoveryMessage, skillInstructionMessage } from "../src/lib/skills.js";
 import type { ChatMessage } from "../src/api.js";
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -630,5 +630,30 @@ assert(skillMessage.content.includes("code-review"), "skill name should be inclu
 assert(skillMessage.content.includes("List findings first."), "skill instructions should be included");
 assert(!skillMessage.content.includes("Do not include me."), "disabled skills should not be included");
 equal(skillInstructionMessage([]), null, "empty skill selection should not create a system message");
+
+const lazySkill = {
+  id: "lazy-skill",
+  name: "Lazy Skill",
+  description: `Compact description ${"word ".repeat(80)}`,
+  instructions: "FULL BODY MUST BE LOADED",
+  enabled: true,
+  source_kind: "manual",
+};
+const lazySkillMessage = skillDiscoveryMessage([lazySkill], []);
+assert(lazySkillMessage, "automatic skills should create discovery metadata");
+assert(lazySkillMessage.content.includes("milim_skill_read"), "automatic skills should explain lazy loading");
+assert(lazySkillMessage.content.includes("..."), "long skill descriptions should be compacted");
+assert(!lazySkillMessage.content.includes(lazySkill.instructions), "automatic skills should omit full instructions");
+const explicitSkillMessage = skillDiscoveryMessage([lazySkill], [lazySkill.id]);
+assert(explicitSkillMessage?.content.includes(lazySkill.instructions), "explicit skills should keep their full instructions");
+
+const oversizedBody = "x".repeat(12_100);
+const wholeSkillMessage = skillInstructionMessage([
+  { ...lazySkill, id: "large", instructions: oversizedBody },
+  { ...lazySkill, id: "later", name: "Later Skill", instructions: "must be omitted whole" },
+]);
+assert(wholeSkillMessage?.content.includes(oversizedBody), "the first selected skill should never be sliced");
+assert(!wholeSkillMessage?.content.includes("must be omitted whole"), "later skills should be omitted rather than sliced");
+assert(wholeSkillMessage?.content.includes("1 additional skill omitted"), "whole-skill omission should be visible");
 
 export {};

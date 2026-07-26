@@ -825,6 +825,13 @@ async function runNativePreviewOcclusionCheck(page, pid) {
   await page.keyboard.press("ArrowLeft");
   await page.waitForFunction(() => document.querySelector(".chat-body")?.classList.contains("inspector-overlay"));
   await delay(100);
+  const wideHeader = await page.locator(".preview-header").evaluate((header) => ({
+    width: header.getBoundingClientRect().width,
+    paddingTop: Number.parseFloat(getComputedStyle(header).paddingTop),
+  }));
+  if (wideHeader.width < 640 || Math.abs(wideHeader.paddingTop - 10) > 1) {
+    throw new Error(`Wide inspector header should not reserve an extra title-bar row: ${JSON.stringify(wideHeader)}.`);
+  }
   const nativeHostAfter = await page.getByTestId("preview-native-browser").boundingBox();
   const nativeViewAfter = wryWebviews(pid).find((view) => view.handle === preview.handle);
   if (
@@ -2707,12 +2714,40 @@ async function runProgressiveInspectorResizeCheck(page, previewHandle) {
   const sidebar = page.locator(".sidebar");
   const sidebarHandle = page.getByTestId("sidebar-resize-handle");
   const chatBody = page.locator(".chat-body");
-  const previewPanel = page.locator(".chat-body > .preview-panel");
+  const inspectorShell = page.getByTestId("inspector-shell");
   const startBox = await previewHandle.boundingBox();
   if (!startBox) throw new Error("Progressive inspector resize requires measurable handle bounds.");
   const startX = startBox.x + startBox.width / 2;
   const startY = startBox.y + startBox.height / 2;
   const startWidth = Number(await previewHandle.getAttribute("aria-valuenow"));
+  const floatingGeometry = await inspectorShell.evaluate((shell) => {
+    const panel = shell.querySelector(":scope > .preview-panel");
+    const shellRect = shell.getBoundingClientRect();
+    const panelRect = panel?.getBoundingClientRect();
+    const style = panel ? getComputedStyle(panel) : null;
+    return {
+      shellWidth: shellRect.width,
+      titlebarHeight: Number.parseFloat(
+        getComputedStyle(document.documentElement).getPropertyValue("--titlebar-height"),
+      ),
+      top: panelRect ? panelRect.top - shellRect.top : -1,
+      right: panelRect ? shellRect.right - panelRect.right : -1,
+      bottom: panelRect ? shellRect.bottom - panelRect.bottom : -1,
+      left: panelRect ? panelRect.left - shellRect.left : -1,
+      border: style?.borderTopWidth,
+      radius: Number.parseFloat(style?.borderTopLeftRadius ?? "0"),
+    };
+  });
+  if (
+    Math.abs(floatingGeometry.shellWidth - startWidth) > 1 ||
+    Math.abs(floatingGeometry.top - floatingGeometry.titlebarHeight - 6) > 1 ||
+    [floatingGeometry.right, floatingGeometry.bottom, floatingGeometry.left]
+      .some((gap) => Math.abs(gap - 6) > 1) ||
+    floatingGeometry.border !== "1px" ||
+    floatingGeometry.radius <= 0
+  ) {
+    throw new Error(`Inspector should retain its width around one inset rounded surface below the title bar: ${JSON.stringify(floatingGeometry)}.`);
+  }
   const initial = await page.evaluate(() => {
     const body = document.querySelector(".chat-body");
     const rail = document.querySelector(".sidebar");
@@ -2761,7 +2796,7 @@ async function runProgressiveInspectorResizeCheck(page, previewHandle) {
   const overlayGeometry = await page.evaluate(() => {
     const body = document.querySelector(".chat-body");
     const transcript = document.querySelector(".chat-main");
-    const panel = body?.querySelector(":scope > .preview-panel, :scope > .inspector-git-panel");
+    const panel = body?.querySelector(":scope > .inspector-shell");
     const bodyRect = body?.getBoundingClientRect();
     const transcriptRect = transcript?.getBoundingClientRect();
     const panelRect = panel?.getBoundingClientRect();
@@ -2832,7 +2867,7 @@ async function runProgressiveInspectorResizeCheck(page, previewHandle) {
   const contextOverlayGeometry = await page.evaluate(() => ({
     transcript: document.querySelector(".chat-main")?.getBoundingClientRect().toJSON(),
     context: document.querySelector('[data-testid="quick-summary-panel"]')?.getBoundingClientRect().toJSON(),
-    panel: document.querySelector(".chat-body > .preview-panel")?.getBoundingClientRect().toJSON(),
+    panel: document.querySelector(".chat-body > .inspector-shell")?.getBoundingClientRect().toJSON(),
   }));
   if (
     Math.abs(contextOverlayGeometry.transcript.width - dockedGeometry.transcript.width) > 1 ||

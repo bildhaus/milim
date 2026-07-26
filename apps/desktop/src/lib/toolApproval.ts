@@ -1,4 +1,52 @@
-import type { McpApprovalField, ToolApprovalRequest } from "../api";
+import type { ChatMessage, ChatStreamPart, McpApprovalField, ToolApprovalRequest } from "../api";
+
+type ApprovalPart = Extract<ChatStreamPart, { kind: "event" }>;
+
+export function pendingToolApprovals(messages: readonly ChatMessage[]): ApprovalPart[] {
+  const approvals = new Map<string, ApprovalPart>();
+  for (const message of messages) {
+    for (const part of message.streamParts ?? []) {
+      if (part.kind === "event" && part.approvalId) approvals.set(part.approvalId, part);
+    }
+  }
+  return [...approvals.values()].filter((part) => part.approvalStatus === "pending");
+}
+
+export function dismissToolApproval(
+  messages: readonly ChatMessage[],
+  approvalId: string,
+  resolvedAt = Date.now(),
+): ChatMessage[] {
+  return messages.map((message) => {
+    const hasPart = message.streamParts?.some(
+      (part) => part.kind === "event" &&
+        part.approvalId === approvalId &&
+        part.approvalStatus === "pending",
+    );
+    const hasStep = message.run?.steps.some(
+      (step) => step.approval?.id === approvalId && step.approval.status === "pending",
+    );
+    if (!hasPart && !hasStep) return message;
+    return {
+      ...message,
+      streamParts: message.streamParts?.map((part) =>
+        part.kind === "event" &&
+        part.approvalId === approvalId &&
+        part.approvalStatus === "pending"
+          ? { ...part, label: "Tool approval dismissed", status: "done", approvalStatus: "canceled" }
+          : part
+      ),
+      run: message.run ? {
+        ...message.run,
+        steps: message.run.steps.map((step) =>
+          step.approval?.id === approvalId && step.approval.status === "pending"
+            ? { ...step, approval: { ...step.approval, status: "canceled", resolvedAt } }
+            : step
+        ),
+      } : undefined,
+    };
+  });
+}
 
 export function initialApprovalValues(request?: ToolApprovalRequest): Record<string, unknown> {
   if (request?.kind !== "mcp_form") return {};

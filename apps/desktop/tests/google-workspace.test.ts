@@ -5,7 +5,13 @@ import {
   GOOGLE_ACCOUNT_CONNECTIONS_URL,
   GOOGLE_CONNECT_DISCLOSURE,
   GOOGLE_REMOVE_MESSAGE,
+  applyGoogleSheetDimension,
+  applyGoogleSheetValues,
+  createGoogleSaveQueue,
   googleDocEditableParagraph,
+  googleDocEditableRegions,
+  googleDocSelectionRange,
+  googleDocTextReplacement,
   googleDisconnectMessage,
   googleSheetCellRange,
   googleWorkspaceFileUrl,
@@ -65,6 +71,68 @@ test("builds safe edit ranges and parses pasted cells", () => {
   );
 });
 
+test("applies optimistic Sheets edits without mutating the confirmed grid", () => {
+  const original = {
+    values: [["A", "B"], ["C", "D"]],
+    formulas: [["A", "B"], ["C", "D"]],
+  };
+  const edited = applyGoogleSheetValues(original, 0, 1, [["changed", "=SUM(A1:A2)"]]);
+  assert.deepEqual(edited.values, [["A", "changed", ""], ["C", "D"]]);
+  assert.deepEqual(edited.formulas, [["A", "changed", "=SUM(A1:A2)"], ["C", "D"]]);
+  assert.deepEqual(original.values, [["A", "B"], ["C", "D"]]);
+
+  const inserted = applyGoogleSheetDimension(edited, "insert_rows", 1);
+  assert.deepEqual(inserted.values[1], ["", "", ""]);
+  assert.deepEqual(
+    applyGoogleSheetDimension(inserted, "delete_columns", 0).values,
+    [["changed", ""], ["", ""], ["D"]],
+  );
+});
+
+test("serializes background saves and retries the failed task before later edits", async () => {
+  const calls: string[] = [];
+  const states: string[] = [];
+  let drained = 0;
+  let releaseFirst!: () => void;
+  const first = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  let secondAttempts = 0;
+  const queue = createGoogleSaveQueue(
+    (state) => states.push(`${state.status}:${state.pending}`),
+    () => { drained += 1; },
+  );
+
+  queue.enqueue(async () => {
+    calls.push("first");
+    await first;
+  });
+  queue.enqueue(async () => {
+    secondAttempts += 1;
+    calls.push(`second:${secondAttempts}`);
+    if (secondAttempts === 1) throw new Error("offline");
+  });
+  assert.deepEqual(calls, ["first"]);
+
+  releaseFirst();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, ["first", "second:1"]);
+  assert.equal(queue.getState().status, "error");
+
+  queue.enqueue(async () => {
+    calls.push("third");
+  });
+  assert.equal(queue.getState().pending, 2);
+  assert(!calls.includes("third"));
+
+  queue.retry();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, ["first", "second:1", "second:2", "third"]);
+  assert.equal(queue.getState().status, "saved");
+  assert.equal(drained, 1);
+  assert(states.includes("error:1"));
+});
+
 test("extracts only safe top-level Docs paragraphs for editing", () => {
   assert.deepEqual(
     googleDocEditableParagraph({
@@ -86,5 +154,54 @@ test("extracts only safe top-level Docs paragraphs for editing", () => {
       paragraph: { elements: [{ inlineObjectElement: { inlineObjectId: "image" } }] },
     }),
     null,
+  );
+});
+
+test("groups adjacent Docs paragraphs into a multi-line editing surface", () => {
+  assert.deepEqual(
+    googleDocEditableRegions([
+      {
+        startIndex: 1,
+        endIndex: 5,
+        paragraph: { elements: [{ textRun: { content: "One\n" } }] },
+      },
+      {
+        startIndex: 5,
+        endIndex: 11,
+        paragraph: { elements: [{ textRun: { content: "Two😀\n" } }] },
+      },
+      { startIndex: 11, endIndex: 20, table: { tableRows: [] } },
+      {
+        startIndex: 20,
+        endIndex: 26,
+        paragraph: { elements: [{ textRun: { content: "Three\n" } }] },
+      },
+    ]),
+    [
+      { start: 1, end: 10, text: "One\nTwo😀", blockIndexes: [0, 1] },
+      { start: 20, end: 25, text: "Three", blockIndexes: [3] },
+    ],
+  );
+});
+
+test("replaces only the changed Docs text range", () => {
+  assert.deepEqual(
+    googleDocTextReplacement(10, "Hello styled world", "Hello edited world"),
+    { start: 16, end: 20, text: "edit" },
+  );
+  assert.deepEqual(
+    googleDocTextReplacement(10, "A😀B", "A🙂B"),
+    { start: 11, end: 13, text: "🙂" },
+  );
+  assert.deepEqual(
+    googleDocTextReplacement(10, "same", "same"),
+    null,
+  );
+});
+
+test("maps Docs selections with Google UTF-16 indices", () => {
+  assert.deepEqual(
+    googleDocSelectionRange(10, "A😀", "selected"),
+    { start: 13, end: 21 },
   );
 });

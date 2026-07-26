@@ -16,15 +16,23 @@ function equal<T>(actual: T, expected: T, message: string) {
 
 const { useUpdateStore } = await import("../src/update/store.js");
 equal(useUpdateStore.getState().automaticCheck, true, "automatic checks should default on");
-equal(useUpdateStore.getState().automaticDownload, false, "automatic downloads should default off");
+equal(useUpdateStore.getState().automaticDownload, true, "automatic downloads should default on");
 useUpdateStore.getState().setAutomaticCheck(false);
-useUpdateStore.getState().setAutomaticDownload(true);
+useUpdateStore.getState().setAutomaticDownload(false);
 equal(useUpdateStore.getState().automaticCheck, false, "automatic checks should update");
-equal(useUpdateStore.getState().automaticDownload, true, "automatic downloads should update");
+equal(useUpdateStore.getState().automaticDownload, false, "automatic downloads should update");
 
-localStorage.setItem("milim.local.updates", JSON.stringify({ state: { automaticCheck: "yes", automaticDownload: 1 }, version: 0 }));
+localStorage.setItem("milim.local.updates", JSON.stringify({ state: { automaticCheck: true, automaticDownload: false }, version: 0 }));
+await useUpdateStore.persist.rehydrate();
+equal(useUpdateStore.getState().automaticDownload, true, "legacy automatic download state should migrate on");
+
+localStorage.setItem("milim.local.updates", JSON.stringify({ state: { automaticCheck: true, automaticDownload: false }, version: 1 }));
+await useUpdateStore.persist.rehydrate();
+equal(useUpdateStore.getState().automaticDownload, false, "post-migration opt-out should persist");
+
+localStorage.setItem("milim.local.updates", JSON.stringify({ state: { automaticCheck: "yes", automaticDownload: 1 }, version: 1 }));
 await useUpdateStore.persist.rehydrate();
 equal(useUpdateStore.getState().automaticCheck, true, "invalid automatic check state should normalize");
-equal(useUpdateStore.getState().automaticDownload, false, "invalid automatic download state should normalize");
+equal(useUpdateStore.getState().automaticDownload, true, "invalid automatic download state should normalize");
 
 export {};

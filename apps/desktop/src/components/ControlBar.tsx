@@ -43,8 +43,8 @@ const TOOL_APPROVAL_LABEL: Record<ToolApprovalMode, string> = {
 };
 
 const TOOL_APPROVAL_DESCRIPTION: Record<ToolApprovalMode, string> = {
-  review: "Ask before each tool action.",
-  guarded: "Run safe tools; ask before consequential actions.",
+  review: "Run read-only tools; ask before consequential actions.",
+  guarded: "Read-only tools only; consequential actions are unavailable.",
   open: "Run without approval in trusted workspaces.",
 };
 

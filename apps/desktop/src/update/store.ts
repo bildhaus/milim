@@ -44,6 +44,7 @@ interface UpdateState {
 }
 
 const LOCAL_UPDATE_STATE_KEY = "milim.local.updates";
+const UPDATE_STATE_VERSION = 1;
 
 function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -87,7 +88,7 @@ export const useUpdateStore = create<UpdateState>()(
   persist(
     (set, get) => ({
       automaticCheck: true,
-      automaticDownload: false,
+      automaticDownload: true,
       currentVersion: null,
       status: "idle",
       updateInfo: null,
@@ -193,7 +194,7 @@ export const useUpdateStore = create<UpdateState>()(
           set({ status: "ready", updatePath, updateInfo, downloadProgress: null, ignoredVersion: null });
           return updatePath;
         } catch (error) {
-          set({ status: "error", downloadProgress: null, error: formatError(error) });
+          set({ status: "available", downloadProgress: null, error: formatError(error) });
           return null;
         }
       },
@@ -223,13 +224,18 @@ export const useUpdateStore = create<UpdateState>()(
     {
       name: LOCAL_UPDATE_STATE_KEY,
       storage: createJSONStorage(() => getMachineLocalStorage() ?? localStorage),
+      version: UPDATE_STATE_VERSION,
+      migrate: (persisted, version) => {
+        const saved = persisted as Partial<UpdateState>;
+        return version < UPDATE_STATE_VERSION ? { ...saved, automaticDownload: true } : saved;
+      },
       merge: (persisted, current) => {
         const saved = persisted as Partial<UpdateState> | undefined;
         return {
           ...current,
           ...saved,
           automaticCheck: typeof saved?.automaticCheck === "boolean" ? saved.automaticCheck : true,
-          automaticDownload: typeof saved?.automaticDownload === "boolean" ? saved.automaticDownload : false,
+          automaticDownload: typeof saved?.automaticDownload === "boolean" ? saved.automaticDownload : true,
         };
       },
       partialize: (state) => ({

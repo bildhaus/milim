@@ -19,6 +19,7 @@ import {
 export type ComposerSendShortcut = "enter" | "modEnter";
 export type ComposerDensity = "comfortable" | "compact";
 export type ChatLayoutStyle = "transcript" | "bubbles" | "compact";
+export type SidebarRailStyle = "regular" | "split" | "centered";
 export type MessageWidth = "narrow" | "standard" | "wide" | "full";
 export type AvatarStyle = "none" | "avatar" | "role";
 export type CodeBlockTheme = "match" | "terminal" | "github" | "high-contrast";
@@ -88,6 +89,7 @@ interface UiPreferencesState {
   developerMode: boolean;
   experimentalHashlinePatch: boolean;
   chatLayoutStyle: ChatLayoutStyle;
+  sidebarRailStyle: SidebarRailStyle;
   showEmptyChatRidgeline: boolean;
   autoColorThreadNames: boolean;
   messageWidth: MessageWidth;
@@ -144,6 +146,7 @@ interface UiPreferencesState {
   setDeveloperMode: (developerMode: boolean) => void;
   setExperimentalHashlinePatch: (experimentalHashlinePatch: boolean) => void;
   setChatLayoutStyle: (chatLayoutStyle: ChatLayoutStyle) => void;
+  setSidebarRailStyle: (sidebarRailStyle: SidebarRailStyle) => void;
   setShowEmptyChatRidgeline: (showEmptyChatRidgeline: boolean) => void;
   setAutoColorThreadNames: (autoColorThreadNames: boolean) => void;
   setMessageWidth: (messageWidth: MessageWidth) => void;
@@ -244,6 +247,10 @@ function normalizeAiThreadNameModel(value: unknown): string {
 
 function normalizeChatLayoutStyle(value: unknown): ChatLayoutStyle {
   return value === "bubbles" || value === "compact" ? value : "transcript";
+}
+
+function normalizeSidebarRailStyle(value: unknown): SidebarRailStyle {
+  return value === "split" || value === "centered" ? value : "regular";
 }
 
 function normalizeMessageWidth(value: unknown): MessageWidth {
@@ -393,6 +400,7 @@ export const useUiPreferences = create<UiPreferencesState>()(
       developerMode: false,
       experimentalHashlinePatch: false,
       chatLayoutStyle: "transcript",
+      sidebarRailStyle: "regular",
       showEmptyChatRidgeline: true,
       autoColorThreadNames: false,
       messageWidth: "standard",
@@ -460,6 +468,7 @@ export const useUiPreferences = create<UiPreferencesState>()(
       setDeveloperMode: (developerMode) => set({ developerMode }),
       setExperimentalHashlinePatch: (experimentalHashlinePatch) => set({ experimentalHashlinePatch }),
       setChatLayoutStyle: (chatLayoutStyle) => set({ chatLayoutStyle: normalizeChatLayoutStyle(chatLayoutStyle) }),
+      setSidebarRailStyle: (sidebarRailStyle) => set({ sidebarRailStyle: normalizeSidebarRailStyle(sidebarRailStyle) }),
       setShowEmptyChatRidgeline: (showEmptyChatRidgeline) => set({ showEmptyChatRidgeline }),
       setAutoColorThreadNames: (autoColorThreadNames) => set({ autoColorThreadNames }),
       setMessageWidth: (messageWidth) => set({ messageWidth: normalizeMessageWidth(messageWidth) }),
@@ -616,6 +625,7 @@ export const useUiPreferences = create<UiPreferencesState>()(
           developerMode: typeof saved?.developerMode === "boolean" ? saved.developerMode : current.developerMode,
           experimentalHashlinePatch: typeof saved?.experimentalHashlinePatch === "boolean" ? saved.experimentalHashlinePatch : current.experimentalHashlinePatch,
           chatLayoutStyle: normalizeChatLayoutStyle(saved?.chatLayoutStyle),
+          sidebarRailStyle: normalizeSidebarRailStyle(saved?.sidebarRailStyle),
           showEmptyChatRidgeline: typeof saved?.showEmptyChatRidgeline === "boolean" ? saved.showEmptyChatRidgeline : true,
           autoColorThreadNames: typeof saved?.autoColorThreadNames === "boolean" ? saved.autoColorThreadNames : false,
           messageWidth: normalizeMessageWidth(saved?.messageWidth),
@@ -682,6 +692,7 @@ export const useUiPreferences = create<UiPreferencesState>()(
         developerMode: state.developerMode,
         experimentalHashlinePatch: state.experimentalHashlinePatch,
         chatLayoutStyle: normalizeChatLayoutStyle(state.chatLayoutStyle),
+        sidebarRailStyle: normalizeSidebarRailStyle(state.sidebarRailStyle),
         showEmptyChatRidgeline: state.showEmptyChatRidgeline,
         autoColorThreadNames: state.autoColorThreadNames,
         messageWidth: normalizeMessageWidth(state.messageWidth),

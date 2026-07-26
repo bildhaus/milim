@@ -107,18 +107,31 @@ equal(
   "download progress should reset after checks, success, and errors",
 );
 equal(autoUpdaterSource.includes("window.confirm"), false, "automatic update checks should not prompt on startup");
-equal(autoUpdaterSource.includes("downloadNow"), false, "automatic update checks should not download before the user clicks update");
+equal(autoUpdaterSource.includes("downloadNow"), false, "the scheduler should delegate automatic download policy to the update store");
 equal(autoUpdaterSource.includes("installNow"), false, "automatic update checks should not install before the user clicks update");
 equal(autoUpdaterSource.includes("ignoreVersion"), false, "canceling the top-bar update prompt should not hide the update");
 equal(autoUpdaterSource.includes("void run(true)"), true, "startup should use the shorter startup update guard");
 equal(autoUpdaterSource.includes("window.setInterval(() => void run()"), true, "background checks should keep the default automatic guard");
+equal(
+  updateStoreSource.includes("if (options?.automatic && get().automaticDownload)"),
+  true,
+  "automatic checks should stage updates when automatic downloads are enabled",
+);
+equal(
+  updateStoreSource.includes('set({ status: "available", downloadProgress: null, error: formatError(error) })'),
+  true,
+  "failed background downloads should remain retryable",
+);
 equal(topBarSource.includes('data-testid="topbar-update"'), true, "available updates should render a top-bar update button");
 equal(topBarSource.includes("window.confirm"), false, "top-bar update flow should use the themed app dialog");
 equal(topBarSource.includes('role="dialog"'), true, "top-bar update flow should render an in-app confirmation dialog");
+equal(topBarSource.includes('if (updateStatus === "ready")'), true, "ready updates should install on the first top-bar click");
+equal(topBarSource.includes("Restart to update milim"), true, "ready updates should identify the restart action");
+equal(topBarSource.includes("<Refresh size={14} />"), true, "ready updates should use the restart icon");
 equal(
-  topBarSource.indexOf("await installNow()") > topBarSource.indexOf("await downloadNow(updateInfo)"),
+  topBarSource.lastIndexOf("await installNow()") > topBarSource.indexOf("await downloadNow(updateInfo)"),
   true,
-  "top-bar update flow should download before installing",
+  "the fallback top-bar update flow should download before installing",
 );
 
 const windowsSelected = selectUpdateAssets(
