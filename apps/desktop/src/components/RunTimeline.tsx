@@ -11,11 +11,11 @@ const STATUS_LABEL: Record<RunStatus, string> = {
 };
 const MUTATING_TOOLS = new Set(["write_file", "edit_file", "patch_file"]);
 
-function fmtDuration(ms: number): string {
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  const m = Math.floor(ms / 60_000);
-  return `${m}m ${Math.round((ms % 60_000) / 1000)}s`;
+export function formatRunDuration(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m ${seconds % 60}s`;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -96,7 +96,7 @@ export function RunTimeline({ run }: { run: RunTrace }) {
   const stickToBottomRef = useRef(true);
   useEffect(() => {
     if (run.status !== "running") return;
-    const t = setInterval(() => setNow(Date.now()), 500);
+    const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, [run.status]);
 
@@ -134,7 +134,7 @@ export function RunTimeline({ run }: { run: RunTrace }) {
         <span className={`run-dot run-dot-${run.status}`} />
         <span className={"run-status" + (run.status === "running" ? " shiny-text" : "")}>{stepLabel}</span>
         {files && <span className="run-files">{files}</span>}
-        <span className="run-meta run-elapsed">{fmtDuration(elapsed)}</span>
+        <span className="run-meta run-elapsed">{formatRunDuration(elapsed)}</span>
       </button>
       <div
         className="run-body"
@@ -145,7 +145,7 @@ export function RunTimeline({ run }: { run: RunTrace }) {
         <div className="run-popover-head">
           <span className={"run-status" + (run.status === "running" ? " shiny-text" : "")}>{STATUS_LABEL[run.status]}</span>
           {run.model && <span className="run-model">{run.model}</span>}
-          <span className="run-meta run-elapsed">{fmtDuration(elapsed)}</span>
+          <span className="run-meta run-elapsed">{formatRunDuration(elapsed)}</span>
         </div>
         {steps.map(({ step: s, detail }, i) => (
           <div className="run-step" key={i}>
@@ -153,7 +153,7 @@ export function RunTimeline({ run }: { run: RunTrace }) {
             <div className="run-step-head">
               <span className="run-step-name">{s.name}</span>
               <span className="run-meta">
-                {s.endedAt != null ? fmtDuration(s.endedAt - s.startedAt) : "..."}
+                {s.endedAt != null ? formatRunDuration(s.endedAt - s.startedAt) : "..."}
               </span>
             </div>
             {detail && <div className="run-step-detail">{detail}</div>}
