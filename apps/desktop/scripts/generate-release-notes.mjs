@@ -9,6 +9,14 @@ const version = readFileSync(resolve(repoRoot, "VERSION"), "utf8").trim();
 const releases = JSON.parse(readFileSync(resolve(appRoot, "src", "update", "releases.json"), "utf8"));
 const release = releases[version];
 const iconNames = new Set(["file-text", "github", "git-pull-request", "google", "plug"]);
+const maxUpdateCards = 3;
+const oversizedLegacyReleases = new Set(["0.2.2", "0.2.3"]);
+
+for (const [releaseVersion, releaseEntry] of Object.entries(releases)) {
+  if (!oversizedLegacyReleases.has(releaseVersion) && Array.isArray(releaseEntry?.items) && releaseEntry.items.length > maxUpdateCards) {
+    fail(`Release ${releaseVersion} has ${releaseEntry.items.length} update cards; maximum is ${maxUpdateCards}.`);
+  }
+}
 
 if (packageVersion !== version) fail(`VERSION ${version} does not match desktop package version ${packageVersion}.`);
 if (!release || typeof release !== "object") fail(`Missing update-card release entry for ${version}.`);
