@@ -322,6 +322,7 @@ async function runTurnChangesCheck(page, fixture) {
 async function runProfileSetup(page) {
   const errors = collectErrors(page);
   await page.getByTestId("chat-shell").waitFor();
+  await dismissOnboardingIfPresent(page);
   await runWindowPinCheck(page);
   await openAgents(page);
 
@@ -361,6 +362,7 @@ async function runPersistenceAndChat(page, pid) {
   await runModelPickerSurfaceCheck(page);
   await runAppShortcutCheck(page);
 
+  await dismissOnboardingIfPresent(page);
   await runSlashAndAttachmentCheck(page);
   await runContextDrawerCheck(page);
   await runMemoryLibraryCheck(page);
@@ -1794,11 +1796,17 @@ async function runSlashAndAttachmentCheck(page) {
   const approvalReview = approvalGroup.getByRole("radio", { name: "Review" });
   await approvalReview.click();
   await approvalTrigger.getByText("Review", { exact: true }).waitFor();
-  await assertTextContains(approvalDescription, "Ask before each tool action.");
+  await assertTextContains(
+    approvalDescription,
+    "Run read-only tools; ask before consequential actions.",
+  );
   const approvalGuarded = approvalGroup.getByRole("radio", { name: "Guarded" });
   await approvalGuarded.click();
   await approvalTrigger.getByText("Guarded", { exact: true }).waitFor();
-  await assertTextContains(approvalDescription, "Run safe tools; ask before consequential actions.");
+  await assertTextContains(
+    approvalDescription,
+    "Read-only tools only; consequential actions are unavailable.",
+  );
   await approvalOpen.click();
   await approvalTrigger.getByText("Open", { exact: true }).waitFor();
   await page.getByTestId("composer-input").click();
@@ -2175,7 +2183,7 @@ async function seedWorkerRunDatabase(milimHome, fixture, status) {
 }
 
 async function dismissOnboardingIfPresent(page) {
-  await page.getByTestId("onboarding-preflight").waitFor({ state: "hidden", timeout: 10_000 }).catch(() => {});
+  await page.getByTestId("onboarding-preflight").waitFor({ state: "hidden", timeout: 30_000 });
   const flow = page.getByTestId("onboarding-flow");
   if (await flow.isVisible().catch(() => false)) {
     await page.getByLabel("Close onboarding").click();

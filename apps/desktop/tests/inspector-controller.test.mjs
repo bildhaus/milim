@@ -5,6 +5,10 @@ import { join } from "node:path";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const chatView = readFileSync(join(root, "src", "components", "ChatView.tsx"), "utf8");
+const chatMessageRow = readFileSync(
+  join(root, "src", "components", "ChatMessageRow.tsx"),
+  "utf8",
+);
 const api = readFileSync(join(root, "src", "api.ts"), "utf8");
 const store = readFileSync(join(root, "src", "sessions", "store.ts"), "utf8");
 
@@ -49,7 +53,7 @@ assert.match(chatView, /`Open Code: \$\{/);
 assert.match(chatView, /"Open Preview: App"/);
 assert.match(chatView, /"Open Workers"/);
 assert.match(chatView, /id="inspector-tab-workers"/);
-assert.match(chatView, /openWorkers\(linkedWorkerRun\.run\.id\)/);
+assert.match(chatMessageRow, /openWorkers\(linkedWorkerRun\.run\.id\)/);
 assert.match(chatView, /inspectorTab === "workers"[\s\S]*?\? true/);
 assert.ok(chatView.includes('[data-testid="open-artifact-browser"]'));
 

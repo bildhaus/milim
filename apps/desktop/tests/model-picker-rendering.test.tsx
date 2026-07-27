@@ -237,7 +237,11 @@ try {
   assert(batonMarkup.includes('data-testid="baton-menu-trigger"'), "Baton actions should collapse under one trigger");
   assert(!batonMarkup.includes("Model handoff actions"), "Closed Baton actions should not leave a hidden menu in the message layout");
   const hotSwapSource = readFileSync(resolve(process.cwd(), "src/components/HotSwapDialogs.tsx"), "utf8");
-  const styles = readFileSync(resolve(process.cwd(), "src/styles.css"), "utf8");
+  const styles = ["chat.css", "workspaces.css"]
+    .map((file) =>
+      readFileSync(resolve(process.cwd(), "src", file), "utf8"),
+    )
+    .join("\n");
   assert(hotSwapSource.includes("createPortal("), "Baton actions should render through a body portal");
   assert(hotSwapSource.includes('className="baton-menu-popover message-popover-layer"'), "Baton actions should use the shared message popover layer");
   assert(hotSwapSource.includes("Continue with...") && hotSwapSource.includes("Review with...") && hotSwapSource.includes("Retry with..."), "Baton menu should offer all handoff actions");

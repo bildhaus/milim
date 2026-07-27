@@ -56,7 +56,10 @@ assert(fileTree[0].children.map((node) => node.name).join(",") === "components,l
 assert(fileTree[1].name === "README.md" && fileTree[1].fileIndex === 2, "root files should remain navigable");
 
 const gitPanelSource = readFileSync(resolve(process.cwd(), "src/components/GitPanel.tsx"), "utf8");
-const styles = readFileSync(resolve(process.cwd(), "src/styles.css"), "utf8");
+const styles = readFileSync(
+  resolve(process.cwd(), "src/shell.css"),
+  "utf8",
+);
 assert(!gitPanelSource.includes('window.prompt("Review comment")'), "diff review comments should use the Milim editor");
 assert(gitPanelSource.includes('className="git-diff-comment-editor"'), "diff review comments should render inline");
 assert(styles.includes(".git-diff-comment {\n  position: absolute;"), "the review button should overlay the gutter instead of creating a row");
