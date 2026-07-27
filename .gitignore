@@ -20,6 +20,7 @@ apps/desktop/downloaded-release-artifacts
 /promo/
 # Generated local screenshots
 milim-*.png
+/design-qa.md
 # local model cache / runtime state
 /.milim-dev
 /.local-tools
