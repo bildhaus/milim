@@ -1350,7 +1350,7 @@ fn claude_spawn_error_message(error: &std::io::Error) -> String {
 }
 
 fn cli_path_warning(label: &str, command: &str) -> String {
-    format!("{label} CLI was not found on PATH. If this is macOS, apps launched from Finder or Dock may not inherit your shell PATH, so Milim may not see `{command}` even when Terminal can. Launch Milim from a terminal or add the CLI install folder to PATH for GUI apps.")
+    format!("{label} CLI was not found on PATH. Apps launched from the Dock or Finder do not inherit your shell PATH, so on macOS and Linux Milim also looks in the usual install directories (`~/.local/bin`, Homebrew, `~/.bun/bin`, and asdf/mise/volta shims). Install `{command}` into one of those, or launch Milim from a terminal.")
 }
 
 fn is_cli_path_warning(message: &str) -> bool {
@@ -1364,8 +1364,14 @@ fn opt_u32(value: &Value, key: &str) -> Option<u32> {
         .and_then(|n| u32::try_from(n).ok())
 }
 
+#[cfg(windows)]
 fn claude_command() -> Command {
     Command::new("claude")
+}
+
+#[cfg(not(windows))]
+fn claude_command() -> Command {
+    crate::cli_path::command("claude")
 }
 
 #[cfg(test)]

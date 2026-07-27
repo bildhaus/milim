@@ -734,7 +734,7 @@ fn pi_command() -> Command {
 
 #[cfg(not(windows))]
 fn pi_command() -> Command {
-    Command::new("pi")
+    crate::cli_path::command("pi")
 }
 
 #[cfg(windows)]
