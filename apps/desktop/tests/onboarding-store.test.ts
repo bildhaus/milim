@@ -31,6 +31,17 @@ Object.defineProperty(globalThis, "localStorage", {
   configurable: true,
 });
 
+localStorage.setItem("milim.onboarding", JSON.stringify({
+  state: {
+    version: 1,
+    status: "completed",
+    selectedSetupPath: "codex",
+    completedSteps: ["model", "defaults", "workbench", "finish"],
+    developerShowOnboarding: false,
+  },
+  version: 0,
+}));
+
 const { ONBOARDING_DISMISS_SNOOZE_MS, ONBOARDING_STATE_VERSION, shouldCheckOnboardingModels, shouldShowOnboarding, useOnboarding } = await import("../src/onboarding/store.js");
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -44,6 +55,12 @@ function equal<T>(actual: T, expected: T, message: string): void {
 }
 
 equal(useOnboarding.getState().version, ONBOARDING_STATE_VERSION, "onboarding state should have a version");
+equal(useOnboarding.getState().selectedSetupPath, "account_runtime", "legacy Codex setup should migrate to account runtimes");
+assert(!useOnboarding.getState().completedSteps.some((step) => String(step) === "defaults"), "removed defaults step should be discarded");
+assert(useOnboarding.getState().completedSteps.includes("context"), "legacy workbench step should migrate to workspace");
+equal(useOnboarding.getState().status, "completed", "completed onboarding should stay completed after migration");
+
+useOnboarding.getState().reset();
 equal(useOnboarding.getState().status, "not_started", "onboarding should default to not started");
 equal(useOnboarding.getState().developerShowOnboarding, false, "developer override should default off");
 assert(shouldShowOnboarding("not_started", false, false), "first run should show when no models are ready");
@@ -65,8 +82,8 @@ equal(useOnboarding.getState().status, "in_progress", "starting should begin uni
 useOnboarding.getState().setSetupPath("hosted");
 equal(useOnboarding.getState().selectedSetupPath, "hosted", "setup path should be stored");
 
-useOnboarding.getState().setSetupPath("codex");
-equal(useOnboarding.getState().selectedSetupPath, "codex", "codex setup path should be stored");
+useOnboarding.getState().setSetupPath("account_runtime");
+equal(useOnboarding.getState().selectedSetupPath, "account_runtime", "account runtime setup path should be stored");
 
 useOnboarding.getState().markStepComplete("model");
 assert(useOnboarding.getState().completedSteps.includes("model"), "model step should be marked complete");

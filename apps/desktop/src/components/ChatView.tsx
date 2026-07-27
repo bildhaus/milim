@@ -194,6 +194,12 @@ import {
   type EmptyStarterSuggestionIcon,
 } from "../lib/emptyStarterSuggestions";
 import {
+  composerNoticeAction,
+  modelComposerBlocker,
+  prioritizeComposerNotice,
+  type ComposerBlockerAction,
+} from "../lib/composerBlocker";
+import {
   checkpointMessage,
   compactionSummaryOutputCap,
   compactionSummaryMessages,
@@ -3682,6 +3688,29 @@ export function ChatView({
     () => mergeModelListsForPicker(models, mediaModelEntries),
     [models, mediaModelEntries],
   );
+  const proactiveModelBlocker = useMemo(
+    () => modelComposerBlocker({
+      modelsLoaded,
+      selectedModel: effectiveModel,
+      models: pickerModels,
+      providers,
+      accountRuntimeEnabled,
+    }),
+    [accountRuntimeEnabled, effectiveModel, modelsLoaded, pickerModels, providers],
+  );
+  const composerNotice = prioritizeComposerNotice(chatNotice, proactiveModelBlocker);
+  const composerAction: ComposerBlockerAction | null = composerNotice
+    ? composerNotice === proactiveModelBlocker
+      ? proactiveModelBlocker.action
+      : composerNoticeAction(composerNotice.message)
+    : null;
+  const composerActionLabel = composerAction === "manage_models"
+    ? "Manage models"
+    : composerAction === "choose_folder"
+      ? "Choose folder"
+      : composerAction === "privacy_settings"
+        ? "Review privacy"
+        : "";
   const composerCompletionRequest = useMemo(() => {
     if (composerCompletionMode === "off" || !model.trim() || isCodexModel(model) || isClaudeModel(model) || isOpenCodeModel(model) || isPiModel(model)) return undefined;
     const modelInfo = pickerModels.find((item) => item.id === model);
@@ -9546,14 +9575,26 @@ export function ChatView({
 
           <div className="dock">
             {emptyThread && showEmptyChatRidgeline && <MilimUsageRidgeline usage={milimUsage} />}
-            {chatNotice && (
+            {composerNotice && (
               <div
-                className={`sheet-hint dock-notice ${chatNotice.tone}`}
+                className={`sheet-hint dock-notice ${composerNotice.tone}`}
                 data-testid="chat-notice"
-                role={chatNotice.tone === "error" ? "alert" : "status"}
-                aria-live={chatNotice.tone === "error" ? "assertive" : "polite"}
+                role={composerNotice.tone === "error" ? "alert" : "status"}
+                aria-live={composerNotice.tone === "error" ? "assertive" : "polite"}
               >
-                {chatNotice.message}
+                <span>{composerNotice.message}</span>
+                {composerAction && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (composerAction === "manage_models") setProvidersOpen(true);
+                      else if (composerAction === "choose_folder") void pickFolder();
+                      else onOpenSettings();
+                    }}
+                  >
+                    {composerActionLabel}
+                  </button>
+                )}
               </div>
             )}
             <ComposerSurface>

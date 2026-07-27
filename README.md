@@ -10,12 +10,14 @@ Release artifacts target Windows and macOS. Linux packaging is intentionally dis
 
 ## What Milim does
 
-- **One thread, many models.** Switch between provider models, local Ollama or LM Studio models, and account runtimes without abandoning the active workspace, artifacts, memory, or conversation.
-- **Bring your own access.** Configure OpenAI-compatible providers, Anthropic, Gemini, Groq, OpenRouter, Replicate, and fal, or use separately installed Codex, Claude, OpenCode, and Pi CLIs.
-- **Review before changes land.** Approval modes govern tools and commands, coding retries can use isolated Git worktrees, and the built-in Git and GitHub views keep diffs, checkpoints, pull requests, and Worker output close to the thread.
-- **Extend the agent loop.** Reusable Agents, parallel Workers, built-in tools, skills, schedules, MCP servers, and inline MCP Apps share the same workspace and approval boundaries.
-- **Keep context local and deliberate.** Local SQLite persistence, encrypted provider records, scoped Personal and Project memory, and Off, Redact, and Block privacy modes make outbound routing explicit.
-- **Inspect the result.** Preview generated artifacts, folder-backed HTML sites, and runnable apps; create image, video, or music outputs through configured providers; and continue active desktop threads from a paired mobile companion.
+- **Keep one canonical thread.** Workspace context, conversation, and review history remain together instead of fragmenting by provider.
+- **Hot-swap models.** Switch the next turn between hosted providers, local Ollama or LM Studio models, and separately installed Codex, Claude, OpenCode, or Pi runtimes.
+- **Keep local control.** Project selection, model routing, tool approvals, local persistence, and outbound privacy boundaries stay explicit.
+- **Review before changes land.** Built-in Git views keep proposed edits, diffs, checkpoints, and approval decisions beside the thread.
+
+### Power tools
+
+Agents, Workers, skills, schedules, MCP servers and Apps, media generation, Google Workspace, previews, and the mobile companion remain available from the app's collapsed **Tools** section. They extend the core thread without competing with the default workflow.
 
 Milim keeps provider-backed chat and installed account runtimes distinct. Provider models use Milim's tool-agent loop, while account runtimes retain their native sessions and tools behind the same visible approval policy. Changing the selected model affects the next turn without turning each model into a separate project history.
 
@@ -25,7 +27,7 @@ Milim keeps provider-backed chat and installed account runtimes distinct. Provid
 
 Download the Windows portable EXE or macOS universal DMG from the [latest GitHub release](https://github.com/oshtz/milim/releases/latest). The desktop app embeds the server, so normal desktop use does not require a separate `milim serve` process.
 
-On first run, connect a model source, choose a workspace folder, select an approval mode, and ask for an edit or test. See the [full quickstart](https://docs.milim.ai/quickstart) for the first-run checklist, provider choices, privacy modes, and common setup failures.
+On first run, connect a model source, optionally choose a workspace folder, review the connection, and open Milim. Preferences and power tools remain available after setup. See the [full quickstart](https://docs.milim.ai/quickstart) for provider choices, privacy modes, and common setup failures.
 
 ### Run the desktop app from source
 

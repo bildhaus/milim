@@ -3,28 +3,37 @@ id: overview
 path:
 label: Overview
 title: milim docs wiki
-summary: Start here for model-agnostic development, model/provider switching, the embedded backend, local API, providers, agents, tools, memory, privacy, media, mobile companion, and release workflow.
+summary: Start here for one canonical development thread, model hot-swapping, local control, and diff review.
 group: Start
 order: 10
-updated: 2026-07-09
+updated: 2026-07-28
 ---
 
-milim is a model-agnostic software development desktop app with an embedded Rust backend and local HTTP API. The desktop app is a Tauri shell that embeds the same Axum server used by the CLI, then layers dev chat, inline model switching, providers, model-agnostic Agents, tools, Personal/Project memory, media, a paired mobile companion, update checks, and local persistence on top.
+milim is a model-agnostic software development desktop app with an embedded Rust backend and local HTTP API. Its default workflow keeps one canonical thread, lets the next turn hot-swap between provider, local, and account runtimes, keeps workspace execution under explicit local control, and puts Git diff review beside the conversation.
 
 ## Start here
 
 | Use case | Read |
 |---|---|
-| First run | Quickstart, then Models, then Desktop app. Stop when you can connect a provider, pick a folder, ask for an edit or test, switch models, and continue the same thread. |
-| Daily app | Desktop app, Agents, Memory, and Privacy explain the controls you touch every day. |
+| First run | Quickstart, then Models, then Desktop app. Stop when you can connect a runtime, optionally pick a folder, and open the main thread. |
+| Daily app | Desktop app, Models, and Privacy explain the canonical thread, model switching, local controls, and review surfaces. |
 | API integration | API, Models, Config, and Troubleshooting cover compatibility routes and stored state. |
 | Release or support | Release, Config, and Troubleshooting cover build checks, local state, and failure triage. |
+
+## Core workflow
+
+1. Keep the work in one canonical thread.
+2. Hot-swap the next turn between connected models and account runtimes.
+3. Choose the local workspace and execution boundaries explicitly.
+4. Inspect tool output and Git diffs before accepting changes.
+
+Agents, Workers, skills, schedules, MCP, media, Google Workspace, previews, and the mobile companion are optional power modules available from **Tools**. They extend the core workflow without changing it.
 
 ## App model
 
 | Part | Boundary |
 |---|---|
-| Desktop app | Tauri 2, Vite, React, TypeScript, one unified workbench, persisted UI state, and per-launch bearer auth. |
+| Desktop app | Tauri 2, Vite, React, TypeScript, one canonical thread, persisted UI state, and per-launch bearer auth. |
 | Embedded server | Axum HTTP server with OpenAI, Anthropic, Ollama, provider, workspace, agent, memory, MCP, media, mobile, and privacy routes. |
 | Local data | Provider records, settings, threads, memories, schedules, and runtime state live under the Milim home directory. |
 | Remote traffic | Hosted chat, embeddings, media, Codex, and installed Claude CLI calls pass through explicit routing and the privacy gate. |

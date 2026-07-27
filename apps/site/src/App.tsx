@@ -81,7 +81,7 @@ const quickstartSteps = [
   {
     step: "develop",
     title: "Start a dev thread",
-    body: "Pick a workspace, ask for an edit or test run, switch models, and keep the same project context.",
+    body: "Optionally pick a workspace, keep one thread across model switches, and review proposed changes before they land.",
   },
 ];
 
@@ -96,7 +96,7 @@ const faqItems = [
     id: "faq-providers",
     question: "Which providers?",
     answer:
-      "OpenAI-compatible endpoints, OpenAI, OpenRouter, Groq, Anthropic, Gemini, Replicate, fal, Ollama, LM Studio, Codex, and Claude Code are covered.",
+      "OpenAI-compatible endpoints, OpenAI, OpenRouter, Groq, Anthropic, Gemini, Replicate, fal, Ollama, LM Studio, Codex, Claude, OpenCode, and Pi are covered.",
   },
   {
     id: "faq-linux",
@@ -120,14 +120,14 @@ const faqItems = [
     id: "faq-difference",
     question: "How is Milim different from Claude Code, LM Studio, or Open WebUI?",
     answer:
-      "Those tools are strong at a specific runtime or interface. Milim is the local control plane around them: one project thread, visible tool runs, review controls, local memory, and provider switching without rebuilding the work around one vendor.",
+      "Those tools are strong at a specific runtime or interface. Milim is the local control plane around them: one canonical thread, model hot-swapping, explicit local boundaries, and diff review without rebuilding the work around one vendor.",
   },
 ];
 
 const features = [
   {
-    title: "One desktop app, not a toolchain",
-    body: "Model switching, generated artifacts, previews, voice, schedules, themes, and provider setup sit in a single cross-platform shell instead of spreading across terminals and browser tabs.",
+    title: "One canonical thread",
+    body: "Conversation, workspace context, and review history stay together while the next turn moves between hosted, local, and account runtimes.",
     wide: true,
   },
   {
@@ -137,8 +137,8 @@ const features = [
     visual: true,
   },
   {
-    title: "Works on your actual repo",
-    body: "Git status, diffs, branches, and pull requests sit beside the thread, so the agent operates on the project you already have instead of a sandbox copy of it.",
+    title: "Local control stays visible",
+    body: "Workspace selection, provider routing, tool approval, and outbound privacy boundaries stay explicit beside the thread.",
     full: true,
   },
 ];
@@ -147,37 +147,37 @@ type ChapterKind = "models" | "privacy" | "tools" | "memory";
 
 const chapters: Array<{ id?: string; title: string; kicker: string; body: string; kind: ChapterKind }> = [
   {
-    title: "Model freedom",
-    kicker: "routing",
-    body: "Switch between hosted APIs, local runtimes, account runtimes, and media models without rebuilding the thread around one vendor.",
+    title: "One thread",
+    kicker: "continuity",
+    body: "Keep the conversation, workspace, and review history together instead of creating a new project for every model.",
+    kind: "memory",
+  },
+  {
+    title: "Hot-swap runtimes",
+    kicker: "switching",
+    body: "Change the next turn between hosted APIs, local servers, and installed coding agents without losing the work.",
     kind: "models",
   },
   {
     id: "privacy",
-    title: "Privacy control",
-    kicker: "boundary",
-    body: "Keep local model traffic untouched and gate remote traffic with deterministic redaction or blocking.",
+    title: "Local control",
+    kicker: "boundaries",
+    body: "Choose the workspace, execution permissions, and outbound routing explicitly; local model traffic stays on loopback.",
     kind: "privacy",
   },
   {
-    title: "Agents and tools",
-    kicker: "execution",
-    body: "Run tools with visible timelines: each model step, tool call, result, error, and elapsed time stays inspectable.",
+    title: "Diff review",
+    kicker: "approval",
+    body: "Inspect tool output and proposed Git changes beside the thread before accepting what lands in the repository.",
     kind: "tools",
-  },
-  {
-    title: "Local memory",
-    kicker: "context",
-    body: "Ingest project context, search it semantically, and keep the useful parts near the thread.",
-    kind: "memory",
   },
 ];
 
 const chapterVisuals: Record<ChapterKind, { label: string; foot: string }> = {
   models: { label: "model router", foot: "one thread / four sources" },
   privacy: { label: "outbound gate", foot: "local passthrough / remote redacted" },
-  tools: { label: "tool run", foot: "3 steps / 1.9s" },
-  memory: { label: "local recall", foot: "3 chunks pinned to thread" },
+  tools: { label: "review queue", foot: "3 changes / approval required" },
+  memory: { label: "thread context", foot: "workspace and history retained" },
 };
 
 const routeSources = [
@@ -462,7 +462,7 @@ export function LandingPage() {
               no black boxes.
             </h2>
             <p>
-              A single desktop shell over the whole loop, where every run, diff, and outbound request is something you can open and read.
+              Keep one thread, switch the model behind the next turn, control the local boundary, and review the resulting diff.
             </p>
           </div>
           <div className="feature-grid">
@@ -485,7 +485,7 @@ export function LandingPage() {
             <Eyebrow label="how it works" />
             <h2>Switch the model without losing the work.</h2>
             <p>
-              The desktop app keeps workspace context, memory, previews, artifacts, approvals, and remote boundaries visible.
+              The desktop app keeps workspace context, approvals, and review history visible. Media, schedules, mobile, Google Workspace, and MCP stay in the collapsed Tools section until needed.
             </p>
           </div>
           <div className="chapter-stack">

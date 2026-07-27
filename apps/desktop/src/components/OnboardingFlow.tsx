@@ -1,23 +1,24 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  createSkill,
-  discoverHarnessImports,
+  accountRuntimeKind,
   discoverLocalProviders,
+  getClaudeStatus,
   getCodexAccount,
+  getOpenCodeStatus,
+  getPiStatus,
   isCliPathWarningMessage,
-  listMcpServers,
   listModelsDetailed,
-  listSkills,
   openExternalUrl,
   PROVIDER_PRESETS,
-  saveMcpServer,
   saveProvider,
   streamCodexDeviceLogin,
+  type AccountRuntimeKind,
+  type ClaudeStatusResponse,
   type CodexAccountResponse,
-  type HarnessImportPreview,
   type CodexLoginEvent,
   type ModelInfo,
-  type PrivacyMode,
+  type OpenCodeStatusResponse,
+  type PiStatusResponse,
   type ProviderDiscovery,
 } from "../api";
 import { modelDisplayName } from "../lib/modelPicker";
@@ -26,47 +27,47 @@ import { DEFAULT_THREAD_SETTINGS, useSessions } from "../sessions/store";
 import { useSettings } from "../settings/store";
 import { ArrowRight, Check, PlusSquare, Search, X } from "./icons";
 import { Logo } from "./Logo";
-import { ProviderIcon, providerBrandForProvider } from "./ProviderIcon";
+import { ProviderIcon, providerBrandForProvider, type ProviderBrand } from "./ProviderIcon";
 import { SheetDialog } from "./SheetDialog";
-import { Select, Toggle } from "./ui";
+import { Select } from "./ui";
 
 type StepDefinition = { id: OnboardingStepId; label: string };
 type NoticeTone = "info" | "success" | "warning" | "error";
 
 const STEPS: StepDefinition[] = [
-  { id: "model", label: "Model" },
-  { id: "defaults", label: "Defaults" },
-  { id: "context", label: "Context" },
+  { id: "model", label: "Runtime" },
+  { id: "context", label: "Workspace" },
   { id: "finish", label: "Ready" },
 ];
+
+type RuntimeStatuses = {
+  codex: CodexAccountResponse | null;
+  claude: ClaudeStatusResponse | null;
+  opencode: OpenCodeStatusResponse | null;
+  pi: PiStatusResponse | null;
+};
+
+const EMPTY_RUNTIME_STATUSES: RuntimeStatuses = {
+  codex: null,
+  claude: null,
+  opencode: null,
+  pi: null,
+};
 
 function modelProviderLabel(model: ModelInfo | null): string {
   return model?.owned_by?.trim() || "local";
 }
 
-function isLikelyRemoteModel(model: ModelInfo | null): boolean {
-  if (!model) return false;
-  const provider = model.owned_by.toLowerCase();
-  return !/(^|\b)(local|ollama|lm studio|lmstudio|milim)(\b|$)/.test(provider);
-}
-
-function privacyLabel(mode: PrivacyMode): string {
-  if (mode === "redact") return "Redact";
-  if (mode === "block") return "Block";
-  return "Off";
-}
-
 function pathLabel(path: OnboardingSetupPath | null): string {
   if (path === "local_detect") return "Local detection";
   if (path === "hosted") return "Hosted provider";
-  if (path === "codex") return "Codex";
+  if (path === "account_runtime") return "Installed agent";
   return "Not chosen";
 }
 
 function stepTitle(step: OnboardingStepId): string {
   if (step === "model") return "Choose the runtime";
-  if (step === "defaults") return "Set the ground rules";
-  if (step === "context") return "Set the working context";
+  if (step === "context") return "Choose the workspace";
   if (step === "finish") return "Review setup";
   return "Configure Milim";
 }
@@ -100,19 +101,31 @@ function inTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
-function importCount(preview: HarnessImportPreview | null): number {
-  return (preview?.mcps.length ?? 0) + (preview?.skills.length ?? 0);
+function runtimeReady(kind: AccountRuntimeKind, statuses: RuntimeStatuses): boolean {
+  if (kind === "codex") return Boolean(statuses.codex && (statuses.codex.account || !statuses.codex.requiresOpenaiAuth));
+  return Boolean(statuses[kind]?.available && statuses[kind]?.authenticated);
 }
 
-function uniqueImportName(name: string, harness: string, used: Set<string>): string {
-  const base = name.trim() || harness;
-  if (!used.has(base.toLowerCase())) return base;
-  const fallback = `${base} (${harness})`;
-  if (!used.has(fallback.toLowerCase())) return fallback;
-  for (let i = 2; ; i++) {
-    const next = `${fallback} ${i}`;
-    if (!used.has(next.toLowerCase())) return next;
+function runtimeDetail(kind: AccountRuntimeKind, statuses: RuntimeStatuses): string {
+  if (kind === "codex") {
+    const status = statuses.codex;
+    if (!status) return "Codex CLI was not detected.";
+    if (status.account) return status.account.email ?? status.account.planType ?? "Authenticated.";
+    return status.requiresOpenaiAuth ? "Sign in with ChatGPT to use Codex models." : "Available.";
   }
+  if (kind === "claude") {
+    const status = statuses.claude;
+    if (!status) return "Claude CLI was not detected.";
+    if (status.available && status.authenticated) return status.auth?.email ?? status.auth?.subscriptionType ?? "Authenticated.";
+    if (status.error) return status.error;
+    return status.available ? "Run `claude auth login`, then refresh." : "CLI not found on PATH.";
+  }
+  const status = kind === "opencode" ? statuses.opencode : statuses.pi;
+  if (!status) return `${kind === "opencode" ? "OpenCode" : "Pi"} CLI was not detected.`;
+  if (status.available && status.authenticated) return status.version ? `Version ${status.version}` : "Authenticated and ready.";
+  if (status.error) return status.error;
+  if (!status.available) return "CLI not found on PATH.";
+  return kind === "opencode" ? "Configure a provider in OpenCode, then refresh." : "Run Pi and use /login, then refresh.";
 }
 
 export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Promise<void> | void }) {
@@ -121,9 +134,10 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
   const rawThreadSettings = useSessions((s) => s.sessions.find((x) => x.id === s.activeId)?.settings);
   const updateThreadSettings = useSessions((s) => s.updateSettings);
   const accountRuntimeEnabled = useSettings((s) => s.accountRuntimeEnabled);
+  const setAccountRuntimeEnabled = useSettings((s) => s.setAccountRuntimeEnabled);
   const threadSettings = useMemo(() => ({ ...DEFAULT_THREAD_SETTINGS, ...rawThreadSettings }), [rawThreadSettings]);
   const selectedModel = threadSettings.model.trim();
-  const [step, setStep] = useState<OnboardingStepId>(() => onboarding.completedSteps.includes("model") ? "defaults" : "model");
+  const [step, setStep] = useState<OnboardingStepId>(() => onboarding.completedSteps.includes("model") ? "context" : "model");
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [discovering, setDiscovering] = useState(false);
@@ -133,18 +147,15 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
   const [hostedPresetName, setHostedPresetName] = useState("OpenAI");
   const [hostedApiKey, setHostedApiKey] = useState("");
   const [hostedBusy, setHostedBusy] = useState(false);
-  const [codexAccount, setCodexAccount] = useState<CodexAccountResponse | null>(null);
+  const [runtimeStatuses, setRuntimeStatuses] = useState<RuntimeStatuses>(EMPTY_RUNTIME_STATUSES);
+  const [runtimeBusy, setRuntimeBusy] = useState(false);
   const [codexBusy, setCodexBusy] = useState(false);
   const [folderDraft, setFolderDraft] = useState(threadSettings.folder);
-  const [harnessPreview, setHarnessPreview] = useState<HarnessImportPreview | null>(null);
-  const [harnessBusy, setHarnessBusy] = useState(false);
-  const [harnessNote, setHarnessNote] = useState<{ tone: NoticeTone; message: string } | null>(null);
 
   const steps = STEPS;
   const currentIndex = Math.max(0, steps.findIndex((item) => item.id === step));
   const selectedModelInfo = models.find((model) => model.id === selectedModel) ?? null;
   const selectedModelReady = Boolean(selectedModelInfo);
-  const remoteLikely = isLikelyRemoteModel(selectedModelInfo);
   const hostedPreset = PROVIDER_PRESETS.find((preset) => preset.name === hostedPresetName) ?? PROVIDER_PRESETS[0];
 
   async function refreshModels(selectFirst = false, preferredOwner?: string) {
@@ -173,7 +184,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
 
   useEffect(() => {
     void refreshModels();
-    if (accountRuntimeEnabled.codex) void refreshCodexAccount();
+    void refreshAccountRuntimes();
     onboarding.start();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountRuntimeEnabled]);
@@ -187,24 +198,37 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
     setStep("finish");
   }, [step, steps]);
 
-  useEffect(() => {
-    if (!inTauriRuntime()) return;
-    void refreshHarnessImports();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  async function refreshCodexAccount() {
-    try {
-      setCodexAccount(await getCodexAccount(false));
-    } catch {
-      setCodexAccount(null);
-    }
+  async function refreshAccountRuntimes(refreshCodex = false) {
+    setRuntimeBusy(true);
+    const [codex, claude, opencode, pi] = await Promise.allSettled([
+      getCodexAccount(refreshCodex),
+      getClaudeStatus(),
+      getOpenCodeStatus(),
+      getPiStatus(),
+    ]);
+    setRuntimeStatuses({
+      codex: codex.status === "fulfilled" ? codex.value : null,
+      claude: claude.status === "fulfilled" ? claude.value : null,
+      opencode: opencode.status === "fulfilled" ? opencode.value : null,
+      pi: pi.status === "fulfilled" ? pi.value : null,
+    });
+    setRuntimeBusy(false);
   }
 
   function selectModel(modelId: string) {
     updateThreadSettings(activeId, { model: modelId });
     onboarding.markStepComplete("model");
+    if (accountRuntimeKind(modelId)) {
+      setActiveSetupPath("account_runtime");
+      onboarding.setSetupPath("account_runtime");
+    }
     setProviderNotice({ tone: "success", message: `Selected ${modelId}.` });
+  }
+
+  function enableRuntime(kind: AccountRuntimeKind) {
+    setAccountRuntimeEnabled(kind, true);
+    setActiveSetupPath("account_runtime");
+    onboarding.setSetupPath("account_runtime");
   }
 
   function chooseSetupPath(path: OnboardingSetupPath) {
@@ -290,8 +314,8 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
   async function connectCodex() {
     if (codexBusy) return;
     setCodexBusy(true);
-    setActiveSetupPath("codex");
-    onboarding.setSetupPath("codex");
+    setActiveSetupPath("account_runtime");
+    onboarding.setSetupPath("account_runtime");
     setProviderNotice({ tone: "info", message: "Starting Codex login." });
     let completed = false;
     let failed = "";
@@ -326,7 +350,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
           failed = ev.message;
         }
       });
-      await refreshCodexAccount();
+      await refreshAccountRuntimes(true);
       if (completed) {
         setProviderNotice({ tone: "success", message: "Codex connected. Refreshing available models." });
         await refreshModels(true, "Codex");
@@ -356,73 +380,16 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
     }
   }
 
-  async function refreshHarnessImports() {
-    setHarnessBusy(true);
-    try {
-      setHarnessPreview(await discoverHarnessImports());
-    } finally {
-      setHarnessBusy(false);
-    }
-  }
-
-  async function importHarnessSetup() {
-    const preview = harnessPreview ?? await discoverHarnessImports();
-    const count = importCount(preview);
-    if (!count) return;
-    setHarnessBusy(true);
-    setHarnessNote(null);
-    try {
-      const [existingMcps, existingSkills] = await Promise.all([listMcpServers(), listSkills()]);
-      const mcpNames = new Set(existingMcps.map((server) => server.name.toLowerCase()));
-      const skillNames = new Set(existingSkills.map((skill) => skill.name.toLowerCase()));
-      let mcpCount = 0;
-      let skillCount = 0;
-
-      for (const mcp of preview.mcps) {
-        const name = uniqueImportName(mcp.name, mcp.harness, mcpNames);
-        const saved = await saveMcpServer({
-          name,
-          command: mcp.command,
-          args: mcp.args,
-          cwd: mcp.cwd ?? null,
-          env: mcp.env ?? [],
-          enabled: false,
-        });
-        if (saved) {
-          mcpNames.add(saved.name.toLowerCase());
-          mcpCount++;
-        }
-      }
-      for (const skill of preview.skills) {
-        if (skillNames.has(skill.name.toLowerCase())) continue;
-        const saved = await createSkill({
-          skill_md: skill.skill_md,
-          enabled: false,
-          source_kind: `imported:${skill.harness.toLowerCase().replace(/\s+/g, "-")}`,
-          source_url: skill.path,
-        });
-        if (saved) {
-          skillNames.add(saved.name.toLowerCase());
-          skillCount++;
-        }
-      }
-
-      setHarnessNote({ tone: "success", message: `Imported ${mcpCount} MCP server${mcpCount === 1 ? "" : "s"} and ${skillCount} skill${skillCount === 1 ? "" : "s"} disabled.` });
-    } catch (error) {
-      setHarnessNote({ tone: "error", message: error instanceof Error ? error.message : "Import failed." });
-    } finally {
-      setHarnessBusy(false);
-    }
-  }
-
   function nextStep() {
     if (step === "model" && !selectedModelReady) {
       setProviderNotice({ tone: "error", message: "Connect and select a reachable chat model before continuing." });
       return;
     }
     const next = steps[Math.min(currentIndex + 1, steps.length - 1)];
-    if (step === "defaults") onboarding.markStepComplete("defaults");
-    if (step === "context") onboarding.markStepComplete("context");
+    if (step === "context") {
+      updateThreadSettings(activeId, { folder: folderDraft.trim() });
+      onboarding.markStepComplete("context");
+    }
     setStep(next.id);
   }
 
@@ -455,9 +422,20 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
     setStep(id);
   }
 
+  const installedRuntimes: Array<{
+    kind: AccountRuntimeKind;
+    name: string;
+    brand: ProviderBrand;
+  }> = [
+    { kind: "codex", name: "Codex", brand: "codex" },
+    { kind: "claude", name: "Claude", brand: "claude" },
+    { kind: "opencode", name: "OpenCode", brand: "opencode" },
+    { kind: "pi", name: "Pi", brand: "pi" },
+  ];
+
   return (
     <SheetDialog
-      title="Personalize Milim"
+      title="Set up Milim"
       className="sheet onboarding-sheet"
       overlayClassName="sheet-overlay onboarding-overlay"
       testId="onboarding-flow"
@@ -501,14 +479,14 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
             <section className="onboarding-panel onboarding-split-panel onboarding-model-panel" aria-labelledby="onboarding-model-title">
                 <OnboardingStory
                   tone="model"
-                  title="Connect a default runtime."
-                  body="Milim needs one reachable model before the first chat. Local providers, hosted providers, and Codex all fit."
+                  title="Connect any model source."
+                  body="Use an installed coding agent, a local server, or a hosted provider. Milim keeps them in the same thread."
                   details={[selectedModelReady ? selectedModel : "No model selected", pathLabel(activeSetupPath)]}
                 />
               <div className="onboarding-step-body">
                 <div className="onboarding-panel-head">
-                  <h3 id="onboarding-model-title">Choose your default model</h3>
-                  <p>Once Milim can see a model, select it here and continue.</p>
+                  <h3 id="onboarding-model-title">Connect a runtime</h3>
+                  <p>Detect or connect a source, then choose any reachable model.</p>
                 </div>
 
                 <div className="onboarding-model-summary">
@@ -539,9 +517,9 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
                       <span className="onboarding-path-icon"><PlusSquare size={14} /></span>
                       <span><strong>Hosted</strong><small>OpenAI, OpenRouter, Gemini</small></span>
                     </button>
-                    <button className={"onboarding-path-option" + (activeSetupPath === "codex" ? " active" : "")} type="button" onClick={() => chooseSetupPath("codex")}>
-                      <span className="onboarding-path-icon"><ProviderIcon brand="codex" /></span>
-                      <span><strong>Codex</strong><small>Account-backed runtime</small></span>
+                    <button className={"onboarding-path-option" + (activeSetupPath === "account_runtime" ? " active" : "")} type="button" onClick={() => chooseSetupPath("account_runtime")}>
+                      <span className="onboarding-path-icon"><ProviderIcon brand="claude" /></span>
+                      <span><strong>Installed agents</strong><small>Codex, Claude, OpenCode, Pi</small></span>
                     </button>
                   </div>
 
@@ -613,27 +591,40 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
                     </>
                   )}
 
-                  {activeSetupPath === "codex" && (
+                  {activeSetupPath === "account_runtime" && (
                     <>
                       <div className="onboarding-path-head">
-                        <span className="onboarding-path-icon"><ProviderIcon brand="codex" size={15} /></span>
+                        <span className="onboarding-path-icon"><ProviderIcon brand="claude" size={15} /></span>
                         <div>
-                          <h4>Use Codex</h4>
-                          <p>Connect the account-backed Codex runtime. Codex models appear only after authentication.</p>
+                          <h4>Use an installed agent</h4>
+                          <p>Milim detects each CLI independently. Authenticate with that agent's own tooling, then refresh.</p>
                         </div>
                       </div>
-                      <div className="onboarding-codex-status">
-                        <strong>
-                          {codexAccount?.account
-                            ? codexAccount.account.email ?? "Codex connected"
-                            : codexAccount && !codexAccount.requiresOpenaiAuth
-                              ? "Codex available"
-                              : "Not connected"}
-                        </strong>
-                        <span>{codexAccount?.account?.planType ?? "ChatGPT login required when prompted."}</span>
+                      <div className="onboarding-runtime-list">
+                        {installedRuntimes.map(({ kind, name, brand }) => {
+                          const enabled = accountRuntimeEnabled[kind];
+                          const ready = enabled && runtimeReady(kind, runtimeStatuses);
+                          return (
+                            <div className="onboarding-runtime-row" data-testid={`onboarding-runtime-${kind}`} key={kind}>
+                              <ProviderIcon brand={brand} size={16} />
+                              <span>
+                                <strong>{name}</strong>
+                                <small>{enabled ? runtimeDetail(kind, runtimeStatuses) : "Disabled in Providers."}</small>
+                              </span>
+                              <em className={ready ? "ready" : ""}>{ready ? "Ready" : enabled ? "Setup needed" : "Disabled"}</em>
+                              {!enabled ? (
+                                <button className="btn-ghost" type="button" onClick={() => enableRuntime(kind)}>Enable</button>
+                              ) : kind === "codex" && !ready ? (
+                                <button className="btn-ghost" type="button" onClick={() => void connectCodex()} disabled={codexBusy}>
+                                  {codexBusy ? "Connecting..." : "Connect"}
+                                </button>
+                              ) : null}
+                            </div>
+                          );
+                        })}
                       </div>
-                      <button className="btn-accent" type="button" onClick={() => void connectCodex()} disabled={codexBusy}>
-                        {codexBusy ? "Connecting..." : "Connect Codex"}
+                      <button className="btn-accent" type="button" onClick={() => void refreshAccountRuntimes(true)} disabled={runtimeBusy}>
+                        {runtimeBusy ? "Checking..." : "Refresh agents"}
                       </button>
                     </>
                   )}
@@ -663,70 +654,22 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
             </section>
           )}
 
-          {step === "defaults" && (
-            <section className="onboarding-panel onboarding-split-panel" aria-labelledby="onboarding-defaults-title">
-              <OnboardingStory
-                tone="tools"
-                title="Set the ground rules."
-                body="Choose what the starter thread can remember and how remote sends should be handled."
-                details={[threadSettings.memory ? "Memory on" : "Memory off", `Privacy ${privacyLabel(threadSettings.privacy)}`]}
-              />
-              <div className="onboarding-step-body">
-                <div className="onboarding-panel-head">
-                  <h3 id="onboarding-defaults-title">Personalize chat defaults</h3>
-                  <p>Keep the defaults simple, or add guardrails for remote providers.</p>
-                </div>
-                <div className="onboarding-defaults">
-                  <div className="onboarding-toggle-row">
-                    <div>
-                      <strong>Memory</strong>
-                      <span>Use thread and project memories when the selected model supports embeddings.</span>
-                    </div>
-                    <Toggle checked={threadSettings.memory} onChange={(memory) => updateThreadSettings(activeId, { memory })} testId="onboarding-memory-toggle" />
-                  </div>
-                  {remoteLikely && (
-                    <div className="onboarding-privacy-grid">
-                      {(["off", "redact", "block"] as PrivacyMode[]).map((privacyMode) => (
-                        <button
-                          key={privacyMode}
-                          type="button"
-                          className={"onboarding-privacy" + (threadSettings.privacy === privacyMode ? " active" : "")}
-                          onClick={() => updateThreadSettings(activeId, { privacy: privacyMode })}
-                        >
-                          <strong>{privacyLabel(privacyMode)}</strong>
-                          <span>
-                            {privacyMode === "off"
-                              ? "No scan before remote sends."
-                              : privacyMode === "redact"
-                                ? "Recommended for remote providers."
-                                : "Stop remote sends when PII is detected."}
-                          </span>
-                          {privacyMode === "redact" && <small>Recommended</small>}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </section>
-          )}
-
           {step === "context" && (
             <section className="onboarding-panel onboarding-split-panel" aria-labelledby="onboarding-context-title">
               <OnboardingStory
                 tone="context"
-                title="Point Milim at a project."
-                body="Folder context, sandbox tools, and computer use stay explicit so Milim only reaches where you allow it."
-                details={[threadSettings.folder || "No folder yet", threadSettings.sandbox ? "Sandbox on" : "Sandbox off"]}
+                title="Choose where work happens."
+                body="A workspace unlocks repository files, shell commands, Git review, and runnable previews. You can also continue without one."
+                details={[threadSettings.folder || "No workspace", threadSettings.folder ? "Project tools ready" : "Chat only"]}
               />
               <div className="onboarding-step-body">
                 <div className="onboarding-panel-head">
-                  <h3 id="onboarding-context-title">Set the working context</h3>
-                  <p>Set the project defaults now, then tune agents, MCP, media, and schedules from the main app.</p>
+                  <h3 id="onboarding-context-title">Choose a workspace</h3>
+                  <p>Optional. Add a project folder now, or use folderless chat and choose one later.</p>
                 </div>
                 <div className="onboarding-workbench-grid">
                   <label className="onboarding-field">
-                    <span>Working folder</span>
+                    <span>Workspace folder</span>
                     <span className="onboarding-field-row">
                       <input
                         value={folderDraft}
@@ -739,47 +682,9 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
                       </button>
                     </span>
                   </label>
-                  <div className="onboarding-toggle-row">
-                    <div>
-                      <strong>Sandbox tools</strong>
-                      <span>Allow isolated Docker command runs when tools are used.</span>
-                    </div>
-                    <Toggle checked={threadSettings.sandbox} onChange={(sandbox) => updateThreadSettings(activeId, { sandbox })} testId="onboarding-sandbox-toggle" />
-                  </div>
-                  <div className="onboarding-toggle-row">
-                    <div>
-                      <strong>Computer use</strong>
-                      <span>Allow screen, mouse, and keyboard tools for this thread.</span>
-                    </div>
-                    <Toggle checked={threadSettings.computerUse} onChange={(computerUse) => updateThreadSettings(activeId, { computerUse })} testId="onboarding-computer-toggle" />
-                  </div>
-                  <div className="onboarding-toggle-row">
-                    <div>
-                      <strong>Import agent setup</strong>
-                      <span>
-                        {harnessPreview
-                          ? `${harnessPreview.mcps.length} MCP server${harnessPreview.mcps.length === 1 ? "" : "s"} and ${harnessPreview.skills.length} skill${harnessPreview.skills.length === 1 ? "" : "s"} found from Claude/Codex.`
-                          : harnessBusy
-                            ? "Scanning Claude and Codex config."
-                            : "Bring over existing Claude/Codex MCP servers and skills."}
-                      </span>
-                    </div>
-                    <button className="btn-ghost" type="button" disabled={harnessBusy || importCount(harnessPreview) === 0} onClick={() => void importHarnessSetup()}>
-                      {harnessBusy ? "Working..." : "Import as disabled"}
-                    </button>
-                  </div>
-                  {harnessNote && <p className={`onboarding-notice ${harnessNote.tone}`}>{harnessNote.message}</p>}
-                  {harnessPreview && importCount(harnessPreview) > 0 && (
-                    <div className="onboarding-model-list">
-                      <span className="onboarding-mini-title">Detected setup</span>
-                      {[...harnessPreview.mcps.slice(0, 4), ...harnessPreview.skills.slice(0, 4)].slice(0, 6).map((item) => (
-                        <div className="onboarding-model-row" key={`${item.harness}:${"command" in item ? item.command : item.path}:${item.name}`}>
-                          <span>{item.name}</span>
-                          <small>{"command" in item ? `${item.harness} MCP` : `${item.harness} skill`}</small>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                  <p className="onboarding-path-note">
+                    Memory, privacy, sandbox, computer use, and power tools remain available after setup.
+                  </p>
                 </div>
               </div>
             </section>
@@ -790,13 +695,13 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
               <OnboardingStory
                 tone="ready"
                 title="Setup is ready."
-                body="Milim will open with these defaults. Settings and model/provider managers stay available after onboarding."
+                body="Open the app with one reachable model and the workspace you chose. Preferences stay available when you need them."
                 details={[threadSettings.folder ? "Project ready" : "No project", selectedModelReady ? "Model ready" : "Model missing"]}
               />
               <div className="onboarding-step-body">
                 <div className="onboarding-panel-head">
                   <h3 id="onboarding-finish-title">Your workspace is ready</h3>
-                  <p>Review the setup, then start with the app hidden until onboarding completes.</p>
+                  <p>Review the connection, then open Milim. No task will run automatically.</p>
                 </div>
                 {!selectedModelReady && (
                   <p className="onboarding-notice error">A selected, reachable chat model is required before setup can finish.</p>
@@ -804,9 +709,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
                 <div className="onboarding-summary">
                   <span><strong>Setup path</strong>{pathLabel(onboarding.selectedSetupPath)}</span>
                   <span><strong>Model</strong>{selectedModelReady ? selectedModel : "Not ready"}</span>
-                  <span><strong>Memory</strong>{threadSettings.memory ? "On" : "Off"}</span>
-                  <span><strong>Privacy</strong>{privacyLabel(threadSettings.privacy)}</span>
-                  <span><strong>Folder</strong>{threadSettings.folder || "Not set"}</span>
+                  <span><strong>Workspace</strong>{threadSettings.folder || "Not set (optional)"}</span>
                 </div>
               </div>
             </section>
@@ -821,7 +724,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
         <div className="onboarding-footer-actions">
           {step === "finish" ? (
             <button className="btn-accent" type="button" onClick={finish}>
-              Start chatting
+              Open Milim
             </button>
           ) : (
             <button className="btn-accent" type="button" onClick={nextStep}>

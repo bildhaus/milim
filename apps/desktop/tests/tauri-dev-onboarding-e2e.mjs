@@ -261,7 +261,11 @@ async function restoreOnboardingState(page, previous) {
 }
 
 async function completeOnboarding(page) {
-  await page.getByRole("heading", { name: "Choose your default model" }).waitFor();
+  await page.getByRole("heading", { name: "Connect a runtime" }).waitFor();
+  await page.getByRole("button", { name: /Installed agents/ }).click();
+  for (const runtime of ["codex", "claude", "opencode", "pi"]) {
+    await page.getByTestId(`onboarding-runtime-${runtime}`).waitFor();
+  }
 
   const modelSummary = await page.locator(".onboarding-model-summary").innerText();
   if (modelSummary.includes("No reachable model selected")) {
@@ -270,12 +274,10 @@ async function completeOnboarding(page) {
   }
 
   await page.getByRole("button", { name: /Continue/ }).click();
-  await page.getByRole("heading", { name: "Personalize chat defaults" }).waitFor();
-  await page.getByRole("button", { name: /Continue/ }).click();
-  await page.getByRole("heading", { name: "Set the working context" }).waitFor();
+  await page.getByRole("heading", { name: "Choose a workspace" }).waitFor();
   await page.getByRole("button", { name: /Continue/ }).click();
   await page.getByRole("heading", { name: "Your workspace is ready" }).waitFor();
-  await page.getByRole("button", { name: "Start chatting" }).click();
+  await page.getByRole("button", { name: "Open Milim" }).click();
   await page.getByTestId("onboarding-flow").waitFor({ state: "detached" });
   await page.getByTestId("composer-input").waitFor();
 }

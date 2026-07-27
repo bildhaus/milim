@@ -9589,11 +9589,30 @@ html[data-dark="true"] .preview-control-cursor {
 }
 
 .dock .dock-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   width: fit-content;
   max-width: min(var(--chat-content-width), calc(100vw - 40px));
   margin: 0 auto 8px;
   text-align: center;
   color: var(--tertiary-text);
+}
+.dock .dock-notice button {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: currentColor;
+  font: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.dock .dock-notice button:focus-visible {
+  outline: 2px solid var(--focus-border);
+  outline-offset: 2px;
 }
 .dock .dock-notice.error {
   color: var(--error);
@@ -12764,7 +12783,7 @@ span.provider-brand-icon {
   border-color: var(--focus-border);
 }
 .onboarding-discoveries,
-.onboarding-codex-status,
+.onboarding-runtime-list,
 .onboarding-download-list,
 .onboarding-model-list,
 .onboarding-defaults,
@@ -12773,23 +12792,43 @@ span.provider-brand-icon {
   display: grid;
   gap: 8px;
 }
-.onboarding-codex-status {
-  min-width: 0;
-  gap: 3px;
-  padding: 8px 0;
-  border: 1px solid var(--border-primary);
-  border-width: 1px 0 0;
+.onboarding-runtime-list {
+  gap: 0;
+  border-top: 1px solid var(--border-primary);
 }
-.onboarding-codex-status strong,
-.onboarding-codex-status span {
+.onboarding-runtime-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 42px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-primary);
+}
+.onboarding-runtime-row > span {
+  display: grid;
+  gap: 2px;
+}
+.onboarding-runtime-row strong,
+.onboarding-runtime-row small {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.onboarding-codex-status span {
+.onboarding-runtime-row small {
   color: var(--tertiary-text);
   font-size: 11px;
+}
+.onboarding-runtime-row em {
+  color: var(--warning);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 700;
+}
+.onboarding-runtime-row em.ready {
+  color: var(--success);
 }
 .onboarding-discovery,
 .onboarding-model-row,
@@ -13321,7 +13360,7 @@ span.provider-brand-icon {
   align-items: start;
 }
 .onboarding-overlay .onboarding-model-panel .onboarding-path-list {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
 }
 .onboarding-overlay .onboarding-model-panel .onboarding-path-option {
