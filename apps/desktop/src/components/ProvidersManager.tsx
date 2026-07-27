@@ -9,6 +9,8 @@ import {
   getPiStatus,
   isCliPathWarningMessage,
   isOpenRouterProvider,
+  importClaudeThread,
+  listClaudeThreads,
   listCodexThreads,
   listProviders,
   logoutCodex,
@@ -19,6 +21,7 @@ import {
   streamCodexDeviceLogin,
   updateAccountRuntime,
   type AccountRuntimeUpdateStatus,
+  type ClaudeThreadSummary,
   type ClaudeStatusResponse,
   type AccountRuntimeKind,
   type CodexAccountResponse,
@@ -31,6 +34,7 @@ import {
   type ProviderKind,
 } from "../api";
 import { recoveredCodexSession, recoveredCodexSessionId } from "../lib/codexRecovery";
+import { importedClaudeSession, importedClaudeSessionId } from "../lib/claudeImport";
 import { isLoopbackProviderEndpoint } from "../lib/providerEndpoint.js";
 import { useSessions } from "../sessions/store";
 import { useSettings } from "../settings/store";
@@ -185,7 +189,7 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
     tone: StatusTone;
     message: string;
   } | null>(null);
-  const [recoveringCodex, setRecoveringCodex] = useState(false);
+  const [importingRuntime, setImportingRuntime] = useState<"codex" | "claude" | null>(null);
   const [claudeStatus, setClaudeStatus] = useState<ClaudeStatusResponse | null>(
     null,
   );
@@ -704,10 +708,11 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
       items: providers.filter((provider) => providerGroup(provider) === label),
     }))
     .filter((group) => group.items.length > 0);
-  if (recoveringCodex) {
+  if (importingRuntime) {
     return (
-      <CodexRecoveryDialog
-        onClose={() => setRecoveringCodex(false)}
+      <AccountRuntimeImportDialog
+        runtime={importingRuntime}
+        onClose={() => setImportingRuntime(null)}
         onOpenSession={onClose}
       />
     );
@@ -871,11 +876,11 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                   {codexReady && (
                     <button
                       className="btn-ghost"
-                      data-testid="codex-recover-chats"
+                      data-testid="codex-import-chats"
                       type="button"
-                      onClick={() => setRecoveringCodex(true)}
+                      onClick={() => setImportingRuntime("codex")}
                     >
-                      Recover chats
+                      Import chats
                     </button>
                   )}
                   {runtimeUpdateButton("codex", codexReady)}
@@ -957,6 +962,16 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                     ariaLabel="Enable Claude runtime"
                     testId="claude-enabled-toggle"
                   />
+                  {accountRuntimeEnabled.claude && (
+                    <button
+                      className="btn-ghost"
+                      data-testid="claude-import-chats"
+                      type="button"
+                      onClick={() => setImportingRuntime("claude")}
+                    >
+                      Import chats
+                    </button>
+                  )}
                   {runtimeUpdateButton("claude", Boolean(claudeStatus?.available))}
                   <button
                     className="btn-ghost"
@@ -1347,41 +1362,83 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
   );
 }
 
-function CodexRecoveryDialog({
+interface RuntimeImportThread {
+  id: string;
+  title: string;
+  cwd?: string | null;
+  updatedAt: number;
+  fallbackMeta: string;
+  resumable: boolean;
+}
+
+function codexImportThread(thread: CodexThreadSummary): RuntimeImportThread {
+  return {
+    id: thread.id,
+    title: thread.name?.trim() || thread.preview.trim() || "Untitled Codex chat",
+    cwd: thread.cwd,
+    updatedAt: thread.updated_at_ms,
+    fallbackMeta: thread.model_provider,
+    resumable: true,
+  };
+}
+
+function claudeImportThread(thread: ClaudeThreadSummary): RuntimeImportThread {
+  return {
+    id: thread.id,
+    title: thread.title.trim() || thread.preview.trim() || "Untitled Claude chat",
+    cwd: thread.cwd,
+    updatedAt: thread.updated_at_ms,
+    fallbackMeta: "Claude CLI",
+    resumable: thread.resumable,
+  };
+}
+
+function AccountRuntimeImportDialog({
+  runtime,
   onClose,
   onOpenSession,
 }: {
+  runtime: "codex" | "claude";
   onClose: () => void;
   onOpenSession: () => void;
 }) {
   const sessions = useSessions((state) => state.sessions);
   const requestId = useRef(0);
-  const [threads, setThreads] = useState<CodexThreadSummary[]>([]);
+  const [threads, setThreads] = useState<RuntimeImportThread[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [archived, setArchived] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [recoveringId, setRecoveringId] = useState<string | null>(null);
+  const [importingId, setImportingId] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const runtimeLabel = runtime === "codex" ? "Codex" : "Claude";
 
   async function load(reset: boolean) {
     const currentRequest = ++requestId.current;
     setBusy(true);
     setError("");
     try {
-      const page = await listCodexThreads({
-        cursor: reset ? undefined : cursor ?? undefined,
-        search,
-        archived,
-      });
+      const page = runtime === "codex"
+        ? await listCodexThreads({
+            cursor: reset ? undefined : cursor ?? undefined,
+            search,
+            archived,
+          })
+        : await listClaudeThreads({
+            cursor: reset ? undefined : cursor ?? undefined,
+            search,
+          });
       if (currentRequest !== requestId.current) return;
+      const next = runtime === "codex"
+        ? page.data.map((thread) => codexImportThread(thread as CodexThreadSummary))
+        : page.data.map((thread) => claudeImportThread(thread as ClaudeThreadSummary));
       setThreads((current) => reset
-        ? page.data
-        : [...current, ...page.data.filter((thread) => !current.some((item) => item.id === thread.id))]);
+        ? next
+        : [...current, ...next.filter((thread) => !current.some((item) => item.id === thread.id))]);
       setCursor(page.next_cursor ?? null);
     } catch (error) {
       if (currentRequest === requestId.current)
-        setError(error instanceof Error ? error.message : "Codex chat recovery failed.");
+        setError(error instanceof Error ? error.message : `${runtimeLabel} chat import failed.`);
     } finally {
       if (currentRequest === requestId.current) setBusy(false);
     }
@@ -1390,49 +1447,73 @@ function CodexRecoveryDialog({
   useEffect(() => {
     const timer = window.setTimeout(() => void load(true), 250);
     return () => window.clearTimeout(timer);
-  }, [search, archived]);
+  }, [search, archived, runtime]);
 
   function openSession(id: string) {
     useSessions.getState().switchTo(id);
     onOpenSession();
   }
 
-  async function recover(thread: CodexThreadSummary) {
-    const existing = recoveredCodexSessionId(useSessions.getState().sessions, thread.id);
+  function importedSessionId(threadId: string) {
+    return runtime === "codex"
+      ? recoveredCodexSessionId(useSessions.getState().sessions, threadId)
+      : importedClaudeSessionId(useSessions.getState().sessions, threadId);
+  }
+
+  async function importThread(thread: RuntimeImportThread) {
+    const existing = importedSessionId(thread.id);
     if (existing) {
       openSession(existing);
       return;
     }
-    setRecoveringId(thread.id);
+    setImportingId(thread.id);
     setError("");
     try {
-      const recovered = await recoverCodexThread(thread.id);
       const store = useSessions.getState();
-      const sessionId = store.importSession(recoveredCodexSession(recovered));
-      if (!sessionId) throw new Error("Milim could not import the recovered chat.");
-      const imported = useSessions.getState().sessions.find((session) => session.id === sessionId);
-      const lastMessageId = imported?.messages[imported.messages.length - 1]?.id;
-      if (!lastMessageId) throw new Error("The recovered chat did not contain a sync cursor.");
-      useSessions.getState().setAccountRuntime(sessionId, {
-        codexThreadId: recovered.id,
-        codexLastSyncedMessageId: lastMessageId,
-      });
+      let sessionId: string | null;
+      let nativeId: string;
+      let resumable = true;
+      if (runtime === "codex") {
+        const source = await recoverCodexThread(thread.id);
+        sessionId = store.importSession(recoveredCodexSession(source));
+        nativeId = source.id;
+      } else {
+        const source = await importClaudeThread(thread.id);
+        sessionId = store.importSession(importedClaudeSession(source));
+        nativeId = source.id;
+        resumable = source.resumable;
+      }
+      if (!sessionId) throw new Error("Milim could not import the selected chat.");
+      const importedSession = useSessions.getState().sessions.find((session) => session.id === sessionId);
+      const lastMessageId = importedSession?.messages[importedSession.messages.length - 1]?.id;
+      if (!lastMessageId) throw new Error("The imported chat did not contain a sync cursor.");
+      if (runtime === "codex") {
+        useSessions.getState().setAccountRuntime(sessionId, {
+          codexThreadId: nativeId,
+          codexLastSyncedMessageId: lastMessageId,
+        });
+      } else {
+        useSessions.getState().setAccountRuntime(sessionId, {
+          claudeSessionId: nativeId,
+          claudeLastSyncedMessageId: resumable ? lastMessageId : undefined,
+        });
+      }
       openSession(sessionId);
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Codex chat recovery failed.");
+      setError(error instanceof Error ? error.message : `${runtimeLabel} chat import failed.`);
     } finally {
-      setRecoveringId(null);
+      setImportingId(null);
     }
   }
 
   return (
-    <SheetDialog title="Recover Codex chats" className="sheet codex-recovery-sheet" onClose={onClose}>
+    <SheetDialog title={`Import ${runtimeLabel} chats`} className="sheet codex-recovery-sheet" onClose={onClose}>
       <div className="sheet-header providers-header">
         <div className="providers-title">
-          <h2>Recover Codex chats</h2>
-          <p className="sheet-sub">Import a transcript once, then choose a Codex model to continue its native thread.</p>
+          <h2>Import {runtimeLabel} chats</h2>
+          <p className="sheet-sub">Choose a chat to import into Milim.</p>
         </div>
-        <button className="icon-btn sheet-close" type="button" onClick={onClose} aria-label="Close recovery">
+        <button className="icon-btn sheet-close" type="button" onClick={onClose} aria-label="Close import">
           <X size={16} />
         </button>
       </div>
@@ -1443,41 +1524,50 @@ function CodexRecoveryDialog({
             type="search"
             value={search}
             onChange={(event) => setSearch(event.currentTarget.value)}
-            placeholder="Search Codex chats"
-            aria-label="Search Codex chats"
+            placeholder={`Search ${runtimeLabel} chats`}
+            aria-label={`Search ${runtimeLabel} chats`}
           />
         </label>
-        <div className="codex-recovery-tabs" role="group" aria-label="Codex chat archive filter">
-          <button type="button" className={!archived ? "active" : ""} onClick={() => setArchived(false)}>Active</button>
-          <button type="button" className={archived ? "active" : ""} onClick={() => setArchived(true)}>Archived</button>
-        </div>
+        {runtime === "codex" && (
+          <div className="codex-recovery-tabs" role="group" aria-label="Codex chat archive filter">
+            <button type="button" className={!archived ? "active" : ""} onClick={() => setArchived(false)}>Active</button>
+            <button type="button" className={archived ? "active" : ""} onClick={() => setArchived(true)}>Archived</button>
+          </div>
+        )}
       </div>
       {error && <p className="provider-note error" role="alert">{error}</p>}
       <div className="codex-recovery-list" aria-busy={busy}>
         {threads.map((thread) => {
-          const existing = recoveredCodexSessionId(sessions, thread.id);
+          const existing = runtime === "codex"
+            ? recoveredCodexSessionId(sessions, thread.id)
+            : importedClaudeSessionId(sessions, thread.id);
           return (
             <div className="codex-recovery-row" key={thread.id}>
               <div>
-                <strong>{thread.name?.trim() || thread.preview.trim() || "Untitled Codex chat"}</strong>
+                <strong>{thread.title}</strong>
                 {thread.cwd && <code>{thread.cwd}</code>}
-                <span>{thread.updated_at_ms ? new Date(thread.updated_at_ms).toLocaleString() : thread.model_provider}</span>
+                <span>
+                  {thread.updatedAt
+                    ? new Date(thread.updatedAt).toLocaleString()
+                    : thread.fallbackMeta}
+                  {runtime === "claude" && !thread.resumable ? " · Project missing; transcript only" : ""}
+                </span>
               </div>
               <button
                 className="btn-ghost"
                 type="button"
-                disabled={recoveringId !== null}
+                disabled={importingId !== null}
                 onClick={() => {
                   if (existing) openSession(existing);
-                  else void recover(thread);
+                  else void importThread(thread);
                 }}
               >
-                        {recoveringId === thread.id ? "Recovering..." : existing ? "Open" : "Recover"}
+                {importingId === thread.id ? "Importing..." : existing ? "Open" : "Import"}
               </button>
             </div>
           );
         })}
-        {!busy && threads.length === 0 && <p className="providers-list-empty">No Codex chats found.</p>}
+        {!busy && threads.length === 0 && <p className="providers-list-empty">No {runtimeLabel} chats found.</p>}
       </div>
       {cursor && (
         <button className="btn-ghost codex-recovery-more" type="button" disabled={busy} onClick={() => void load(false)}>

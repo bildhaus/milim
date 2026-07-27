@@ -232,6 +232,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/codex/run", post(routes::codex_run))
         // Installed Claude CLI bridge (separate from Anthropic API-key providers)
         .route("/claude/status", get(routes::claude_status))
+        .route("/claude/threads", get(routes::claude_threads))
+        .route("/claude/threads/{id}", get(routes::claude_thread_import))
         .route("/claude/run", post(routes::claude_run))
         // User-installed OpenCode ACP runtime
         .route("/opencode/status", get(routes::opencode_status))

@@ -84,6 +84,12 @@ assert.match(
 );
 assert.match(providersManager, /<strong>Installed Pi CLI<\/strong>/);
 assert.match(providersManager, /piStatus\.provider_count/);
+assert.match(api, /export async function listClaudeThreads/);
+assert.match(api, /export async function importClaudeThread/);
+assert.match(providersManager, /data-testid="codex-import-chats"/);
+assert.match(providersManager, /data-testid="claude-import-chats"/);
+assert.match(providersManager, /Import \{runtimeLabel\} chats/);
+assert.doesNotMatch(providersManager, />Recover chats</);
 for (const runtime of ["codex", "claude", "opencode", "pi"]) {
   assert.match(providersManager, new RegExp(`runtimeUpdateButton\\("${runtime}"`));
 }

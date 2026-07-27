@@ -3399,6 +3399,40 @@ pub(crate) async fn claude_status(
     Ok(Json(status).into_response())
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct ClaudeThreadsQuery {
+    cursor: Option<String>,
+    search: Option<String>,
+}
+
+/// `GET /claude/threads` - page through locally retained Claude CLI chats.
+pub(crate) async fn claude_threads(
+    State(st): State<AppState>,
+    Query(query): Query<ClaudeThreadsQuery>,
+    headers: HeaderMap,
+    peer: Peer,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    let result = crate::claude_bridge::threads(query.cursor, query.search)
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(result).into_response())
+}
+
+/// `GET /claude/threads/{id}` - import visible messages from one local Claude chat.
+pub(crate) async fn claude_thread_import(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    peer: Peer,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    let result = crate::claude_bridge::import_thread(&id)
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(result).into_response())
+}
+
 /// `GET /opencode/status` - installed OpenCode CLI and configured-model state.
 pub(crate) async fn opencode_status(
     State(st): State<AppState>,

@@ -1,5 +1,6 @@
-import type { CodexRecoveredThread, ToolApprovalRequest } from "../src/api.js";
+import type { ClaudeImportedThread, CodexRecoveredThread, ToolApprovalRequest } from "../src/api.js";
 import { recoveredCodexSession, recoveredCodexSessionId } from "../src/lib/codexRecovery.js";
+import { importedClaudeSession, importedClaudeSessionId } from "../src/lib/claudeImport.js";
 import { approvalResponse, initialApprovalValues, updateApprovalField } from "../src/lib/toolApproval.js";
 import type { Session } from "../src/sessions/store.js";
 
@@ -54,3 +55,30 @@ equal(input.messages.length, 2, "recovery should preserve visible transcript mes
 const sessions = [{ id: "milim-1", accountRuntime: { codexThreadId: recovered.id } }] as Session[];
 equal(recoveredCodexSessionId(sessions, recovered.id), "milim-1", "existing recovered threads should open instead of duplicating");
 equal(recoveredCodexSessionId(sessions, "missing"), null, "unknown threads should remain recoverable");
+
+const claudeImported: ClaudeImportedThread = {
+  id: "11111111-1111-4111-8111-111111111111",
+  title: "Imported Claude work",
+  cwd: "C:\\repo",
+  created_at_ms: 1,
+  updated_at_ms: 2,
+  resumable: true,
+  messages: [{ role: "user", content: "Hello" }, { role: "assistant", content: "Hi" }],
+};
+const claudeInput = importedClaudeSession(claudeImported);
+equal(claudeInput.settings.model, "", "Claude import should require an explicit model choice");
+equal(claudeInput.settings.folder, "C:\\repo", "resumable Claude imports should preserve their project");
+equal(
+  importedClaudeSession({ ...claudeImported, resumable: false }).settings.folder,
+  "",
+  "non-resumable Claude imports should not preserve a missing project",
+);
+const claudeSessions = [{
+  id: "milim-claude",
+  accountRuntime: { claudeSessionId: claudeImported.id },
+}] as Session[];
+equal(
+  importedClaudeSessionId(claudeSessions, claudeImported.id),
+  "milim-claude",
+  "existing Claude imports should open instead of duplicating",
+);

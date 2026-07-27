@@ -2124,6 +2124,31 @@ export interface CodexRecoveredThread {
   messages: Array<{ role: "user" | "assistant"; content: string }>;
 }
 
+export interface ClaudeThreadSummary {
+  id: string;
+  title: string;
+  preview: string;
+  cwd?: string | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+  resumable: boolean;
+}
+
+export interface ClaudeThreadPage {
+  data: ClaudeThreadSummary[];
+  next_cursor?: string | null;
+}
+
+export interface ClaudeImportedThread {
+  id: string;
+  title: string;
+  cwd?: string | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+  resumable: boolean;
+  messages: Array<{ role: "user" | "assistant"; content: string }>;
+}
+
 export interface ClaudeStatusResponse {
   available: boolean;
   authenticated: boolean;
@@ -2330,14 +2355,34 @@ export async function listCodexThreads(options: {
   if (options.archived) url.searchParams.set("archived", "true");
   return await parseJsonResponse<CodexThreadPage>(
     await authFetch(url),
-    "Codex chat recovery failed",
+    "Codex chat import failed",
   );
 }
 
 export async function recoverCodexThread(id: string): Promise<CodexRecoveredThread> {
   return await parseJsonResponse<CodexRecoveredThread>(
     await authFetch(`${BASE}/codex/threads/${encodeURIComponent(id)}`),
-    "Codex chat recovery failed",
+    "Codex chat import failed",
+  );
+}
+
+export async function listClaudeThreads(options: {
+  cursor?: string;
+  search?: string;
+} = {}): Promise<ClaudeThreadPage> {
+  const url = new URL(`${BASE}/claude/threads`);
+  if (options.cursor) url.searchParams.set("cursor", options.cursor);
+  if (options.search?.trim()) url.searchParams.set("search", options.search.trim());
+  return await parseJsonResponse<ClaudeThreadPage>(
+    await authFetch(url),
+    "Claude chat import failed",
+  );
+}
+
+export async function importClaudeThread(id: string): Promise<ClaudeImportedThread> {
+  return await parseJsonResponse<ClaudeImportedThread>(
+    await authFetch(`${BASE}/claude/threads/${encodeURIComponent(id)}`),
+    "Claude chat import failed",
   );
 }
 
