@@ -8,7 +8,6 @@ import "./UpdateCards.css";
 
 const SEEN_VERSION_KEY = "milim.local.update-cards.seen-version";
 const PREVIEW_EVENT = "milim:update-cards-preview";
-const googleLogo = new URL("../assets/google.svg", import.meta.url).href;
 const ICONS = {
   "file-text": FileText,
   github: GitHub,
@@ -146,7 +145,7 @@ export function UpdateCards() {
                         ))}
                       </div>
                       {item.icon === "google"
-                        ? <img src={googleLogo} width={48} height={48} alt="" />
+                        ? <span className="update-card-google-logo" />
                         : <Icon size={48} />}
                     </div>
 

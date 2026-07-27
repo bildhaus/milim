@@ -4,7 +4,7 @@
   backdrop-filter: blur(6px);
 }
 
-.update-cards-dialog {
+.sheet.update-cards-dialog {
   width: min(680px, calc(100vw - 72px));
   height: min(430px, calc(100vh - 72px));
   max-height: none;
@@ -152,11 +152,20 @@
 }
 
 .update-card-visual svg,
-.update-card-visual img {
+.update-card-visual img,
+.update-card-google-logo {
   position: relative;
   z-index: 2;
   filter: drop-shadow(0 5px 12px color-mix(in srgb, var(--update-card-accent) 18%, transparent));
   animation: update-card-visual-icon-enter 220ms var(--motion-ease-out) both;
+}
+
+.update-card-google-logo {
+  width: 48px;
+  height: 48px;
+  background: currentColor;
+  -webkit-mask: url("../assets/google.svg") center / contain no-repeat;
+  mask: url("../assets/google.svg") center / contain no-repeat;
 }
 
 .update-card-visual svg[data-brand-logo="github"] {
@@ -305,7 +314,7 @@
 }
 
 @media (max-width: 640px) {
-  .update-cards-dialog {
+  .sheet.update-cards-dialog {
     width: calc(100vw - 32px);
     height: min(590px, calc(100vh - 32px));
   }
@@ -327,7 +336,7 @@
 }
 
 @media (max-height: 500px) and (min-width: 641px) {
-  .update-cards-dialog {
+  .sheet.update-cards-dialog {
     height: calc(100vh - 32px);
   }
 
@@ -352,7 +361,8 @@
 
   .update-card-visual,
   .update-card-visual svg,
-  .update-card-visual img {
+  .update-card-visual img,
+  .update-card-google-logo {
     animation: update-card-visual-fade var(--motion-fast) linear both;
   }
 
