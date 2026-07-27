@@ -13,7 +13,7 @@ import {
 import { deriveThreadTitle, shouldReplaceThreadTitle } from "../lib/threadTitles";
 import { readUserStateKey } from "../persistence/userStateStorage.js";
 import { useSessions } from "../sessions/store";
-import { uiSizeShortcutDelta } from "../ui/shortcuts";
+import { shortcutMatchesEvent, uiSizeShortcutDelta } from "../ui/shortcuts";
 import {
   DEFAULT_UI_SIZE,
   MAX_UI_SIZE,
@@ -118,6 +118,11 @@ export function TopBar({ onOpenAppMenu }: { onOpenAppMenu: (event: MouseEvent<HT
 
   useEffect(() => {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (!event.defaultPrevented && inTauri && event.metaKey && shortcutMatchesEvent("Mod+W", event)) {
+        event.preventDefault();
+        void getCurrentWindow().close().catch(() => {});
+        return;
+      }
       const delta = uiSizeShortcutDelta(event);
       if (!delta) return;
       event.preventDefault();

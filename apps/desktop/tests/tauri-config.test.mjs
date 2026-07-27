@@ -418,6 +418,8 @@ for (const needle of [
   "startWindowDrag",
   "startDragging",
   "INTERACTIVE_TITLEBAR_SELECTOR",
+  'shortcutMatchesEvent("Mod+W", event)',
+  "getCurrentWindow().close()",
   "data-tauri-drag-region",
   "onMouseDown={startWindowDrag}",
   'data-testid="app-menu-trigger"',
