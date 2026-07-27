@@ -307,6 +307,17 @@ if (sidebar.includes("new-chat-isolated") || sidebar.includes("<span>Isolated</s
   throw new Error("Isolated worktrees should be a New chat menu option, not a peer sidebar button");
 }
 
+for (const needle of [
+  'openWorkspaceLauncher(projectFolder, "file_manager")',
+  'label: "Mark all as read"',
+  "unreadProjectSessions.length > 0",
+  "projectFolderForSession(session) === projectFolder",
+]) {
+  if (!sidebar.includes(needle)) {
+    throw new Error(`Sidebar project context menus must include ${needle}`);
+  }
+}
+
 if (
   sidebar.includes("section-count") ||
   styles.includes(".section-count") ||
@@ -407,6 +418,8 @@ for (const needle of [
   "startWindowDrag",
   "startDragging",
   "INTERACTIVE_TITLEBAR_SELECTOR",
+  'shortcutMatchesEvent("Mod+W", event)',
+  "getCurrentWindow().close()",
   "data-tauri-drag-region",
   "onMouseDown={startWindowDrag}",
   'data-testid="app-menu-trigger"',

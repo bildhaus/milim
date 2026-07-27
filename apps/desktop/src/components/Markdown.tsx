@@ -1,16 +1,4 @@
 import { Children, isValidElement, memo, useMemo, type ComponentProps, type MouseEvent, type ReactNode } from "react";
-import { createLowlight } from "lowlight";
-import bash from "highlight.js/lib/languages/bash";
-import css from "highlight.js/lib/languages/css";
-import diff from "highlight.js/lib/languages/diff";
-import javascript from "highlight.js/lib/languages/javascript";
-import json from "highlight.js/lib/languages/json";
-import markdown from "highlight.js/lib/languages/markdown";
-import python from "highlight.js/lib/languages/python";
-import rust from "highlight.js/lib/languages/rust";
-import typescript from "highlight.js/lib/languages/typescript";
-import xml from "highlight.js/lib/languages/xml";
-import yaml from "highlight.js/lib/languages/yaml";
 import ReactMarkdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize from "rehype-sanitize";
@@ -18,6 +6,7 @@ import remarkGfm from "remark-gfm";
 import { openExternalUrl, type ChatArtifact } from "../api";
 import { extractArtifactsFromContent, isPreviewableArtifact } from "../lib/artifacts";
 import { markPerfRender } from "../lib/perf";
+import { highlightSyntax, type SyntaxNode } from "../lib/syntaxHighlight";
 import { CodeBlock } from "./CodeBlock";
 
 type MarkdownRehypePlugins = NonNullable<ComponentProps<typeof ReactMarkdown>["rehypePlugins"]>;
@@ -32,13 +21,7 @@ type MarkdownProps = {
 };
 
 type MarkdownRehypePlugin = MarkdownRehypePlugins[number];
-type HastNode = {
-  type?: string;
-  tagName?: string;
-  properties?: Record<string, unknown>;
-  children?: HastNode[];
-  value?: string;
-};
+type HastNode = SyntaxNode;
 
 function codeBlockText(children: ReactNode): string {
   return Children.toArray(children)
@@ -57,31 +40,6 @@ function normalizedCodeText(text: string): string {
 function previewArtifactForCodeText(text: string, artifacts: ChatArtifact[]): ChatArtifact | undefined {
   return artifacts.find((artifact) => normalizedCodeText(artifact.content) === text);
 }
-
-const plainTextLanguages = new Set(["text", "txt", "plain", "plaintext"]);
-const selectedLowlight = createLowlight({
-  bash,
-  css,
-  diff,
-  javascript,
-  json,
-  markdown,
-  python,
-  rust,
-  typescript,
-  xml,
-  yaml,
-});
-
-selectedLowlight.registerAlias({
-  bash: ["sh", "shell", "zsh", "ps1", "powershell"],
-  javascript: ["js", "jsx", "mjs", "cjs"],
-  markdown: ["md", "mdx"],
-  rust: ["rs"],
-  typescript: ["ts", "tsx"],
-  xml: ["html", "htm", "svg"],
-  yaml: ["yml"],
-});
 
 function classNames(value: unknown): string[] {
   if (typeof value === "string") return value.split(/\s+/).filter(Boolean);
@@ -117,17 +75,13 @@ function selectedHighlightPlugin() {
     const code = pre.children?.find((child) => child.type === "element" && child.tagName === "code");
     if (!code) return;
     const language = languageFromCode(code);
-    if (!language || plainTextLanguages.has(language) || !selectedLowlight.registered(language)) return;
-    try {
-      const highlighted = selectedLowlight.highlight(language, textContent(code), { prefix: "hljs-" });
-      code.children = highlighted.children as HastNode[];
-      code.properties = {
-        ...code.properties,
-        className: Array.from(new Set(["hljs", ...classNames(code.properties?.className)])),
-      };
-    } catch {
-      /* keep the original code block */
-    }
+    const highlighted = highlightSyntax(language, textContent(code));
+    if (!highlighted) return;
+    code.children = highlighted.children;
+    code.properties = {
+      ...code.properties,
+      className: Array.from(new Set(["hljs", ...classNames(code.properties?.className)])),
+    };
   }
 }
 

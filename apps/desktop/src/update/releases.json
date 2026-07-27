@@ -1,4 +1,75 @@
 {
+  "0.2.3": {
+    "version": "0.2.3",
+    "summary": "Milim 0.2.3 brings pull request workflows, account runtime updates, editable Google Workspace files, sharper code review, and faster project actions.",
+    "items": [
+      {
+        "id": "pull-requests",
+        "eyebrow": "GitHub pull requests",
+        "title": "Review and merge GitHub pull requests in Milim",
+        "description": "Open a pull request from the Git inspector and keep the review beside your coding thread.",
+        "details": [
+          "Track checks, approvals, and merge readiness",
+          "Read and reply to review comments",
+          "Merge without switching to GitHub"
+        ],
+        "accent": "var(--accent)",
+        "icon": "github"
+      },
+      {
+        "id": "account-runtimes",
+        "eyebrow": "Agent runtimes",
+        "title": "Update coding-agent CLIs from Milim",
+        "description": "Manage Codex, Claude, OpenCode, and Pi from the Providers screen.",
+        "details": [
+          "See installed and available versions",
+          "Run CLI updates without opening a terminal",
+          "Use the same approval modes across runtimes"
+        ],
+        "accent": "var(--accent)",
+        "icon": "plug"
+      },
+      {
+        "id": "google-workspace",
+        "eyebrow": "Google Workspace",
+        "title": "Open and edit Google Workspace files",
+        "description": "Keep selected Docs, Sheets, and Slides beside the conversation.",
+        "details": [
+          "Edit Docs text and Sheets cells in place",
+          "Preview Slides without leaving Milim",
+          "Autosave supported changes back to Google"
+        ],
+        "accent": "var(--accent)",
+        "icon": "google"
+      },
+      {
+        "id": "project-sidebar-actions",
+        "eyebrow": "Projects",
+        "title": "Act on projects from the sidebar",
+        "description": "Project context menus now put common workspace and inbox actions within reach.",
+        "details": [
+          "Open a project directly in File Explorer or Finder",
+          "Mark every unread thread in a project as read",
+          "Show the read action only when the project has unread threads"
+        ],
+        "accent": "var(--accent)",
+        "icon": "file-text"
+      },
+      {
+        "id": "desktop-workflow",
+        "eyebrow": "Desktop workflow",
+        "title": "Review code without losing your place",
+        "description": "Workspace review is easier to navigate, and macOS window handling follows expected shortcuts.",
+        "details": [
+          "Browse workspace files from a hideable, resizable rail",
+          "Use the same syntax-highlighting theme for artifacts and workspace code",
+          "Hide Milim with Cmd+W when the URL browser does not consume the shortcut"
+        ],
+        "accent": "var(--accent)",
+        "icon": "file-text"
+      }
+    ]
+  },
   "0.2.2": {
     "version": "0.2.2",
     "summary": "Milim 0.2.2 keeps Google Workspace edits fluid, clarifies tool approvals, and adds more control over the desktop layout.",

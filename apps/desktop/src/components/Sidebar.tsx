@@ -12,7 +12,7 @@ import {
   type SessionPreviewRuntime,
   type SessionSidebarState,
 } from "../sessions/store";
-import { runWorkspaceGitAction } from "../api";
+import { openWorkspaceLauncher, runWorkspaceGitAction } from "../api";
 import { createInteractiveChat } from "../lib/newChatCoordinator";
 import { GIT_STATUS_REFRESH_INTERVAL_MS } from "../lib/gitRefresh";
 import { markPerfRender } from "../lib/perf";
@@ -34,7 +34,7 @@ import { useContextMenu } from "./ContextMenu";
 import { HoverScrollText } from "./HoverScrollText";
 import { SheetDialog } from "./SheetDialog";
 import { ColorField } from "./ui";
-import { Archive, ArrowUp, Bolt, Calendar, ChevronDown, Code, Cube, Download, FileText, Folder, FolderOpen, Gear, GitBranch, GitPullRequest, Globe, Image, Lightbulb, MoreHorizontal, Pin, Plus, Search, Sidebar as PanelIcon, Star, Terminal } from "./icons";
+import { Archive, ArrowUp, Bolt, Calendar, Check, ChevronDown, Code, Cube, Download, FileText, Folder, FolderOpen, Gear, GitBranch, GitPullRequest, Globe, Image, Lightbulb, MoreHorizontal, Pin, Plus, Search, Sidebar as PanelIcon, Star, Terminal } from "./icons";
 
 const SIDEBAR_KEYBOARD_STEP = 32;
 const SIDEBAR_COLLAPSE_OVERSHOOT = 96;
@@ -516,6 +516,7 @@ export function Sidebar({
   const toggleSessionPinned = useSessions((s) => s.toggleSessionPinned);
   const toggleSidebarSectionCollapsed = useSessions((s) => s.toggleSidebarSectionCollapsed);
   const toggleSidebarSectionPinned = useSessions((s) => s.toggleSidebarSectionPinned);
+  const setSessionUnread = useSessions((s) => s.setSessionUnread);
   const moveSidebarSection = useSessions((s) => s.moveSidebarSection);
   const moveSessionInSidebar = useSessions((s) => s.moveSessionInSidebar);
   const sidebarWidth = useUiPreferences((s) => s.sidebarWidth);
@@ -524,6 +525,7 @@ export function Sidebar({
   const autoColorThreadNames = useUiPreferences((s) => s.autoColorThreadNames);
   const toolsExpanded = useUiPreferences((s) => s.toolsExpanded);
   const setToolsExpanded = useUiPreferences((s) => s.setToolsExpanded);
+  const pushNotice = useUiPreferences((s) => s.pushNotice);
   const theme = useTheme((s) => s.theme);
 
   const [editing, setEditing] = useState<string | null>(null);
@@ -890,6 +892,11 @@ export function Sidebar({
 
   function openSectionContextMenu(event: ReactMouseEvent, group: SessionGroup, collapsed: boolean, pinned: boolean) {
     const projectSection = Boolean(group.projectId);
+    const projectFolder = projectSection ? folderFromSectionId(group.id) : "";
+    const unreadProjectSessions = projectFolder
+      ? sessions.filter((session) => projectFolderForSession(session) === projectFolder && unreadSessions.has(session.id))
+      : [];
+    const fileManagerLabel = navigator.userAgent.includes("Mac") ? "Open in Finder" : "Open in File Explorer";
     openContextMenu(event, [
       {
         id: "toggle",
@@ -903,6 +910,18 @@ export function Sidebar({
         icon: <Plus size={13} />,
         action: () => createChatInSection(group.id),
       }] : []),
+      ...(projectSection ? [{
+        id: "open-file-manager",
+        label: fileManagerLabel,
+        icon: <FolderOpen size={13} />,
+        action: async () => {
+          try {
+            await openWorkspaceLauncher(projectFolder, "file_manager");
+          } catch (error) {
+            pushNotice({ tone: "warning", message: `Could not open the project folder: ${error instanceof Error ? error.message : String(error)}` });
+          }
+        },
+      }] : []),
       ...(group.project ? [{
         id: "customize-project",
         label: "Customize project...",
@@ -915,6 +934,12 @@ export function Sidebar({
         icon: <Pin size={13} />,
         checked: pinned,
         action: () => toggleSidebarSectionPinned(group.id),
+      }] : []),
+      ...(unreadProjectSessions.length > 0 ? [{
+        id: "mark-project-read",
+        label: "Mark all as read",
+        icon: <Check size={13} />,
+        action: () => unreadProjectSessions.forEach((session) => setSessionUnread(session.id, false)),
       }] : []),
       ...(group.projectId && group.id !== SIDEBAR_CHATS_SECTION_ID ? [{
         id: "archive-project",

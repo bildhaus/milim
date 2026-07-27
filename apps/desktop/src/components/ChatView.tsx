@@ -5073,15 +5073,6 @@ export function ChatView({
     setChatNotice({ tone: "error", message: "Attachment content is unavailable." });
   }
 
-  function openArtifactBrowser() {
-    rememberInspectorInvoker();
-    clearPreviewCloseTimer();
-    setPreviewPanelClosing(false);
-    setDismissedPreviewKey(latestPreviewSelection?.autoOpenKey ?? null);
-    selectPreviewSource("url");
-    setSessionInspectorTab(activeId, "preview");
-  }
-
   function selectPreviewSource(source: InspectorPreviewSource) {
     previewSourcesByThreadRef.current.set(activeId, source);
     setPreviewSource(source);
@@ -5244,7 +5235,7 @@ export function ChatView({
     clearPreviewCloseTimer();
     setPreviewPanelClosing(false);
     artifactSelectionsByThreadRef.current.set(activeId, selection);
-    selectPreviewSource("artifact");
+    if (tab === "preview") selectPreviewSource("artifact");
     setSessionInspectorTab(activeId, tab);
     setDismissedPreviewKey(null);
     setPreviewSelection(selection);
@@ -9854,7 +9845,6 @@ export function ChatView({
                   noEnterMotion={sidePanelAlreadyOpen}
                   onClose={closePreview}
                   onSelectRevision={selectPreviewRevision}
-                  onOpenBrowser={openArtifactBrowser}
                   onPrepareArtifactFix={sendArtifactFixPrompt}
                   fixArtifact={activeArtifactSelection?.artifact}
                   fixArtifacts={activeArtifactSelection?.artifacts}

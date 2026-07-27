@@ -1,5 +1,6 @@
 import { createElement, type ComponentType, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { readFileSync } from "node:fs";
 import { createServer } from "vite";
 import type { ChatArtifact, GoogleFilePreview, GoogleFileSummary, PreviewAppPreflight, PreviewAppStatus, PreviewSurfaceTarget } from "../src/api.js";
 import type { ArtifactRevision } from "../src/lib/artifactRevisions.js";
@@ -13,7 +14,6 @@ type PreviewPanelProps = {
   fixArtifacts?: readonly ChatArtifact[];
   fixRevision?: ArtifactRevision;
   onClose: () => void;
-  onOpenBrowser?: () => void;
   onPrepareArtifactFix?: (prompt: string) => void;
   activeTab?: PreviewTab;
   onActiveTabChange?: (tab: PreviewTab) => void;
@@ -32,6 +32,7 @@ type PreviewPanelProps = {
   modeSwitcher?: ReactNode;
   controlActivity?: PreviewControlActivity | null;
   onSurfaceChange?: (surface: PreviewSurfaceTarget | null) => void;
+  workspaceFolder?: string;
 };
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -92,6 +93,13 @@ const textArtifact: ChatArtifact = {
   mime: "text/plain",
   content: "first line\nsecond line",
   size: 22,
+};
+
+const workspaceArtifact: ChatArtifact = {
+  ...textArtifact,
+  id: "workspace-review",
+  title: "Workspace",
+  content: "Select a workspace file above to review it.",
 };
 
 const runtimePreflight: PreviewAppPreflight = {
@@ -171,6 +179,15 @@ try {
   };
   const { ContextMenuProvider } = await server.ssrLoadModule("/src/components/ContextMenu.tsx") as {
     ContextMenuProvider: ComponentType<{ children: ReactNode }>;
+  };
+  const { SourceCodeView } = await server.ssrLoadModule("/src/components/SourceCodeView.tsx") as {
+    SourceCodeView: ComponentType<{
+      source: string;
+      language?: string;
+      ariaLabel: string;
+      selectedLine?: number;
+      onLineClick?: () => void;
+    }>;
   };
   const { DocumentPreview, FolderPreview, GoogleTextFormatToolbar, SheetPreview, SlidesPreview, browserLinkOpensNewTab, googleDocFitScale, googleFileKindDetail, googleSlideGestureRect, googleSlideGroupBounds, googleSlideMarqueeRect, googleSlideRectsIntersect, googleSlideSnapRect, googleSlideTextFormat, googleSlideTextSegments, googleSlideThumbnailRequestKey, googleSlideTransformGroup, googleSlidesNavigationAction, googleWorkspacePreviewNeedsLoad } = await server.ssrLoadModule("/src/components/GoogleWorkspacePreview.tsx") as {
     DocumentPreview: ComponentType<{
@@ -538,6 +555,11 @@ try {
   assert(!blockerSelector.includes('[role="menu"]') && !blockerSelector.includes("aria-modal"), "Native preview blocking should not infer visibility from semantic roles");
   assert(nativePreviewBlockedByAppUi({ querySelector: () => ({}) as Element }), "Native preview should hide behind app modal/menu UI");
   assert(!nativePreviewBlockedByAppUi({ querySelector: () => null }), "Native preview should stay visible without blocking app UI");
+  const previewPanelSource = readFileSync("src/components/PreviewPanel.tsx", "utf8");
+  assert(!previewPanelSource.includes("window.prompt"), "Preview review comments should use the themed dialog instead of a native prompt");
+  assert(previewPanelSource.includes('data-testid="review-comment-dialog"'), "Preview review comments should keep a testable themed dialog");
+  assert(previewPanelSource.includes('data-testid="workspace-review-resize-handle"'), "Workspace review should expose a resizable file rail");
+  assert(previewPanelSource.includes("Hide workspace files"), "Workspace review should expose a collapsible file rail");
   assert(previewSurfaceIsInspectable({
     label: "main",
     kind: "artifact_iframe",
@@ -614,9 +636,9 @@ try {
   assert(blankUrlMarkup.includes('data-testid="preview-browser-empty"'), "Blank URL artifacts should render the empty browser state");
   assert(!blankUrlMarkup.includes('data-testid="preview-native-browser"'), "Blank URL artifacts should not render a native browser host");
 
-  const htmlMarkup = renderPreviewPanel({ artifact: htmlArtifact, onClose: () => {}, onOpenBrowser: () => {} });
+  const htmlMarkup = renderPreviewPanel({ artifact: htmlArtifact, onClose: () => {} });
   assert(!htmlMarkup.includes('data-testid="preview-browser-bar"'), "HTML artifacts should not render browser chrome");
-  assert(htmlMarkup.includes('data-testid="preview-open-browser"'), "HTML artifacts should let users switch to the browser");
+  assert(!htmlMarkup.includes('data-testid="preview-open-browser"'), "Preview source switching should not use a separate globe shortcut");
   assert(htmlMarkup.includes("srcDoc="), "HTML artifacts should keep srcDoc preview rendering");
   assert(!htmlMarkup.includes('data-testid="preview-control-overlay"'), "Preview overlay should not render without activity");
   assert(htmlMarkup.includes('aria-label="Inspector"'), "The side inspector should have an accessible name");
@@ -636,6 +658,24 @@ try {
   assert(codeMarkup.includes('aria-labelledby="inspector-tab-code"'), "Code panel should be labelled by its tab");
   assert(codeMarkup.includes('aria-label="Artifact file"'), "Multi-file code should provide a narrow-layout file selector");
   assert(codeMarkup.includes('data-testid="preview-code-line-number" aria-hidden="true"'), "Visual line numbers should be hidden from assistive technology");
+  const highlightedCodeMarkup = renderToStaticMarkup(createElement(SourceCodeView, {
+    source: "/* first\nsecond */\nconst answer: number = 42;",
+    language: "typescript",
+    ariaLabel: "Highlighted source",
+  }));
+  assert((highlightedCodeMarkup.match(/hljs-comment/g) ?? []).length === 2, "Source code should preserve multiline syntax highlighting");
+  assert(highlightedCodeMarkup.includes("hljs-keyword"), "Source code should reuse the existing syntax theme classes");
+  const reviewCodeMarkup = renderToStaticMarkup(createElement(SourceCodeView, {
+    source: "first\nsecond",
+    ariaLabel: "Review source",
+    selectedLine: 2,
+    onLineClick: () => {},
+  }));
+  assert(reviewCodeMarkup.includes('<button type="button"'), "Review source should keep line-level comment controls");
+  assert(reviewCodeMarkup.includes("preview-code-line selected"), "Review source should expose its selected line");
+  const workspaceMarkup = renderPreviewPanel({ artifact: workspaceArtifact, activeTab: "code", workspaceFolder: "C:\\workspace", onClose: () => {} });
+  assert(workspaceMarkup.includes("workspace-review-only"), "Workspace-only review should fill the Code panel");
+  assert(!workspaceMarkup.includes('data-testid="preview-code-source"'), "Workspace-only review should omit the redundant placeholder source");
 
   const unifiedTabs = createElement("div", { className: "side-panel-switcher", role: "tablist", "aria-label": "Inspector views" },
     createElement("button", { id: "inspector-tab-preview", role: "tab", "aria-selected": true, "aria-controls": "inspector-panel-preview" }, "Preview"),

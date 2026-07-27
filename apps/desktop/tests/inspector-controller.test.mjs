@@ -18,9 +18,9 @@ assert.doesNotMatch(prepareRuntime, /startPreviewApp|stagePreviewApp/);
 assert.doesNotMatch(chatView, /autoPreviewRuntimeStartedRef/);
 assert.doesNotMatch(chatView, /\bstagePreviewApp\b/);
 
-const openUrlPreview = functionBody("openArtifactBrowser");
-assert.match(openUrlPreview, /selectPreviewSource\("url"\)/);
-assert.doesNotMatch(openUrlPreview, /"app"/);
+const openArtifact = functionBody("openArtifactSidePanel");
+assert.match(openArtifact, /if \(tab === "preview"\) selectPreviewSource\("artifact"\)/);
+assert.equal(openArtifact.match(/selectPreviewSource\("artifact"\)/g)?.length, 1);
 
 const startRuntime = functionBody("startPreviewRuntime");
 assert.match(startRuntime, /previewRuntimeRunOptions\(\)/);
