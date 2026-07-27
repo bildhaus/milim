@@ -6444,6 +6444,18 @@ fn github_repository(value: Option<String>) -> Result<String, String> {
     }
 }
 
+fn github_viewer_permission(output: Result<Output, String>) -> Option<String> {
+    let output = output.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    serde_json::from_slice::<Value>(&output.stdout)
+        .ok()?
+        .get("viewerPermission")?
+        .as_str()
+        .map(str::to_string)
+}
+
 fn workspace_git_pr_list_action() -> WorkspaceGitActionResponse {
     let fields = "number,title,url,state,isDraft,author,repository,updatedAt,commentsCount,body";
     let mut pull_requests = HashMap::<String, Value>::new();
@@ -6624,7 +6636,17 @@ fn workspace_git_pr_view_action(
         }
     }
     pull_request["exists"] = Value::Bool(true);
-    pull_request["repository"] = Value::String(repository);
+    pull_request["repository"] = Value::String(repository.clone());
+    let permission_args = vec![
+        "repo".to_string(),
+        "view".to_string(),
+        repository,
+        "--json".to_string(),
+        "viewerPermission".to_string(),
+    ];
+    if let Some(permission) = github_viewer_permission(gh_output_global(&permission_args)) {
+        pull_request["viewerPermission"] = Value::String(permission);
+    }
     let mut response = workspace_git_combined_response(
         "pr_view",
         &command,
@@ -6763,6 +6785,12 @@ fn workspace_git_pr_status_action(
         }
     }
     pull_request["exists"] = Value::Bool(true);
+    if let Some(permission) = github_viewer_permission(gh_output(
+        root,
+        &["repo", "view", "--json", "viewerPermission"],
+    )) {
+        pull_request["viewerPermission"] = Value::String(permission);
+    }
     let mut response = workspace_git_combined_response(
         "pr_status",
         &command,

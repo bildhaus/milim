@@ -4069,6 +4069,7 @@ export interface PullRequestDetails {
   reviewDecision?: string;
   mergeStateStatus?: string;
   mergeable?: string;
+  viewerPermission?: string;
   comments?: PullRequestComment[];
   checks?: PullRequestCheck[];
   checksError?: string;
