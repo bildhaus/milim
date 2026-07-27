@@ -174,7 +174,21 @@ function OnboardingGate() {
         className="onboarding-preflight"
         data-native-preview-blocker="true"
         data-testid="onboarding-preflight"
-      />
+      >
+        <svg
+          className="onboarding-preflight-logo"
+          viewBox="0 0 424.58 352.98"
+          aria-hidden="true"
+        >
+          <use className="signal-medium" href="/milim-wordmark.svg#g-m1" />
+          <use className="signal-short signal-d1" href="/milim-wordmark.svg#g-i1s" />
+          <use className="bounce-dot bounce-d1" href="/milim-wordmark.svg#g-i1d" />
+          <use className="signal-long signal-l" href="/milim-wordmark.svg#g-l" />
+          <use className="signal-short signal-s2" href="/milim-wordmark.svg#g-i2s" />
+          <use className="bounce-dot bounce-d2" href="/milim-wordmark.svg#g-i2d" />
+          <use className="signal-medium signal-m2" href="/milim-wordmark.svg#g-m2" />
+        </svg>
+      </div>
     );
   if (
     !shouldShowOnboarding(

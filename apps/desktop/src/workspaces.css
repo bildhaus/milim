@@ -2252,8 +2252,9 @@ body.pull-requests-divider-resizing {
     opacity: 0.65;
     transform: none;
   }
-  .onboarding-preflight::after {
-    animation: onboarding-preflight-show 1ms linear 0.5s forwards;
+  .onboarding-preflight-logo use {
+    animation: none;
+    transform: none;
   }
 }
 

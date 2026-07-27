@@ -2227,23 +2227,57 @@
   display: grid;
   place-items: center;
 }
-.onboarding-preflight::after {
-  content: "";
-  width: 52px;
-  height: 44px;
-  background: rgba(255, 255, 255, 0.74);
-  opacity: 0;
-  -webkit-mask: url("/milim-wordmark.svg") center / contain no-repeat;
-  mask: url("/milim-wordmark.svg") center / contain no-repeat;
-  animation: onboarding-preflight-pulse 1.4s ease-in-out 0.5s infinite;
+.onboarding-preflight-logo {
+  width: 88px;
+  height: 74px;
+  overflow: visible;
+  fill: rgba(255, 255, 255, 0.74);
 }
-@keyframes onboarding-preflight-pulse {
-  0%, 100% { opacity: 0.36; transform: scale(0.98); }
-  50% { opacity: 0.78; transform: scale(1.02); }
+.onboarding-preflight-logo use {
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
 }
-@keyframes onboarding-preflight-show {
-  to { opacity: 0.62; }
+@keyframes onboarding-signal-short {
+  0%, 100% { transform: scaleY(1); }
+  45% { transform: scaleY(0.83); }
+  58% { transform: scaleY(1.025); }
 }
+@keyframes onboarding-signal-medium {
+  0%, 100% { transform: scaleY(1); }
+  45% { transform: scaleY(0.91); }
+  58% { transform: scaleY(1.012); }
+}
+@keyframes onboarding-signal-long {
+  0%, 100% { transform: scaleY(1); }
+  45% { transform: scaleY(0.875); }
+  58% { transform: scaleY(1.016); }
+}
+@keyframes onboarding-bounce-dot {
+  0%, 58% { transform: translateY(0) scale(1); }
+  68% { transform: translateY(-14.9px) scale(0.92, 1.08); }
+  78% { transform: translateY(0) scale(1.14, 0.82); }
+  85% { transform: translateY(-4.4px) scale(0.97, 1.04); }
+  91% { transform: translateY(0) scale(1.06, 0.93); }
+  95% { transform: translateY(-1px) scale(0.995, 1.01); }
+  100% { transform: translateY(0) scale(1); }
+}
+.onboarding-preflight-logo :is(.signal-short, .signal-medium, .signal-long) {
+  animation-duration: 2.1s;
+  animation-timing-function: cubic-bezier(0.65, 0, 0.22, 1);
+  animation-iteration-count: infinite;
+}
+.onboarding-preflight-logo .signal-short { animation-name: onboarding-signal-short; }
+.onboarding-preflight-logo .signal-medium { animation-name: onboarding-signal-medium; }
+.onboarding-preflight-logo .signal-long { animation-name: onboarding-signal-long; }
+.onboarding-preflight-logo .bounce-dot {
+  animation: onboarding-bounce-dot 2.1s cubic-bezier(0.22, 0.72, 0.28, 1) infinite;
+}
+.onboarding-preflight-logo .signal-d1,
+.onboarding-preflight-logo .bounce-d1 { animation-delay: -0.22s; }
+.onboarding-preflight-logo .signal-l { animation-delay: -0.44s; }
+.onboarding-preflight-logo .signal-s2,
+.onboarding-preflight-logo .bounce-d2 { animation-delay: -0.67s; }
+.onboarding-preflight-logo .signal-m2 { animation-delay: -0.89s; }
 .onboarding-overlay {
   place-items: center;
   padding: 24px;
