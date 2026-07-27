@@ -37,7 +37,8 @@
         "details": [
           "Keep the familiar full-height rail by default",
           "Separate top and bottom actions into floating surfaces",
-          "Use the unified inspector shell across preview surfaces"
+          "Use the unified inspector shell across preview surfaces",
+          "Read nested projects and threads through quieter tree connectors"
         ],
         "accent": "var(--accent)",
         "icon": "file-text"
@@ -50,7 +51,8 @@
         "details": [
           "Download update payloads without interrupting active work",
           "Keep update progress visible in the desktop UI",
-          "Apply the staged update from the normal update flow"
+          "Apply the staged update from the normal update flow",
+          "See sharper update cards with theme-colored provider marks"
         ],
         "accent": "var(--accent)",
         "icon": "file-text"

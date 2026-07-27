@@ -1560,6 +1560,7 @@ body.sidebar-pointer-dragging .session-section-title {
 }
 .session-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 5px; margin-top: 3px; padding-right: 1px; }
 .session-section {
+  --session-connector: color-mix(in srgb, var(--project-color, var(--tertiary-text)) 18%, var(--border-primary));
   position: relative;
   display: flex;
   flex-direction: column;
@@ -1579,12 +1580,12 @@ body.sidebar-pointer-dragging .session-section-title {
 .session-section-content:has(.session-item)::before {
   content: "";
   position: absolute;
-  left: 12px;
+  left: 11px;
   top: 2px;
   bottom: 14px;
   width: 1px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--border-primary) 72%, transparent);
+  background: linear-gradient(to bottom, transparent, var(--session-connector) 8px, var(--session-connector));
 }
 .session-section-content:has(.session-more-row)::before {
   bottom: 39px;
@@ -1767,8 +1768,8 @@ body.sidebar-pointer-dragging .session-section-title {
   position: relative;
   z-index: 1;
   min-height: 27px;
-  margin-left: 16px;
-  padding: 1px 5px 1px 10px;
+  margin-left: 14px;
+  padding: 1px 5px 1px 6px;
   border-radius: 8px;
   cursor: pointer;
   color: var(--secondary-text);
@@ -1778,11 +1779,16 @@ body.sidebar-pointer-dragging .session-section-title {
 .session-item::before {
   content: "";
   position: absolute;
-  left: -5px;
-  top: 50%;
+  left: -3px;
+  top: calc(50% - 0.5px);
   width: 8px;
   height: 1px;
-  background: color-mix(in srgb, var(--border-primary) 72%, transparent);
+  border-radius: 0 999px 999px 0;
+  background: var(--session-connector);
+}
+.session-item:hover::before,
+.session-item.active::before {
+  --session-connector: color-mix(in srgb, var(--project-color, var(--accent)) 36%, var(--border-primary));
 }
 .session-item:hover {
   background: color-mix(in srgb, var(--panel-row-hover) 82%, transparent);
@@ -1803,6 +1809,7 @@ body.sidebar-pointer-dragging .session-section-title {
   right: 8px;
   width: auto;
   height: 2px;
+  border: 0;
   border-radius: 999px;
   background: var(--accent);
   box-shadow: 0 0 10px var(--accent-glow);
@@ -1818,13 +1825,13 @@ body.sidebar-pointer-dragging .session-section-title {
 }
 .session-item.child-session {
   min-height: 26px;
-  margin-left: 32px;
+  margin-left: 30px;
   padding-top: 1px;
   padding-bottom: 1px;
 }
 .session-item.child-session::before {
-  left: -21px;
-  width: 24px;
+  left: -19px;
+  width: 22px;
 }
 .session-item.child-session .session-title {
   font-size: 12.5px;
