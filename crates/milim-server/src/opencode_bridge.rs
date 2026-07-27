@@ -700,7 +700,7 @@ fn opencode_command() -> Command {
 
 #[cfg(not(windows))]
 fn opencode_command() -> Command {
-    Command::new("opencode")
+    crate::cli_path::command("opencode")
 }
 
 #[cfg(windows)]
