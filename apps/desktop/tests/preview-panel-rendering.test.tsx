@@ -33,6 +33,7 @@ type PreviewPanelProps = {
   controlActivity?: PreviewControlActivity | null;
   onSurfaceChange?: (surface: PreviewSurfaceTarget | null) => void;
   workspaceFolder?: string;
+  onPreviewWorkspaceFile?: (path: string) => void;
 };
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -118,6 +119,7 @@ const runtimePreflight: PreviewAppPreflight = {
 
 const runtimeStatus: PreviewAppStatus = {
   thread_id: "thread-1",
+  kind: "app",
   status: "error",
   cwd: runtimePreflight.cwd,
   active: false,
@@ -560,6 +562,7 @@ try {
   assert(previewPanelSource.includes('data-testid="review-comment-dialog"'), "Preview review comments should keep a testable themed dialog");
   assert(previewPanelSource.includes('data-testid="workspace-review-resize-handle"'), "Workspace review should expose a resizable file rail");
   assert(previewPanelSource.includes("Hide workspace files"), "Workspace review should expose a collapsible file rail");
+  assert(previewPanelSource.includes("onPreviewWorkspaceFile(workspaceReviewFile.path)"), "Workspace HTML review should expose its Preview action");
   assert(previewSurfaceIsInspectable({
     label: "main",
     kind: "artifact_iframe",
@@ -734,6 +737,24 @@ try {
   assert(readyRuntimeMarkup.includes('aria-expanded="false"'), "Healthy runtime details should start collapsed");
   assert(readyRuntimeMarkup.includes('data-testid="preview-runtime-quick-stop"'), "Healthy runtime should keep a one-click Stop action");
   assert(!readyRuntimeMarkup.includes("Running."), "Healthy runtime should suppress redundant running copy");
+
+  const staticRuntimeMarkup = renderPreviewPanel({
+    artifact: urlArtifact,
+    previewSource: "app",
+    runtimeStatus: {
+      ...readyRuntimeStatus,
+      kind: "static",
+      command: null,
+      preflight: null,
+      message: "Serving index.html.",
+    },
+    runtimeStale: true,
+    onRuntimeStop: () => {},
+    onClose: () => {},
+  });
+  assert(staticRuntimeMarkup.includes("Static preview"), "Static runtime should identify itself without app command controls");
+  assert(!staticRuntimeMarkup.includes('data-testid="preview-runtime-restart"'), "Static runtime should omit Restart");
+  assert(!staticRuntimeMarkup.includes('data-testid="preview-runtime-preflight"'), "Static runtime should omit command preflight");
 
   const startingRuntimeMarkup = renderPreviewPanel({
     artifact: urlArtifact,

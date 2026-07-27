@@ -1507,7 +1507,10 @@ body.sidebar-pointer-dragging .session-section-title {
 .workspace-review-tree button { padding: 4px; text-align: left; }
 .workspace-review-resize-handle { height: 100%; }
 .workspace-review-file { min-width: 0; overflow: auto; }
-.workspace-review-file > strong { display: block; position: sticky; top: 0; padding: 5px 8px; background: var(--panel-bg); z-index: 1; }
+.workspace-review-file > strong { display: flex; align-items: center; gap: 8px; position: sticky; top: 0; padding: 5px 8px; background: var(--panel-bg); z-index: 1; }
+.workspace-review-file > strong > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-review-file > strong > button { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; border: 0; background: transparent; color: var(--accent); cursor: pointer; font: inherit; }
+.workspace-review-file > strong > button:disabled { cursor: default; opacity: .55; }
 .workspace-review-source { min-width: max-content; font-family: var(--mono); font-size: 12px; line-height: 1.5; }
 .workspace-review-source > button { width: 100%; padding: 0; border: 0; background: transparent; color: var(--primary-text); font: inherit; text-align: left; cursor: pointer; }
 .workspace-review-source > button.selected { background: color-mix(in srgb, var(--accent) 15%, transparent); }

@@ -15,7 +15,7 @@ Release artifacts target Windows and macOS. Linux packaging is intentionally dis
 - **Review before changes land.** Approval modes govern tools and commands, coding retries can use isolated Git worktrees, and the built-in Git and GitHub views keep diffs, checkpoints, pull requests, and Worker output close to the thread.
 - **Extend the agent loop.** Reusable Agents, parallel Workers, built-in tools, skills, schedules, MCP servers, and inline MCP Apps share the same workspace and approval boundaries.
 - **Keep context local and deliberate.** Local SQLite persistence, encrypted provider records, scoped Personal and Project memory, and Off, Redact, and Block privacy modes make outbound routing explicit.
-- **Inspect the result.** Preview generated artifacts and runnable apps, create image, video, or music outputs through configured providers, and continue active desktop threads from a paired mobile companion.
+- **Inspect the result.** Preview generated artifacts, folder-backed HTML sites, and runnable apps; create image, video, or music outputs through configured providers; and continue active desktop threads from a paired mobile companion.
 
 Milim keeps provider-backed chat and installed account runtimes distinct. Provider models use Milim's tool-agent loop, while account runtimes retain their native sessions and tools behind the same visible approval policy. Changing the selected model affects the next turn without turning each model into a separate project history.
 

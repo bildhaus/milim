@@ -18,6 +18,7 @@ equal(firstProjectKey, secondProjectKey, "same folder should share a runtime key
 equal(firstProjectKey, caseVariantProjectKey, "same folder key should ignore Windows path case and trailing slashes");
 equal(previewRuntimeKeyForThread("thread-a", ""), "thread-a", "no-folder runtime should stay thread-local");
 equal(previewRuntimeFoldersEqual("C:\\Users\\USER\\app\\", "c:/users/user/app"), true, "folder status matching should use the same normalization as runtime keys");
+equal(previewRuntimeFoldersEqual("\\\\?\\C:\\Users\\USER\\app", "c:/users/user/app"), true, "folder status matching should ignore Windows canonical path prefixes");
 assert(/^[A-Za-z0-9_.-]+$/.test(firstProjectKey), "folder runtime key should be route-safe");
 
 export {};

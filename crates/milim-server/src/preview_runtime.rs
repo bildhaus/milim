@@ -6,13 +6,20 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use axum::body::Body;
+use axum::extract::State;
+use axum::http::{Request, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
+use axum::Router;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
 use tokio::process::{Child, Command};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+use tower_http::services::ServeDir;
 
 use milim_core::{Error, Result};
 
@@ -73,6 +80,7 @@ pub struct PreviewAppPreflight {
 #[derive(Debug, Clone, Serialize)]
 pub struct PreviewAppStatus {
     pub thread_id: String,
+    pub kind: String,
     pub status: String,
     pub active: bool,
     pub ready: bool,
@@ -119,6 +127,12 @@ pub struct PreviewAppStartRequest {
     pub source_fingerprint: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct PreviewStaticStartRequest {
+    pub cwd: String,
+    pub entry_path: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PreviewAppLogsResponse {
     pub logs: Vec<PreviewAppLog>,
@@ -129,6 +143,7 @@ pub struct PreviewAppLogsResponse {
 #[derive(Default)]
 struct PreviewAppEntry {
     cwd: Option<PathBuf>,
+    kind: String,
     status: String,
     active: bool,
     ready: bool,
@@ -224,6 +239,7 @@ impl PreviewRuntimeManager {
         self.stage_files_atomically(&thread_id, files)?;
         self.set_entry(&thread_id, |entry| {
             entry.cwd = Some(dir.clone());
+            entry.kind = "app".to_string();
             entry.managed = true;
             entry.preflight = None;
             if !entry.active {
@@ -232,6 +248,102 @@ impl PreviewRuntimeManager {
             entry.message = Some(format!("Staged {} file(s).", files.len()));
             push_log(entry, "system", &format!("staged {} file(s)", files.len()));
         })?;
+        Ok(self.status_for(&thread_id))
+    }
+
+    pub async fn start_static(
+        self: &Arc<Self>,
+        thread_id: &str,
+        request: &PreviewStaticStartRequest,
+    ) -> Result<PreviewAppStatus> {
+        let thread_id = safe_thread_id(thread_id)?;
+        let root = canonical_static_root(&request.cwd)?;
+        let entry_path = safe_relative_path(&request.entry_path)?;
+        let entry_file = canonical_static_entry(&root, &entry_path)?;
+        let url_path = static_url_path(&entry_path);
+
+        {
+            let mut entries = self
+                .entries
+                .lock()
+                .map_err(|_| Error::Other("preview runtime state lock poisoned".to_string()))?;
+            if let Some(entry) = entries.get_mut(&thread_id).filter(|entry| entry.active) {
+                if entry.kind == "static" && entry.cwd.as_deref() == Some(root.as_path()) {
+                    let port = entry
+                        .url
+                        .as_deref()
+                        .and_then(static_preview_port)
+                        .ok_or_else(|| {
+                            Error::Other("active static preview URL is invalid".to_string())
+                        })?;
+                    entry.url = Some(format!("http://127.0.0.1:{port}/{url_path}"));
+                    entry.message = Some(format!(
+                        "Serving {}.",
+                        workspace_relative_display(&root, &entry_file)
+                    ));
+                    entry.updated_at = crate::now_unix();
+                    return Ok(status_from_entry(
+                        &thread_id,
+                        entry,
+                        &self.app_dir(&thread_id),
+                    ));
+                }
+                return Err(Error::InvalidRequest(
+                    "stop the current preview before starting a static preview".to_string(),
+                ));
+            }
+        }
+
+        let listener = TokioTcpListener::bind(("127.0.0.1", 0)).await?;
+        let port = listener.local_addr()?.port();
+        let url = format!("http://127.0.0.1:{port}/{url_path}");
+        let run_id = uuid::Uuid::new_v4().simple().to_string();
+        let (cancel, cancel_rx) = watch::channel(false);
+
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| Error::Other("preview runtime state lock poisoned".to_string()))?;
+        let entry = entries
+            .entry(thread_id.clone())
+            .or_insert_with(|| PreviewAppEntry {
+                status: "idle".to_string(),
+                managed: true,
+                ..Default::default()
+            });
+        if entry.active {
+            return Err(Error::InvalidRequest(
+                "stop the current preview before starting a static preview".to_string(),
+            ));
+        }
+        entry.task.take();
+        entry.cwd = Some(root.clone());
+        entry.kind = "static".to_string();
+        entry.status = "running".to_string();
+        entry.active = true;
+        entry.ready = true;
+        entry.managed = false;
+        entry.run_id = Some(run_id.clone());
+        entry.error = None;
+        entry.preflight = None;
+        entry.url = Some(url);
+        entry.pid = None;
+        entry.command = None;
+        entry.message = Some(format!(
+            "Serving {}.",
+            workspace_relative_display(&root, &entry_file)
+        ));
+        entry.cancel = Some(cancel);
+        entry.compile_error_at = None;
+        entry.updated_at = crate::now_unix();
+        push_log(entry, "system", "static preview is running");
+
+        let manager = self.clone();
+        let run_thread_id = thread_id.clone();
+        entry.task = Some(tokio::spawn(async move {
+            run_static_preview(manager, run_thread_id, run_id, root, listener, cancel_rx).await;
+        }));
+        drop(entries);
         Ok(self.status_for(&thread_id))
     }
 
@@ -276,6 +388,7 @@ impl PreviewRuntimeManager {
         };
         self.set_entry(&thread_id, |entry| {
             entry.cwd = Some(target.dir.clone());
+            entry.kind = "app".to_string();
             entry.managed = target.managed;
             entry.preflight = Some(preflight.clone());
         })?;
@@ -369,6 +482,7 @@ impl PreviewRuntimeManager {
         }
         entry.task.take();
         entry.cwd = Some(dir.clone());
+        entry.kind = "app".to_string();
         entry.status = if stages_files {
             "staging".to_string()
         } else if install_required {
@@ -599,6 +713,7 @@ impl PreviewRuntimeManager {
             Some(entry) => status_from_entry(thread_id, entry, &self.app_dir(thread_id)),
             None => PreviewAppStatus {
                 thread_id: thread_id.to_string(),
+                kind: "app".to_string(),
                 status: "idle".to_string(),
                 active: false,
                 ready: false,
@@ -681,6 +796,11 @@ fn status_from_entry(
 ) -> PreviewAppStatus {
     PreviewAppStatus {
         thread_id: thread_id.to_string(),
+        kind: if entry.kind.is_empty() {
+            "app".to_string()
+        } else {
+            entry.kind.clone()
+        },
         status: entry.status.clone(),
         active: entry.active,
         ready: entry.ready,
@@ -724,6 +844,168 @@ struct PreviewRun {
     managed: bool,
     files: Vec<PreviewAppFile>,
     install_required: bool,
+}
+
+async fn run_static_preview(
+    manager: Arc<PreviewRuntimeManager>,
+    thread_id: String,
+    run_id: String,
+    root: PathBuf,
+    listener: TokioTcpListener,
+    mut cancel: watch::Receiver<bool>,
+) {
+    let stopped = cancel.clone();
+    let app =
+        Router::new()
+            .fallback_service(ServeDir::new(&root))
+            .layer(middleware::from_fn_with_state(
+                root,
+                validate_static_preview_path,
+            ));
+    let result = axum::serve(listener, app)
+        .with_graceful_shutdown(async move { wait_for_cancel(&mut cancel).await })
+        .await;
+    if let Err(error) = result {
+        fail_run(
+            &manager,
+            &thread_id,
+            &run_id,
+            "static_server_failed",
+            &format!("static preview server failed: {error}"),
+        );
+    } else if !*stopped.borrow() {
+        fail_run(
+            &manager,
+            &thread_id,
+            &run_id,
+            "static_server_stopped",
+            "static preview server stopped unexpectedly",
+        );
+    }
+}
+
+async fn validate_static_preview_path(
+    State(root): State<PathBuf>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    if static_preview_request_target(&root, request.uri().path()).is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    next.run(request).await
+}
+
+fn canonical_static_root(value: &str) -> Result<PathBuf> {
+    let path = PathBuf::from(value.trim());
+    if !path.is_absolute() {
+        return Err(Error::InvalidRequest(
+            "static preview cwd must be absolute".to_string(),
+        ));
+    }
+    let canonical = std::fs::canonicalize(&path).map_err(|error| {
+        Error::InvalidRequest(format!("static preview folder is invalid: {error}"))
+    })?;
+    if !canonical.is_dir() {
+        return Err(Error::InvalidRequest(
+            "static preview cwd must be a directory".to_string(),
+        ));
+    }
+    Ok(canonical)
+}
+
+fn canonical_static_entry(root: &Path, entry_path: &Path) -> Result<PathBuf> {
+    let entry = std::fs::canonicalize(root.join(entry_path)).map_err(|error| {
+        Error::InvalidRequest(format!("static preview file is invalid: {error}"))
+    })?;
+    if !entry.starts_with(root) {
+        return Err(Error::InvalidRequest(
+            "static preview file must stay inside the workspace".to_string(),
+        ));
+    }
+    if !entry.is_file() {
+        return Err(Error::InvalidRequest(
+            "static preview entry must be a file".to_string(),
+        ));
+    }
+    let extension = entry
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if !extension.eq_ignore_ascii_case("html") && !extension.eq_ignore_ascii_case("htm") {
+        return Err(Error::InvalidRequest(
+            "static preview entry must be an HTML file".to_string(),
+        ));
+    }
+    Ok(entry)
+}
+
+fn static_preview_request_target(root: &Path, uri_path: &str) -> Option<PathBuf> {
+    let decoded = decode_static_url_path(uri_path)?;
+    let relative = if decoded.trim_matches('/').is_empty() {
+        PathBuf::from("index.html")
+    } else {
+        safe_relative_path(decoded.trim_start_matches('/')).ok()?
+    };
+    let mut target = std::fs::canonicalize(root.join(relative)).ok()?;
+    if target.is_dir() {
+        target = std::fs::canonicalize(target.join("index.html")).ok()?;
+    }
+    (target.is_file() && target.starts_with(root)).then_some(target)
+}
+
+fn decode_static_url_path(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let high = hex_value(*bytes.get(index + 1)?)?;
+            let low = hex_value(*bytes.get(index + 2)?)?;
+            decoded.push((high << 4) | low);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn static_url_path(path: &Path) -> String {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    let mut encoded = String::with_capacity(normalized.len());
+    for byte in normalized.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+fn static_preview_port(url: &str) -> Option<u16> {
+    url.strip_prefix("http://127.0.0.1:")?
+        .split('/')
+        .next()?
+        .parse()
+        .ok()
+}
+
+fn workspace_relative_display(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 async fn run_preview_app(
@@ -2093,6 +2375,173 @@ mod tests {
             });
         }
         files
+    }
+
+    #[test]
+    fn static_preview_validates_entries_and_request_paths() {
+        let root = test_root();
+        let outside = test_root();
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("index.html"), "<h1>Home</h1>").unwrap();
+        std::fs::write(root.join("nested").join("page.htm"), "<h1>Nested</h1>").unwrap();
+        std::fs::write(root.join("notes.txt"), "notes").unwrap();
+        std::fs::write(outside.join("secret.html"), "secret").unwrap();
+        let canonical_root = canonical_static_root(root.to_str().unwrap()).unwrap();
+
+        assert!(canonical_static_entry(&canonical_root, Path::new("index.html")).is_ok());
+        assert!(canonical_static_entry(&canonical_root, Path::new("nested/page.htm")).is_ok());
+        assert!(canonical_static_entry(&canonical_root, Path::new("missing.html")).is_err());
+        assert!(canonical_static_entry(&canonical_root, Path::new("notes.txt")).is_err());
+        assert!(static_preview_request_target(&canonical_root, "/").is_some());
+        assert!(static_preview_request_target(&canonical_root, "/nested/page.htm").is_some());
+        assert!(static_preview_request_target(&canonical_root, "/../secret.html").is_none());
+        assert!(static_preview_request_target(&canonical_root, "/%2e%2e/secret.html").is_none());
+
+        let link = root.join("escaped.html");
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(outside.join("secret.html"), &link).is_ok();
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_file(outside.join("secret.html"), &link).is_ok();
+        if linked {
+            assert!(canonical_static_entry(&canonical_root, Path::new("escaped.html")).is_err());
+            assert!(static_preview_request_target(&canonical_root, "/escaped.html").is_none());
+        }
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[tokio::test]
+    async fn static_preview_serves_assets_reuses_folder_and_stops() {
+        let root = test_root();
+        let runtime_root = test_root();
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::write(
+            root.join("index.html"),
+            r#"<link rel="stylesheet" href="/style.css"><script src="/app.js"></script><img src="/pixel.png">"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("nested").join("page.html"), "<h1>Nested</h1>").unwrap();
+        std::fs::write(root.join("style.css"), "body { color: red; }").unwrap();
+        std::fs::write(root.join("app.js"), "document.body.dataset.ready = 'yes';").unwrap();
+        std::fs::write(root.join("pixel.png"), [137, 80, 78, 71]).unwrap();
+
+        let manager = Arc::new(PreviewRuntimeManager::new(runtime_root.clone()));
+        let status = manager
+            .start_static(
+                "thread-1",
+                &PreviewStaticStartRequest {
+                    cwd: root.to_string_lossy().to_string(),
+                    entry_path: "index.html".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(status.kind, "static");
+        assert_eq!(status.status, "running");
+        assert!(status.active);
+        assert!(status.ready);
+        assert!(status.pid.is_none());
+        assert!(status.command.is_none());
+        assert!(status.preflight.is_none());
+
+        let client = reqwest::Client::new();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let html = loop {
+            match client.get(status.url.as_ref().unwrap()).send().await {
+                Ok(response) => break response,
+                Err(error) if Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    let _ = error;
+                }
+                Err(error) => panic!("static preview did not start: {error}"),
+            }
+        };
+        assert_eq!(html.status(), reqwest::StatusCode::OK);
+        assert!(html
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("text/html"));
+
+        let base = status.url.as_ref().unwrap().rsplit_once('/').unwrap().0;
+        for (path, mime) in [
+            ("style.css", "text/css"),
+            ("app.js", "text/javascript"),
+            ("pixel.png", "image/png"),
+        ] {
+            let response = client.get(format!("{base}/{path}")).send().await.unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert!(response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with(mime));
+        }
+
+        let reused = manager
+            .start_static(
+                "thread-1",
+                &PreviewStaticStartRequest {
+                    cwd: root.to_string_lossy().to_string(),
+                    entry_path: "nested/page.html".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            static_preview_port(status.url.as_ref().unwrap()),
+            static_preview_port(reused.url.as_ref().unwrap())
+        );
+        assert!(reused.url.as_ref().unwrap().ends_with("/nested/page.html"));
+
+        let stopped_url = reused.url.clone().unwrap();
+        let stopped = manager.stop("thread-1").await.unwrap();
+        assert_eq!(stopped.status, "stopped");
+        assert!(!stopped.active);
+        assert!(client.get(stopped_url).send().await.is_err());
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(runtime_root);
+    }
+
+    #[tokio::test]
+    async fn static_preview_rejects_an_active_app_runtime() {
+        let root = test_root();
+        let runtime_root = test_root();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("index.html"), "<h1>Home</h1>").unwrap();
+        let manager = Arc::new(PreviewRuntimeManager::new(runtime_root.clone()));
+        manager
+            .set_entry("thread-1", |entry| {
+                entry.kind = "app".to_string();
+                entry.cwd = Some(root.clone());
+                entry.status = "running".to_string();
+                entry.active = true;
+                entry.ready = true;
+                entry.run_id = Some("app-run".to_string());
+            })
+            .unwrap();
+
+        let result = manager
+            .start_static(
+                "thread-1",
+                &PreviewStaticStartRequest {
+                    cwd: root.to_string_lossy().to_string(),
+                    entry_path: "index.html".to_string(),
+                },
+            )
+            .await;
+        assert!(matches!(result, Err(Error::InvalidRequest(_))));
+        assert_eq!(manager.status("thread-1").unwrap().kind, "app");
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(runtime_root);
     }
 
     #[test]

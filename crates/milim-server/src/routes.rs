@@ -37,6 +37,7 @@ use crate::media_library::{
 };
 use crate::preview_runtime::{
     PreviewAppPreflightRequest, PreviewAppStageRequest, PreviewAppStartRequest,
+    PreviewStaticStartRequest,
 };
 use crate::privacy::{kinds_summary, PrivacyMode};
 use crate::sse::{agent_sse, anthropic_sse, ollama_ndjson, openai_sse, ChunkCtx};
@@ -4670,6 +4671,18 @@ pub(crate) async fn preview_app_start(
     authorize(&st, &headers, peer_addr(peer))?;
     let request = req.map(|Json(req)| req).unwrap_or_default();
     Ok(Json(st.preview_runtime.start(&thread_id, &request)?).into_response())
+}
+
+/// `POST /preview-apps/{thread_id}/static` - serve a workspace HTML file without running commands.
+pub(crate) async fn preview_app_static(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: Peer,
+    Path(thread_id): Path<String>,
+    Json(req): Json<PreviewStaticStartRequest>,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    Ok(Json(st.preview_runtime.start_static(&thread_id, &req).await?).into_response())
 }
 
 /// `POST /preview-apps/{thread_id}/stop` - stop the preview app process tree.

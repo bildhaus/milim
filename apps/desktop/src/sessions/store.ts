@@ -13,6 +13,7 @@ import type {
   McpAppDescriptor,
   PreviewAppFile,
   PreviewAppError,
+  PreviewAppKind,
   PreviewAppPreflight,
   PreviewAppState,
   PrivacyMode,
@@ -261,6 +262,7 @@ export type SessionArtifactPanelTab = "preview" | "code";
 export type SessionInspectorTab = "preview" | "code" | "git" | "workers";
 
 export interface SessionPreviewRuntime {
+  kind?: PreviewAppKind | string;
   status: PreviewAppState | string;
   cwd?: string;
   url?: string;
@@ -496,6 +498,7 @@ function normalizePreviewRuntime(
       ? raw.pid
       : undefined;
   return {
+    kind: stringValue(raw.kind),
     status,
     cwd: stringValue(raw.cwd),
     url: stringValue(raw.url),
@@ -611,6 +614,7 @@ function samePreviewRuntime(
   b?: SessionPreviewRuntime,
 ): boolean {
   return (
+    (a?.kind ?? "app") === (b?.kind ?? "app") &&
     (a?.status ?? "") === (b?.status ?? "") &&
     (a?.cwd ?? "") === (b?.cwd ?? "") &&
     (a?.url ?? "") === (b?.url ?? "") &&

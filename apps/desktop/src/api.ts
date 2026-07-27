@@ -1233,6 +1233,8 @@ export type PreviewAppState =
   | "stopped"
   | "error";
 
+export type PreviewAppKind = "app" | "static";
+
 export interface PreviewAppFile {
   path: string;
   content: string;
@@ -1266,6 +1268,7 @@ export interface PreviewAppPreflight {
 
 export interface PreviewAppStatus {
   thread_id: string;
+  kind: PreviewAppKind | string;
   status: PreviewAppState | string;
   cwd: string;
   active?: boolean;
@@ -1293,6 +1296,11 @@ export interface PreviewAppStartOptions {
 export interface PreviewAppPreflightOptions {
   cwd?: string;
   files?: PreviewAppFile[];
+}
+
+export interface PreviewStaticStartOptions {
+  cwd: string;
+  entry_path: string;
 }
 
 export interface PreviewAppLogs {
@@ -1369,6 +1377,20 @@ export async function startPreviewApp(
         : {}),
     }),
     "preview app start failed",
+  );
+}
+
+export async function startStaticPreview(
+  threadId: string,
+  options: PreviewStaticStartOptions,
+): Promise<PreviewAppStatus> {
+  return await parseJsonResponse<PreviewAppStatus>(
+    await authFetch(previewAppUrl(threadId, "/static"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(options),
+    }),
+    "static preview start failed",
   );
 }
 

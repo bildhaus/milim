@@ -73,6 +73,7 @@ import {
   setPrivacyMode,
   setWorkspace,
   startPreviewApp,
+  startStaticPreview,
   startWorkerRun,
   stopChildThread,
   stopPreviewApp,
@@ -1666,6 +1667,7 @@ function previewRuntimeFromStatus(
       ? previous?.url
       : undefined);
   return {
+    kind: status.kind,
     status: state,
     cwd: previewRuntimeText(status.cwd),
     url,
@@ -1691,6 +1693,7 @@ function previewStatusFromRuntime(
   if (!runtime) return null;
   return {
     thread_id: threadId,
+    kind: runtime.kind ?? "app",
     status: runtime.status,
     cwd: runtime.cwd ?? "",
     url: runtime.url ?? null,
@@ -1723,6 +1726,7 @@ function previewIdleStatus(
   const cwd = previewRuntimeText(folder) ?? "";
   return {
     thread_id: threadId,
+    kind: "app",
     status: "idle",
     cwd,
     url: null,
@@ -5166,8 +5170,33 @@ export function ChatView({
   function applyPreviewAppStatus(status: PreviewAppStatus) {
     const freshStatus = { ...status, stale: false };
     setPreviewAppStatus(freshStatus);
-    setPreviewAppPreflight(status.preflight ?? activePreviewAppPreflight);
+    setPreviewAppPreflight(
+      status.kind === "static"
+        ? null
+        : (status.preflight ?? activePreviewAppPreflight),
+    );
     persistPreviewRuntimeStatus(freshStatus);
+  }
+
+  async function startWorkspaceHtmlPreview(path: string) {
+    if (!folder.trim()) return;
+    setPreviewAppBusy("start");
+    try {
+      const status = await startStaticPreview(activePreviewRuntimeKey, {
+        cwd: folder,
+        entry_path: path,
+      });
+      applyPreviewAppStatus(status);
+      selectPreviewSource("app");
+      setSessionInspectorTab(activeId, "preview");
+    } catch (error) {
+      setChatNotice({
+        tone: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setPreviewAppBusy(null);
+    }
   }
 
   async function startPreviewRuntime() {
@@ -9872,15 +9901,16 @@ export function ChatView({
                   runtimePreflight={activePreviewAppPreflight}
                   runtimePreflightBusy={previewAppPreflightBusy}
                   runtimeStale={activePreviewAppStatus?.stale === true}
-                  onRuntimePreflight={() => void preflightPreviewRuntime()}
+                  onRuntimePreflight={activePreviewAppStatus?.kind === "static" ? undefined : () => void preflightPreviewRuntime()}
                   runtimeBusy={previewAppBusy != null}
-                  onRuntimeStart={() => void startPreviewRuntime()}
+                  onRuntimeStart={activePreviewAppStatus?.kind === "static" ? undefined : () => void startPreviewRuntime()}
                   onRuntimeStop={() => void stopPreviewRuntime()}
-                  onRuntimeRestart={() => void restartPreviewRuntime()}
+                  onRuntimeRestart={activePreviewAppStatus?.kind === "static" ? undefined : () => void restartPreviewRuntime()}
                   controlActivity={previewControlActivity}
                   onSurfaceChange={setActivePreviewSurface}
                   modeSwitcher={inspectorTabSwitcher}
                   workspaceFolder={folder}
+                  onPreviewWorkspaceFile={(path) => void startWorkspaceHtmlPreview(path)}
                 />
               )
             )}

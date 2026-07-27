@@ -183,6 +183,10 @@ pub fn build_router(state: AppState) -> Router {
             post(routes::preview_app_start),
         )
         .route(
+            "/preview-apps/{thread_id}/static",
+            post(routes::preview_app_static),
+        )
+        .route(
             "/preview-apps/{thread_id}/stop",
             post(routes::preview_app_stop),
         )
