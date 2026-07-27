@@ -9,6 +9,8 @@
 mod account_runtime_update;
 mod auth;
 mod claude_bridge;
+#[cfg(not(windows))]
+mod cli_path;
 mod codex_bridge;
 pub mod companion;
 mod error;
