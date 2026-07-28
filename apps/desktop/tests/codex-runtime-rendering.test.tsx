@@ -2,7 +2,7 @@ import { createElement, type ComponentType } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
 import type { ChatStreamPart } from "../src/api.js";
-import { dismissToolApproval, pendingToolApprovals } from "../src/lib/toolApproval.js";
+import { autoApprovableToolApprovals, dismissToolApproval, pendingToolApprovals } from "../src/lib/toolApproval.js";
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -101,6 +101,15 @@ try {
   assert(
     pendingToolApprovals([{ role: "assistant", content: "", streamParts: [pending, secondPending] }]).length === 2,
     "every pending approval should attach to the composer",
+  );
+  assert(
+    autoApprovableToolApprovals([
+      pending,
+      approvalPart({ kind: "permissions" }),
+      approvalPart({ kind: "mcp_form", server_name: "example", message: "Input", fields: [] }),
+      approvalPart({ kind: "mcp_url", server_name: "example", message: "Authorize", url: "https://example.com" }),
+    ]).length === 2,
+    "Open should auto-approve plain tool and permission requests but keep MCP input and authorization interactive",
   );
   assert(pendingToolApprovals([{ role: "assistant", content: "", streamParts: [pending, resolved] }]).length === 0, "resolved legacy approvals should not reappear by the composer");
   const dismissed = dismissToolApproval([{ role: "assistant", content: "", streamParts: [pending] }], "approval-1", 42);

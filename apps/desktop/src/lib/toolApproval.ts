@@ -12,6 +12,15 @@ export function pendingToolApprovals(messages: readonly ChatMessage[]): Approval
   return [...approvals.values()].filter((part) => part.approvalStatus === "pending");
 }
 
+export function autoApprovableToolApprovals(approvals: readonly ApprovalPart[]): ApprovalPart[] {
+  return approvals.filter((part) =>
+    part.approvalRequest == null ||
+    part.approvalRequest.kind === "command" ||
+    part.approvalRequest.kind === "file_change" ||
+    part.approvalRequest.kind === "permissions"
+  );
+}
+
 export function dismissToolApproval(
   messages: readonly ChatMessage[],
   approvalId: string,

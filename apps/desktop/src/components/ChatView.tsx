@@ -48,6 +48,7 @@ import {
   pollScheduleRunEvents,
   previewArtifactFile,
   readWorkspaceAttachmentFile,
+  resolveToolApproval,
   retryWorkerTask,
   deleteWorkerRun,
   runWorkspaceGitAction,
@@ -269,7 +270,11 @@ import {
   runSelectedAccountRuntimeTurn,
   runToolAgentTurn,
 } from "../lib/turnRuntime";
-import { dismissToolApproval, pendingToolApprovals } from "../lib/toolApproval";
+import {
+  autoApprovableToolApprovals,
+  dismissToolApproval,
+  pendingToolApprovals,
+} from "../lib/toolApproval";
 import {
   hasQueuedMessages,
 } from "../lib/turnQueue";
@@ -1741,6 +1746,18 @@ export function ChatView({
     planMode,
     goal,
   } = threadSettings;
+  const autoApprovingToolIdsRef = useRef(new Set<string>());
+  useEffect(() => {
+    if (toolApproval !== "open") return;
+    for (const approval of autoApprovableToolApprovals(pendingApprovals)) {
+      const id = approval.approvalId;
+      if (!id || autoApprovingToolIdsRef.current.has(id)) continue;
+      autoApprovingToolIdsRef.current.add(id);
+      void resolveToolApproval(id, "approve")
+        .catch(() => {})
+        .finally(() => autoApprovingToolIdsRef.current.delete(id));
+    }
+  }, [pendingApprovals, toolApproval]);
   const {
     activePreviewRuntimeKey,
     activePreviewSurface,
