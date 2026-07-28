@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
+import { flushDeferredUserStateWrites } from "../persistence/userStateStorage.js";
 import {
   checkForUpdate,
   compareVersions,
@@ -211,6 +212,7 @@ export const useUpdateStore = create<UpdateState>()(
           error: null,
         });
         try {
+          await flushDeferredUserStateWrites("milim.sessions");
           await installUpdate(updatePath);
         } catch (error) {
           set({ status: "ready", downloadProgress: null, error: formatError(error) });

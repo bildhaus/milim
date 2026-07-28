@@ -14,7 +14,21 @@ function equal<T>(actual: T, expected: T, message: string) {
   if (actual !== expected) throw new Error(`${message}: expected ${String(expected)}, got ${String(actual)}`);
 }
 
+const invokeCalls: string[] = [];
+Object.defineProperty(globalThis, "window", {
+  value: {
+    __TAURI_INTERNALS__: {
+      invoke: async (command: string) => {
+        invokeCalls.push(command);
+        return null;
+      },
+    },
+  },
+  configurable: true,
+});
+
 const { useUpdateStore } = await import("../src/update/store.js");
+const { writeUserStateKey } = await import("../src/persistence/userStateStorage.js");
 equal(useUpdateStore.getState().automaticCheck, true, "automatic checks should default on");
 equal(useUpdateStore.getState().automaticDownload, true, "automatic downloads should default on");
 useUpdateStore.getState().setAutomaticCheck(false);
@@ -34,5 +48,18 @@ localStorage.setItem("milim.local.updates", JSON.stringify({ state: { automaticC
 await useUpdateStore.persist.rehydrate();
 equal(useUpdateStore.getState().automaticCheck, true, "invalid automatic check state should normalize");
 equal(useUpdateStore.getState().automaticDownload, true, "invalid automatic download state should normalize");
+
+const pendingSessionWrite = writeUserStateKey(
+  "milim.sessions",
+  '{"state":{"sessions":[{"id":"before-update","messages":[]}]}}',
+);
+useUpdateStore.setState({ updatePath: "/tmp/milim.app", status: "ready" });
+await useUpdateStore.getState().installNow();
+await pendingSessionWrite;
+equal(
+  invokeCalls.indexOf("user_sessions_set") < invokeCalls.indexOf("apply_update"),
+  true,
+  "pending session state should flush before applying an update",
+);
 
 export {};
