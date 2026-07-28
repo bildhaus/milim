@@ -87,6 +87,8 @@ assert.match(api, /`\$\{BASE\}\/pi\/status`/);
 assert.match(api, /`\$\{BASE\}\/pi\/run`/);
 assert.match(api, /export async function getAccountRuntimeUpdates/);
 assert.match(api, /export async function updateAccountRuntime/);
+assert.match(api, /latest_version\?: string \| null/);
+assert.match(api, /update_available\?: boolean \| null/);
 assert.match(api, /`\$\{BASE\}\/account-runtimes\/updates`/);
 assert.match(
   api,
@@ -104,6 +106,10 @@ for (const runtime of ["codex", "claude", "opencode", "pi"]) {
   assert.match(providersManager, new RegExp(`runtimeUpdateButton\\("${runtime}"`));
 }
 assert.match(providersManager, /data-testid=\{`\$\{runtime\}-update`\}/);
+assert.match(providersManager, /updateAvailable === true \? "btn-accent" : "btn-ghost"/);
+assert.match(providersManager, /updateAvailable === false/);
+assert.match(providersManager, /"Update available"/);
+assert.match(providersManager, /"Up to date"/);
 assert.match(
   providersManager,
   /confirmRuntimeUpdate !== runtime[\s\S]*click Confirm update/,

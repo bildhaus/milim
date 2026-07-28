@@ -331,7 +331,7 @@ pub(crate) async fn pi_run(
     .into_response())
 }
 
-/// `GET /account-runtimes/updates` - installed versions for user-owned CLIs.
+/// `GET /account-runtimes/updates` - installed and latest versions for user-owned CLIs.
 pub(crate) async fn account_runtime_updates(
     State(st): State<AppState>,
     headers: HeaderMap,

@@ -2195,6 +2195,9 @@ export interface PiStatusResponse {
 export interface AccountRuntimeUpdateStatus {
   available: boolean;
   version?: string | null;
+  latest_version?: string | null;
+  update_available?: boolean | null;
+  update_error?: string | null;
   error?: string | null;
 }
 

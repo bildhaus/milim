@@ -11,6 +11,8 @@ updated: 2026-07-28
 
 Milim is your local control plane for coding agents: use your own models and subscriptions, keep one canonical thread, review the diff, and ship.
 
+Account-runtime cards compare the installed CLI with its latest stable release, highlight available updates, disable the action when current, and keep it neutral if the release check is unavailable.
+
 The Providers sheet uses branded icons for saved providers, setup shortcuts, detected local runtimes, and the separate Codex, OpenCode, Claude, and Pi account-runtime cards. Pi reports its configured provider and model counts with refresh and `/login` guidance. Cards use a two-column grid: four runtimes render 2×2, while a final odd card spans both columns.
 
 Git-backed New Chat flows use the configured workspace preference. The split-button menu can explicitly start in the current checkout or an isolated worktree. Isolated threads execute from `~/.milim/runtime/threads/<thread-id>` on a retained `milim/thread-<short-id>` branch while continuing to group under the original project. Uncommitted changes in the original checkout are excluded. Archive preserves the worktree; deletion removes a clean worktree or asks before force-discarding dirty state, and never deletes its branch.

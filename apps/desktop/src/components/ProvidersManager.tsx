@@ -432,19 +432,38 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
   function runtimeUpdateButton(runtime: AccountRuntimeKind, available: boolean) {
     const updating = updatingRuntime === runtime;
     const confirming = confirmRuntimeUpdate === runtime;
+    const status = runtimeUpdates[runtime];
+    const updateAvailable = status?.update_available;
+    const installed = status?.available ?? available;
     return (
       <button
-        className="btn-ghost"
+        className={updateAvailable === true ? "btn-accent" : "btn-ghost"}
         data-testid={`${runtime}-update`}
         type="button"
         onClick={() => void runRuntimeUpdate(runtime)}
+        title={
+          updateAvailable === true
+            ? `Update to v${status?.latest_version ?? "latest"}`
+            : updateAvailable === false
+              ? `${ACCOUNT_RUNTIME_LABEL[runtime]} is up to date`
+              : status?.update_error ?? undefined
+        }
         disabled={
           updatingRuntime !== null ||
           !accountRuntimeEnabled[runtime] ||
-          !(runtimeUpdates[runtime]?.available ?? available)
+          !installed ||
+          updateAvailable === false
         }
       >
-        {updating ? "Updating..." : confirming ? "Confirm update" : "Update"}
+        {updating
+          ? "Updating..."
+          : confirming
+            ? "Confirm update"
+            : updateAvailable === true
+              ? "Update available"
+              : updateAvailable === false
+                ? "Up to date"
+                : "Update"}
       </button>
     );
   }

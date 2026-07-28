@@ -1023,8 +1023,8 @@ fn run_stream_with_worker_events(
                         }
                         yield locked_session_error_event(&req, message);
                     } else if !saw_terminal_event {
-                        yield sse_event_with_worker(&ClaudeStreamEvent::Done {
-                            status: "completed".to_string(),
+                        yield sse_event_with_worker(&ClaudeStreamEvent::Error {
+                            message: claude_missing_terminal_error(&stderr),
                             usage: None,
                             cost_usd: None,
                         }, &worker_events);
@@ -1393,6 +1393,10 @@ fn first_error(stderr: &str, fallback: &str) -> String {
         .find(|line| !line.trim().is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| fallback.to_string())
+}
+
+fn claude_missing_terminal_error(stderr: &str) -> String {
+    first_error(stderr, "Claude CLI ended without a terminal result.")
 }
 
 fn claude_session_in_use_error(message: &str) -> bool {
@@ -2483,6 +2487,18 @@ not json
         assert!(is_cli_path_warning(&message));
         assert!(message.contains("claude"));
         assert!(message.contains("macOS"));
+    }
+
+    #[test]
+    fn missing_terminal_result_is_an_error() {
+        assert_eq!(
+            claude_missing_terminal_error(""),
+            "Claude CLI ended without a terminal result."
+        );
+        assert_eq!(
+            claude_missing_terminal_error("\nprovider authentication failed\nignored"),
+            "provider authentication failed"
+        );
     }
 
     #[test]

@@ -55,14 +55,24 @@ impl AccountRuntime {
             Self::Pi => &["update", "self", "--no-approve"],
         }
     }
+
+    fn latest_url(self) -> &'static str {
+        match self {
+            Self::Codex => "https://registry.npmjs.org/%40openai%2Fcodex/latest",
+            Self::Claude => "https://registry.npmjs.org/%40anthropic-ai%2Fclaude-code/latest",
+            Self::OpenCode => "https://registry.npmjs.org/opencode-ai/latest",
+            Self::Pi => "https://registry.npmjs.org/%40earendil-works%2Fpi-coding-agent/latest",
+        }
+    }
 }
 
 pub(crate) async fn statuses() -> Value {
+    let client = reqwest::Client::new();
     let (codex, claude, opencode, pi) = tokio::join!(
-        status(AccountRuntime::Codex),
-        status(AccountRuntime::Claude),
-        status(AccountRuntime::OpenCode),
-        status(AccountRuntime::Pi),
+        status(&client, AccountRuntime::Codex),
+        status(&client, AccountRuntime::Claude),
+        status(&client, AccountRuntime::OpenCode),
+        status(&client, AccountRuntime::Pi),
     );
     json!({
         "runtimes": {
@@ -108,15 +118,81 @@ pub(crate) async fn update(runtime: AccountRuntime) -> Result<Value> {
     }))
 }
 
-async fn status(runtime: AccountRuntime) -> Value {
+async fn status(client: &reqwest::Client, runtime: AccountRuntime) -> Value {
     match installed_version(runtime).await {
-        Ok(version) => json!({ "available": true, "version": version }),
+        Ok(version) => match latest_version(client, runtime).await {
+            Ok(latest_version) => {
+                let update_available = version_is_newer(&version, &latest_version);
+                json!({
+                    "available": true,
+                    "version": version,
+                    "latest_version": latest_version,
+                    "update_available": update_available,
+                    "update_error": if update_available.is_none() {
+                        Value::String("Could not compare installed and latest versions.".into())
+                    } else {
+                        Value::Null
+                    },
+                })
+            }
+            Err(error) => json!({
+                "available": true,
+                "version": version,
+                "latest_version": Value::Null,
+                "update_available": Value::Null,
+                "update_error": error.to_string(),
+            }),
+        },
         Err(error) => json!({
             "available": false,
             "version": Value::Null,
+            "latest_version": Value::Null,
+            "update_available": Value::Null,
             "error": error.to_string(),
         }),
     }
+}
+
+async fn latest_version(client: &reqwest::Client, runtime: AccountRuntime) -> Result<String> {
+    tokio::time::timeout(VERSION_TIMEOUT, async {
+        let response = client
+            .get(runtime.latest_url())
+            .send()
+            .await
+            .map_err(|error| {
+                Error::Upstream(format!(
+                    "Could not check the latest {} version: {error}",
+                    runtime.id()
+                ))
+            })?;
+        if !response.status().is_success() {
+            return Err(Error::Upstream(format!(
+                "Latest {} version check returned {}.",
+                runtime.id(),
+                response.status()
+            )));
+        }
+        let payload: Value = response.json().await.map_err(|error| {
+            Error::Upstream(format!(
+                "Latest {} version response was invalid: {error}",
+                runtime.id()
+            ))
+        })?;
+        payload
+            .get("version")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|version| !version.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                Error::Upstream(format!(
+                    "Latest {} version response had no version.",
+                    runtime.id()
+                ))
+            })
+    })
+    .await
+    .map_err(|_| Error::Upstream(format!("Latest {} version check timed out.", runtime.id())))?
 }
 
 async fn installed_version(runtime: AccountRuntime) -> Result<String> {
@@ -152,6 +228,40 @@ fn normalize_version(output: &str) -> Option<String> {
                 .to_string()
         })
         .filter(|version| !version.is_empty())
+}
+
+fn version_is_newer(installed: &str, latest: &str) -> Option<bool> {
+    let (installed_parts, installed_pre) = version_parts(installed)?;
+    let (latest_parts, latest_pre) = version_parts(latest)?;
+    for index in 0..installed_parts.len().max(latest_parts.len()) {
+        let installed_part = installed_parts.get(index).copied().unwrap_or(0);
+        let latest_part = latest_parts.get(index).copied().unwrap_or(0);
+        if installed_part != latest_part {
+            return Some(latest_part > installed_part);
+        }
+    }
+    match (installed_pre, latest_pre) {
+        (Some(_), None) => Some(true),
+        (None, Some(_)) => Some(false),
+        (None, None) => Some(false),
+        (Some(installed), Some(latest)) if installed == latest => Some(false),
+        (Some(_), Some(_)) => None,
+    }
+}
+
+fn version_parts(version: &str) -> Option<(Vec<u64>, Option<&str>)> {
+    let version = version.trim_start_matches('v').split('+').next()?;
+    let (core, prerelease) = version
+        .split_once('-')
+        .map_or((version, None), |(core, prerelease)| {
+            (core, Some(prerelease))
+        });
+    let parts = core
+        .split('.')
+        .map(str::parse)
+        .collect::<std::result::Result<Vec<u64>, _>>()
+        .ok()?;
+    (!parts.is_empty()).then_some((parts, prerelease))
 }
 
 fn command_detail(stdout: &[u8], stderr: &[u8]) -> String {
@@ -225,5 +335,14 @@ mod tests {
             Some("2.1.215")
         );
         assert_eq!(normalize_version("no version"), None);
+    }
+
+    #[test]
+    fn update_availability_compares_release_versions() {
+        assert_eq!(version_is_newer("1.18.7", "1.18.9"), Some(true));
+        assert_eq!(version_is_newer("2.1.220", "2.1.220"), Some(false));
+        assert_eq!(version_is_newer("0.146.0", "0.145.0"), Some(false));
+        assert_eq!(version_is_newer("1.0.0-beta.1", "1.0.0"), Some(true));
+        assert_eq!(version_is_newer("unknown", "1.0.0"), None);
     }
 }
