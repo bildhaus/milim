@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { extname, join } from "node:path";
+import { extname, join, sep } from "node:path";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const src = join(root, "src");
@@ -22,7 +22,11 @@ for (const file of files(src)) {
     const line = text.slice(0, match.index).split(/\r?\n/).length;
     findings.push(`${file}:${line}: do not call getSettings inside a useSessions selector`);
   }
-  if (file.endsWith(`${join("components", "Sidebar.tsx")}`) || file.endsWith(`${join("components", "ChatView.tsx")}`)) {
+  if (
+    file.endsWith(`${join("components", "Sidebar.tsx")}`) ||
+    file.endsWith(`${join("components", "ChatView.tsx")}`) ||
+    file.includes(`${join("components", "chat")}${sep}`)
+  ) {
     for (const match of text.matchAll(metadataOnlyFullSessionSelector)) {
       const line = text.slice(0, match.index).split(/\r?\n/).length;
       findings.push(`${file}:${line}: metadata views must subscribe to summaries, not full sessions`);

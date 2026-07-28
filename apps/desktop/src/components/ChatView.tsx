@@ -22,18 +22,13 @@ import {
   requestComposerCompletion,
   codexRuntimeModel,
   inferAttachmentMime,
-  generateMedia,
   getClaudeStatus,
   getOpenCodeStatus,
   getPiStatus,
   getCodexAccount,
-  getMobileCompanionStatus,
   getWorkspaceGitStatus,
   getWorkerRun,
   getWorkerDiff,
-  getMediaModelSchema,
-  getMediaStatus,
-  getPreviewAppStatus,
   isClaudeModel,
   accountRuntimeKind,
   isCliPathWarningMessage,
@@ -41,11 +36,8 @@ import {
   isOpenCodeModel,
   isPiModel,
   listWorkspaceFiles,
-  loadStartupModels,
   listModelsDetailed,
-  listMediaModels,
   listProviders,
-  listSkills,
   listTools,
   listWorkerRuns,
   MAX_ATTACHMENT_BYTES,
@@ -53,13 +45,9 @@ import {
   openDiagnosticsFolder,
   openExternalUrl,
   pickAttachmentFiles,
-  pollMobileCompanionEvents,
   pollScheduleRunEvents,
-  preflightPreviewApp,
-  publishMobileThreadSnapshot,
   previewArtifactFile,
   readWorkspaceAttachmentFile,
-  restartPreviewApp,
   retryWorkerTask,
   deleteWorkerRun,
   runWorkspaceGitAction,
@@ -69,11 +57,8 @@ import {
   setComputerUse,
   setPrivacyMode,
   setWorkspace,
-  startPreviewApp,
-  startStaticPreview,
   startWorkerRun,
   stopChildThread,
-  stopPreviewApp,
   stopWorkerRun,
   stopWorker,
   streamAgentRun,
@@ -88,7 +73,6 @@ import {
   opencodeRuntimeModel,
   piRuntimeModel,
   wireMessageContent,
-  mediaProviders,
   type AgentEvent,
   type AccountNativeWorkerLifecycle,
   type ArtifactFileStatus,
@@ -107,30 +91,20 @@ import {
   type OpenCodeRunEvent,
   type PiRunEvent,
   type MediaGenerationResult,
-  type MediaKind,
-  type MediaModelSchema,
-  type MediaSchemaControl,
   type MobileThreadGroup,
   type MobileThreadSummary,
   type MobileWorkerRunSnapshot,
-  type MobileRelayAttachment,
-  type MobileRelayEvent,
   type MemoryNotice,
   type ModelInfo,
   type PreviewAppFile,
-  type PreviewAppPreflight,
   type PreviewAppStatus,
   type PreviewAppStartOptions,
-  type PreviewSurfaceTarget,
   type ReviewComment,
-  type ProviderInfo,
   type ReasoningEffort,
   type RunTrace,
   type SavedArtifactFile,
   type ScheduleRunEvent,
-  type SkillInfo,
   type TokenUsage,
-  type ToolInfo,
   type ThreadEvent,
   type WorkspaceFileSuggestion,
   type WorkspaceCheckpoint,
@@ -177,10 +151,7 @@ import {
   workerRunReadyForSynthesis,
   workerRunSynthesisId,
 } from "../lib/workerRuns";
-import {
-  assertValidImageAttachment,
-  readBrowserAttachmentDataUrl,
-} from "../lib/attachmentInput";
+import { readBrowserAttachmentDataUrl } from "../lib/attachmentInput";
 import {
   buildEmptyStarterStrip,
   type EmptyStarterStrip,
@@ -246,21 +217,8 @@ import {
   type GoalSettings,
 } from "../lib/goals";
 import { isNearScrollBottom } from "../lib/scroll";
-import {
-  bestMediaResultUrl,
-  defaultMediaAdvanced,
-  defaultMediaModel,
-  inputWithSchemaControls,
-  mediaKindForModelId,
-  mediaPollingMaxAttempts,
-  mediaPreferenceKey,
-  mediaResultContent,
-  parseControlValue,
-  schemaDefaults,
-  shouldPollMediaStatus,
-} from "../lib/media";
 import { mergeModelListsForPicker, providerOwnsModel } from "../lib/modelPicker";
-import { assessHotSwap, nativeRuntimeIsStale, type HotSwapAssessment } from "../lib/hotSwap";
+import { assessHotSwap, type HotSwapAssessment } from "../lib/hotSwap";
 import {
   approvalWaitDuration,
   estimateResponseCostUsd,
@@ -313,9 +271,7 @@ import {
 } from "../lib/turnRuntime";
 import { dismissToolApproval, pendingToolApprovals } from "../lib/toolApproval";
 import {
-  drainQueuedMessages as drainQueuedMessagesFromQueue,
   hasQueuedMessages,
-  queuedModelForSession,
 } from "../lib/turnQueue";
 import {
   claimTurnGeneration,
@@ -325,7 +281,7 @@ import {
 import { checkpointWorkspaceBeforeTurn } from "../lib/turnWorkspace";
 import { createChatMessageId } from "../lib/messageIds.js";
 import { flushDeferredUserStateWrites } from "../persistence/userStateStorage";
-import { useSettings, type MediaSettings } from "../settings/store";
+import { useSettings } from "../settings/store";
 import { themeCssVariables } from "../theme/applyTheme";
 import { useTheme } from "../theme/store";
 import { shortcutLabel, shortcutMatchesEvent } from "../ui/shortcuts";
@@ -374,6 +330,17 @@ import { BatonTargetSheet, HotSwapPreflightSheet } from "./HotSwapDialogs";
 import { MessageRow, type MessageRowActions } from "./ChatMessageRow";
 import { QueuedMessageTray } from "./QueuedMessageTray";
 import { MilimUsageRidgeline } from "./MilimUsageRidgeline";
+import { useChatCatalogController } from "./chat/useChatCatalogController";
+import {
+  previewRuntimeText,
+  previewStatusFromRuntime,
+  previewStatusMatchesFolder,
+  useChatInspectorController,
+} from "./chat/useChatInspectorController";
+import { useChatConversationController } from "./chat/useChatConversationController";
+import { useChatMobileRelayController } from "./chat/useChatMobileRelayController";
+import { useChatMediaController } from "./chat/useChatMediaController";
+import { useChatWorkerController } from "./chat/useChatWorkerController";
 
 const ProvidersManager = lazy(() =>
   import("./ProvidersManager").then((mod) => ({
@@ -668,8 +635,6 @@ const PREVIEW_PANEL_STAGE_OVERSHOOT = 32;
 const PREVIEW_PANEL_COLLAPSE_OVERSHOOT = 96;
 const PREVIEW_PANEL_ANIMATION_MS = 180;
 const COLLAPSED_SIDEBAR_WIDTH = 48;
-const MEDIA_CONTEXT_MESSAGE_LIMIT = 10;
-const MEDIA_CONTEXT_CHAR_LIMIT = 1800;
 const HOT_SWAP_CONTINUE_PROMPT =
   "Continue from the current workspace and thread state. Inspect what is already complete, then finish the active task.";
 const HOT_SWAP_REVIEW_PROMPT =
@@ -966,78 +931,6 @@ function MessageVirtualRow({
   );
 }
 
-function previewRuntimeText(value?: string | null): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function previewRuntimeFromStatus(
-  status: PreviewAppStatus,
-  previous?: SessionPreviewRuntime,
-): SessionPreviewRuntime {
-  const state = previewRuntimeText(status.status) ?? "idle";
-  const url =
-    previewRuntimeText(status.url) ??
-    (status.active === true ||
-    state === "staging" ||
-    state === "installing" ||
-    state === "starting" ||
-    state === "stopping" ||
-    state === "error"
-      ? previous?.url
-      : undefined);
-  return {
-    kind: status.kind,
-    status: state,
-    cwd: previewRuntimeText(status.cwd),
-    url,
-    pid:
-      typeof status.pid === "number" && Number.isFinite(status.pid)
-        ? status.pid
-        : undefined,
-    command: previewRuntimeText(status.command),
-    message: previewRuntimeText(status.message),
-    active: status.active,
-    ready: status.ready,
-    managed: status.managed,
-    runId: previewRuntimeText(status.run_id),
-    error: status.error ?? undefined,
-    preflight: status.preflight ?? undefined,
-  };
-}
-
-function previewStatusFromRuntime(
-  threadId: string,
-  runtime?: SessionPreviewRuntime,
-): PreviewAppStatus | null {
-  if (!runtime) return null;
-  return {
-    thread_id: threadId,
-    kind: runtime.kind ?? "app",
-    status: runtime.status,
-    cwd: runtime.cwd ?? "",
-    url: runtime.url ?? null,
-    pid: runtime.pid ?? null,
-    command: runtime.command ?? null,
-    message: runtime.message ?? null,
-    active: runtime.active,
-    ready: runtime.ready,
-    managed: runtime.managed,
-    run_id: runtime.runId ?? null,
-    updated_at: runtime.updatedAt,
-    error: runtime.error ?? null,
-    preflight: runtime.preflight ?? null,
-    logs: [],
-  };
-}
-
-function previewStatusMatchesFolder(
-  status: PreviewAppStatus | null,
-  folder: string,
-): boolean {
-  const cwd = previewRuntimeText(folder);
-  return !cwd || previewRuntimeFoldersEqual(status?.cwd, cwd);
-}
-
 function previewIdleStatus(
   threadId: string,
   folder: string,
@@ -1318,12 +1211,6 @@ function resolveApprovalMessage(
   };
 }
 
-type GoalLoopState = {
-  sessionId: string;
-  stopped: boolean;
-  decisionController?: AbortController;
-};
-
 type PreviewSelection = {
   artifact: ChatArtifact;
   artifacts: ChatArtifact[];
@@ -1337,18 +1224,6 @@ type InspectorPreviewSource = "artifact" | "app" | "url";
 
 type InspectorBrowserTab = SessionBrowserTab;
 type InspectorBrowserSession = SessionBrowserSession;
-
-type ActiveMediaTarget = {
-  provider: ProviderInfo;
-  model: string;
-  kind: MediaKind;
-  supportedKinds: MediaKind[];
-};
-
-type MediaProviderCatalog = Record<
-  string,
-  Partial<Record<MediaKind, string[]>>
->;
 
 type ChatSessionSummary = {
   id: string;
@@ -1486,69 +1361,6 @@ function createChatSessionSummariesSelector() {
   };
 }
 
-function addMediaCandidate(
-  candidates: Map<string, Set<MediaKind>>,
-  model: string | undefined,
-  fallbackKind: MediaKind,
-  force = false,
-): void {
-  const trimmed = model?.trim();
-  if (!trimmed) return;
-  const kind = mediaKindForModelId(trimmed);
-  if (!kind && !force) return;
-  const kinds = candidates.get(trimmed) ?? new Set<MediaKind>();
-  kinds.add(kind ?? fallbackKind);
-  candidates.set(trimmed, kinds);
-}
-
-function mediaCandidatesForProvider(
-  provider: ProviderInfo,
-  settings: MediaSettings,
-  catalog: MediaProviderCatalog,
-): Map<string, Set<MediaKind>> {
-  const candidates = new Map<string, Set<MediaKind>>();
-  addMediaCandidate(candidates, defaultMediaModel(provider), "image", true);
-  addMediaCandidate(
-    candidates,
-    settings.modelByProvider[provider.id],
-    "image",
-    true,
-  );
-  for (const id of settings.favoriteModelIdsByProvider[provider.id] ?? []) {
-    addMediaCandidate(candidates, id, "image", true);
-  }
-  for (const id of provider.models ?? []) {
-    addMediaCandidate(candidates, id, "image");
-  }
-  for (const kind of ["image", "video", "music"] as MediaKind[]) {
-    for (const id of catalog[provider.id]?.[kind] ?? []) {
-      addMediaCandidate(candidates, id, kind, true);
-    }
-  }
-  return candidates;
-}
-
-function mediaModelsForPicker(
-  providers: ProviderInfo[],
-  settings: MediaSettings,
-  catalog: MediaProviderCatalog,
-): ModelInfo[] {
-  return providers.flatMap((provider) =>
-    Array.from(
-      mediaCandidatesForProvider(provider, settings, catalog),
-      ([id, kinds]) => ({
-        id,
-        owned_by: `${provider.name} media`,
-        capabilities: {
-          imageOutput: kinds.has("image"),
-          videoOutput: kinds.has("video"),
-          musicOutput: kinds.has("music"),
-        },
-      }),
-    ),
-  );
-}
-
 function executePlanPrompt(plan: string): string {
   return [
     "Execute the approved implementation plan below.",
@@ -1557,74 +1369,6 @@ function executePlanPrompt(plan: string): string {
     "Approved plan:",
     plan,
   ].join("\n");
-}
-
-function resolveActiveMediaTarget(
-  model: string,
-  providers: ProviderInfo[],
-  settings: MediaSettings,
-  catalog: MediaProviderCatalog,
-): ActiveMediaTarget | null {
-  const selected = model.trim();
-  if (!selected) return null;
-  for (const provider of providers) {
-    const candidates = mediaCandidatesForProvider(provider, settings, catalog);
-    const kinds = candidates.get(selected);
-    if (kinds?.size) {
-      const supportedKinds = Array.from(kinds);
-      return {
-        provider,
-        model: selected,
-        kind: supportedKinds[0],
-        supportedKinds,
-      };
-    }
-  }
-  return null;
-}
-
-function updateMediaMessage(
-  sessionId: string,
-  requestId: string,
-  patch: Partial<ChatMessage>,
-): void {
-  const store = useSessions.getState();
-  const session = store.sessions.find((item) => item.id === sessionId);
-  if (!session) return;
-  const messages = session.messages.map((message) =>
-    message.mediaRequestId === requestId ? { ...message, ...patch } : message,
-  );
-  store.setMessages(sessionId, messages, { autoTitle: false });
-}
-
-function replaceMediaResult(
-  sessionId: string,
-  requestId: string,
-  result: MediaGenerationResult,
-): void {
-  const store = useSessions.getState();
-  const session = store.sessions.find((item) => item.id === sessionId);
-  if (!session) return;
-  const messages = session.messages.map((message) => {
-    if (message.mediaRequestId !== requestId) return message;
-    const current = message.mediaResults ?? [];
-    const index = current.findIndex(
-      (item) =>
-        item.provider_id === result.provider_id && item.id === result.id,
-    );
-    const mediaResults =
-      index >= 0
-        ? current.map((item, itemIndex) =>
-            itemIndex === index ? { ...item, ...result } : item,
-          )
-        : [result, ...current];
-    return {
-      ...message,
-      content: bestMediaResultUrl(result) ? "" : mediaResultContent(result),
-      mediaResults,
-    };
-  });
-  store.setMessages(sessionId, messages, { autoTitle: false });
 }
 
 function codexImageMediaResult(
@@ -1697,57 +1441,6 @@ function compactText(value: string, max = 96): string {
   return text.length > max ? text.slice(0, max - 1).trimEnd() + "..." : text;
 }
 
-function mediaContextLine(message: ChatMessage): string | null {
-  const text = message.content.trim();
-  if (message.role === "user") {
-    return text ? `User: ${compactText(text, 420)}` : null;
-  }
-  if (message.mediaResults?.length) {
-    const summaries = message.mediaResults.slice(0, 2).map((result) => {
-      const kind = String(result.media[0]?.kind ?? result.kind ?? "media");
-      const status = result.status.trim() || "submitted";
-      return bestMediaResultUrl(result)
-        ? `generated ${kind} (${status})`
-        : `${kind} generation ${status}`;
-    });
-    return summaries.length ? `Assistant: ${summaries.join(", ")}.` : null;
-  }
-  if (!text || text.startsWith("Generating ")) return null;
-  return `Assistant: ${compactText(text, 420)}`;
-}
-
-function boundedMediaContextLines(messages: ChatMessage[]): string[] {
-  const lines = messages
-    .map(mediaContextLine)
-    .filter((line): line is string => Boolean(line))
-    .slice(-MEDIA_CONTEXT_MESSAGE_LIMIT);
-  const selected: string[] = [];
-  let chars = 0;
-  for (const line of lines.slice().reverse()) {
-    const nextChars = chars + line.length + 1;
-    if (selected.length && nextChars > MEDIA_CONTEXT_CHAR_LIMIT) break;
-    selected.push(line);
-    chars = nextChars;
-  }
-  return selected.reverse();
-}
-
-function mediaPromptWithHistory(
-  baseMessages: ChatMessage[],
-  currentPrompt: string,
-): string {
-  const context = boundedMediaContextLines(baseMessages);
-  if (!context.length) return currentPrompt;
-  return [
-    "Use the recent chat context only to resolve references and maintain continuity. Create the latest requested media.",
-    "",
-    "Recent chat:",
-    ...context,
-    "",
-    `Latest request: ${currentPrompt}`,
-  ].join("\n");
-}
-
 export function ChatView({
   onManageAgents,
   onOpenSchedules,
@@ -1774,7 +1467,6 @@ export function ChatView({
   markPerfRender("ChatView");
   const { openContextMenu } = useContextMenu();
   const messageRowActionsRef = useRef<MessageRowActions | null>(null);
-  const [models, setModels] = useState<ModelInfo[]>([]);
   const [input, setInputState] = useState(() =>
     getSessionComposerDraft(useSessions.getState().activeId),
   );
@@ -1783,36 +1475,13 @@ export function ChatView({
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [memoryTarget, setMemoryTarget] = useState<MemoryNotice | null>(null);
   const [attachmentPreview, setAttachmentPreview] = useState<ChatAttachment | null>(null);
-  const [skills, setSkills] = useState<SkillInfo[]>([]);
-  const [composerTools, setComposerTools] = useState<ToolInfo[]>([]);
   const [editing, setEditing] = useState<number | null>(null);
-  const [modelsLoaded, setModelsLoaded] = useState(false);
-  const [providers, setProviders] = useState<ProviderInfo[]>([]);
-  const [mediaCatalog, setMediaCatalog] = useState<MediaProviderCatalog>({});
-  const [mediaKind, setMediaKind] = useState<MediaKind>("image");
-  const [mediaAdvanced, setMediaAdvanced] = useState("{}");
-  const [mediaSchema, setMediaSchema] = useState<MediaModelSchema | null>(null);
-  const [mediaParameterValues, setMediaParameterValues] = useState<
-    Record<string, unknown>
-  >({});
-  const [mediaSchemaLoading, setMediaSchemaLoading] = useState(false);
-  const [mediaError, setMediaError] = useState<string | null>(null);
   const [pendingAttachments, setPendingAttachments] = useState<
     ChatAttachment[]
   >([]);
   const [reviewCommentsBySession, setReviewCommentsBySession] = useState<Record<string, ReviewComment[]>>({});
   const [, setPreviewSelection] =
     useState<PreviewSelection | null>(null);
-  const [activePreviewSurface, setActivePreviewSurface] =
-    useState<PreviewSurfaceTarget | null>(null);
-  const [previewAppStatus, setPreviewAppStatus] =
-    useState<PreviewAppStatus | null>(null);
-  const [previewAppPreflight, setPreviewAppPreflight] =
-    useState<PreviewAppPreflight | null>(null);
-  const [previewAppPreflightBusy, setPreviewAppPreflightBusy] = useState(false);
-  const [previewAppBusy, setPreviewAppBusy] = useState<
-    "start" | "stop" | "restart" | null
-  >(null);
   const [workerActionBusy, setWorkerActionBusy] = useState(false);
   const [workerFocusRunId, setWorkerFocusRunId] = useState("");
   const [workerSettingsOpen, setWorkerSettingsOpen] = useState(false);
@@ -1997,8 +1666,6 @@ export function ChatView({
   const setSessionInspectorOpen = useSessions((s) => s.setInspectorOpen);
   const setSessionInspectorTab = useSessions((s) => s.setInspectorTab);
   const setSessionBrowserSession = useSessions((s) => s.setBrowserSession);
-  const setSessionPreviewRuntime = useSessions((s) => s.setPreviewRuntime);
-  const setPreviewRuntimeByKey = useSessions((s) => s.setPreviewRuntimeByKey);
   const updateThreadSettings = useSessions((s) => s.updateSettings);
   const switchToSession = useSessions((s) => s.switchTo);
   const enqueueQueuedMessage = useSessions((s) => s.enqueueQueuedMessage);
@@ -2024,6 +1691,16 @@ export function ChatView({
   const configuredNewThreads = useSettings((s) => s.newThreadBehavior === "configured");
   const unavailableModelPolicy = useSettings((s) => s.unavailableModelPolicy);
   const setMediaSettings = useSettings((s) => s.setMediaSettings);
+  const {
+    models,
+    modelsLoaded,
+    providers,
+    skills,
+    composerTools,
+    setModels,
+    setProviders,
+    setComposerTools,
+  } = useChatCatalogController(accountRuntimeEnabled, skillsRevision);
   const previewPanelWidth = useUiPreferences((s) => s.previewPanelWidth);
   const setPreviewPanelWidth = useUiPreferences((s) => s.setPreviewPanelWidth);
   const sidebarOpen = useUiPreferences((s) => s.sidebarOpen);
@@ -2064,8 +1741,26 @@ export function ChatView({
     planMode,
     goal,
   } = threadSettings;
+  const {
+    activePreviewRuntimeKey,
+    activePreviewSurface,
+    previewAppBusy,
+    previewAppPreflight,
+    previewAppPreflightBusy,
+    previewAppStatus,
+    preflightRuntime,
+    restartRuntime,
+    setActivePreviewSurface,
+    startRuntime,
+    startStaticRuntime,
+    stopRuntime,
+  } = useChatInspectorController({
+    activeId,
+    folder,
+    sessionsHydrated,
+    onNotice: setChatNotice,
+  });
   const goalComposerMode = Boolean(goalComposerSessions[activeId]);
-  const activePreviewRuntimeKey = previewRuntimeKeyForThread(activeId, folder);
   const activePreviewAppStatus =
     previewAppStatus?.thread_id === activePreviewRuntimeKey &&
     previewStatusMatchesFolder(previewAppStatus, folder)
@@ -2134,6 +1829,54 @@ export function ChatView({
     [projects, sessionSummaries],
   );
   const effectiveModel = activeWorker?.model || model;
+  const {
+    compactionInFlightRef,
+    deleteGoal,
+    drainQueuedMessages,
+    generationControllersRef,
+    goalLoopRef,
+    openGoalPanel,
+    pauseGoalRun,
+    runTurnAndDrain,
+    saveGoalDraft,
+    sessionGoal,
+    updateGoalState,
+  } = useChatConversationController({
+    queueInterrupts,
+    setQueueInterrupts,
+    generatingSessionIds,
+    liveWorkerSessionIdsKey,
+    setChatNotice,
+    setGoalPanelOpen,
+    setGoalPrefill,
+    sessionMessages,
+    runTurn,
+  });
+  const {
+    activeMediaTarget,
+    mediaAdvanced,
+    mediaError,
+    mediaKind,
+    mediaModelEntries,
+    mediaParameterValues,
+    mediaSchema,
+    mediaSchemaLoading,
+    sendMediaPrompt,
+    setMediaKind,
+    updateInlineMediaAdvanced,
+    updateInlineMediaParameter,
+  } = useChatMediaController({
+    providers,
+    effectiveModel,
+    mediaSettings,
+    setMediaSettings,
+    pendingAttachments,
+    setInput,
+    setPendingAttachments,
+    setChatNotice,
+    generationControllersRef,
+    createRequestId: attachmentId,
+  });
   const quickSummary = useMemo(
     () =>
       buildQuickSummary({
@@ -2164,26 +1907,6 @@ export function ChatView({
       generatingSessionIds,
     ],
   );
-  const enabledMediaProviders = useMemo(
-    () => mediaProviders(providers),
-    [providers],
-  );
-  const mediaModelEntries = useMemo(
-    () => mediaModelsForPicker(enabledMediaProviders, mediaSettings, mediaCatalog),
-    [enabledMediaProviders, mediaSettings, mediaCatalog],
-  );
-
-  function persistPreviewRuntimeStatus(status: PreviewAppStatus) {
-    const state = useSessions.getState();
-    const previous = folder.trim()
-      ? state.previewRuntimesByKey[activePreviewRuntimeKey]
-      : state.sessions.find((session) => session.id === activeId)
-          ?.previewRuntime;
-    const runtime = previewRuntimeFromStatus(status, previous);
-    if (folder.trim()) setPreviewRuntimeByKey(activePreviewRuntimeKey, runtime);
-    else setSessionPreviewRuntime(activeId, runtime);
-  }
-
   function currentVirtualProjectFiles(sessionId = activeId): PreviewAppFile[] {
     return sessionVirtualProjectFiles(
       useSessions
@@ -2211,67 +1934,6 @@ export function ChatView({
     return mergePreviewAppFiles(currentVirtualProjectFiles(), updates);
   }
 
-  useEffect(() => {
-    const state = useSessions.getState();
-    const runtime = folder.trim()
-      ? state.previewRuntimesByKey[activePreviewRuntimeKey]
-      : state.sessions.find((session) => session.id === activeId)
-          ?.previewRuntime;
-    const status = previewStatusFromRuntime(activePreviewRuntimeKey, runtime);
-    const matchingStatus = previewStatusMatchesFolder(status, folder)
-      ? status
-      : null;
-    setPreviewAppStatus(matchingStatus);
-    setPreviewAppPreflight(matchingStatus?.preflight ?? null);
-  }, [activeId, activePreviewRuntimeKey, folder, sessionsHydrated]);
-
-  useEffect(() => {
-    let cancelled = false;
-    async function pollPreviewApp() {
-      if (!documentVisible()) return;
-      try {
-        const status = await getPreviewAppStatus(activePreviewRuntimeKey);
-        if (!cancelled) {
-          if (previewStatusMatchesFolder(status, folder)) {
-            const freshStatus = { ...status, stale: false };
-            setPreviewAppStatus(freshStatus);
-            setPreviewAppPreflight(status.preflight ?? null);
-            persistPreviewRuntimeStatus(freshStatus);
-          } else {
-            setPreviewAppStatus(null);
-            if (folder.trim())
-              setPreviewRuntimeByKey(activePreviewRuntimeKey, undefined);
-            else setSessionPreviewRuntime(activeId, undefined);
-          }
-        }
-      } catch {
-        if (!cancelled) {
-          setPreviewAppStatus((current) =>
-            current?.thread_id === activePreviewRuntimeKey
-              ? { ...current, stale: true }
-              : current,
-          );
-        }
-      }
-    }
-    void pollPreviewApp();
-    const timer = window.setInterval(() => void pollPreviewApp(), 2500);
-    const onVisible = () => {
-      if (documentVisible()) void pollPreviewApp();
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, [
-    activeId,
-    activePreviewRuntimeKey,
-    folder,
-    setPreviewRuntimeByKey,
-    setSessionPreviewRuntime,
-  ]);
   const pickerModels = useMemo(
     () => mergeModelListsForPicker(models, mediaModelEntries),
     [models, mediaModelEntries],
@@ -2328,20 +1990,6 @@ export function ChatView({
       setProvidersOpen(true);
     }
   }, [activeId, configuredNewThreads, favoriteModels, messages.length, model, modelsLoaded, pickerModels, unavailableModelPolicy, updateThreadSettings]);
-  const activeMediaTarget = useMemo(
-    () => resolveActiveMediaTarget(
-      effectiveModel,
-      enabledMediaProviders,
-      mediaSettings,
-      mediaCatalog,
-    ),
-    [
-      effectiveModel,
-      enabledMediaProviders,
-      mediaSettings,
-      mediaCatalog,
-    ],
-  );
   const activeWorkerRunning =
     activeWorker?.status === "queued" ||
     activeWorker?.status === "running" ||
@@ -2405,20 +2053,15 @@ export function ChatView({
   const previewResizeHandleRef = useRef<HTMLDivElement>(null);
   const contextLauncherRef = useRef<HTMLButtonElement>(null);
   const stickToBottomRef = useRef(true);
-  const generationControllersRef = useRef<Map<string, AbortController>>(
-    new Map(),
-  );
-  const childThreadEventControllersRef = useRef<Map<string, AbortController>>(
-    new Map(),
-  );
-  const workerRunEventControllersRef = useRef<Map<string, AbortController>>(
-    new Map(),
-  );
-  const approvedWorkerRunsRef = useRef<Set<string>>(new Set());
-  const resumingWorkerRunsRef = useRef<Set<string>>(new Set());
-  const workerRunReconcileRetriesRef = useRef<Map<string, number>>(new Map());
-  const childThreadLiveIdsRef = useRef<Map<string, Set<string>>>(new Map());
-  const childThreadEventsRef = useRef<Map<string, ThreadEvent[]>>(new Map());
+  const {
+    approvedWorkerRunsRef,
+    childThreadEventControllersRef,
+    childThreadEventsRef,
+    childThreadLiveIdsRef,
+    resumingWorkerRunsRef,
+    workerRunEventControllersRef,
+    workerRunReconcileRetriesRef,
+  } = useChatWorkerController();
   const previewResizeStartRef = useRef<{
     clientX: number;
     width: number;
@@ -2452,12 +2095,7 @@ export function ChatView({
   const preparedPreviewFilesByThreadRef = useRef(
     new Map<string, PreviewAppFile[]>(),
   );
-  const mobileRelayPollingRef = useRef(false);
   const scheduleRunPollingRef = useRef(false);
-  const mobileRelayReadyRef = useRef(false);
-  const goalLoopRef = useRef<GoalLoopState | null>(null);
-  const queueDrainRef = useRef<Set<string>>(new Set());
-  const compactionInFlightRef = useRef(false);
   const messageHeightsRef = useRef<number[]>([]);
   const gitStatusUpdatedAtRef = useRef<number | null>(null);
   const [previewResizing, setPreviewResizing] = useState(false);
@@ -2817,152 +2455,10 @@ export function ChatView({
   }
 
   useEffect(() => {
-    let cancelled = false;
-    void loadStartupModels(
-      (nextModels) => {
-        if (cancelled) return;
-        setModels(nextModels);
-        setModelsLoaded(true);
-      },
-      accountRuntimeEnabled,
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [accountRuntimeEnabled]);
-
-  useEffect(() => {
-    listProviders().then(setProviders);
-  }, []);
-
-  useEffect(() => {
-    listSkills().then(setSkills);
-  }, [skillsRevision]);
-
-  useEffect(() => {
-    let cancelled = false;
-    void listTools()
-      .then((tools) => {
-        if (!cancelled) setComposerTools(tools);
-      })
-      .catch(() => {
-        if (!cancelled) setComposerTools([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (enabledMediaProviders.length === 0) {
-      setMediaCatalog({});
-      return;
-    }
-    let cancelled = false;
-    async function loadMediaCatalogs() {
-      const rows = await Promise.all(
-        enabledMediaProviders.flatMap((provider) =>
-          (["image", "video", "music"] as MediaKind[]).map(async (kind) => {
-            try {
-              const models = await listMediaModels(provider.id, kind);
-              return {
-                providerId: provider.id,
-                kind,
-                ids: models.map((item) => item.id).filter(Boolean),
-              };
-            } catch {
-              return { providerId: provider.id, kind, ids: [] };
-            }
-          }),
-        ),
-      );
-      if (cancelled) return;
-      const next: MediaProviderCatalog = {};
-      for (const row of rows) {
-        next[row.providerId] ??= {};
-        next[row.providerId][row.kind] = row.ids;
-      }
-      setMediaCatalog(next);
-    }
-    void loadMediaCatalogs();
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    enabledMediaProviders.map((provider) => provider.id).join("\u0000"),
-  ]);
-
-  useEffect(() => {
     if (modelsLoaded && !model && models[0]?.id) {
       updateThreadSettings(activeId, { model: models[0].id });
     }
   }, [activeId, model, models, modelsLoaded, updateThreadSettings]);
-
-  useEffect(() => {
-    if (!activeMediaTarget) {
-      setMediaSchema(null);
-      setMediaParameterValues({});
-      setMediaSchemaLoading(false);
-      setMediaError(null);
-      return;
-    }
-    const key = mediaPreferenceKey(
-      activeMediaTarget.provider.id,
-      activeMediaTarget.model,
-    );
-    const saved = useSettings.getState().media;
-    setMediaKind(activeMediaTarget.kind);
-    setMediaAdvanced(
-      saved.advancedByProviderModel[key] ??
-        defaultMediaAdvanced(activeMediaTarget.provider),
-    );
-    setMediaParameterValues(saved.parametersByProviderModel[key] ?? {});
-    setMediaSettings({
-      providerId: activeMediaTarget.provider.id,
-      modelByProvider: {
-        ...saved.modelByProvider,
-        [activeMediaTarget.provider.id]: activeMediaTarget.model,
-      },
-    });
-  }, [activeMediaTarget?.provider.id, activeMediaTarget?.model]);
-
-  useEffect(() => {
-    if (!activeMediaTarget) return;
-    const kind = activeMediaTarget.supportedKinds.includes(mediaKind)
-      ? mediaKind
-      : activeMediaTarget.kind;
-    const key = mediaPreferenceKey(
-      activeMediaTarget.provider.id,
-      activeMediaTarget.model,
-    );
-    let cancelled = false;
-    setMediaSchemaLoading(true);
-    setMediaError(null);
-    getMediaModelSchema(
-      activeMediaTarget.provider.id,
-      activeMediaTarget.model,
-      kind,
-    )
-      .then((schema) => {
-        if (cancelled) return;
-        setMediaSchema(schema);
-        const nextSaved =
-          useSettings.getState().media.parametersByProviderModel[key];
-        setMediaParameterValues({ ...schemaDefaults(schema), ...nextSaved });
-      })
-      .catch((e) => {
-        if (!cancelled) {
-          setMediaSchema(null);
-          setMediaError(e instanceof Error ? e.message : String(e));
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setMediaSchemaLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [activeMediaTarget?.provider.id, activeMediaTarget?.model, mediaKind]);
 
   useEffect(() => {
     if (stickToBottomRef.current) scrollToChatBottom();
@@ -3015,21 +2511,6 @@ export function ChatView({
         window.clearTimeout(stopShortcutConfirmTimerRef.current);
         stopShortcutConfirmTimerRef.current = null;
       }
-      const store = useSessions.getState();
-      generationControllersRef.current.forEach((controller, id) => {
-        controller.abort();
-        store.setSessionGenerating(id, false);
-      });
-      generationControllersRef.current.clear();
-      childThreadEventControllersRef.current.forEach((controller) =>
-        controller.abort(),
-      );
-      childThreadEventControllersRef.current.clear();
-      childThreadLiveIdsRef.current.clear();
-      workerRunEventControllersRef.current.forEach((controller) =>
-        controller.abort(),
-      );
-      workerRunEventControllersRef.current.clear();
     };
   }, []);
 
@@ -3733,36 +3214,16 @@ export function ChatView({
   }
 
   async function preflightPreviewRuntime(files?: PreviewAppFile[]) {
-    setPreviewAppPreflightBusy(true);
-    try {
-      const managedFiles = folder.trim()
-        ? undefined
-        : (files ??
-          preparedPreviewFilesByThreadRef.current.get(activeId) ??
-          managedPreviewFiles(latestRuntimePreview?.artifacts));
-      if (managedFiles)
-        preparedPreviewFilesByThreadRef.current.set(activeId, managedFiles);
-      const preflight = await preflightPreviewApp(
-        activePreviewRuntimeKey,
-        folder.trim()
-          ? { cwd: folder }
-          : { files: managedFiles },
-      );
-      setPreviewAppPreflight(preflight);
-      setPreviewAppStatus((current) =>
-        current
-          ? { ...current, preflight, stale: false }
-          : current,
-      );
-      setChatNotice({ tone: "info", message: "Preview commands are ready to review." });
-    } catch (error) {
-      setChatNotice({
-        tone: "error",
-        message: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setPreviewAppPreflightBusy(false);
-    }
+    const managedFiles = folder.trim()
+      ? undefined
+      : (files ??
+        preparedPreviewFilesByThreadRef.current.get(activeId) ??
+        managedPreviewFiles(latestRuntimePreview?.artifacts));
+    if (managedFiles)
+      preparedPreviewFilesByThreadRef.current.set(activeId, managedFiles);
+    await preflightRuntime(
+      folder.trim() ? { cwd: folder } : { files: managedFiles },
+    );
   }
 
   function previewRuntimeRunOptions(): PreviewAppStartOptions | null {
@@ -3784,91 +3245,38 @@ export function ChatView({
         };
   }
 
-  function applyPreviewAppStatus(status: PreviewAppStatus) {
-    const freshStatus = { ...status, stale: false };
-    setPreviewAppStatus(freshStatus);
-    setPreviewAppPreflight(
-      status.kind === "static"
-        ? null
-        : (status.preflight ?? activePreviewAppPreflight),
-    );
-    persistPreviewRuntimeStatus(freshStatus);
-  }
-
   async function startWorkspaceHtmlPreview(path: string) {
     if (!folder.trim()) return;
-    setPreviewAppBusy("start");
-    try {
-      const status = await startStaticPreview(activePreviewRuntimeKey, {
-        cwd: folder,
-        entry_path: path,
-      });
-      applyPreviewAppStatus(status);
-      selectPreviewSource("app");
-      setSessionInspectorTab(activeId, "preview");
-    } catch (error) {
-      setChatNotice({
-        tone: "error",
-        message: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setPreviewAppBusy(null);
-    }
+    const status = await startStaticRuntime({
+      cwd: folder,
+      entry_path: path,
+    });
+    if (!status) return;
+    selectPreviewSource("app");
+    setSessionInspectorTab(activeId, "preview");
   }
 
   async function startPreviewRuntime() {
     const options = previewRuntimeRunOptions();
     if (!options) return;
-    setPreviewAppBusy("start");
-    try {
-      const status = await startPreviewApp(activePreviewRuntimeKey, options);
-      applyPreviewAppStatus(status);
-      if (!folder.trim() && options.files?.length)
-        upsertVirtualFiles(activeId, options.files);
-      selectPreviewSource("app");
-      setSessionInspectorTab(activeId, "preview");
-    } catch (error) {
-      setChatNotice({
-        tone: "error",
-        message: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setPreviewAppBusy(null);
-    }
+    const status = await startRuntime(options);
+    if (!status) return;
+    if (!folder.trim() && options.files?.length)
+      upsertVirtualFiles(activeId, options.files);
+    selectPreviewSource("app");
+    setSessionInspectorTab(activeId, "preview");
   }
 
   async function stopPreviewRuntime() {
-    setPreviewAppBusy("stop");
-    try {
-      const status = await stopPreviewApp(activePreviewRuntimeKey);
-      applyPreviewAppStatus(status);
-    } catch (error) {
-      setChatNotice({
-        tone: "error",
-        message: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setPreviewAppBusy(null);
-    }
+    await stopRuntime();
   }
 
   async function restartPreviewRuntime() {
     const options = previewRuntimeRunOptions();
     if (!options) return;
-    setPreviewAppBusy("restart");
-    try {
-      const status = await restartPreviewApp(activePreviewRuntimeKey, options);
-      applyPreviewAppStatus(status);
-      if (!folder.trim() && options.files?.length)
-        upsertVirtualFiles(activeId, options.files);
-    } catch (error) {
-      setChatNotice({
-        tone: "error",
-        message: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setPreviewAppBusy(null);
-    }
+    const status = await restartRuntime(options);
+    if (status && !folder.trim() && options.files?.length)
+      upsertVirtualFiles(activeId, options.files);
   }
 
   function openArtifactSidePanel(tab: "preview" | "code" = "preview") {
@@ -4937,194 +4345,6 @@ export function ChatView({
     }
   }
 
-  function sessionGoal(sessionId: string): GoalSettings {
-    return useSessions.getState().getSettings(sessionId).goal;
-  }
-
-  function updateGoalState(
-    sessionId: string,
-    patch: Partial<GoalSettings>,
-    baseGoal = sessionGoal(sessionId),
-  ): GoalSettings {
-    const next = normalizeGoalSettings({
-      ...baseGoal,
-      ...patch,
-      updatedAt: Date.now(),
-    });
-    useSessions.getState().updateSettings(sessionId, { goal: next });
-    return next;
-  }
-
-  async function drainQueuedMessages(
-    sessionId: string,
-    fallbackModel?: string,
-  ) {
-    return drainQueuedMessagesFromQueue({
-      sessionId,
-      fallbackModel,
-      queueDrainRef,
-      generationControllersRef,
-      agents: useAgents.getState().agents,
-      setChatNotice,
-      sessionMessages,
-      runTurn: (convo, selectedModel, targetSessionId) =>
-        runTurn(convo, selectedModel, {}, targetSessionId),
-    });
-  }
-
-  useEffect(() => {
-    const interruptedSessionIds = Object.keys(queueInterrupts);
-    if (interruptedSessionIds.length === 0) return;
-    const generating = new Set(generatingSessionIds);
-    const liveWorkers = new Set(
-      liveWorkerSessionIdsKey ? liveWorkerSessionIdsKey.split("\0") : [],
-    );
-    const ready = interruptedSessionIds.filter(
-      (sessionId) =>
-        !generating.has(sessionId) && !liveWorkers.has(sessionId),
-    );
-    if (ready.length === 0) return;
-    setQueueInterrupts((current) => {
-      const next = { ...current };
-      for (const sessionId of ready) delete next[sessionId];
-      return next;
-    });
-    for (const sessionId of ready) void drainQueuedMessages(sessionId);
-  }, [generatingSessionIds, liveWorkerSessionIdsKey, queueInterrupts]);
-
-  async function runTurnAndDrain(
-    convo: ChatMessage[],
-    selectedModel?: string,
-    options: RunTurnOptions = {},
-  ) {
-    const sessionId = activeId;
-    const result = await runTurn(convo, selectedModel, options, sessionId);
-    let terminalResult = result;
-    if (result.status === "done") {
-      terminalResult = await drainQueuedMessages(sessionId, selectedModel) ?? result;
-    }
-    if (
-      document.visibilityState === "visible" &&
-      useSessions.getState().activeId === sessionId
-    ) {
-      const preferences = useUiPreferences.getState();
-      if (
-        preferences.interfaceSounds &&
-        terminalResult.status === "done" &&
-        preferences.soundOnFinished
-      ) playInterfaceSound(preferences.finishedSound);
-      else if (
-        preferences.interfaceSounds &&
-        terminalResult.status === "error" &&
-        preferences.soundOnAttention
-      ) playInterfaceSound(preferences.attentionSound);
-    }
-    const preferences = useUiPreferences.getState();
-    const threadTitle = useSessions.getState().sessions.find((session) => session.id === sessionId)?.title;
-    if (terminalResult.status === "done" && preferences.notifyRunFinished) {
-      void sendMilimNotification("finished", {
-        threadTitle,
-        includeThreadTitle: preferences.notificationIncludeThreadTitle,
-        onlyWhenUnfocused: preferences.notifyOnlyWhenUnfocused,
-      });
-    } else if (terminalResult.status === "error" && preferences.notifyNeedsAttention) {
-      void sendMilimNotification("attention", {
-        threadTitle,
-        includeThreadTitle: preferences.notificationIncludeThreadTitle,
-        onlyWhenUnfocused: preferences.notifyOnlyWhenUnfocused,
-      });
-    }
-    return result;
-  }
-
-  function pauseGoalRun(reason = "Goal paused.", sessionId = activeId) {
-    const loop = goalLoopRef.current;
-    if (loop?.sessionId === sessionId) {
-      loop.stopped = true;
-      loop.decisionController?.abort();
-    }
-    generationControllersRef.current.get(sessionId)?.abort();
-    const current = sessionGoal(sessionId);
-    if (current.status === "running") {
-      updateGoalState(
-        sessionId,
-        { status: "paused", lastReason: reason },
-        current,
-      );
-    }
-  }
-
-  function draftToGoal(
-    draft: GoalPanelDraft,
-    current: GoalSettings,
-  ): GoalSettings {
-    const contentChanged =
-      draft.objective !== current.objective ||
-      draft.successCriteria !== current.successCriteria ||
-      draft.constraints !== current.constraints;
-    const status = !draft.objective.trim()
-      ? "idle"
-      : current.status === "running"
-        ? "paused"
-        : contentChanged &&
-            (current.status === "complete" ||
-              current.status === "blocked" ||
-              current.status === "error")
-          ? "paused"
-          : current.status;
-    return normalizeGoalSettings({
-      ...current,
-      objective: draft.objective,
-      successCriteria: draft.successCriteria,
-      constraints: draft.constraints,
-      developerMaxTurns: draft.developerMaxTurns,
-      status,
-      lastReason:
-        current.status === "running"
-          ? "Goal paused for edits."
-          : current.lastReason,
-      updatedAt: Date.now(),
-    });
-  }
-
-  function saveGoalDraft(
-    draft: GoalPanelDraft,
-    sessionId = activeId,
-  ): GoalSettings {
-    const current = sessionGoal(sessionId);
-    if (current.status === "running")
-      pauseGoalRun("Goal paused for edits.", sessionId);
-    const next = draftToGoal(draft, current);
-    useSessions.getState().updateSettings(sessionId, { goal: next });
-    setGoalPrefill(null);
-    return next;
-  }
-
-  function deleteGoal(sessionId = activeId) {
-    pauseGoalRun("Goal deleted.", sessionId);
-    useSessions
-      .getState()
-      .updateSettings(sessionId, { goal: DEFAULT_GOAL_SETTINGS });
-    setGoalPrefill(null);
-    setGoalPanelOpen(false);
-  }
-
-  function markGoalSeen(sessionId = activeId) {
-    const current = sessionGoal(sessionId);
-    const updatedAt = current.updatedAt ?? 0;
-    if (!updatedAt || (current.lastSeenAt ?? 0) >= updatedAt) return;
-    useSessions.getState().updateSettings(sessionId, {
-      goal: { ...current, lastSeenAt: Date.now() },
-    });
-  }
-
-  function openGoalPanel(prefill: string | null = null) {
-    setGoalPrefill(prefill);
-    markGoalSeen();
-    setGoalPanelOpen(true);
-    setChatNotice(null);
-  }
-
   function requestClaudeSessionRecoveryCard(
     sessionId: string,
     convo: ChatMessage[],
@@ -6070,159 +5290,6 @@ export function ChatView({
         return true;
       default:
         return false;
-    }
-  }
-
-  function updateInlineMediaAdvanced(value: string) {
-    setMediaAdvanced(value);
-    const target = activeMediaTarget;
-    if (!target) return;
-    const key = mediaPreferenceKey(target.provider.id, target.model);
-    const saved = useSettings.getState().media;
-    setMediaSettings({
-      advancedByProviderModel: {
-        ...saved.advancedByProviderModel,
-        [key]: value,
-      },
-    });
-  }
-
-  function updateInlineMediaParameter(
-    control: MediaSchemaControl,
-    value: string | boolean,
-  ) {
-    const target = activeMediaTarget;
-    if (!target) return;
-    let parsed: unknown;
-    try {
-      parsed = parseControlValue(control, value);
-    } catch (e) {
-      setMediaError(e instanceof Error ? e.message : String(e));
-      return;
-    }
-    const next = { ...mediaParameterValues, [control.key]: parsed };
-    const key = mediaPreferenceKey(target.provider.id, target.model);
-    const saved = useSettings.getState().media;
-    setMediaParameterValues(next);
-    setMediaSettings({
-      parametersByProviderModel: {
-        ...saved.parametersByProviderModel,
-        [key]: next,
-      },
-    });
-    setMediaError(null);
-  }
-
-  async function pollInlineMediaStatus(
-    initial: MediaGenerationResult,
-    sessionId: string,
-    requestId: string,
-  ) {
-    if (!shouldPollMediaStatus(initial)) return;
-    let current = initial;
-    try {
-      for (let attempt = 0; attempt < mediaPollingMaxAttempts(initial); attempt += 1) {
-        await new Promise((resolve) => window.setTimeout(resolve, 3000));
-        const next = await getMediaStatus({
-          provider_id: current.provider_id,
-          id: current.id,
-          model: current.model,
-          response_url: current.urls.response,
-          status_url: current.urls.status,
-          kind: current.kind as MediaKind,
-        });
-        current = next;
-        replaceMediaResult(sessionId, requestId, next);
-        if (!shouldPollMediaStatus(next) || next.media.length > 0) break;
-      }
-    } catch (e) {
-      updateMediaMessage(sessionId, requestId, {
-        content: `Media status failed: ${e instanceof Error ? e.message : String(e)}`,
-      });
-    }
-  }
-
-  async function sendMediaPrompt(
-    text: string,
-    target: ActiveMediaTarget,
-    baseMessages: ChatMessage[] = messages,
-    checkPendingAttachments = true,
-  ) {
-    if (checkPendingAttachments && pendingAttachments.length > 0) {
-      setChatNotice({
-        tone: "error",
-        message:
-          "Media generation uses the prompt text only. Remove attachments or choose a chat model.",
-      });
-      return;
-    }
-    if (generationControllersRef.current.has(activeId)) return;
-
-    let requestInput: Record<string, unknown>;
-    try {
-      requestInput = inputWithSchemaControls(
-        mediaAdvanced,
-        mediaSchema,
-        mediaParameterValues,
-      );
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      setMediaError(message);
-      setChatNotice({ tone: "error", message });
-      return;
-    }
-
-    const sessionId = activeId;
-    const requestId = attachmentId();
-    const kind = target.supportedKinds.includes(mediaKind)
-      ? mediaKind
-      : target.kind;
-    const prompt = mediaPromptWithHistory(baseMessages, text);
-    const userMessage: ChatMessage = { role: "user", content: text };
-    const assistantMessage: ChatMessage = {
-      role: "assistant",
-      content: `Generating ${kind} with ${target.model}...`,
-      mediaRequestId: requestId,
-    };
-    setInput("");
-    setPendingAttachments([]);
-    setChatNotice(null);
-    setMediaError(null);
-    setMessages(sessionId, [...baseMessages, userMessage, assistantMessage], {
-      autoTitle: autoTitleChats,
-    });
-
-    const store = useSessions.getState();
-    const controller = new AbortController();
-    generationControllersRef.current.set(sessionId, controller);
-    store.setSessionGenerating(sessionId, true);
-    try {
-      const result = await generateMedia(
-        {
-          provider_id: target.provider.id,
-          kind,
-          model: target.model,
-          prompt,
-          input: requestInput,
-        },
-        controller.signal,
-      );
-      replaceMediaResult(sessionId, requestId, result);
-      void pollInlineMediaStatus(result, sessionId, requestId);
-    } catch (e) {
-      const aborted = e instanceof DOMException && e.name === "AbortError";
-      updateMediaMessage(sessionId, requestId, {
-        content: aborted
-          ? "Media generation stopped."
-          : `Media generation failed: ${e instanceof Error ? e.message : String(e)}`,
-      });
-    } finally {
-      generationControllersRef.current.delete(sessionId);
-      store.setSessionGenerating(sessionId, false);
-      store.setSessionUnread(
-        sessionId,
-        useSessions.getState().activeId !== sessionId,
-      );
     }
   }
 
@@ -7347,93 +6414,6 @@ export function ChatView({
     toggleSidebar,
   ]);
 
-  function mobileRelayAttachments(
-    attachments?: MobileRelayAttachment[],
-  ): ChatAttachment[] {
-    return (attachments ?? [])
-      .filter(
-        (attachment) =>
-          attachment.name && attachment.mime && attachment.size >= 0,
-      )
-      .flatMap((attachment) => {
-        const next = {
-          id: attachment.id || attachmentId(),
-          name: attachment.name,
-          mime: attachment.mime,
-          size: attachment.size,
-          content: attachment.content,
-          dataUrl: attachment.dataUrl,
-          truncated: Boolean(attachment.truncated),
-        };
-        try {
-          assertValidImageAttachment(next);
-          return [next];
-        } catch (error) {
-          setChatNotice({
-            tone: "error",
-            message: error instanceof Error ? error.message : String(error),
-          });
-          return [];
-        }
-      });
-  }
-
-  function appendMobileRelayText(
-    text: string,
-    attachments: ChatAttachment[] = [],
-  ) {
-    if (text) {
-      setInput((current) => {
-        const trimmed = current.trimEnd();
-        return trimmed ? `${trimmed}\n${text}` : text;
-      });
-    }
-    if (attachments.length) {
-      setPendingAttachments((current) =>
-        [...current, ...attachments].slice(0, 12),
-      );
-    }
-  }
-
-  function sendMobileRelayText(event: MobileRelayEvent) {
-    const text = event.text.trim();
-    const attachments = mobileRelayAttachments(event.attachments);
-    if (!text && attachments.length === 0) return;
-    if (busy) {
-      enqueueQueuedMessage(activeId, { content: text, attachments });
-      setChatNotice({
-        tone: "info",
-        message: `Mobile relay from ${event.device_name} queued.`,
-      });
-      return;
-    }
-    const selectedModel = effectiveModel.trim();
-    if (!selectedModel) {
-      appendMobileRelayText(text, attachments);
-      setProvidersOpen(true);
-      setChatNotice({
-        tone: "error",
-        message:
-          "Mobile relay is waiting in the composer. Choose a model before sending.",
-      });
-      return;
-    }
-    setInput("");
-    setPendingAttachments([]);
-    setChatNotice({
-      tone: "info",
-      message: `Mobile relay from ${event.device_name} sent.`,
-    });
-    void runTurnAndDrain(
-      appendUserTurn(
-        messages,
-        text,
-        attachments.length ? attachments : undefined,
-      ),
-      selectedModel,
-    );
-  }
-
   function promoteQueuedMessage(messageId: string) {
     const first =
       useSessions.getState().queuedMessagesBySession[activeId]?.[0]?.id;
@@ -7498,233 +6478,6 @@ export function ChatView({
     });
   }
 
-  function startMobileThread(event: MobileRelayEvent) {
-    const text = event.text.trim();
-    const attachments = mobileRelayAttachments(event.attachments);
-    useSessions.getState().newChat(threadSettings);
-    const sessionId = useSessions.getState().activeId;
-    setInput("");
-    setPendingAttachments([]);
-    if (!text && attachments.length === 0) {
-      setChatNotice({
-        tone: "info",
-        message: `Mobile relay from ${event.device_name} created a thread.`,
-      });
-      return;
-    }
-    const selectedModel = queuedModelForSession(
-      sessionId,
-      effectiveModel.trim(),
-      agents,
-    );
-    if (!selectedModel) {
-      enqueueQueuedMessage(sessionId, { content: text, attachments });
-      setProvidersOpen(true);
-      setChatNotice({
-        tone: "error",
-        message:
-          "Mobile relay created a thread, but a model is needed before sending.",
-      });
-      return;
-    }
-    setChatNotice({
-      tone: "info",
-      message: `Mobile relay from ${event.device_name} started a thread.`,
-    });
-    void runTurn(
-      appendUserTurn([], text, attachments.length ? attachments : undefined),
-      selectedModel,
-      {},
-      sessionId,
-    ).then((result) => {
-      if (result.status === "done")
-        void drainQueuedMessages(sessionId, selectedModel);
-    });
-  }
-
-  function activeOrPayloadThreadId(text: string): string {
-    return text.trim() || activeId;
-  }
-
-  function deleteMobileMessage(text: string) {
-    const index = Number.parseInt(text.trim(), 10);
-    if (!Number.isFinite(index)) return;
-    deleteMessageAt(index);
-  }
-
-  async function deleteThreadWithRetryCleanup(sessionId: string) {
-    const session = useSessions.getState().sessions.find((item) => item.id === sessionId);
-    const isolated = session?.threadWorkspace?.mode === "worktree"
-      ? session.threadWorkspace
-      : null;
-    if (isolated) {
-      try {
-        await setWorkspace(isolated.projectFolder);
-        let result = await runWorkspaceGitAction("remove_thread_worktree", {
-          thread_id: sessionId,
-        });
-        if (!result.ok && result.message.includes("uncommitted changes")) {
-          const discard = window.confirm(
-            `${result.message}\n\nForce-discard the worktree? The branch will be retained.`,
-          );
-          if (!discard) return;
-          result = await runWorkspaceGitAction("remove_thread_worktree", {
-            thread_id: sessionId,
-            force: true,
-          });
-        }
-        if (!result.ok) throw new Error(result.message);
-      } catch (error) {
-        setChatNotice({
-          tone: "error",
-          message: `Thread was kept because worktree cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
-        });
-        return;
-      }
-    }
-    const retry = session?.retryWorkspace;
-    if (retry) {
-      try {
-        await setWorkspace(retry.originalFolder);
-        const result = await runWorkspaceGitAction("remove_retry_worktree", {
-          worktree: retry.worktreeFolder,
-        });
-        if (!result.ok) throw new Error(result.message);
-      } catch (error) {
-        setChatNotice({
-          tone: "error",
-          message: `Retry thread was kept because cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
-        });
-        return;
-      }
-    }
-    useSessions.getState().remove(sessionId);
-  }
-
-  function applyMobileRelayEvent(event: MobileRelayEvent) {
-    if (event.action === "new_thread") {
-      startMobileThread(event);
-      return;
-    }
-    if (event.action === "worker_run_start") {
-      const runId = event.text.trim() || activeWorkerRun?.run.id;
-      if (runId) void approveWorkerRun(runId);
-      return;
-    }
-    if (event.action === "worker_run_continue_solo") {
-      const runId = event.text.trim() || activeWorkerRun?.run.id;
-      if (runId) void continueWorkerRunSolo(runId);
-      return;
-    }
-    if (event.action === "worker_run_stop") {
-      const runId = event.text.trim() || activeWorkerRun?.run.id;
-      if (runId) void stopActiveWorkerRun(runId);
-      return;
-    }
-    if (event.action === "stop") {
-      stop();
-      setChatNotice({
-        tone: "info",
-        message: `Mobile relay from ${event.device_name} stopped generation.`,
-      });
-      return;
-    }
-    if (event.action === "regenerate") {
-      regenerate();
-      return;
-    }
-    if (event.action === "delete_message") {
-      deleteMobileMessage(event.text);
-      return;
-    }
-    if (event.action === "rename_thread") {
-      const title = event.text.trim();
-      if (title) useSessions.getState().rename(activeId, title);
-      return;
-    }
-    if (event.action === "archive_thread") {
-      useSessions
-        .getState()
-        .archiveSession(activeOrPayloadThreadId(event.text));
-      return;
-    }
-    if (event.action === "delete_thread") {
-      void deleteThreadWithRetryCleanup(activeOrPayloadThreadId(event.text));
-      return;
-    }
-    if (event.action === "set_model") {
-      const nextModel = event.text.trim();
-      if (nextModel) {
-        const session = useSessions.getState().sessions.find((item) => item.id === activeId);
-        const kind = nextModel.startsWith("codex:")
-          ? "codex"
-          : nextModel.startsWith("claude:")
-            ? "claude"
-            : nextModel.startsWith("opencode:")
-              ? "opencode"
-              : nextModel.startsWith("pi:")
-                ? "pi"
-              : null;
-        if (session && kind && nativeRuntimeIsStale(session, kind)) {
-          useSessions.getState().clearAccountRuntimeKind(activeId, kind);
-        }
-        updateThreadSettings(activeId, { model: nextModel });
-      }
-      return;
-    }
-    if (event.action === "attach") {
-      appendMobileRelayText(
-        event.text.trim(),
-        mobileRelayAttachments(event.attachments),
-      );
-      setChatNotice({
-        tone: "info",
-        message: `Mobile relay from ${event.device_name} added attachments.`,
-      });
-      return;
-    }
-    if (event.action === "switch_thread") {
-      const targetId = event.text.trim();
-      const target = useSessions
-        .getState()
-        .sessions.find(
-          (session) => session.id === targetId && !session.archivedAt,
-        );
-      if (target) {
-        switchToSession(target.id);
-        setChatNotice({
-          tone: "info",
-          message: `Mobile relay switched to ${target.title || "thread"}.`,
-        });
-      }
-      return;
-    }
-    if (event.action === "replace") {
-      setInput(event.text);
-      const attachments = mobileRelayAttachments(event.attachments);
-      setPendingAttachments(attachments);
-      setChatNotice({
-        tone: "info",
-        message: `Mobile relay from ${event.device_name} replaced the composer.`,
-      });
-      return;
-    }
-    if (event.action === "send") {
-      sendMobileRelayText(event);
-      return;
-    }
-    appendMobileRelayText(
-      event.text,
-      mobileRelayAttachments(event.attachments),
-    );
-    const notice = {
-      tone: "info",
-      message: `Mobile relay from ${event.device_name} added to the composer.`,
-    } as const;
-    setChatNotice(notice);
-    pushNotice(notice);
-  }
-
   function applyScheduleRunEvent(event: ScheduleRunEvent) {
     const title = `Schedule: ${event.schedule_name || event.schedule_id}`;
     const importedId = useSessions.getState().importSession({
@@ -7741,52 +6494,6 @@ export function ChatView({
       pushNotice(notice);
     }
   }
-
-  useEffect(() => {
-    let cancelled = false;
-    async function refreshMobileRelayReady() {
-      if (!documentVisible()) return;
-      try {
-        const status = await getMobileCompanionStatus();
-        mobileRelayReadyRef.current =
-          status.enabled && status.devices.length > 0;
-        if (mobileRelayReadyRef.current) void pollMobileRelay();
-      } catch {
-        mobileRelayReadyRef.current = false;
-      }
-    }
-    async function pollMobileRelay() {
-      if (!documentVisible() || !mobileRelayReadyRef.current) return;
-      if (mobileRelayPollingRef.current) return;
-      mobileRelayPollingRef.current = true;
-      try {
-        const events = await pollMobileCompanionEvents();
-        if (!cancelled) {
-          for (const event of events) applyMobileRelayEvent(event);
-        }
-      } catch {
-        // The bridge is disabled in normal web previews and before pairing.
-      } finally {
-        mobileRelayPollingRef.current = false;
-      }
-    }
-    void refreshMobileRelayReady();
-    const timer = window.setInterval(() => void pollMobileRelay(), 1500);
-    const statusTimer = window.setInterval(
-      () => void refreshMobileRelayReady(),
-      30_000,
-    );
-    const onVisible = () => {
-      if (documentVisible()) void refreshMobileRelayReady();
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-      window.clearInterval(statusTimer);
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, [activeId, busy, effectiveModel, switchToSession]);
 
   useEffect(() => {
     let cancelled = false;
@@ -7816,52 +6523,69 @@ export function ChatView({
     };
   }, []);
 
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      void publishMobileThreadSnapshot({
-        session_id: activeId,
-        title: activeTitle,
-        model: effectiveModel.trim() || null,
-        busy,
-        messages: mobileThreadMessages(messages),
-        threads: mobileThreadSummaries(
-          sessionSummaries,
-          projects,
-          generatingSessionIds,
-        ),
-        groups: mobileThreadGroups(
-          sessionSummaries,
-          projects,
-          sidebarState,
-          generatingSessionIds,
-        ),
-        models: mobileModelSummaries(pickerModels),
-        theme: {
-          is_dark: activeTheme.isDark,
-          css_vars: themeCssVariables(activeTheme),
-          background_fit: backgroundFit,
-          background_treatment: backgroundTreatment,
-        },
-        worker_run: mobileWorkerRun(activeWorkerRun),
-      }).catch(() => {});
-    }, 300);
-    return () => window.clearTimeout(timer);
-  }, [
-    activeId,
-    activeTheme,
-    activeWorkerRun,
-    activeTitle,
-    backgroundFit,
-    backgroundTreatment,
-    busy,
-    effectiveModel,
-    generatingSessionIds,
-    messages,
-    pickerModels,
-    projects,
-    sessionSummaries,
-    sidebarState,
-  ]);
+  const mobileSnapshot = useMemo(
+    () => ({
+      session_id: activeId,
+      title: activeTitle,
+      model: effectiveModel.trim() || null,
+      busy,
+      messages: mobileThreadMessages(messages),
+      threads: mobileThreadSummaries(
+        sessionSummaries,
+        projects,
+        generatingSessionIds,
+      ),
+      groups: mobileThreadGroups(
+        sessionSummaries,
+        projects,
+        sidebarState,
+        generatingSessionIds,
+      ),
+      models: mobileModelSummaries(pickerModels),
+      theme: {
+        is_dark: activeTheme.isDark,
+        css_vars: themeCssVariables(activeTheme),
+        background_fit: backgroundFit,
+        background_treatment: backgroundTreatment,
+      },
+      worker_run: mobileWorkerRun(activeWorkerRun),
+    }),
+    [
+      activeId,
+      activeTheme,
+      activeWorkerRun,
+      activeTitle,
+      backgroundFit,
+      backgroundTreatment,
+      busy,
+      effectiveModel,
+      generatingSessionIds,
+      messages,
+      pickerModels,
+      projects,
+      sessionSummaries,
+      sidebarState,
+    ],
+  );
+  useChatMobileRelayController({
+    pollKey: `${activeId}\u0000${busy}\u0000${effectiveModel}`,
+    snapshot: mobileSnapshot,
+    setInput,
+    setPendingAttachments,
+    setChatNotice,
+    setProvidersOpen,
+    pushNotice,
+    createAttachmentId: attachmentId,
+    runTurn,
+    runTurnAndDrain,
+    drainQueuedMessages,
+    approveWorkerRun,
+    continueWorkerRunSolo,
+    stopActiveWorkerRun,
+    stop,
+    regenerate,
+    deleteMessageAt,
+  });
 
   const emptyThread = messages.length === 0;
   const activeAssistantRuntime = useMemo(() => {
