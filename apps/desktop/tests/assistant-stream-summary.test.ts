@@ -92,8 +92,8 @@ try {
   const streamingMarkup = render(true);
   assert.equal(
     (streamingMarkup.match(/assistant-stream-work-group/g) ?? []).length,
-    2,
-    "streaming should preserve both compacted work groups",
+    1,
+    "streaming should keep failed and successful activity in one work group",
   );
   assert.equal(
     (streamingMarkup.match(/reasoning\.\.\./g) ?? []).length,
@@ -108,6 +108,11 @@ try {
   );
 
   const completedMarkup = render(false);
+  assert.match(
+    completedMarkup,
+    /<summary class="stream-event stream-event-tool stream-event-error">/,
+    "completed drawers containing failures should keep a visible error state",
+  );
   assert.equal(
     (completedMarkup.match(/stream-event-running/g) ?? []).length,
     0,

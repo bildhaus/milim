@@ -148,14 +148,17 @@ function compactToolNames(parts: ChatStreamEventPart[]): string {
 }
 
 function StreamToolGroup({ group }: { group: ChatStreamToolGroup }) {
+  const status = group.parts.some((part) => part.status === "error")
+    ? "error"
+    : "done";
   return (
     <details
       className="stream-tool-group"
       data-testid="assistant-stream-tool-group"
     >
-      <summary className="stream-event stream-event-tool stream-event-done">
+      <summary className={`stream-event stream-event-tool stream-event-${status}`}>
         <span className="stream-event-icon" aria-hidden="true">
-          <StreamIcon icon="tool" />
+          <StreamIcon icon="tool" status={status} />
         </span>
         <span className="stream-event-label">
           Used {group.parts.length} tools
@@ -224,18 +227,25 @@ function StreamWorkGroup({
   streaming?: boolean;
 }) {
   const liveSummary = streaming ? liveWorkGroupSummary(group) : null;
+  const status =
+    liveSummary?.status ??
+    (group.parts.some(
+      (part) => part.kind === "event" && part.status === "error",
+    )
+      ? "error"
+      : "done");
   return (
     <details
       className="stream-tool-group stream-work-group"
       data-testid="assistant-stream-work-group"
     >
       <summary
-        className={`stream-event stream-event-${liveSummary?.eventType ?? "tool"} stream-event-${liveSummary?.status ?? "done"}`}
+        className={`stream-event stream-event-${liveSummary?.eventType ?? "tool"} stream-event-${status}`}
       >
         <span className="stream-event-icon" aria-hidden="true">
           <StreamIcon
             icon={liveSummary?.icon ?? "thinking"}
-            status={liveSummary?.status}
+            status={status}
           />
         </span>
         <span
