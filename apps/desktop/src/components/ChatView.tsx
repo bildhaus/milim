@@ -6101,6 +6101,7 @@ export function ChatView({
         reviewComments,
       };
     }
+    setMessages(activeId, conversation, { autoTitle: autoTitleChats });
     void runTurnAndDrain(
       conversation,
       selectedModel,
