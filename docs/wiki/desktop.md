@@ -6,7 +6,7 @@ title: Desktop app
 summary: Unified threads, projects, composer controls, artifacts, plan mode, goals, search, rendering, settings, and slash commands.
 group: Core
 order: 30
-updated: 2026-07-27
+updated: 2026-07-28
 ---
 
 Milim is your local control plane for coding agents: use your own models and subscriptions, keep one canonical thread, review the diff, and ship.
@@ -164,7 +164,7 @@ Composer completion defaults off. Local providers requires a loopback provider e
 
 New chats default to Review tool approval, which runs reads directly and asks before consequential calls. Changing the workspace folder also resets approval to Review; Guarded is the explicit read-only mode, and Open remains thread-local.
 
-Pending per-call approvals appear inside the composer surface with a readable tool name, a compact disclosure for the exact request, and explicit Deny/Approve controls while the run waits; concurrent requests remain independently actionable, and resolution errors appear in that same action row with Dismiss so an expired backend request cannot strand the composer. The run status reads Waiting for approval and excludes user decision time from its live and final duration. The chat transcript upserts each tool lifecycle by call id, collapses completed activity with its compact approval history, and records the requested tool, its arguments, and the final approved, denied, or canceled choice. After every successful Google Sheets, Docs, or Slides edit tool finishes, Milim immediately refreshes the open native preview, including edits made through account runtimes such as OpenCode.
+Pending per-call approvals appear inside the composer surface with a readable tool name, a compact disclosure for the exact request, and explicit Deny/Approve controls while the run waits; concurrent requests remain independently actionable, and resolution errors appear in that same action row with Dismiss so an expired backend request cannot strand the composer. Switching the active thread to Open auto-approves existing and subsequent command, file-change, and permission requests from that running turn; MCP data-entry and authorization requests remain interactive. The run status reads Waiting for approval and excludes user decision time from its live and final duration. The chat transcript upserts each tool lifecycle by call id, collapses completed activity with its compact approval history, and records the requested tool, its arguments, and the final approved, denied, or canceled choice. After every successful Google Sheets, Docs, or Slides edit tool finishes, Milim immediately refreshes the open native preview, including edits made through account runtimes such as OpenCode.
 
 ## Slash commands
 

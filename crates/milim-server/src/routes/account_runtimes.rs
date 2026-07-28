@@ -377,6 +377,7 @@ pub(crate) async fn claude_run(
         account_runtime_prompt_for_remote(&st, &req.prompt, "Claude").map_err(ApiError)?;
     account_runtime_images_for_remote(&st, &req.images, "Claude").map_err(ApiError)?;
     req.prompt = prompt;
+    req.interactive_tool_approval = crate::claude_bridge::claude_interactive_tool_approval(&req);
     let endpoint = account_runtime_tool_endpoint(
         &st,
         &headers,

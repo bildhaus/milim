@@ -932,10 +932,15 @@ export async function runAccountRuntimeTurn(
     appendImage: params.kind === "codex" ? params.appendImage : undefined,
   });
   const input = accountRuntimeInputFromMessages(outbound);
+  const interactiveToolApproval =
+    toolApproval === "review" && !planMode && !toolApprovalGrant;
   const milimContext: AccountRuntimeMilimContext = {
     tool_context: {
       ...promptContext.toolContext,
+      tool_approval_policy: toolApproval,
       tool_approval_grant: toolApprovalGrant,
+      interactive_tool_approval: interactiveToolApproval,
+      plan_mode: planMode,
     },
     memory_context: promptContext.runMemoryContext,
     tool_mode: promptContext.toolMode ?? "all",
@@ -960,7 +965,7 @@ export async function runAccountRuntimeTurn(
         persist_thread: true,
         tool_approval_policy: toolApproval,
         tool_approval_grant: toolApprovalGrant,
-        interactive_tool_approval: toolApproval === "review" && !planMode && !toolApprovalGrant,
+        interactive_tool_approval: interactiveToolApproval,
         plan_mode: planMode,
         milim_context: milimContext,
       },
@@ -978,7 +983,7 @@ export async function runAccountRuntimeTurn(
         session_id: params.sessionId,
         tool_approval_policy: toolApproval,
         tool_approval_grant: toolApprovalGrant,
-        interactive_tool_approval: toolApproval === "review" && !planMode && !toolApprovalGrant,
+        interactive_tool_approval: interactiveToolApproval,
         plan_mode: planMode,
         allow_session_recovery: allowClaudeSessionRecovery,
         milim_context: milimContext,
@@ -996,7 +1001,7 @@ export async function runAccountRuntimeTurn(
         session_id: params.sessionId,
         tool_approval_policy: toolApproval,
         tool_approval_grant: toolApprovalGrant,
-        interactive_tool_approval: toolApproval === "review" && !planMode && !toolApprovalGrant,
+        interactive_tool_approval: interactiveToolApproval,
         plan_mode: planMode,
         milim_context: milimContext,
       },
@@ -1015,8 +1020,7 @@ export async function runAccountRuntimeTurn(
         persist_session: true,
         tool_approval_policy: toolApproval,
         tool_approval_grant: toolApprovalGrant,
-        interactive_tool_approval:
-          toolApproval === "review" && !planMode && !toolApprovalGrant,
+        interactive_tool_approval: interactiveToolApproval,
         plan_mode: planMode,
         milim_context: milimContext,
       },

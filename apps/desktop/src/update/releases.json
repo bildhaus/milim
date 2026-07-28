@@ -1,4 +1,23 @@
 {
+  "0.2.5": {
+    "version": "0.2.5",
+    "summary": "Milim 0.2.5 makes Open mode apply consistently to Claude CLI tool approvals, including turns already in progress.",
+    "items": [
+      {
+        "id": "claude-open-approvals",
+        "eyebrow": "Agent runtimes",
+        "title": "Keep Claude Open mode open",
+        "description": "Claude CLI commands now follow Milim's selected approval mode without stale Bash approval prompts.",
+        "details": [
+          "Bypass ordinary command, file-change, and permission prompts in Open mode",
+          "Clear pending ordinary approvals when switching an active turn to Open",
+          "Keep connector data-entry and authorization requests interactive"
+        ],
+        "accent": "var(--accent)",
+        "icon": "plug"
+      }
+    ]
+  },
   "0.2.4": {
     "version": "0.2.4",
     "summary": "Milim 0.2.4 adds one-click HTML previews, selective Claude chat imports, and a calmer, more reliable desktop workflow.",

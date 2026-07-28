@@ -817,8 +817,7 @@ struct ClaudeApprovalConfig {
 
 impl ClaudeApprovalConfig {
     fn materialize(req: &ClaudeRunRequest) -> Result<Option<Self>> {
-        let needs_approval = req.interactive_tool_approval
-            && account_runtime_policy(req.tool_approval_policy.as_deref()) == "review";
+        let needs_approval = claude_interactive_tool_approval(req);
         if !needs_approval && req.milim_mcp.is_none() {
             return Ok(None);
         }
@@ -1820,12 +1819,17 @@ fn claude_tools_allowed(req: &ClaudeRunRequest) -> bool {
         }
 }
 
+pub(crate) fn claude_interactive_tool_approval(req: &ClaudeRunRequest) -> bool {
+    req.interactive_tool_approval
+        && !req.plan_mode
+        && !req.tool_approval_grant
+        && account_runtime_policy(req.tool_approval_policy.as_deref()) == "review"
+}
+
 fn claude_permission_mode(req: &ClaudeRunRequest) -> &'static str {
     if req.plan_mode {
         "plan"
-    } else if req.interactive_tool_approval
-        && account_runtime_policy(req.tool_approval_policy.as_deref()) == "review"
-    {
+    } else if claude_interactive_tool_approval(req) {
         "manual"
     } else if !claude_tools_allowed(req)
         || account_runtime_policy(req.tool_approval_policy.as_deref()) == "guarded"
@@ -2410,11 +2414,13 @@ not json
         );
 
         req.tool_approval_policy = Some("open".into());
+        req.interactive_tool_approval = true;
+        assert!(!claude_interactive_tool_approval(&req));
         assert_eq!(claude_permission_mode(&req), "bypassPermissions");
         assert!(claude_denied_tools(&req).is_empty());
 
         req.tool_approval_policy = Some("review".into());
-        req.interactive_tool_approval = true;
+        assert!(claude_interactive_tool_approval(&req));
         assert_eq!(claude_permission_mode(&req), "manual");
         assert!(claude_denied_tools(&req).is_empty());
 

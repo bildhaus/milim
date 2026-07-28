@@ -572,7 +572,11 @@ const accountPromptContext = {
   skillMode: "custom",
   enabledSkills: ["review"],
   runMemoryContext: {},
-  toolContext: {},
+  toolContext: {
+    tool_approval_policy: "review",
+    interactive_tool_approval: true,
+    plan_mode: true,
+  },
 } satisfies Parameters<typeof runAccountRuntimeTurn>[0]["promptContext"];
 let codexPrompt = "";
 let codexThreadId = "";
@@ -633,6 +637,9 @@ const codexResult = await runAccountRuntimeTurn({
     assert.equal(request.thread_id, "codex-thread-1");
     assert.equal(request.persist_thread, true);
     assert.equal(request.tool_approval_grant, true);
+    assert.equal(request.milim_context?.tool_context.tool_approval_policy, "guarded");
+    assert.equal(request.milim_context?.tool_context.interactive_tool_approval, false);
+    assert.equal(request.milim_context?.tool_context.plan_mode, false);
     assert.deepEqual(request.images, [{ media_type: "image/png", data: "AAAA" }]);
     assert.deepEqual(request.milim_context?.enabled_tools, ["milim_skill_search", "milim_skill_read"]);
     assert.equal(request.milim_context?.skill_mode, "custom");
