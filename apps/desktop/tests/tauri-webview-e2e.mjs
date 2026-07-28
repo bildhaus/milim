@@ -13,6 +13,7 @@ const cdpHost = "127.0.0.1";
 const cdpPort = Number(process.env.MILIM_TAURI_E2E_CDP_PORT || 9333);
 const cdpUrl = `http://${cdpHost}:${cdpPort}`;
 const nativePreviewOnly = process.argv.includes("--native-preview-only");
+const staticPreviewOnly = process.argv.includes("--static-preview-only");
 const browserProfileOnly = process.argv.includes("--browser-profile-only");
 const zoomOnly = process.argv.includes("--zoom-only");
 const microUiOnly = process.argv.includes("--micro-ui-only");
@@ -113,6 +114,10 @@ try {
     const errors = collectErrors(session.page);
     await runNativePreviewOcclusionCheck(session.page, session.child.pid);
     consoleErrors.push(...errors);
+  } else if (staticPreviewOnly) {
+    const errors = collectErrors(session.page);
+    await runStaticWorkspacePreviewCheck(session.page, session.child.pid);
+    consoleErrors.push(...errors.filter((message) => !message.includes("(about:srcdoc)")));
   } else if (sidebarMotionOnly || newChatSplitOnly) {
     const errors = collectErrors(session.page);
     await runSidebarSectionMotionCheck(session.page, newChatSplitOnly);
@@ -317,6 +322,7 @@ async function runTurnChangesCheck(page, fixture) {
 async function runProfileSetup(page) {
   const errors = collectErrors(page);
   await page.getByTestId("chat-shell").waitFor();
+  await dismissOnboardingIfPresent(page);
   await runWindowPinCheck(page);
   await openAgents(page);
 
@@ -356,6 +362,7 @@ async function runPersistenceAndChat(page, pid) {
   await runModelPickerSurfaceCheck(page);
   await runAppShortcutCheck(page);
 
+  await dismissOnboardingIfPresent(page);
   await runSlashAndAttachmentCheck(page);
   await runContextDrawerCheck(page);
   await runMemoryLibraryCheck(page);
@@ -859,6 +866,90 @@ async function runNativePreviewOcclusionCheck(page, pid) {
   await waitForWryVisibility(pid, preview.handle, true);
   await page.getByLabel("Close inspector", { exact: true }).click();
   await page.getByTestId("open-artifact-browser").waitFor();
+}
+
+async function runStaticWorkspacePreviewCheck(page, pid) {
+  await page.getByTestId("chat-shell").waitFor();
+  await dismissOnboardingIfPresent(page);
+  await page.locator(".app-notices").waitFor({ state: "hidden", timeout: 8_000 }).catch(() => {});
+  const workspace = mkdtempSync(join(tmpdir(), "milim-static-preview-e2e-"));
+  const indexPath = join(workspace, "index.html");
+  writeFileSync(
+    indexPath,
+    '<!doctype html><title>Static Fixture</title><link rel="stylesheet" href="style.css"><h1>Static preview ready</h1>',
+    "utf8",
+  );
+  writeFileSync(join(workspace, "style.css"), "body { color: rgb(12, 34, 56); }", "utf8");
+
+  try {
+    await page.getByTestId("composer-input").fill(`/folder ${workspace}`);
+    await page.getByTestId("composer-send").click();
+    await page.getByTestId("open-artifact-browser").click();
+    await page.getByRole("tab", { name: "Code", exact: true }).click();
+    await page.getByRole("button", { name: "Workspace", exact: true }).click();
+    await page.getByRole("button", { name: "index.html", exact: true }).click();
+    const previewButton = page.getByTestId("workspace-html-preview");
+    await previewButton.waitFor();
+
+    const baselineHandles = new Set(wryWebviews(pid).map((view) => view.handle));
+    const responsePromise = page.waitForResponse(
+      (response) => response.request().method() === "POST" && response.url().includes("/preview-apps/") && response.url().endsWith("/static"),
+    );
+    await previewButton.click();
+    const response = await responsePromise;
+    if (!response.ok()) throw new Error(`Static preview start failed: ${response.status()} ${await response.text()}`);
+    const status = await response.json();
+    if (
+      status.kind !== "static" ||
+      status.status !== "running" ||
+      status.command != null ||
+      status.pid != null ||
+      status.preflight != null
+    ) {
+      throw new Error(`Static preview should run without commands: ${JSON.stringify(status)}`);
+    }
+
+    await page.getByTestId("preview-native-browser").waitFor();
+    await page.locator(".preview-native-browser-status").waitFor({ state: "hidden", timeout: 10_000 });
+    await waitForNewVisibleWryWebview(pid, baselineHandles);
+    const html = await (await fetch(status.url)).text();
+    const css = await (await fetch(new URL("style.css", status.url))).text();
+    if (!html.includes("Static preview ready") || !css.includes("rgb(12, 34, 56)")) {
+      throw new Error("Static preview did not serve the workspace HTML and relative stylesheet.");
+    }
+
+    writeFileSync(
+      indexPath,
+      '<!doctype html><title>Static Fixture Updated</title><link rel="stylesheet" href="style.css"><h1>Updated</h1>',
+      "utf8",
+    );
+    await page.getByRole("button", { name: "Reload page", exact: true }).click();
+    await page.locator(".preview-browser-tab.active > button").getByText("Static Fixture Updated", { exact: true }).waitFor({ timeout: 10_000 });
+
+    await page.getByRole("tab", { name: "Code", exact: true }).click();
+    const reusedResponsePromise = page.waitForResponse(
+      (response) => response.request().method() === "POST" && response.url().endsWith("/static"),
+    );
+    await page.getByTestId("workspace-html-preview").click();
+    const reused = await (await reusedResponsePromise).json();
+    if (new URL(reused.url).port !== new URL(status.url).port) {
+      throw new Error(`Static preview should reuse its loopback server: ${status.url} -> ${reused.url}`);
+    }
+
+    await page.getByTestId("preview-runtime-quick-stop").click();
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      try {
+        await fetch(status.url);
+        await delay(50);
+      } catch {
+        return;
+      }
+    }
+    throw new Error("Static preview server remained reachable after Stop.");
+  } finally {
+    await rmWithRetry(workspace, { label: "static preview workspace" });
+  }
 }
 
 async function runBrowserProfileCheck(session) {
@@ -1705,11 +1796,17 @@ async function runSlashAndAttachmentCheck(page) {
   const approvalReview = approvalGroup.getByRole("radio", { name: "Review" });
   await approvalReview.click();
   await approvalTrigger.getByText("Review", { exact: true }).waitFor();
-  await assertTextContains(approvalDescription, "Ask before each tool action.");
+  await assertTextContains(
+    approvalDescription,
+    "Run read-only tools; ask before consequential actions.",
+  );
   const approvalGuarded = approvalGroup.getByRole("radio", { name: "Guarded" });
   await approvalGuarded.click();
   await approvalTrigger.getByText("Guarded", { exact: true }).waitFor();
-  await assertTextContains(approvalDescription, "Run safe tools; ask before consequential actions.");
+  await assertTextContains(
+    approvalDescription,
+    "Read-only tools only; consequential actions are unavailable.",
+  );
   await approvalOpen.click();
   await approvalTrigger.getByText("Open", { exact: true }).waitFor();
   await page.getByTestId("composer-input").click();
@@ -2086,7 +2183,7 @@ async function seedWorkerRunDatabase(milimHome, fixture, status) {
 }
 
 async function dismissOnboardingIfPresent(page) {
-  await page.getByTestId("onboarding-preflight").waitFor({ state: "hidden", timeout: 10_000 }).catch(() => {});
+  await page.getByTestId("onboarding-preflight").waitFor({ state: "hidden", timeout: 30_000 });
   const flow = page.getByTestId("onboarding-flow");
   if (await flow.isVisible().catch(() => false)) {
     await page.getByLabel("Close onboarding").click();

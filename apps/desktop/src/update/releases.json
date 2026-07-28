@@ -1,4 +1,49 @@
 {
+  "0.2.4": {
+    "version": "0.2.4",
+    "summary": "Milim 0.2.4 adds one-click HTML previews, selective Claude chat imports, and a calmer, more reliable desktop workflow.",
+    "items": [
+      {
+        "id": "html-preview",
+        "eyebrow": "Artifacts",
+        "title": "Preview HTML in one click",
+        "description": "Turn generated HTML into a live inspector preview without leaving the conversation.",
+        "details": [
+          "Open HTML artifacts directly in Preview",
+          "Reuse the existing workspace preview runtime",
+          "Keep preview controls beside the conversation"
+        ],
+        "accent": "var(--accent)",
+        "icon": "file-text"
+      },
+      {
+        "id": "claude-chat-import",
+        "eyebrow": "Conversation import",
+        "title": "Bring over the Claude chats you choose",
+        "description": "Review available Claude conversations and import only the ones you want in Milim.",
+        "details": [
+          "Select individual conversations before importing",
+          "Preserve imported conversation content",
+          "Avoid adding unwanted chats to the sidebar"
+        ],
+        "accent": "var(--accent)",
+        "icon": "plug"
+      },
+      {
+        "id": "desktop-workflow-polish",
+        "eyebrow": "Desktop workflow",
+        "title": "Start faster and act with clearer readiness",
+        "description": "A streamlined startup experience makes Milim’s readiness and available actions easier to understand.",
+        "details": [
+          "Use a simpler onboarding and readiness flow",
+          "See smoother startup branding",
+          "Offer pull request merging only when repository permissions allow it"
+        ],
+        "accent": "var(--accent)",
+        "icon": "git-pull-request"
+      }
+    ]
+  },
   "0.2.3": {
     "version": "0.2.3",
     "summary": "Milim 0.2.3 brings pull request workflows, account runtime updates, editable Google Workspace files, sharper code review, and faster project actions.",

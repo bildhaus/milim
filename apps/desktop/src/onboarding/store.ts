@@ -6,8 +6,8 @@ export const ONBOARDING_STATE_VERSION = 1;
 export const ONBOARDING_DISMISS_SNOOZE_MS = 24 * 60 * 60 * 1000;
 
 export type OnboardingStatus = "not_started" | "in_progress" | "completed" | "dismissed";
-export type OnboardingSetupPath = "local_detect" | "hosted" | "codex";
-export type OnboardingStepId = "model" | "defaults" | "context" | "finish";
+export type OnboardingSetupPath = "local_detect" | "hosted" | "account_runtime";
+export type OnboardingStepId = "model" | "context" | "finish";
 
 interface OnboardingState {
   version: number;
@@ -41,7 +41,7 @@ function withStep(steps: OnboardingStepId[], step: OnboardingStepId): Onboarding
 
 function normalizeSteps(value: unknown): OnboardingStepId[] {
   if (!Array.isArray(value)) return [];
-  const allowed = new Set<OnboardingStepId>(["model", "defaults", "context", "finish"]);
+  const allowed = new Set<OnboardingStepId>(["model", "context", "finish"]);
   const out: OnboardingStepId[] = [];
   for (const item of value) {
     const normalized = item === "workbench" ? "context" : item;
@@ -53,7 +53,8 @@ function normalizeSteps(value: unknown): OnboardingStepId[] {
 }
 
 function normalizeSetupPath(value: unknown): OnboardingSetupPath | null {
-  return value === "local_detect" || value === "hosted" || value === "codex" ? value : null;
+  if (value === "codex") return "account_runtime";
+  return value === "local_detect" || value === "hosted" || value === "account_runtime" ? value : null;
 }
 
 function normalizeStatus(value: unknown): OnboardingStatus {

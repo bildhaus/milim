@@ -137,6 +137,7 @@ export function PreviewPanel({
   modeSwitcher,
   style,
   workspaceFolder,
+  onPreviewWorkspaceFile,
 }: {
   artifact: ChatArtifact;
   artifacts?: readonly ChatArtifact[];
@@ -174,6 +175,7 @@ export function PreviewPanel({
   modeSwitcher?: ReactNode;
   style?: CSSProperties;
   workspaceFolder?: string;
+  onPreviewWorkspaceFile?: (path: string) => void;
 }) {
   const { openContextMenu } = useContextMenu();
   const browserStorageMode = useSettings((state) => state.browserStorageMode);
@@ -264,6 +266,7 @@ export function PreviewPanel({
   const selectedCodeArtifact = selectedCodeFile?.artifact ?? artifact;
   const selectedSource = selectedCodeArtifact.content;
   const workspaceReviewLines = useMemo(() => workspaceReviewFile?.content.split(/\r?\n/) ?? [], [workspaceReviewFile?.content]);
+  const workspaceReviewIsHtml = Boolean(workspaceReviewFile && /\.html?$/i.test(workspaceReviewFile.path));
   const workspaceReviewOnly = Boolean(workspaceFolder?.trim() && selectedCodeArtifact.id === "workspace-review");
   const runtimeLogs = useMemo(
     () => (runtimeStatus?.logs ?? []).filter((log) => log.ts > runtimeLogsClearedAt).slice(-MAX_PREVIEW_LOGS).map((log, index): PreviewLogEntry => ({
@@ -1670,7 +1673,20 @@ export function PreviewPanel({
                 ) : null}
                 {workspaceReviewFile ? (
                   <div className="workspace-review-file">
-                    <strong>{workspaceReviewFile.path}</strong>
+                    <strong>
+                      <span>{workspaceReviewFile.path}</span>
+                      {workspaceReviewIsHtml && onPreviewWorkspaceFile ? (
+                        <button
+                          type="button"
+                          data-testid="workspace-html-preview"
+                          disabled={runtimeBusy}
+                          onClick={() => onPreviewWorkspaceFile(workspaceReviewFile.path)}
+                        >
+                          <Eye size={12} />
+                          Preview
+                        </button>
+                      ) : null}
+                    </strong>
                     <SourceCodeView
                       className="workspace-review-source"
                       source={workspaceReviewFile.content}
@@ -1924,7 +1940,7 @@ function PreviewRuntimeStatus({
       id="preview-runtime-details"
       className={`preview-managed-runtime ${previewRuntimeTone(status, stale)}`}
       data-testid="preview-managed-runtime"
-      aria-label="App preview runtime"
+      aria-label={status.kind === "static" ? "Static preview runtime" : "App preview runtime"}
       aria-busy={busy || preflightBusy}
       tabIndex={-1}
       onFocusCapture={() => onFocusChange(true)}
@@ -1936,7 +1952,7 @@ function PreviewRuntimeStatus({
         <div className="preview-managed-runtime-copy">
           <span className="preview-managed-runtime-dot" aria-hidden="true" />
           <div>
-            <strong>App runtime</strong>
+            <strong>{status.kind === "static" ? "Static preview" : "App runtime"}</strong>
             <span role="status" aria-live="polite">{statusText}</span>
           </div>
         </div>
@@ -1964,7 +1980,7 @@ function PreviewRuntimeStatus({
                 <Square size={12} />
                 <span>Stop</span>
               </button>
-              {(status.ready || stale || Boolean(error)) && (
+              {onRestart && (status.ready || stale || Boolean(error)) && (
                 <button className="preview-runtime-button" data-testid="preview-runtime-restart" aria-label="Restart app preview" disabled={busy || !onRestart || stale} onClick={onRestart}>
                   <Refresh size={13} />
                   <span>Restart</span>

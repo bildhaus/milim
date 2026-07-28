@@ -80,6 +80,11 @@ export function pullRequestReadiness(
   ) {
     return { tone: "pending", label: "Merge status pending", canMerge: false };
   }
+  const permission = pullRequest.viewerPermission?.toUpperCase();
+  if (!permission)
+    return { tone: "pending", label: "Merge permission unavailable", canMerge: false };
+  if (!["WRITE", "MAINTAIN", "ADMIN"].includes(permission))
+    return { tone: "blocked", label: "No merge permission", canMerge: false };
   return { tone: "ready", label: "Ready to merge", canMerge: true };
 }
 

@@ -315,6 +315,7 @@ const projectRuntimeKey = previewRuntimeKeyForThread(
   "C:\\workspace-a",
 );
 useSessions.getState().setPreviewRuntimeByKey(projectRuntimeKey, {
+  kind: "static",
   status: "running",
   cwd: "C:\\workspace-a",
   url: "http://127.0.0.1:5999/",
@@ -323,6 +324,11 @@ equal(
   useSessions.getState().previewRuntimesByKey[projectRuntimeKey]?.url,
   "http://127.0.0.1:5999/",
   "project preview runtime should persist by runtime key",
+);
+equal(
+  useSessions.getState().previewRuntimesByKey[projectRuntimeKey]?.kind,
+  "static",
+  "static preview kind should persist by runtime key",
 );
 assert(
   localStorage.getItem("milim.sessions")?.includes(projectRuntimeKey),

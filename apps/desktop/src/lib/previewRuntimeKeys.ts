@@ -1,5 +1,7 @@
 export function normalizePreviewRuntimeFolder(folder?: string | null): string {
-  const normalized = (folder ?? "").trim().replace(/\\/g, "/");
+  let normalized = (folder ?? "").trim().replace(/\\/g, "/");
+  if (normalized.toLowerCase().startsWith("//?/unc/")) normalized = `//${normalized.slice(8)}`;
+  else if (normalized.startsWith("//?/")) normalized = normalized.slice(4);
   const trimmed = normalized.length > 1 ? normalized.replace(/\/+$/, "") : normalized;
   return (/^[A-Za-z]:$/.test(trimmed) ? `${trimmed}/` : trimmed).toLowerCase();
 }

@@ -1,6 +1,5 @@
 import {
   lazy,
-  memo,
   Suspense,
   useCallback,
   useEffect,
@@ -9,8 +8,6 @@ import {
   useState,
   type CSSProperties,
   type KeyboardEvent,
-  type MouseEvent,
-  type MutableRefObject,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
   type SetStateAction,
@@ -25,18 +22,13 @@ import {
   requestComposerCompletion,
   codexRuntimeModel,
   inferAttachmentMime,
-  generateMedia,
   getClaudeStatus,
   getOpenCodeStatus,
   getPiStatus,
   getCodexAccount,
-  getMobileCompanionStatus,
   getWorkspaceGitStatus,
   getWorkerRun,
   getWorkerDiff,
-  getMediaModelSchema,
-  getMediaStatus,
-  getPreviewAppStatus,
   isClaudeModel,
   accountRuntimeKind,
   isCliPathWarningMessage,
@@ -44,11 +36,8 @@ import {
   isOpenCodeModel,
   isPiModel,
   listWorkspaceFiles,
-  loadStartupModels,
   listModelsDetailed,
-  listMediaModels,
   listProviders,
-  listSkills,
   listTools,
   listWorkerRuns,
   MAX_ATTACHMENT_BYTES,
@@ -56,13 +45,9 @@ import {
   openDiagnosticsFolder,
   openExternalUrl,
   pickAttachmentFiles,
-  pollMobileCompanionEvents,
   pollScheduleRunEvents,
-  preflightPreviewApp,
-  publishMobileThreadSnapshot,
   previewArtifactFile,
   readWorkspaceAttachmentFile,
-  restartPreviewApp,
   retryWorkerTask,
   deleteWorkerRun,
   runWorkspaceGitAction,
@@ -72,10 +57,8 @@ import {
   setComputerUse,
   setPrivacyMode,
   setWorkspace,
-  startPreviewApp,
   startWorkerRun,
   stopChildThread,
-  stopPreviewApp,
   stopWorkerRun,
   stopWorker,
   streamAgentRun,
@@ -90,7 +73,6 @@ import {
   opencodeRuntimeModel,
   piRuntimeModel,
   wireMessageContent,
-  mediaProviders,
   type AgentEvent,
   type AccountNativeWorkerLifecycle,
   type ArtifactFileStatus,
@@ -109,32 +91,20 @@ import {
   type OpenCodeRunEvent,
   type PiRunEvent,
   type MediaGenerationResult,
-  type MediaKind,
-  type MediaModelSchema,
-  type MediaSchemaControl,
   type MobileThreadGroup,
   type MobileThreadSummary,
   type MobileWorkerRunSnapshot,
-  type MobileRelayAttachment,
-  type MobileRelayEvent,
   type MemoryNotice,
   type ModelInfo,
   type PreviewAppFile,
-  type PreviewAppPreflight,
   type PreviewAppStatus,
   type PreviewAppStartOptions,
-  type PreviewSurfaceTarget,
   type ReviewComment,
-  type ProviderInfo,
   type ReasoningEffort,
-  type RunStep,
   type RunTrace,
   type SavedArtifactFile,
   type ScheduleRunEvent,
-  type SkillInfo,
   type TokenUsage,
-  type ToolInfo,
-  type ToolApprovalMode,
   type ThreadEvent,
   type WorkspaceFileSuggestion,
   type WorkspaceCheckpoint,
@@ -175,23 +145,24 @@ import {
   artifactRevisionChoiceByOccurrence,
   artifactRevisionGroups,
   type ArtifactRevision,
-  type ArtifactRevisionChoice,
   type ArtifactRevisionGroup,
 } from "../lib/artifactRevisions";
-import { hiddenArtifactIdsForMessage } from "../lib/artifactVisibility";
 import {
   workerRunReadyForSynthesis,
   workerRunSynthesisId,
 } from "../lib/workerRuns";
-import {
-  assertValidImageAttachment,
-  readBrowserAttachmentDataUrl,
-} from "../lib/attachmentInput";
+import { readBrowserAttachmentDataUrl } from "../lib/attachmentInput";
 import {
   buildEmptyStarterStrip,
   type EmptyStarterStrip,
   type EmptyStarterSuggestionIcon,
 } from "../lib/emptyStarterSuggestions";
+import {
+  composerNoticeAction,
+  modelComposerBlocker,
+  prioritizeComposerNotice,
+  type ComposerBlockerAction,
+} from "../lib/composerBlocker";
 import {
   checkpointMessage,
   compactionSummaryOutputCap,
@@ -246,29 +217,14 @@ import {
   type GoalSettings,
 } from "../lib/goals";
 import { isNearScrollBottom } from "../lib/scroll";
-import {
-  bestMediaResultUrl,
-  defaultMediaAdvanced,
-  defaultMediaModel,
-  inputWithSchemaControls,
-  mediaKindForModelId,
-  mediaPollingMaxAttempts,
-  mediaPreferenceKey,
-  mediaResultContent,
-  parseControlValue,
-  schemaDefaults,
-  shouldPollMediaStatus,
-} from "../lib/media";
 import { mergeModelListsForPicker, providerOwnsModel } from "../lib/modelPicker";
-import { assessHotSwap, nativeRuntimeIsStale, type HotSwapAssessment } from "../lib/hotSwap";
+import { assessHotSwap, type HotSwapAssessment } from "../lib/hotSwap";
 import {
   approvalWaitDuration,
   estimateResponseCostUsd,
-  formatResponseMetrics,
   responseMetricsForTurn,
   summarizeMilimUsage,
   summarizeThreadMetricsBreakdown,
-  type MilimUsageSummary,
 } from "../lib/usageMetrics";
 import { markPerfRender } from "../lib/perf";
 import {
@@ -315,9 +271,7 @@ import {
 } from "../lib/turnRuntime";
 import { dismissToolApproval, pendingToolApprovals } from "../lib/toolApproval";
 import {
-  drainQueuedMessages as drainQueuedMessagesFromQueue,
   hasQueuedMessages,
-  queuedModelForSession,
 } from "../lib/turnQueue";
 import {
   claimTurnGeneration,
@@ -327,7 +281,7 @@ import {
 import { checkpointWorkspaceBeforeTurn } from "../lib/turnWorkspace";
 import { createChatMessageId } from "../lib/messageIds.js";
 import { flushDeferredUserStateWrites } from "../persistence/userStateStorage";
-import { useSettings, type MediaSettings } from "../settings/store";
+import { useSettings } from "../settings/store";
 import { themeCssVariables } from "../theme/applyTheme";
 import { useTheme } from "../theme/store";
 import { shortcutLabel, shortcutMatchesEvent } from "../ui/shortcuts";
@@ -336,7 +290,6 @@ import { createInteractiveChat } from "../lib/newChatCoordinator";
 import { isLoopbackProviderEndpoint } from "../lib/providerEndpoint.js";
 import { pendingAttentionKey, playInterfaceSound } from "../ui/sounds";
 import { DEFAULT_PREVIEW_PANEL_WIDTH, useUiPreferences } from "../ui/store";
-import { AgentAvatar } from "./AgentAvatar";
 import { Composer } from "./Composer";
 import { ComposerSurface } from "./ComposerSurface";
 import { ControlBar } from "./ControlBar";
@@ -344,31 +297,22 @@ import type { ModelPickerSelection } from "./ModelPicker";
 import { GoalPanel, type GoalPanelDraft } from "./GoalPanel";
 import {
   ArrowRight,
-  Calendar,
-  Check,
   Code,
-  Copy,
   Eye,
   FileText,
   GitBranch,
-  Globe,
-  MoreHorizontal,
   Pencil,
   Refresh,
   Sidebar as PanelIcon,
-  Trash,
   UserRound,
   X,
 } from "./icons";
 import { groupSessionsByProjects } from "./Sidebar";
 import { InlineMediaControls } from "./InlineMediaControls";
-import { GeneratedMedia } from "./GeneratedMedia";
 import { WorkersInspector, WorkersSummary } from "./WorkersInspector";
-import { AssistantMessage } from "./AssistantMessage";
 import { ToolApprovalPrompt } from "./ToolApprovalPrompt";
-import { ArtifactList } from "./ArtifactList";
 import { CommandPalette, type RuntimeCommand } from "./ChatSearchPopover";
-import { useContextMenu, type ContextMenuItem } from "./ContextMenu";
+import { useContextMenu } from "./ContextMenu";
 import {
   GitWorkspacePanel,
   type GitPanelDiffRequest,
@@ -376,15 +320,27 @@ import {
 } from "./GitPanel";
 import { PreviewPanel } from "./PreviewPanel";
 import { QuickSummaryPanel } from "./QuickSummaryPanel";
-import { RunTimeline } from "./RunTimeline";
 import {
-  TurnChangesCard,
   turnChangesFromDiff,
   type TurnChanges,
 } from "./TurnChangesCard";
 import { SheetDialog } from "./SheetDialog";
 import { WorkspaceLauncherButton } from "./WorkspaceLauncher";
-import { BatonMenu, BatonTargetSheet, HotSwapPreflightSheet } from "./HotSwapDialogs";
+import { BatonTargetSheet, HotSwapPreflightSheet } from "./HotSwapDialogs";
+import { MessageRow, type MessageRowActions } from "./ChatMessageRow";
+import { QueuedMessageTray } from "./QueuedMessageTray";
+import { MilimUsageRidgeline } from "./MilimUsageRidgeline";
+import { useChatCatalogController } from "./chat/useChatCatalogController";
+import {
+  previewRuntimeText,
+  previewStatusFromRuntime,
+  previewStatusMatchesFolder,
+  useChatInspectorController,
+} from "./chat/useChatInspectorController";
+import { useChatConversationController } from "./chat/useChatConversationController";
+import { useChatMobileRelayController } from "./chat/useChatMobileRelayController";
+import { useChatMediaController } from "./chat/useChatMediaController";
+import { useChatWorkerController } from "./chat/useChatWorkerController";
 
 const ProvidersManager = lazy(() =>
   import("./ProvidersManager").then((mod) => ({
@@ -397,11 +353,6 @@ const McpManager = lazy(() =>
 const MemoryManager = lazy(() =>
   import("./MemoryManager").then((mod) => ({ default: mod.MemoryManager })),
 );
-const Markdown = lazy(() =>
-  import("./Markdown").then((mod) => ({ default: mod.Markdown })),
-);
-
-
 const inTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const EMPTY: ChatMessage[] = [];
@@ -684,8 +635,6 @@ const PREVIEW_PANEL_STAGE_OVERSHOOT = 32;
 const PREVIEW_PANEL_COLLAPSE_OVERSHOOT = 96;
 const PREVIEW_PANEL_ANIMATION_MS = 180;
 const COLLAPSED_SIDEBAR_WIDTH = 48;
-const MEDIA_CONTEXT_MESSAGE_LIMIT = 10;
-const MEDIA_CONTEXT_CHAR_LIMIT = 1800;
 const HOT_SWAP_CONTINUE_PROMPT =
   "Continue from the current workspace and thread state. Inspect what is already complete, then finish the active task.";
 const HOT_SWAP_REVIEW_PROMPT =
@@ -745,64 +694,6 @@ async function browserFileAttachment(file: File): Promise<ChatAttachment> {
     dataUrl,
     truncated: textLike ? file.size > MAX_ATTACHMENT_BYTES : false,
   };
-}
-
-function renderMessageAttachments(attachments?: ChatAttachment[]) {
-  if (!attachments?.length) return null;
-  return (
-    <div className="message-attachments">
-      {attachments.map((attachment) => (
-        <div
-          key={attachment.id}
-          className="message-attachment"
-          data-testid={`message-attachment-${attachment.id}`}
-        >
-          {attachment.dataUrl && (
-            <img
-              className="message-attachment-thumb"
-              src={attachment.dataUrl}
-              alt={`Attachment preview: ${attachment.name}`}
-            />
-          )}
-          <span className="message-attachment-name">{attachment.name}</span>
-          <span className="message-attachment-meta">
-            {attachment.mime}
-            {attachment.truncated ? " clipped" : ""}
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function renderMessageMedia(results?: MediaGenerationResult[]) {
-  if (!results?.length) return null;
-  return (
-    <div className="message-media-results" data-testid="message-media-results">
-      {results.map((result) => {
-        const media = result.media[0];
-        const key = `${result.provider_id}-${result.id || result.model}-${result.status}`;
-        const label = `Generated ${media?.kind ?? "media"} from ${result.model}`;
-        return (
-          <div
-            className={`message-media-preview ${media?.url ? "" : "placeholder"}`}
-            data-testid="message-media-result"
-            key={key}
-          >
-            <GeneratedMedia
-              item={media}
-              alt={label}
-              onOpenExternal={(url) => {
-                void openExternalUrl(url).catch((error) =>
-                  console.warn("failed to open URL", error),
-                );
-              }}
-            />
-          </div>
-        );
-      })}
-    </div>
-  );
 }
 
 function previewArtifactsForMessage(
@@ -939,612 +830,6 @@ function browserPreviewSelection(
   return { artifact, artifacts: [artifact], previewDeferred: false };
 }
 
-function isPreviewAppActive(status: PreviewAppStatus | null): boolean {
-  if (typeof status?.active === "boolean") return status.active;
-  return (
-    Boolean(status?.pid) ||
-    status?.status === "staging" ||
-    status?.status === "installing" ||
-    status?.status === "starting" ||
-    status?.status === "running" ||
-    status?.status === "stopping"
-  );
-}
-
-type MessageRowActions = {
-  openContextMenu: (
-    event: MouseEvent,
-    items: ContextMenuItem[],
-    label?: string,
-  ) => boolean;
-  setInspectorTab: (
-    sessionId: string,
-    tab: "code" | "preview",
-  ) => void;
-  openWorkers: (runId?: string) => void;
-  preparePreviewRuntimeForArtifacts: (
-    artifacts?: readonly ChatArtifact[],
-  ) => Promise<void>;
-  openPreviewArtifact: (
-    artifact: ChatArtifact,
-    artifacts?: readonly ChatArtifact[],
-    previewDeferred?: boolean,
-    revision?: ArtifactRevision,
-  ) => void;
-  artifactRevisionChoice: (
-    messageIndex: number,
-    artifactIndex: number,
-  ) => ArtifactRevisionChoice | undefined;
-  executePlan: (messageIndex: number, message: ChatMessage) => void;
-  restoreWorkspaceCheckpoint: (
-    checkpoint: WorkspaceCheckpoint,
-  ) => Promise<void>;
-  forkThreadAt: (messageIndex: number) => void;
-  setEditing: (messageIndex: number | null) => void;
-  deleteMessageAt: (messageIndex: number) => void;
-  regenerate: () => void;
-  startBaton: (
-    action: Exclude<HotSwapAction, "switch">,
-    messageIndex: number,
-  ) => void;
-  undoTurnChanges: (messageIndex: number) => Promise<void>;
-  reviewTurnChanges: (
-    checkpoint: WorkspaceCheckpoint,
-    result: WorkspaceGitActionResult,
-  ) => void;
-  editResend: (messageIndex: number, text: string) => void;
-  editMessageInPlace: (messageIndex: number, text: string) => void;
-  approveToolApproval: (messageIndex: number, message: ChatMessage) => void;
-  denyToolApproval: (messageIndex: number, message: ChatMessage) => void;
-  handleSaveArtifact: (
-    messageIndex: number,
-    artifact: ChatArtifact,
-    options?: {
-      overwrite?: boolean;
-      path?: string;
-      source?: SavedArtifactFile["source"];
-    },
-    revision?: ArtifactRevision,
-  ) => Promise<SavedArtifactFile>;
-  handlePreviewArtifact: (
-    artifact: ChatArtifact,
-    path?: string,
-    revision?: ArtifactRevision,
-  ) => Promise<ArtifactWritePreview>;
-  handleCheckArtifact: (
-    saved: SavedArtifactFile,
-  ) => Promise<ArtifactFileStatus>;
-  handleOpenArtifact: (
-    saved: SavedArtifactFile,
-    target: ArtifactOpenTarget,
-  ) => Promise<void>;
-  onOpenSchedules: () => void;
-};
-
-type MessageRowProps = {
-  activeId: string;
-  message: ChatMessage;
-  index: number;
-  isEditing: boolean;
-  isLastAssistant: boolean;
-  assistantStreaming: boolean;
-  busy: boolean;
-  activeMediaTargetPresent: boolean;
-  folderIsEmpty: boolean;
-  activeRun?: RunTrace | null;
-  previewArtifacts?: ChatArtifact[];
-  previewAppBusy: "start" | "stop" | "restart" | null;
-  previewAppStatus: PreviewAppStatus | null;
-  toolApproval: ToolApprovalMode;
-  turnChanges?: TurnChanges | null;
-  actionsRef: MutableRefObject<MessageRowActions | null>;
-};
-
-function MessageRowView({
-  activeId,
-  message: m,
-  index: i,
-  isEditing,
-  isLastAssistant,
-  assistantStreaming,
-  busy,
-  activeMediaTargetPresent,
-  folderIsEmpty,
-  activeRun,
-  previewArtifacts,
-  previewAppBusy,
-  previewAppStatus,
-  toolApproval,
-  turnChanges,
-  actionsRef,
-}: MessageRowProps) {
-  markPerfRender("MessageRow");
-  const [copied, setCopied] = useState(false);
-  const showModelAvatar = useUiPreferences((state) => state.avatarStyle === "avatar");
-  const linkedWorkerRun = useSessions((state) =>
-    m.workerRunId
-      ? state.workerRuns.find((record) => record.run.id === m.workerRunId)
-      : undefined,
-  );
-  const actions = actionsRef.current;
-  const messageIsCompaction = isCompactionCheckpoint(m);
-  const isApprovalMessage = Boolean(m.approval);
-  const artifactContext = m.artifacts?.length ? m.artifacts : previewArtifacts;
-  const openMessagePreview = (
-    artifact: ChatArtifact,
-    revision?: ArtifactRevision,
-  ) => {
-    if (!actions) return;
-    const artifactIndex =
-      m.artifacts?.findIndex((item) => item.id === artifact.id) ?? -1;
-    const choice =
-      !revision && artifactIndex >= 0
-        ? actions.artifactRevisionChoice(i, artifactIndex)
-        : undefined;
-    actions.setInspectorTab(
-      activeId,
-      isPreviewableArtifact(revision?.artifact ?? artifact)
-        ? "preview"
-        : "code",
-    );
-    actions.openPreviewArtifact(
-      artifact,
-      artifactContext ?? [artifact],
-      assistantStreaming,
-      revision ?? choice?.revision,
-    );
-  };
-  const previewArtifactsStreaming =
-    assistantStreaming && Boolean(previewArtifacts?.length);
-  const hasStreamTranscript = Boolean(m.streamParts?.length);
-  const hasAssistantOutput = Boolean(m.content || hasStreamTranscript);
-  const metricsLabel = formatResponseMetrics(m.metrics);
-  const modelAvatarSeed = m.role === "assistant" ? m.metrics?.model.trim() : "";
-  const canExecutePlan =
-    m.role === "assistant" &&
-    m.plan?.status === "proposed" &&
-    !assistantStreaming &&
-    Boolean(m.content.trim());
-  const runtimeFiles =
-    folderIsEmpty && !assistantStreaming
-      ? previewRuntimeFiles(m.artifacts)
-      : [];
-  const canStartRuntime =
-    runtimeFiles.length > 0 && hasPreviewPackageJson(runtimeFiles);
-  async function copyMessage() {
-    if (!navigator.clipboard) return;
-    try {
-      await navigator.clipboard.writeText(wireMessageContent(m));
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1200);
-    } catch {
-      /* clipboard unavailable */
-    }
-  }
-  const openMessageContextMenu = (event: MouseEvent<HTMLDivElement>) => {
-    if (!actions) return;
-    actions.openContextMenu(
-      event,
-      [
-        ...(canExecutePlan
-          ? [
-              {
-                id: "execute-plan",
-                label: "Execute plan",
-                icon: <ArrowRight size={13} />,
-                action: () => actions.executePlan(i, m),
-              },
-            ]
-          : []),
-        ...(m.workspaceCheckpoint
-          ? [
-              {
-                id: "restore-checkpoint",
-                label: "Restore workspace checkpoint",
-                icon: <Refresh size={13} />,
-                disabled: busy,
-                action: () =>
-                  void actions.restoreWorkspaceCheckpoint(
-                    m.workspaceCheckpoint!,
-                  ),
-              },
-            ]
-          : []),
-        ...(!messageIsCompaction
-          ? [
-              {
-                id: "branch",
-                label: "Branch from here",
-                icon: <GitBranch size={13} />,
-                disabled: busy,
-                separatorBefore: true,
-                action: () => actions.forkThreadAt(i),
-              },
-            ]
-          : []),
-        ...(!isApprovalMessage
-          ? [
-              {
-                id: "copy",
-                label: "Copy",
-                icon: <Copy size={13} />,
-                action: () => void copyMessage(),
-              },
-            ]
-          : []),
-        ...(m.role === "user"
-          ? [
-              {
-                id: "edit-resend",
-                label: "Edit and resend",
-                icon: <Pencil size={13} />,
-                disabled: busy,
-                action: () => actions.setEditing(i),
-              },
-            ]
-          : []),
-        ...(m.role === "assistant" && !messageIsCompaction && !isApprovalMessage
-          ? [
-              {
-                id: "edit",
-                label: "Edit message",
-                icon: <Pencil size={13} />,
-                disabled: busy,
-                action: () => actions.setEditing(i),
-              },
-            ]
-          : []),
-        ...(!messageIsCompaction
-          ? [
-              {
-                id: "delete",
-                label: "Delete message",
-                icon: <Trash size={13} />,
-                disabled: busy,
-                danger: true,
-                separatorBefore: true,
-                action: () => actions.deleteMessageAt(i),
-              },
-            ]
-          : []),
-        ...(isLastAssistant
-          ? [
-              {
-                id: "continue-with",
-                label: "Continue with...",
-                icon: <ArrowRight size={13} />,
-                disabled: busy,
-                separatorBefore: true,
-                action: () => actions.startBaton("continue", i),
-              },
-              {
-                id: "review-with",
-                label: "Review with...",
-                icon: <Eye size={13} />,
-                disabled: busy,
-                action: () => actions.startBaton("review", i),
-              },
-              {
-                id: "retry-with",
-                label: "Retry with...",
-                icon: <Refresh size={13} />,
-                disabled:
-                  busy ||
-                  (!folderIsEmpty && !m.workspaceCheckpoint && !m.plan),
-                action: () => actions.startBaton("retry", i),
-              },
-              ...(m.workspaceCheckpoint
-                ? [
-                    {
-                      id: "undo-turn",
-                      label: "Undo turn changes",
-                      icon: <Refresh size={13} />,
-                      disabled: busy,
-                      action: () => void actions.undoTurnChanges(i),
-                    },
-                  ]
-                : []),
-              {
-                id: "regenerate",
-                label: "Regenerate",
-                icon: <Refresh size={13} />,
-                disabled: busy,
-                action: actions.regenerate,
-              },
-            ]
-          : []),
-      ],
-      m.role === "assistant" ? "Assistant message" : "User message",
-    );
-  };
-
-  if (isEditing) {
-    return (
-      <div className={"msg " + m.role}>
-        <MessageEditor
-          initial={m.content}
-          saveLabel={m.role === "user" ? "Send" : "Save"}
-          onCancel={() => actions?.setEditing(null)}
-          onSave={(text) =>
-            m.role === "user"
-              ? actions?.editResend(i, text)
-              : actions?.editMessageInPlace(i, text)
-          }
-        />
-      </div>
-    );
-  }
-
-  return (
-    <div
-      className={`msg ${m.role}${modelAvatarSeed ? " has-model-avatar" : ""}`}
-      data-testid={
-        m.role === "assistant" ? "assistant-message" : "user-message"
-      }
-      onContextMenu={openMessageContextMenu}
-    >
-      {showModelAvatar && modelAvatarSeed && (
-        <AgentAvatar avatar={modelAvatarSeed} className="message-agent-avatar" />
-      )}
-      <div className="msg-content" dir="auto">
-        {m.role === "assistant" ? (
-          <>
-            {m.run && m.run !== activeRun && <RunTimeline run={m.run} />}
-            {!hasStreamTranscript && (
-              <MemoryBreadcrumbs memories={m.memories} />
-            )}
-            {m.approval && (
-              <ToolApprovalCard
-                approval={m.approval}
-                disabled={busy || activeMediaTargetPresent}
-                onApprove={() => actions?.approveToolApproval(i, m)}
-                onDeny={() => actions?.denyToolApproval(i, m)}
-              />
-            )}
-            {linkedWorkerRun && (
-              <button
-                className={`worker-run-event ${linkedWorkerRun.run.status}`}
-                type="button"
-                data-testid="worker-run-event"
-                onClick={() => actions?.openWorkers(linkedWorkerRun.run.id)}
-              >
-                <UserRound size={13} />
-                <span>
-                  {linkedWorkerRun.run.status === "proposed"
-                    ? "Worker plan ready"
-                    : linkedWorkerRun.run.status === "running"
-                      ? "Workers running"
-                      : `Worker run ${linkedWorkerRun.run.status}`}
-                </span>
-                <small>
-                  {linkedWorkerRun.run.tasks.length} task{linkedWorkerRun.run.tasks.length === 1 ? "" : "s"}
-                </small>
-                <ArrowRight size={12} />
-              </button>
-            )}
-            {(hasAssistantOutput || assistantStreaming) && (
-              <AssistantMessage
-                content={m.content}
-                streamParts={m.streamParts}
-                previewArtifacts={previewArtifacts}
-                onOpenPreview={openMessagePreview}
-                streaming={assistantStreaming}
-                previewArtifactsStreaming={previewArtifactsStreaming}
-                workDurationMs={m.metrics?.durationMs}
-                toolApproval={toolApproval}
-              />
-            )}
-            {renderMessageMedia(m.mediaResults)}
-            <AutomationCards
-              run={m.run}
-              onOpenSchedules={() => actions?.onOpenSchedules()}
-            />
-            <ArtifactList
-              artifacts={m.artifacts}
-              currentSessionId={APP_SESSION_ID}
-              hiddenArtifactIds={hiddenArtifactIdsForMessage(m, folderIsEmpty)}
-              onOpenPreview={openMessagePreview}
-              onSaveToWorkspace={(artifact, options, revision) =>
-                actions?.handleSaveArtifact(i, artifact, options, revision) ??
-                Promise.reject(new Error("message actions unavailable"))
-              }
-              onPreviewArtifact={(artifact, path, revision) =>
-                actions?.handlePreviewArtifact(artifact, path, revision) ??
-                Promise.reject(new Error("message actions unavailable"))
-              }
-              onCheckSavedArtifact={(saved) =>
-                actions?.handleCheckArtifact(saved) ??
-                Promise.reject(new Error("message actions unavailable"))
-              }
-              onOpenSavedArtifact={(saved, target) =>
-                actions?.handleOpenArtifact(saved, target) ??
-                Promise.reject(new Error("message actions unavailable"))
-              }
-              revisionForArtifact={(artifactIndex) =>
-                actions?.artifactRevisionChoice(i, artifactIndex)
-              }
-              autoSaveArtifacts={toolApproval === "open" && !assistantStreaming}
-              storageLabel={folderIsEmpty ? "virtual project" : "folder"}
-            />
-            {canStartRuntime && (
-              <div className="artifact-runtime-actions">
-                <button
-                  className="msg-act msg-act-text"
-                  data-testid="preview-app-start"
-                  title="Review preview app commands before running"
-                  disabled={
-                    previewAppBusy != null ||
-                    isPreviewAppActive(previewAppStatus)
-                  }
-                  onClick={() =>
-                    void actions?.preparePreviewRuntimeForArtifacts(m.artifacts)
-                  }
-                >
-                  <Globe size={13} />
-                  <span>
-                    {previewAppBusy === "start"
-                      ? "Inspecting preview..."
-                      : "Inspect preview app"}
-                  </span>
-                </button>
-              </div>
-            )}
-            {turnChanges && (
-              <TurnChangesCard
-                sections={turnChanges.sections}
-                stats={turnChanges.stats}
-                onUndo={() => void actions?.undoTurnChanges(i)}
-                onReview={() =>
-                  actions?.reviewTurnChanges(
-                    turnChanges.checkpoint,
-                    turnChanges.result,
-                  )
-                }
-              />
-            )}
-            {metricsLabel && (
-              <div className="response-metrics">{metricsLabel}</div>
-            )}
-          </>
-        ) : (
-          <>
-            {m.content && (
-              <Suspense fallback={<span>{m.content}</span>}>
-                <Markdown
-                  content={m.content}
-                  highlight={false}
-                  collapseArtifacts={false}
-                />
-              </Suspense>
-            )}
-            {renderMessageAttachments(m.attachments)}
-            {m.reviewComments?.length ? (
-              <div className="message-review-count">
-                {m.reviewComments.length} review comment{m.reviewComments.length === 1 ? "" : "s"}
-              </div>
-            ) : null}
-          </>
-        )}
-      </div>
-      <div className="msg-actions">
-        {canExecutePlan && (
-          <button
-            className="msg-act msg-act-text"
-            data-testid="execute-plan"
-            title="Execute plan"
-            onClick={() => actions?.executePlan(i, m)}
-          >
-            <ArrowRight size={13} />
-            <span>Execute plan</span>
-          </button>
-        )}
-        {m.workspaceCheckpoint && !busy && !turnChanges && (
-          <button
-            className="msg-act"
-            title="Restore workspace to before this turn"
-            aria-label="Restore workspace to before this turn"
-            onClick={() =>
-              void actions?.restoreWorkspaceCheckpoint(m.workspaceCheckpoint!)
-            }
-          >
-            <Refresh size={13} />
-          </button>
-        )}
-        {!messageIsCompaction && !busy && (
-          <button
-            className="msg-act"
-            title="Branch from here"
-            aria-label="Branch from here"
-            onClick={() => actions?.forkThreadAt(i)}
-          >
-            <GitBranch size={13} />
-          </button>
-        )}
-        {!isApprovalMessage && (
-          <button
-            className="msg-act"
-            data-testid="message-copy"
-            title={copied ? "Copied" : "Copy"}
-            aria-label={copied ? "Copied" : "Copy message"}
-            aria-live="polite"
-            onClick={() => void copyMessage()}
-          >
-            {copied ? <Check size={13} /> : <Copy size={13} />}
-          </button>
-        )}
-        {m.role === "user" && !busy && (
-          <button
-            className="msg-act"
-            title="Edit & resend"
-            onClick={() => actions?.setEditing(i)}
-          >
-            <Pencil size={13} />
-          </button>
-        )}
-        {m.role === "assistant" &&
-          !messageIsCompaction &&
-          !isApprovalMessage &&
-          !busy && (
-            <button
-              className="msg-act"
-              title="Edit message"
-              aria-label="Edit message"
-              onClick={() => actions?.setEditing(i)}
-            >
-              <Pencil size={13} />
-            </button>
-          )}
-        {!messageIsCompaction && !busy && (
-          <button
-            className="msg-act danger"
-            title="Delete message"
-            aria-label="Delete message"
-            onClick={() => actions?.deleteMessageAt(i)}
-          >
-            <Trash size={13} />
-          </button>
-        )}
-        {isLastAssistant && !busy && (
-          <BatonMenu
-            retryDisabled={!folderIsEmpty && !m.workspaceCheckpoint && !m.plan}
-            onAction={(action) => actions?.startBaton(action, i)}
-          />
-        )}
-        {isLastAssistant && !busy && (
-          <button
-            className="msg-act"
-            title="Regenerate"
-            onClick={actions?.regenerate}
-          >
-            <Refresh size={13} />
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-const MessageRow = memo(
-  MessageRowView,
-  (prev, next) =>
-    prev.activeId === next.activeId &&
-    prev.message === next.message &&
-    prev.index === next.index &&
-    prev.isEditing === next.isEditing &&
-    prev.isLastAssistant === next.isLastAssistant &&
-    prev.assistantStreaming === next.assistantStreaming &&
-    prev.busy === next.busy &&
-    prev.activeMediaTargetPresent === next.activeMediaTargetPresent &&
-    prev.folderIsEmpty === next.folderIsEmpty &&
-    prev.activeRun === next.activeRun &&
-    prev.previewArtifacts === next.previewArtifacts &&
-    prev.previewAppBusy === next.previewAppBusy &&
-    prev.previewAppStatus === next.previewAppStatus &&
-    prev.toolApproval === next.toolApproval &&
-    prev.turnChanges === next.turnChanges &&
-    prev.actionsRef === next.actionsRef,
-);
-
 type VirtualMessageItem = {
   index: number;
   message: ChatMessage;
@@ -1646,76 +931,6 @@ function MessageVirtualRow({
   );
 }
 
-function previewRuntimeText(value?: string | null): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function previewRuntimeFromStatus(
-  status: PreviewAppStatus,
-  previous?: SessionPreviewRuntime,
-): SessionPreviewRuntime {
-  const state = previewRuntimeText(status.status) ?? "idle";
-  const url =
-    previewRuntimeText(status.url) ??
-    (status.active === true ||
-    state === "staging" ||
-    state === "installing" ||
-    state === "starting" ||
-    state === "stopping" ||
-    state === "error"
-      ? previous?.url
-      : undefined);
-  return {
-    status: state,
-    cwd: previewRuntimeText(status.cwd),
-    url,
-    pid:
-      typeof status.pid === "number" && Number.isFinite(status.pid)
-        ? status.pid
-        : undefined,
-    command: previewRuntimeText(status.command),
-    message: previewRuntimeText(status.message),
-    active: status.active,
-    ready: status.ready,
-    managed: status.managed,
-    runId: previewRuntimeText(status.run_id),
-    error: status.error ?? undefined,
-    preflight: status.preflight ?? undefined,
-  };
-}
-
-function previewStatusFromRuntime(
-  threadId: string,
-  runtime?: SessionPreviewRuntime,
-): PreviewAppStatus | null {
-  if (!runtime) return null;
-  return {
-    thread_id: threadId,
-    status: runtime.status,
-    cwd: runtime.cwd ?? "",
-    url: runtime.url ?? null,
-    pid: runtime.pid ?? null,
-    command: runtime.command ?? null,
-    message: runtime.message ?? null,
-    active: runtime.active,
-    ready: runtime.ready,
-    managed: runtime.managed,
-    run_id: runtime.runId ?? null,
-    updated_at: runtime.updatedAt,
-    error: runtime.error ?? null,
-    preflight: runtime.preflight ?? null,
-    logs: [],
-  };
-}
-
-function previewStatusMatchesFolder(
-  status: PreviewAppStatus | null,
-  folder: string,
-): boolean {
-  const cwd = previewRuntimeText(folder);
-  return !cwd || previewRuntimeFoldersEqual(status?.cwd, cwd);
-}
-
 function previewIdleStatus(
   threadId: string,
   folder: string,
@@ -1723,6 +938,7 @@ function previewIdleStatus(
   const cwd = previewRuntimeText(folder) ?? "";
   return {
     thread_id: threadId,
+    kind: "app",
     status: "idle",
     cwd,
     url: null,
@@ -1864,364 +1080,6 @@ function prefersReducedMotion(): boolean {
   );
 }
 
-function MessageEditor({
-  initial,
-  onSave,
-  onCancel,
-  saveLabel = "Send",
-}: {
-  initial: string;
-  onSave: (t: string) => void;
-  onCancel: () => void;
-  saveLabel?: string;
-}) {
-  const [v, setV] = useState(initial);
-  return (
-    <div className="msg-editor">
-      <textarea
-        className="msg-edit-input"
-        value={v}
-        autoFocus
-        onChange={(e) => setV(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Escape") onCancel();
-          if (shortcutMatchesEvent("Mod+Enter", e)) onSave(v);
-        }}
-      />
-      <div className="msg-edit-actions">
-        <button className="btn-ghost" onClick={onCancel}>
-          Cancel
-        </button>
-        <button className="btn-accent" onClick={() => onSave(v)}>
-          {saveLabel}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function MemoryBreadcrumbs({ memories }: { memories?: MemoryNotice[] }) {
-  if (!memories?.length) return null;
-  return (
-    <div
-      className="memory-breadcrumbs"
-      data-testid="memory-breadcrumbs"
-      aria-label="Registered memories"
-    >
-      {memories.map((memory) => (
-        <span
-          className="memory-crumb"
-          key={memory.id}
-          title={`${memory.scope_label}: ${memory.summary}`}
-        >
-          Remembered in {memory.scope_kind}: {memory.summary}
-        </span>
-      ))}
-    </div>
-  );
-}
-
-type AutomationCard = {
-  id: string;
-  name: string;
-  cron: string;
-  enabled: boolean;
-  operation: "created" | "updated";
-};
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-function scheduleFromToolResult(step: RunStep): AutomationCard | null {
-  if (step.name !== "schedule_create" && step.name !== "schedule_update")
-    return null;
-  const root = asRecord(step.result);
-  const schedule = asRecord(root?.schedule);
-  if (!schedule) return null;
-  const id = schedule?.id;
-  const name = schedule?.name;
-  const cron = schedule?.cron;
-  if (
-    typeof id !== "string" ||
-    typeof name !== "string" ||
-    typeof cron !== "string"
-  )
-    return null;
-  return {
-    id,
-    name,
-    cron,
-    enabled: schedule.enabled !== false,
-    operation: step.name === "schedule_create" ? "created" : "updated",
-  };
-}
-
-function automationCardsFromRun(run?: RunTrace): AutomationCard[] {
-  const cards: AutomationCard[] = [];
-  const seen = new Set<string>();
-  for (const step of run?.steps ?? []) {
-    const card = scheduleFromToolResult(step);
-    if (!card || seen.has(card.id)) continue;
-    seen.add(card.id);
-    cards.push(card);
-  }
-  return cards;
-}
-
-function plural(value: number, unit: string): string {
-  return `${value} ${unit}${value === 1 ? "" : "s"}`;
-}
-
-function describeScheduleCron(cron: string): string {
-  const parts = cron.trim().replace(/\s+/g, " ").split(" ");
-  if (parts.length !== 6) return cron;
-  const [sec, min, hour, day, month, dow] = parts;
-  const minuteInterval = min.match(/^\*\/(\d+)$/);
-  const secondInterval = sec.match(/^\*\/(\d+)$/);
-  const daily = day === "*" && month === "*";
-  if (daily && dow === "*" && hour === "*" && sec === "0" && minuteInterval) {
-    return `Every ${plural(Number(minuteInterval[1]), "minute")}`;
-  }
-  if (daily && dow === "*" && hour === "*" && min === "0" && sec === "0") {
-    return "Hourly";
-  }
-  if (daily && dow === "*" && hour === "*" && min === "*" && secondInterval) {
-    return `Every ${plural(Number(secondInterval[1]), "second")}`;
-  }
-  if (daily && sec === "0" && /^\d+$/.test(min) && /^\d+$/.test(hour)) {
-    const time = `${hour.padStart(2, "0")}:${min.padStart(2, "0")}`;
-    return dow === "*" ? `Daily at ${time}` : `Runs at ${time}`;
-  }
-  return cron;
-}
-
-function AutomationCards({
-  run,
-  onOpenSchedules,
-}: {
-  run?: RunTrace;
-  onOpenSchedules: () => void;
-}) {
-  const cards = automationCardsFromRun(run);
-  if (cards.length === 0) return null;
-  return (
-    <div
-      className="automation-cards"
-      data-testid="automation-cards"
-      aria-label="Automations"
-    >
-      {cards.map((card) => (
-        <div
-          className="automation-card"
-          key={card.id}
-          data-testid="automation-card"
-        >
-          <div className="automation-card-icon" aria-hidden="true">
-            <Calendar size={16} />
-          </div>
-          <div className="automation-card-copy">
-            <div className="automation-card-title">
-              <span>{card.name}</span>
-              <span
-                className={
-                  "automation-card-status " +
-                  (card.enabled ? "active" : "paused")
-                }
-              >
-                {card.enabled ? "Active" : "Paused"}
-              </span>
-            </div>
-            <div className="automation-card-meta">
-              Automation {card.operation} - {describeScheduleCron(card.cron)}
-            </div>
-          </div>
-          <button
-            className="automation-card-open"
-            type="button"
-            onClick={onOpenSchedules}
-          >
-            Open
-          </button>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function MilimUsageRidgeline({ usage }: { usage: MilimUsageSummary }) {
-  const months = visibleUsageMonths(usage);
-  const width = 440;
-  const gradientId = "usage-ridge-fill-gradient";
-  const amplitude = usage.hasUsage ? 40 : 0;
-  const lineSpacing = 17;
-  const lineWidth = 1.35;
-  const topPad = amplitude + 8;
-  const height = topPad + lineSpacing * (months.length - 1) + 10;
-  const maxValue = Math.max(1, ...months.flatMap((month) => month.days));
-  const ridges = months.map((month, index) => {
-    const base = topPad + index * lineSpacing;
-    const line = ridgePath(month.days, base, amplitude, width, maxValue);
-    const empty = month.days.every((value) => value === 0);
-    const depth =
-      months.length <= 1 ? 1 : index / Math.max(1, months.length - 1);
-    return {
-      base,
-      closed: `${line} L${width},${base} L0,${base} Z`,
-      depth,
-      empty,
-      fillOpacity: empty ? 0 : 0.18 + depth * 0.18,
-      index,
-      key: month.key,
-      line,
-      lineOpacity: empty ? 0.16 : 0.5 + depth * 0.22,
-    };
-  });
-  const activeRidges = ridges.filter((ridge) => !ridge.empty);
-  const drawRidges = [
-    ...ridges.filter((ridge) => ridge.empty),
-    ...ridges.filter((ridge) => !ridge.empty),
-  ];
-  const blockersForRidge = (ridge: (typeof ridges)[number]) =>
-    ridge.empty
-      ? activeRidges
-      : activeRidges.filter((blocker) => blocker.index > ridge.index);
-  const maskIdForRidge = (ridge: (typeof ridges)[number]) =>
-    `usage-ridge-occlusion-${ridge.index}`;
-
-  return (
-    <section
-      className="usage-empty-panel"
-      data-testid="empty-usage-ridgeline"
-      aria-label="Milim usage"
-    >
-      <svg
-        className="usage-ridgeline"
-        role="img"
-        aria-label="Monthly ridgeline chart of local thread activity"
-        viewBox={`0 0 ${width} ${height}`}
-        preserveAspectRatio="none"
-      >
-        <defs>
-          <linearGradient id={gradientId} x1="0" x2="0" y1="0" y2="1">
-            <stop
-              offset="0%"
-              stopColor="var(--accent-light)"
-              stopOpacity="0.64"
-            />
-            <stop offset="54%" stopColor="var(--accent)" stopOpacity="0.28" />
-            <stop
-              offset="100%"
-              stopColor="var(--panel-bg)"
-              stopOpacity="0"
-            />
-          </linearGradient>
-          {ridges.map((ridge) => {
-            const blockers = blockersForRidge(ridge);
-            if (!blockers.length) return null;
-            return (
-              <mask
-                id={maskIdForRidge(ridge)}
-                key={ridge.key}
-                maskUnits="userSpaceOnUse"
-              >
-                <rect width={width} height={height} fill="white" />
-                {blockers.map((blocker) => (
-                  <path key={blocker.key} d={blocker.closed} fill="black" />
-                ))}
-              </mask>
-            );
-          })}
-        </defs>
-        {drawRidges.map((ridge) => {
-          const blockers = blockersForRidge(ridge);
-          return (
-            <g
-              key={ridge.key}
-              className="usage-ridge-row"
-              mask={
-                blockers.length ? `url(#${maskIdForRidge(ridge)})` : undefined
-              }
-            >
-              <path
-                className="usage-ridge-fill"
-                d={ridge.closed}
-                style={{ opacity: ridge.fillOpacity }}
-                data-empty={ridge.empty || undefined}
-              />
-              <path
-                className="usage-ridge-line"
-                d={ridge.line}
-                style={{ opacity: ridge.lineOpacity }}
-                strokeWidth={lineWidth}
-                data-empty={ridge.empty || undefined}
-              />
-            </g>
-          );
-        })}
-      </svg>
-      <div className="usage-empty-footer">
-        <div className="usage-empty-metrics">
-          {usage.metrics.map((metric) => (
-            <div className="usage-empty-metric" key={metric.label}>
-              <span className="usage-empty-metric-value">{metric.value}</span>
-              <span className="usage-empty-metric-label">{metric.label}</span>
-            </div>
-          ))}
-        </div>
-        <div className="usage-empty-latest">
-          {usage.months[usage.months.length - 1]?.label}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function visibleUsageMonths(
-  usage: MilimUsageSummary,
-): MilimUsageSummary["months"] {
-  const indexed = usage.months.map((month, index) => ({ month, index }));
-  const active = indexed.filter(({ month }) =>
-    month.days.some((value) => value > 0),
-  );
-  if (active.length === 0) return usage.months.slice(-3);
-
-  const empty = indexed.filter(({ month }) =>
-    month.days.every((value) => value === 0),
-  );
-  const selected = new Set([
-    ...active.map(({ index }) => index),
-    ...empty.slice(-Math.max(0, 3 - active.length)).map(({ index }) => index),
-  ]);
-  return indexed
-    .filter(({ index }) => selected.has(index))
-    .map(({ month }) => month);
-}
-
-function ridgePath(
-  values: number[],
-  base: number,
-  amplitude: number,
-  width: number,
-  maxValue: number,
-): string {
-  const points = values.map((value, index) => {
-    const x = values.length <= 1 ? 0 : (index / (values.length - 1)) * width;
-    const y = base - (value / maxValue) * amplitude;
-    return [x, y];
-  });
-  let line = `M${points[0][0]},${points[0][1]}`;
-  for (let index = 1; index < points.length; index += 1) {
-    const [x0, y0] = points[index - 1];
-    const [x1, y1] = points[index];
-    const midX = (x0 + x1) / 2;
-    line += ` C${midX},${y0} ${midX},${y1} ${x1},${y1}`;
-  }
-  return line;
-}
-
 function emptyStarterIcon(icon: EmptyStarterSuggestionIcon): ReactNode {
   switch (icon) {
     case "arrow":
@@ -2297,295 +1155,6 @@ function EmptyStarterActions({
   );
 }
 
-function queuedAttachmentLabel(count: number): string {
-  return count === 1 ? "1 attachment" : `${count} attachments`;
-}
-
-type QueuedDropTarget = {
-  id: string;
-  position: "before" | "after";
-};
-
-type QueuedPointerDrag = {
-  id: string;
-  pointerId: number;
-  startX: number;
-  startY: number;
-  active: boolean;
-  source: HTMLElement;
-  captureTarget: HTMLButtonElement;
-};
-
-const QUEUED_DRAG_THRESHOLD = 4;
-
-function QueuedMessageTray({
-  items,
-  busy,
-  canActivate,
-  interruptingMessageId,
-  openContextMenu,
-  onActivate,
-  onEdit,
-  onMove,
-  onRemove,
-}: {
-  items: QueuedMessage[];
-  busy: boolean;
-  canActivate: boolean;
-  interruptingMessageId?: string;
-  openContextMenu: (
-    event: MouseEvent,
-    items: ContextMenuItem[],
-    label?: string,
-  ) => boolean;
-  onActivate: (item: QueuedMessage) => void;
-  onEdit: (item: QueuedMessage) => void;
-  onMove: (
-    messageId: string,
-    targetId: string,
-    position: "before" | "after",
-  ) => void;
-  onRemove: (id: string) => void;
-}) {
-  const pointerDragRef = useRef<QueuedPointerDrag | null>(null);
-  const dropTargetRef = useRef<QueuedDropTarget | null>(null);
-  const [draggingId, setDraggingId] = useState<string | null>(null);
-  const [dropTarget, setDropTarget] = useState<QueuedDropTarget | null>(null);
-  const [reorderStatus, setReorderStatus] = useState("");
-
-  if (items.length === 0) return null;
-
-  function setQueuedDropTarget(target: QueuedDropTarget | null) {
-    dropTargetRef.current = target;
-    setDropTarget(target);
-  }
-
-  function clearQueuedDrag() {
-    const drag = pointerDragRef.current;
-    if (drag) {
-      drag.source.style.removeProperty("pointer-events");
-      drag.source.style.removeProperty("translate");
-      drag.source.style.removeProperty("will-change");
-      if (drag.captureTarget.hasPointerCapture(drag.pointerId)) {
-        drag.captureTarget.releasePointerCapture(drag.pointerId);
-      }
-    }
-    pointerDragRef.current = null;
-    setDraggingId(null);
-    setQueuedDropTarget(null);
-  }
-
-  function dropTargetAt(clientX: number, clientY: number, sourceId: string) {
-    const element = document.elementFromPoint(clientX, clientY);
-    const row =
-      element instanceof Element
-        ? element.closest<HTMLElement>("[data-queued-message-id]")
-        : null;
-    const id = row?.dataset.queuedMessageId;
-    if (!row || !id || id === sourceId) return null;
-    const rect = row.getBoundingClientRect();
-    return {
-      id,
-      position: clientY > rect.top + rect.height / 2 ? "after" : "before",
-    } as QueuedDropTarget;
-  }
-
-  function startQueuedDrag(
-    event: ReactPointerEvent<HTMLButtonElement>,
-    id: string,
-  ) {
-    if (
-      event.button !== 0 ||
-      items.length < 2 ||
-      Boolean(interruptingMessageId)
-    )
-      return;
-    const source = event.currentTarget.closest<HTMLElement>(
-      "[data-queued-message-id]",
-    );
-    if (!source) return;
-    event.currentTarget.setPointerCapture(event.pointerId);
-    pointerDragRef.current = {
-      id,
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      active: false,
-      source,
-      captureTarget: event.currentTarget,
-    };
-  }
-
-  function moveQueuedDrag(event: ReactPointerEvent<HTMLButtonElement>) {
-    const drag = pointerDragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    const moved = Math.hypot(
-      event.clientX - drag.startX,
-      event.clientY - drag.startY,
-    );
-    if (!drag.active && moved < QUEUED_DRAG_THRESHOLD) return;
-    if (!drag.active) {
-      drag.active = true;
-      drag.source.style.pointerEvents = "none";
-      drag.source.style.willChange = "translate";
-      setDraggingId(drag.id);
-    }
-    event.preventDefault();
-    drag.source.style.translate = `0 ${event.clientY - drag.startY}px`;
-    setQueuedDropTarget(dropTargetAt(event.clientX, event.clientY, drag.id));
-  }
-
-  function endQueuedDrag(event: ReactPointerEvent<HTMLButtonElement>) {
-    const drag = pointerDragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    if (drag.active) {
-      event.preventDefault();
-      const target =
-        dropTargetAt(event.clientX, event.clientY, drag.id) ??
-        dropTargetRef.current;
-      if (target) {
-        onMove(drag.id, target.id, target.position);
-        const nextItems = items.filter((item) => item.id !== drag.id);
-        const targetIndex = nextItems.findIndex(
-          (item) => item.id === target.id,
-        );
-        const nextIndex =
-          targetIndex + (target.position === "after" ? 1 : 0) + 1;
-        setReorderStatus(
-          `Queued message moved to position ${nextIndex} of ${items.length}.`,
-        );
-      }
-    }
-    clearQueuedDrag();
-  }
-
-  function cancelQueuedDrag(event: ReactPointerEvent<HTMLButtonElement>) {
-    const drag = pointerDragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    clearQueuedDrag();
-  }
-
-  function moveQueuedWithKeyboard(
-    event: KeyboardEvent<HTMLButtonElement>,
-    item: QueuedMessage,
-    index: number,
-  ) {
-    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
-    event.preventDefault();
-    const targetIndex = index + (event.key === "ArrowUp" ? -1 : 1);
-    const target = items[targetIndex];
-    if (!target) return;
-    onMove(
-      item.id,
-      target.id,
-      event.key === "ArrowUp" ? "before" : "after",
-    );
-    setReorderStatus(
-      `Queued message moved to position ${targetIndex + 1} of ${items.length}.`,
-    );
-  }
-
-  return (
-    <div className="queued-tray" data-testid="queued-message-tray">
-      <div className="queued-list">
-        {items.map((item, index) => {
-          const text = item.content.trim();
-          const attachmentCount = item.attachments?.length ?? 0;
-          const rowDrop = dropTarget?.id === item.id ? dropTarget : null;
-          const interrupting = interruptingMessageId === item.id;
-          return (
-            <div
-              className={`queued-item${draggingId === item.id ? " dragging" : ""}${rowDrop ? ` drag-over drop-${rowDrop.position}` : ""}`}
-              data-testid="queued-message"
-              data-queued-message-id={item.id}
-              key={item.id}
-            >
-              <button
-                className="queued-drag-handle"
-                type="button"
-                aria-label={`Reorder queued message ${index + 1} of ${items.length}`}
-                disabled={items.length < 2 || Boolean(interruptingMessageId)}
-                onPointerDown={(event) => startQueuedDrag(event, item.id)}
-                onPointerMove={moveQueuedDrag}
-                onPointerUp={endQueuedDrag}
-                onPointerCancel={cancelQueuedDrag}
-                onKeyDown={(event) =>
-                  moveQueuedWithKeyboard(event, item, index)
-                }
-              />
-              <span
-                className="queued-copy"
-                title={text || queuedAttachmentLabel(attachmentCount)}
-              >
-                {text || "Attached files"}
-              </span>
-              {attachmentCount > 0 && (
-                <span className="queued-meta">
-                  {queuedAttachmentLabel(attachmentCount)}
-                </span>
-              )}
-              <button
-                className="queued-activate"
-                type="button"
-                title={
-                  canActivate
-                    ? busy
-                      ? "Interrupt the current response and run this message"
-                      : "Run this queued message next"
-                    : "Choose a chat model to run queued messages"
-                }
-                disabled={!canActivate || Boolean(interruptingMessageId)}
-                onClick={() => onActivate(item)}
-              >
-                <ArrowRight size={12} />
-                <span>
-                  {interrupting ? "Interrupting..." : busy ? "Interrupt" : "Run"}
-                </span>
-              </button>
-              <button
-                className="queued-action"
-                type="button"
-                title="Remove queued message"
-                aria-label="Remove queued message"
-                disabled={Boolean(interruptingMessageId)}
-                onClick={() => onRemove(item.id)}
-              >
-                <Trash size={12} />
-              </button>
-              <button
-                className="queued-action"
-                type="button"
-                title="More queued message actions"
-                aria-label="More queued message actions"
-                disabled={Boolean(interruptingMessageId)}
-                onClick={(event) =>
-                  openContextMenu(
-                    event,
-                    [
-                      {
-                        id: "edit",
-                        label: "Edit queued message",
-                        icon: <Pencil size={13} />,
-                        action: () => onEdit(item),
-                      },
-                    ],
-                    "Queued message actions",
-                  )
-                }
-              >
-                <MoreHorizontal size={13} />
-              </button>
-            </div>
-          );
-        })}
-      </div>
-      <span className="queued-reorder-status" role="status" aria-live="polite">
-        {reorderStatus}
-      </span>
-    </div>
-  );
-}
-
 type ChatNotice = {
   message: string;
   tone: "info" | "warning" | "error";
@@ -2642,90 +1211,6 @@ function resolveApprovalMessage(
   };
 }
 
-function toolApprovalCardTitle(approval: ChatApprovalRequest): string {
-  if (approval.kind === "claude_session_recovery")
-    return "Claude session recovery";
-  if (approval.scope === "goal") return "Goal tool access";
-  return "Tool access request";
-}
-
-function toolApprovalCardDetail(approval: ChatApprovalRequest): string {
-  const model = approval.model ? ` for ${approval.model}` : "";
-  if (approval.kind === "claude_session_recovery") {
-    if (approval.status === "approved")
-      return `Approved Claude session recovery${model}.`;
-    if (approval.status === "denied")
-      return `Canceled Claude session recovery${model}.`;
-    return (
-      approval.detail ||
-      "This Claude session appears to be in use by another Claude CLI process. Milim can try to stop the matching local Claude process and retry, or you can cancel and resume manually."
-    );
-  }
-  if (approval.status === "approved") return `Approved${model}.`;
-  if (approval.status === "denied") return `Denied${model}.`;
-  return approval.scope === "goal"
-    ? `Allow this goal run to use tools${model}.`
-    : `Allow this reply to use tools${model}.`;
-}
-
-function ToolApprovalCard({
-  approval,
-  disabled,
-  onApprove,
-  onDeny,
-}: {
-  approval: ChatApprovalRequest;
-  disabled: boolean;
-  onApprove: () => void;
-  onDeny: () => void;
-}) {
-  return (
-    <div
-      className={`approval-card ${approval.status}`}
-      data-testid="tool-approval-card"
-    >
-      <div className="approval-copy">
-        <div className="approval-title">{toolApprovalCardTitle(approval)}</div>
-        <div className="approval-detail">
-          {toolApprovalCardDetail(approval)}
-        </div>
-      </div>
-      {approval.status === "pending" && (
-        <div className="approval-actions">
-          <button
-            className="approval-btn approve"
-            data-testid="approve-tools"
-            type="button"
-            title="Approve tool access"
-            onClick={onApprove}
-            disabled={disabled}
-          >
-            <Check size={13} />
-            <span>Approve</span>
-          </button>
-          <button
-            className="approval-btn deny"
-            data-testid="deny-tools"
-            type="button"
-            title="Deny tool access"
-            onClick={onDeny}
-            disabled={disabled}
-          >
-            <X size={13} />
-            <span>Deny</span>
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-type GoalLoopState = {
-  sessionId: string;
-  stopped: boolean;
-  decisionController?: AbortController;
-};
-
 type PreviewSelection = {
   artifact: ChatArtifact;
   artifacts: ChatArtifact[];
@@ -2739,18 +1224,6 @@ type InspectorPreviewSource = "artifact" | "app" | "url";
 
 type InspectorBrowserTab = SessionBrowserTab;
 type InspectorBrowserSession = SessionBrowserSession;
-
-type ActiveMediaTarget = {
-  provider: ProviderInfo;
-  model: string;
-  kind: MediaKind;
-  supportedKinds: MediaKind[];
-};
-
-type MediaProviderCatalog = Record<
-  string,
-  Partial<Record<MediaKind, string[]>>
->;
 
 type ChatSessionSummary = {
   id: string;
@@ -2888,69 +1361,6 @@ function createChatSessionSummariesSelector() {
   };
 }
 
-function addMediaCandidate(
-  candidates: Map<string, Set<MediaKind>>,
-  model: string | undefined,
-  fallbackKind: MediaKind,
-  force = false,
-): void {
-  const trimmed = model?.trim();
-  if (!trimmed) return;
-  const kind = mediaKindForModelId(trimmed);
-  if (!kind && !force) return;
-  const kinds = candidates.get(trimmed) ?? new Set<MediaKind>();
-  kinds.add(kind ?? fallbackKind);
-  candidates.set(trimmed, kinds);
-}
-
-function mediaCandidatesForProvider(
-  provider: ProviderInfo,
-  settings: MediaSettings,
-  catalog: MediaProviderCatalog,
-): Map<string, Set<MediaKind>> {
-  const candidates = new Map<string, Set<MediaKind>>();
-  addMediaCandidate(candidates, defaultMediaModel(provider), "image", true);
-  addMediaCandidate(
-    candidates,
-    settings.modelByProvider[provider.id],
-    "image",
-    true,
-  );
-  for (const id of settings.favoriteModelIdsByProvider[provider.id] ?? []) {
-    addMediaCandidate(candidates, id, "image", true);
-  }
-  for (const id of provider.models ?? []) {
-    addMediaCandidate(candidates, id, "image");
-  }
-  for (const kind of ["image", "video", "music"] as MediaKind[]) {
-    for (const id of catalog[provider.id]?.[kind] ?? []) {
-      addMediaCandidate(candidates, id, kind, true);
-    }
-  }
-  return candidates;
-}
-
-function mediaModelsForPicker(
-  providers: ProviderInfo[],
-  settings: MediaSettings,
-  catalog: MediaProviderCatalog,
-): ModelInfo[] {
-  return providers.flatMap((provider) =>
-    Array.from(
-      mediaCandidatesForProvider(provider, settings, catalog),
-      ([id, kinds]) => ({
-        id,
-        owned_by: `${provider.name} media`,
-        capabilities: {
-          imageOutput: kinds.has("image"),
-          videoOutput: kinds.has("video"),
-          musicOutput: kinds.has("music"),
-        },
-      }),
-    ),
-  );
-}
-
 function executePlanPrompt(plan: string): string {
   return [
     "Execute the approved implementation plan below.",
@@ -2959,74 +1369,6 @@ function executePlanPrompt(plan: string): string {
     "Approved plan:",
     plan,
   ].join("\n");
-}
-
-function resolveActiveMediaTarget(
-  model: string,
-  providers: ProviderInfo[],
-  settings: MediaSettings,
-  catalog: MediaProviderCatalog,
-): ActiveMediaTarget | null {
-  const selected = model.trim();
-  if (!selected) return null;
-  for (const provider of providers) {
-    const candidates = mediaCandidatesForProvider(provider, settings, catalog);
-    const kinds = candidates.get(selected);
-    if (kinds?.size) {
-      const supportedKinds = Array.from(kinds);
-      return {
-        provider,
-        model: selected,
-        kind: supportedKinds[0],
-        supportedKinds,
-      };
-    }
-  }
-  return null;
-}
-
-function updateMediaMessage(
-  sessionId: string,
-  requestId: string,
-  patch: Partial<ChatMessage>,
-): void {
-  const store = useSessions.getState();
-  const session = store.sessions.find((item) => item.id === sessionId);
-  if (!session) return;
-  const messages = session.messages.map((message) =>
-    message.mediaRequestId === requestId ? { ...message, ...patch } : message,
-  );
-  store.setMessages(sessionId, messages, { autoTitle: false });
-}
-
-function replaceMediaResult(
-  sessionId: string,
-  requestId: string,
-  result: MediaGenerationResult,
-): void {
-  const store = useSessions.getState();
-  const session = store.sessions.find((item) => item.id === sessionId);
-  if (!session) return;
-  const messages = session.messages.map((message) => {
-    if (message.mediaRequestId !== requestId) return message;
-    const current = message.mediaResults ?? [];
-    const index = current.findIndex(
-      (item) =>
-        item.provider_id === result.provider_id && item.id === result.id,
-    );
-    const mediaResults =
-      index >= 0
-        ? current.map((item, itemIndex) =>
-            itemIndex === index ? { ...item, ...result } : item,
-          )
-        : [result, ...current];
-    return {
-      ...message,
-      content: bestMediaResultUrl(result) ? "" : mediaResultContent(result),
-      mediaResults,
-    };
-  });
-  store.setMessages(sessionId, messages, { autoTitle: false });
 }
 
 function codexImageMediaResult(
@@ -3099,57 +1441,6 @@ function compactText(value: string, max = 96): string {
   return text.length > max ? text.slice(0, max - 1).trimEnd() + "..." : text;
 }
 
-function mediaContextLine(message: ChatMessage): string | null {
-  const text = message.content.trim();
-  if (message.role === "user") {
-    return text ? `User: ${compactText(text, 420)}` : null;
-  }
-  if (message.mediaResults?.length) {
-    const summaries = message.mediaResults.slice(0, 2).map((result) => {
-      const kind = String(result.media[0]?.kind ?? result.kind ?? "media");
-      const status = result.status.trim() || "submitted";
-      return bestMediaResultUrl(result)
-        ? `generated ${kind} (${status})`
-        : `${kind} generation ${status}`;
-    });
-    return summaries.length ? `Assistant: ${summaries.join(", ")}.` : null;
-  }
-  if (!text || text.startsWith("Generating ")) return null;
-  return `Assistant: ${compactText(text, 420)}`;
-}
-
-function boundedMediaContextLines(messages: ChatMessage[]): string[] {
-  const lines = messages
-    .map(mediaContextLine)
-    .filter((line): line is string => Boolean(line))
-    .slice(-MEDIA_CONTEXT_MESSAGE_LIMIT);
-  const selected: string[] = [];
-  let chars = 0;
-  for (const line of lines.slice().reverse()) {
-    const nextChars = chars + line.length + 1;
-    if (selected.length && nextChars > MEDIA_CONTEXT_CHAR_LIMIT) break;
-    selected.push(line);
-    chars = nextChars;
-  }
-  return selected.reverse();
-}
-
-function mediaPromptWithHistory(
-  baseMessages: ChatMessage[],
-  currentPrompt: string,
-): string {
-  const context = boundedMediaContextLines(baseMessages);
-  if (!context.length) return currentPrompt;
-  return [
-    "Use the recent chat context only to resolve references and maintain continuity. Create the latest requested media.",
-    "",
-    "Recent chat:",
-    ...context,
-    "",
-    `Latest request: ${currentPrompt}`,
-  ].join("\n");
-}
-
 export function ChatView({
   onManageAgents,
   onOpenSchedules,
@@ -3176,7 +1467,6 @@ export function ChatView({
   markPerfRender("ChatView");
   const { openContextMenu } = useContextMenu();
   const messageRowActionsRef = useRef<MessageRowActions | null>(null);
-  const [models, setModels] = useState<ModelInfo[]>([]);
   const [input, setInputState] = useState(() =>
     getSessionComposerDraft(useSessions.getState().activeId),
   );
@@ -3185,36 +1475,13 @@ export function ChatView({
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [memoryTarget, setMemoryTarget] = useState<MemoryNotice | null>(null);
   const [attachmentPreview, setAttachmentPreview] = useState<ChatAttachment | null>(null);
-  const [skills, setSkills] = useState<SkillInfo[]>([]);
-  const [composerTools, setComposerTools] = useState<ToolInfo[]>([]);
   const [editing, setEditing] = useState<number | null>(null);
-  const [modelsLoaded, setModelsLoaded] = useState(false);
-  const [providers, setProviders] = useState<ProviderInfo[]>([]);
-  const [mediaCatalog, setMediaCatalog] = useState<MediaProviderCatalog>({});
-  const [mediaKind, setMediaKind] = useState<MediaKind>("image");
-  const [mediaAdvanced, setMediaAdvanced] = useState("{}");
-  const [mediaSchema, setMediaSchema] = useState<MediaModelSchema | null>(null);
-  const [mediaParameterValues, setMediaParameterValues] = useState<
-    Record<string, unknown>
-  >({});
-  const [mediaSchemaLoading, setMediaSchemaLoading] = useState(false);
-  const [mediaError, setMediaError] = useState<string | null>(null);
   const [pendingAttachments, setPendingAttachments] = useState<
     ChatAttachment[]
   >([]);
   const [reviewCommentsBySession, setReviewCommentsBySession] = useState<Record<string, ReviewComment[]>>({});
   const [, setPreviewSelection] =
     useState<PreviewSelection | null>(null);
-  const [activePreviewSurface, setActivePreviewSurface] =
-    useState<PreviewSurfaceTarget | null>(null);
-  const [previewAppStatus, setPreviewAppStatus] =
-    useState<PreviewAppStatus | null>(null);
-  const [previewAppPreflight, setPreviewAppPreflight] =
-    useState<PreviewAppPreflight | null>(null);
-  const [previewAppPreflightBusy, setPreviewAppPreflightBusy] = useState(false);
-  const [previewAppBusy, setPreviewAppBusy] = useState<
-    "start" | "stop" | "restart" | null
-  >(null);
   const [workerActionBusy, setWorkerActionBusy] = useState(false);
   const [workerFocusRunId, setWorkerFocusRunId] = useState("");
   const [workerSettingsOpen, setWorkerSettingsOpen] = useState(false);
@@ -3399,8 +1666,6 @@ export function ChatView({
   const setSessionInspectorOpen = useSessions((s) => s.setInspectorOpen);
   const setSessionInspectorTab = useSessions((s) => s.setInspectorTab);
   const setSessionBrowserSession = useSessions((s) => s.setBrowserSession);
-  const setSessionPreviewRuntime = useSessions((s) => s.setPreviewRuntime);
-  const setPreviewRuntimeByKey = useSessions((s) => s.setPreviewRuntimeByKey);
   const updateThreadSettings = useSessions((s) => s.updateSettings);
   const switchToSession = useSessions((s) => s.switchTo);
   const enqueueQueuedMessage = useSessions((s) => s.enqueueQueuedMessage);
@@ -3426,6 +1691,16 @@ export function ChatView({
   const configuredNewThreads = useSettings((s) => s.newThreadBehavior === "configured");
   const unavailableModelPolicy = useSettings((s) => s.unavailableModelPolicy);
   const setMediaSettings = useSettings((s) => s.setMediaSettings);
+  const {
+    models,
+    modelsLoaded,
+    providers,
+    skills,
+    composerTools,
+    setModels,
+    setProviders,
+    setComposerTools,
+  } = useChatCatalogController(accountRuntimeEnabled, skillsRevision);
   const previewPanelWidth = useUiPreferences((s) => s.previewPanelWidth);
   const setPreviewPanelWidth = useUiPreferences((s) => s.setPreviewPanelWidth);
   const sidebarOpen = useUiPreferences((s) => s.sidebarOpen);
@@ -3466,8 +1741,26 @@ export function ChatView({
     planMode,
     goal,
   } = threadSettings;
+  const {
+    activePreviewRuntimeKey,
+    activePreviewSurface,
+    previewAppBusy,
+    previewAppPreflight,
+    previewAppPreflightBusy,
+    previewAppStatus,
+    preflightRuntime,
+    restartRuntime,
+    setActivePreviewSurface,
+    startRuntime,
+    startStaticRuntime,
+    stopRuntime,
+  } = useChatInspectorController({
+    activeId,
+    folder,
+    sessionsHydrated,
+    onNotice: setChatNotice,
+  });
   const goalComposerMode = Boolean(goalComposerSessions[activeId]);
-  const activePreviewRuntimeKey = previewRuntimeKeyForThread(activeId, folder);
   const activePreviewAppStatus =
     previewAppStatus?.thread_id === activePreviewRuntimeKey &&
     previewStatusMatchesFolder(previewAppStatus, folder)
@@ -3536,6 +1829,54 @@ export function ChatView({
     [projects, sessionSummaries],
   );
   const effectiveModel = activeWorker?.model || model;
+  const {
+    compactionInFlightRef,
+    deleteGoal,
+    drainQueuedMessages,
+    generationControllersRef,
+    goalLoopRef,
+    openGoalPanel,
+    pauseGoalRun,
+    runTurnAndDrain,
+    saveGoalDraft,
+    sessionGoal,
+    updateGoalState,
+  } = useChatConversationController({
+    queueInterrupts,
+    setQueueInterrupts,
+    generatingSessionIds,
+    liveWorkerSessionIdsKey,
+    setChatNotice,
+    setGoalPanelOpen,
+    setGoalPrefill,
+    sessionMessages,
+    runTurn,
+  });
+  const {
+    activeMediaTarget,
+    mediaAdvanced,
+    mediaError,
+    mediaKind,
+    mediaModelEntries,
+    mediaParameterValues,
+    mediaSchema,
+    mediaSchemaLoading,
+    sendMediaPrompt,
+    setMediaKind,
+    updateInlineMediaAdvanced,
+    updateInlineMediaParameter,
+  } = useChatMediaController({
+    providers,
+    effectiveModel,
+    mediaSettings,
+    setMediaSettings,
+    pendingAttachments,
+    setInput,
+    setPendingAttachments,
+    setChatNotice,
+    generationControllersRef,
+    createRequestId: attachmentId,
+  });
   const quickSummary = useMemo(
     () =>
       buildQuickSummary({
@@ -3566,26 +1907,6 @@ export function ChatView({
       generatingSessionIds,
     ],
   );
-  const enabledMediaProviders = useMemo(
-    () => mediaProviders(providers),
-    [providers],
-  );
-  const mediaModelEntries = useMemo(
-    () => mediaModelsForPicker(enabledMediaProviders, mediaSettings, mediaCatalog),
-    [enabledMediaProviders, mediaSettings, mediaCatalog],
-  );
-
-  function persistPreviewRuntimeStatus(status: PreviewAppStatus) {
-    const state = useSessions.getState();
-    const previous = folder.trim()
-      ? state.previewRuntimesByKey[activePreviewRuntimeKey]
-      : state.sessions.find((session) => session.id === activeId)
-          ?.previewRuntime;
-    const runtime = previewRuntimeFromStatus(status, previous);
-    if (folder.trim()) setPreviewRuntimeByKey(activePreviewRuntimeKey, runtime);
-    else setSessionPreviewRuntime(activeId, runtime);
-  }
-
   function currentVirtualProjectFiles(sessionId = activeId): PreviewAppFile[] {
     return sessionVirtualProjectFiles(
       useSessions
@@ -3613,71 +1934,33 @@ export function ChatView({
     return mergePreviewAppFiles(currentVirtualProjectFiles(), updates);
   }
 
-  useEffect(() => {
-    const state = useSessions.getState();
-    const runtime = folder.trim()
-      ? state.previewRuntimesByKey[activePreviewRuntimeKey]
-      : state.sessions.find((session) => session.id === activeId)
-          ?.previewRuntime;
-    const status = previewStatusFromRuntime(activePreviewRuntimeKey, runtime);
-    const matchingStatus = previewStatusMatchesFolder(status, folder)
-      ? status
-      : null;
-    setPreviewAppStatus(matchingStatus);
-    setPreviewAppPreflight(matchingStatus?.preflight ?? null);
-  }, [activeId, activePreviewRuntimeKey, folder, sessionsHydrated]);
-
-  useEffect(() => {
-    let cancelled = false;
-    async function pollPreviewApp() {
-      if (!documentVisible()) return;
-      try {
-        const status = await getPreviewAppStatus(activePreviewRuntimeKey);
-        if (!cancelled) {
-          if (previewStatusMatchesFolder(status, folder)) {
-            const freshStatus = { ...status, stale: false };
-            setPreviewAppStatus(freshStatus);
-            setPreviewAppPreflight(status.preflight ?? null);
-            persistPreviewRuntimeStatus(freshStatus);
-          } else {
-            setPreviewAppStatus(null);
-            if (folder.trim())
-              setPreviewRuntimeByKey(activePreviewRuntimeKey, undefined);
-            else setSessionPreviewRuntime(activeId, undefined);
-          }
-        }
-      } catch {
-        if (!cancelled) {
-          setPreviewAppStatus((current) =>
-            current?.thread_id === activePreviewRuntimeKey
-              ? { ...current, stale: true }
-              : current,
-          );
-        }
-      }
-    }
-    void pollPreviewApp();
-    const timer = window.setInterval(() => void pollPreviewApp(), 2500);
-    const onVisible = () => {
-      if (documentVisible()) void pollPreviewApp();
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, [
-    activeId,
-    activePreviewRuntimeKey,
-    folder,
-    setPreviewRuntimeByKey,
-    setSessionPreviewRuntime,
-  ]);
   const pickerModels = useMemo(
     () => mergeModelListsForPicker(models, mediaModelEntries),
     [models, mediaModelEntries],
   );
+  const proactiveModelBlocker = useMemo(
+    () => modelComposerBlocker({
+      modelsLoaded,
+      selectedModel: effectiveModel,
+      models: pickerModels,
+      providers,
+      accountRuntimeEnabled,
+    }),
+    [accountRuntimeEnabled, effectiveModel, modelsLoaded, pickerModels, providers],
+  );
+  const composerNotice = prioritizeComposerNotice(chatNotice, proactiveModelBlocker);
+  const composerAction: ComposerBlockerAction | null = composerNotice
+    ? composerNotice === proactiveModelBlocker
+      ? proactiveModelBlocker.action
+      : composerNoticeAction(composerNotice.message)
+    : null;
+  const composerActionLabel = composerAction === "manage_models"
+    ? "Manage models"
+    : composerAction === "choose_folder"
+      ? "Choose folder"
+      : composerAction === "privacy_settings"
+        ? "Review privacy"
+        : "";
   const composerCompletionRequest = useMemo(() => {
     if (composerCompletionMode === "off" || !model.trim() || isCodexModel(model) || isClaudeModel(model) || isOpenCodeModel(model) || isPiModel(model)) return undefined;
     const modelInfo = pickerModels.find((item) => item.id === model);
@@ -3707,20 +1990,6 @@ export function ChatView({
       setProvidersOpen(true);
     }
   }, [activeId, configuredNewThreads, favoriteModels, messages.length, model, modelsLoaded, pickerModels, unavailableModelPolicy, updateThreadSettings]);
-  const activeMediaTarget = useMemo(
-    () => resolveActiveMediaTarget(
-      effectiveModel,
-      enabledMediaProviders,
-      mediaSettings,
-      mediaCatalog,
-    ),
-    [
-      effectiveModel,
-      enabledMediaProviders,
-      mediaSettings,
-      mediaCatalog,
-    ],
-  );
   const activeWorkerRunning =
     activeWorker?.status === "queued" ||
     activeWorker?.status === "running" ||
@@ -3784,20 +2053,15 @@ export function ChatView({
   const previewResizeHandleRef = useRef<HTMLDivElement>(null);
   const contextLauncherRef = useRef<HTMLButtonElement>(null);
   const stickToBottomRef = useRef(true);
-  const generationControllersRef = useRef<Map<string, AbortController>>(
-    new Map(),
-  );
-  const childThreadEventControllersRef = useRef<Map<string, AbortController>>(
-    new Map(),
-  );
-  const workerRunEventControllersRef = useRef<Map<string, AbortController>>(
-    new Map(),
-  );
-  const approvedWorkerRunsRef = useRef<Set<string>>(new Set());
-  const resumingWorkerRunsRef = useRef<Set<string>>(new Set());
-  const workerRunReconcileRetriesRef = useRef<Map<string, number>>(new Map());
-  const childThreadLiveIdsRef = useRef<Map<string, Set<string>>>(new Map());
-  const childThreadEventsRef = useRef<Map<string, ThreadEvent[]>>(new Map());
+  const {
+    approvedWorkerRunsRef,
+    childThreadEventControllersRef,
+    childThreadEventsRef,
+    childThreadLiveIdsRef,
+    resumingWorkerRunsRef,
+    workerRunEventControllersRef,
+    workerRunReconcileRetriesRef,
+  } = useChatWorkerController();
   const previewResizeStartRef = useRef<{
     clientX: number;
     width: number;
@@ -3831,12 +2095,7 @@ export function ChatView({
   const preparedPreviewFilesByThreadRef = useRef(
     new Map<string, PreviewAppFile[]>(),
   );
-  const mobileRelayPollingRef = useRef(false);
   const scheduleRunPollingRef = useRef(false);
-  const mobileRelayReadyRef = useRef(false);
-  const goalLoopRef = useRef<GoalLoopState | null>(null);
-  const queueDrainRef = useRef<Set<string>>(new Set());
-  const compactionInFlightRef = useRef(false);
   const messageHeightsRef = useRef<number[]>([]);
   const gitStatusUpdatedAtRef = useRef<number | null>(null);
   const [previewResizing, setPreviewResizing] = useState(false);
@@ -4196,152 +2455,10 @@ export function ChatView({
   }
 
   useEffect(() => {
-    let cancelled = false;
-    void loadStartupModels(
-      (nextModels) => {
-        if (cancelled) return;
-        setModels(nextModels);
-        setModelsLoaded(true);
-      },
-      accountRuntimeEnabled,
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [accountRuntimeEnabled]);
-
-  useEffect(() => {
-    listProviders().then(setProviders);
-  }, []);
-
-  useEffect(() => {
-    listSkills().then(setSkills);
-  }, [skillsRevision]);
-
-  useEffect(() => {
-    let cancelled = false;
-    void listTools()
-      .then((tools) => {
-        if (!cancelled) setComposerTools(tools);
-      })
-      .catch(() => {
-        if (!cancelled) setComposerTools([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (enabledMediaProviders.length === 0) {
-      setMediaCatalog({});
-      return;
-    }
-    let cancelled = false;
-    async function loadMediaCatalogs() {
-      const rows = await Promise.all(
-        enabledMediaProviders.flatMap((provider) =>
-          (["image", "video", "music"] as MediaKind[]).map(async (kind) => {
-            try {
-              const models = await listMediaModels(provider.id, kind);
-              return {
-                providerId: provider.id,
-                kind,
-                ids: models.map((item) => item.id).filter(Boolean),
-              };
-            } catch {
-              return { providerId: provider.id, kind, ids: [] };
-            }
-          }),
-        ),
-      );
-      if (cancelled) return;
-      const next: MediaProviderCatalog = {};
-      for (const row of rows) {
-        next[row.providerId] ??= {};
-        next[row.providerId][row.kind] = row.ids;
-      }
-      setMediaCatalog(next);
-    }
-    void loadMediaCatalogs();
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    enabledMediaProviders.map((provider) => provider.id).join("\u0000"),
-  ]);
-
-  useEffect(() => {
     if (modelsLoaded && !model && models[0]?.id) {
       updateThreadSettings(activeId, { model: models[0].id });
     }
   }, [activeId, model, models, modelsLoaded, updateThreadSettings]);
-
-  useEffect(() => {
-    if (!activeMediaTarget) {
-      setMediaSchema(null);
-      setMediaParameterValues({});
-      setMediaSchemaLoading(false);
-      setMediaError(null);
-      return;
-    }
-    const key = mediaPreferenceKey(
-      activeMediaTarget.provider.id,
-      activeMediaTarget.model,
-    );
-    const saved = useSettings.getState().media;
-    setMediaKind(activeMediaTarget.kind);
-    setMediaAdvanced(
-      saved.advancedByProviderModel[key] ??
-        defaultMediaAdvanced(activeMediaTarget.provider),
-    );
-    setMediaParameterValues(saved.parametersByProviderModel[key] ?? {});
-    setMediaSettings({
-      providerId: activeMediaTarget.provider.id,
-      modelByProvider: {
-        ...saved.modelByProvider,
-        [activeMediaTarget.provider.id]: activeMediaTarget.model,
-      },
-    });
-  }, [activeMediaTarget?.provider.id, activeMediaTarget?.model]);
-
-  useEffect(() => {
-    if (!activeMediaTarget) return;
-    const kind = activeMediaTarget.supportedKinds.includes(mediaKind)
-      ? mediaKind
-      : activeMediaTarget.kind;
-    const key = mediaPreferenceKey(
-      activeMediaTarget.provider.id,
-      activeMediaTarget.model,
-    );
-    let cancelled = false;
-    setMediaSchemaLoading(true);
-    setMediaError(null);
-    getMediaModelSchema(
-      activeMediaTarget.provider.id,
-      activeMediaTarget.model,
-      kind,
-    )
-      .then((schema) => {
-        if (cancelled) return;
-        setMediaSchema(schema);
-        const nextSaved =
-          useSettings.getState().media.parametersByProviderModel[key];
-        setMediaParameterValues({ ...schemaDefaults(schema), ...nextSaved });
-      })
-      .catch((e) => {
-        if (!cancelled) {
-          setMediaSchema(null);
-          setMediaError(e instanceof Error ? e.message : String(e));
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setMediaSchemaLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [activeMediaTarget?.provider.id, activeMediaTarget?.model, mediaKind]);
 
   useEffect(() => {
     if (stickToBottomRef.current) scrollToChatBottom();
@@ -4394,21 +2511,6 @@ export function ChatView({
         window.clearTimeout(stopShortcutConfirmTimerRef.current);
         stopShortcutConfirmTimerRef.current = null;
       }
-      const store = useSessions.getState();
-      generationControllersRef.current.forEach((controller, id) => {
-        controller.abort();
-        store.setSessionGenerating(id, false);
-      });
-      generationControllersRef.current.clear();
-      childThreadEventControllersRef.current.forEach((controller) =>
-        controller.abort(),
-      );
-      childThreadEventControllersRef.current.clear();
-      childThreadLiveIdsRef.current.clear();
-      workerRunEventControllersRef.current.forEach((controller) =>
-        controller.abort(),
-      );
-      workerRunEventControllersRef.current.clear();
     };
   }, []);
 
@@ -5112,36 +3214,16 @@ export function ChatView({
   }
 
   async function preflightPreviewRuntime(files?: PreviewAppFile[]) {
-    setPreviewAppPreflightBusy(true);
-    try {
-      const managedFiles = folder.trim()
-        ? undefined
-        : (files ??
-          preparedPreviewFilesByThreadRef.current.get(activeId) ??
-          managedPreviewFiles(latestRuntimePreview?.artifacts));
-      if (managedFiles)
-        preparedPreviewFilesByThreadRef.current.set(activeId, managedFiles);
-      const preflight = await preflightPreviewApp(
-        activePreviewRuntimeKey,
-        folder.trim()
-          ? { cwd: folder }
-          : { files: managedFiles },
-      );
-      setPreviewAppPreflight(preflight);
-      setPreviewAppStatus((current) =>
-        current
-          ? { ...current, preflight, stale: false }
-          : current,
-      );
-      setChatNotice({ tone: "info", message: "Preview commands are ready to review." });
-    } catch (error) {
-      setChatNotice({
-        tone: "error",
-        message: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setPreviewAppPreflightBusy(false);
-    }
+    const managedFiles = folder.trim()
+      ? undefined
+      : (files ??
+        preparedPreviewFilesByThreadRef.current.get(activeId) ??
+        managedPreviewFiles(latestRuntimePreview?.artifacts));
+    if (managedFiles)
+      preparedPreviewFilesByThreadRef.current.set(activeId, managedFiles);
+    await preflightRuntime(
+      folder.trim() ? { cwd: folder } : { files: managedFiles },
+    );
   }
 
   function previewRuntimeRunOptions(): PreviewAppStartOptions | null {
@@ -5163,66 +3245,38 @@ export function ChatView({
         };
   }
 
-  function applyPreviewAppStatus(status: PreviewAppStatus) {
-    const freshStatus = { ...status, stale: false };
-    setPreviewAppStatus(freshStatus);
-    setPreviewAppPreflight(status.preflight ?? activePreviewAppPreflight);
-    persistPreviewRuntimeStatus(freshStatus);
+  async function startWorkspaceHtmlPreview(path: string) {
+    if (!folder.trim()) return;
+    const status = await startStaticRuntime({
+      cwd: folder,
+      entry_path: path,
+    });
+    if (!status) return;
+    selectPreviewSource("app");
+    setSessionInspectorTab(activeId, "preview");
   }
 
   async function startPreviewRuntime() {
     const options = previewRuntimeRunOptions();
     if (!options) return;
-    setPreviewAppBusy("start");
-    try {
-      const status = await startPreviewApp(activePreviewRuntimeKey, options);
-      applyPreviewAppStatus(status);
-      if (!folder.trim() && options.files?.length)
-        upsertVirtualFiles(activeId, options.files);
-      selectPreviewSource("app");
-      setSessionInspectorTab(activeId, "preview");
-    } catch (error) {
-      setChatNotice({
-        tone: "error",
-        message: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setPreviewAppBusy(null);
-    }
+    const status = await startRuntime(options);
+    if (!status) return;
+    if (!folder.trim() && options.files?.length)
+      upsertVirtualFiles(activeId, options.files);
+    selectPreviewSource("app");
+    setSessionInspectorTab(activeId, "preview");
   }
 
   async function stopPreviewRuntime() {
-    setPreviewAppBusy("stop");
-    try {
-      const status = await stopPreviewApp(activePreviewRuntimeKey);
-      applyPreviewAppStatus(status);
-    } catch (error) {
-      setChatNotice({
-        tone: "error",
-        message: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setPreviewAppBusy(null);
-    }
+    await stopRuntime();
   }
 
   async function restartPreviewRuntime() {
     const options = previewRuntimeRunOptions();
     if (!options) return;
-    setPreviewAppBusy("restart");
-    try {
-      const status = await restartPreviewApp(activePreviewRuntimeKey, options);
-      applyPreviewAppStatus(status);
-      if (!folder.trim() && options.files?.length)
-        upsertVirtualFiles(activeId, options.files);
-    } catch (error) {
-      setChatNotice({
-        tone: "error",
-        message: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setPreviewAppBusy(null);
-    }
+    const status = await restartRuntime(options);
+    if (status && !folder.trim() && options.files?.length)
+      upsertVirtualFiles(activeId, options.files);
   }
 
   function openArtifactSidePanel(tab: "preview" | "code" = "preview") {
@@ -6291,194 +4345,6 @@ export function ChatView({
     }
   }
 
-  function sessionGoal(sessionId: string): GoalSettings {
-    return useSessions.getState().getSettings(sessionId).goal;
-  }
-
-  function updateGoalState(
-    sessionId: string,
-    patch: Partial<GoalSettings>,
-    baseGoal = sessionGoal(sessionId),
-  ): GoalSettings {
-    const next = normalizeGoalSettings({
-      ...baseGoal,
-      ...patch,
-      updatedAt: Date.now(),
-    });
-    useSessions.getState().updateSettings(sessionId, { goal: next });
-    return next;
-  }
-
-  async function drainQueuedMessages(
-    sessionId: string,
-    fallbackModel?: string,
-  ) {
-    return drainQueuedMessagesFromQueue({
-      sessionId,
-      fallbackModel,
-      queueDrainRef,
-      generationControllersRef,
-      agents: useAgents.getState().agents,
-      setChatNotice,
-      sessionMessages,
-      runTurn: (convo, selectedModel, targetSessionId) =>
-        runTurn(convo, selectedModel, {}, targetSessionId),
-    });
-  }
-
-  useEffect(() => {
-    const interruptedSessionIds = Object.keys(queueInterrupts);
-    if (interruptedSessionIds.length === 0) return;
-    const generating = new Set(generatingSessionIds);
-    const liveWorkers = new Set(
-      liveWorkerSessionIdsKey ? liveWorkerSessionIdsKey.split("\0") : [],
-    );
-    const ready = interruptedSessionIds.filter(
-      (sessionId) =>
-        !generating.has(sessionId) && !liveWorkers.has(sessionId),
-    );
-    if (ready.length === 0) return;
-    setQueueInterrupts((current) => {
-      const next = { ...current };
-      for (const sessionId of ready) delete next[sessionId];
-      return next;
-    });
-    for (const sessionId of ready) void drainQueuedMessages(sessionId);
-  }, [generatingSessionIds, liveWorkerSessionIdsKey, queueInterrupts]);
-
-  async function runTurnAndDrain(
-    convo: ChatMessage[],
-    selectedModel?: string,
-    options: RunTurnOptions = {},
-  ) {
-    const sessionId = activeId;
-    const result = await runTurn(convo, selectedModel, options, sessionId);
-    let terminalResult = result;
-    if (result.status === "done") {
-      terminalResult = await drainQueuedMessages(sessionId, selectedModel) ?? result;
-    }
-    if (
-      document.visibilityState === "visible" &&
-      useSessions.getState().activeId === sessionId
-    ) {
-      const preferences = useUiPreferences.getState();
-      if (
-        preferences.interfaceSounds &&
-        terminalResult.status === "done" &&
-        preferences.soundOnFinished
-      ) playInterfaceSound(preferences.finishedSound);
-      else if (
-        preferences.interfaceSounds &&
-        terminalResult.status === "error" &&
-        preferences.soundOnAttention
-      ) playInterfaceSound(preferences.attentionSound);
-    }
-    const preferences = useUiPreferences.getState();
-    const threadTitle = useSessions.getState().sessions.find((session) => session.id === sessionId)?.title;
-    if (terminalResult.status === "done" && preferences.notifyRunFinished) {
-      void sendMilimNotification("finished", {
-        threadTitle,
-        includeThreadTitle: preferences.notificationIncludeThreadTitle,
-        onlyWhenUnfocused: preferences.notifyOnlyWhenUnfocused,
-      });
-    } else if (terminalResult.status === "error" && preferences.notifyNeedsAttention) {
-      void sendMilimNotification("attention", {
-        threadTitle,
-        includeThreadTitle: preferences.notificationIncludeThreadTitle,
-        onlyWhenUnfocused: preferences.notifyOnlyWhenUnfocused,
-      });
-    }
-    return result;
-  }
-
-  function pauseGoalRun(reason = "Goal paused.", sessionId = activeId) {
-    const loop = goalLoopRef.current;
-    if (loop?.sessionId === sessionId) {
-      loop.stopped = true;
-      loop.decisionController?.abort();
-    }
-    generationControllersRef.current.get(sessionId)?.abort();
-    const current = sessionGoal(sessionId);
-    if (current.status === "running") {
-      updateGoalState(
-        sessionId,
-        { status: "paused", lastReason: reason },
-        current,
-      );
-    }
-  }
-
-  function draftToGoal(
-    draft: GoalPanelDraft,
-    current: GoalSettings,
-  ): GoalSettings {
-    const contentChanged =
-      draft.objective !== current.objective ||
-      draft.successCriteria !== current.successCriteria ||
-      draft.constraints !== current.constraints;
-    const status = !draft.objective.trim()
-      ? "idle"
-      : current.status === "running"
-        ? "paused"
-        : contentChanged &&
-            (current.status === "complete" ||
-              current.status === "blocked" ||
-              current.status === "error")
-          ? "paused"
-          : current.status;
-    return normalizeGoalSettings({
-      ...current,
-      objective: draft.objective,
-      successCriteria: draft.successCriteria,
-      constraints: draft.constraints,
-      developerMaxTurns: draft.developerMaxTurns,
-      status,
-      lastReason:
-        current.status === "running"
-          ? "Goal paused for edits."
-          : current.lastReason,
-      updatedAt: Date.now(),
-    });
-  }
-
-  function saveGoalDraft(
-    draft: GoalPanelDraft,
-    sessionId = activeId,
-  ): GoalSettings {
-    const current = sessionGoal(sessionId);
-    if (current.status === "running")
-      pauseGoalRun("Goal paused for edits.", sessionId);
-    const next = draftToGoal(draft, current);
-    useSessions.getState().updateSettings(sessionId, { goal: next });
-    setGoalPrefill(null);
-    return next;
-  }
-
-  function deleteGoal(sessionId = activeId) {
-    pauseGoalRun("Goal deleted.", sessionId);
-    useSessions
-      .getState()
-      .updateSettings(sessionId, { goal: DEFAULT_GOAL_SETTINGS });
-    setGoalPrefill(null);
-    setGoalPanelOpen(false);
-  }
-
-  function markGoalSeen(sessionId = activeId) {
-    const current = sessionGoal(sessionId);
-    const updatedAt = current.updatedAt ?? 0;
-    if (!updatedAt || (current.lastSeenAt ?? 0) >= updatedAt) return;
-    useSessions.getState().updateSettings(sessionId, {
-      goal: { ...current, lastSeenAt: Date.now() },
-    });
-  }
-
-  function openGoalPanel(prefill: string | null = null) {
-    setGoalPrefill(prefill);
-    markGoalSeen();
-    setGoalPanelOpen(true);
-    setChatNotice(null);
-  }
-
   function requestClaudeSessionRecoveryCard(
     sessionId: string,
     convo: ChatMessage[],
@@ -7424,159 +5290,6 @@ export function ChatView({
         return true;
       default:
         return false;
-    }
-  }
-
-  function updateInlineMediaAdvanced(value: string) {
-    setMediaAdvanced(value);
-    const target = activeMediaTarget;
-    if (!target) return;
-    const key = mediaPreferenceKey(target.provider.id, target.model);
-    const saved = useSettings.getState().media;
-    setMediaSettings({
-      advancedByProviderModel: {
-        ...saved.advancedByProviderModel,
-        [key]: value,
-      },
-    });
-  }
-
-  function updateInlineMediaParameter(
-    control: MediaSchemaControl,
-    value: string | boolean,
-  ) {
-    const target = activeMediaTarget;
-    if (!target) return;
-    let parsed: unknown;
-    try {
-      parsed = parseControlValue(control, value);
-    } catch (e) {
-      setMediaError(e instanceof Error ? e.message : String(e));
-      return;
-    }
-    const next = { ...mediaParameterValues, [control.key]: parsed };
-    const key = mediaPreferenceKey(target.provider.id, target.model);
-    const saved = useSettings.getState().media;
-    setMediaParameterValues(next);
-    setMediaSettings({
-      parametersByProviderModel: {
-        ...saved.parametersByProviderModel,
-        [key]: next,
-      },
-    });
-    setMediaError(null);
-  }
-
-  async function pollInlineMediaStatus(
-    initial: MediaGenerationResult,
-    sessionId: string,
-    requestId: string,
-  ) {
-    if (!shouldPollMediaStatus(initial)) return;
-    let current = initial;
-    try {
-      for (let attempt = 0; attempt < mediaPollingMaxAttempts(initial); attempt += 1) {
-        await new Promise((resolve) => window.setTimeout(resolve, 3000));
-        const next = await getMediaStatus({
-          provider_id: current.provider_id,
-          id: current.id,
-          model: current.model,
-          response_url: current.urls.response,
-          status_url: current.urls.status,
-          kind: current.kind as MediaKind,
-        });
-        current = next;
-        replaceMediaResult(sessionId, requestId, next);
-        if (!shouldPollMediaStatus(next) || next.media.length > 0) break;
-      }
-    } catch (e) {
-      updateMediaMessage(sessionId, requestId, {
-        content: `Media status failed: ${e instanceof Error ? e.message : String(e)}`,
-      });
-    }
-  }
-
-  async function sendMediaPrompt(
-    text: string,
-    target: ActiveMediaTarget,
-    baseMessages: ChatMessage[] = messages,
-    checkPendingAttachments = true,
-  ) {
-    if (checkPendingAttachments && pendingAttachments.length > 0) {
-      setChatNotice({
-        tone: "error",
-        message:
-          "Media generation uses the prompt text only. Remove attachments or choose a chat model.",
-      });
-      return;
-    }
-    if (generationControllersRef.current.has(activeId)) return;
-
-    let requestInput: Record<string, unknown>;
-    try {
-      requestInput = inputWithSchemaControls(
-        mediaAdvanced,
-        mediaSchema,
-        mediaParameterValues,
-      );
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      setMediaError(message);
-      setChatNotice({ tone: "error", message });
-      return;
-    }
-
-    const sessionId = activeId;
-    const requestId = attachmentId();
-    const kind = target.supportedKinds.includes(mediaKind)
-      ? mediaKind
-      : target.kind;
-    const prompt = mediaPromptWithHistory(baseMessages, text);
-    const userMessage: ChatMessage = { role: "user", content: text };
-    const assistantMessage: ChatMessage = {
-      role: "assistant",
-      content: `Generating ${kind} with ${target.model}...`,
-      mediaRequestId: requestId,
-    };
-    setInput("");
-    setPendingAttachments([]);
-    setChatNotice(null);
-    setMediaError(null);
-    setMessages(sessionId, [...baseMessages, userMessage, assistantMessage], {
-      autoTitle: autoTitleChats,
-    });
-
-    const store = useSessions.getState();
-    const controller = new AbortController();
-    generationControllersRef.current.set(sessionId, controller);
-    store.setSessionGenerating(sessionId, true);
-    try {
-      const result = await generateMedia(
-        {
-          provider_id: target.provider.id,
-          kind,
-          model: target.model,
-          prompt,
-          input: requestInput,
-        },
-        controller.signal,
-      );
-      replaceMediaResult(sessionId, requestId, result);
-      void pollInlineMediaStatus(result, sessionId, requestId);
-    } catch (e) {
-      const aborted = e instanceof DOMException && e.name === "AbortError";
-      updateMediaMessage(sessionId, requestId, {
-        content: aborted
-          ? "Media generation stopped."
-          : `Media generation failed: ${e instanceof Error ? e.message : String(e)}`,
-      });
-    } finally {
-      generationControllersRef.current.delete(sessionId);
-      store.setSessionGenerating(sessionId, false);
-      store.setSessionUnread(
-        sessionId,
-        useSessions.getState().activeId !== sessionId,
-      );
     }
   }
 
@@ -8701,93 +6414,6 @@ export function ChatView({
     toggleSidebar,
   ]);
 
-  function mobileRelayAttachments(
-    attachments?: MobileRelayAttachment[],
-  ): ChatAttachment[] {
-    return (attachments ?? [])
-      .filter(
-        (attachment) =>
-          attachment.name && attachment.mime && attachment.size >= 0,
-      )
-      .flatMap((attachment) => {
-        const next = {
-          id: attachment.id || attachmentId(),
-          name: attachment.name,
-          mime: attachment.mime,
-          size: attachment.size,
-          content: attachment.content,
-          dataUrl: attachment.dataUrl,
-          truncated: Boolean(attachment.truncated),
-        };
-        try {
-          assertValidImageAttachment(next);
-          return [next];
-        } catch (error) {
-          setChatNotice({
-            tone: "error",
-            message: error instanceof Error ? error.message : String(error),
-          });
-          return [];
-        }
-      });
-  }
-
-  function appendMobileRelayText(
-    text: string,
-    attachments: ChatAttachment[] = [],
-  ) {
-    if (text) {
-      setInput((current) => {
-        const trimmed = current.trimEnd();
-        return trimmed ? `${trimmed}\n${text}` : text;
-      });
-    }
-    if (attachments.length) {
-      setPendingAttachments((current) =>
-        [...current, ...attachments].slice(0, 12),
-      );
-    }
-  }
-
-  function sendMobileRelayText(event: MobileRelayEvent) {
-    const text = event.text.trim();
-    const attachments = mobileRelayAttachments(event.attachments);
-    if (!text && attachments.length === 0) return;
-    if (busy) {
-      enqueueQueuedMessage(activeId, { content: text, attachments });
-      setChatNotice({
-        tone: "info",
-        message: `Mobile relay from ${event.device_name} queued.`,
-      });
-      return;
-    }
-    const selectedModel = effectiveModel.trim();
-    if (!selectedModel) {
-      appendMobileRelayText(text, attachments);
-      setProvidersOpen(true);
-      setChatNotice({
-        tone: "error",
-        message:
-          "Mobile relay is waiting in the composer. Choose a model before sending.",
-      });
-      return;
-    }
-    setInput("");
-    setPendingAttachments([]);
-    setChatNotice({
-      tone: "info",
-      message: `Mobile relay from ${event.device_name} sent.`,
-    });
-    void runTurnAndDrain(
-      appendUserTurn(
-        messages,
-        text,
-        attachments.length ? attachments : undefined,
-      ),
-      selectedModel,
-    );
-  }
-
   function promoteQueuedMessage(messageId: string) {
     const first =
       useSessions.getState().queuedMessagesBySession[activeId]?.[0]?.id;
@@ -8852,233 +6478,6 @@ export function ChatView({
     });
   }
 
-  function startMobileThread(event: MobileRelayEvent) {
-    const text = event.text.trim();
-    const attachments = mobileRelayAttachments(event.attachments);
-    useSessions.getState().newChat(threadSettings);
-    const sessionId = useSessions.getState().activeId;
-    setInput("");
-    setPendingAttachments([]);
-    if (!text && attachments.length === 0) {
-      setChatNotice({
-        tone: "info",
-        message: `Mobile relay from ${event.device_name} created a thread.`,
-      });
-      return;
-    }
-    const selectedModel = queuedModelForSession(
-      sessionId,
-      effectiveModel.trim(),
-      agents,
-    );
-    if (!selectedModel) {
-      enqueueQueuedMessage(sessionId, { content: text, attachments });
-      setProvidersOpen(true);
-      setChatNotice({
-        tone: "error",
-        message:
-          "Mobile relay created a thread, but a model is needed before sending.",
-      });
-      return;
-    }
-    setChatNotice({
-      tone: "info",
-      message: `Mobile relay from ${event.device_name} started a thread.`,
-    });
-    void runTurn(
-      appendUserTurn([], text, attachments.length ? attachments : undefined),
-      selectedModel,
-      {},
-      sessionId,
-    ).then((result) => {
-      if (result.status === "done")
-        void drainQueuedMessages(sessionId, selectedModel);
-    });
-  }
-
-  function activeOrPayloadThreadId(text: string): string {
-    return text.trim() || activeId;
-  }
-
-  function deleteMobileMessage(text: string) {
-    const index = Number.parseInt(text.trim(), 10);
-    if (!Number.isFinite(index)) return;
-    deleteMessageAt(index);
-  }
-
-  async function deleteThreadWithRetryCleanup(sessionId: string) {
-    const session = useSessions.getState().sessions.find((item) => item.id === sessionId);
-    const isolated = session?.threadWorkspace?.mode === "worktree"
-      ? session.threadWorkspace
-      : null;
-    if (isolated) {
-      try {
-        await setWorkspace(isolated.projectFolder);
-        let result = await runWorkspaceGitAction("remove_thread_worktree", {
-          thread_id: sessionId,
-        });
-        if (!result.ok && result.message.includes("uncommitted changes")) {
-          const discard = window.confirm(
-            `${result.message}\n\nForce-discard the worktree? The branch will be retained.`,
-          );
-          if (!discard) return;
-          result = await runWorkspaceGitAction("remove_thread_worktree", {
-            thread_id: sessionId,
-            force: true,
-          });
-        }
-        if (!result.ok) throw new Error(result.message);
-      } catch (error) {
-        setChatNotice({
-          tone: "error",
-          message: `Thread was kept because worktree cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
-        });
-        return;
-      }
-    }
-    const retry = session?.retryWorkspace;
-    if (retry) {
-      try {
-        await setWorkspace(retry.originalFolder);
-        const result = await runWorkspaceGitAction("remove_retry_worktree", {
-          worktree: retry.worktreeFolder,
-        });
-        if (!result.ok) throw new Error(result.message);
-      } catch (error) {
-        setChatNotice({
-          tone: "error",
-          message: `Retry thread was kept because cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
-        });
-        return;
-      }
-    }
-    useSessions.getState().remove(sessionId);
-  }
-
-  function applyMobileRelayEvent(event: MobileRelayEvent) {
-    if (event.action === "new_thread") {
-      startMobileThread(event);
-      return;
-    }
-    if (event.action === "worker_run_start") {
-      const runId = event.text.trim() || activeWorkerRun?.run.id;
-      if (runId) void approveWorkerRun(runId);
-      return;
-    }
-    if (event.action === "worker_run_continue_solo") {
-      const runId = event.text.trim() || activeWorkerRun?.run.id;
-      if (runId) void continueWorkerRunSolo(runId);
-      return;
-    }
-    if (event.action === "worker_run_stop") {
-      const runId = event.text.trim() || activeWorkerRun?.run.id;
-      if (runId) void stopActiveWorkerRun(runId);
-      return;
-    }
-    if (event.action === "stop") {
-      stop();
-      setChatNotice({
-        tone: "info",
-        message: `Mobile relay from ${event.device_name} stopped generation.`,
-      });
-      return;
-    }
-    if (event.action === "regenerate") {
-      regenerate();
-      return;
-    }
-    if (event.action === "delete_message") {
-      deleteMobileMessage(event.text);
-      return;
-    }
-    if (event.action === "rename_thread") {
-      const title = event.text.trim();
-      if (title) useSessions.getState().rename(activeId, title);
-      return;
-    }
-    if (event.action === "archive_thread") {
-      useSessions
-        .getState()
-        .archiveSession(activeOrPayloadThreadId(event.text));
-      return;
-    }
-    if (event.action === "delete_thread") {
-      void deleteThreadWithRetryCleanup(activeOrPayloadThreadId(event.text));
-      return;
-    }
-    if (event.action === "set_model") {
-      const nextModel = event.text.trim();
-      if (nextModel) {
-        const session = useSessions.getState().sessions.find((item) => item.id === activeId);
-        const kind = nextModel.startsWith("codex:")
-          ? "codex"
-          : nextModel.startsWith("claude:")
-            ? "claude"
-            : nextModel.startsWith("opencode:")
-              ? "opencode"
-              : nextModel.startsWith("pi:")
-                ? "pi"
-              : null;
-        if (session && kind && nativeRuntimeIsStale(session, kind)) {
-          useSessions.getState().clearAccountRuntimeKind(activeId, kind);
-        }
-        updateThreadSettings(activeId, { model: nextModel });
-      }
-      return;
-    }
-    if (event.action === "attach") {
-      appendMobileRelayText(
-        event.text.trim(),
-        mobileRelayAttachments(event.attachments),
-      );
-      setChatNotice({
-        tone: "info",
-        message: `Mobile relay from ${event.device_name} added attachments.`,
-      });
-      return;
-    }
-    if (event.action === "switch_thread") {
-      const targetId = event.text.trim();
-      const target = useSessions
-        .getState()
-        .sessions.find(
-          (session) => session.id === targetId && !session.archivedAt,
-        );
-      if (target) {
-        switchToSession(target.id);
-        setChatNotice({
-          tone: "info",
-          message: `Mobile relay switched to ${target.title || "thread"}.`,
-        });
-      }
-      return;
-    }
-    if (event.action === "replace") {
-      setInput(event.text);
-      const attachments = mobileRelayAttachments(event.attachments);
-      setPendingAttachments(attachments);
-      setChatNotice({
-        tone: "info",
-        message: `Mobile relay from ${event.device_name} replaced the composer.`,
-      });
-      return;
-    }
-    if (event.action === "send") {
-      sendMobileRelayText(event);
-      return;
-    }
-    appendMobileRelayText(
-      event.text,
-      mobileRelayAttachments(event.attachments),
-    );
-    const notice = {
-      tone: "info",
-      message: `Mobile relay from ${event.device_name} added to the composer.`,
-    } as const;
-    setChatNotice(notice);
-    pushNotice(notice);
-  }
-
   function applyScheduleRunEvent(event: ScheduleRunEvent) {
     const title = `Schedule: ${event.schedule_name || event.schedule_id}`;
     const importedId = useSessions.getState().importSession({
@@ -9095,52 +6494,6 @@ export function ChatView({
       pushNotice(notice);
     }
   }
-
-  useEffect(() => {
-    let cancelled = false;
-    async function refreshMobileRelayReady() {
-      if (!documentVisible()) return;
-      try {
-        const status = await getMobileCompanionStatus();
-        mobileRelayReadyRef.current =
-          status.enabled && status.devices.length > 0;
-        if (mobileRelayReadyRef.current) void pollMobileRelay();
-      } catch {
-        mobileRelayReadyRef.current = false;
-      }
-    }
-    async function pollMobileRelay() {
-      if (!documentVisible() || !mobileRelayReadyRef.current) return;
-      if (mobileRelayPollingRef.current) return;
-      mobileRelayPollingRef.current = true;
-      try {
-        const events = await pollMobileCompanionEvents();
-        if (!cancelled) {
-          for (const event of events) applyMobileRelayEvent(event);
-        }
-      } catch {
-        // The bridge is disabled in normal web previews and before pairing.
-      } finally {
-        mobileRelayPollingRef.current = false;
-      }
-    }
-    void refreshMobileRelayReady();
-    const timer = window.setInterval(() => void pollMobileRelay(), 1500);
-    const statusTimer = window.setInterval(
-      () => void refreshMobileRelayReady(),
-      30_000,
-    );
-    const onVisible = () => {
-      if (documentVisible()) void refreshMobileRelayReady();
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-      window.clearInterval(statusTimer);
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, [activeId, busy, effectiveModel, switchToSession]);
 
   useEffect(() => {
     let cancelled = false;
@@ -9170,52 +6523,69 @@ export function ChatView({
     };
   }, []);
 
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      void publishMobileThreadSnapshot({
-        session_id: activeId,
-        title: activeTitle,
-        model: effectiveModel.trim() || null,
-        busy,
-        messages: mobileThreadMessages(messages),
-        threads: mobileThreadSummaries(
-          sessionSummaries,
-          projects,
-          generatingSessionIds,
-        ),
-        groups: mobileThreadGroups(
-          sessionSummaries,
-          projects,
-          sidebarState,
-          generatingSessionIds,
-        ),
-        models: mobileModelSummaries(pickerModels),
-        theme: {
-          is_dark: activeTheme.isDark,
-          css_vars: themeCssVariables(activeTheme),
-          background_fit: backgroundFit,
-          background_treatment: backgroundTreatment,
-        },
-        worker_run: mobileWorkerRun(activeWorkerRun),
-      }).catch(() => {});
-    }, 300);
-    return () => window.clearTimeout(timer);
-  }, [
-    activeId,
-    activeTheme,
-    activeWorkerRun,
-    activeTitle,
-    backgroundFit,
-    backgroundTreatment,
-    busy,
-    effectiveModel,
-    generatingSessionIds,
-    messages,
-    pickerModels,
-    projects,
-    sessionSummaries,
-    sidebarState,
-  ]);
+  const mobileSnapshot = useMemo(
+    () => ({
+      session_id: activeId,
+      title: activeTitle,
+      model: effectiveModel.trim() || null,
+      busy,
+      messages: mobileThreadMessages(messages),
+      threads: mobileThreadSummaries(
+        sessionSummaries,
+        projects,
+        generatingSessionIds,
+      ),
+      groups: mobileThreadGroups(
+        sessionSummaries,
+        projects,
+        sidebarState,
+        generatingSessionIds,
+      ),
+      models: mobileModelSummaries(pickerModels),
+      theme: {
+        is_dark: activeTheme.isDark,
+        css_vars: themeCssVariables(activeTheme),
+        background_fit: backgroundFit,
+        background_treatment: backgroundTreatment,
+      },
+      worker_run: mobileWorkerRun(activeWorkerRun),
+    }),
+    [
+      activeId,
+      activeTheme,
+      activeWorkerRun,
+      activeTitle,
+      backgroundFit,
+      backgroundTreatment,
+      busy,
+      effectiveModel,
+      generatingSessionIds,
+      messages,
+      pickerModels,
+      projects,
+      sessionSummaries,
+      sidebarState,
+    ],
+  );
+  useChatMobileRelayController({
+    pollKey: `${activeId}\u0000${busy}\u0000${effectiveModel}`,
+    snapshot: mobileSnapshot,
+    setInput,
+    setPendingAttachments,
+    setChatNotice,
+    setProvidersOpen,
+    pushNotice,
+    createAttachmentId: attachmentId,
+    runTurn,
+    runTurnAndDrain,
+    drainQueuedMessages,
+    approveWorkerRun,
+    continueWorkerRunSolo,
+    stopActiveWorkerRun,
+    stop,
+    regenerate,
+    deleteMessageAt,
+  });
 
   const emptyThread = messages.length === 0;
   const activeAssistantRuntime = useMemo(() => {
@@ -9476,6 +6846,7 @@ export function ChatView({
                     <MessageRow
                       key={m.id ?? i}
                       activeId={activeId}
+                      appSessionId={APP_SESSION_ID}
                       message={m}
                       index={i}
                       isEditing={editing === i}
@@ -9517,14 +6888,26 @@ export function ChatView({
 
           <div className="dock">
             {emptyThread && showEmptyChatRidgeline && <MilimUsageRidgeline usage={milimUsage} />}
-            {chatNotice && (
+            {composerNotice && (
               <div
-                className={`sheet-hint dock-notice ${chatNotice.tone}`}
+                className={`sheet-hint dock-notice ${composerNotice.tone}`}
                 data-testid="chat-notice"
-                role={chatNotice.tone === "error" ? "alert" : "status"}
-                aria-live={chatNotice.tone === "error" ? "assertive" : "polite"}
+                role={composerNotice.tone === "error" ? "alert" : "status"}
+                aria-live={composerNotice.tone === "error" ? "assertive" : "polite"}
               >
-                {chatNotice.message}
+                <span>{composerNotice.message}</span>
+                {composerAction && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (composerAction === "manage_models") setProvidersOpen(true);
+                      else if (composerAction === "choose_folder") void pickFolder();
+                      else onOpenSettings();
+                    }}
+                  >
+                    {composerActionLabel}
+                  </button>
+                )}
               </div>
             )}
             <ComposerSurface>
@@ -9872,15 +7255,16 @@ export function ChatView({
                   runtimePreflight={activePreviewAppPreflight}
                   runtimePreflightBusy={previewAppPreflightBusy}
                   runtimeStale={activePreviewAppStatus?.stale === true}
-                  onRuntimePreflight={() => void preflightPreviewRuntime()}
+                  onRuntimePreflight={activePreviewAppStatus?.kind === "static" ? undefined : () => void preflightPreviewRuntime()}
                   runtimeBusy={previewAppBusy != null}
-                  onRuntimeStart={() => void startPreviewRuntime()}
+                  onRuntimeStart={activePreviewAppStatus?.kind === "static" ? undefined : () => void startPreviewRuntime()}
                   onRuntimeStop={() => void stopPreviewRuntime()}
-                  onRuntimeRestart={() => void restartPreviewRuntime()}
+                  onRuntimeRestart={activePreviewAppStatus?.kind === "static" ? undefined : () => void restartPreviewRuntime()}
                   controlActivity={previewControlActivity}
                   onSurfaceChange={setActivePreviewSurface}
                   modeSwitcher={inspectorTabSwitcher}
                   workspaceFolder={folder}
+                  onPreviewWorkspaceFile={(path) => void startWorkspaceHtmlPreview(path)}
                 />
               )
             )}

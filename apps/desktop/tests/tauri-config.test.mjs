@@ -42,7 +42,22 @@ const sidebar = readFileSync(
   join(root, "src", "components", "Sidebar.tsx"),
   "utf8",
 );
-const styles = readFileSync(join(root, "src", "styles.css"), "utf8");
+const styleFiles = [
+  "foundation.css",
+  "shell.css",
+  "chat.css",
+  "settings.css",
+  "workspaces.css",
+];
+const styleEntry = readFileSync(join(root, "src", "styles.css"), "utf8");
+const expectedStyleEntry =
+  styleFiles.map((file) => `@import "./${file}";`).join("\n") + "\n";
+if (styleEntry !== expectedStyleEntry) {
+  throw new Error("styles.css must preserve the ordered desktop CSS imports");
+}
+const styles = styleFiles
+  .map((file) => readFileSync(join(root, "src", file), "utf8"))
+  .join("\n");
 const nativePreviewBlockerFiles = [
   ["App.tsx", 2],
   [join("components", "SheetDialog.tsx"), 1],

@@ -24,6 +24,7 @@ function pullRequest(patch: Partial<PullRequestDetails> = {}): PullRequestDetail
     changedFiles: 3,
     mergeable: "MERGEABLE",
     mergeStateStatus: "CLEAN",
+    viewerPermission: "WRITE",
     checks: [{ name: "test", state: "SUCCESS", bucket: "pass" }],
     ...patch,
   };
@@ -75,6 +76,14 @@ assert.equal(
   "blocked",
 );
 assert.equal(pullRequestReadiness(pullRequest()).tone, "ready");
+assert.deepEqual(
+  pullRequestReadiness(pullRequest({ viewerPermission: "READ" })),
+  { tone: "blocked", label: "No merge permission", canMerge: false },
+);
+assert.deepEqual(
+  pullRequestReadiness(pullRequest({ viewerPermission: undefined })),
+  { tone: "pending", label: "Merge permission unavailable", canMerge: false },
+);
 assert.equal(
   pullRequestReadiness(pullRequest({ state: "MERGED" })).tone,
   "merged",

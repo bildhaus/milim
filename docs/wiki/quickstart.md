@@ -3,27 +3,26 @@ id: quickstart
 path: quickstart
 label: Quickstart
 title: Quickstart
-summary: Connect a provider or account runtime, pick a workspace folder, ask for an edit or test, switch models inline, and continue the same dev thread.
+summary: Connect any model runtime, optionally pick a workspace, keep one canonical thread, switch models inline, and review the result.
 group: Start
 order: 20
-updated: 2026-07-09
+updated: 2026-07-28
 ---
 
-Aim for one complete loop first: connect a model source, select a workspace folder, ask for an edit or test run, switch models inline, and continue the same thread. Switching models changes the next turn; it does not reset workspace context, memory, previews, artifacts, approvals, or queued messages.
+Aim for the core loop first: connect a model source, optionally select a workspace, continue one canonical thread across models, and review proposed changes before accepting them. Switching models changes the next turn; it does not reset workspace context or conversation history.
 
 ## First run checklist
 
 | Step | What to check |
 |---|---|
 | Install or run | Use a release build for normal use. Use `pnpm -C apps/desktop tauri:dev` only when working on the app. |
-| Choose a model | The model chip is the sole selector; Favorites and per-model reasoning effort keep frequent choices close. |
-| Add a model source | Configure a hosted provider, start Ollama or LM Studio, or set `MILIM_REMOTE_BASE_URL` for the CLI server path. |
-| Select a workspace | Pick the folder before asking for file reads, shell commands, Git actions, or artifact saves. |
+| Connect a runtime | The first panel detects Codex, Claude, OpenCode, Pi, Ollama, and LM Studio, and can connect a hosted provider. Select any reachable model. |
+| Select a workspace | The folder is optional for chat. Pick one before asking for host file reads, shell commands, Git actions, or folder-backed previews. |
+| Review setup | Confirm the selected model and optional workspace, then open Milim. Onboarding does not run or prefill a task. |
 | Check the model chip | The chip shows provider, runtime lane, setup status, capabilities, favorite state, and reasoning effort where supported. |
-| Set privacy | Use Off for local-only tests, Redact for cautious remote work, and Block when remote sends must fail closed on detected PII. |
 | Send a useful prompt | Ask for a repo map, failing-test diagnosis, small docs edit, or test command. A generic hello only proves chat works. |
-| Switch and continue | Pick another model from the same chip. Provider models use Milim tools when workspace/tool context is active; Codex and Claude use account-runtime bridges. |
-| Verify the result | Check model name, tool timeline, selected folder, artifacts, memory notices, and privacy mode before longer runs. |
+| Switch and continue | Pick another model from the same chip. Provider models use Milim tools when workspace/tool context is active; Codex, Claude, OpenCode, and Pi use account-runtime bridges. |
+| Review the result | Check the selected model, tool timeline, workspace, and Git diff before accepting changes. |
 
 ## Desktop app
 
@@ -35,7 +34,7 @@ pnpm -C apps/desktop tauri:dev
 
 The desktop app embeds the server in-process. There is no separate `milim serve` process for normal desktop use.
 
-On first run, follow Model, Defaults, optional Context, and Ready. Advanced tools remain available from the unified app and the sidebar Tools launcher.
+On first run, follow Runtime, optional Workspace, and Ready. Memory, privacy, sandbox, computer use, imports, and other power tools remain available after setup through thread controls, Settings, and the collapsed sidebar Tools launcher.
 
 ## CLI server
 
@@ -74,4 +73,4 @@ curl http://127.0.0.1:7377/v1/chat/completions `
 | Tools refuse the folder | The thread has no workspace folder. Use the folder control or `/folder C:\path\to\repo`. |
 | Remote send is blocked | Privacy is set to `block` and the scanner detected PII or a secret-looking value. |
 | Sandbox fails | Docker is not installed, not running, or cannot start the default container. |
-| Account runtime is missing | Codex or Anthropic's official Claude CLI must be installed and authenticated outside the provider key registry. |
+| Account runtime is missing | Codex, Claude, OpenCode, or Pi must be installed and authenticated through its own tooling, then refreshed in Milim. |

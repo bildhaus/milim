@@ -1,16 +1,19 @@
 //! Thin local bridge to the user's installed official `claude` CLI.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::convert::Infallible;
+use std::fs::File;
+use std::io::{BufRead, BufReader as StdBufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::response::sse::Event;
 use futures::{Stream, StreamExt};
 use milim_agents::ToolApprovalBroker;
 use milim_core::api::openai::{ReasoningEffort, Usage};
 use milim_core::{Error, Result};
+use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -24,6 +27,9 @@ use crate::privacy::Unredactor;
 const CLAUDE_STATUS_TIMEOUT: Duration = Duration::from_secs(10);
 const CLAUDE_MODEL_ALIASES: &[&str] = &["sonnet", "opus", "haiku", "fable"];
 const CLAUDE_PROJECT_DIR_NAME_LIMIT: usize = 200;
+const CLAUDE_THREAD_PAGE_SIZE: usize = 25;
+const CLAUDE_THREAD_HEAD_BYTES: u64 = 1024 * 1024;
+const CLAUDE_THREAD_TAIL_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ClaudeRunRequest {
@@ -60,6 +66,567 @@ pub(crate) struct ClaudeRunRequest {
     pub approval_mcp_authorization: Option<String>,
     #[serde(skip)]
     approval_mcp_config: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ClaudeThreadSummary {
+    pub id: String,
+    pub title: String,
+    pub preview: String,
+    pub cwd: Option<String>,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub resumable: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ClaudeThreadPage {
+    pub data: Vec<ClaudeThreadSummary>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ClaudeImportedMessage {
+    pub role: &'static str,
+    pub content: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ClaudeImportedThread {
+    pub id: String,
+    pub title: String,
+    pub cwd: Option<String>,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub resumable: bool,
+    pub messages: Vec<ClaudeImportedMessage>,
+}
+
+#[derive(Clone)]
+struct ClaudeTranscriptFile {
+    id: String,
+    path: PathBuf,
+    created_at_ms: u64,
+    updated_at_ms: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeTranscriptRecord {
+    #[serde(rename = "type", default)]
+    kind: String,
+    #[serde(default)]
+    uuid: Option<String>,
+    #[serde(default)]
+    parent_uuid: Option<String>,
+    #[serde(default)]
+    is_sidechain: bool,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    leaf_uuid: Option<String>,
+    #[serde(default)]
+    custom_title: Option<String>,
+    #[serde(default)]
+    ai_title: Option<String>,
+    #[serde(default)]
+    origin: Option<ClaudeTranscriptOrigin>,
+    #[serde(default)]
+    message: Option<ClaudeTranscriptMessage>,
+}
+
+#[derive(Deserialize)]
+struct ClaudeTranscriptOrigin {
+    #[serde(default)]
+    kind: String,
+}
+
+#[derive(Deserialize)]
+struct ClaudeTranscriptMessage {
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    content: Option<ClaudeTranscriptContent>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ClaudeTranscriptContent {
+    Text(String),
+    Blocks(Vec<ClaudeTranscriptBlock>),
+    Other(IgnoredAny),
+}
+
+#[derive(Deserialize)]
+struct ClaudeTranscriptBlock {
+    #[serde(rename = "type", default)]
+    kind: String,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+struct ClaudeTranscriptNode {
+    parent_uuid: Option<String>,
+    visible: Option<ClaudeImportedMessage>,
+}
+
+pub(crate) async fn threads(
+    cursor: Option<String>,
+    search: Option<String>,
+) -> Result<ClaudeThreadPage> {
+    tokio::task::spawn_blocking(move || claude_threads_sync(cursor, search))
+        .await
+        .map_err(|error| Error::Other(format!("Claude chat listing task failed: {error}")))?
+}
+
+pub(crate) async fn import_thread(session_id: &str) -> Result<ClaudeImportedThread> {
+    let session_id = session_id.trim().to_string();
+    if uuid::Uuid::parse_str(&session_id).is_err() {
+        return Err(Error::InvalidRequest(
+            "Claude session id must be a UUID".to_string(),
+        ));
+    }
+    tokio::task::spawn_blocking(move || {
+        let transcript = claude_transcript_files()
+            .into_iter()
+            .find(|file| file.id == session_id)
+            .ok_or_else(|| Error::ModelNotFound("Claude chat not found".to_string()))?;
+        import_claude_transcript(&transcript)
+    })
+    .await
+    .map_err(|error| Error::Other(format!("Claude chat import task failed: {error}")))?
+}
+
+fn claude_threads_sync(cursor: Option<String>, search: Option<String>) -> Result<ClaudeThreadPage> {
+    let offset = match clean_optional(cursor.as_deref()) {
+        Some(value) => value
+            .parse::<usize>()
+            .map_err(|_| Error::InvalidRequest("Claude chat cursor is invalid".to_string()))?,
+        None => 0,
+    };
+    let search = clean_optional(search.as_deref()).map(|value| value.to_lowercase());
+    let summaries = claude_transcript_files()
+        .iter()
+        .map(claude_thread_summary)
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    Ok(page_claude_threads(summaries, offset, search.as_deref()))
+}
+
+fn page_claude_threads(
+    mut summaries: Vec<ClaudeThreadSummary>,
+    offset: usize,
+    search: Option<&str>,
+) -> ClaudeThreadPage {
+    if let Some(search) = search {
+        summaries.retain(|thread| {
+            thread.title.to_lowercase().contains(search)
+                || thread.preview.to_lowercase().contains(search)
+                || thread
+                    .cwd
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_lowercase()
+                    .contains(search)
+        });
+    }
+    summaries.sort_by(|left, right| {
+        right
+            .updated_at_ms
+            .cmp(&left.updated_at_ms)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let end = offset
+        .saturating_add(CLAUDE_THREAD_PAGE_SIZE)
+        .min(summaries.len());
+    let data = if offset < summaries.len() {
+        summaries[offset..end].to_vec()
+    } else {
+        Vec::new()
+    };
+    ClaudeThreadPage {
+        data,
+        next_cursor: (end < summaries.len()).then(|| end.to_string()),
+    }
+}
+
+fn claude_transcript_files() -> Vec<ClaudeTranscriptFile> {
+    let mut by_id = HashMap::<String, ClaudeTranscriptFile>::new();
+    for projects_dir in claude_projects_dirs() {
+        for file in claude_transcript_files_in(&projects_dir) {
+            let replace = by_id
+                .get(&file.id)
+                .map(|existing| file.updated_at_ms > existing.updated_at_ms)
+                .unwrap_or(true);
+            if replace {
+                by_id.insert(file.id.clone(), file);
+            }
+        }
+    }
+    by_id.into_values().collect()
+}
+
+fn claude_transcript_files_in(projects_dir: &Path) -> Vec<ClaudeTranscriptFile> {
+    let mut files = Vec::new();
+    let Ok(projects) = std::fs::read_dir(projects_dir) else {
+        return files;
+    };
+    for project in projects.flatten() {
+        if !project.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(project.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                continue;
+            }
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Some(id) = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .filter(|value| uuid::Uuid::parse_str(value).is_ok())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            let updated_at_ms = system_time_ms(metadata.modified().ok()).unwrap_or_default();
+            let created_at_ms = system_time_ms(metadata.created().ok()).unwrap_or(updated_at_ms);
+            files.push(ClaudeTranscriptFile {
+                id,
+                path,
+                created_at_ms,
+                updated_at_ms,
+            });
+        }
+    }
+    files
+}
+
+fn system_time_ms(value: Option<SystemTime>) -> Option<u64> {
+    value?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+}
+
+fn claude_thread_summary(transcript: &ClaudeTranscriptFile) -> Result<Option<ClaudeThreadSummary>> {
+    let mut cwd = None;
+    let mut first_prompt = None;
+    let mut custom_title = None;
+    let mut ai_title = None;
+    let file = File::open(&transcript.path)?;
+    let mut reader = StdBufReader::new(file);
+    let mut bytes = 0_u64;
+    let mut line = String::new();
+    while bytes < CLAUDE_THREAD_HEAD_BYTES {
+        line.clear();
+        let read = reader.read_line(&mut line)?;
+        if read == 0 {
+            break;
+        }
+        bytes = bytes.saturating_add(read as u64);
+        if let Ok(record) = serde_json::from_str::<ClaudeTranscriptRecord>(&line) {
+            apply_claude_summary_record(
+                &record,
+                &mut cwd,
+                &mut first_prompt,
+                &mut custom_title,
+                &mut ai_title,
+            );
+        }
+    }
+    for line in claude_tail_lines(&transcript.path)? {
+        if let Ok(record) = serde_json::from_str::<ClaudeTranscriptRecord>(&line) {
+            apply_claude_summary_record(
+                &record,
+                &mut cwd,
+                &mut first_prompt,
+                &mut custom_title,
+                &mut ai_title,
+            );
+        }
+    }
+    let Some(preview) = first_prompt.map(|value| compact_claude_text(&value, 160)) else {
+        return Ok(None);
+    };
+    let title = custom_title
+        .or(ai_title)
+        .map(|value| compact_claude_text(&value, 100))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| compact_claude_text(&preview, 100));
+    let cwd = cwd.filter(|value| Path::new(value).is_absolute());
+    let resumable = cwd
+        .as_deref()
+        .is_some_and(|value| claude_transcript_resumable(transcript, value));
+    Ok(Some(ClaudeThreadSummary {
+        id: transcript.id.clone(),
+        title,
+        preview,
+        cwd,
+        created_at_ms: transcript.created_at_ms,
+        updated_at_ms: transcript.updated_at_ms,
+        resumable,
+    }))
+}
+
+fn apply_claude_summary_record(
+    record: &ClaudeTranscriptRecord,
+    cwd: &mut Option<String>,
+    first_prompt: &mut Option<String>,
+    custom_title: &mut Option<String>,
+    ai_title: &mut Option<String>,
+) {
+    if cwd.is_none() {
+        *cwd = clean_optional(record.cwd.as_deref());
+    }
+    if first_prompt.is_none() {
+        if let Some(message) = visible_claude_message(record).filter(|item| item.role == "user") {
+            *first_prompt = Some(message.content);
+        }
+    }
+    if let Some(value) = clean_optional(record.custom_title.as_deref()) {
+        *custom_title = Some(value);
+    }
+    if let Some(value) = clean_optional(record.ai_title.as_deref()) {
+        *ai_title = Some(value);
+    }
+}
+
+fn claude_tail_lines(path: &Path) -> Result<Vec<String>> {
+    let mut file = File::open(path)?;
+    let len = file.metadata()?.len();
+    let start = len.saturating_sub(CLAUDE_THREAD_TAIL_BYTES);
+    file.seek(SeekFrom::Start(start))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    let text = String::from_utf8_lossy(&bytes);
+    let text = if start == 0 {
+        text.as_ref()
+    } else {
+        text.split_once('\n')
+            .map(|(_, tail)| tail)
+            .unwrap_or_default()
+    };
+    Ok(text.lines().map(str::to_string).collect())
+}
+
+fn claude_transcript_resumable(transcript: &ClaudeTranscriptFile, cwd: &str) -> bool {
+    let cwd = Path::new(cwd);
+    if !cwd.is_dir() {
+        return false;
+    }
+    let Some(project_name) = transcript
+        .path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|value| value.to_str())
+    else {
+        return false;
+    };
+    let expected = claude_project_dir_name(&cwd.to_string_lossy());
+    project_name == expected
+        || (expected.len() > CLAUDE_PROJECT_DIR_NAME_LIMIT
+            && project_name
+                .starts_with(&format!("{}-", &expected[..CLAUDE_PROJECT_DIR_NAME_LIMIT])))
+}
+
+fn import_claude_transcript(transcript: &ClaudeTranscriptFile) -> Result<ClaudeImportedThread> {
+    let file = File::open(&transcript.path)?;
+    let reader = StdBufReader::new(file);
+    let mut nodes = HashMap::<String, ClaudeTranscriptNode>::new();
+    let mut last_uuid = None;
+    let mut leaf_uuid = None;
+    let mut cwd = None;
+    let mut custom_title = None;
+    let mut ai_title = None;
+    for line in reader.lines() {
+        let Ok(line) = line else {
+            continue;
+        };
+        let Ok(record) = serde_json::from_str::<ClaudeTranscriptRecord>(&line) else {
+            continue;
+        };
+        if cwd.is_none() {
+            cwd = clean_optional(record.cwd.as_deref());
+        }
+        if let Some(value) = clean_optional(record.custom_title.as_deref()) {
+            custom_title = Some(value);
+        }
+        if let Some(value) = clean_optional(record.ai_title.as_deref()) {
+            ai_title = Some(value);
+        }
+        if record.kind == "last-prompt" {
+            if let Some(value) = clean_optional(record.leaf_uuid.as_deref()) {
+                leaf_uuid = Some(value);
+            }
+        }
+        let Some(uuid) = clean_optional(record.uuid.as_deref()) else {
+            continue;
+        };
+        last_uuid = Some(uuid.clone());
+        let visible = (!record.is_sidechain)
+            .then(|| visible_claude_message(&record))
+            .flatten();
+        nodes.insert(
+            uuid,
+            ClaudeTranscriptNode {
+                parent_uuid: clean_optional(record.parent_uuid.as_deref()),
+                visible,
+            },
+        );
+    }
+    let mut current = leaf_uuid
+        .filter(|value| nodes.contains_key(value))
+        .or(last_uuid);
+    let mut branch = Vec::<ClaudeImportedMessage>::new();
+    let mut visited = HashSet::new();
+    while let Some(uuid) = current {
+        if !visited.insert(uuid.clone()) {
+            break;
+        }
+        let Some(node) = nodes.get(&uuid) else {
+            break;
+        };
+        if let Some(message) = &node.visible {
+            branch.push(message.clone());
+        }
+        current = node.parent_uuid.clone();
+    }
+    branch.reverse();
+    let mut messages = Vec::<ClaudeImportedMessage>::new();
+    for message in branch {
+        if message.role == "assistant" {
+            if let Some(previous) = messages.last_mut().filter(|item| item.role == "assistant") {
+                previous.content.push_str("\n\n");
+                previous.content.push_str(&message.content);
+                continue;
+            }
+        }
+        messages.push(message);
+    }
+    if messages.is_empty() {
+        return Err(Error::InvalidRequest(
+            "This Claude chat has no importable user or assistant messages".to_string(),
+        ));
+    }
+    let first_prompt = messages
+        .iter()
+        .find(|message| message.role == "user")
+        .map(|message| compact_claude_text(&message.content, 100));
+    let title = custom_title
+        .or(ai_title)
+        .map(|value| compact_claude_text(&value, 100))
+        .filter(|value| !value.is_empty())
+        .or(first_prompt)
+        .unwrap_or_else(|| "Imported Claude chat".to_string());
+    let cwd = cwd.filter(|value| Path::new(value).is_absolute());
+    let resumable = cwd
+        .as_deref()
+        .is_some_and(|value| claude_transcript_resumable(transcript, value));
+    Ok(ClaudeImportedThread {
+        id: transcript.id.clone(),
+        title,
+        cwd,
+        created_at_ms: transcript.created_at_ms,
+        updated_at_ms: transcript.updated_at_ms,
+        resumable,
+        messages,
+    })
+}
+
+fn visible_claude_message(record: &ClaudeTranscriptRecord) -> Option<ClaudeImportedMessage> {
+    if record
+        .origin
+        .as_ref()
+        .is_some_and(|origin| origin.kind == "task-notification")
+    {
+        return None;
+    }
+    let message = record.message.as_ref()?;
+    let role = match (record.kind.as_str(), message.role.as_str()) {
+        ("user", "user") => "user",
+        ("assistant", "assistant") => "assistant",
+        _ => return None,
+    };
+    let (text, omitted_media) = match message.content.as_ref()? {
+        ClaudeTranscriptContent::Text(value) => {
+            let value = if role == "user" {
+                normalize_claude_user_text(value)
+            } else {
+                clean_optional(Some(value))
+            };
+            (value.unwrap_or_default(), false)
+        }
+        ClaudeTranscriptContent::Blocks(blocks) => {
+            let text = blocks
+                .iter()
+                .filter(|block| block.kind == "text")
+                .filter_map(|block| clean_optional(block.text.as_deref()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let omitted_media = role == "user"
+                && blocks.iter().any(|block| {
+                    matches!(block.kind.as_str(), "image" | "audio" | "document" | "file")
+                });
+            (text, omitted_media)
+        }
+        ClaudeTranscriptContent::Other(_) => return None,
+    };
+    let content = if !text.trim().is_empty() {
+        text
+    } else if omitted_media {
+        "[Media omitted during Claude import]".to_string()
+    } else {
+        return None;
+    };
+    Some(ClaudeImportedMessage { role, content })
+}
+
+fn normalize_claude_user_text(value: &str) -> Option<String> {
+    if let Some(command) = xml_tag_value(value, "command-name") {
+        let args = xml_tag_value(value, "command-args");
+        return Some(match args {
+            Some(args) if !args.is_empty() => format!("{command} {args}"),
+            _ => command,
+        });
+    }
+    let value = value.trim();
+    if value.starts_with("<local-command") {
+        return None;
+    }
+    clean_optional(Some(value))
+}
+
+fn xml_tag_value(value: &str, tag: &str) -> Option<String> {
+    let start_tag = format!("<{tag}>");
+    let end_tag = format!("</{tag}>");
+    let start = value.find(&start_tag)? + start_tag.len();
+    let end = value[start..].find(&end_tag)? + start;
+    clean_optional(Some(&value[start..end]))
+}
+
+fn compact_claude_text(value: &str, max_chars: usize) -> String {
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= max_chars {
+        return compact;
+    }
+    format!(
+        "{}…",
+        compact
+            .chars()
+            .take(max_chars.saturating_sub(1))
+            .collect::<String>()
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -1377,6 +1944,128 @@ fn claude_command() -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_transcript(contents: &str) -> (PathBuf, ClaudeTranscriptFile) {
+        let root =
+            std::env::temp_dir().join(format!("milim-claude-import-test-{}", uuid::Uuid::new_v4()));
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let path = project.join(format!("{id}.jsonl"));
+        std::fs::write(&path, contents).unwrap();
+        (
+            root,
+            ClaudeTranscriptFile {
+                id,
+                path,
+                created_at_ms: 1,
+                updated_at_ms: 2,
+            },
+        )
+    }
+
+    #[test]
+    fn claude_import_uses_active_branch_and_visible_text_only() {
+        let (root, transcript) = test_transcript(
+            r#"{"type":"user","uuid":"u1","parentUuid":null,"message":{"role":"user","content":"hello"}}
+{"type":"assistant","uuid":"a1","parentUuid":"u1","message":{"role":"assistant","content":[{"type":"thinking","thinking":"secret"},{"type":"text","text":"first"}]}}
+{"type":"user","uuid":"old-u","parentUuid":"a1","message":{"role":"user","content":"old branch"}}
+{"type":"assistant","uuid":"old-a","parentUuid":"old-u","message":{"role":"assistant","content":[{"type":"text","text":"old answer"}]}}
+not json
+{"type":"user","uuid":"u2","parentUuid":"a1","message":{"role":"user","content":"new branch"}}
+{"type":"assistant","uuid":"tool","parentUuid":"u2","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"path":"secret"}}]}}
+{"type":"user","uuid":"result","parentUuid":"tool","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"large private result"}]}}
+{"type":"assistant","uuid":"a2","parentUuid":"result","message":{"role":"assistant","content":[{"type":"text","text":"new answer"}]}}
+{"type":"user","uuid":"notice","parentUuid":"a2","origin":{"kind":"task-notification"},"message":{"role":"user","content":"worker detail"}}
+{"type":"assistant","uuid":"a3","parentUuid":"notice","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}
+{"type":"last-prompt","leafUuid":"a3"}
+{"type":"custom-title","customTitle":"Chosen title"}
+"#,
+        );
+        let imported = import_claude_transcript(&transcript).unwrap();
+        assert_eq!(imported.title, "Chosen title");
+        assert_eq!(
+            imported
+                .messages
+                .iter()
+                .map(|message| (message.role, message.content.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("user", "hello"),
+                ("assistant", "first"),
+                ("user", "new branch"),
+                ("assistant", "new answer\n\ndone"),
+            ]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn claude_import_normalizes_commands_and_marks_media_only_prompts() {
+        let (root, transcript) = test_transcript(
+            r#"{"type":"user","uuid":"u1","parentUuid":null,"message":{"role":"user","content":"<command-name>/review</command-name><command-args>123</command-args><local-command-stdout>hidden</local-command-stdout>"}}
+{"type":"assistant","uuid":"a1","parentUuid":"u1","message":{"role":"assistant","content":[{"type":"text","text":"reviewed"}]}}
+{"type":"user","uuid":"u2","parentUuid":"a1","message":{"role":"user","content":[{"type":"image","source":{"data":"pixels"}}]}}
+{"type":"last-prompt","leafUuid":"u2"}
+"#,
+        );
+        let imported = import_claude_transcript(&transcript).unwrap();
+        assert_eq!(imported.messages[0].content, "/review 123");
+        assert_eq!(
+            imported.messages[2].content,
+            "[Media omitted during Claude import]"
+        );
+        assert!(!imported.resumable);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn claude_discovery_excludes_nested_subagent_transcripts() {
+        let root = std::env::temp_dir().join(format!(
+            "milim-claude-discovery-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let project = root.join("project");
+        let nested = project.join("session").join("subagents");
+        std::fs::create_dir_all(&nested).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        std::fs::write(project.join(format!("{id}.jsonl")), "{}\n").unwrap();
+        std::fs::write(project.join("agent-main.jsonl"), "{}\n").unwrap();
+        std::fs::write(nested.join("agent-child.jsonl"), "{}\n").unwrap();
+        let files = claude_transcript_files_in(&root);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].id, id);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn claude_import_listing_filters_sorts_and_pages() {
+        let summaries: Vec<ClaudeThreadSummary> = (0..30)
+            .map(|index| ClaudeThreadSummary {
+                id: format!("{index:02}"),
+                title: if index == 7 {
+                    "Needle chat".to_string()
+                } else {
+                    format!("Chat {index}")
+                },
+                preview: String::new(),
+                cwd: Some(format!("C:\\project-{index}")),
+                created_at_ms: index,
+                updated_at_ms: index,
+                resumable: true,
+            })
+            .collect();
+        let first = page_claude_threads(summaries.clone(), 0, None);
+        assert_eq!(first.data.len(), CLAUDE_THREAD_PAGE_SIZE);
+        assert_eq!(first.data[0].updated_at_ms, 29);
+        assert_eq!(first.next_cursor.as_deref(), Some("25"));
+        let second = page_claude_threads(summaries.clone(), 25, None);
+        assert_eq!(second.data.len(), 5);
+        assert!(second.next_cursor.is_none());
+        let filtered = page_claude_threads(summaries, 0, Some("needle"));
+        assert_eq!(filtered.data.len(), 1);
+        assert_eq!(filtered.data[0].id, "07");
+    }
 
     #[test]
     fn parses_text_delta() {

@@ -10,6 +10,16 @@ const chatView = readFileSync(
   join(root, "src", "components", "ChatView.tsx"),
   "utf8",
 );
+const chatCatalogController = readFileSync(
+  join(
+    root,
+    "src",
+    "components",
+    "chat",
+    "useChatCatalogController.ts",
+  ),
+  "utf8",
+);
 const providersManager = readFileSync(
   join(root, "src", "components", "ProvidersManager.tsx"),
   "utf8",
@@ -84,6 +94,12 @@ assert.match(
 );
 assert.match(providersManager, /<strong>Installed Pi CLI<\/strong>/);
 assert.match(providersManager, /piStatus\.provider_count/);
+assert.match(api, /export async function listClaudeThreads/);
+assert.match(api, /export async function importClaudeThread/);
+assert.match(providersManager, /data-testid="codex-import-chats"/);
+assert.match(providersManager, /data-testid="claude-import-chats"/);
+assert.match(providersManager, /Import \{runtimeLabel\} chats/);
+assert.doesNotMatch(providersManager, />Recover chats</);
 for (const runtime of ["codex", "claude", "opencode", "pi"]) {
   assert.match(providersManager, new RegExp(`runtimeUpdateButton\\("${runtime}"`));
 }
@@ -105,7 +121,7 @@ assert.match(
   /const providerRefresh = refreshProviderModelsAtStartup\(\);\s*onModels\(await listModelsDetailed\(accountRuntimeEnabled\)\);\s*if \(await providerRefresh\)\s*onModels\(await listModelsDetailed\(accountRuntimeEnabled\)\);/,
 );
 assert.match(app, /loadStartupModels\(\s*\(models\) =>/);
-assert.match(chatView, /loadStartupModels\(\s*\(nextModels\) =>/);
+assert.match(chatCatalogController, /loadStartupModels\(\s*\(nextModels\) =>/);
 for (const runtime of ["codex", "claude", "opencode", "pi"]) {
   assert.match(providersManager, new RegExp(`${runtime}-enabled-toggle`));
 }

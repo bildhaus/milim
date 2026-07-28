@@ -164,7 +164,10 @@ try {
   assert(chatSource.includes("<ComposerSurface>"), "Chat and Media Studio should share the same composer surface component");
   assert(chatSource.includes("popover"), "Chat should opt into the single-pill media controls");
 
-  const styleSource = readFileSync(resolve(process.cwd(), "src/styles.css"), "utf8");
+  const styleSource = readFileSync(
+    resolve(process.cwd(), "src/workspaces.css"),
+    "utf8",
+  );
   assert(styleSource.includes(".inline-media-parameter-controls"), "The shared inline media controls should retain compact parameter layout");
   assert(styleSource.includes("grid-auto-rows: max-content"), "Library cards should not stretch to fill an otherwise empty sidebar");
   assert(styleSource.includes(".inline-media-popover::before"), "The media settings surface should keep nested dropdown backdrop blur working");
