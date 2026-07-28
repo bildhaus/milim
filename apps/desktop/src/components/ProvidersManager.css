@@ -335,10 +335,16 @@
   line-height: 1.3;
 }
 
-.provider-account-card .btn-ghost {
+.provider-account-card .btn-ghost,
+.provider-account-card .btn-accent {
   min-height: 30px;
   padding: 0 10px;
   white-space: nowrap;
+}
+
+.provider-account-card .btn-accent:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .provider-quick-panel {

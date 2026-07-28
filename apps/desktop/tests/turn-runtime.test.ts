@@ -276,6 +276,7 @@ assert.equal(limits[0].provider, "Claude");
 assert.equal(metrics.length, 2);
 assert.equal(metrics[0].cost_usd, 0.01);
 assert.equal(metrics[1].usage?.total_tokens, 9);
+assert.equal(handler.state.done, true);
 assert.equal(handler.state.warning, "CLI missing");
 assert.equal(handler.state.error, "boom");
 assert.deepEqual(accountCompletedTools, ["shell"]);
@@ -292,6 +293,8 @@ const acpHandler = createAccountRuntimeEventHandler({
   captureRuntimeMetrics: () => {},
   onToolCompleted: (name) => acpTools.push(name),
 });
+acpHandler.handle({ type: "done", status: "running" });
+assert.equal(acpHandler.state.done, false);
 acpHandler.handle({ type: "tool", id: "edit-1", name: "milim_google_docs_edit", status: "pending" } as never);
 acpHandler.handle({ type: "tool", id: "edit-1", name: "milim_google_docs_edit", status: "in_progress" } as never);
 acpHandler.handle({ type: "tool", id: "edit-1", name: "milim_google_docs_edit", status: "completed" } as never);
@@ -646,6 +649,7 @@ const codexResult = await runAccountRuntimeTurn({
     assert.deepEqual(request.milim_context?.enabled_skills, ["review"]);
     codexPrompt = request.prompt;
     onEvent({ type: "thread", thread_id: "codex-thread-2", model: "gpt-5" });
+    onEvent({ type: "warning", message: "temporary runtime notice" });
     onEvent({
       type: "done",
       thread_id: "codex-thread-2",
@@ -786,6 +790,7 @@ const selectedAccountResult = await runSelectedAccountRuntimeTurn({
       status: "completed",
       url: "https://example.com/selected.png",
     });
+    onEvent({ type: "done", thread_id: "new-codex", status: "done" });
   },
   streamClaudeRun: async () =>
     assert.fail("codex should win when both account models are present"),
@@ -847,6 +852,67 @@ const selectedPiResult = await runSelectedAccountRuntimeTurn({
 });
 assert.equal(selectedPiResult?.status, "done");
 assert.equal(selectedPiSession, "resumed-pi");
+
+const silentRuntimeBase = {
+  promptContext: accountPromptContext,
+  conversation: [{ role: "user", content: "silent" }] satisfies ChatMessage[],
+  prepareOutbound: async (_contextMessages: ChatMessage[], conversation: ChatMessage[]) => ({
+    conversation,
+    outbound: [],
+  }),
+  beginAssistant: () => {},
+  checkpointWorkspace: async () => {},
+  model: "test-model",
+  workspace: "C:\\work",
+  reasoningEffort: "medium" as const,
+  toolApproval: "guarded" as const,
+  toolApprovalGrant: false,
+  planMode: false,
+  append: () => {},
+  appendThinking: () => {},
+  flush: () => {},
+  appendStreamEvent: () => {},
+  completeStreamEvent: () => {},
+  captureRuntimeMetrics: () => {},
+};
+await assert.rejects(
+  runAccountRuntimeTurn({
+    ...silentRuntimeBase,
+    kind: "codex",
+    stream: async () => {},
+    setThreadId: () => {},
+  }),
+  /Codex ended without reporting completion or an error/,
+);
+await assert.rejects(
+  runAccountRuntimeTurn({
+    ...silentRuntimeBase,
+    kind: "claude",
+    hadSession: false,
+    stream: async () => {},
+  }),
+  /Claude CLI ended without reporting completion or an error/,
+);
+await assert.rejects(
+  runAccountRuntimeTurn({
+    ...silentRuntimeBase,
+    kind: "opencode",
+    hadSession: false,
+    stream: async () => {},
+    setSessionId: () => {},
+  }),
+  /OpenCode ended without reporting completion or an error/,
+);
+await assert.rejects(
+  runAccountRuntimeTurn({
+    ...silentRuntimeBase,
+    kind: "pi",
+    hadSession: false,
+    stream: async () => {},
+    setSessionId: () => {},
+  }),
+  /Pi CLI ended without reporting completion or an error/,
+);
 
 let toolRun: RunTrace | null = null;
 const toolSignal = new AbortController().signal;

@@ -148,6 +148,10 @@ pub(crate) fn run_stream(
                     break;
                 }
             };
+            if let Some(error) = pi_error_message(&message) {
+                yield sse(&json!({ "type": "error", "message": error }));
+                break;
+            }
             match message.get("type").and_then(Value::as_str).unwrap_or_default() {
                 "response" if message.get("id").and_then(Value::as_str) == Some("milim-prompt") => {
                     if message.get("success").and_then(Value::as_bool) == Some(false) {
@@ -432,6 +436,13 @@ fn run_arguments(
 fn parse_rpc_line(line: &str) -> Result<Value> {
     serde_json::from_str(line)
         .map_err(|error| Error::Upstream(format!("Pi RPC emitted invalid JSON: {error}")))
+}
+
+fn pi_error_message(message: &Value) -> Option<&str> {
+    message
+        .pointer("/message/errorMessage")
+        .and_then(Value::as_str)
+        .filter(|message| !message.trim().is_empty())
 }
 
 struct PiProcess {
@@ -879,6 +890,22 @@ mod tests {
         assert_eq!(
             parse_rpc_line(r#"{"type":"agent_settled"}"#).unwrap()["type"],
             "agent_settled"
+        );
+    }
+
+    #[test]
+    fn current_pi_message_errors_are_visible() {
+        let message = json!({
+            "type": "message_start",
+            "message": {
+                "role": "assistant",
+                "stopReason": "error",
+                "errorMessage": "Your authentication token has been invalidated. Please try signing in again."
+            }
+        });
+        assert_eq!(
+            pi_error_message(&message),
+            Some("Your authentication token has been invalidated. Please try signing in again.")
         );
     }
 }

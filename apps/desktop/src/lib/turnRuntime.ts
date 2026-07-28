@@ -274,6 +274,7 @@ export const CLAUDE_SESSION_RECOVERY_REQUIRED =
   "CLAUDE_SESSION_RECOVERY_REQUIRED";
 
 export type AccountRuntimeEventState = {
+  done: boolean;
   warning: string | null;
   error: string | null;
   sessionRecoveryRequired: string | null;
@@ -585,6 +586,7 @@ export function createAccountRuntimeEventHandler({
   handle: (event: AccountRuntimeEvent) => void;
 } {
   const state: AccountRuntimeEventState = {
+    done: false,
     warning: null,
     error: null,
     sessionRecoveryRequired: null,
@@ -678,6 +680,7 @@ export function createAccountRuntimeEventHandler({
         snapshot?.();
       } else if (event.type === "done") {
         captureRuntimeMetrics(event);
+        if (event.status !== "running") state.done = true;
       } else if (event.type === "warning") {
         state.warning = event.message;
       } else if (event.type === "session_recovery_required") {
@@ -1049,6 +1052,18 @@ export async function runAccountRuntimeTurn(
     };
   }
 
+  throwIfTurnAborted(signal);
+  if (events.state.error) {
+    throw new Error(events.state.error);
+  }
+  if (events.state.done) {
+    if (runRef?.current) {
+      runRef.current.status = "done";
+      runRef.current.endedAt = Date.now();
+      snapshot?.();
+    }
+    return { status: "done" };
+  }
   if (events.state.warning) {
     flush();
     appendStreamEvent(
@@ -1071,16 +1086,15 @@ export async function runAccountRuntimeTurn(
     }
     return { status: "skipped", error: events.state.warning };
   }
-  if (events.state.error) {
-    if (signal?.aborted) throw turnAbortSentinel();
-    throw new Error(events.state.error);
-  }
-  if (runRef?.current) {
-    runRef.current.status = "done";
-    runRef.current.endedAt = Date.now();
-    snapshot?.();
-  }
-  return { status: "done" };
+  const runtime =
+    params.kind === "codex"
+      ? "Codex"
+      : params.kind === "claude"
+        ? "Claude CLI"
+        : params.kind === "opencode"
+          ? "OpenCode"
+          : "Pi CLI";
+  throw new Error(`${runtime} ended without reporting completion or an error.`);
 }
 
 export async function runSelectedAccountRuntimeTurn({

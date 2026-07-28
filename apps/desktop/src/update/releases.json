@@ -1,4 +1,9 @@
 {
+  "0.2.7": {
+    "version": "0.2.7",
+    "summary": "Milim 0.2.7 makes account-runtime failures and CLI updates visible while keeping sent messages and command activity responsive.",
+    "items": []
+  },
   "0.2.6": {
     "version": "0.2.6",
     "summary": "Milim 0.2.6 protects local threads when installing desktop updates.",
