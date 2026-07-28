@@ -108,6 +108,8 @@ The public documentation site is generated from `docs/wiki/*.md`; those pages ar
 
 Codex, Claude, OpenCode, and Pi integrations invoke separately installed tools and do not bundle their CLIs, credentials, subscriptions, or provider access. Authentication and direct provider communication remain governed by each tool and provider. Milim is not affiliated with or endorsed by Anthropic, and Claude usage remains subject to Anthropic's terms. Review the [account-runtime reference](docs/account-runtimes.md) before enabling permissive tool modes.
 
+On Windows, Milim refreshes the current system and user executable search path at startup, so account runtimes and host tools installed after sign-in are available without launching Milim from a terminal.
+
 ## License
 
 [MIT](LICENSE)

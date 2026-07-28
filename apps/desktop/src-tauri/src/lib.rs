@@ -17,6 +17,8 @@ mod preview_webview;
 mod secret_storage;
 
 use std::collections::BTreeMap;
+#[cfg(target_os = "windows")]
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::net::{SocketAddr, TcpListener};
@@ -3884,10 +3886,82 @@ fn setup_tray<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()>
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn merged_windows_path(inherited: Option<&OsStr>, persisted: &OsStr) -> io::Result<OsString> {
+    let mut paths = Vec::new();
+    for source in [inherited.unwrap_or_default(), persisted] {
+        for path in std::env::split_paths(source) {
+            if !path.as_os_str().is_empty() && !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+    }
+    std::env::join_paths(paths).map_err(io::Error::other)
+}
+
+#[cfg(target_os = "windows")]
+fn refresh_windows_path() -> io::Result<()> {
+    let windows = std::env::var_os("SystemRoot").unwrap_or_else(|| OsString::from(r"C:\Windows"));
+    let powershell = PathBuf::from(windows)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    let mut command = Command::new(powershell);
+    command.args([
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "$path = @([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User')) -join ';'; [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); [Console]::Write($path)",
+    ]);
+    milim_core::proc::hide_console(&mut command);
+    let output = command.output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "PowerShell exited with {}",
+            output.status
+        )));
+    }
+    let persisted = String::from_utf8(output.stdout)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let inherited = std::env::var_os("PATH");
+    let merged = merged_windows_path(inherited.as_deref(), OsStr::new(&persisted))?;
+    std::env::set_var("PATH", merged);
+    Ok(())
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_path_tests {
+    use super::*;
+
+    #[test]
+    fn refreshed_windows_path_keeps_session_entries_and_adds_current_entries() {
+        let merged = merged_windows_path(
+            Some(OsStr::new(r"C:\inherited;C:\shared")),
+            OsStr::new(r"C:\shared;C:\current"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::env::split_paths(&merged).collect::<Vec<_>>(),
+            [
+                PathBuf::from(r"C:\inherited"),
+                PathBuf::from(r"C:\shared"),
+                PathBuf::from(r"C:\current"),
+            ]
+        );
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     if let Err(error) = diagnostics::init() {
         eprintln!("desktop diagnostics unavailable: {error}");
+    }
+    #[cfg(target_os = "windows")]
+    if let Err(error) = refresh_windows_path() {
+        tracing::warn!("could not refresh the Windows executable search path: {error}");
     }
     let api_key = milim_server::gen_id("desktop");
     let preview_tools_state = Arc::new(preview_tools::PreviewToolState::default());
