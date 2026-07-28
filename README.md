@@ -66,7 +66,7 @@ OpenAI-compatible clients can use `http://127.0.0.1:7377/v1`. Milim does not shi
 |---|---|
 | Desktop app | Tauri 2 with Vite, React, and TypeScript; provides chat, model and provider management, approvals, previews, Git review, settings, and local persistence. |
 | Embedded server | The Axum server runs in-process with the desktop app and is also exposed by the Rust CLI for standalone API use. |
-| Local data | Threads, settings, memories, schedules, provider records, and runtime state live under the Milim data directory; secrets use OS-backed or encrypted local storage. |
+| Local data | Threads, settings, memories, schedules, provider records, and runtime state live under the Milim data directory; updates flush pending thread state before replacing the app, and secrets use OS-backed or encrypted local storage. |
 | Model sources | Hosted providers, local OpenAI-compatible runtimes, and separately installed account-runtime CLIs connect through explicit routing and privacy boundaries. |
 
 The [docs overview](https://docs.milim.ai/) includes the source map for the server router, desktop API client, Tauri host, session state, and account-runtime reference.

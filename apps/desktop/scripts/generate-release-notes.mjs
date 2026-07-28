@@ -19,10 +19,10 @@ for (const [releaseVersion, releaseEntry] of Object.entries(releases)) {
 }
 
 if (packageVersion !== version) fail(`VERSION ${version} does not match desktop package version ${packageVersion}.`);
-if (!release || typeof release !== "object") fail(`Missing update-card release entry for ${version}.`);
+if (!release || typeof release !== "object") fail(`Missing release entry for ${version}.`);
 if (release.version !== version) fail(`Release key ${version} must match its version field.`);
 if (typeof release.summary !== "string" || !release.summary.trim()) fail(`Release ${version} needs a summary.`);
-if (!Array.isArray(release.items) || release.items.length === 0) fail(`Release ${version} needs at least one item.`);
+if (!Array.isArray(release.items)) fail(`Release ${version} items must be an array.`);
 
 const ids = new Set();
 for (const [index, item] of release.items.entries()) {

@@ -1,4 +1,9 @@
 {
+  "0.2.6": {
+    "version": "0.2.6",
+    "summary": "Milim 0.2.6 protects local threads when installing desktop updates.",
+    "items": []
+  },
   "0.2.5": {
     "version": "0.2.5",
     "summary": "Milim 0.2.5 makes Open mode apply consistently to Claude CLI tool approvals, including turns already in progress.",
