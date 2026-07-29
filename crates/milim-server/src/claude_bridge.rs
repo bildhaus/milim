@@ -173,8 +173,9 @@ struct ClaudeTranscriptNode {
 pub(crate) async fn threads(
     cursor: Option<String>,
     search: Option<String>,
+    all: bool,
 ) -> Result<ClaudeThreadPage> {
-    tokio::task::spawn_blocking(move || claude_threads_sync(cursor, search))
+    tokio::task::spawn_blocking(move || claude_threads_sync(cursor, search, all))
         .await
         .map_err(|error| Error::Other(format!("Claude chat listing task failed: {error}")))?
 }
@@ -197,7 +198,11 @@ pub(crate) async fn import_thread(session_id: &str) -> Result<ClaudeImportedThre
     .map_err(|error| Error::Other(format!("Claude chat import task failed: {error}")))?
 }
 
-fn claude_threads_sync(cursor: Option<String>, search: Option<String>) -> Result<ClaudeThreadPage> {
+fn claude_threads_sync(
+    cursor: Option<String>,
+    search: Option<String>,
+    all: bool,
+) -> Result<ClaudeThreadPage> {
     let offset = match clean_optional(cursor.as_deref()) {
         Some(value) => value
             .parse::<usize>()
@@ -212,13 +217,19 @@ fn claude_threads_sync(cursor: Option<String>, search: Option<String>) -> Result
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
-    Ok(page_claude_threads(summaries, offset, search.as_deref()))
+    Ok(page_claude_threads(
+        summaries,
+        offset,
+        search.as_deref(),
+        all,
+    ))
 }
 
 fn page_claude_threads(
     mut summaries: Vec<ClaudeThreadSummary>,
     offset: usize,
     search: Option<&str>,
+    all: bool,
 ) -> ClaudeThreadPage {
     if let Some(search) = search {
         summaries.retain(|thread| {
@@ -238,9 +249,13 @@ fn page_claude_threads(
             .cmp(&left.updated_at_ms)
             .then_with(|| left.id.cmp(&right.id))
     });
-    let end = offset
-        .saturating_add(CLAUDE_THREAD_PAGE_SIZE)
-        .min(summaries.len());
+    let end = if all {
+        summaries.len()
+    } else {
+        offset
+            .saturating_add(CLAUDE_THREAD_PAGE_SIZE)
+            .min(summaries.len())
+    };
     let data = if offset < summaries.len() {
         summaries[offset..end].to_vec()
     } else {
@@ -248,7 +263,7 @@ fn page_claude_threads(
     };
     ClaudeThreadPage {
         data,
-        next_cursor: (end < summaries.len()).then(|| end.to_string()),
+        next_cursor: (!all && end < summaries.len()).then(|| end.to_string()),
     }
 }
 
@@ -2096,16 +2111,19 @@ not json
                 resumable: true,
             })
             .collect();
-        let first = page_claude_threads(summaries.clone(), 0, None);
+        let first = page_claude_threads(summaries.clone(), 0, None, false);
         assert_eq!(first.data.len(), CLAUDE_THREAD_PAGE_SIZE);
         assert_eq!(first.data[0].updated_at_ms, 29);
         assert_eq!(first.next_cursor.as_deref(), Some("25"));
-        let second = page_claude_threads(summaries.clone(), 25, None);
+        let second = page_claude_threads(summaries.clone(), 25, None, false);
         assert_eq!(second.data.len(), 5);
         assert!(second.next_cursor.is_none());
-        let filtered = page_claude_threads(summaries, 0, Some("needle"));
+        let filtered = page_claude_threads(summaries.clone(), 0, Some("needle"), false);
         assert_eq!(filtered.data.len(), 1);
         assert_eq!(filtered.data[0].id, "07");
+        let complete = page_claude_threads(summaries, 0, None, true);
+        assert_eq!(complete.data.len(), 30);
+        assert!(complete.next_cursor.is_none());
     }
 
     #[test]

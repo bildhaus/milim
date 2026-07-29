@@ -142,6 +142,7 @@ pub(crate) struct CodexThreadSummary {
     pub id: String,
     pub name: Option<String>,
     pub preview: String,
+    pub project_path: Option<String>,
     pub cwd: Option<String>,
     pub model_provider: String,
     pub created_at_ms: u64,
@@ -439,35 +440,50 @@ pub(crate) async fn threads(
     cursor: Option<String>,
     search: Option<String>,
     archived: bool,
+    all: bool,
 ) -> Result<CodexThreadPage> {
     let mut proc = CodexProcess::start().await?;
-    let mut params = json!({
-        "limit": CODEX_THREAD_PAGE_SIZE,
-        "sortKey": "updated_at",
-        "sortDirection": "desc",
-        "archived": archived,
-    });
-    if let Some(cursor) = clean_optional(cursor.as_deref()) {
-        params["cursor"] = Value::String(cursor);
+    let search = clean_optional(search.as_deref());
+    let mut cursor = clean_optional(cursor.as_deref());
+    let mut seen_cursors = cursor.iter().cloned().collect::<HashSet<_>>();
+    let mut data = Vec::new();
+    loop {
+        let mut params = json!({
+            "limit": CODEX_THREAD_PAGE_SIZE,
+            "sortKey": "updated_at",
+            "sortDirection": "desc",
+            "archived": archived,
+        });
+        if let Some(value) = cursor.as_ref() {
+            params["cursor"] = Value::String(value.clone());
+        }
+        if let Some(value) = search.as_ref() {
+            params["searchTerm"] = Value::String(value.clone());
+        }
+        let result = proc.request("thread/list", Some(params)).await?;
+        data.extend(
+            result
+                .get("data")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|thread| codex_thread_summary(thread, archived)),
+        );
+        let next_cursor = extract_string(&result, &["nextCursor"]);
+        if !all || next_cursor.is_none() {
+            return Ok(CodexThreadPage {
+                data,
+                next_cursor: (!all).then_some(next_cursor).flatten(),
+            });
+        }
+        let next_cursor = next_cursor.expect("checked above");
+        if !seen_cursors.insert(next_cursor.clone()) {
+            return Err(Error::Upstream(
+                "Codex returned a repeated thread cursor".to_string(),
+            ));
+        }
+        cursor = Some(next_cursor);
     }
-    if let Some(search) = clean_optional(search.as_deref()) {
-        params["searchTerm"] = Value::String(search);
-    }
-    let result = proc.request("thread/list", Some(params)).await?;
-    let data = result
-        .get("data")
-        .and_then(Value::as_array)
-        .map(|threads| {
-            threads
-                .iter()
-                .filter_map(|thread| codex_thread_summary(thread, archived))
-                .collect()
-        })
-        .unwrap_or_default();
-    Ok(CodexThreadPage {
-        data,
-        next_cursor: extract_string(&result, &["nextCursor"]),
-    })
 }
 
 pub(crate) async fn recover_thread(thread_id: &str) -> Result<CodexRecoveredThread> {
@@ -1606,17 +1622,24 @@ fn clean_optional(value: Option<&str>) -> Option<String> {
 }
 
 fn existing_absolute_directory(value: Option<&str>) -> Option<String> {
-    let value = clean_optional(value)?;
+    let value = absolute_path(value)?;
     let path = PathBuf::from(&value);
-    (path.is_absolute() && path.is_dir()).then_some(value)
+    path.is_dir().then_some(value)
+}
+
+fn absolute_path(value: Option<&str>) -> Option<String> {
+    let value = clean_optional(value)?;
+    PathBuf::from(&value).is_absolute().then_some(value)
 }
 
 fn codex_thread_summary(thread: &Value, archived: bool) -> Option<CodexThreadSummary> {
+    let project_path = absolute_path(extract_string(thread, &["cwd"]).as_deref());
     Some(CodexThreadSummary {
         id: extract_string(thread, &["id"])?,
         name: extract_string(thread, &["name"]),
         preview: extract_string(thread, &["preview"]).unwrap_or_default(),
-        cwd: existing_absolute_directory(extract_string(thread, &["cwd"]).as_deref()),
+        cwd: existing_absolute_directory(project_path.as_deref()),
+        project_path,
         model_provider: extract_string(thread, &["modelProvider"])
             .unwrap_or_else(|| "openai".to_string()),
         created_at_ms: thread
@@ -3163,6 +3186,19 @@ mod tests {
         assert_eq!(recovered.messages[1].content, "Visible answer");
         assert!(recovered.cwd.is_none());
         assert_eq!(recovered.created_at_ms, 10_000);
+    }
+
+    #[test]
+    fn thread_summary_keeps_missing_project_path_display_only() {
+        let path = std::env::temp_dir().join(format!("milim-missing-{}", uuid::Uuid::new_v4()));
+        let result = json!({
+            "id": "thread-1",
+            "preview": "preview",
+            "cwd": path.to_string_lossy(),
+        });
+        let summary = codex_thread_summary(&result, false).expect("thread summary");
+        assert_eq!(summary.project_path.as_deref(), path.to_str());
+        assert!(summary.cwd.is_none());
     }
 
     #[test]

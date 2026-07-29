@@ -24,6 +24,8 @@ Milim keeps provider-backed chat and installed account runtimes distinct. Provid
 
 The desktop consumes one versioned `HarnessEvent` stream for Codex, Claude, OpenCode, and Pi. Their native bridges and runtime-specific account, model, quota, import, update, worker, and recovery behavior remain intact behind that boundary.
 
+Connected Codex and Claude histories can be imported by project, as selected individual chats, or as the complete no-project group; existing imports are opened instead of duplicated.
+
 Review decisions are tracked through runtime delivery and acknowledgement. A runtime that rejects, drops, or fails to resume after a decision ends the turn with a visible recovery error instead of leaving it Running indefinitely.
 
 Failed or canceled native-runtime turns discard that runtime's native session before the next send, preventing a partially persisted prompt from being replayed into divergent history.

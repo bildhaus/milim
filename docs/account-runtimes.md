@@ -61,7 +61,7 @@ Codex uses the installed Codex CLI app-server.
 | `POST /codex/logout` | Logs out through Codex app-server. |
 | `GET /codex/models` | Lists Codex models and forwards Codex model metadata to the picker. |
 | `GET /codex/rate-limits` | Reads Codex account rate-limit state. |
-| `GET /codex/threads` | Lists active or archived interactive Codex threads in cursor-based pages of 25, with optional `search`. |
+| `GET /codex/threads` | Lists active or archived interactive Codex threads in cursor-based pages of 25, with optional `search`; `all=true` drains the matching catalog into one response. |
 | `GET /codex/threads/{id}` | Reads one importable user/assistant transcript without changing or deleting the Codex thread. |
 | `POST /codex/run` | Starts or resumes a Codex app-server thread with Milim's selected tool approval and workspace sandbox policy. |
 
@@ -83,7 +83,9 @@ Normal Codex processes initialize against the stable app-server API. Milim start
 
 Codex warnings, configuration warnings, model reroutes/verifications, and deprecation notices appear as nonterminal run events. Unknown server requests receive JSON-RPC method-not-found responses instead of blocking the app-server stream.
 
-The Providers screen exposes **Import chats** after Codex is connected. Search and page through active or archived app-server history, then import one selected chat. Import keeps only visible user/assistant text, replaces media-only messages with an omission marker, and omits reasoning, tool records, and local file references. Milim attaches the original Codex thread id and the final imported message as its sync cursor, so the next Codex turn resumes without replaying the imported transcript. The new Milim chat has current local timestamps and no selected model; choose a Codex model before continuing. An already-imported thread opens its existing Milim chat. Milim remains authoritative after this one-time import and does not continuously merge Codex history.
+The Providers screen exposes **Import chats** after Codex is connected. The picker loads the complete matching history, groups it by recorded project folder, and supports All, Active, and Archived scopes. Select a whole project, the no-project group, or individual chats; project selection is not narrowed by search, and existing imports are excluded. Missing folders remain visible under their recorded project but are display-only and never become the imported Milim workspace. Selected chats import sequentially, continue past individual failures, and remain in the dialog for review or retry.
+
+Import keeps only visible user/assistant text, replaces media-only messages with an omission marker, and omits reasoning, tool records, and local file references. Milim attaches the original Codex thread id and the final imported message as its sync cursor, so the next Codex turn resumes without replaying the imported transcript. New Milim chats have current local timestamps and no selected model; choose a Codex model before continuing. Milim remains authoritative after this one-time import and does not continuously merge Codex history.
 
 Legacy histories use stable `thread/read`. When Codex explicitly reports paginated history, chat import alone starts a narrowly experimental process and pages `thread/turns/list`; normal account operations and turns remain stable-only.
 
@@ -106,13 +108,15 @@ Claude CLI integration boundaries:
 | Surface | Behavior |
 |---|---|
 | `GET /claude/status` | Checks installed CLI availability, auth state, account metadata, model aliases, and optional per-alias image capability metadata. |
-| `GET /claude/threads` | Lists locally retained top-level Claude chats in cursor-based pages of 25, with optional `search`. |
+| `GET /claude/threads` | Lists locally retained top-level Claude chats in cursor-based pages of 25, with optional `search`; `all=true` returns the complete matching catalog. |
 | `GET /claude/threads/{id}` | Reads the selected chat's active importable user/assistant branch without changing its Claude transcript. |
 | `POST /claude/run` | Runs `claude -p --input-format stream-json --output-format stream-json` with Milim's selected tool approval mode. |
 
 `/claude/run` accepts `model`, `prompt`, the same optional base64 `images` array as Codex, optional `cwd`, optional `reasoning_effort`, optional `session_id`, optional `allow_session_recovery`, and Milim tool approval fields. A request may be image-only. Milim pipes a native user message containing text and Anthropic base64 image blocks into the CLI; no OCR or prompt-only image note is used. Milim desktop stores one Claude session id per Milim chat. New native sessions pass it as `--session-id`; existing Claude project transcripts pass it as `--resume`, so reopening a chat restores the same installed Claude CLI session instead of colliding with the existing transcript file. One-off side calls omit `session_id` and use `--no-session-persistence`.
 
-The Claude account card also exposes **Import chats**. Milim searches locally retained top-level UUID transcripts under Claude Code's project history, pages them newest-first, and imports one selected active branch at a time. Import keeps human prompts and assistant text, joins assistant fragments around omitted tool activity, replaces media-only prompts with an omission marker, and omits reasoning, tools, task notifications, attachments, and internal command scaffolding. Existing imports open instead of duplicating. A retained project folder attaches the native session and sync cursor for `--resume`; a missing project imports as transcript-only and leaves the session stale so Milim's existing Fresh/Resume choice appears before continuation. This is a one-time local import, not continuous synchronization or Claude.ai cloud history access.
+The Claude account card also exposes **Import chats**. Milim searches locally retained top-level UUID transcripts under Claude Code's project history and groups the complete newest-first catalog by recorded project folder. Select a whole project, the no-project group, or individual chats; search does not reduce project-wide selection, and existing imports open instead of duplicating. Selected chats import sequentially and failed transcripts remain selected for retry.
+
+Import keeps human prompts and assistant text, joins assistant fragments around omitted tool activity, replaces media-only prompts with an omission marker, and omits reasoning, tools, task notifications, attachments, and internal command scaffolding. A retained project folder attaches the native session and sync cursor for `--resume`; a missing project remains grouped under its recorded path but imports as transcript-only and leaves the session stale so Milim's existing Fresh/Resume choice appears before continuation. This is a one-time local import, not continuous synchronization or Claude.ai cloud history access.
 
 If Claude reports that a persisted session id is already in use, Milim emits a recovery-required event and asks before trying to stop a matching local `claude`/`node` process for that exact session id and retrying once. Milim does not delete Claude session registry files by default.
 

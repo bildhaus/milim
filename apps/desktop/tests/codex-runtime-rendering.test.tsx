@@ -27,6 +27,90 @@ try {
   const { ToolApprovalPrompt } = (await server.ssrLoadModule(
     "/src/components/ToolApprovalPrompt.tsx",
   )) as { ToolApprovalPrompt: ComponentType<{ part: Extract<ChatStreamPart, { kind: "event" }> }> };
+  const {
+    filterRuntimeImportGroups,
+    groupRuntimeImportThreads,
+    runtimeImportGroupSelection,
+    setRuntimeImportGroupSelected,
+  } = (await server.ssrLoadModule("/src/components/ProvidersManager.tsx")) as
+    typeof import("../src/components/ProvidersManager.js");
+
+  const importThreads = [
+    {
+      id: "project-new",
+      title: "Newest project chat",
+      preview: "Visible project preview",
+      projectPath: "C:\\work\\milim",
+      cwd: "C:\\work\\milim",
+      updatedAt: 30,
+      fallbackMeta: "openai",
+      resumable: true,
+      archived: false,
+    },
+    {
+      id: "project-old",
+      title: "Older project chat",
+      preview: "",
+      projectPath: "C:\\work\\milim",
+      cwd: "C:\\work\\milim",
+      updatedAt: 20,
+      fallbackMeta: "openai",
+      resumable: true,
+      archived: true,
+    },
+    {
+      id: "missing-project",
+      title: "Missing folder chat",
+      preview: "",
+      projectPath: "C:\\gone\\archive",
+      updatedAt: 10,
+      fallbackMeta: "openai",
+      resumable: true,
+      archived: false,
+    },
+    {
+      id: "no-project",
+      title: "Folderless chat",
+      preview: "",
+      updatedAt: 40,
+      fallbackMeta: "Claude CLI",
+      resumable: false,
+      archived: false,
+    },
+  ];
+  const importGroups = groupRuntimeImportThreads(importThreads);
+  assert(importGroups.length === 3, "runtime imports should group exact project paths");
+  assert(importGroups[0].label === "milim", "project groups should sort by latest activity");
+  assert(importGroups.at(-1)?.label === "No project", "folderless chats should remain in a final group");
+  assert(
+    filterRuntimeImportGroups(importGroups, "visible project preview")[0].threads.length === 1,
+    "chat search should narrow rows within a project",
+  );
+  assert(
+    filterRuntimeImportGroups(importGroups, "milim")[0].threads.length === 2,
+    "project search should keep the whole project visible",
+  );
+  const importedIds = new Set(["project-old"]);
+  const projectSelection = setRuntimeImportGroupSelected(
+    new Set(),
+    importGroups[0],
+    importedIds,
+    true,
+  );
+  assert(
+    projectSelection.has("project-new") && !projectSelection.has("project-old"),
+    "project selection should include every not-yet-imported chat",
+  );
+  assert(
+    runtimeImportGroupSelection(importGroups[0], projectSelection, importedIds) === "all",
+    "project selection should ignore existing imports when calculating its state",
+  );
+  projectSelection.add("project-old");
+  projectSelection.delete("project-new");
+  assert(
+    runtimeImportGroupSelection(importGroups[0], projectSelection, new Set()) === "some",
+    "project selection should expose a mixed state for partial selections",
+  );
 
   const approvalPart = (
     approvalRequest: Extract<ChatStreamPart, { kind: "event" }>["approvalRequest"],

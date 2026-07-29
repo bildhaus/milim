@@ -101,6 +101,8 @@ pub(crate) struct CodexThreadsQuery {
     search: Option<String>,
     #[serde(default)]
     archived: bool,
+    #[serde(default)]
+    all: bool,
 }
 
 /// `GET /codex/threads` - page through recoverable Codex app-server threads.
@@ -111,9 +113,10 @@ pub(crate) async fn codex_threads(
     peer: Peer,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
-    let result = crate::codex_bridge::threads(query.cursor, query.search, query.archived)
-        .await
-        .map_err(ApiError)?;
+    let result =
+        crate::codex_bridge::threads(query.cursor, query.search, query.archived, query.all)
+            .await
+            .map_err(ApiError)?;
     Ok(Json(result).into_response())
 }
 
@@ -189,6 +192,8 @@ pub(crate) async fn claude_status(
 pub(crate) struct ClaudeThreadsQuery {
     cursor: Option<String>,
     search: Option<String>,
+    #[serde(default)]
+    all: bool,
 }
 
 /// `GET /claude/threads` - page through locally retained Claude CLI chats.
@@ -199,7 +204,7 @@ pub(crate) async fn claude_threads(
     peer: Peer,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
-    let result = crate::claude_bridge::threads(query.cursor, query.search)
+    let result = crate::claude_bridge::threads(query.cursor, query.search, query.all)
         .await
         .map_err(ApiError)?;
     Ok(Json(result).into_response())

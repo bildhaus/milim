@@ -105,9 +105,14 @@ assert.match(providersManager, /<strong>Installed Pi CLI<\/strong>/);
 assert.match(providersManager, /piStatus\.provider_count/);
 assert.match(api, /export async function listClaudeThreads/);
 assert.match(api, /export async function importClaudeThread/);
+assert.match(api, /project_path\?: string \| null;/);
+assert.match(api, /if \(options\.all\) url\.searchParams\.set\("all", "true"\);/);
 assert.match(providersManager, /data-testid="codex-import-chats"/);
 assert.match(providersManager, /data-testid="claude-import-chats"/);
 assert.match(providersManager, /Import \{runtimeLabel\} chats/);
+assert.match(providersManager, /scope === "all"/);
+assert.match(providersManager, /setRuntimeImportGroupSelected/);
+assert.match(providersManager, /Importing \$\{progress\.current\} of \$\{progress\.total\}/);
 assert.doesNotMatch(providersManager, />Recover chats</);
 for (const runtime of ["codex", "claude", "opencode", "pi"]) {
   assert.match(providersManager, new RegExp(`runtimeUpdateButton\\("${runtime}"`));

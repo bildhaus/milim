@@ -2193,6 +2193,7 @@ export interface CodexThreadSummary {
   id: string;
   name?: string | null;
   preview: string;
+  project_path?: string | null;
   cwd?: string | null;
   model_provider: string;
   created_at_ms: number;
@@ -2533,11 +2534,13 @@ export async function listCodexThreads(options: {
   cursor?: string;
   search?: string;
   archived?: boolean;
+  all?: boolean;
 } = {}): Promise<CodexThreadPage> {
   const url = new URL(`${BASE}/codex/threads`);
   if (options.cursor) url.searchParams.set("cursor", options.cursor);
   if (options.search?.trim()) url.searchParams.set("search", options.search.trim());
   if (options.archived) url.searchParams.set("archived", "true");
+  if (options.all) url.searchParams.set("all", "true");
   return await parseJsonResponse<CodexThreadPage>(
     await authFetch(url),
     "Codex chat import failed",
@@ -2554,10 +2557,12 @@ export async function recoverCodexThread(id: string): Promise<CodexRecoveredThre
 export async function listClaudeThreads(options: {
   cursor?: string;
   search?: string;
+  all?: boolean;
 } = {}): Promise<ClaudeThreadPage> {
   const url = new URL(`${BASE}/claude/threads`);
   if (options.cursor) url.searchParams.set("cursor", options.cursor);
   if (options.search?.trim()) url.searchParams.set("search", options.search.trim());
+  if (options.all) url.searchParams.set("all", "true");
   return await parseJsonResponse<ClaudeThreadPage>(
     await authFetch(url),
     "Claude chat import failed",
