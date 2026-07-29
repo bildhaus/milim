@@ -1,4 +1,9 @@
 {
+  "0.2.9": {
+    "version": "0.2.9",
+    "summary": "Milim 0.2.9 includes the latest reliability and desktop workflow improvements.",
+    "items": []
+  },
   "0.2.8": {
     "version": "0.2.8",
     "summary": "Milim 0.2.8 keeps Windows account runtimes and host tools in sync with newly installed command-line tools.",
