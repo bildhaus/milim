@@ -1222,22 +1222,30 @@ function normalizePersistedStreamParts(message: ChatMessage): ChatMessage {
 }
 
 function normalizeStaleToolApprovals(message: ChatMessage): ChatMessage {
-  const hasPendingStep = message.run?.steps.some((step) => step.approval?.status === "pending") ?? false;
+  const incomplete = (status?: string) =>
+    status === "pending" || status === "decided" || status === "delivered";
+  const hasPendingStep = message.run?.steps.some((step) => incomplete(step.approval?.status)) ?? false;
   const hasPendingPart = message.streamParts?.some(
-    (part) => part.kind === "event" && part.approvalStatus === "pending",
+    (part) => part.kind === "event" && incomplete(part.approvalStatus),
   ) ?? false;
   if (!hasPendingStep && !hasPendingPart) return message;
   return {
     ...message,
     run: message.run ? {
       ...message.run,
-      steps: message.run.steps.map((step) => step.approval?.status === "pending"
-        ? { ...step, approval: { ...step.approval, status: "canceled", resolvedAt: step.approval.resolvedAt ?? Date.now() } }
+      steps: message.run.steps.map((step) => incomplete(step.approval?.status)
+        ? { ...step, approval: { ...step.approval, status: "failed", resolvedAt: step.approval.resolvedAt ?? Date.now() } }
         : step),
     } : undefined,
     streamParts: message.streamParts?.map((part) =>
-      part.kind === "event" && part.approvalStatus === "pending"
-        ? { ...part, label: "Tool approval canceled", approvalStatus: "canceled", status: "done" }
+      part.kind === "event" && incomplete(part.approvalStatus)
+        ? {
+            ...part,
+            label: "Tool approval interrupted",
+            detail: "The runtime stopped before acknowledging this decision.",
+            approvalStatus: "failed",
+            status: "error",
+          }
         : part
     ),
   };

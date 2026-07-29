@@ -259,6 +259,18 @@ enum CodexStreamEvent {
         call_id: Option<String>,
         decision: &'static str,
     },
+    ToolApprovalStatus {
+        approval_id: String,
+        call_id: Option<String>,
+        decision: &'static str,
+        status: &'static str,
+    },
+    ToolApprovalFailed {
+        approval_id: String,
+        call_id: Option<String>,
+        decision: Option<&'static str>,
+        message: String,
+    },
     Tool {
         id: String,
         name: String,
@@ -813,11 +825,56 @@ fn run_stream_with_worker_events(
         let mut reasoning = Unredactor::new(redactions);
         let mut last_agent_message_id: Option<String> = None;
         let mut emitted_agent_text = false;
+        let mut approval_ack: Option<(
+            milim_agents::PendingApproval,
+            Option<String>,
+            &'static str,
+        )> = None;
 
         loop {
-            let msg = match proc.read_value().await {
+            let read = if approval_ack.is_some() {
+                match tokio::time::timeout(
+                    milim_agents::APPROVAL_RUNTIME_ACK_TIMEOUT,
+                    proc.read_value(),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        if let Some((pending, call_id, decision)) = approval_ack.take() {
+                            let message = "Codex did not resume after the approval decision".to_string();
+                            pending.fail(message.clone());
+                            yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalFailed {
+                                approval_id: pending.id.clone(),
+                                call_id,
+                                decision: Some(decision),
+                                message: message.clone(),
+                            }, &worker_events);
+                            yield sse_event_with_worker(&CodexStreamEvent::Error {
+                                message,
+                                usage: None,
+                                cost_usd: None,
+                            }, &worker_events);
+                        }
+                        yield Ok(Event::default().data("[DONE]"));
+                        return;
+                    }
+                }
+            } else {
+                proc.read_value().await
+            };
+            let msg = match read {
                 Ok(msg) => msg,
                 Err(e) => {
+                    if let Some((pending, call_id, decision)) = approval_ack.take() {
+                        pending.fail(e.to_string());
+                        yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalFailed {
+                            approval_id: pending.id.clone(),
+                            call_id,
+                            decision: Some(decision),
+                            message: e.to_string(),
+                        }, &worker_events);
+                    }
                     yield sse_event_with_worker(&CodexStreamEvent::Error {
                         message: e.to_string(),
                         usage: None,
@@ -827,6 +884,14 @@ fn run_stream_with_worker_events(
                     return;
                 }
             };
+            if let Some((pending, call_id, decision)) = approval_ack.take() {
+                pending.acknowledge();
+                yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalResolved {
+                    approval_id: pending.id.clone(),
+                    call_id,
+                    decision,
+                }, &worker_events);
+            }
 
             if response_id(&msg) == Some(turn_request_id) {
                 if let Some(error) = msg.get("error") {
@@ -858,6 +923,7 @@ fn run_stream_with_worker_events(
                         let interactive = account_runtime_policy(req.tool_approval_policy.as_deref()) == "review"
                             && req.interactive_tool_approval
                             && !req.tool_approval_grant;
+                        let mut pending_delivery = None;
                         let result = if interactive {
                             let Some(broker) = approval_broker.as_ref() else {
                                 yield sse_event_with_worker(&CodexStreamEvent::Error {
@@ -883,16 +949,58 @@ fn run_stream_with_worker_events(
                                 request: None,
                             }, &worker_events);
                             let approved = pending.wait().await.approved;
-                            yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalResolved {
+                            let decision = if approved { "approve" } else { "deny" };
+                            yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalStatus {
                                 approval_id: pending.id.clone(),
-                                call_id,
-                                decision: if approved { "approve" } else { "deny" },
+                                call_id: call_id.clone(),
+                                decision,
+                                status: "decided",
                             }, &worker_events);
-                            json!({ "decision": if approved { "accept" } else { "decline" } })
+                            let result = match codex_decision_response(params, approved, false) {
+                                Ok(result) => result,
+                                Err(error) => {
+                                    pending.fail(error.to_string());
+                                    yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalFailed {
+                                        approval_id: pending.id.clone(),
+                                        call_id,
+                                        decision: Some(decision),
+                                        message: error.to_string(),
+                                    }, &worker_events);
+                                    yield sse_event_with_worker(&CodexStreamEvent::Error {
+                                        message: error.to_string(),
+                                        usage: None,
+                                        cost_usd: None,
+                                    }, &worker_events);
+                                    yield Ok(Event::default().data("[DONE]"));
+                                    return;
+                                }
+                            };
+                            pending_delivery = Some((pending, call_id, decision));
+                            result
                         } else {
-                            codex_approval_response(&req, method)
+                            match codex_approval_response(&req, method, params) {
+                                Ok(result) => result,
+                                Err(error) => {
+                                    yield sse_event_with_worker(&CodexStreamEvent::Error {
+                                        message: error.to_string(),
+                                        usage: None,
+                                        cost_usd: None,
+                                    }, &worker_events);
+                                    yield Ok(Event::default().data("[DONE]"));
+                                    return;
+                                }
+                            }
                         };
                         if let Err(e) = proc.respond(id, result).await {
+                            if let Some((pending, call_id, decision)) = pending_delivery.take() {
+                                pending.fail(e.to_string());
+                                yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalFailed {
+                                    approval_id: pending.id.clone(),
+                                    call_id,
+                                    decision: Some(decision),
+                                    message: e.to_string(),
+                                }, &worker_events);
+                            }
                             yield sse_event_with_worker(&CodexStreamEvent::Error {
                                 message: e.to_string(),
                                 usage: None,
@@ -901,12 +1009,37 @@ fn run_stream_with_worker_events(
                             yield Ok(Event::default().data("[DONE]"));
                             return;
                         }
+                        if let Some((pending, call_id, decision)) = pending_delivery {
+                            if let Err(message) = pending.deliver() {
+                                yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalFailed {
+                                    approval_id: pending.id.clone(),
+                                    call_id,
+                                    decision: Some(decision),
+                                    message: message.clone(),
+                                }, &worker_events);
+                                yield sse_event_with_worker(&CodexStreamEvent::Error {
+                                    message,
+                                    usage: None,
+                                    cost_usd: None,
+                                }, &worker_events);
+                                yield Ok(Event::default().data("[DONE]"));
+                                return;
+                            }
+                            yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalStatus {
+                                approval_id: pending.id.clone(),
+                                call_id: call_id.clone(),
+                                decision,
+                                status: "delivered",
+                            }, &worker_events);
+                            approval_ack = Some((pending, call_id, decision));
+                        }
                     }
                 }
                 "item/permissions/requestApproval" => {
                     if let Some(id) = rpc_request_id(&msg) {
                         let mut approved = false;
                         let call_id = extract_string(params, &["itemId"]);
+                        let mut pending_delivery = None;
                         if let Some(broker) = approval_broker.as_ref() {
                             let mut pending = broker.request();
                             yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalRequired {
@@ -919,13 +1052,25 @@ fn run_stream_with_worker_events(
                                 request: Some(permission_request_descriptor(params)),
                             }, &worker_events);
                             approved = pending.wait().await.approved;
-                            yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalResolved {
+                            let decision = if approved { "approve" } else { "deny" };
+                            yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalStatus {
                                 approval_id: pending.id.clone(),
-                                call_id,
-                                decision: if approved { "approve" } else { "deny" },
+                                call_id: call_id.clone(),
+                                decision,
+                                status: "decided",
                             }, &worker_events);
+                            pending_delivery = Some((pending, call_id.clone(), decision));
                         }
                         if let Err(e) = proc.respond(id, permission_response(params, approved)).await {
+                            if let Some((pending, call_id, decision)) = pending_delivery.take() {
+                                pending.fail(e.to_string());
+                                yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalFailed {
+                                    approval_id: pending.id.clone(),
+                                    call_id,
+                                    decision: Some(decision),
+                                    message: e.to_string(),
+                                }, &worker_events);
+                            }
                             yield sse_event_with_worker(&CodexStreamEvent::Error {
                                 message: e.to_string(),
                                 usage: None,
@@ -933,6 +1078,30 @@ fn run_stream_with_worker_events(
                             }, &worker_events);
                             yield Ok(Event::default().data("[DONE]"));
                             return;
+                        }
+                        if let Some((pending, call_id, decision)) = pending_delivery {
+                            if let Err(message) = pending.deliver() {
+                                yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalFailed {
+                                    approval_id: pending.id.clone(),
+                                    call_id,
+                                    decision: Some(decision),
+                                    message: message.clone(),
+                                }, &worker_events);
+                                yield sse_event_with_worker(&CodexStreamEvent::Error {
+                                    message,
+                                    usage: None,
+                                    cost_usd: None,
+                                }, &worker_events);
+                                yield Ok(Event::default().data("[DONE]"));
+                                return;
+                            }
+                            yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalStatus {
+                                approval_id: pending.id.clone(),
+                                call_id: call_id.clone(),
+                                decision,
+                                status: "delivered",
+                            }, &worker_events);
+                            approval_ack = Some((pending, call_id, decision));
                         }
                     }
                 }
@@ -962,12 +1131,21 @@ fn run_stream_with_worker_events(
                                     detail: Some(message),
                                 }, &worker_events);
                             }
-                            yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalResolved {
+                            let decision = if accepted { "approve" } else { "deny" };
+                            yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalStatus {
                                 approval_id: pending.id.clone(),
-                                call_id,
-                                decision: if accepted { "approve" } else { "deny" },
+                                call_id: call_id.clone(),
+                                decision,
+                                status: "decided",
                             }, &worker_events);
                             if let Err(e) = proc.respond(id, response).await {
+                                pending.fail(e.to_string());
+                                yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalFailed {
+                                    approval_id: pending.id.clone(),
+                                    call_id,
+                                    decision: Some(decision),
+                                    message: e.to_string(),
+                                }, &worker_events);
                                 yield sse_event_with_worker(&CodexStreamEvent::Error {
                                     message: e.to_string(),
                                     usage: None,
@@ -976,6 +1154,28 @@ fn run_stream_with_worker_events(
                                 yield Ok(Event::default().data("[DONE]"));
                                 return;
                             }
+                            if let Err(message) = pending.deliver() {
+                                yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalFailed {
+                                    approval_id: pending.id.clone(),
+                                    call_id,
+                                    decision: Some(decision),
+                                    message: message.clone(),
+                                }, &worker_events);
+                                yield sse_event_with_worker(&CodexStreamEvent::Error {
+                                    message,
+                                    usage: None,
+                                    cost_usd: None,
+                                }, &worker_events);
+                                yield Ok(Event::default().data("[DONE]"));
+                                return;
+                            }
+                            yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalStatus {
+                                approval_id: pending.id.clone(),
+                                call_id: call_id.clone(),
+                                decision,
+                                status: "delivered",
+                            }, &worker_events);
+                            approval_ack = Some((pending, call_id, decision));
                         } else if let Err(e) = proc
                             .respond(id, noninteractive_request_response(method).expect("known request"))
                             .await
@@ -1153,7 +1353,9 @@ fn account_worker_event_from_codex(value: &CodexStreamEvent) -> Option<AccountWo
             Some(AccountWorkerEvent::Reasoning { text: text.clone() })
         }
         CodexStreamEvent::ToolApprovalRequired { .. }
-        | CodexStreamEvent::ToolApprovalResolved { .. } => None,
+        | CodexStreamEvent::ToolApprovalResolved { .. }
+        | CodexStreamEvent::ToolApprovalStatus { .. }
+        | CodexStreamEvent::ToolApprovalFailed { .. } => None,
         CodexStreamEvent::Tool {
             id,
             name,
@@ -1612,18 +1814,50 @@ fn codex_sandbox_mode(req: &CodexRunRequest, cwd: Option<&str>) -> &'static str 
     }
 }
 
-fn codex_approval_response(req: &CodexRunRequest, method: &str) -> Value {
+fn codex_approval_response(req: &CodexRunRequest, method: &str, params: &Value) -> Result<Value> {
     let policy = account_runtime_policy(req.tool_approval_policy.as_deref());
-    let decision = if !codex_tools_allowed(req)
-        || (policy == "guarded" && method == "item/commandExecution/requestApproval")
-    {
-        "decline"
-    } else if policy == "guarded" {
-        "accept"
-    } else {
-        "acceptForSession"
+    let approved = codex_tools_allowed(req)
+        && !(policy == "guarded" && method == "item/commandExecution/requestApproval");
+    codex_decision_response(params, approved, approved && policy != "guarded")
+}
+
+fn codex_decision_response(params: &Value, approved: bool, prefer_session: bool) -> Result<Value> {
+    let available = params.get("availableDecisions").and_then(Value::as_array);
+    let has = |name: &str| {
+        available.is_some_and(|decisions| {
+            decisions.iter().any(|decision| {
+                decision.as_str() == Some(name)
+                    || decision
+                        .as_object()
+                        .is_some_and(|object| object.contains_key(name))
+            })
+        })
     };
-    json!({ "decision": decision })
+    let candidates: &[&str] = if approved && prefer_session {
+        &["acceptForSession", "accept"]
+    } else if approved {
+        &["accept", "acceptForSession"]
+    } else {
+        &["cancel", "decline"]
+    };
+    let decision = if available.is_some() {
+        candidates.iter().copied().find(|candidate| has(candidate))
+    } else if approved && prefer_session {
+        Some("acceptForSession")
+    } else if approved {
+        Some("accept")
+    } else {
+        // Older Codex app-server releases did not advertise their decision enum.
+        Some("decline")
+    };
+    decision
+        .map(|decision| json!({ "decision": decision }))
+        .ok_or_else(|| {
+            Error::Other(format!(
+                "Codex did not advertise a supported {} decision",
+                if approved { "approval" } else { "denial" }
+            ))
+        })
 }
 
 fn permission_request_descriptor(params: &Value) -> Value {
@@ -2715,6 +2949,31 @@ mod tests {
             compact_json(Some(&json!({ "command": command }))),
             Some(json!({ "command": command }).to_string())
         );
+    }
+
+    #[test]
+    fn codex_decisions_follow_the_runtime_advertisement() {
+        let params = json!({
+            "availableDecisions": [
+                "accept",
+                { "acceptWithExecpolicyAmendment": { "execpolicy_amendment": ["git", "status"] } },
+                "cancel"
+            ]
+        });
+        assert_eq!(
+            codex_decision_response(&params, true, false).unwrap(),
+            json!({ "decision": "accept" })
+        );
+        assert_eq!(
+            codex_decision_response(&params, false, false).unwrap(),
+            json!({ "decision": "cancel" })
+        );
+        assert!(codex_decision_response(
+            &json!({ "availableDecisions": ["accept"] }),
+            false,
+            false,
+        )
+        .is_err());
     }
 
     #[test]

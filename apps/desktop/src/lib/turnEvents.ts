@@ -293,13 +293,21 @@ export function statusPart(label: string, detail?: string, tone: "status" | "war
 }
 
 export function toolApprovalPart(
-  event: Pick<AgentEvent, "approval_id" | "name" | "arguments" | "decision"> & {
+  event: {
+    approval_id?: string;
+    name?: string;
+    arguments?: string;
+    decision?: "approve" | "deny";
+    status?: "decided" | "delivered";
+    message?: string;
     request_kind?: ToolApprovalRequestKind;
     request?: Record<string, unknown>;
   },
 ): ChatStreamEventPart {
-  const resolved = event.decision != null;
-  const approvalRequest = !resolved && event.request_kind
+  const failed = event.message != null;
+  const progressing = event.status != null;
+  const resolved = event.decision != null && !progressing && !failed;
+  const approvalRequest = !resolved && !progressing && !failed && event.request_kind
     ? ({ kind: event.request_kind, ...(event.request ?? {}) } as ToolApprovalRequest)
     : undefined;
   const requestLabel = approvalRequest?.kind === "permissions"
@@ -321,19 +329,31 @@ export function toolApprovalPart(
   return {
     kind: "event",
     eventType: "status",
-    label: resolved
-      ? `${outcomeTarget} ${event.decision === "approve" ? "approved" : "denied"}`
-      : requestLabel,
-    detail: resolved
-      ? undefined
+    label: failed
+      ? "Approval delivery failed"
+      : progressing
+        ? event.status === "decided" ? "Approval submitted" : "Approval delivered"
+        : resolved
+          ? `${outcomeTarget} ${event.decision === "approve" ? "approved" : "denied"}`
+          : requestLabel,
+    detail: failed
+      ? event.message
+      : resolved || progressing
+        ? undefined
       : approvalRequest && approvalRequest.kind !== "command" && approvalRequest.kind !== "file_change"
         ? "message" in approvalRequest ? approvalRequest.message : "reason" in approvalRequest ? approvalRequest.reason ?? undefined : undefined
         : event.arguments,
     icon: toolEventIcon(event.name),
     name: `approval:${event.approval_id}`,
-    status: "done",
+    status: failed ? "error" : progressing ? "running" : "done",
     approvalId: event.approval_id,
-    approvalStatus: resolved ? (event.decision === "approve" ? "approved" : "denied") : "pending",
+    approvalStatus: failed
+      ? "failed"
+      : progressing
+        ? event.status
+        : resolved
+          ? (event.decision === "approve" ? "approved" : "denied")
+          : "pending",
     approvalRequest,
   };
 }

@@ -140,14 +140,53 @@ pub(crate) fn run_stream(
         let mut tool_calls: HashMap<String, (String, String, &'static str)> = HashMap::new();
         let mut final_usage: Option<Usage> = None;
         let mut finished = false;
+        let mut approval_ack: Option<(milim_agents::PendingApproval, String, &'static str)> = None;
         while !finished {
-            let message = match proc.read_value().await {
+            let read = if approval_ack.is_some() {
+                match tokio::time::timeout(
+                    milim_agents::APPROVAL_RUNTIME_ACK_TIMEOUT,
+                    proc.read_value(),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        if let Some((pending, call_id, decision)) = approval_ack.take() {
+                            let message = "Pi did not resume after the approval decision".to_string();
+                            pending.fail(message.clone());
+                            yield sse(&json!({
+                                "type": "tool_approval_failed", "approval_id": pending.id,
+                                "call_id": call_id, "decision": decision, "message": message
+                            }));
+                            yield sse(&json!({ "type": "error", "message": message }));
+                        }
+                        break;
+                    }
+                }
+            } else {
+                proc.read_value().await
+            };
+            let message = match read {
                 Ok(value) => value,
                 Err(error) => {
+                    if let Some((pending, call_id, decision)) = approval_ack.take() {
+                        pending.fail(error.to_string());
+                        yield sse(&json!({
+                            "type": "tool_approval_failed", "approval_id": pending.id,
+                            "call_id": call_id, "decision": decision, "message": error.to_string()
+                        }));
+                    }
                     yield sse(&json!({ "type": "error", "message": error.to_string() }));
                     break;
                 }
             };
+            if let Some((pending, call_id, decision)) = approval_ack.take() {
+                pending.acknowledge();
+                yield sse(&json!({
+                    "type": "tool_approval_resolved", "approval_id": pending.id,
+                    "call_id": call_id, "decision": decision
+                }));
+            }
             if let Some(error) = pi_error_message(&message) {
                 yield sse(&json!({ "type": "error", "message": actionable_pi_error(error) }));
                 break;
@@ -221,13 +260,28 @@ pub(crate) fn run_stream(
                 }
                 "extension_ui_request" => {
                     let title = message.get("title").and_then(Value::as_str).unwrap_or_default();
+                    let request_id = message.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
                     if message.get("method").and_then(Value::as_str) != Some("confirm") || !title.starts_with(APPROVAL_PREFIX) {
+                        if !request_id.is_empty() {
+                            if let Err(error) = proc.write_value(&json!({
+                                "type": "extension_ui_response",
+                                "id": request_id,
+                                "confirmed": false
+                            })).await {
+                                yield sse(&json!({ "type": "error", "message": error.to_string() }));
+                                break;
+                            }
+                        }
+                        yield sse(&json!({
+                            "type": "warning",
+                            "message": "Pi requested an unsupported extension interaction"
+                        }));
                         continue;
                     }
-                    let request_id = message.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
                     let call_id = title.trim_start_matches(APPROVAL_PREFIX).to_string();
                     let (name, arguments, effect) = tool_calls.get(&call_id).cloned().unwrap_or_else(|| ("Pi tool".into(), "null".into(), "unknown"));
                     let interactive = req.interactive_tool_approval && !req.tool_approval_grant;
+                    let mut pending_delivery = None;
                     let approved = if interactive {
                         let Some(broker) = approval_broker.as_ref() else {
                             let _ = proc.write_value(&json!({ "type": "extension_ui_response", "id": request_id, "confirmed": false })).await;
@@ -241,16 +295,42 @@ pub(crate) fn run_stream(
                         }));
                         let decision = pending.wait().await.approved;
                         yield sse(&json!({
-                            "type": "tool_approval_resolved", "approval_id": pending.id,
-                            "call_id": call_id, "decision": if decision { "approve" } else { "deny" }
+                            "type": "tool_approval_status", "approval_id": pending.id,
+                            "call_id": call_id, "decision": if decision { "approve" } else { "deny" },
+                            "status": "decided"
                         }));
+                        pending_delivery = Some(pending);
                         decision
                     } else {
                         req.tool_approval_grant || req.tool_approval_policy.as_deref() == Some("open")
                     };
                     if let Err(error) = proc.write_value(&json!({ "type": "extension_ui_response", "id": request_id, "confirmed": approved })).await {
+                        if let Some(pending) = pending_delivery.take() {
+                            pending.fail(error.to_string());
+                            yield sse(&json!({
+                                "type": "tool_approval_failed", "approval_id": pending.id,
+                                "call_id": call_id, "decision": if approved { "approve" } else { "deny" },
+                                "message": error.to_string()
+                            }));
+                        }
                         yield sse(&json!({ "type": "error", "message": error.to_string() }));
                         break;
+                    }
+                    if let Some(pending) = pending_delivery {
+                        let decision = if approved { "approve" } else { "deny" };
+                        if let Err(message) = pending.deliver() {
+                            yield sse(&json!({
+                                "type": "tool_approval_failed", "approval_id": pending.id,
+                                "call_id": call_id, "decision": decision, "message": message
+                            }));
+                            yield sse(&json!({ "type": "error", "message": message }));
+                            break;
+                        }
+                        yield sse(&json!({
+                            "type": "tool_approval_status", "approval_id": pending.id,
+                            "call_id": call_id, "decision": decision, "status": "delivered"
+                        }));
+                        approval_ack = Some((pending, call_id, decision));
                     }
                 }
                 "extension_error" => {

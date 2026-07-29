@@ -133,6 +133,7 @@ export function ToolApprovalPrompt({
     initialApprovalValues(part.approvalRequest),
   );
   const [error, setError] = useState("");
+  const [submitted, setSubmitted] = useState<"approve" | "deny" | null>(null);
   const title = approvalTitle(part.label);
   const showReview = part.detail && (
     !part.approvalRequest ||
@@ -154,9 +155,9 @@ export function ToolApprovalPrompt({
     setError("");
     try {
       await resolveToolApproval(part.approvalId, decision, result.response);
+      setSubmitted(decision);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Approval failed.");
-    } finally {
       setResolving(false);
     }
   }
@@ -176,6 +177,11 @@ export function ToolApprovalPrompt({
           <strong>{title}</strong>
         </span>
       </header>
+      {submitted && (
+        <p className="composer-approval-progress" role="status">
+          Decision delivered; waiting for the runtime to resume...
+        </p>
+      )}
       {showReview && (
         <details className="composer-approval-details">
           <summary>Review request</summary>
@@ -186,7 +192,7 @@ export function ToolApprovalPrompt({
         request={part.approvalRequest}
         values={values}
         error={error}
-        disabled={resolving}
+        disabled={resolving || submitted != null}
         onChange={(field, value) => {
           setError("");
           setValues((current) => ({

@@ -10,6 +10,10 @@ After a Milim chat has a native Codex thread id, Claude session id, OpenCode ses
 
 Every account-runtime turn must report an explicit completion, error, or intentional terminal notice. If a runtime exits or closes its stream without one, Milim shows a runtime error instead of treating an empty response as success.
 
+Review approvals use a shared lifecycle: requested, user-decided, delivered to the runtime, then acknowledged when the runtime resumes. The decision endpoint is idempotent for identical retries and does not report success until the runtime adapter accepts the response. Delivery failures, disconnects, and post-delivery silence terminalize the turn with an actionable error; only the human decision wait is unbounded. Persisted transcripts retain nonterminal lifecycle states and reconcile them as interrupted after restart.
+
+Each adapter maps the normalized Approve/Deny choice to its own protocol. Codex selects only from the request's advertised `availableDecisions`—including `cancel` rather than assuming `decline`—while Claude, OpenCode, and Pi keep their native response shapes.
+
 Failed or canceled turns clear only the affected native session before the next send. This prevents a prompt that the CLI persisted before the failure from being replayed into divergent native history.
 
 All account-runtime tool events keep their full input text behind the transcript's visual ellipsis. Claude no longer truncates structured tool inputs server-side, while OpenCode and Pi also preserve completion results and error details in the shared run trace.

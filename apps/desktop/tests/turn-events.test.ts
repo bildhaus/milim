@@ -137,6 +137,27 @@ equal(commandDecision.label, "Command approved", "command decisions should have 
 equal(commandDecision.detail, undefined, "resolved decisions should omit protocol payloads");
 equal(commandDecision.icon, "command", "command decisions should keep the command icon");
 
+const deliveredDecision = toolApprovalPart({
+  type: "tool_approval_status",
+  approval_id: "approval-3",
+  name: "command",
+  decision: "deny",
+  status: "delivered",
+} as never);
+equal(deliveredDecision.label, "Approval delivered", "delivery should remain distinct from runtime acknowledgement");
+equal(deliveredDecision.approvalStatus, "delivered", "delivery state should persist in the transcript");
+equal(deliveredDecision.status, "running", "delivery should remain nonterminal until runtime acknowledgement");
+
+const failedDecision = toolApprovalPart({
+  type: "tool_approval_failed",
+  approval_id: "approval-4",
+  name: "command",
+  decision: "approve",
+  message: "runtime disconnected",
+} as never);
+equal(failedDecision.approvalStatus, "failed", "delivery failures should be terminal");
+equal(failedDecision.detail, "runtime disconnected", "delivery failures should explain recovery");
+
 const appended: { sessionId: string; chunks: BufferedStreamChunk[] }[] = [];
 const batcher = createStreamUpdateBatcher("s1", {
   appendStreamChunks: (sessionId: string, chunks: BufferedStreamChunk[]) => {

@@ -21,6 +21,8 @@ Agents, Workers, skills, schedules, MCP servers and Apps, media generation, Goog
 
 Milim keeps provider-backed chat and installed account runtimes distinct. Provider models use Milim's tool-agent loop, while account runtimes retain their native sessions and tools behind the same visible approval policy. Changing a running thread to Open also clears ordinary pending tool approvals; connector input and authorization remain interactive. Changing the selected model affects the next turn without turning each model into a separate project history.
 
+Review decisions are tracked through runtime delivery and acknowledgement. A runtime that rejects, drops, or fails to resume after a decision ends the turn with a visible recovery error instead of leaving it Running indefinitely.
+
 Failed or canceled native-runtime turns discard that runtime's native session before the next send, preventing a partially persisted prompt from being replayed into divergent history.
 
 Completed assistant responses retain their provider or account runtime and model in the transcript footer. Tool inputs remain fully copyable from collapsed activity even when the row is visually clipped.

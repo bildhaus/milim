@@ -99,7 +99,7 @@ function StreamEvent({
   toolApproval: ToolApprovalMode;
 }) {
   const status = part.status ?? "done";
-  const detail = part.approvalStatus && part.approvalStatus !== "pending"
+  const detail = part.approvalStatus && ["approved", "denied", "canceled"].includes(part.approvalStatus)
     ? undefined
     : part.detail;
   return (

@@ -691,6 +691,18 @@ export function createAccountRuntimeEventHandler({
         }
         appendStreamEvent(toolApprovalPart(event));
         snapshot?.();
+      } else if (event.type === "tool_approval_status") {
+        flush();
+        const step = runRef?.current?.steps
+          .slice()
+          .reverse()
+          .find((candidate) => candidate.approval?.id === event.approval_id);
+        if (step?.approval) step.approval.status = event.status;
+        completeStreamEvent(
+          `approval:${event.approval_id}`,
+          toolApprovalPart({ ...event, name: step?.name, arguments: step?.arguments }),
+        );
+        snapshot?.();
       } else if (event.type === "tool_approval_resolved") {
         flush();
         const step = runRef?.current?.steps
@@ -708,6 +720,21 @@ export function createAccountRuntimeEventHandler({
             name: step?.name,
             arguments: step?.arguments,
           }),
+        );
+        snapshot?.();
+      } else if (event.type === "tool_approval_failed") {
+        flush();
+        const step = runRef?.current?.steps
+          .slice()
+          .reverse()
+          .find((candidate) => candidate.approval?.id === event.approval_id);
+        if (step?.approval) {
+          step.approval.status = "failed";
+          step.approval.resolvedAt = now();
+        }
+        completeStreamEvent(
+          `approval:${event.approval_id}`,
+          toolApprovalPart({ ...event, name: step?.name, arguments: step?.arguments }),
         );
         snapshot?.();
       } else if (event.type === "thread") {
@@ -1550,6 +1577,19 @@ export function createAgentRunEventHandler({
         appendStreamEvent(toolApprovalPart(event));
         break;
       }
+      case "tool_approval_status": {
+        if (!event.status) break;
+        const step = run.steps
+          .slice()
+          .reverse()
+          .find((candidate) => candidate.approval?.id === event.approval_id);
+        if (step?.approval) step.approval.status = event.status;
+        completeStreamEvent(
+          `approval:${event.approval_id}`,
+          toolApprovalPart({ ...event, name: step?.name, arguments: step?.arguments }),
+        );
+        break;
+      }
       case "tool_approval_resolved": {
         const step = lastOpenStep(run.steps, undefined, event.call_id);
         if (step?.approval && event.approval_id === step.approval.id) {
@@ -1563,6 +1603,21 @@ export function createAgentRunEventHandler({
             name: step?.name,
             arguments: step?.arguments,
           }),
+        );
+        break;
+      }
+      case "tool_approval_failed": {
+        const step = run.steps
+          .slice()
+          .reverse()
+          .find((candidate) => candidate.approval?.id === event.approval_id);
+        if (step?.approval) {
+          step.approval.status = "failed";
+          step.approval.resolvedAt = now();
+        }
+        completeStreamEvent(
+          `approval:${event.approval_id}`,
+          toolApprovalPart({ ...event, name: step?.name, arguments: step?.arguments }),
         );
         break;
       }

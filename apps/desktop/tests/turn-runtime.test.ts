@@ -681,6 +681,20 @@ const codexResult = await runAccountRuntimeTurn({
       effect: "command",
     });
     onEvent({
+      type: "tool_approval_status",
+      approval_id: "approval-1",
+      call_id: "shell-1",
+      decision: "approve",
+      status: "decided",
+    });
+    onEvent({
+      type: "tool_approval_status",
+      approval_id: "approval-1",
+      call_id: "shell-1",
+      decision: "approve",
+      status: "delivered",
+    });
+    onEvent({
       type: "tool_approval_resolved",
       approval_id: "approval-1",
       call_id: "shell-1",

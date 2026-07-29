@@ -334,9 +334,18 @@ export type ChatStreamPart =
       mcpAppResult?: unknown;
       toolArguments?: string;
       approvalId?: string;
-      approvalStatus?: "pending" | "approved" | "denied" | "canceled";
+      approvalStatus?: ToolApprovalLifecycleStatus;
       approvalRequest?: ToolApprovalRequest;
     };
+
+export type ToolApprovalLifecycleStatus =
+  | "pending"
+  | "decided"
+  | "delivered"
+  | "approved"
+  | "denied"
+  | "failed"
+  | "canceled";
 
 export type RunStatus = "running" | "done" | "stopped" | "aborted" | "error";
 
@@ -353,7 +362,7 @@ export interface RunStep {
   endedAt?: number;
   approval?: {
     id: string;
-    status: "pending" | "approved" | "denied" | "canceled";
+    status: ToolApprovalLifecycleStatus;
     requestedAt: number;
     resolvedAt?: number;
   };
@@ -3512,7 +3521,9 @@ export interface AgentEvent {
     | "tool_call"
     | "tool_result"
     | "tool_approval_required"
+    | "tool_approval_status"
     | "tool_approval_resolved"
+    | "tool_approval_failed"
     | "memory_registered"
     | "child_thread_started"
     | "child_thread_done"
@@ -3561,6 +3572,7 @@ export interface AgentEvent {
   approval_id?: string;
   effect?: "read_only" | "mutating" | "command" | "unknown";
   decision?: "approve" | "deny";
+  status?: "decided" | "delivered";
 }
 
 export type ToolApprovalEvent =
@@ -3575,10 +3587,24 @@ export type ToolApprovalEvent =
       request?: Record<string, unknown>;
     }
   | {
+      type: "tool_approval_status";
+      approval_id: string;
+      call_id?: string;
+      decision: "approve" | "deny";
+      status: "decided" | "delivered";
+    }
+  | {
       type: "tool_approval_resolved";
       approval_id: string;
       call_id?: string;
       decision: "approve" | "deny";
+    }
+  | {
+      type: "tool_approval_failed";
+      approval_id: string;
+      call_id?: string;
+      decision?: "approve" | "deny";
+      message: string;
     };
 
 export type ToolApprovalRequestKind =
@@ -4302,13 +4328,30 @@ export async function resolveToolApproval(
   approvalId: string,
   decision: "approve" | "deny",
   responseBody?: Record<string, unknown>,
-): Promise<void> {
+): Promise<ToolApprovalSnapshot | null> {
   const response = await authFetch(`${BASE}/tool-approvals/${encodeURIComponent(approvalId)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ decision, ...(responseBody ? { response: responseBody } : {}) }),
   });
   if (!response.ok) throw new Error(await responseErrorMessage(response, "Tool approval failed"));
+  return response.status === 204 ? null : ((await response.json()) as ToolApprovalSnapshot);
+}
+
+export interface ToolApprovalSnapshot {
+  approval_id: string;
+  state: "requested" | "decided" | "delivered" | "acknowledged" | "failed" | "canceled";
+  decision?: "approve" | "deny" | null;
+  error?: string | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
+export async function getToolApproval(approvalId: string): Promise<ToolApprovalSnapshot> {
+  return parseJsonResponse<ToolApprovalSnapshot>(
+    await authFetch(`${BASE}/tool-approvals/${encodeURIComponent(approvalId)}`),
+    "Tool approval status failed",
+  );
 }
 
 export async function runWorkspaceGitAction(

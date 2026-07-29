@@ -187,12 +187,17 @@ pub(crate) fn account_runtime_tool_endpoint(
 
 struct AccountRuntimeToolLease {
     sessions: Arc<Mutex<HashMap<String, crate::state::AccountRuntimeToolSession>>>,
+    approvals: Arc<milim_agents::ToolApprovalBroker>,
     run_id: Option<String>,
 }
 
 impl Drop for AccountRuntimeToolLease {
     fn drop(&mut self) {
         if let Some(run_id) = &self.run_id {
+            self.approvals.fail_run(
+                run_id,
+                "account runtime disconnected during approval delivery",
+            );
             self.sessions
                 .lock()
                 .expect("account runtime tool store poisoned")
@@ -212,34 +217,63 @@ where
 {
     let run_id = endpoint.map(|endpoint| endpoint.run_id.clone());
     let sessions = st.account_runtime_tools.clone();
+    let approvals = st.tool_approvals.clone();
     let mut notices = st.tool_approvals.subscribe();
     async_stream::stream! {
-        let _lease = AccountRuntimeToolLease { sessions, run_id: run_id.clone() };
+        let _lease = AccountRuntimeToolLease {
+            sessions,
+            approvals: approvals.clone(),
+            run_id: run_id.clone(),
+        };
         futures::pin_mut!(stream);
         loop {
             tokio::select! {
                 event = stream.next() => match event {
-                    Some(event) => yield event,
+                    Some(event) => {
+                        if let Some(run_id) = run_id.as_deref() {
+                            approvals.acknowledge_run(run_id);
+                        }
+                        yield event
+                    },
                     None => break,
                 },
                 notice = notices.recv(), if relay_notices && run_id.is_some() => match notice {
                     Ok(notice) if Some(notice.run_id.as_str()) == run_id.as_deref() => {
-                        let value = if let Some(decision) = notice.decision {
-                            json!({
-                                "type": "tool_approval_resolved",
-                                "approval_id": notice.approval_id,
-                                "call_id": notice.call_id.unwrap_or_else(|| notice.approval_id.clone()),
-                                "decision": decision,
-                            })
-                        } else {
-                            json!({
+                        let value = match notice.state {
+                            milim_agents::ApprovalState::Requested => json!({
                                 "type": "tool_approval_required",
                                 "approval_id": notice.approval_id,
                                 "call_id": notice.call_id.unwrap_or_else(|| notice.approval_id.clone()),
                                 "name": notice.name,
                                 "arguments": notice.arguments,
                                 "effect": notice.effect,
-                            })
+                            }),
+                            milim_agents::ApprovalState::Decided
+                            | milim_agents::ApprovalState::Delivered => json!({
+                                "type": "tool_approval_status",
+                                "approval_id": notice.approval_id,
+                                "call_id": notice.call_id.unwrap_or_else(|| notice.approval_id.clone()),
+                                "decision": notice.decision,
+                                "status": if notice.state == milim_agents::ApprovalState::Decided {
+                                    "decided"
+                                } else {
+                                    "delivered"
+                                },
+                            }),
+                            milim_agents::ApprovalState::Acknowledged => json!({
+                                "type": "tool_approval_resolved",
+                                "approval_id": notice.approval_id,
+                                "call_id": notice.call_id.unwrap_or_else(|| notice.approval_id.clone()),
+                                "decision": notice.decision.unwrap_or("deny"),
+                            }),
+                            milim_agents::ApprovalState::Failed
+                            | milim_agents::ApprovalState::Canceled => json!({
+                                "type": "tool_approval_failed",
+                                "approval_id": notice.approval_id,
+                                "call_id": notice.call_id.unwrap_or_else(|| notice.approval_id.clone()),
+                                "decision": notice.decision,
+                                "message": notice.error.unwrap_or_else(|| "Approval delivery failed".to_string()),
+                            }),
                         };
                         yield Ok(Event::default().data(value.to_string()));
                     }
@@ -273,6 +307,7 @@ mod account_runtime_tool_tests {
         )])));
         drop(AccountRuntimeToolLease {
             sessions: sessions.clone(),
+            approvals: Arc::new(milim_agents::ToolApprovalBroker::default()),
             run_id: Some("run".into()),
         });
         assert!(sessions.lock().unwrap().is_empty());
@@ -1328,6 +1363,23 @@ pub(crate) struct ToolApprovalDecision {
     response: Option<Value>,
 }
 
+pub(crate) async fn tool_approval_status(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    peer: Peer,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    match st.tool_approvals.snapshot(&id) {
+        Some(snapshot) => Ok(Json(snapshot).into_response()),
+        None => Ok((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "tool approval not found or expired" })),
+        )
+            .into_response()),
+    }
+}
+
 pub(crate) async fn tool_approval_resolve(
     State(st): State<AppState>,
     Path(id): Path<String>,
@@ -1349,10 +1401,49 @@ pub(crate) async fn tool_approval_resolve(
         .tool_approvals
         .resolve_with_response(&id, approved, req.response)
     {
-        milim_agents::ApprovalResolve::Resolved => Ok(StatusCode::NO_CONTENT.into_response()),
-        milim_agents::ApprovalResolve::AlreadyResolved => Ok((
+        milim_agents::ApprovalResolve::Resolved
+        | milim_agents::ApprovalResolve::AlreadyResolved => {
+            let Some(snapshot) = st
+                .tool_approvals
+                .wait_for_delivery(&id, milim_agents::APPROVAL_DELIVERY_TIMEOUT)
+                .await
+            else {
+                return Ok((
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "error": "tool approval not found or expired" })),
+                )
+                    .into_response());
+            };
+            if matches!(
+                snapshot.state,
+                milim_agents::ApprovalState::Delivered | milim_agents::ApprovalState::Acknowledged
+            ) {
+                Ok(Json(snapshot).into_response())
+            } else {
+                Ok((
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({
+                        "error": snapshot.error.as_deref().unwrap_or("tool approval delivery failed"),
+                        "approval": snapshot,
+                    })),
+                )
+                    .into_response())
+            }
+        }
+        milim_agents::ApprovalResolve::Conflict => Ok((
             StatusCode::CONFLICT,
-            Json(json!({ "error": "tool approval already resolved" })),
+            Json(json!({ "error": "tool approval was resolved with a different decision" })),
+        )
+            .into_response()),
+        milim_agents::ApprovalResolve::Failed => Ok((
+            StatusCode::GONE,
+            Json(json!({
+                "error": st
+                    .tool_approvals
+                    .snapshot(&id)
+                    .and_then(|snapshot| snapshot.error)
+                    .unwrap_or_else(|| "tool approval is no longer deliverable".to_string())
+            })),
         )
             .into_response()),
         milim_agents::ApprovalResolve::Missing => Ok((

@@ -684,6 +684,18 @@ enum ClaudeStreamEvent {
         call_id: String,
         decision: &'static str,
     },
+    ToolApprovalStatus {
+        approval_id: String,
+        call_id: String,
+        decision: Option<&'static str>,
+        status: &'static str,
+    },
+    ToolApprovalFailed {
+        approval_id: String,
+        call_id: String,
+        decision: Option<&'static str>,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -778,23 +790,55 @@ pub(crate) fn run_stream(
                 (stream.next().await, None)
             };
             match (event, notice) {
-                (Some(event), _) => yield event,
+                (Some(event), _) => {
+                    if let (Some(broker), Some(run_id)) =
+                        (approval_broker.as_ref(), approval_run_id.as_deref())
+                    {
+                        broker.acknowledge_run(run_id);
+                    }
+                    yield event
+                },
                 (None, Some(Ok(notice))) if Some(notice.run_id.as_str()) == approval_run_id.as_deref() => {
                     let call_id = notice.call_id.unwrap_or_else(|| notice.approval_id.clone());
-                    if let Some(decision) = notice.decision {
-                        yield sse_event(&ClaudeStreamEvent::ToolApprovalResolved {
-                            approval_id: notice.approval_id,
-                            call_id,
-                            decision,
-                        });
-                    } else {
-                        yield sse_event(&ClaudeStreamEvent::ToolApprovalRequired {
-                            approval_id: notice.approval_id,
-                            call_id,
-                            name: notice.name,
-                            arguments: notice.arguments,
-                            effect: notice.effect,
-                        });
+                    match notice.state {
+                        milim_agents::ApprovalState::Requested => {
+                            yield sse_event(&ClaudeStreamEvent::ToolApprovalRequired {
+                                approval_id: notice.approval_id,
+                                call_id,
+                                name: notice.name,
+                                arguments: notice.arguments,
+                                effect: notice.effect,
+                            });
+                        }
+                        milim_agents::ApprovalState::Decided
+                        | milim_agents::ApprovalState::Delivered => {
+                            yield sse_event(&ClaudeStreamEvent::ToolApprovalStatus {
+                                approval_id: notice.approval_id,
+                                call_id,
+                                decision: notice.decision,
+                                status: if notice.state == milim_agents::ApprovalState::Decided {
+                                    "decided"
+                                } else {
+                                    "delivered"
+                                },
+                            });
+                        }
+                        milim_agents::ApprovalState::Acknowledged => {
+                            yield sse_event(&ClaudeStreamEvent::ToolApprovalResolved {
+                                approval_id: notice.approval_id,
+                                call_id,
+                                decision: notice.decision.unwrap_or("deny"),
+                            });
+                        }
+                        milim_agents::ApprovalState::Failed
+                        | milim_agents::ApprovalState::Canceled => {
+                            yield sse_event(&ClaudeStreamEvent::ToolApprovalFailed {
+                                approval_id: notice.approval_id,
+                                call_id,
+                                decision: notice.decision,
+                                message: notice.error.unwrap_or_else(|| "Approval delivery failed".to_string()),
+                            });
+                        }
                     }
                 }
                 (None, Some(Ok(_)))
@@ -1383,7 +1427,9 @@ fn account_worker_event_from_claude(value: &ClaudeStreamEvent) -> Option<Account
         }
         ClaudeStreamEvent::RateLimit { .. }
         | ClaudeStreamEvent::ToolApprovalRequired { .. }
-        | ClaudeStreamEvent::ToolApprovalResolved { .. } => None,
+        | ClaudeStreamEvent::ToolApprovalResolved { .. }
+        | ClaudeStreamEvent::ToolApprovalStatus { .. }
+        | ClaudeStreamEvent::ToolApprovalFailed { .. } => None,
     }
 }
 

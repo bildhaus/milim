@@ -5489,6 +5489,10 @@ html[data-dark="true"] .preview-control-cursor {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.composer-approval-progress {
+  margin: 0;
+  color: var(--tertiary-text);
+}
 .composer-approval-details {
   overflow: hidden;
   border: 1px solid var(--border-primary);

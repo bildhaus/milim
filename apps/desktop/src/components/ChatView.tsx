@@ -6124,7 +6124,10 @@ export function ChatView({
     } finally {
       const endedAt = Date.now();
       const pendingApprovals = runRef.current?.steps.filter(
-        (step) => step.approval?.status === "pending",
+        (step) =>
+          step.approval?.status === "pending" ||
+          step.approval?.status === "decided" ||
+          step.approval?.status === "delivered",
       ) ?? [];
       for (const step of pendingApprovals) {
         const approval = step.approval;

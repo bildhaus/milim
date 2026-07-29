@@ -116,6 +116,7 @@ pub(crate) fn run_stream(
         };
         yield sse(&json!({ "type": "session", "session_id": session, "model": req.model }));
         let mut tool_calls: BTreeMap<String, (String, String)> = BTreeMap::new();
+        let mut approval_ack: Option<(milim_agents::PendingApproval, String, &'static str)> = None;
 
         let prompt_id = match proc.send_request("session/prompt", Some(prompt_params(&req, &session))).await {
             Ok(id) => id,
@@ -126,13 +127,51 @@ pub(crate) fn run_stream(
             }
         };
         loop {
-            let message = match proc.read_value().await {
+            let read = if approval_ack.is_some() {
+                match tokio::time::timeout(
+                    milim_agents::APPROVAL_RUNTIME_ACK_TIMEOUT,
+                    proc.read_value(),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        if let Some((pending, call_id, decision)) = approval_ack.take() {
+                            let message = "OpenCode did not resume after the approval decision".to_string();
+                            pending.fail(message.clone());
+                            yield sse(&json!({
+                                "type": "tool_approval_failed", "approval_id": pending.id,
+                                "call_id": call_id, "decision": decision, "message": message
+                            }));
+                            yield sse(&json!({ "type": "error", "message": message }));
+                        }
+                        break;
+                    }
+                }
+            } else {
+                proc.read_value().await
+            };
+            let message = match read {
                 Ok(value) => value,
                 Err(error) => {
+                    if let Some((pending, call_id, decision)) = approval_ack.take() {
+                        pending.fail(error.to_string());
+                        yield sse(&json!({
+                            "type": "tool_approval_failed", "approval_id": pending.id,
+                            "call_id": call_id, "decision": decision, "message": error.to_string()
+                        }));
+                    }
                     yield sse(&json!({ "type": "error", "message": error.to_string() }));
                     break;
                 }
             };
+            if let Some((pending, call_id, decision)) = approval_ack.take() {
+                pending.acknowledge();
+                yield sse(&json!({
+                    "type": "tool_approval_resolved", "approval_id": pending.id,
+                    "call_id": call_id, "decision": decision
+                }));
+            }
             if message.get("id") == Some(&prompt_id) {
                 if let Some(error) = message.get("error") {
                     yield sse(&json!({ "type": "error", "message": rpc_error(error) }));
@@ -150,6 +189,7 @@ pub(crate) fn run_stream(
                 let name = string_at(call, &["title"]).unwrap_or_else(|| "OpenCode tool".into());
                 let arguments = call.get("rawInput").cloned().unwrap_or(Value::Null).to_string();
                 let interactive = req.interactive_tool_approval && !req.tool_approval_grant;
+                let mut pending_delivery = None;
                 let approved = if interactive {
                     let Some(broker) = approval_broker.as_ref() else {
                         let _ = proc.respond(id, permission_response(params, false)).await;
@@ -163,20 +203,61 @@ pub(crate) fn run_stream(
                     }));
                     let decision = pending.wait().await.approved;
                     yield sse(&json!({
-                        "type": "tool_approval_resolved", "approval_id": pending.id,
-                        "call_id": call_id, "decision": if decision { "approve" } else { "deny" }
+                        "type": "tool_approval_status", "approval_id": pending.id,
+                        "call_id": call_id, "decision": if decision { "approve" } else { "deny" },
+                        "status": "decided"
                     }));
+                    pending_delivery = Some(pending);
                     decision
                 } else {
                     req.tool_approval_grant || req.tool_approval_policy.as_deref() == Some("open")
                 };
                 if let Err(error) = proc.respond(id, permission_response(params, approved)).await {
+                    if let Some(pending) = pending_delivery.take() {
+                        pending.fail(error.to_string());
+                        yield sse(&json!({
+                            "type": "tool_approval_failed", "approval_id": pending.id,
+                            "call_id": call_id, "decision": if approved { "approve" } else { "deny" },
+                            "message": error.to_string()
+                        }));
+                    }
                     yield sse(&json!({ "type": "error", "message": error.to_string() }));
                     break;
                 }
+                if let Some(pending) = pending_delivery {
+                    let decision = if approved { "approve" } else { "deny" };
+                    if let Err(message) = pending.deliver() {
+                        yield sse(&json!({
+                            "type": "tool_approval_failed", "approval_id": pending.id,
+                            "call_id": call_id, "decision": decision, "message": message
+                        }));
+                        yield sse(&json!({ "type": "error", "message": message }));
+                        break;
+                    }
+                    yield sse(&json!({
+                        "type": "tool_approval_status", "approval_id": pending.id,
+                        "call_id": call_id, "decision": decision, "status": "delivered"
+                    }));
+                    approval_ack = Some((pending, call_id, decision));
+                }
                 continue;
             }
-            if method != "session/update" { continue; }
+            if method != "session/update" {
+                if let Some(id) = message.get("id").cloned() {
+                    if let Err(error) = proc
+                        .respond_error(id, -32601, "Method not found")
+                        .await
+                    {
+                        yield sse(&json!({ "type": "error", "message": error.to_string() }));
+                        break;
+                    }
+                    yield sse(&json!({
+                        "type": "warning",
+                        "message": format!("OpenCode requested unsupported method {method}")
+                    }));
+                }
+                continue;
+            }
             let update = params.get("update").unwrap_or(&Value::Null);
             match update.get("sessionUpdate").and_then(Value::as_str).unwrap_or_default() {
                 "agent_message_chunk" => {
@@ -487,6 +568,15 @@ impl OpenCodeProcess {
     async fn respond(&mut self, id: Value, result: Value) -> Result<()> {
         self.write_value(&json!({ "jsonrpc": "2.0", "id": id, "result": result }))
             .await
+    }
+
+    async fn respond_error(&mut self, id: Value, code: i64, message: &str) -> Result<()> {
+        self.write_value(&json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": code, "message": message }
+        }))
+        .await
     }
 
     async fn write_value(&mut self, value: &Value) -> Result<()> {
