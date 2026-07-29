@@ -1,8 +1,10 @@
 import type {
   AccountRuntimeEnablement,
+  AgentToolContext,
   ChatMessage,
   DelegationPolicy,
   ModelInfo,
+  PrivacyMode,
   ReasoningEffort,
   ToolApprovalMode,
 } from "../api.js";
@@ -48,6 +50,7 @@ type TurnSetupSettings = {
   sandbox: boolean;
   computerUse: boolean;
   memory: boolean;
+  privacy: PrivacyMode;
   activeAgentId?: string | null;
   toolApproval: ToolApprovalMode;
   delegationPolicy: DelegationPolicy;
@@ -390,6 +393,7 @@ export async function prepareTurnOutbound({
   model,
   models,
   folder,
+  toolContext,
   reasoningEffort,
   compactionInFlightRef,
   setChatNotice,
@@ -406,6 +410,7 @@ export async function prepareTurnOutbound({
   model: string;
   models: ModelInfo[];
   folder: string;
+  toolContext: AgentToolContext;
   reasoningEffort: ReasoningEffort;
   compactionInFlightRef: { current: boolean };
   setChatNotice: (notice: TurnChatNotice | null) => void;
@@ -416,6 +421,7 @@ export async function prepareTurnOutbound({
     options: {
       auto: boolean;
       folder: string;
+      toolContext: AgentToolContext;
       reasoningEffort: ReasoningEffort;
       signal?: AbortSignal;
     },
@@ -467,6 +473,7 @@ export async function prepareTurnOutbound({
       {
         auto: true,
         folder,
+        toolContext,
         reasoningEffort,
         signal,
       },

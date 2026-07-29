@@ -566,10 +566,33 @@ useSessions.getState().commitResponseMetrics(first, {
   model: "stream-model",
   provider: "Stream Provider",
 });
-equal(
-  localStorage.getItem("milim.sessions"),
-  streamingPersistSnapshot,
-  "session persistence should be skipped while generating",
+assert(
+  localStorage.getItem("milim.sessions") !== streamingPersistSnapshot,
+  "non-token session state should keep persisting while generating",
+);
+assert(
+  localStorage.getItem("milim.sessions")?.includes('"durationMs":1'),
+  "response metadata should persist while its token body remains transient",
+);
+assert(
+  !localStorage.getItem("milim.sessions")?.includes("transient-token"),
+  "persisting response metadata should not persist the live token body",
+);
+const background = useSessions.getState().newChat();
+useSessions.getState().setMessages(background, [
+  { role: "user", content: "background state survives" },
+]);
+useSessions.getState().enqueueQueuedMessage(background, {
+  content: "background queue survives",
+});
+useSessions.getState().switchTo(first);
+assert(
+  localStorage.getItem("milim.sessions")?.includes("background state survives"),
+  "another thread should persist while the first thread is generating",
+);
+assert(
+  localStorage.getItem("milim.sessions")?.includes("background queue survives"),
+  "another thread's queue should persist while the first thread is generating",
 );
 useSessions.getState().setSessionGenerating(first, false);
 assert(
@@ -590,7 +613,7 @@ assert(
 );
 assert(
   localStorage.getItem("milim.sessions")?.includes('"durationMs":1'),
-  "completed response metrics should persist once generation stops",
+  "response metrics should remain persisted after generation stops",
 );
 setSessionComposerDraft(first, "unsent draft");
 equal(
@@ -1820,6 +1843,30 @@ deepEqual(
   childRun?.workers[0]?.messages?.[1]?.streamParts?.map((part) => part.kind),
   ["thinking", "event", "text"],
   "legacy worker events should hydrate inspector stream parts",
+);
+useSessions.getState().setWorkerRunEvent("legacy:child-thread-1", {
+  id: "event-5-original",
+  thread_id: "child-thread-1",
+  seq: 5,
+  kind: "token",
+  payload: { text: "stale" },
+  created_at: "2026-06-22 10:00:05",
+});
+useSessions.getState().setWorkerRunEvent("legacy:child-thread-1", {
+  id: "event-5-replayed",
+  thread_id: "child-thread-1",
+  seq: 5,
+  kind: "token",
+  payload: { text: "fresh" },
+  created_at: "2026-06-22 10:00:05",
+});
+childRun = useSessions
+  .getState()
+  .workerRuns.find((record) => record.run.id === "legacy:child-thread-1");
+equal(
+  childRun?.workers[0]?.events?.filter((event) => event.seq === 5).length,
+  1,
+  "worker event replay should deduplicate by sequence",
 );
 
 deepEqual(

@@ -1868,6 +1868,19 @@
   gap: 3px;
   min-width: 0;
 }
+.onboarding-model-picker {
+  display: grid;
+  gap: 6px;
+  min-height: 0;
+}
+.onboarding-model-picker .mp {
+  position: static;
+  width: 100%;
+  max-width: none;
+  height: min(220px, 28vh);
+  border-color: var(--border-primary);
+  box-shadow: none;
+}
 .onboarding-path-list,
 .onboarding-path-detail {
   display: grid;

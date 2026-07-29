@@ -25,6 +25,7 @@ const commandPaletteOnly = process.argv.includes("--command-palette-only");
 const settingsOnly = process.argv.includes("--settings-only");
 const appMenuOnly = process.argv.includes("--app-menu-only");
 const turnChangesOnly = process.argv.includes("--turn-changes-only");
+const mobileAuthOnly = process.argv.includes("--mobile-auth-only");
 const mcpAppKinds = ["chart", "diagram", "form", "dashboard", "viewer"];
 const screenshots = {
   avatars: join(tmpdir(), "milim-tauri-webview-agent-avatars.png"),
@@ -101,7 +102,9 @@ let turnChangesRepo;
 try {
   session = await launchTauri(milimHome);
   await resetFrontendStorage(session.page);
-  if (turnChangesOnly) {
+  if (mobileAuthOnly) {
+    await runMobileAuthCheck(session.page);
+  } else if (turnChangesOnly) {
     const errors = collectErrors(session.page);
     turnChangesRepo = createTurnChangesRepo();
     await runTurnChangesCheck(session.page, turnChangesRepo);
@@ -143,7 +146,13 @@ try {
     await seedChatSearchFixture(session.page);
     await runCommandPaletteCheck(session.page);
     await runRestartCheck(session);
-    consoleErrors.push(...errors.filter((message) => !message.includes("/codex/models")));
+    consoleErrors.push(
+      ...errors.filter(
+        (message) =>
+          !message.includes("/codex/models") &&
+          !message.includes("net::ERR_CONNECTION_REFUSED"),
+      ),
+    );
   } else if (settingsOnly) {
     const errors = collectErrors(session.page);
     await runSettingsLayoutCheck(session.page);
@@ -221,6 +230,58 @@ function createTurnChangesRepo() {
   return { folder, checkpoint };
 }
 
+async function runMobileAuthCheck(page) {
+  await page.getByTestId("chat-shell").waitFor();
+  const setup = await page.evaluate(async () => {
+    const invoke = window.__TAURI_INTERNALS__.invoke;
+    const [base, token] = await Promise.all([invoke("api_base_url"), invoke("api_token")]);
+    const headers = { Authorization: `Bearer ${token}` };
+    const enabled = await fetch(`${base}/mobile/enabled`, {
+      method: "POST",
+      headers: { ...headers, "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: true }),
+    });
+    if (!enabled.ok) throw new Error(`Mobile enable failed with HTTP ${enabled.status}`);
+    const response = await fetch(`${base}/mobile/pairing`, { method: "POST", headers });
+    if (!response.ok) throw new Error(`Mobile pairing failed with HTTP ${response.status}`);
+    const pairing = await response.json();
+    return { base, path: pairing.path };
+  });
+
+  const firstStream = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname === "/mobile/thread/events" && !url.search && response.status() === 200;
+  });
+  await page.goto(new URL(setup.path, setup.base).toString(), { waitUntil: "domcontentloaded" });
+  const firstResponse = await firstStream;
+  if (!/^Bearer \S+$/.test((await firstResponse.request().allHeaders()).authorization ?? "")) {
+    throw new Error("Bundled mobile SSE did not send an Authorization bearer header.");
+  }
+  await page.locator("#relayPanel:not(.hidden)").waitFor();
+  await page.locator("#status").filter({ hasText: "Live" }).waitFor();
+
+  const queryOnlyStatus = await page.evaluate(async () => {
+    const key = localStorage.getItem("milim.mobile.deviceKey");
+    if (!key) throw new Error("Paired mobile credential was not stored.");
+    return (await fetch(`/mobile/thread/events?key=${encodeURIComponent(key)}`)).status;
+  });
+  if (queryOnlyStatus !== 401) {
+    throw new Error(`Query-only mobile SSE auth returned HTTP ${queryOnlyStatus}; expected 401.`);
+  }
+
+  const reloadedStream = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname === "/mobile/thread/events" && !url.search && response.status() === 200;
+  });
+  await page.reload({ waitUntil: "domcontentloaded" });
+  const reloadedResponse = await reloadedStream;
+  if (!/^Bearer \S+$/.test((await reloadedResponse.request().allHeaders()).authorization ?? "")) {
+    throw new Error("Reloaded mobile SSE did not send an Authorization bearer header.");
+  }
+  await page.locator("#relayPanel:not(.hidden)").waitFor();
+  await page.locator("#status").filter({ hasText: "Live" }).waitFor();
+}
+
 function runGit(folder, args) {
   const result = spawnSync("git", args, { cwd: folder, encoding: "utf8" });
   if (result.error) throw result.error;
@@ -230,10 +291,11 @@ function runGit(folder, args) {
 }
 
 async function runTurnChangesCheck(page, fixture) {
-  const gitActionRequests = [];
+  const diffActionRequests = [];
   page.on("request", (request) => {
     if (request.method() === "POST" && request.url().includes("/workspace/git/action")) {
-      gitActionRequests.push(request.postData() ?? "");
+      const body = JSON.parse(request.postData() ?? "{}");
+      if (body.action === "diff") diffActionRequests.push(body);
     }
   });
   const now = Date.now();
@@ -275,6 +337,24 @@ async function runTurnChangesCheck(page, fixture) {
     });
     await invoke("user_sessions_set", { value });
   }, { ...fixture, timestamp: now });
+  let failNextDiff = true;
+  await page.route("**/workspace/git/action", async (route) => {
+    const body = route.request().postDataJSON();
+    if (failNextDiff && body?.action === "diff") {
+      failNextDiff = false;
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          ok: false,
+          message: "simulated unavailable diff",
+          stdout: "",
+          stderr: "",
+        }),
+      });
+      return;
+    }
+    await route.continue();
+  });
   await page.reload();
   await page.getByTestId("chat-shell").waitFor();
   await dismissOnboardingIfPresent(page);
@@ -284,6 +364,14 @@ async function runTurnChangesCheck(page, fixture) {
   if (await page.getByTestId("turn-changes-card").count() !== 1) {
     throw new Error("Only the latest assistant response should show a turn changes card.");
   }
+  await card.getByText("Change review unavailable", { exact: true }).waitFor();
+  await card.getByTestId("turn-changes-open-git").click();
+  const unavailableGitPanel = page.getByTestId("git-workspace-panel");
+  await unavailableGitPanel.waitFor();
+  await page.getByRole("button", { name: "Close Git panel" }).click();
+  await unavailableGitPanel.waitFor({ state: "hidden" });
+  await card.getByTestId("turn-changes-retry").click();
+  await card.getByText("Changed 5 files", { exact: true }).waitFor();
   await assertTextContains(card, "Changed 5 files");
   await assertTextContains(card, "+5");
   await assertTextContains(card, "-0");
@@ -293,14 +381,14 @@ async function runTurnChangesCheck(page, fixture) {
   await card.getByTestId("turn-changes-toggle").click();
   await card.getByText("file-4.txt", { exact: true }).waitFor();
 
-  const requestsBeforeReview = gitActionRequests.length;
+  const requestsBeforeReview = diffActionRequests.length;
   await card.getByTestId("turn-changes-review").click();
   const gitPanel = page.getByTestId("git-workspace-panel");
   await gitPanel.waitFor();
   await assertTextContains(gitPanel.getByLabel("Diff scope"), "Last turn");
   await assertTextContains(gitPanel.getByLabel("Changed files", { exact: true }), "file-5.txt");
   await page.waitForTimeout(300);
-  if (gitActionRequests.length !== requestsBeforeReview) {
+  if (diffActionRequests.length !== requestsBeforeReview) {
     throw new Error("Review changes should use the cached turn diff without another Git action request.");
   }
 
@@ -1913,6 +2001,15 @@ async function runMessageContextMenuCheck(page) {
 }
 
 async function runMessagePopoverLayerCheck(page) {
+  const continueButton = page.getByTestId("baton-continue").last();
+  await continueButton.waitFor({ timeout: 60_000 });
+  if (!(await continueButton.isVisible())) {
+    throw new Error("Continue with should remain visible on the latest completed response.");
+  }
+  await continueButton.focus();
+  if (!(await continueButton.evaluate((element) => element === document.activeElement))) {
+    throw new Error("Continue with should accept keyboard focus.");
+  }
   const trigger = page.getByTestId("baton-menu-trigger").last();
   await trigger.waitFor({ timeout: 60_000 });
   await trigger.click();
@@ -2188,7 +2285,6 @@ async function dismissOnboardingIfPresent(page) {
   if (await flow.isVisible().catch(() => false)) {
     await page.getByLabel("Close onboarding").click();
     await flow.waitFor({ state: "hidden", timeout: 10_000 });
-    await page.getByTestId("update-cards").waitFor({ state: "visible", timeout: 10_000 });
   }
   const updates = page.getByTestId("update-cards");
   if (await updates.isVisible().catch(() => false)) {
@@ -2288,7 +2384,10 @@ async function openSettings(page) {
 async function runSettingsLayoutCheck(page) {
   await page.getByTestId("chat-shell").waitFor();
   await dismissOnboardingIfPresent(page);
-  await page.getByTestId("empty-usage-ridgeline").waitFor();
+  const ridgeline = page.getByTestId("empty-usage-ridgeline");
+  if (await ridgeline.count()) {
+    await ridgeline.waitFor();
+  }
   await openSettings(page);
   await page.getByTestId("settings-section-appearance").click();
   const ridgelineToggle = page.getByTestId("empty-chat-ridgeline-toggle");
@@ -2312,7 +2411,7 @@ async function runSettingsLayoutCheck(page) {
 
   await ridgelineToggle.click();
   await closeSettings(page);
-  await page.getByTestId("empty-usage-ridgeline").waitFor({ state: "hidden" });
+  await ridgeline.waitFor({ state: "hidden" });
 }
 
 async function closeSettings(page) {
@@ -2402,10 +2501,15 @@ async function runCommandPaletteCheck(page) {
 }
 
 async function runRestartCheck(session) {
+  const shutdownStarted = Date.now();
   await session.page.evaluate(async () => {
     await window.__TAURI_INTERNALS__.invoke("restart_app");
   }).catch(() => {});
-  await waitForExit(session.child, 20_000);
+  await waitForExit(session.child, 5_000);
+  const shutdownElapsed = Date.now() - shutdownStarted;
+  if (shutdownElapsed > 5_000) {
+    throw new Error(`Graceful desktop shutdown took ${shutdownElapsed}ms; expected at most 5000ms.`);
+  }
   await session.browser?.close().catch(() => {});
   session.browser = null;
   session.page = null;

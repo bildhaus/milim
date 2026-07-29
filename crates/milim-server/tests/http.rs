@@ -456,6 +456,16 @@ async fn mobile_companion_pairs_relays_and_revokes_device() {
     let device_key = paired["device_key"].as_str().unwrap();
     assert_eq!(paired["device_name"], "Pixel QA");
 
+    let query_only_stream = client
+        .get(format!("{base}/mobile/thread/events?key={device_key}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        query_only_stream.status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+
     let paired_pwa: Value = client
         .post(format!("{base}/mobile/pair"))
         .json(&json!({
@@ -570,6 +580,15 @@ async fn mobile_companion_pairs_relays_and_revokes_device() {
     assert!(thread["thread"]["theme"]["css_vars"]["bad-key"].is_null());
     assert_eq!(thread["thread"]["theme"]["background_fit"], "contain");
     assert_eq!(thread["thread"]["theme"]["background_treatment"], "mono");
+
+    let bearer_stream = client
+        .get(format!("{base}/mobile/thread/events"))
+        .bearer_auth(device_key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bearer_stream.status(), reqwest::StatusCode::OK);
+    drop(bearer_stream);
 
     let switch: Value = client
         .post(format!("{base}/mobile/relay"))
@@ -712,6 +731,10 @@ async fn mobile_companion_phone_router_exposes_only_phone_routes() {
     assert!(page_text.contains("syncComposerInset"));
     assert!(page_text.contains("scroll-padding-bottom"));
     assert!(page_text.contains("overscroll-behavior: contain"));
+    assert!(page_text.contains("fetch(\"/mobile/thread/events\""));
+    assert!(page_text.contains("\"Authorization\": `Bearer ${store.key}`"));
+    assert!(!page_text.contains("new EventSource"));
+    assert!(!page_text.contains("/mobile/thread/events?key="));
     assert!(page_text.contains("renderMarkdown"));
     assert!(page_text.contains("safeHref"));
     assert!(page_text.contains("Scan desktop QR"));
@@ -1441,6 +1464,36 @@ fn reconstruct_sse(text: &str) -> String {
         }
     }
     out
+}
+
+async fn read_sse_thread_event_sequences(response: reqwest::Response, count: usize) -> Vec<i64> {
+    let mut chunks = response.bytes_stream();
+    let mut buffer = String::new();
+    let mut sequences = Vec::with_capacity(count);
+    while sequences.len() < count {
+        let chunk = tokio::time::timeout(Duration::from_secs(3), chunks.next())
+            .await
+            .expect("timed out waiting for SSE event")
+            .expect("SSE stream closed before replay completed")
+            .expect("failed to read SSE event");
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(newline) = buffer.find('\n') {
+            let line = buffer[..newline].trim().to_string();
+            buffer.drain(..=newline);
+            let Some(data) = line.strip_prefix("data:") else {
+                continue;
+            };
+            let event: Value = serde_json::from_str(data.trim()).unwrap();
+            let Some(seq) = event["event"]["seq"].as_i64() else {
+                continue;
+            };
+            sequences.push(seq);
+            if sequences.len() == count {
+                return sequences;
+            }
+        }
+    }
+    sequences
 }
 
 #[tokio::test]
@@ -5619,7 +5672,10 @@ async fn thread_supervisor_sweeps_interrupted_threads_on_restart() {
 
 #[tokio::test]
 async fn graceful_shutdown_marks_running_threads_stopped() {
-    use milim_agents::{THREAD_STATUS_RUNNING, THREAD_STATUS_STOPPED};
+    use milim_agents::{
+        DelegationPolicy, WorkerRunStatus, WorkerRuntime, THREAD_STATUS_RUNNING,
+        THREAD_STATUS_STOPPED,
+    };
     use milim_server::threads::ThreadSupervisor;
     use milim_storage::Database;
 
@@ -5633,6 +5689,19 @@ async fn graceful_shutdown_marks_running_threads_stopped() {
     store
         .update_status(&thread.id, THREAD_STATUS_RUNNING, None, None)
         .unwrap();
+    let worker_run = store
+        .create_worker_run(
+            "parent-1",
+            Some("turn-1"),
+            DelegationPolicy::Ask,
+            WorkerRuntime::Managed,
+            vec![],
+            None,
+        )
+        .unwrap();
+    store
+        .update_worker_run_status(&worker_run.id, WorkerRunStatus::Running, None)
+        .unwrap();
     let state = test_state().with_threads(supervisor.clone());
 
     milim_server::with_graceful_shutdown(state, async {}).await;
@@ -5641,6 +5710,12 @@ async fn graceful_shutdown_marks_running_threads_stopped() {
     assert_eq!(stopped.status, THREAD_STATUS_STOPPED);
     assert_eq!(stopped.error.as_deref(), Some("stopped by server shutdown"));
     assert!(stopped.finished_at.is_some());
+    let stopped_run = store.get_worker_run(&worker_run.id).unwrap().unwrap();
+    assert_eq!(stopped_run.status, WorkerRunStatus::Error);
+    assert_eq!(
+        stopped_run.error.as_deref(),
+        Some("stopped by server shutdown")
+    );
 }
 
 #[tokio::test]
@@ -5734,6 +5809,106 @@ async fn thread_events_stream_supervisor_updates() {
     assert!(text.contains("\"type\":\"child_thread_event\""), "{text}");
     assert!(text.contains("\"type\":\"child_thread_done\""), "{text}");
     assert!(text.contains("Echo: hello child"), "{text}");
+}
+
+#[tokio::test]
+async fn child_event_stream_reconciles_terminal_state_without_a_live_broadcast() {
+    use milim_server::threads::ThreadSupervisor;
+    use milim_storage::Database;
+
+    let supervisor = ThreadSupervisor::new(
+        milim_agents::ThreadStore::new(Database::open_in_memory().unwrap()).unwrap(),
+    );
+    let store = supervisor.store();
+    let child = store
+        .create("parent-1", "Stopped child", "test-echo", None, "stop")
+        .unwrap();
+    store
+        .update_status(
+            &child.id,
+            milim_agents::THREAD_STATUS_STOPPED,
+            None,
+            Some("stopped while disconnected"),
+        )
+        .unwrap();
+
+    let base = spawn(test_state().with_threads(supervisor)).await;
+    let response = reqwest::Client::new()
+        .get(format!("{base}/threads/parent-1/events"))
+        .send()
+        .await
+        .unwrap();
+    let mut chunks = response.bytes_stream();
+    let mut event = String::new();
+    while !event.contains("\"type\":\"child_thread_stopped\"") {
+        let chunk = tokio::time::timeout(Duration::from_secs(1), chunks.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        event.push_str(&String::from_utf8_lossy(&chunk));
+    }
+    assert!(event.contains("stopped while disconnected"), "{event}");
+}
+
+#[tokio::test]
+async fn worker_event_stream_replays_2505_events_once_across_three_disconnects() {
+    use milim_agents::{DelegationPolicy, WorkerAccess, WorkerRuntime};
+    use milim_server::threads::ThreadSupervisor;
+    use milim_storage::Database;
+
+    let supervisor = ThreadSupervisor::new(
+        milim_agents::ThreadStore::new(Database::open_in_memory().unwrap()).unwrap(),
+    );
+    let store = supervisor.store();
+    let run = store
+        .create_worker_run(
+            "parent-1",
+            Some("turn-1"),
+            DelegationPolicy::Ask,
+            WorkerRuntime::Managed,
+            vec![],
+            None,
+        )
+        .unwrap();
+    let worker = store
+        .create_worker(
+            "parent-1",
+            "Replay worker",
+            "test-echo",
+            None,
+            "replay",
+            Some(&run.id),
+            WorkerRuntime::Managed,
+            WorkerAccess::ReadOnly,
+        )
+        .unwrap();
+    for index in 0..2_505 {
+        store
+            .append_event(&worker.id, "token", json!({ "index": index }))
+            .unwrap();
+    }
+
+    let base = spawn(test_state().with_threads(supervisor)).await;
+    let client = reqwest::Client::new();
+    let mut cursor = 0;
+    let mut received = Vec::with_capacity(2_505);
+    for count in [600, 700, 800, 405] {
+        let response = client
+            .get(format!(
+                "{base}/worker-runs/{}/events?after_seq={cursor}&event_limit=1000",
+                run.id
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        let batch = read_sse_thread_event_sequences(response, count).await;
+        cursor = *batch.last().unwrap();
+        received.extend(batch);
+    }
+
+    assert_eq!(received, (1..=2_505).collect::<Vec<_>>());
 }
 
 #[tokio::test]
@@ -6081,7 +6256,9 @@ async fn agent_run_open_mode_child_inherits_parent_tools_without_child_spawn() {
         milim_agents::ThreadStore::new(Database::open_in_memory().unwrap()).unwrap(),
     );
     let store = supervisor.store();
-    let workspace = Arc::new(RwLock::new(Some(unique_temp_path("milim-workspace"))));
+    let workspace_path = unique_temp_path("milim-workspace");
+    fs::create_dir_all(&workspace_path).unwrap();
+    let workspace = Arc::new(RwLock::new(Some(workspace_path.clone())));
     let mut tools = ToolRegistry::with_builtins();
     for name in ["read_file", "list_dir", "write_file", "shell"] {
         tools.register(Arc::new(NamedTestTool { name }));
@@ -6121,6 +6298,7 @@ async fn agent_run_open_mode_child_inherits_parent_tools_without_child_spawn() {
     assert!(!summary.contains("shell"), "{summary}");
     assert!(!summary.contains("write_file"), "{summary}");
     assert!(!summary.contains("delegate_workers"), "{summary}");
+    fs::remove_dir_all(workspace_path).unwrap();
 }
 
 #[tokio::test]
@@ -6133,7 +6311,9 @@ async fn agent_run_guarded_mode_child_stays_read_only() {
         milim_agents::ThreadStore::new(Database::open_in_memory().unwrap()).unwrap(),
     );
     let store = supervisor.store();
-    let workspace = Arc::new(RwLock::new(Some(unique_temp_path("milim-workspace"))));
+    let workspace_path = unique_temp_path("milim-workspace");
+    fs::create_dir_all(&workspace_path).unwrap();
+    let workspace = Arc::new(RwLock::new(Some(workspace_path.clone())));
     let mut tools = ToolRegistry::with_builtins();
     for name in ["read_file", "list_dir", "write_file", "shell"] {
         tools.register(Arc::new(NamedTestTool { name }));
@@ -6174,6 +6354,7 @@ async fn agent_run_guarded_mode_child_stays_read_only() {
     assert!(summary.contains("list_dir"), "{summary}");
     assert!(!summary.contains("write_file"), "{summary}");
     assert!(!summary.contains("shell"), "{summary}");
+    fs::remove_dir_all(workspace_path).unwrap();
 }
 
 #[tokio::test]

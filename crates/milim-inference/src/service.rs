@@ -106,6 +106,12 @@ pub trait ModelService: Send + Sync {
     /// Stable backend label (e.g. `"test"`, `"openai"`, `"ollama"`).
     fn name(&self) -> &str;
 
+    /// Whether requests to this backend cross the machine boundary and must
+    /// pass through Milim's outbound privacy gate.
+    fn requires_privacy_gate(&self) -> bool {
+        false
+    }
+
     /// Models this backend can serve.
     async fn list_models(&self) -> Result<Vec<Model>>;
 

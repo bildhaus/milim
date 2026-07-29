@@ -239,6 +239,13 @@ impl ProviderRegistry {
         }
     }
 
+    /// A router whose privacy mode is fixed for one request/run.
+    pub fn router_with_privacy(&self, mode: PrivacyMode) -> ProviderRouter {
+        let gate = Arc::new(PrivacyGate::default());
+        gate.set(mode);
+        self.router(gate)
+    }
+
     /// All providers (keys included — callers redact before returning to UIs).
     pub async fn list(&self) -> Vec<Provider> {
         self.inner
@@ -323,39 +330,22 @@ impl ProviderRegistry {
         let refreshed = !configs.is_empty();
         for cfg in configs {
             let backend = backend_for(&cfg);
-            let (models, pricing, model_context, model_reasoning, model_capabilities, err) =
-                match backend.list_models().await {
-                    Ok(ms) => {
-                        let model_context = collect_model_context(&ms);
-                        let model_reasoning = collect_model_reasoning(&ms, &cfg);
-                        let model_capabilities = collect_model_capabilities(&ms);
-                        let pricing = collect_pricing(&ms, is_openrouter_provider(&cfg));
-                        (
-                            ms.into_iter().map(|m| m.id).collect::<Vec<_>>(),
-                            pricing,
-                            model_context,
-                            model_reasoning,
-                            model_capabilities,
-                            None,
-                        )
-                    }
-                    Err(e) => (
-                        Vec::new(),
-                        BTreeMap::new(),
-                        BTreeMap::new(),
-                        BTreeMap::new(),
-                        BTreeMap::new(),
-                        Some(e.to_string()),
-                    ),
-                };
+            let result = backend.list_models().await;
             let mut w = self.inner.write().await;
             if let Some(rt) = w.iter_mut().find(|rt| rt.cfg.id == cfg.id) {
-                rt.cfg.models = models;
-                rt.cfg.pricing = pricing;
-                rt.cfg.model_context = model_context;
-                rt.cfg.model_reasoning = model_reasoning;
-                rt.cfg.model_capabilities = model_capabilities;
-                rt.cfg.last_error = err;
+                match result {
+                    Ok(models) => {
+                        rt.cfg.model_context = collect_model_context(&models);
+                        rt.cfg.model_reasoning = collect_model_reasoning(&models, &cfg);
+                        rt.cfg.model_capabilities = collect_model_capabilities(&models);
+                        rt.cfg.pricing = collect_pricing(&models, is_openrouter_provider(&cfg));
+                        rt.cfg.models = models.into_iter().map(|model| model.id).collect();
+                        rt.cfg.last_error = None;
+                    }
+                    Err(error) => {
+                        rt.cfg.last_error = Some(error.to_string());
+                    }
+                }
             }
         }
         let snapshot = self
@@ -778,14 +768,15 @@ impl ModelService for ProviderRouter {
         if let Some((_, model_id)) = routed {
             req.model = model_id;
         }
-        // Local backends never leave the machine, so they bypass the gate.
         let Some(remote) = backend else {
             if provider_qualified {
                 return Err(Error::InvalidRequest(
                     "selected provider model is not available".to_string(),
                 ));
             }
-            return self.local.stream(req).await;
+            return privacy::scoped_service(self.local.clone(), self.privacy.mode())
+                .stream(req)
+                .await;
         };
         // Remote: enforce the outbound privacy gate before sending.
         match self.privacy.mode() {
@@ -891,7 +882,9 @@ impl ModelService for ProviderRouter {
                     "selected provider model is not available".to_string(),
                 ));
             }
-            return self.local.embed(model_id, inputs).await;
+            return privacy::scoped_service(self.local.clone(), self.privacy.mode())
+                .embed(model_id, inputs)
+                .await;
         };
         match self.privacy.mode() {
             PrivacyMode::Off => remote.embed(model_id, inputs).await,
@@ -937,6 +930,10 @@ mod tests {
     impl ModelService for RecordingBackend {
         fn name(&self) -> &str {
             "recording"
+        }
+
+        fn requires_privacy_gate(&self) -> bool {
+            true
         }
 
         async fn list_models(&self) -> Result<Vec<Model>> {
@@ -1003,6 +1000,39 @@ mod tests {
         registry.inner.write().await[0].cfg.enabled = true;
         assert!(registry.refresh_all().await.unwrap());
         assert!(registry.list().await[0].last_error.is_some());
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn refresh_all_keeps_cached_models_when_refresh_fails() {
+        let root = std::env::temp_dir().join(format!(
+            "milim-provider-refresh-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut cfg = provider(
+            "unreachable",
+            ProviderKind::OpenAiCompatible,
+            "not a valid url",
+        );
+        cfg.models = vec!["cached-model".to_string()];
+        let registry = ProviderRegistry {
+            inner: Arc::new(RwLock::new(vec![Runtime {
+                backend: backend_for(&cfg),
+                cfg,
+            }])),
+            local: Arc::new(milim_inference::unavailable::UnavailableBackend::new()),
+            store: ProviderStore::open(&root).unwrap(),
+        };
+
+        assert!(registry.refresh_all().await.unwrap());
+        let refreshed = registry.list().await;
+        assert_eq!(refreshed[0].models, ["cached-model"]);
+        assert!(refreshed[0].last_error.is_some());
 
         std::fs::remove_dir_all(root).ok();
     }
@@ -1109,6 +1139,132 @@ mod tests {
         assert_eq!(inputs.len(), 1);
         assert!(inputs[0][0].contains("[EMAIL_1]"));
         assert!(!inputs[0][0].contains("person@example.com"));
+    }
+
+    #[tokio::test]
+    async fn router_applies_privacy_to_remote_fallback() {
+        let inputs = Arc::new(Mutex::new(Vec::new()));
+        let models = Arc::new(Mutex::new(Vec::new()));
+        let privacy = Arc::new(PrivacyGate::default());
+        privacy.set(PrivacyMode::Redact);
+        let router = ProviderRouter {
+            inner: Arc::new(RwLock::new(Vec::new())),
+            local: Arc::new(RecordingBackend {
+                inputs: inputs.clone(),
+                models: models.clone(),
+            }),
+            privacy: privacy.clone(),
+        };
+
+        router
+            .embed(
+                "fallback-model",
+                vec!["email person@example.com".to_string()],
+            )
+            .await
+            .unwrap();
+        {
+            let recorded = inputs.lock().unwrap();
+            assert_eq!(recorded.len(), 1);
+            assert_eq!(recorded[0], ["email [EMAIL_1]"]);
+        }
+
+        privacy.set(PrivacyMode::Block);
+        let error = router
+            .stream(CompletionRequest {
+                model: "fallback-model".to_string(),
+                messages: vec![ChatMessage::text("user", "email person@example.com")],
+                tools: Vec::new(),
+                tool_choice: None,
+                response_format: None,
+                prompt: None,
+                suffix: None,
+                sampling: Default::default(),
+                reasoning_effort: None,
+            })
+            .await
+            .err()
+            .expect("remote fallback should be blocked");
+        assert!(error.to_string().contains("blocked by the privacy gate"));
+        assert!(models.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn request_scoped_routers_keep_privacy_modes_independent() {
+        let root = std::env::temp_dir().join(format!(
+            "milim-provider-privacy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let inputs = Arc::new(Mutex::new(Vec::new()));
+        let mut cfg = provider(
+            "OpenAI",
+            ProviderKind::OpenAiCompatible,
+            "https://api.openai.com/v1",
+        );
+        cfg.models = vec!["text-embedding-3-small".to_string()];
+        let registry = ProviderRegistry {
+            inner: Arc::new(RwLock::new(vec![Runtime {
+                cfg,
+                backend: Arc::new(RecordingBackend {
+                    inputs: inputs.clone(),
+                    models: Arc::new(Mutex::new(Vec::new())),
+                }),
+            }])),
+            local: Arc::new(milim_inference::unavailable::UnavailableBackend::new()),
+            store: ProviderStore::open(&root).unwrap(),
+        };
+        let off = registry.router_with_privacy(PrivacyMode::Off);
+        let redact = registry.router_with_privacy(PrivacyMode::Redact);
+
+        for index in 0..100 {
+            let (off_result, redact_result) = tokio::join!(
+                off.embed(
+                    "text-embedding-3-small",
+                    vec![format!("off-{index}@example.com")]
+                ),
+                redact.embed(
+                    "text-embedding-3-small",
+                    vec![format!("redact-{index}@example.com")]
+                )
+            );
+            off_result.unwrap();
+            redact_result.unwrap();
+        }
+
+        let inputs = inputs.lock().unwrap();
+        assert_eq!(inputs.len(), 200);
+        assert_eq!(
+            inputs
+                .iter()
+                .flatten()
+                .filter(|input| input.as_str() == "[EMAIL_1]")
+                .count(),
+            100
+        );
+        assert_eq!(
+            inputs
+                .iter()
+                .flatten()
+                .filter(|input| input.starts_with("off-"))
+                .count(),
+            100
+        );
+        assert!(!inputs
+            .iter()
+            .flatten()
+            .any(|input| input.starts_with("redact-")));
+        for index in 0..100 {
+            assert!(inputs
+                .iter()
+                .flatten()
+                .any(|input| input == &format!("off-{index}@example.com")));
+        }
+        drop(inputs);
+        std::fs::remove_dir_all(root).ok();
     }
 
     fn image_completion_request(model: &str) -> CompletionRequest {

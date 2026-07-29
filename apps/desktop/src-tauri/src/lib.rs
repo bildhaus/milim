@@ -24,7 +24,8 @@ use std::io::{self, Read};
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -74,7 +75,7 @@ fn diagnostics_path() -> std::result::Result<String, String> {
 
 #[tauri::command]
 fn restart_app(app: tauri::AppHandle) {
-    restart_after_preview_cleanup(app);
+    restart_after_server_shutdown(app);
 }
 
 #[tauri::command]
@@ -98,9 +99,74 @@ struct UserDataState(Arc<milim_storage::UserDataStore>);
 
 struct DesktopPreviewRuntime(Arc<milim_server::preview_runtime::PreviewRuntimeManager>);
 
+struct DesktopServerRuntime(Arc<DesktopServerRuntimeState>);
+
+struct DesktopServerRuntimeState {
+    shutdown: tokio::sync::watch::Sender<bool>,
+    tasks: Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>,
+    finishing: AtomicBool,
+}
+
+impl DesktopServerRuntimeState {
+    fn new() -> Arc<Self> {
+        let (shutdown, _) = tokio::sync::watch::channel(false);
+        Arc::new(Self {
+            shutdown,
+            tasks: Mutex::new(Vec::new()),
+            finishing: AtomicBool::new(false),
+        })
+    }
+
+    fn subscribe(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.shutdown.subscribe()
+    }
+
+    fn register(&self, task: tauri::async_runtime::JoinHandle<()>) {
+        self.tasks
+            .lock()
+            .expect("desktop server tasks poisoned")
+            .push(task);
+    }
+
+    async fn shutdown(
+        &self,
+        preview_runtime: Arc<milim_server::preview_runtime::PreviewRuntimeManager>,
+    ) {
+        let _ = self.shutdown.send(true);
+        let mut tasks =
+            std::mem::take(&mut *self.tasks.lock().expect("desktop server tasks poisoned"));
+        let cleanup = async {
+            for task in &mut tasks {
+                if let Err(error) = task.await {
+                    tracing::warn!("embedded server shutdown task failed: {error}");
+                }
+            }
+            if let Err(error) = preview_runtime.stop_all().await {
+                tracing::warn!("failed to stop preview apps during desktop shutdown: {error}");
+            }
+        };
+        if tokio::time::timeout(DESKTOP_SERVER_SHUTDOWN_TIMEOUT, cleanup)
+            .await
+            .is_err()
+        {
+            tracing::warn!("desktop shutdown exceeded its cleanup deadline");
+            for task in tasks {
+                task.abort();
+            }
+        }
+    }
+}
+
+async fn wait_for_desktop_shutdown(mut shutdown: tokio::sync::watch::Receiver<bool>) {
+    let shutting_down = *shutdown.borrow();
+    if !shutting_down {
+        let _ = shutdown.changed().await;
+    }
+}
+
 #[tauri::command]
 fn quit_after_user_state_flush(app: tauri::AppHandle) {
-    exit_after_preview_cleanup(app);
+    exit_after_server_shutdown(app);
 }
 
 #[tauri::command]
@@ -115,6 +181,8 @@ const TRAY_OPEN_ID: &str = "open";
 const TRAY_QUIT_ID: &str = "quit";
 const FLUSH_USER_STATE_EVENT: &str = "milim://flush-user-state";
 const FLUSH_USER_STATE_AND_EXIT_EVENT: &str = "milim://flush-user-state-and-exit";
+const USER_STATE_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
+const DESKTOP_SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const RUNTIME_FAILED_EVENT: &str = "milim://runtime-failed";
 const APP_MENU_EVENT: &str = "milim://menu-action";
 const APP_MENU_NEW_CHAT_ID: &str = "app.new-chat";
@@ -3371,7 +3439,7 @@ rm -rf "$backup"
                 .map_err(|e| e.to_string())?;
         }
 
-        exit_after_preview_cleanup(app);
+        exit_after_server_shutdown(app);
         Ok(())
     }
 }
@@ -3747,32 +3815,44 @@ fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     }
 }
 
-fn exit_after_preview_cleanup<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+#[derive(Clone, Copy)]
+enum DesktopFinishAction {
+    Exit,
+    Restart,
+}
+
+fn finish_after_server_shutdown<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    action: DesktopFinishAction,
+) {
+    let server_runtime = app.state::<DesktopServerRuntime>().0.clone();
+    if server_runtime.finishing.swap(true, Ordering::AcqRel) {
+        return;
+    }
     let preview_runtime = app.state::<DesktopPreviewRuntime>().0.clone();
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = preview_runtime.stop_all().await {
-            tracing::warn!("failed to stop preview apps during desktop shutdown: {error}");
+        server_runtime.shutdown(preview_runtime).await;
+        match action {
+            DesktopFinishAction::Exit => app.exit(0),
+            DesktopFinishAction::Restart => app.restart(),
         }
-        app.exit(0);
     });
 }
 
-fn restart_after_preview_cleanup<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
-    let preview_runtime = app.state::<DesktopPreviewRuntime>().0.clone();
-    tauri::async_runtime::spawn(async move {
-        if let Err(error) = preview_runtime.stop_all().await {
-            tracing::warn!("failed to stop preview apps before desktop restart: {error}");
-        }
-        app.restart();
-    });
+fn exit_after_server_shutdown<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    finish_after_server_shutdown(app, DesktopFinishAction::Exit);
+}
+
+fn restart_after_server_shutdown<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    finish_after_server_shutdown(app, DesktopFinishAction::Restart);
 }
 
 fn request_user_state_flush_then_exit<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     let _ = app.emit(FLUSH_USER_STATE_AND_EXIT_EVENT, ());
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        exit_after_preview_cleanup(app);
+        tokio::time::sleep(USER_STATE_FLUSH_TIMEOUT).await;
+        exit_after_server_shutdown(app);
     });
 }
 
@@ -3987,6 +4067,7 @@ pub fn run() {
     let mobile_startup_companion = state.mobile_companion.clone();
     let mobile_startup_target = mobile_local_target.clone();
     let user_data = open_user_data_store().expect("initialize user data store");
+    let server_runtime = DesktopServerRuntimeState::new();
 
     tauri::Builder::default()
         .manage(DesktopApiToken(api_key))
@@ -3996,6 +4077,7 @@ pub fn run() {
         .manage(MobileRelayLocalTarget(mobile_local_target))
         .manage(UserDataState(user_data))
         .manage(DesktopPreviewRuntime(preview_runtime))
+        .manage(DesktopServerRuntime(server_runtime.clone()))
         .manage(preview_tools_state.clone())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -4018,36 +4100,51 @@ pub fn run() {
                     milim_server::scheduler_loop(scheduler_state).await;
                 });
             }
-            // Run the HTTP server on Tauri's async runtime for the app's lifetime.
+            // Run both embedded servers until desktop shutdown signals them.
             let server_app = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                match tokio::net::TcpListener::from_std(server_listener) {
-                    Ok(listener) => {
-                        if let Err(e) = milim_server::serve_listener(state, listener).await {
-                            tracing::error!("embedded milim server error: {e}");
+            let main_shutdown = server_runtime.subscribe();
+            let mobile_shutdown = server_runtime.subscribe();
+            let server_task = tauri::async_runtime::spawn(async move {
+                let main_server = async move {
+                    match tokio::net::TcpListener::from_std(server_listener) {
+                        Ok(listener) => {
+                            if let Err(e) = milim_server::serve_listener_with_graceful_shutdown(
+                                state,
+                                listener,
+                                wait_for_desktop_shutdown(main_shutdown),
+                            )
+                            .await
+                            {
+                                tracing::error!("embedded milim server error: {e}");
+                                let _ = server_app.emit(RUNTIME_FAILED_EVENT, ());
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("embedded milim server listener error: {e}");
                             let _ = server_app.emit(RUNTIME_FAILED_EVENT, ());
                         }
                     }
-                    Err(e) => {
-                        tracing::error!("embedded milim server listener error: {e}");
-                        let _ = server_app.emit(RUNTIME_FAILED_EVENT, ());
-                    }
-                }
-            });
-            // Separate phone-facing server. Tailscale Serve targets this, not the full API.
-            tauri::async_runtime::spawn(async move {
-                match tokio::net::TcpListener::from_std(mobile_listener) {
-                    Ok(listener) => {
-                        if let Err(e) =
-                            milim_server::serve_mobile_companion_listener(mobile_state, listener)
+                };
+                let mobile_server = async move {
+                    match tokio::net::TcpListener::from_std(mobile_listener) {
+                        Ok(listener) => {
+                            if let Err(e) =
+                                milim_server::serve_mobile_companion_listener_with_graceful_shutdown(
+                                    mobile_state,
+                                    listener,
+                                    wait_for_desktop_shutdown(mobile_shutdown),
+                                )
                                 .await
-                        {
-                            tracing::warn!("embedded mobile relay server error: {e}");
+                            {
+                                tracing::warn!("embedded mobile relay server error: {e}");
+                            }
                         }
+                        Err(e) => tracing::warn!("embedded mobile relay listener error: {e}"),
                     }
-                    Err(e) => tracing::warn!("embedded mobile relay listener error: {e}"),
-                }
+                };
+                tokio::join!(main_server, mobile_server);
             });
+            server_runtime.register(server_task);
             if let Some(companion) = mobile_startup_companion {
                 tauri::async_runtime::spawn(async move {
                     if companion.status(milim_server::now_unix()).enabled {
@@ -4140,6 +4237,31 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running milim desktop");
+}
+
+#[cfg(test)]
+mod desktop_shutdown_tests {
+    use super::*;
+
+    #[test]
+    fn desktop_shutdown_deadline_is_at_most_five_seconds() {
+        assert!(
+            USER_STATE_FLUSH_TIMEOUT + DESKTOP_SERVER_SHUTDOWN_TIMEOUT <= Duration::from_secs(5)
+        );
+    }
+
+    #[tokio::test]
+    async fn desktop_shutdown_signal_releases_server_waiters() {
+        let runtime = DesktopServerRuntimeState::new();
+        let waiter = tokio::spawn(wait_for_desktop_shutdown(runtime.subscribe()));
+
+        runtime.shutdown.send(true).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("shutdown waiter timed out")
+            .unwrap();
+    }
 }
 
 #[cfg(test)]

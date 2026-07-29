@@ -47,7 +47,10 @@ import { AssistantMessage } from "./AssistantMessage";
 import { ArtifactList } from "./ArtifactList";
 import { GeneratedMedia } from "./GeneratedMedia";
 import { RunTimeline } from "./RunTimeline";
-import { TurnChangesCard, type TurnChanges } from "./TurnChangesCard";
+import {
+  TurnChangesCard,
+  type TurnReviewState,
+} from "./TurnChangesCard";
 import { BatonMenu } from "./HotSwapDialogs";
 import type { ContextMenuItem } from "./ContextMenu";
 import {
@@ -180,6 +183,8 @@ export type MessageRowActions = {
     checkpoint: WorkspaceCheckpoint,
     result: WorkspaceGitActionResult,
   ) => void;
+  retryTurnReview: () => void;
+  openGit: () => void;
   editResend: (messageIndex: number, text: string) => void;
   editMessageInPlace: (messageIndex: number, text: string) => void;
   approveToolApproval: (messageIndex: number, message: ChatMessage) => void;
@@ -225,7 +230,7 @@ type MessageRowProps = {
   previewAppBusy: "start" | "stop" | "restart" | null;
   previewAppStatus: PreviewAppStatus | null;
   toolApproval: ToolApprovalMode;
-  turnChanges?: TurnChanges | null;
+  turnReview?: TurnReviewState | null;
   actionsRef: MutableRefObject<MessageRowActions | null>;
 };
 
@@ -245,7 +250,7 @@ function MessageRowView({
   previewAppBusy,
   previewAppStatus,
   toolApproval,
-  turnChanges,
+  turnReview,
   actionsRef,
 }: MessageRowProps) {
   markPerfRender("MessageRow");
@@ -579,21 +584,31 @@ function MessageRowView({
                 </button>
               </div>
             )}
-            {turnChanges && (
+            {turnReview && (
               <TurnChangesCard
-                sections={turnChanges.sections}
-                stats={turnChanges.stats}
+                review={turnReview}
                 onUndo={() => void actions?.undoTurnChanges(i)}
-                onReview={() =>
-                  actions?.reviewTurnChanges(
-                    turnChanges.checkpoint,
-                    turnChanges.result,
-                  )
-                }
+                onReview={() => {
+                  if (turnReview.status === "ready")
+                    actions?.reviewTurnChanges(
+                      turnReview.checkpoint,
+                      turnReview.result,
+                    );
+                }}
+                onRetry={() => actions?.retryTurnReview()}
+                onOpenGit={() => actions?.openGit()}
               />
             )}
             {metricsLabel && (
               <div className="response-metrics">{metricsLabel}</div>
+            )}
+            {isLastAssistant && !busy && (
+              <BatonMenu
+                retryDisabled={
+                  !folderIsEmpty && !m.workspaceCheckpoint && !m.plan
+                }
+                onAction={(action) => actions?.startBaton(action, i)}
+              />
             )}
           </>
         ) : (
@@ -628,7 +643,7 @@ function MessageRowView({
             <span>Execute plan</span>
           </button>
         )}
-        {m.workspaceCheckpoint && !busy && !turnChanges && (
+        {m.workspaceCheckpoint && !busy && !turnReview && (
           <button
             className="msg-act"
             title="Restore workspace to before this turn"
@@ -695,12 +710,6 @@ function MessageRowView({
           </button>
         )}
         {isLastAssistant && !busy && (
-          <BatonMenu
-            retryDisabled={!folderIsEmpty && !m.workspaceCheckpoint && !m.plan}
-            onAction={(action) => actions?.startBaton(action, i)}
-          />
-        )}
-        {isLastAssistant && !busy && (
           <button
             className="msg-act"
             title="Regenerate"
@@ -732,7 +741,7 @@ export const MessageRow = memo(
     prev.previewAppBusy === next.previewAppBusy &&
     prev.previewAppStatus === next.previewAppStatus &&
     prev.toolApproval === next.toolApproval &&
-    prev.turnChanges === next.turnChanges &&
+    prev.turnReview === next.turnReview &&
     prev.actionsRef === next.actionsRef,
 );
 

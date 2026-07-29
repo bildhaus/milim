@@ -290,6 +290,26 @@ impl ModelService for RemoteBackend {
         &self.label
     }
 
+    fn requires_privacy_gate(&self) -> bool {
+        let Ok(url) = reqwest::Url::parse(&self.base_url) else {
+            return true;
+        };
+        let Some(host) = url.host_str() else {
+            return true;
+        };
+        if host.eq_ignore_ascii_case("localhost")
+            || host
+                .to_ascii_lowercase()
+                .strip_suffix(".localhost")
+                .is_some()
+        {
+            return false;
+        }
+        host.parse::<std::net::IpAddr>()
+            .map(|ip| !ip.is_loopback())
+            .unwrap_or(true)
+    }
+
     async fn list_models(&self) -> Result<Vec<Model>> {
         let resp = self
             .auth(self.client.get(self.endpoint("models")))
@@ -1574,6 +1594,20 @@ mod tests {
         assert!(matches!(parse_sse_line("event: foo"), LineOutcome::Ignore));
         let line = r#"data: {"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"hi"}}]}"#;
         assert!(matches!(parse_sse_line(line), LineOutcome::Event(_)));
+    }
+
+    #[test]
+    fn privacy_gate_boundary_distinguishes_loopback_endpoints() {
+        assert!(
+            !RemoteBackend::new("local", "http://localhost:11434/v1", None).requires_privacy_gate()
+        );
+        assert!(
+            !RemoteBackend::new("local", "http://127.0.0.1:1234/v1", None).requires_privacy_gate()
+        );
+        assert!(
+            RemoteBackend::new("remote", "https://api.openai.com/v1", None).requires_privacy_gate()
+        );
+        assert!(RemoteBackend::new("invalid", "not a valid url", None).requires_privacy_gate());
     }
 
     #[test]

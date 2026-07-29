@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import type {
   AgentEvent,
+  AgentToolContext,
   ChatMessage,
   ChatStreamPart,
   CodexRunEvent,
@@ -27,6 +28,7 @@ import {
   runModelChatTurn,
   runSelectedAccountRuntimeTurn,
   runToolAgentTurn,
+  utilityAccountRuntimeMilimContext,
 } from "../src/lib/turnRuntime.js";
 
 const runtimeDelta = accountRuntimePromptMessages(
@@ -441,6 +443,7 @@ let streamedModel = "";
 let streamedUsage: TokenUsage | undefined;
 let preparedModelSignal: AbortSignal | undefined;
 let streamedModelSignal: AbortSignal | undefined;
+let streamedToolContext: AgentToolContext | undefined;
 await runModelChatTurn({
   promptContext: {
     instructionMessages: [{ role: "system", content: "Be terse." }],
@@ -454,7 +457,11 @@ await runModelChatTurn({
     useTools: false,
     accountRuntimeMayUseTools: false,
     runMemoryContext: {},
-    toolContext: {},
+    toolContext: {
+      workspace: "C:\\repo-a",
+      privacy_mode: "block",
+      tool_approval_policy: "review",
+    },
   },
   conversation: [{ role: "user", content: "hello" }],
   prepareOutbound: async (contextMessages, conversation, options) => {
@@ -473,8 +480,10 @@ await runModelChatTurn({
     onThinking,
     onUsage,
     reasoningEffort,
+    toolContext,
   ) => {
     streamedModelSignal = signal;
+    streamedToolContext = toolContext;
     streamedModel = `${model}:${reasoningEffort ?? ""}`;
     streamedMessages = messages;
     onToken("token");
@@ -499,6 +508,11 @@ assert.deepEqual(modelOrder, [
 assert.equal(streamedModel, "model-a:low");
 assert.equal(preparedModelSignal, modelSignal);
 assert.equal(streamedModelSignal, modelSignal);
+assert.deepEqual(streamedToolContext, {
+  workspace: "C:\\repo-a",
+  privacy_mode: "block",
+  tool_approval_policy: "review",
+});
 assert.deepEqual(streamedMessages, [{ role: "system", content: "Be terse." }]);
 assert.equal(streamedUsage?.total_tokens, 5);
 
@@ -723,23 +737,55 @@ assert.equal(
   "Claude CLI not on PATH",
 );
 
+const compactionToolContext: AgentToolContext = {
+  workspace: "C:\\work",
+  privacy_mode: "block",
+};
 const codexSummaryRequest = codexCompactionSummaryRequest({
   model: "gpt-5",
   prompt: "summarize",
   cwd: "C:\\work",
   reasoningEffort: "low",
+  toolContext: compactionToolContext,
 });
 assert.equal(codexSummaryRequest.thread_id, undefined);
 assert.equal(codexSummaryRequest.persist_thread, false);
 assert.equal(codexSummaryRequest.plan_mode, true);
+assert.deepEqual(codexSummaryRequest.milim_context?.tool_context, {
+  ...compactionToolContext,
+  tool_approval_policy: "guarded",
+  tool_approval_grant: false,
+  interactive_tool_approval: false,
+  plan_mode: true,
+});
+assert.equal(codexSummaryRequest.milim_context?.tool_mode, "none");
 const claudeSummaryRequest = claudeCompactionSummaryRequest({
   model: "sonnet",
   prompt: "summarize",
   cwd: "C:\\work",
   reasoningEffort: "medium",
+  toolContext: compactionToolContext,
 });
 assert.equal(claudeSummaryRequest.session_id, undefined);
 assert.equal(claudeSummaryRequest.plan_mode, true);
+assert.equal(
+  claudeSummaryRequest.milim_context?.tool_context.privacy_mode,
+  "block",
+);
+assert.deepEqual(
+  utilityAccountRuntimeMilimContext({
+    toolContext: compactionToolContext,
+    toolApproval: "review",
+    planMode: false,
+  }).tool_context,
+  {
+    ...compactionToolContext,
+    tool_approval_policy: "review",
+    tool_approval_grant: false,
+    interactive_tool_approval: false,
+    plan_mode: false,
+  },
+);
 
 let selectedCodexThread = "";
 let selectedClaudeSessions = 0;

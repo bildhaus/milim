@@ -4024,6 +4024,14 @@ html[data-dark="true"] .preview-control-cursor {
   font-size: 12px;
   font-weight: 650;
 }
+.turn-changes-title > span {
+  color: var(--tertiary-text);
+  font-size: 10.5px;
+  line-height: 1.35;
+}
+.turn-changes-card:is(.checking, .no_changes, .unavailable) .turn-changes-head {
+  border-bottom: 0;
+}
 .turn-changes-total,
 .turn-changes-file-stat {
   display: flex;
@@ -4056,10 +4064,15 @@ html[data-dark="true"] .preview-control-cursor {
   cursor: pointer;
 }
 .turn-changes-actions button:hover,
+.turn-changes-actions button:focus-visible,
 .turn-changes-toggle:hover {
   border-color: var(--border-secondary);
   background: var(--panel-row-hover);
   color: var(--primary-text);
+}
+.turn-changes-actions button:focus-visible {
+  outline: 2px solid var(--focus-border);
+  outline-offset: 1px;
 }
 .turn-changes-files {
   display: flex;
@@ -4866,7 +4879,20 @@ html[data-dark="true"] .preview-control-cursor {
 .msg-act:hover { background: var(--chip-hover); color: var(--primary-text); }
 .msg-act.danger:hover { color: var(--error); }
 .baton-menu {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  width: fit-content;
+  margin-top: 8px;
   position: relative;
+}
+.baton-continue {
+  border: 1px solid var(--border-primary);
+  color: var(--secondary-text);
+}
+.baton-menu :is(.baton-continue, .baton-menu-trigger):focus-visible {
+  outline: 2px solid var(--focus-border);
+  outline-offset: 2px;
 }
 .baton-menu.open > .baton-menu-trigger {
   background: var(--chip-hover);
@@ -5676,6 +5702,38 @@ html[data-dark="true"] .preview-control-cursor {
   min-width: 0;
   padding: 7px 9px 5px;
   border-bottom: 1px solid var(--border-primary);
+}
+.first-send-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.8fr) auto auto;
+  gap: 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-primary);
+  color: var(--tertiary-text);
+  font-size: 10px;
+}
+.first-send-summary span {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+.first-send-summary strong {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.first-send-summary em {
+  overflow: hidden;
+  color: var(--secondary-text);
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (max-width: 620px) {
+  .first-send-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 .chips { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; flex-wrap: wrap; }
 .chip-wrap { position: relative; }

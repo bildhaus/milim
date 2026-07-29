@@ -9,6 +9,10 @@ const releaseWorkflow = readFileSync(
   "utf8",
 );
 const ciWorkflow = readFileSync(process.env.MILIM_CI_WORKFLOW_PATH || join(repoRoot, ".github", "workflows", "ci.yml"), "utf8");
+const siteWorkflow = readFileSync(
+  process.env.MILIM_SITE_WORKFLOW_PATH || join(repoRoot, ".github", "workflows", "site.yml"),
+  "utf8",
+);
 
 const expectedArtifacts = [
   { artifact: "macos-universal", os: "macos-latest", args: "--target universal-apple-darwin --bundles app,dmg" },
@@ -27,6 +31,9 @@ for (const needle of [
   "Create or update draft release",
   'gh release create "${MILIM_RELEASE_TAG}"',
   'gh release edit "${MILIM_RELEASE_TAG}"',
+  "--json isDraft --jq",
+  "Refusing to edit published release",
+  "Refusing to upload assets to published release",
   "node scripts/generate-release-notes.mjs --output release-notes.md",
   "--notes-file apps/desktop/release-notes.md",
   "--verify-tag",
@@ -53,7 +60,7 @@ for (const needle of [
   "milim-windows-x64-portable.exe",
   "milim-macos-universal.dmg",
   "cat release-checksums/*.sha256 | sort -k2 > release-published/SHA256SUMS.txt",
-  'gh release upload "${MILIM_RELEASE_TAG}" release-published/manifest.json release-published/SHA256SUMS.txt --repo "${GITHUB_REPOSITORY}" --clobber',
+  'gh release upload "${MILIM_RELEASE_TAG}" release-published/manifest.json release-published/SHA256SUMS.txt --repo "${GITHUB_REPOSITORY}"',
 ]) {
   assertIncludes(releaseWorkflow, needle, "release workflow");
 }
@@ -75,9 +82,14 @@ for (const needle of [
   "cat release-checksums/*.sha256 | sort -k2 > SHA256SUMS.txt",
   'gh release upload "${{ env.MILIM_RELEASE_TAG }}" src-tauri/target/release/bundle/portable/*.exe --clobber',
   'gh release upload "${{ env.MILIM_RELEASE_TAG }}" src-tauri/target/release/bundle/portable/*.exe.sha256 --clobber',
+  "--clobber",
 ]) {
   assertNotIncludes(releaseWorkflow, needle, "release workflow");
 }
+
+assertEveryMutationGuarded(releaseWorkflow, "gh release edit", "--json isDraft --jq", "release edits");
+assertEveryMutationGuarded(releaseWorkflow, "gh release upload", "--json isDraft --jq", "release uploads");
+assertOccurrences(siteWorkflow, '- "VERSION"', 2, "site workflow version trigger");
 
 assertBefore(releaseWorkflow, "Validate release tag", checkoutReleaseTagRef, "release workflow checkout");
 assertBefore(releaseWorkflow, "Generate release notes", "Create or update draft release", "release workflow notes");
@@ -121,4 +133,22 @@ function assertBefore(text, first, second, label) {
   if (firstIndex < 0) throw new Error(`${label} must include ${first}`);
   if (secondIndex < 0) throw new Error(`${label} must include ${second}`);
   if (firstIndex >= secondIndex) throw new Error(`${label} must run ${first} before ${second}`);
+}
+
+function assertEveryMutationGuarded(text, mutation, guard, label) {
+  let count = 0;
+  let index = text.indexOf(mutation);
+  while (index >= 0) {
+    const stepStart = text.lastIndexOf("\n      - name:", index);
+    const guardIndex = text.lastIndexOf(guard, index);
+    if (guardIndex < stepStart) throw new Error(`${label} must check draft status before ${mutation}`);
+    count += 1;
+    index = text.indexOf(mutation, index + mutation.length);
+  }
+  if (!count) throw new Error(`${label} must include ${mutation}`);
+}
+
+function assertOccurrences(text, needle, expected, label) {
+  const count = text.split(needle).length - 1;
+  if (count !== expected) throw new Error(`${label} must include ${needle} exactly ${expected} times (found ${count})`);
 }

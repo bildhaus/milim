@@ -8,6 +8,8 @@ const originalWindow = globalThis.window;
 const seen = [];
 let modelReads = 0;
 let refreshCalls = 0;
+let codexReads = 0;
+let phase = "slow-account";
 
 globalThis.window = {
   __TAURI_INTERNALS__: {
@@ -23,10 +25,13 @@ globalThis.window = {
   },
 };
 
-globalThis.fetch = async (input) => {
+globalThis.fetch = async (input, init) => {
   const url = String(input);
   if (url.endsWith("/v1/models")) {
     modelReads += 1;
+    if (phase === "failed-refresh") {
+      return new Response("provider unavailable", { status: 503 });
+    }
     return Response.json({
       data: [
         {
@@ -37,7 +42,17 @@ globalThis.fetch = async (input) => {
     });
   }
   if (url.endsWith("/codex/account")) {
-    return Response.json({ requiresOpenaiAuth: true, account: null });
+    codexReads += 1;
+    if (codexReads > 1) {
+      return Response.json({ requiresOpenaiAuth: true, account: null });
+    }
+    return await new Promise((_, reject) => {
+      init?.signal?.addEventListener(
+        "abort",
+        () => reject(new DOMException("Aborted", "AbortError")),
+        { once: true },
+      );
+    });
   }
   if (url.endsWith("/claude/status")) {
     return Response.json({ available: false, authenticated: false, models: [] });
@@ -57,13 +72,71 @@ const server = await createServer({
 
 try {
   const { loadStartupModels } = await server.ssrLoadModule("/src/api.ts");
-  await loadStartupModels((models) => {
-    seen.push(models.map((model) => model.id));
+  const startedAt = performance.now();
+  let cachedAt;
+  let resolveCached;
+  const cachedVisible = new Promise((resolve) => {
+    resolveCached = resolve;
   });
+  const loading = loadStartupModels(
+    (models) => {
+      const ids = models.map((model) => model.id);
+      seen.push(ids);
+      if (ids.includes("cached-model") && cachedAt === undefined) {
+        cachedAt = performance.now() - startedAt;
+        resolveCached();
+      }
+    },
+    { codex: true, claude: false, opencode: false, pi: false },
+    [{ id: "codex:existing", owned_by: "Codex" }],
+  );
+
+  await Promise.race([
+    cachedVisible,
+    new Promise((_, reject) =>
+      setTimeout(
+        () =>
+          reject(
+            new Error(
+              "Cached provider models were not visible within one second.",
+            ),
+          ),
+        1_000,
+      ),
+    ),
+  ]);
+  assert.ok(cachedAt < 1_000, `cached models took ${cachedAt}ms`);
+  await loading;
 
   assert.equal(refreshCalls, 1);
   assert.equal(modelReads, 2);
-  assert.deepEqual(seen, [["cached-model"], ["refreshed-model"]]);
+  assert.equal(codexReads, 2);
+  assert.ok(
+    performance.now() - startedAt >= 12_000,
+    "The account probe should remain isolated while its full configured timeout elapses.",
+  );
+  assert.ok(
+    seen.every((ids) => ids.includes("codex:existing")),
+    "A slow or failed account lane must not clear an existing usable model.",
+  );
+  assert.ok(
+    seen.some((ids) => ids.includes("cached-model")),
+    "Cached provider models should render before account discovery finishes.",
+  );
+  assert.deepEqual(seen.at(-1), ["refreshed-model", "codex:existing"]);
+
+  phase = "failed-refresh";
+  const retained = [];
+  await loadStartupModels(
+    (models) => retained.push(models.map((model) => model.id)),
+    { codex: false, claude: false, opencode: false, pi: false },
+    [{ id: "provider-seeded", owned_by: "Test Provider" }],
+  );
+  assert.ok(
+    retained.length > 0 &&
+      retained.every((ids) => ids.includes("provider-seeded")),
+    "Failed provider reads must preserve the last usable seeded catalog.",
+  );
 } finally {
   globalThis.fetch = originalFetch;
   if (originalWindow === undefined) delete globalThis.window;

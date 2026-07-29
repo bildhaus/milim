@@ -2319,7 +2319,7 @@ pub fn tools(connection: Arc<GoogleWorkspaceConnection>) -> Vec<Arc<dyn Tool>> {
         Arc::new(GoogleDriveListTool(connection.clone())),
         Arc::new(GoogleDriveReadTool(connection.clone())),
         Arc::new(GoogleDriveManageTool(connection.clone())),
-        Arc::new(GoogleDriveTransferTool(connection.clone())),
+        Arc::new(GoogleDriveTransferTool(connection.clone(), None)),
         Arc::new(GoogleSheetsReadTool(connection.clone())),
         Arc::new(GoogleSheetsEditTool(connection.clone())),
         Arc::new(GoogleDocsReadTool(connection.clone())),
@@ -2332,7 +2332,7 @@ pub fn tools(connection: Arc<GoogleWorkspaceConnection>) -> Vec<Arc<dyn Tool>> {
 struct GoogleDriveListTool(Arc<GoogleWorkspaceConnection>);
 struct GoogleDriveReadTool(Arc<GoogleWorkspaceConnection>);
 struct GoogleDriveManageTool(Arc<GoogleWorkspaceConnection>);
-struct GoogleDriveTransferTool(Arc<GoogleWorkspaceConnection>);
+struct GoogleDriveTransferTool(Arc<GoogleWorkspaceConnection>, Option<PathBuf>);
 struct GoogleSheetsReadTool(Arc<GoogleWorkspaceConnection>);
 struct GoogleSheetsEditTool(Arc<GoogleWorkspaceConnection>);
 struct GoogleDocsReadTool(Arc<GoogleWorkspaceConnection>);
@@ -2826,6 +2826,19 @@ struct DriveTransferArgs {
     overwrite: bool,
 }
 
+impl GoogleDriveTransferTool {
+    fn with_workspace(&self, root: &Path) -> Self {
+        Self(self.0.clone(), Some(root.to_path_buf()))
+    }
+
+    fn workspace_root(&self) -> Result<PathBuf> {
+        self.1
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(|| self.0.workspace_root())
+    }
+}
+
 #[async_trait]
 impl Tool for GoogleDriveTransferTool {
     fn name(&self) -> &str {
@@ -2858,9 +2871,13 @@ impl Tool for GoogleDriveTransferTool {
         ToolEffect::Command
     }
 
+    fn scoped_to_workspace(&self, root: &Path) -> Option<Arc<dyn Tool>> {
+        Some(Arc::new(self.with_workspace(root)))
+    }
+
     async fn invoke(&self, args: Value) -> Result<Value> {
         let args: DriveTransferArgs = parse_args(args)?;
-        let root = self.0.workspace_root()?;
+        let root = self.workspace_root()?;
         let path = resolve_workspace_path(&root, &args.workspace_path)?;
         match args.action.as_str() {
             "upload" => {
@@ -4965,6 +4982,27 @@ mod tests {
         }
         assert!(connection.remove_file("file_1").await.unwrap());
         assert!(!connection.stored.read().await.files.contains_key("file_1"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn drive_transfer_uses_the_workspace_captured_for_its_run() {
+        let root = test_root();
+        let initial = root.join("initial-workspace");
+        let captured = root.join("captured-workspace");
+        let later = root.join("later-workspace");
+        let selected = Arc::new(StdRwLock::new(Some(initial)));
+        let connection = Arc::new(
+            GoogleWorkspaceConnection::open(&root, test_config(), selected.clone()).unwrap(),
+        );
+        let tool = GoogleDriveTransferTool(connection, None);
+        let scoped = tool.with_workspace(&captured);
+
+        *selected.write().unwrap() = Some(later.clone());
+
+        assert_eq!(scoped.workspace_root().unwrap(), captured);
+        assert_eq!(tool.workspace_root().unwrap(), later);
+        assert!(tool.scoped_to_workspace(Path::new("another")).is_some());
         std::fs::remove_dir_all(root).unwrap();
     }
 

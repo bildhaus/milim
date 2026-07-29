@@ -10,7 +10,7 @@ import {
   type DiffSection,
   type DiffStats,
 } from "../lib/gitDiffRows";
-import { ChevronDown, Eye, FileText, Refresh } from "./icons";
+import { ChevronDown, Eye, FileText, GitBranch, Refresh } from "./icons";
 
 const COLLAPSED_FILE_COUNT = 3;
 
@@ -21,6 +21,20 @@ export type TurnChanges = {
   sections: DiffSection[];
   stats: DiffStats;
 };
+
+export type TurnReviewState =
+  | ({ status: "ready" } & TurnChanges)
+  | {
+      key: string;
+      status: "checking" | "no_changes";
+      checkpoint: WorkspaceCheckpoint;
+    }
+  | {
+      key: string;
+      status: "unavailable";
+      checkpoint: WorkspaceCheckpoint;
+      message: string;
+    };
 
 export function turnChangesFromDiff(
   key: string,
@@ -39,18 +53,91 @@ export function turnChangesFromDiff(
   return { key, checkpoint, result, sections, stats: diffStats(rows) };
 }
 
+export function turnReviewFromDiff(
+  key: string,
+  checkpoint: WorkspaceCheckpoint,
+  result: WorkspaceGitActionResult,
+): TurnReviewState {
+  if (!result.ok) {
+    return {
+      key,
+      checkpoint,
+      status: "unavailable",
+      message: result.message || "Git could not load this turn's diff.",
+    };
+  }
+  const changes = turnChangesFromDiff(key, checkpoint, result);
+  return changes
+    ? { ...changes, status: "ready" }
+    : { key, checkpoint, status: "no_changes" };
+}
+
 export function TurnChangesCard({
-  sections,
-  stats,
+  review,
   onUndo,
   onReview,
+  onRetry,
+  onOpenGit,
 }: {
-  sections: DiffSection[];
-  stats: DiffStats;
+  review: TurnReviewState;
   onUndo: () => void;
   onReview: () => void;
+  onRetry: () => void;
+  onOpenGit: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  if (review.status !== "ready") {
+    const title =
+      review.status === "checking"
+        ? "Checking turn changes..."
+        : review.status === "no_changes"
+          ? "No workspace changes"
+          : "Change review unavailable";
+    return (
+      <section
+        className={`turn-changes-card ${review.status}`}
+        data-testid="turn-changes-card"
+        data-review-state={review.status}
+        aria-label="Turn changes"
+      >
+        <div className="turn-changes-head">
+          <span className="turn-changes-icon" aria-hidden="true">
+            {review.status === "checking" ? (
+              <Refresh size={15} />
+            ) : (
+              <FileText size={15} />
+            )}
+          </span>
+          <div className="turn-changes-title">
+            <strong>{title}</strong>
+            {review.status === "unavailable" && <span>{review.message}</span>}
+          </div>
+          {review.status === "unavailable" && (
+            <div className="turn-changes-actions">
+              <button
+                data-testid="turn-changes-retry"
+                type="button"
+                onClick={onRetry}
+              >
+                <Refresh size={12} />
+                <span>Retry</span>
+              </button>
+              <button
+                data-testid="turn-changes-open-git"
+                type="button"
+                onClick={onOpenGit}
+              >
+                <GitBranch size={12} />
+                <span>Open Git</span>
+              </button>
+            </div>
+          )}
+        </div>
+      </section>
+    );
+  }
+
+  const { sections, stats } = review;
   const hiddenCount = Math.max(0, sections.length - COLLAPSED_FILE_COUNT);
   const visibleSections = expanded
     ? sections

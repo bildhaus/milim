@@ -204,6 +204,7 @@ type StreamChatFn = (
   onThinking?: (text: string) => void,
   onUsage?: (usage: TokenUsage) => void,
   reasoningEffort?: ReasoningEffort,
+  toolContext?: AgentToolContext,
 ) => Promise<void>;
 type StreamAgentRunFn = (
   agentId: string | null,
@@ -219,18 +220,45 @@ type StreamAgentRunFn = (
 export type CodexRunRequest = Parameters<StreamCodexRunFn>[0];
 export type ClaudeRunRequest = Parameters<StreamClaudeRunFn>[0];
 
+export function utilityAccountRuntimeMilimContext({
+  toolContext,
+  toolApproval,
+  planMode,
+}: {
+  toolContext: AgentToolContext;
+  toolApproval: ToolApprovalMode;
+  planMode: boolean;
+}): AccountRuntimeMilimContext {
+  return {
+    tool_context: {
+      ...toolContext,
+      tool_approval_policy: toolApproval,
+      tool_approval_grant: false,
+      interactive_tool_approval: false,
+      plan_mode: planMode,
+    },
+    memory_context: {},
+    tool_mode: "none",
+    enabled_tools: [],
+    skill_mode: "none",
+    enabled_skills: [],
+  };
+}
+
 export function codexCompactionSummaryRequest({
   model,
   prompt,
   cwd,
   reasoningEffort,
   images,
+  toolContext,
 }: {
   model: string;
   prompt: string;
   cwd?: string;
   reasoningEffort?: ReasoningEffort;
   images?: AccountRuntimeImage[];
+  toolContext: AgentToolContext;
 }): CodexRunRequest {
   return {
     model,
@@ -242,6 +270,11 @@ export function codexCompactionSummaryRequest({
     tool_approval_policy: "guarded",
     tool_approval_grant: false,
     plan_mode: true,
+    milim_context: utilityAccountRuntimeMilimContext({
+      toolContext,
+      toolApproval: "guarded",
+      planMode: true,
+    }),
   };
 }
 
@@ -251,12 +284,14 @@ export function claudeCompactionSummaryRequest({
   cwd,
   reasoningEffort,
   images,
+  toolContext,
 }: {
   model: string;
   prompt: string;
   cwd?: string;
   reasoningEffort?: ReasoningEffort;
   images?: AccountRuntimeImage[];
+  toolContext: AgentToolContext;
 }): ClaudeRunRequest {
   return {
     model,
@@ -267,6 +302,11 @@ export function claudeCompactionSummaryRequest({
     tool_approval_policy: "guarded",
     tool_approval_grant: false,
     plan_mode: true,
+    milim_context: utilityAccountRuntimeMilimContext({
+      toolContext,
+      toolApproval: "guarded",
+      planMode: true,
+    }),
   };
 }
 
@@ -776,6 +816,7 @@ export async function runModelChatTurn({
     appendThinking,
     captureUsage,
     reasoningEffort,
+    promptContext.toolContext,
   );
   if (runRef?.current?.status === "running") {
     runRef.current.status = "done";

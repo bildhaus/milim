@@ -111,6 +111,10 @@ impl ModelService for GeminiBackend {
         &self.label
     }
 
+    fn requires_privacy_gate(&self) -> bool {
+        true
+    }
+
     async fn list_models(&self) -> Result<Vec<Model>> {
         let resp = self
             .auth(self.client.get(self.endpoint("models")))

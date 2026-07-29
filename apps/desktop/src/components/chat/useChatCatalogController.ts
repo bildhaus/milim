@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   listProviders,
   listSkills,
@@ -20,16 +20,23 @@ export function useChatCatalogController(
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [composerTools, setComposerTools] = useState<ToolInfo[]>([]);
+  const modelsRef = useRef<ModelInfo[]>([]);
+
+  useEffect(() => {
+    modelsRef.current = models;
+  }, [models]);
 
   useEffect(() => {
     let cancelled = false;
     void loadStartupModels(
       (nextModels) => {
         if (cancelled) return;
+        modelsRef.current = nextModels;
         setModels(nextModels);
         setModelsLoaded(true);
       },
       accountRuntimeEnabled,
+      modelsRef.current,
     );
     return () => {
       cancelled = true;

@@ -131,6 +131,7 @@ const workspaceProviderTools = buildTurnPromptContext({
   turnId: "turn-workspace",
   sandbox: false,
   computerUse: false,
+  privacy: "block",
   activeAgentId: null,
   toolApproval: "guarded",
   toolApprovalGrant: false,
@@ -138,6 +139,8 @@ const workspaceProviderTools = buildTurnPromptContext({
 });
 assert.equal(workspaceProviderTools.useTools, true, "provider model plus workspace should use the Milim tool loop");
 assert.equal(workspaceProviderTools.accountRuntimeMayUseTools, false);
+assert.equal(workspaceProviderTools.toolContext.workspace, "C:\\repo");
+assert.equal(workspaceProviderTools.toolContext.privacy_mode, "block");
 
 const previewTools = buildTurnPromptContext({
   sessionId: "s-preview",

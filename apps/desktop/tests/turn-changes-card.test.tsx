@@ -16,11 +16,26 @@ type TurnChanges = {
   stats: DiffStats;
 };
 
+type TurnReviewState =
+  | ({ status: "ready" } & TurnChanges)
+  | {
+      key: string;
+      status: "checking" | "no_changes";
+      checkpoint: WorkspaceCheckpoint;
+    }
+  | {
+      key: string;
+      status: "unavailable";
+      checkpoint: WorkspaceCheckpoint;
+      message: string;
+    };
+
 type TurnChangesCardProps = {
-  sections: DiffSection[];
-  stats: DiffStats;
+  review: TurnReviewState;
   onUndo: () => void;
   onReview: () => void;
+  onRetry: () => void;
+  onOpenGit: () => void;
 };
 
 const checkpoint: WorkspaceCheckpoint = {
@@ -62,29 +77,31 @@ const server = await createServer({
 });
 
 try {
-  const { TurnChangesCard, turnChangesFromDiff } = await server.ssrLoadModule(
+  const { TurnChangesCard, turnReviewFromDiff } = await server.ssrLoadModule(
     "/src/components/TurnChangesCard.tsx",
   ) as {
     TurnChangesCard: ComponentType<TurnChangesCardProps>;
-    turnChangesFromDiff: (
+    turnReviewFromDiff: (
       key: string,
       checkpoint: WorkspaceCheckpoint,
       result: WorkspaceGitActionResult,
-    ) => TurnChanges | null;
+    ) => TurnReviewState;
   };
-  const changes = turnChangesFromDiff("turn-1", checkpoint, result(patch));
-  assert(changes);
+  const changes = turnReviewFromDiff("turn-1", checkpoint, result(patch));
+  assert.equal(changes.status, "ready");
+  if (changes.status !== "ready") throw new Error("Expected ready review.");
   assert.deepEqual(changes.stats, { files: 5, additions: 5, deletions: 5 });
   assert.equal(changes.sections[0].path, "src/file-1.ts");
-  assert.equal(turnChangesFromDiff("empty", checkpoint, result("")), null);
-  assert.equal(turnChangesFromDiff("error", checkpoint, result("", false)), null);
+  assert.equal(turnReviewFromDiff("empty", checkpoint, result("")).status, "no_changes");
+  assert.equal(turnReviewFromDiff("error", checkpoint, result("", false)).status, "unavailable");
 
   const markup = renderToStaticMarkup(
     createElement(TurnChangesCard, {
-      sections: changes.sections,
-      stats: changes.stats,
+      review: changes,
       onUndo: () => {},
       onReview: () => {},
+      onRetry: () => {},
+      onOpenGit: () => {},
     }),
   );
   assert.match(markup, /aria-label="Turn changes"/);
@@ -102,14 +119,33 @@ try {
   const single = { ...changes, sections: changes.sections.slice(0, 1), stats: { files: 1, additions: 1, deletions: 1 } };
   const singleMarkup = renderToStaticMarkup(
     createElement(TurnChangesCard, {
-      sections: single.sections,
-      stats: single.stats,
+      review: single,
       onUndo: () => {},
       onReview: () => {},
+      onRetry: () => {},
+      onOpenGit: () => {},
     }),
   );
   assert.match(singleMarkup, />Changed 1 file</);
   assert.doesNotMatch(singleMarkup, /Show .* more/);
+
+  const unavailable = turnReviewFromDiff(
+    "unavailable",
+    checkpoint,
+    result("", false),
+  );
+  const unavailableMarkup = renderToStaticMarkup(
+    createElement(TurnChangesCard, {
+      review: unavailable,
+      onUndo: () => {},
+      onReview: () => {},
+      onRetry: () => {},
+      onOpenGit: () => {},
+    }),
+  );
+  assert.match(unavailableMarkup, /data-review-state="unavailable"/);
+  assert.match(unavailableMarkup, />Retry</);
+  assert.match(unavailableMarkup, />Open Git</);
 } finally {
   await server.close();
 }

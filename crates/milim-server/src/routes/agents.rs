@@ -44,6 +44,10 @@ pub(crate) struct AccountRuntimeMilimContext {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct AccountRuntimeToolContext {
+    #[serde(default)]
+    workspace: RequestValue,
+    #[serde(default)]
+    privacy_mode: RequestValue,
     tool_approval_policy: Option<String>,
     #[serde(default)]
     tool_approval_grant: bool,
@@ -93,6 +97,7 @@ pub(crate) fn account_runtime_tool_endpoint(
     st: &AppState,
     headers: &HeaderMap,
     context: Option<&AccountRuntimeMilimContext>,
+    run_context: &RunContext,
     model: &str,
     prompt: &str,
 ) -> Result<Option<AccountRuntimeToolEndpoint>, ApiError> {
@@ -129,12 +134,13 @@ pub(crate) fn account_runtime_tool_endpoint(
         worker_model: context.tool_context.worker_model.clone(),
         worker_context: Some(prompt.chars().take(32_000).collect()),
     };
-    let mut registry = agent_registry_for_mode(
+    let mut registry = agent_registry_for_mode_with_context(
         st,
         &context.tool_mode,
         &context.enabled_tools,
         Some(memory),
         &policy,
+        run_context,
     )
     .without(DESKTOP_WORKSPACE_TOOL_NAMES);
     if !policy.plan_mode {
@@ -282,6 +288,7 @@ const DESKTOP_WORKSPACE_TOOL_NAMES: &[&str] = &[
     "patch_file",
     "shell",
 ];
+const RUN_WORKSPACE_TOOL_NAMES: &[&str] = &["google_drive_transfer"];
 pub(crate) const HASHLINE_TOOL_NAMES: &[&str] = &["read_file_anchors", "patch_file"];
 const SANDBOX_TOOL_NAMES: &[&str] = &["run_command"];
 const COMPUTER_TOOL_NAMES: &[&str] = &[
@@ -358,6 +365,727 @@ impl Default for ToolRunPolicy {
             experimental_hashline_patch: false,
             plan_mode: false,
         }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RunContext {
+    workspace: Option<PathBuf>,
+    privacy_mode: crate::privacy::PrivacyMode,
+}
+
+#[derive(Clone, Debug, Default)]
+enum RequestValue {
+    #[default]
+    Missing,
+    Present(Value),
+}
+
+impl RequestValue {
+    fn as_value(&self) -> Option<&Value> {
+        match self {
+            Self::Missing => None,
+            Self::Present(value) => Some(value),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RequestValue {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Value::deserialize(deserializer).map(Self::Present)
+    }
+}
+
+impl RunContext {
+    fn current(st: &AppState) -> Self {
+        Self {
+            workspace: workspace_snapshot(st),
+            privacy_mode: st.privacy.mode(),
+        }
+    }
+
+    pub(crate) fn from_request(
+        st: &AppState,
+        req: &ChatCompletionRequest,
+    ) -> milim_core::Result<Self> {
+        Self::from_values(
+            st,
+            req.extra.get("workspace"),
+            req.extra.get("privacy_mode"),
+        )
+    }
+
+    fn from_values(
+        st: &AppState,
+        workspace: Option<&Value>,
+        privacy_mode: Option<&Value>,
+    ) -> milim_core::Result<Self> {
+        let workspace = match workspace {
+            None => workspace_snapshot(st),
+            Some(Value::Null) => None,
+            Some(Value::String(path)) if !path.trim().is_empty() => {
+                Some(canonical_workspace(PathBuf::from(path.trim()))?)
+            }
+            Some(Value::String(_)) => {
+                return Err(Error::InvalidRequest(
+                    "workspace must be a non-empty path or null".to_string(),
+                ))
+            }
+            Some(_) => {
+                return Err(Error::InvalidRequest(
+                    "workspace must be a string path or null".to_string(),
+                ))
+            }
+        };
+        let privacy_mode = match privacy_mode {
+            None => st.privacy.mode(),
+            Some(Value::String(mode)) => explicit_privacy_mode(mode)?,
+            Some(_) => {
+                return Err(Error::InvalidRequest(
+                    "privacy_mode must be off, redact, or block".to_string(),
+                ))
+            }
+        };
+        Ok(Self {
+            workspace,
+            privacy_mode,
+        })
+    }
+
+    pub(crate) fn from_account_runtime(
+        st: &AppState,
+        context: Option<&AccountRuntimeMilimContext>,
+        cwd: Option<&str>,
+    ) -> milim_core::Result<Self> {
+        let cwd = cwd
+            .map(str::trim)
+            .filter(|cwd| !cwd.is_empty())
+            .map(|cwd| Value::String(cwd.to_string()));
+        let workspace = context
+            .and_then(|context| context.tool_context.workspace.as_value())
+            .or(cwd.as_ref());
+        let privacy_mode = context.and_then(|context| context.tool_context.privacy_mode.as_value());
+        Self::from_values(st, workspace, privacy_mode)
+    }
+
+    fn from_worker_run(run: &milim_agents::WorkerRun) -> milim_core::Result<Self> {
+        let privacy_mode = run
+            .privacy_mode
+            .as_deref()
+            .ok_or_else(legacy_worker_run_context_error)
+            .and_then(explicit_privacy_mode)?;
+        let workspace = run
+            .workspace
+            .as_deref()
+            .map(PathBuf::from)
+            .map(canonical_workspace)
+            .transpose()?;
+        Ok(Self {
+            workspace,
+            privacy_mode,
+        })
+    }
+
+    pub(crate) fn workspace(&self) -> Option<&FsPath> {
+        self.workspace.as_deref()
+    }
+
+    pub(crate) fn privacy_mode(&self) -> crate::privacy::PrivacyMode {
+        self.privacy_mode
+    }
+
+    pub(crate) fn workspace_text(&self) -> Option<String> {
+        self.workspace
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string())
+    }
+}
+
+fn canonical_workspace(path: PathBuf) -> milim_core::Result<PathBuf> {
+    let canonical = std::fs::canonicalize(&path).map_err(|error| {
+        Error::InvalidRequest(format!("invalid workspace {}: {error}", path.display()))
+    })?;
+    if !canonical.is_dir() {
+        return Err(Error::InvalidRequest(format!(
+            "workspace is not a directory: {}",
+            canonical.display()
+        )));
+    }
+    Ok(canonical)
+}
+
+fn explicit_privacy_mode(mode: &str) -> milim_core::Result<crate::privacy::PrivacyMode> {
+    match mode {
+        "off" => Ok(crate::privacy::PrivacyMode::Off),
+        "redact" => Ok(crate::privacy::PrivacyMode::Redact),
+        "block" => Ok(crate::privacy::PrivacyMode::Block),
+        _ => Err(Error::InvalidRequest(
+            "privacy_mode must be off, redact, or block".to_string(),
+        )),
+    }
+}
+
+fn legacy_worker_run_context_error() -> Error {
+    Error::InvalidRequest(
+        "this worker run predates origin context and cannot be approved, retried, or applied; create a new run"
+            .to_string(),
+    )
+}
+
+pub(crate) fn service_for_run(
+    st: &AppState,
+    context: &RunContext,
+) -> milim_inference::SharedService {
+    st.providers
+        .as_ref()
+        .map(|providers| {
+            Arc::new(providers.router_with_privacy(context.privacy_mode))
+                as milim_inference::SharedService
+        })
+        .unwrap_or_else(|| crate::privacy::scoped_service(st.service.clone(), context.privacy_mode))
+}
+
+#[cfg(test)]
+mod run_context_tests {
+    use super::*;
+    use milim_inference::test_backend::TestBackend;
+
+    struct WorkspaceProbe;
+
+    struct ScopedWorkspaceProbe {
+        workspace: PathBuf,
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingRemoteBackend {
+        prompts: Arc<Mutex<Vec<String>>>,
+        embeddings: Arc<Mutex<Vec<Vec<String>>>>,
+    }
+
+    struct NamedProbe(&'static str);
+
+    #[async_trait]
+    impl ModelService for RecordingRemoteBackend {
+        fn name(&self) -> &str {
+            "recording-remote"
+        }
+
+        fn requires_privacy_gate(&self) -> bool {
+            true
+        }
+
+        async fn list_models(&self) -> milim_core::Result<Vec<Model>> {
+            Ok(vec![Model::local("recording-model", 0)])
+        }
+
+        async fn stream(&self, req: CompletionRequest) -> milim_core::Result<EventStream> {
+            self.prompts.lock().unwrap().push(req.last_user_text());
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        async fn embed(
+            &self,
+            _model: &str,
+            inputs: Vec<String>,
+        ) -> milim_core::Result<Vec<Vec<f32>>> {
+            self.embeddings.lock().unwrap().push(inputs.clone());
+            Ok(inputs
+                .iter()
+                .map(|input| vec![input.len() as f32])
+                .collect())
+        }
+    }
+
+    #[async_trait]
+    impl Tool for NamedProbe {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        fn description(&self) -> &str {
+            "No-op test tool."
+        }
+
+        fn input_schema(&self) -> Value {
+            json!({"type":"object"})
+        }
+
+        fn effect(&self) -> ToolEffect {
+            ToolEffect::ReadOnly
+        }
+
+        async fn invoke(&self, _args: Value) -> milim_core::Result<Value> {
+            Ok(Value::Null)
+        }
+    }
+
+    #[async_trait]
+    impl Tool for WorkspaceProbe {
+        fn name(&self) -> &str {
+            "echo"
+        }
+
+        fn description(&self) -> &str {
+            "Return the workspace bound to this run."
+        }
+
+        fn input_schema(&self) -> Value {
+            json!({"type":"object"})
+        }
+
+        fn effect(&self) -> ToolEffect {
+            ToolEffect::ReadOnly
+        }
+
+        fn scoped_to_workspace(&self, root: &FsPath) -> Option<Arc<dyn Tool>> {
+            Some(Arc::new(ScopedWorkspaceProbe {
+                workspace: root.to_path_buf(),
+            }))
+        }
+
+        async fn invoke(&self, _args: Value) -> milim_core::Result<Value> {
+            Err(Error::InvalidRequest(
+                "workspace probe was not scoped".to_string(),
+            ))
+        }
+    }
+
+    #[async_trait]
+    impl Tool for ScopedWorkspaceProbe {
+        fn name(&self) -> &str {
+            "echo"
+        }
+
+        fn description(&self) -> &str {
+            "Return the workspace bound to this run."
+        }
+
+        fn input_schema(&self) -> Value {
+            json!({"type":"object"})
+        }
+
+        fn effect(&self) -> ToolEffect {
+            ToolEffect::ReadOnly
+        }
+
+        async fn invoke(&self, _args: Value) -> milim_core::Result<Value> {
+            Ok(json!({"workspace": self.workspace}))
+        }
+    }
+
+    fn temp_workspace_root() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "milim-run-context-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn request(value: Value) -> ChatCompletionRequest {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn explicit_and_legacy_request_contexts_snapshot_once() {
+        let root = temp_workspace_root();
+        let first = root.join("first");
+        let second = root.join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let state = AppState::new(
+            Arc::new(TestBackend::new()),
+            milim_core::config::ServerConfiguration::default(),
+        );
+        *state.workspace.write().unwrap() = Some(first.clone());
+
+        let legacy =
+            RunContext::from_request(&state, &request(json!({"model":"test-echo","messages":[]})))
+                .unwrap();
+        let explicit = RunContext::from_request(
+            &state,
+            &request(json!({
+                "model":"test-echo",
+                "messages":[],
+                "workspace":second,
+                "privacy_mode":"block"
+            })),
+        )
+        .unwrap();
+
+        *state.workspace.write().unwrap() = None;
+        state.privacy.set(crate::privacy::PrivacyMode::Redact);
+        assert_eq!(legacy.workspace, Some(first));
+        assert_eq!(legacy.privacy_mode, crate::privacy::PrivacyMode::Off);
+        assert_eq!(
+            explicit.workspace,
+            Some(std::fs::canonicalize(second).unwrap())
+        );
+        assert_eq!(explicit.privacy_mode, crate::privacy::PrivacyMode::Block);
+
+        let null_workspace = RunContext::from_request(
+            &state,
+            &request(json!({
+                "model":"test-echo",
+                "messages":[],
+                "workspace":null,
+                "privacy_mode":"off"
+            })),
+        )
+        .unwrap();
+        assert!(null_workspace.workspace.is_none());
+        assert!(RunContext::from_request(
+            &state,
+            &request(json!({
+                "model":"test-echo",
+                "messages":[],
+                "workspace":root.join("missing"),
+                "privacy_mode":"off"
+            }))
+        )
+        .is_err());
+        assert!(RunContext::from_request(
+            &state,
+            &request(json!({
+                "model":"test-echo",
+                "messages":[],
+                "workspace":null,
+                "privacy_mode":"invalid"
+            }))
+        )
+        .is_err());
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn standalone_remote_service_uses_captured_privacy_mode() {
+        let backend = RecordingRemoteBackend::default();
+        let state = AppState::new(
+            Arc::new(backend.clone()),
+            milim_core::config::ServerConfiguration::default(),
+        );
+        let block_context = RunContext {
+            workspace: None,
+            privacy_mode: crate::privacy::PrivacyMode::Block,
+        };
+        let block_error = service_for_run(&state, &block_context)
+            .stream(CompletionRequest {
+                model: "recording-model".to_string(),
+                messages: vec![ChatMessage::text("user", "email person@example.com")],
+                tools: Vec::new(),
+                tool_choice: None,
+                response_format: None,
+                prompt: None,
+                suffix: None,
+                sampling: Default::default(),
+                reasoning_effort: None,
+            })
+            .await
+            .err()
+            .expect("captured block mode should reject PII");
+        assert!(block_error
+            .to_string()
+            .contains("blocked by the privacy gate"));
+        assert!(backend.prompts.lock().unwrap().is_empty());
+
+        let redact_context = RunContext {
+            workspace: None,
+            privacy_mode: crate::privacy::PrivacyMode::Redact,
+        };
+        service_for_run(&state, &redact_context)
+            .embed(
+                "recording-model",
+                vec!["email person@example.com".to_string()],
+            )
+            .await
+            .unwrap();
+        let embeddings = backend.embeddings.lock().unwrap();
+        assert_eq!(embeddings.len(), 1);
+        assert_eq!(embeddings[0], ["email [EMAIL_1]"]);
+    }
+
+    #[test]
+    fn worker_review_without_workspace_hides_workspace_tools() {
+        let mut tools = ToolRegistry::new();
+        for name in [
+            "read_file",
+            "shell",
+            "google_drive_transfer",
+            "current_time",
+        ] {
+            tools.register(Arc::new(NamedProbe(name)));
+        }
+        let state = AppState::new(
+            Arc::new(TestBackend::new()),
+            milim_core::config::ServerConfiguration::default(),
+        )
+        .with_tools(tools);
+        *state.workspace.write().unwrap() = Some(PathBuf::from("later-selected-workspace"));
+
+        let no_workspace = RunContext {
+            workspace: None,
+            privacy_mode: crate::privacy::PrivacyMode::Off,
+        };
+        let review = worker_review_registry(&state, &no_workspace);
+        assert!(!review.contains("read_file"));
+        assert!(!review.contains("shell"));
+        assert!(!review.contains("google_drive_transfer"));
+        assert!(review.contains("current_time"));
+
+        let captured_workspace = RunContext {
+            workspace: Some(PathBuf::from("captured-workspace")),
+            privacy_mode: crate::privacy::PrivacyMode::Off,
+        };
+        let review = worker_review_registry(&state, &captured_workspace);
+        assert!(review.contains("read_file"));
+        assert!(review.contains("shell"));
+        assert!(review.contains("google_drive_transfer"));
+    }
+
+    #[tokio::test]
+    async fn memory_registration_uses_run_scoped_privacy() {
+        let backend = RecordingRemoteBackend::default();
+        let memory = milim_memory::MemoryStore::new(
+            milim_storage::Database::open_in_memory().unwrap(),
+            Arc::new(backend.clone()),
+        )
+        .unwrap();
+        let state = AppState::new(
+            Arc::new(backend.clone()),
+            milim_core::config::ServerConfiguration::default(),
+        )
+        .with_memory(memory);
+        state.privacy.set(crate::privacy::PrivacyMode::Off);
+        let run_context = RunContext {
+            workspace: None,
+            privacy_mode: crate::privacy::PrivacyMode::Redact,
+        };
+        let policy = ToolRunPolicy {
+            approval: ToolApprovalPolicy::Open,
+            ..Default::default()
+        };
+        let registry = agent_base_registry_with_memory(
+            &state,
+            Some(AgentMemoryContext {
+                enabled: true,
+                model: "recording-model".to_string(),
+                ..Default::default()
+            }),
+            &policy,
+            &run_context,
+        );
+
+        registry
+            .call(
+                "memory_register",
+                json!({"scope":"personal","content":"Contact person@example.com"}),
+            )
+            .await
+            .unwrap();
+
+        let embeddings = backend.embeddings.lock().unwrap();
+        assert_eq!(embeddings.len(), 1);
+        assert!(!embeddings[0][0].contains("person@example.com"));
+        assert!(embeddings[0][0].contains("[EMAIL_"));
+    }
+
+    #[test]
+    fn account_runtime_context_prefers_explicit_fields_and_captures_legacy_cwd() {
+        let root = temp_workspace_root();
+        let legacy = root.join("legacy");
+        let explicit = root.join("explicit");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&explicit).unwrap();
+        let state = AppState::new(
+            Arc::new(TestBackend::new()),
+            milim_core::config::ServerConfiguration::default(),
+        );
+        state.privacy.set(crate::privacy::PrivacyMode::Redact);
+        let context: AccountRuntimeMilimContext = serde_json::from_value(json!({
+            "tool_context": {
+                "workspace": explicit,
+                "privacy_mode": "block"
+            }
+        }))
+        .unwrap();
+
+        let captured = RunContext::from_account_runtime(
+            &state,
+            Some(&context),
+            Some(legacy.to_string_lossy().as_ref()),
+        )
+        .unwrap();
+        assert_eq!(
+            captured.workspace,
+            Some(std::fs::canonicalize(&explicit).unwrap())
+        );
+        assert_eq!(captured.privacy_mode, crate::privacy::PrivacyMode::Block);
+
+        let legacy_context =
+            RunContext::from_account_runtime(&state, None, Some(legacy.to_string_lossy().as_ref()))
+                .unwrap();
+        state.privacy.set(crate::privacy::PrivacyMode::Off);
+        assert_eq!(
+            legacy_context.workspace,
+            Some(std::fs::canonicalize(&legacy).unwrap())
+        );
+        assert_eq!(
+            legacy_context.privacy_mode,
+            crate::privacy::PrivacyMode::Redact
+        );
+
+        let null_context: AccountRuntimeMilimContext = serde_json::from_value(json!({
+            "tool_context": {
+                "workspace": null,
+                "privacy_mode": "off"
+            }
+        }))
+        .unwrap();
+        assert!(RunContext::from_account_runtime(
+            &state,
+            Some(&null_context),
+            Some(legacy.to_string_lossy().as_ref()),
+        )
+        .unwrap()
+        .workspace
+        .is_none());
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn simultaneous_two_iteration_runs_keep_workspace_origin_100_times() {
+        let root = temp_workspace_root();
+        let left = root.join("left");
+        let right = root.join("right");
+        std::fs::create_dir_all(&left).unwrap();
+        std::fs::create_dir_all(&right).unwrap();
+        std::fs::write(left.join("AGENTS.md"), "LEFT_ONLY").unwrap();
+        std::fs::write(right.join("AGENTS.md"), "RIGHT_ONLY").unwrap();
+        let left = std::fs::canonicalize(left).unwrap();
+        let right = std::fs::canonicalize(right).unwrap();
+
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(WorkspaceProbe));
+        let state = AppState::new(
+            Arc::new(TestBackend::new()),
+            milim_core::config::ServerConfiguration::default(),
+        )
+        .with_tools(tools);
+        let left_context = RunContext {
+            workspace: Some(left.clone()),
+            privacy_mode: crate::privacy::PrivacyMode::Off,
+        };
+        let right_context = RunContext {
+            workspace: Some(right.clone()),
+            privacy_mode: crate::privacy::PrivacyMode::Block,
+        };
+        let left_tools = static_registry_for_context(&state, &left_context);
+        let right_tools = static_registry_for_context(&state, &right_context);
+        let service = TestBackend::new();
+        let mut left_messages = vec![ChatMessage::text("user", "/tool left")];
+        let mut right_messages = vec![ChatMessage::text("user", "/tool right")];
+        add_workspace_instructions_for(&mut left_messages, Some(&left));
+        add_workspace_instructions_for(&mut right_messages, Some(&right));
+        assert!(left_messages[0].text_content().contains("LEFT_ONLY"));
+        assert!(!left_messages[0].text_content().contains("RIGHT_ONLY"));
+        assert!(right_messages[0].text_content().contains("RIGHT_ONLY"));
+        assert!(!right_messages[0].text_content().contains("LEFT_ONLY"));
+
+        for _ in 0..100 {
+            let (left_run, right_run) = tokio::join!(
+                milim_agents::run_agent(
+                    &service,
+                    &left_tools,
+                    "test-echo",
+                    left_messages.clone(),
+                    None
+                ),
+                milim_agents::run_agent(
+                    &service,
+                    &right_tools,
+                    "test-echo",
+                    right_messages.clone(),
+                    None
+                )
+            );
+            let left_run = left_run.unwrap();
+            let right_run = right_run.unwrap();
+            assert_eq!(left_run.iterations, 2);
+            assert_eq!(right_run.iterations, 2);
+            assert_eq!(
+                left_run.steps[0].result["workspace"],
+                json!(left.to_string_lossy())
+            );
+            assert_eq!(
+                right_run.steps[0].result["workspace"],
+                json!(right.to_string_lossy())
+            );
+            assert_eq!(left_context.privacy_mode, crate::privacy::PrivacyMode::Off);
+            assert_eq!(
+                right_context.privacy_mode,
+                crate::privacy::PrivacyMode::Block
+            );
+        }
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn worker_run_create_fields_distinguish_omitted_from_null() {
+        let omitted: WorkerRunCreateRequest = serde_json::from_value(json!({
+            "parent_thread_id":"parent",
+            "tasks":[]
+        }))
+        .unwrap();
+        let explicit_null: WorkerRunCreateRequest = serde_json::from_value(json!({
+            "parent_thread_id":"parent",
+            "workspace":null,
+            "privacy_mode":"off",
+            "tasks":[]
+        }))
+        .unwrap();
+
+        assert!(omitted.workspace.as_value().is_none());
+        assert_eq!(explicit_null.workspace.as_value(), Some(&Value::Null));
+        assert_eq!(
+            explicit_null.privacy_mode.as_value(),
+            Some(&Value::String("off".to_string()))
+        );
+    }
+
+    #[test]
+    fn legacy_worker_run_origin_is_rejected_for_mutating_reentry() {
+        let mut run = milim_agents::WorkerRun {
+            id: "legacy".to_string(),
+            parent_thread_id: "parent".to_string(),
+            parent_turn_id: None,
+            policy: milim_agents::DelegationPolicy::Ask,
+            runtime: milim_agents::WorkerRuntime::Managed,
+            status: milim_agents::WorkerRunStatus::Proposed,
+            tasks: Vec::new(),
+            context: None,
+            workspace: None,
+            privacy_mode: None,
+            error: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+            finished_at: None,
+        };
+
+        let error = RunContext::from_worker_run(&run).unwrap_err().to_string();
+        assert!(error.contains("cannot be approved, retried, or applied"));
+
+        run.privacy_mode = Some("off".to_string());
+        run.workspace = Some(temp_workspace_root().to_string_lossy().to_string());
+        let error = RunContext::from_worker_run(&run).unwrap_err().to_string();
+        assert!(error.contains("invalid workspace"));
     }
 }
 
@@ -449,28 +1177,33 @@ fn worker_context_from_request(req: &ChatCompletionRequest) -> Option<String> {
     (!context.is_empty()).then(|| context.chars().take(32_000).collect())
 }
 
-fn workspace_is_selected(st: &AppState) -> bool {
-    workspace_snapshot(st).is_some()
-}
-
 pub(crate) fn workspace_snapshot(st: &AppState) -> Option<PathBuf> {
     st.workspace.read().ok().and_then(|guard| guard.clone())
 }
 
 pub(crate) fn static_registry_for_run(st: &AppState) -> ToolRegistry {
+    static_registry_for_context(st, &RunContext::current(st))
+}
+
+fn static_registry_for_context(st: &AppState, context: &RunContext) -> ToolRegistry {
     let reg = st.tools.as_deref().cloned().unwrap_or_default();
-    workspace_snapshot(st)
-        .map(|root| reg.scoped_to_workspace(&root))
-        .unwrap_or(reg)
-        .scoped_for_run()
+    let mut reg = context
+        .workspace
+        .as_deref()
+        .map(|root| reg.scoped_to_workspace(root))
+        .unwrap_or(reg);
+    if context.workspace.is_none() {
+        reg = reg.without(RUN_WORKSPACE_TOOL_NAMES);
+    }
+    reg.scoped_for_run()
 }
 
 fn registry_has_desktop_host_tools(reg: &ToolRegistry) -> bool {
     reg.contains("edit_file") || reg.contains("patch_file") || reg.contains("shell")
 }
 
-fn desktop_workspace_unavailable(st: &AppState) -> bool {
-    !workspace_is_selected(st)
+fn desktop_workspace_unavailable_for(st: &AppState, workspace: Option<&FsPath>) -> bool {
+    workspace.is_none()
         && st
             .tools
             .as_ref()
@@ -493,8 +1226,14 @@ fn add_workspace_notice_if_needed(messages: &mut Vec<ChatMessage>, workspace_una
 }
 
 pub(crate) fn add_workspace_instructions(messages: &mut Vec<ChatMessage>, st: &AppState) {
-    let folder = workspace_snapshot(st);
-    let context = crate::workspace_context::resolve(folder.as_deref());
+    add_workspace_instructions_for(messages, workspace_snapshot(st).as_deref());
+}
+
+pub(crate) fn add_workspace_instructions_for(
+    messages: &mut Vec<ChatMessage>,
+    workspace: Option<&FsPath>,
+) {
+    let context = crate::workspace_context::resolve(workspace);
     let Some(instructions) = crate::workspace_context::formatted(&context, None) else {
         return;
     };
@@ -509,17 +1248,20 @@ fn agent_registry_with_memory(
     st: &AppState,
     memory: Option<AgentMemoryContext>,
     policy: &ToolRunPolicy,
+    run_context: &RunContext,
 ) -> ToolRegistry {
-    agent_registry_for_mode(st, "all", &[], memory, policy)
+    agent_registry_for_mode_with_context(st, "all", &[], memory, policy, run_context)
 }
 
 fn agent_base_registry_with_memory(
     st: &AppState,
     memory: Option<AgentMemoryContext>,
     policy: &ToolRunPolicy,
+    run_context: &RunContext,
 ) -> ToolRegistry {
-    let mut reg = static_registry_for_run(st);
-    let workspace_unavailable = desktop_workspace_unavailable(st);
+    let mut reg = static_registry_for_context(st, run_context);
+    let workspace_unavailable =
+        desktop_workspace_unavailable_for(st, run_context.workspace.as_deref());
     if policy.plan_mode {
         return plan_mode_registry(
             reg,
@@ -536,12 +1278,12 @@ fn agent_base_registry_with_memory(
         }
     }
     if let Some(store) = st.schedules.as_ref() {
-        register_schedule_tools(&mut reg, store.clone(), workspace_snapshot(st));
+        register_schedule_tools(&mut reg, store.clone(), run_context.workspace.clone());
     }
     if let (Some(memory), Some(store)) = (memory.clone(), st.memory.as_ref()) {
         if memory.enabled {
             reg.register(Arc::new(MemoryRegisterTool {
-                store: store.clone(),
+                store: Arc::new(store.with_embedder(service_for_run(st, run_context))),
                 context: memory,
             }));
         }
@@ -647,7 +1389,19 @@ fn agent_registry_for_mode(
     memory: Option<AgentMemoryContext>,
     policy: &ToolRunPolicy,
 ) -> ToolRegistry {
-    let all = agent_base_registry_with_memory(st, memory.clone(), policy);
+    let run_context = RunContext::current(st);
+    agent_registry_for_mode_with_context(st, tool_mode, enabled_tools, memory, policy, &run_context)
+}
+
+fn agent_registry_for_mode_with_context(
+    st: &AppState,
+    tool_mode: &str,
+    enabled_tools: &[String],
+    memory: Option<AgentMemoryContext>,
+    policy: &ToolRunPolicy,
+    run_context: &RunContext,
+) -> ToolRegistry {
+    let all = agent_base_registry_with_memory(st, memory.clone(), policy, run_context);
     let normalized = milim_agents::normalize_tool_mode(tool_mode, enabled_tools);
     let inherited = match normalized.as_str() {
         "none" => ToolRegistry::new(),
@@ -658,14 +1412,15 @@ fn agent_registry_for_mode(
     let mut reg = inherited.clone();
     if let (Some(memory), Some(supervisor)) = (memory, st.threads.as_ref()) {
         if tools_available(policy) && child_thread_tools_allowed(supervisor, &memory) {
-            register_child_thread_tools(
+            register_child_thread_tools_with_context(
                 &mut reg,
                 st.clone(),
                 supervisor.clone(),
                 memory,
-                child_registry_for_policy(st, policy, inherited),
+                child_registry_for_policy(st, policy, inherited, run_context),
                 policy.approval == ToolApprovalPolicy::Open
                     || (policy.approval == ToolApprovalPolicy::Review && policy.approval_granted),
+                run_context.clone(),
             );
         }
     }
@@ -849,6 +1604,28 @@ pub(crate) fn register_child_thread_tools(
     child_tools: ToolRegistry,
     allow_write_review: bool,
 ) {
+    let run_context = RunContext::current(&state);
+    register_child_thread_tools_with_context(
+        reg,
+        state,
+        supervisor,
+        context,
+        child_tools,
+        allow_write_review,
+        run_context,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn register_child_thread_tools_with_context(
+    reg: &mut ToolRegistry,
+    state: AppState,
+    supervisor: Arc<ThreadSupervisor>,
+    context: AgentMemoryContext,
+    child_tools: ToolRegistry,
+    allow_write_review: bool,
+    run_context: RunContext,
+) {
     if context.delegation_policy != milim_agents::DelegationPolicy::Off {
         reg.register(Arc::new(DelegateWorkersTool {
             state,
@@ -856,41 +1633,47 @@ pub(crate) fn register_child_thread_tools(
             context,
             child_tools,
             allow_write_review,
+            run_context,
         }));
     }
 }
 
-fn child_read_only_registry(st: &AppState) -> ToolRegistry {
+fn child_read_only_registry(st: &AppState, run_context: &RunContext) -> ToolRegistry {
     let allowed: Vec<String> = CHILD_THREAD_READ_ONLY_TOOL_NAMES
         .iter()
         .map(|name| (*name).to_string())
         .collect();
-    let mut reg = static_registry_for_run(st).filtered(&allowed);
-    if desktop_workspace_unavailable(st) {
+    let mut reg = static_registry_for_context(st, run_context).filtered(&allowed);
+    if desktop_workspace_unavailable_for(st, run_context.workspace.as_deref()) {
         reg = reg.without(&["read_file", "list_dir"]);
     }
     reg
 }
 
-fn worker_review_registry(st: &AppState) -> ToolRegistry {
-    static_registry_for_run(st)
+fn worker_review_registry(st: &AppState, run_context: &RunContext) -> ToolRegistry {
+    let mut reg = static_registry_for_context(st, run_context)
         .without(CHILD_THREAD_TOOL_NAMES)
         .without(SANDBOX_TOOL_NAMES)
         .without(COMPUTER_TOOL_NAMES)
-        .without(PREVIEW_TOOL_NAMES)
+        .without(PREVIEW_TOOL_NAMES);
+    if desktop_workspace_unavailable_for(st, run_context.workspace.as_deref()) {
+        reg = reg.without(DESKTOP_WORKSPACE_TOOL_NAMES);
+    }
+    reg
 }
 
 fn child_registry_for_policy(
     st: &AppState,
     policy: &ToolRunPolicy,
     inherited: ToolRegistry,
+    run_context: &RunContext,
 ) -> ToolRegistry {
     if policy.approval == ToolApprovalPolicy::Open
         || (policy.approval == ToolApprovalPolicy::Review && policy.approval_granted)
     {
         inherited.without(CHILD_THREAD_TOOL_NAMES)
     } else {
-        child_read_only_registry(st)
+        child_read_only_registry(st, run_context)
     }
 }
 
@@ -934,6 +1717,7 @@ struct DelegateWorkersTool {
     context: AgentMemoryContext,
     child_tools: ToolRegistry,
     allow_write_review: bool,
+    run_context: RunContext,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1174,13 +1958,13 @@ fn worker_specs(
         .collect()
 }
 
-fn managed_worker_context(state: &AppState, base: Option<&str>) -> Option<String> {
+fn managed_worker_context(workspace: Option<&FsPath>, base: Option<&str>) -> Option<String> {
     let mut sections = Vec::new();
     if let Some(base) = base.filter(|value| !value.trim().is_empty()) {
         sections.push(base.to_string());
     }
-    if let Some(workspace) = workspace_snapshot(state) {
-        let branch = git_text(&workspace, &["branch", "--show-current"]);
+    if let Some(workspace) = workspace {
+        let branch = git_text(workspace, &["branch", "--show-current"]);
         sections.push(format!(
             "Workspace: {}{}",
             workspace.display(),
@@ -1189,7 +1973,7 @@ fn managed_worker_context(state: &AppState, base: Option<&str>) -> Option<String
                 .map(|value| format!("\nBranch: {value}"))
                 .unwrap_or_default(),
         ));
-        let context = crate::workspace_context::resolve(Some(&workspace));
+        let context = crate::workspace_context::resolve(Some(workspace));
         if let Some(instructions) = crate::workspace_context::formatted(&context, None) {
             sections.push(instructions);
         }
@@ -1208,6 +1992,8 @@ async fn start_managed_worker_run(
             "worker run is not awaiting approval".to_string(),
         ));
     }
+    let run_context = RunContext::from_worker_run(run)?;
+    let service = service_for_run(state, &run_context);
     let task_args = run
         .tasks
         .iter()
@@ -1237,7 +2023,7 @@ async fn start_managed_worker_run(
     let mut workers = Vec::with_capacity(running.tasks.len());
     for mut spec in worker_specs(&running, prompts) {
         let worker_tools = if spec.access == milim_agents::WorkerAccess::WriteReview {
-            match create_worker_worktree(state).await {
+            match create_worker_worktree(run_context.workspace.clone()).await {
                 Some(path) => {
                     spec.worktree_path = Some(path.to_string_lossy().to_string());
                     tools.scoped_to_workspace(&path)
@@ -1250,13 +2036,13 @@ async fn start_managed_worker_run(
         } else {
             tools.read_only()
         };
-        workers.push(supervisor.spawn(state.service.clone(), worker_tools, spec)?);
+        workers.push(supervisor.spawn(service.clone(), worker_tools, spec)?);
     }
     Ok((running, workers))
 }
 
-async fn create_worker_worktree(state: &AppState) -> Option<PathBuf> {
-    let folder = workspace_snapshot(state)?;
+async fn create_worker_worktree(folder: Option<PathBuf>) -> Option<PathBuf> {
+    let folder = folder?;
     tokio::task::spawn_blocking(move || {
         let status = workspace_git_status_blocking(Some(folder));
         if !status.is_repo {
@@ -1338,13 +2124,19 @@ impl Tool for DelegateWorkersTool {
                 task.access = milim_agents::WorkerAccess::ReadOnly;
             }
         }
-        let run = self.supervisor.store().create_worker_run(
+        let worker_context = managed_worker_context(
+            self.run_context.workspace.as_deref(),
+            self.context.worker_context.as_deref(),
+        );
+        let run = self.supervisor.store().create_worker_run_with_origin(
             &parent_id,
             self.context.message_id.as_deref(),
             self.context.delegation_policy,
             milim_agents::WorkerRuntime::Managed,
             tasks,
-            managed_worker_context(&self.state, self.context.worker_context.as_deref()).as_deref(),
+            worker_context.as_deref(),
+            self.run_context.workspace_text().as_deref(),
+            self.run_context.privacy_mode.as_str(),
         )?;
         if self.context.delegation_policy == milim_agents::DelegationPolicy::Ask {
             return Ok(
@@ -1750,6 +2542,8 @@ pub(crate) async fn agents_run(
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
 
+    let run_context = RunContext::from_request(&st, &req).map_err(ApiError)?;
+    let service = service_for_run(&st, &run_context);
     let model = req.model.clone();
     let want_stream = req.wants_stream();
     let reasoning_effort = req.reasoning_effort;
@@ -1765,19 +2559,21 @@ pub(crate) async fn agents_run(
     let memory = memory_context_from_request(&req, model.clone());
     let skill_mode = string_extra(&req, "skill_mode").unwrap_or_else(|| "auto".to_string());
     let enabled_skills = string_list_extra(&req, "enabled_skills");
-    let workspace_unavailable = desktop_workspace_unavailable(&st);
+    let workspace_unavailable =
+        desktop_workspace_unavailable_for(&st, run_context.workspace.as_deref());
     let mut messages = req.messages;
-    add_workspace_instructions(&mut messages, &st);
+    add_workspace_instructions_for(&mut messages, run_context.workspace.as_deref());
     add_workspace_notice_if_needed(&mut messages, workspace_unavailable);
 
     if want_stream {
-        let mut registry = agent_registry_with_memory(&st, Some(memory), &tool_policy);
+        let mut registry =
+            agent_registry_with_memory(&st, Some(memory), &tool_policy, &run_context);
         if !tool_policy.plan_mode {
             register_skill_tools(&mut registry, &st, &skill_mode, &enabled_skills);
         }
         let tools = std::sync::Arc::new(registry);
         let stream = milim_agents::run_agent_stream_with_config(
-            st.service.clone(),
+            service,
             tools,
             model,
             messages,
@@ -1789,12 +2585,12 @@ pub(crate) async fn agents_run(
             .into_response());
     }
 
-    let mut tools = agent_registry_with_memory(&st, Some(memory), &tool_policy);
+    let mut tools = agent_registry_with_memory(&st, Some(memory), &tool_policy, &run_context);
     if !tool_policy.plan_mode {
         register_skill_tools(&mut tools, &st, &skill_mode, &enabled_skills);
     }
     let outcome = milim_agents::run_agent_with_config(
-        st.service.as_ref(),
+        service.as_ref(),
         &tools,
         &model,
         messages,
@@ -1897,6 +2693,8 @@ pub(crate) async fn agent_run_by_id(
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
+    let run_context = RunContext::from_request(&st, &req).map_err(ApiError)?;
+    let service = service_for_run(&st, &run_context);
     let store = agents_store(&st)?;
     let agent = store
         .get(&id)
@@ -1950,28 +2748,32 @@ pub(crate) async fn agent_run_by_id(
         );
     }
     messages.extend(req.messages);
-    add_workspace_instructions(&mut messages, &st);
+    add_workspace_instructions_for(&mut messages, run_context.workspace.as_deref());
     let model = requested_model;
     let memory = AgentMemoryContext {
         model: model.clone(),
         ..memory
     };
-    add_workspace_notice_if_needed(&mut messages, desktop_workspace_unavailable(&st));
+    add_workspace_notice_if_needed(
+        &mut messages,
+        desktop_workspace_unavailable_for(&st, run_context.workspace.as_deref()),
+    );
 
     if want_stream {
-        let mut registry = agent_registry_for_mode(
+        let mut registry = agent_registry_for_mode_with_context(
             &st,
             &agent.tool_mode,
             &agent.enabled_tools,
             Some(memory),
             &tool_policy,
+            &run_context,
         );
         if !tool_policy.plan_mode {
             register_skill_tools(&mut registry, &st, &agent.skill_mode, &agent.enabled_skills);
         }
         let tools = std::sync::Arc::new(registry);
         let stream = milim_agents::run_agent_stream_with_config(
-            st.service.clone(),
+            service,
             tools,
             model,
             messages,
@@ -1983,18 +2785,19 @@ pub(crate) async fn agent_run_by_id(
             .into_response());
     }
 
-    let mut tools = agent_registry_for_mode(
+    let mut tools = agent_registry_for_mode_with_context(
         &st,
         &agent.tool_mode,
         &agent.enabled_tools,
         Some(memory),
         &tool_policy,
+        &run_context,
     );
     if !tool_policy.plan_mode {
         register_skill_tools(&mut tools, &st, &agent.skill_mode, &agent.enabled_skills);
     }
     let outcome = milim_agents::run_agent_with_config(
-        st.service.as_ref(),
+        service.as_ref(),
         &tools,
         &model,
         messages,
@@ -2100,6 +2903,27 @@ pub(crate) struct ThreadEventsQuery {
     event_limit: Option<usize>,
 }
 
+fn canonical_child_event(thread: milim_agents::AgentThread) -> SupervisorEvent {
+    match thread.status.as_str() {
+        "done" => SupervisorEvent::ChildThreadDone { thread },
+        "error" => {
+            let message = thread
+                .error
+                .clone()
+                .unwrap_or_else(|| "child thread failed".to_string());
+            SupervisorEvent::ChildThreadError { thread, message }
+        }
+        "stopped" => {
+            let message = thread
+                .error
+                .clone()
+                .unwrap_or_else(|| "child thread stopped".to_string());
+            SupervisorEvent::ChildThreadStopped { thread, message }
+        }
+        _ => SupervisorEvent::ChildThreadStarted { thread },
+    }
+}
+
 /// `GET /threads/{id}` - inspect one child thread.
 pub(crate) async fn thread_get(
     State(st): State<AppState>,
@@ -2171,10 +2995,25 @@ pub(crate) async fn thread_events(
     let initial_after_seq = query.after_seq.unwrap_or(0).max(0);
     let stream = async_stream::stream! {
         let mut last_seq = initial_after_seq;
-        if let Ok(backfill) = supervisor.child_events_after(&id, last_seq, event_limit) {
+        loop {
+            let Ok(backfill) = supervisor.child_events_after(&id, last_seq, event_limit) else {
+                break;
+            };
+            let drained = backfill.len() < event_limit;
+            let previous_seq = last_seq;
             for (thread, event) in backfill {
                 last_seq = last_seq.max(event.seq);
                 let data = serde_json::to_string(&SupervisorEvent::ChildThreadEvent { thread, event })
+                    .unwrap_or_else(|_| "{}".to_string());
+                yield Ok::<Event, Infallible>(Event::default().data(data));
+            }
+            if drained || last_seq == previous_seq {
+                break;
+            }
+        }
+        if let Ok(children) = supervisor.children(&id, None, 200) {
+            for thread in children.into_iter().filter(|thread| thread.run_id.is_none()) {
+                let data = serde_json::to_string(&canonical_child_event(thread))
                     .unwrap_or_else(|_| "{}".to_string());
                 yield Ok::<Event, Infallible>(Event::default().data(data));
             }
@@ -2195,10 +3034,27 @@ pub(crate) async fn thread_events(
                     yield Ok::<Event, Infallible>(Event::default().data(data));
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    if let Ok(backfill) = supervisor.child_events_after(&id, last_seq, event_limit) {
+                    loop {
+                        let Ok(backfill) =
+                            supervisor.child_events_after(&id, last_seq, event_limit)
+                        else {
+                            break;
+                        };
+                        let drained = backfill.len() < event_limit;
+                        let previous_seq = last_seq;
                         for (thread, event) in backfill {
                             last_seq = last_seq.max(event.seq);
                             let data = serde_json::to_string(&SupervisorEvent::ChildThreadEvent { thread, event })
+                                .unwrap_or_else(|_| "{}".to_string());
+                            yield Ok::<Event, Infallible>(Event::default().data(data));
+                        }
+                        if drained || last_seq == previous_seq {
+                            break;
+                        }
+                    }
+                    if let Ok(children) = supervisor.children(&id, None, 200) {
+                        for thread in children.into_iter().filter(|thread| thread.run_id.is_none()) {
+                            let data = serde_json::to_string(&canonical_child_event(thread))
                                 .unwrap_or_else(|_| "{}".to_string());
                             yield Ok::<Event, Infallible>(Event::default().data(data));
                         }
@@ -2260,6 +3116,10 @@ pub(crate) struct WorkerRunCreateRequest {
     runtime: milim_agents::WorkerRuntime,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    workspace: RequestValue,
+    #[serde(default)]
+    privacy_mode: RequestValue,
     tasks: Vec<DelegateWorkerTaskArgs>,
 }
 
@@ -2291,6 +3151,9 @@ pub(crate) async fn worker_run_create(
     Json(req): Json<WorkerRunCreateRequest>,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
+    let run_context =
+        RunContext::from_values(&st, req.workspace.as_value(), req.privacy_mode.as_value())
+            .map_err(ApiError)?;
     if req.policy == milim_agents::DelegationPolicy::Off {
         return Err(ApiError(Error::InvalidRequest(
             "delegation is off for this thread".to_string(),
@@ -2327,23 +3190,30 @@ pub(crate) async fn worker_run_create(
     // Native adapters normalize their own activity into this contract. This endpoint safely falls back to managed workers.
     let _requested_runtime = req.runtime;
     let supervisor = thread_supervisor(&st)?;
+    let worker_context = managed_worker_context(run_context.workspace.as_deref(), None);
     let mut run = supervisor
         .store()
-        .create_worker_run(
+        .create_worker_run_with_origin(
             &parent_id,
             req.parent_turn_id.as_deref(),
             req.policy,
             milim_agents::WorkerRuntime::Managed,
             tasks,
-            None,
+            worker_context.as_deref(),
+            run_context.workspace_text().as_deref(),
+            run_context.privacy_mode.as_str(),
         )
         .map_err(ApiError)?;
     let mut workers = Vec::new();
     if req.policy == milim_agents::DelegationPolicy::Auto {
-        (run, workers) =
-            start_managed_worker_run(&st, &supervisor, &run, child_read_only_registry(&st))
-                .await
-                .map_err(ApiError)?;
+        (run, workers) = start_managed_worker_run(
+            &st,
+            &supervisor,
+            &run,
+            child_read_only_registry(&st, &run_context),
+        )
+        .await
+        .map_err(ApiError)?;
         schedule_worker_run_deadline(supervisor.clone(), run.id.clone());
     }
     Ok(Json(json!({ "run": run, "workers": workers })).into_response())
@@ -2404,10 +3274,15 @@ pub(crate) async fn worker_run_start(
         .worker_run(&id)
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(Error::ModelNotFound(format!("worker run {id}"))))?;
-    let (run, workers) =
-        start_managed_worker_run(&st, &supervisor, &run, worker_review_registry(&st))
-            .await
-            .map_err(ApiError)?;
+    let run_context = RunContext::from_worker_run(&run).map_err(ApiError)?;
+    let (run, workers) = start_managed_worker_run(
+        &st,
+        &supervisor,
+        &run,
+        worker_review_registry(&st, &run_context),
+    )
+    .await
+    .map_err(ApiError)?;
     schedule_worker_run_deadline(supervisor, run.id.clone());
     Ok(Json(json!({ "run": run, "workers": workers })).into_response())
 }
@@ -2431,6 +3306,7 @@ pub(crate) async fn worker_run_task_retry(
         .worker_run(&id)
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(Error::ModelNotFound(format!("worker run {id}"))))?;
+    let run_context = RunContext::from_worker_run(&source).map_err(ApiError)?;
     if matches!(
         source.status,
         milim_agents::WorkerRunStatus::Proposed | milim_agents::WorkerRunStatus::Running
@@ -2467,19 +3343,25 @@ pub(crate) async fn worker_run_task_retry(
     .map_err(ApiError)?;
     let retry = supervisor
         .store()
-        .create_worker_run(
+        .create_worker_run_with_origin(
             &source.parent_thread_id,
             source.parent_turn_id.as_deref(),
             source.policy,
             milim_agents::WorkerRuntime::Managed,
             tasks,
             source.context.as_deref(),
+            run_context.workspace_text().as_deref(),
+            run_context.privacy_mode.as_str(),
         )
         .map_err(ApiError)?;
-    let (run, workers) =
-        start_managed_worker_run(&st, &supervisor, &retry, worker_review_registry(&st))
-            .await
-            .map_err(ApiError)?;
+    let (run, workers) = start_managed_worker_run(
+        &st,
+        &supervisor,
+        &retry,
+        worker_review_registry(&st, &run_context),
+    )
+    .await
+    .map_err(ApiError)?;
     schedule_worker_run_deadline(supervisor, run.id.clone());
     Ok(Json(json!({ "run": run, "workers": workers })).into_response())
 }
@@ -2577,13 +3459,19 @@ pub(crate) async fn worker_run_worker_apply(
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
     let supervisor = thread_supervisor(&st)?;
+    let run = supervisor
+        .worker_run(&id)
+        .map_err(ApiError)?
+        .ok_or_else(|| ApiError(Error::ModelNotFound(format!("worker run {id}"))))?;
+    let run_context = RunContext::from_worker_run(&run).map_err(ApiError)?;
     let worker = owned_worker(&supervisor, &id, &worker_id)?;
     let worktree = worker.worktree_path.clone().ok_or_else(|| {
         ApiError(Error::InvalidRequest(
             "worker has no review worktree".into(),
         ))
     })?;
-    let root = workspace_snapshot(&st)
+    let root = run_context
+        .workspace
         .ok_or_else(|| ApiError(Error::InvalidRequest("no working folder selected".into())))?;
     let worktree_root = milim_core::paths::Paths::resolve()
         .root()
@@ -2615,11 +3503,19 @@ pub(crate) async fn worker_run_events(
     let initial_after_seq = query.after_seq.unwrap_or(0).max(0);
     let stream = async_stream::stream! {
         let mut last_seq = initial_after_seq;
-        if let Ok(backfill) = supervisor.worker_events_after(&id, last_seq, limit) {
+        loop {
+            let Ok(backfill) = supervisor.worker_events_after(&id, last_seq, limit) else {
+                break;
+            };
+            let drained = backfill.len() < limit;
+            let previous_seq = last_seq;
             for (worker, event) in backfill {
                 last_seq = last_seq.max(event.seq);
                 let data = serde_json::to_string(&json!({"type":"worker_run_worker_event","run_id":id,"worker":worker,"event":event})).unwrap_or_else(|_| "{}".to_string());
                 yield Ok::<Event, Infallible>(Event::default().data(data));
+            }
+            if drained || last_seq == previous_seq {
+                break;
             }
         }
         if let Ok(Some(run)) = supervisor.store().refresh_worker_run_status(&id) {
@@ -2643,10 +3539,38 @@ pub(crate) async fn worker_run_events(
                         SupervisorEvent::ChildThreadStopped { .. } => "worker_run_worker_stopped",
                         SupervisorEvent::ChildThreadEvent { .. } => "worker_run_worker_event",
                     };
-                    let data = serde_json::to_string(&json!({"type":kind,"run":run,"worker":event.thread(),"event":event})).unwrap_or_else(|_| "{}".to_string());
+                    let stored = match &event {
+                        SupervisorEvent::ChildThreadEvent { event, .. } => Some(event),
+                        _ => None,
+                    };
+                    let data = serde_json::to_string(&json!({"type":kind,"run":run,"worker":event.thread(),"event":stored})).unwrap_or_else(|_| "{}".to_string());
                     yield Ok::<Event, Infallible>(Event::default().data(data));
                 }
-                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    loop {
+                        let Ok(backfill) = supervisor.worker_events_after(&id, last_seq, limit)
+                        else {
+                            break;
+                        };
+                        let drained = backfill.len() < limit;
+                        let previous_seq = last_seq;
+                        for (worker, event) in backfill {
+                            last_seq = last_seq.max(event.seq);
+                            let data = serde_json::to_string(&json!({"type":"worker_run_worker_event","run_id":id,"worker":worker,"event":event})).unwrap_or_else(|_| "{}".to_string());
+                            yield Ok::<Event, Infallible>(Event::default().data(data));
+                        }
+                        if drained || last_seq == previous_seq {
+                            break;
+                        }
+                    }
+                    if let Ok(Some(run)) = supervisor.store().refresh_worker_run_status(&id) {
+                        let workers = supervisor.workers_for_run(&id).unwrap_or_default();
+                        let kind = format!("worker_run_{}", worker_run_event_name(run.status));
+                        let data = serde_json::to_string(&json!({"type":kind,"run":run,"workers":workers})).unwrap_or_else(|_| "{}".to_string());
+                        yield Ok::<Event, Infallible>(Event::default().data(data));
+                    }
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }

@@ -253,6 +253,22 @@ deepEqual(
   ["pi:github-copilot/shared"],
   "search should match humanized nested provider routes",
 );
+
+const onboardingCatalog = Array.from({ length: 200 }, (_, index) => ({
+  id: `onboarding-model-${index + 1}`,
+  display_id: `Searchable onboarding model ${index + 1}`,
+  owned_by: index % 2 === 0 ? "OpenAI" : "Anthropic",
+})) satisfies ModelInfo[];
+deepEqual(
+  modelPickerGroups(
+    onboardingCatalog,
+    [],
+    false,
+    "onboarding model 200",
+  ).flatMap(([, models]) => models.map((model) => model.id)),
+  ["onboarding-model-200"],
+  "the shared picker should search a 200-model onboarding catalog",
+);
 equal(
   modelDevProfile(
     {
