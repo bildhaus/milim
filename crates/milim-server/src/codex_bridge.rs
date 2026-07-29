@@ -2322,7 +2322,7 @@ fn compact_json(value: Option<&Value>) -> Option<String> {
     if value.is_null() {
         return None;
     }
-    Some(compact(&value.to_string(), 110))
+    Some(value.to_string())
 }
 
 fn compact(value: &str, limit: usize) -> String {
@@ -2710,6 +2710,10 @@ mod tests {
         assert_eq!(
             command_detail(&json!({ "command": command })).as_deref(),
             Some(command.as_str())
+        );
+        assert_eq!(
+            compact_json(Some(&json!({ "command": command }))),
+            Some(json!({ "command": command }).to_string())
         );
     }
 

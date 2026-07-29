@@ -691,6 +691,7 @@ const codexResult = await runAccountRuntimeTurn({
       id: "shell-1",
       name: "shell",
       status: "done",
+      result: { exit_code: 0 },
     });
     onEvent({ type: "warning", message: "temporary runtime notice" });
     onEvent({
@@ -726,6 +727,7 @@ assert.equal(accountMetrics[0].usage?.total_tokens, 2);
 assert.equal(accountRun?.status, "done");
 assert.equal(accountRun?.steps[0].arguments, "echo traced");
 assert.equal(accountRun?.steps[0].approval?.status, "approved");
+assert.deepEqual(accountRun?.steps[0].result, { exit_code: 0 });
 assert(accountRun?.steps[0].endedAt);
 assert(accountSnapshots >= 6);
 

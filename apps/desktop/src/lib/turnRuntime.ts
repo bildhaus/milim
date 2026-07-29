@@ -661,7 +661,14 @@ export function createAccountRuntimeEventHandler({
           activeToolIds.delete(toolId);
           const step = run && lastOpenStep(run.steps, event.name ?? undefined, event.id);
           if (step) {
-            if (part.status === "error") step.error = event.detail || `${event.name ?? "Tool"} failed`;
+            if (part.status === "error") {
+              step.error =
+                event.error ||
+                event.detail ||
+                `${event.name ?? "Tool"} failed`;
+            } else if (event.result != null) {
+              step.result = event.result;
+            }
             step.endedAt = now();
           }
           completeStreamEvent(toolId, part);

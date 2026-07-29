@@ -916,7 +916,7 @@ assert(
 );
 equal(
   formatResponseMetrics(assistantMetrics),
-  "3.2s · 1.4k tokens · est. $0.004",
+  "OpenRouter · openrouter/test · 3.2s · 1.4k tokens · est. $0.004",
   "response metrics should format compactly",
 );
 equal(
@@ -1199,6 +1199,35 @@ deepEqual(
     costUsd: 0.5,
   },
   "account-runtime turn metrics should use runtime provider and explicit cost only",
+);
+deepEqual(
+  responseMetricsForTurn({
+    startedAt: 10,
+    endedAt: 40,
+    model: "opencode:opencode/north-mini-code-free",
+    providers: pricedProviders,
+    usage,
+  }),
+  {
+    startedAt: 10,
+    endedAt: 40,
+    durationMs: 30,
+    model: "opencode:opencode/north-mini-code-free",
+    provider: "Local OpenCode CLI",
+    usage,
+  },
+  "OpenCode runtime metrics should retain native provenance without provider pricing",
+);
+equal(
+  formatResponseMetrics({
+    startedAt: 10,
+    endedAt: 40,
+    durationMs: 30,
+    model: "pi:openai-codex/gpt-5.4-mini",
+    provider: "Local Pi CLI",
+  }),
+  "Local Pi CLI · openai-codex/gpt-5.4-mini · 30ms",
+  "account-runtime response footers should identify the runtime and model",
 );
 equal(
   approvalWaitDuration({

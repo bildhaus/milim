@@ -271,7 +271,10 @@ export function accountRuntimeToolPart(ev: AccountRuntimeToolEvent): ChatStreamE
     kind: "event",
     eventType: "tool",
     label: ev.label || (status === "running" ? `Using ${ev.name}` : status === "error" ? `${ev.name} failed` : `Used ${ev.name}`),
-    detail: ev.detail || undefined,
+    detail:
+      (status === "error" ? ev.error : ev.detail) ||
+      ev.detail ||
+      undefined,
     icon: ev.icon || toolEventIcon(ev.name),
     name: ev.id || ev.name,
     status,

@@ -115,6 +115,7 @@ pub(crate) fn run_stream(
             }
         };
         yield sse(&json!({ "type": "session", "session_id": session, "model": req.model }));
+        let mut tool_calls: BTreeMap<String, (String, String)> = BTreeMap::new();
 
         let prompt_id = match proc.send_request("session/prompt", Some(prompt_params(&req, &session))).await {
             Ok(id) => id,
@@ -192,9 +193,27 @@ pub(crate) fn run_stream(
                 }
                 "tool_call" | "tool_call_update" => {
                     let id = string_at(update, &["toolCallId"]).unwrap_or_else(|| "opencode-tool".into());
-                    let name = string_at(update, &["title"]).or_else(|| string_at(update, &["kind"])).unwrap_or_else(|| "OpenCode tool".into());
+                    let previous = tool_calls.get(&id).cloned();
+                    let name = string_at(update, &["title"])
+                        .or_else(|| string_at(update, &["kind"]))
+                        .or_else(|| previous.as_ref().map(|(name, _)| name.clone()))
+                        .unwrap_or_else(|| "OpenCode tool".into());
+                    let detail = tool_input_detail(update)
+                        .or_else(|| previous.as_ref().map(|(_, detail)| detail.clone()));
                     let status = string_at(update, &["status"]).unwrap_or_else(|| "running".into());
-                    yield sse(&json!({ "type": "tool", "id": id, "name": name, "status": status }));
+                    let result = tool_result(update);
+                    let error = matches!(status.as_str(), "failed" | "error")
+                        .then(|| tool_error_detail(update, result.as_ref()))
+                        .flatten();
+                    if matches!(status.as_str(), "completed" | "done" | "failed" | "error") {
+                        tool_calls.remove(&id);
+                    } else if let Some(detail) = detail.as_ref() {
+                        tool_calls.insert(id.clone(), (name.clone(), detail.clone()));
+                    }
+                    yield sse(&json!({
+                        "type": "tool", "id": id, "name": name, "status": status,
+                        "detail": detail, "result": result, "error": error
+                    }));
                 }
                 "usage_update" => {
                     if let Some(usage) = usage_from_update(update) {
@@ -269,6 +288,41 @@ fn usage_from_update(update: &Value) -> Option<Usage> {
             .and_then(Value::as_u64)
             .unwrap_or(0) as u32,
     })
+}
+
+fn tool_input_detail(update: &Value) -> Option<String> {
+    update.get("rawInput").and_then(value_detail)
+}
+
+fn tool_result(update: &Value) -> Option<Value> {
+    update
+        .get("rawOutput")
+        .or_else(|| update.get("content"))
+        .filter(|value| !value.is_null())
+        .cloned()
+}
+
+fn tool_error_detail(update: &Value, result: Option<&Value>) -> Option<String> {
+    update
+        .get("error")
+        .and_then(value_detail)
+        .or_else(|| result.and_then(value_detail))
+}
+
+fn value_detail(value: &Value) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+    value
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| {
+            value
+                .get("command")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .or_else(|| Some(value.to_string()))
 }
 
 struct OpenCodeProcess {
@@ -828,6 +882,25 @@ mod tests {
         assert_eq!(model["image_input"], false);
         assert_eq!(model["tool_use"], true);
         assert_eq!(model["supported_efforts"], json!(["none", "high"]));
+    }
+
+    #[test]
+    fn tool_updates_keep_full_inputs_and_outputs() {
+        let command = format!("powershell -Command \"{}\"", "x".repeat(140));
+        assert_eq!(
+            tool_input_detail(&json!({ "rawInput": { "command": command } })),
+            Some(command)
+        );
+        let update = json!({
+            "status": "failed",
+            "rawOutput": { "error": "permission denied" }
+        });
+        let result = tool_result(&update);
+        assert_eq!(result, Some(json!({ "error": "permission denied" })));
+        assert_eq!(
+            tool_error_detail(&update, result.as_ref()),
+            Some("{\"error\":\"permission denied\"}".into())
+        );
     }
 
     #[test]

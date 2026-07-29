@@ -2331,6 +2331,8 @@ export type CodexRunEvent =
       status: ChatStreamEventStatus;
       label?: string | null;
       detail?: string | null;
+      result?: unknown;
+      error?: string | null;
       icon?: ChatStreamEventIcon | null;
     }
   | {
@@ -2365,6 +2367,8 @@ export type ClaudeRunEvent =
       status: ChatStreamEventStatus;
       label?: string | null;
       detail?: string | null;
+      result?: unknown;
+      error?: string | null;
       icon?: ChatStreamEventIcon | null;
     }
   | { type: "rate_limit"; limit: ProviderLimitInfo }
@@ -2386,6 +2390,8 @@ export type OpenCodeRunEvent =
       status: ChatStreamEventStatus;
       label?: string | null;
       detail?: string | null;
+      result?: unknown;
+      error?: string | null;
       icon?: ChatStreamEventIcon | null;
     }
   | { type: "done"; status: string; usage?: TokenUsage; cost_usd?: number }

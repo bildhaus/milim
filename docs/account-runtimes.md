@@ -12,6 +12,8 @@ Every account-runtime turn must report an explicit completion, error, or intenti
 
 Failed or canceled turns clear only the affected native session before the next send. This prevents a prompt that the CLI persisted before the failure from being replayed into divergent native history.
 
+All account-runtime tool events keep their full input text behind the transcript's visual ellipsis. Claude no longer truncates structured tool inputs server-side, while OpenCode and Pi also preserve completion results and error details in the shared run trace.
+
 ## OpenCode
 
 Milim invokes the user-installed `opencode acp` process once per turn and speaks ACP v1 JSON-RPC over stdio. `GET /opencode/status` and `GET /opencode/models` discover configured models without refreshing OpenCode's network cache; `POST /opencode/run` creates or resumes the native session, applies the exact selected model, streams normalized events, and forwards permission requests to Milim's one-shot approval cards. Plan, Guarded, Review, and Open map to a Milim-owned permission overlay. Guarded and Review refuse to run when `opencode debug config` shows that higher-precedence configuration weakened the promised policy.

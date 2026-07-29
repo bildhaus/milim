@@ -181,7 +181,7 @@ pub(crate) fn run_stream(
                                 .or_else(|| message.pointer("/message/errorMessage").and_then(Value::as_str))
                                 .or_else(|| event.get("reason").and_then(Value::as_str))
                                 .unwrap_or("Pi model request failed.");
-                            yield sse(&json!({ "type": "error", "message": detail }));
+                            yield sse(&json!({ "type": "error", "message": actionable_pi_error(detail) }));
                         }
                         _ => {}
                     }
@@ -201,9 +201,23 @@ pub(crate) fn run_stream(
                 }
                 "tool_execution_end" => {
                     let call_id = message.get("toolCallId").and_then(Value::as_str).unwrap_or("pi-tool").to_string();
-                    let name = message.get("toolName").and_then(Value::as_str).unwrap_or("Pi tool").to_string();
-                    let status = if message.get("isError").and_then(Value::as_bool) == Some(true) { "error" } else { "done" };
-                    yield sse(&json!({ "type": "tool", "id": call_id, "name": name, "status": status }));
+                    let previous = tool_calls.remove(&call_id);
+                    let name = message.get("toolName").and_then(Value::as_str).map(str::to_string)
+                        .or_else(|| previous.as_ref().map(|(name, _, _)| name.clone()))
+                        .unwrap_or_else(|| "Pi tool".into());
+                    let detail = previous.as_ref().map(|(_, arguments, _)| arguments.clone());
+                    let result = pi_tool_result(&message);
+                    let failed = message.get("isError").and_then(Value::as_bool) == Some(true);
+                    let error = failed.then(|| {
+                        message.get("error").and_then(value_detail)
+                            .or_else(|| result.as_ref().and_then(value_detail))
+                            .unwrap_or_else(|| format!("{name} failed"))
+                    });
+                    yield sse(&json!({
+                        "type": "tool", "id": call_id, "name": name,
+                        "status": if failed { "error" } else { "done" },
+                        "detail": detail, "result": result, "error": error
+                    }));
                 }
                 "extension_ui_request" => {
                     let title = message.get("title").and_then(Value::as_str).unwrap_or_default();
@@ -342,6 +356,25 @@ fn actionable_pi_error(message: &str) -> String {
         "Pi sign-in expired. Open Pi, run /login, then refresh models in Milim.".into()
     } else {
         message.to_string()
+    }
+}
+
+fn pi_tool_result(message: &Value) -> Option<Value> {
+    message
+        .get("result")
+        .or_else(|| message.get("content"))
+        .filter(|value| !value.is_null())
+        .cloned()
+}
+
+fn value_detail(value: &Value) -> Option<String> {
+    if value.is_null() {
+        None
+    } else {
+        value
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| Some(value.to_string()))
     }
 }
 
@@ -830,6 +863,17 @@ mod tests {
                 "{\"command\":\"echo ok\"}".into(),
                 "command"
             ))
+        );
+    }
+
+    #[test]
+    fn tool_completion_keeps_result_and_error_detail() {
+        let success = json!({ "result": { "content": "ok" } });
+        assert_eq!(pi_tool_result(&success), Some(json!({ "content": "ok" })));
+        let failure = json!({ "isError": true, "error": "permission denied" });
+        assert_eq!(
+            failure.get("error").and_then(value_detail),
+            Some("permission denied".into())
         );
     }
 

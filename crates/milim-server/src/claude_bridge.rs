@@ -1901,20 +1901,7 @@ fn compact_json(value: Option<&Value>) -> Option<String> {
     if value.is_null() {
         return None;
     }
-    Some(compact(&value.to_string(), 110))
-}
-
-fn compact(value: &str, limit: usize) -> String {
-    let text = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    if text.chars().count() > limit {
-        let prefix = text
-            .chars()
-            .take(limit.saturating_sub(3))
-            .collect::<String>();
-        format!("{prefix}...")
-    } else {
-        text
-    }
+    Some(value.to_string())
 }
 
 fn claude_spawn_error_message(error: &std::io::Error) -> String {
@@ -2132,6 +2119,28 @@ not json
             Some(ClaudeStreamEvent::Reasoning { text }) if text == "still working"
         ));
         assert!(tools.contains_key("toolu_1"));
+    }
+
+    #[test]
+    fn tool_inputs_keep_full_copy_text() {
+        let command = format!("powershell -Command \"{}\"", "x".repeat(140));
+        let input = json!({ "command": command });
+        let expected = input.to_string();
+        let mut tools = BTreeMap::new();
+        let event = claude_tool_start_event(
+            &json!({
+                "type": "tool_use",
+                "id": "toolu-long",
+                "name": "Bash",
+                "input": input,
+            }),
+            &mut tools,
+        );
+        assert!(matches!(
+            event,
+            Some(ClaudeStreamEvent::Tool { detail: Some(detail), .. })
+                if detail == expected
+        ));
     }
 
     #[test]

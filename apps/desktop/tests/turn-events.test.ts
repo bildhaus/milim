@@ -101,6 +101,14 @@ equal(accountRuntimeToolPart({
   name: "edit",
   status: "in_progress",
 } as never).status, "running", "ACP in-progress tools should normalize to running");
+equal(accountRuntimeToolPart({
+  type: "tool",
+  id: "tool-4",
+  name: "shell",
+  status: "failed",
+  detail: "full command",
+  error: "permission denied",
+} as never).detail, "permission denied", "account runtime failures should show their error detail");
 
 const warning = runtimeWarningMessage("Codex not on PATH", "Install Codex");
 assert(warning.streamParts?.[0]?.kind === "event", "runtime warning should be an event part");

@@ -23,6 +23,8 @@ Milim keeps provider-backed chat and installed account runtimes distinct. Provid
 
 Failed or canceled native-runtime turns discard that runtime's native session before the next send, preventing a partially persisted prompt from being replayed into divergent history.
 
+Completed assistant responses retain their provider or account runtime and model in the transcript footer. Tool inputs remain fully copyable from collapsed activity even when the row is visually clipped.
+
 ## Get started
 
 ### Install the desktop app

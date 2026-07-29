@@ -147,20 +147,25 @@ export function responseMetricsForTurn({
   costUsd?: number;
   limits?: ProviderLimitInfo[];
 }): ResponseMetrics {
+  const runtimeProvider = codexModel || model.startsWith("codex:")
+    ? "Codex"
+    : claudeModel || model.startsWith("claude:")
+      ? "Local Claude CLI"
+      : model.startsWith("opencode:")
+        ? "Local OpenCode CLI"
+        : model.startsWith("pi:")
+          ? "Local Pi CLI"
+          : undefined;
   return {
     startedAt,
     endedAt,
     durationMs: Math.max(0, endedAt - startedAt - pausedMs),
     model,
-    provider: codexModel
-      ? "Codex"
-      : claudeModel
-        ? "Local Claude CLI"
-        : providerNameForModel(model, providers),
+    provider: runtimeProvider ?? providerNameForModel(model, providers),
     usage,
     costUsd:
       costUsd ??
-      (codexModel || claudeModel
+      (runtimeProvider
         ? undefined
         : estimateResponseCostUsd(model, usage, providers)),
     limits: limits?.length ? limits : undefined,
@@ -356,11 +361,17 @@ export function formatResponseMetrics(
   metrics?: ResponseMetrics,
 ): string | null {
   if (!metrics?.endedAt) return null;
-  return formatMetricParts(
-    metrics.durationMs ?? 0,
-    metrics.usage?.total_tokens ?? 0,
-    metrics.costUsd,
-  );
+  const model = rawModelId(metrics.model)
+    .replace(/^(?:codex|claude|opencode|pi):/, "")
+    .trim();
+  return [
+    [metrics.provider?.trim(), model].filter(Boolean).join(" · "),
+    formatMetricParts(
+      metrics.durationMs ?? 0,
+      metrics.usage?.total_tokens ?? 0,
+      metrics.costUsd,
+    ),
+  ].filter(Boolean).join(" · ");
 }
 
 export function formatThreadMetrics(
