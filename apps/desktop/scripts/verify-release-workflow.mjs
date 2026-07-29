@@ -20,7 +20,6 @@ const expectedArtifacts = [
 ];
 
 const checkoutReleaseTagRef = "ref: ${{ env.MILIM_RELEASE_TAG }}";
-const verifyCommand = "pnpm -C apps/desktop verify";
 
 for (const artifact of expectedArtifacts) {
   assertIncludes(releaseWorkflow, matrixRow(artifact), "release workflow matrix");
@@ -40,9 +39,7 @@ for (const needle of [
   "needs: create-draft-release",
   "Checkout release tag",
   checkoutReleaseTagRef,
-  "GITHUB_REF_TYPE: tag",
-  "GITHUB_REF_NAME: ${{ env.MILIM_RELEASE_TAG }}",
-  verifyCommand,
+  "save-if: false",
   "Require macOS signing secrets",
   "::error::Missing required macOS signing secret",
   "Build macOS app and DMG",
@@ -83,6 +80,7 @@ for (const needle of [
   'gh release upload "${{ env.MILIM_RELEASE_TAG }}" src-tauri/target/release/bundle/portable/*.exe --clobber',
   'gh release upload "${{ env.MILIM_RELEASE_TAG }}" src-tauri/target/release/bundle/portable/*.exe.sha256 --clobber',
   "--clobber",
+  "run: pnpm -C apps/desktop verify",
 ]) {
   assertNotIncludes(releaseWorkflow, needle, "release workflow");
 }
@@ -94,23 +92,35 @@ assertOccurrences(siteWorkflow, '- "VERSION"', 2, "site workflow version trigger
 assertBefore(releaseWorkflow, "Validate release tag", checkoutReleaseTagRef, "release workflow checkout");
 assertBefore(releaseWorkflow, "Generate release notes", "Create or update draft release", "release workflow notes");
 assertBefore(releaseWorkflow, checkoutReleaseTagRef, "Require macOS signing secrets", "release workflow signing preflight");
-assertBefore(releaseWorkflow, "Require macOS signing secrets", verifyCommand, "release workflow signing preflight");
 assertBefore(releaseWorkflow, "Require macOS signing secrets", "Build macOS app and DMG", "release workflow signing preflight");
-assertBefore(releaseWorkflow, checkoutReleaseTagRef, verifyCommand, "release workflow verify");
-assertBefore(releaseWorkflow, verifyCommand, "Build macOS app and DMG", "release workflow verify");
-assertBefore(releaseWorkflow, verifyCommand, "pnpm -C apps/desktop tauri build --no-bundle", "release workflow verify");
 assertBefore(releaseWorkflow, "pnpm -C apps/desktop tauri build --no-bundle", "node scripts/smoke-release-binary.mjs", "release workflow launch smoke");
 assertBefore(releaseWorkflow, "node scripts/stage-portable-release-artifact.mjs", "node scripts/generate-release-manifest.mjs", "release workflow manifest");
 assertBefore(releaseWorkflow, "node scripts/generate-release-manifest.mjs", "node scripts/verify-release-manifest.mjs", "release workflow manifest");
 assertBefore(releaseWorkflow, "node scripts/verify-release-manifest.mjs", "Upload release manifest artifact", "release workflow manifest");
 assertBefore(releaseWorkflow, "desktop:", "publish-release-checksums:", "release workflow checksums");
+assertIncludes(
+  siteWorkflow,
+  "if: github.event_name == 'pull_request' || github.ref != 'refs/heads/main'",
+  "site build workflow",
+);
+assertIncludes(
+  siteWorkflow,
+  "if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'",
+  "site deploy workflow",
+);
+assertNotIncludes(siteWorkflow, "needs: check", "site workflow");
 
 for (const needle of [
   'tags: ["v*"]',
+  "pull_request:",
   "cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings",
   "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml",
 ]) {
   assertIncludes(ciWorkflow, needle, "CI workflow");
+}
+
+for (const needle of ["branches: [main]", "Optional feature smoke"]) {
+  assertNotIncludes(ciWorkflow, needle, "CI workflow");
 }
 
 console.log(`Release workflow smoke verified: ${expectedArtifacts.map((artifact) => `milim-${artifact.artifact}`).join(", ")}`);
