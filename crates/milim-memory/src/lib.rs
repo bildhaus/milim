@@ -281,6 +281,15 @@ impl MemoryStore {
         })
     }
 
+    /// Share this store's database while using a different embedder for one
+    /// request or run.
+    pub fn with_embedder(&self, embedder: SharedService) -> Self {
+        Self {
+            db: self.db.clone(),
+            embedder,
+        }
+    }
+
     /// Embed `text` with `model` and persist it. Returns the new id.
     pub async fn add(&self, model: &str, text: &str) -> Result<String> {
         let embedding = self.embed_one(model, text).await?;

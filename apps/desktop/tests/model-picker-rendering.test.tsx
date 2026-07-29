@@ -170,6 +170,30 @@ try {
   assert(mediaMarkup.includes('aria-pressed="true"'), "The shared picker should render provider-scoped media favorites");
   assert(!mediaMarkup.includes('data-testid="manage-providers"'), "Media picker usage should hide chat management actions");
 
+  const largeCatalog = Array.from({ length: 200 }, (_, index): ModelInfo => ({
+    id: `model-${String(index + 1).padStart(3, "0")}`,
+    display_id: `Searchable model ${index + 1}`,
+    owned_by: index % 2 === 0 ? "OpenAI" : "Anthropic",
+    capabilities: { toolUse: true },
+  }));
+  const largeCatalogMarkup = renderToStaticMarkup(
+    createElement(ModelPicker, {
+      models: largeCatalog,
+      model: largeCatalog[0].id,
+      onModel: () => {},
+      onClose: () => {},
+      searchPlaceholder: "Search 200 models...",
+    }),
+  );
+  assert(
+    largeCatalogMarkup.includes("Search 200 models..."),
+    "The shared onboarding picker should remain searchable with a 200-model catalog",
+  );
+  assert(
+    largeCatalogMarkup.includes("Searchable model 200"),
+    "The shared picker should retain all 200 discoverable models",
+  );
+
   const { ControlBar } = (await server.ssrLoadModule(
     "/src/components/ControlBar.tsx",
   )) as {
@@ -234,7 +258,10 @@ try {
       onAction: () => {},
     }),
   );
-  assert(batonMarkup.includes('data-testid="baton-menu-trigger"'), "Baton actions should collapse under one trigger");
+  assert(batonMarkup.includes('data-testid="baton-continue"'), "Continue should stay visible without hover or opening a menu");
+  assert(batonMarkup.includes(">Continue with...</span>"), "The visible handoff action should be labeled Continue with");
+  assert(batonMarkup.includes("<button"), "The visible Continue action should use a keyboard-focusable native button");
+  assert(batonMarkup.includes('data-testid="baton-menu-trigger"'), "Review and Retry should remain available from the handoff menu");
   assert(!batonMarkup.includes("Model handoff actions"), "Closed Baton actions should not leave a hidden menu in the message layout");
   const hotSwapSource = readFileSync(resolve(process.cwd(), "src/components/HotSwapDialogs.tsx"), "utf8");
   const styles = ["chat.css", "workspaces.css"]
@@ -244,7 +271,11 @@ try {
     .join("\n");
   assert(hotSwapSource.includes("createPortal("), "Baton actions should render through a body portal");
   assert(hotSwapSource.includes('className="baton-menu-popover message-popover-layer"'), "Baton actions should use the shared message popover layer");
-  assert(hotSwapSource.includes("Continue with...") && hotSwapSource.includes("Review with...") && hotSwapSource.includes("Retry with..."), "Baton menu should offer all handoff actions");
+  assert(hotSwapSource.includes("Continue with...") && hotSwapSource.includes("Review with...") && hotSwapSource.includes("Retry with..."), "Baton controls should offer all handoff actions");
+  assert(
+    styles.includes(".baton-menu :is(.baton-continue, .baton-menu-trigger):focus-visible"),
+    "The always-visible Continue action should expose keyboard focus",
+  );
   assert(styles.includes(".message-popover-layer") && styles.includes("z-index: 1200 !important"), "Message popovers should render above the sidebar layer");
   assert(styles.includes(".mp-route") && styles.includes("max-width: 42%"), "Picker routes should truncate within compact rows");
   const effortStyles = styles.match(/\.mp-effort-label\s*\{([^}]*)\}/)?.[1] ?? "";

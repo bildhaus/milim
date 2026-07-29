@@ -51,6 +51,8 @@ pub(crate) async fn openai_chat(
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
+    let run_context = RunContext::from_request(&st, &req).map_err(ApiError)?;
+    let service = service_for_run(&st, &run_context);
 
     let model = req.model.clone();
     let want_stream = req.wants_stream();
@@ -61,7 +63,7 @@ pub(crate) async fn openai_chat(
         .unwrap_or(false);
 
     let mut creq = openai_to_completion(req);
-    add_workspace_instructions(&mut creq.messages, &st);
+    add_workspace_instructions_for(&mut creq.messages, run_context.workspace());
     let ctx = ChunkCtx {
         id: gen_id("chatcmpl"),
         created: now_unix(),
@@ -69,13 +71,13 @@ pub(crate) async fn openai_chat(
     };
 
     if want_stream {
-        let inner = st.service.stream(creq).await.map_err(ApiError)?;
+        let inner = service.stream(creq).await.map_err(ApiError)?;
         let stream = openai_sse(inner, ctx, include_usage);
         Ok(Sse::new(stream)
             .keep_alive(KeepAlive::default())
             .into_response())
     } else {
-        let out = st.service.complete(creq).await.map_err(ApiError)?;
+        let out = service.complete(creq).await.map_err(ApiError)?;
         let resp = ChatCompletionResponse {
             id: ctx.id,
             object: "chat.completion".to_string(),

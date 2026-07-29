@@ -11,11 +11,16 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 
+use async_trait::async_trait;
 use futures::StreamExt;
 
-use milim_core::api::openai::{ChatMessage, Content, ContentPart};
-use milim_inference::{CompletionRequest, DeltaEvent, EventStream, StreamEvent};
+use milim_core::api::openai::{ChatMessage, Content, ContentPart, Model};
+use milim_core::{Error, Result};
+use milim_inference::{
+    CompletionRequest, DeltaEvent, EventStream, ModelService, SharedService, StreamEvent,
+};
 use milim_privacy::{Detection, Redactor};
 
 /// What the gate does to outbound requests bound for a remote provider.
@@ -48,8 +53,9 @@ impl PrivacyMode {
     }
 }
 
-/// Shared, runtime-settable outbound privacy mode. The desktop syncs the
-/// active UI setting via `POST /privacy/mode`; enforcement is process-global.
+/// Shared, runtime-settable default privacy mode. The desktop syncs the active
+/// UI setting via `POST /privacy/mode`; each new run snapshots that default
+/// into its own fixed request-scoped gate.
 pub struct PrivacyGate {
     mode: AtomicU8,
 }
@@ -105,6 +111,111 @@ impl PrivacyGate {
 
     pub fn is_clean_text(&self, text: &str) -> bool {
         milim_privacy::is_clean(text)
+    }
+}
+
+/// Return a request-scoped view of a backend with a fixed privacy mode.
+///
+/// Local services remain untouched. Remote services are wrapped so callers
+/// that do not use [`ProviderRouter`](crate::providers::ProviderRouter), such
+/// as the standalone CLI fallback, receive the same outbound enforcement.
+pub(crate) fn scoped_service(service: SharedService, mode: PrivacyMode) -> SharedService {
+    if mode == PrivacyMode::Off || !service.requires_privacy_gate() {
+        service
+    } else {
+        Arc::new(ScopedPrivacyService {
+            inner: service,
+            mode,
+        })
+    }
+}
+
+struct ScopedPrivacyService {
+    inner: SharedService,
+    mode: PrivacyMode,
+}
+
+#[async_trait]
+impl ModelService for ScopedPrivacyService {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    async fn list_models(&self) -> Result<Vec<Model>> {
+        self.inner.list_models().await
+    }
+
+    async fn stream(&self, mut req: CompletionRequest) -> Result<EventStream> {
+        match self.mode {
+            PrivacyMode::Off => self.inner.stream(req).await,
+            PrivacyMode::Block => {
+                if request_has_image_parts(&req) {
+                    return Err(Error::InvalidRequest(
+                        "blocked by the privacy gate: outbound message contains image data, which the privacy gate cannot scan. Switch the gate to Off to send images to a remote provider.".to_string(),
+                    ));
+                }
+                let detections = scan_request(&req);
+                if detections.is_empty() {
+                    self.inner.stream(req).await
+                } else {
+                    Err(Error::InvalidRequest(format!(
+                        "blocked by the privacy gate: outbound message contains {} ({} item(s)). Switch the gate to Redact or Off to send this to a remote provider.",
+                        kinds_summary(&detections),
+                        detections.len()
+                    )))
+                }
+            }
+            PrivacyMode::Redact => {
+                if request_has_image_parts(&req) {
+                    return Err(Error::InvalidRequest(
+                        "blocked by the privacy gate: outbound message contains image data, which the privacy gate cannot redact. Switch the gate to Off to send images to a remote provider.".to_string(),
+                    ));
+                }
+                let map = redact_request(&mut req);
+                let inner = self.inner.stream(req).await?;
+                Ok(if map.is_empty() {
+                    inner
+                } else {
+                    unredact_stream(inner, map)
+                })
+            }
+        }
+    }
+
+    async fn ollama_keep_alive(
+        &self,
+        model: &str,
+        keep_alive: Option<serde_json::Value>,
+    ) -> Result<bool> {
+        self.inner.ollama_keep_alive(model, keep_alive).await
+    }
+
+    async fn embed(&self, model: &str, inputs: Vec<String>) -> Result<Vec<Vec<f32>>> {
+        match self.mode {
+            PrivacyMode::Off => self.inner.embed(model, inputs).await,
+            PrivacyMode::Block => {
+                let detections = inputs
+                    .iter()
+                    .flat_map(|input| milim_privacy::scan(input))
+                    .collect::<Vec<_>>();
+                if detections.is_empty() {
+                    self.inner.embed(model, inputs).await
+                } else {
+                    Err(Error::InvalidRequest(format!(
+                        "blocked by the privacy gate: embedding input contains {} ({} item(s)). Switch the gate to Redact or Off to send this to a remote provider.",
+                        kinds_summary(&detections),
+                        detections.len()
+                    )))
+                }
+            }
+            PrivacyMode::Redact => {
+                let inputs = inputs
+                    .into_iter()
+                    .map(|input| milim_privacy::redact(&input).text)
+                    .collect();
+                self.inner.embed(model, inputs).await
+            }
+        }
     }
 }
 

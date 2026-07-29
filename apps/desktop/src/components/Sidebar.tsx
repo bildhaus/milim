@@ -534,6 +534,8 @@ export function Sidebar({
   const [confirmArchiveId, setConfirmArchiveId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const projectMenuRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const focusSearchAfterOpenRef = useRef(false);
   const sidebarElementRef = useRef<HTMLElement>(null);
   const sidebarResizeHandleRef = useRef<HTMLDivElement>(null);
   const sidebarResizeStartRef = useRef<{
@@ -553,6 +555,15 @@ export function Sidebar({
   const [dragging, setDragging] = useState<SidebarDragItem | null>(null);
   const [dragOver, setDragOver] = useState<SidebarDragTarget | null>(null);
   const [sectionVisibleLimits, setSectionVisibleLimits] = useState<Record<string, number>>(() => ({}));
+
+  useEffect(() => {
+    if (!open || !focusSearchAfterOpenRef.current) return;
+    focusSearchAfterOpenRef.current = false;
+    const frame = window.requestAnimationFrame(() => {
+      searchInputRef.current?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [open]);
 
   function switchVisibleSession(id: string) {
     if (id === activeId) return;
@@ -1249,7 +1260,16 @@ export function Sidebar({
             <button className="icon-btn" title="New chat" onClick={() => createChat()}>
               <Plus size={16} />
             </button>
-            <button className="icon-btn" title="Search chats" onClick={onToggle}>
+            <button
+              className="icon-btn"
+              data-testid="sidebar-rail-search"
+              title="Search chats"
+              aria-label="Search chats"
+              onClick={() => {
+                focusSearchAfterOpenRef.current = true;
+                onToggle();
+              }}
+            >
               <Search size={15} />
             </button>
             {collapsedStatusSessions.length > 0 && (
@@ -1310,6 +1330,7 @@ export function Sidebar({
           <label className="sidebar-search">
             <Search size={14} />
             <input
+              ref={searchInputRef}
               data-testid="sidebar-search"
               value={query}
               placeholder="Search chats..."

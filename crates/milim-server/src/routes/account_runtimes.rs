@@ -139,20 +139,26 @@ pub(crate) async fn codex_run(
     Json(mut req): Json<crate::codex_bridge::CodexRunRequest>,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
+    let run_context =
+        RunContext::from_account_runtime(&st, req.milim_context.as_ref(), req.cwd.as_deref())
+            .map_err(ApiError)?;
+    req.cwd = run_context.workspace_text();
     if req.prompt.trim().is_empty() && req.images.is_empty() {
         return Err(ApiError(Error::InvalidRequest(
             "Codex requires a prompt or at least one image".to_string(),
         )));
     }
-    req.prompt = account_runtime_workspace_prompt(&st, req.cwd.as_deref(), &req.prompt, "claude");
+    req.prompt = account_runtime_workspace_prompt(&run_context, &req.prompt, "claude");
     let (prompt, redactions) =
-        account_runtime_prompt_for_remote(&st, &req.prompt, "Codex").map_err(ApiError)?;
-    account_runtime_images_for_remote(&st, &req.images, "Codex").map_err(ApiError)?;
+        account_runtime_prompt_for_remote(&st, &run_context, &req.prompt, "Codex")
+            .map_err(ApiError)?;
+    account_runtime_images_for_remote(&run_context, &req.images, "Codex").map_err(ApiError)?;
     req.prompt = prompt;
     let endpoint = account_runtime_tool_endpoint(
         &st,
         &headers,
         req.milim_context.as_ref(),
+        &run_context,
         req.model.as_deref().unwrap_or_default(),
         &req.prompt,
     )?;
@@ -241,25 +247,26 @@ pub(crate) async fn opencode_run(
     Json(mut req): Json<crate::opencode_bridge::OpenCodeRunRequest>,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
+    let run_context =
+        RunContext::from_account_runtime(&st, req.milim_context.as_ref(), req.cwd.as_deref())
+            .map_err(ApiError)?;
+    req.cwd = run_context.workspace_text();
     if req.prompt.trim().is_empty() && req.images.is_empty() {
         return Err(ApiError(Error::InvalidRequest(
             "OpenCode requires a prompt or at least one image".to_string(),
         )));
     }
-    req.prompt = account_runtime_workspace_prompt(
-        &st,
-        req.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()),
-        &req.prompt,
-        "agents",
-    );
+    req.prompt = account_runtime_workspace_prompt(&run_context, &req.prompt, "agents");
     let (prompt, redactions) =
-        account_runtime_prompt_for_remote(&st, &req.prompt, "OpenCode").map_err(ApiError)?;
-    account_runtime_images_for_remote(&st, &req.images, "OpenCode").map_err(ApiError)?;
+        account_runtime_prompt_for_remote(&st, &run_context, &req.prompt, "OpenCode")
+            .map_err(ApiError)?;
+    account_runtime_images_for_remote(&run_context, &req.images, "OpenCode").map_err(ApiError)?;
     req.prompt = prompt;
     let endpoint = account_runtime_tool_endpoint(
         &st,
         &headers,
         req.milim_context.as_ref(),
+        &run_context,
         &req.model,
         &req.prompt,
     )?;
@@ -302,21 +309,26 @@ pub(crate) async fn pi_run(
     Json(mut req): Json<crate::pi_bridge::PiRunRequest>,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
-    req.cwd = req.cwd.take().filter(|cwd| !cwd.trim().is_empty());
+    let run_context =
+        RunContext::from_account_runtime(&st, req.milim_context.as_ref(), req.cwd.as_deref())
+            .map_err(ApiError)?;
+    req.cwd = run_context.workspace_text();
     if req.prompt.trim().is_empty() && req.images.is_empty() {
         return Err(ApiError(Error::InvalidRequest(
             "Pi requires a prompt or at least one image".to_string(),
         )));
     }
-    req.prompt = account_runtime_workspace_prompt(&st, req.cwd.as_deref(), &req.prompt, "native");
+    req.prompt = account_runtime_workspace_prompt(&run_context, &req.prompt, "native");
     let (prompt, redactions) =
-        account_runtime_prompt_for_remote(&st, &req.prompt, "Pi").map_err(ApiError)?;
-    account_runtime_images_for_remote(&st, &req.images, "Pi").map_err(ApiError)?;
+        account_runtime_prompt_for_remote(&st, &run_context, &req.prompt, "Pi")
+            .map_err(ApiError)?;
+    account_runtime_images_for_remote(&run_context, &req.images, "Pi").map_err(ApiError)?;
     req.prompt = prompt;
     let endpoint = account_runtime_tool_endpoint(
         &st,
         &headers,
         req.milim_context.as_ref(),
+        &run_context,
         &req.model,
         &req.prompt,
     )?;
@@ -367,21 +379,27 @@ pub(crate) async fn claude_run(
     Json(mut req): Json<crate::claude_bridge::ClaudeRunRequest>,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
+    let run_context =
+        RunContext::from_account_runtime(&st, req.milim_context.as_ref(), req.cwd.as_deref())
+            .map_err(ApiError)?;
+    req.cwd = run_context.workspace_text();
     if req.prompt.trim().is_empty() && req.images.is_empty() {
         return Err(ApiError(Error::InvalidRequest(
             "Claude requires a prompt or at least one image".to_string(),
         )));
     }
-    req.prompt = account_runtime_workspace_prompt(&st, req.cwd.as_deref(), &req.prompt, "agents");
+    req.prompt = account_runtime_workspace_prompt(&run_context, &req.prompt, "agents");
     let (prompt, redactions) =
-        account_runtime_prompt_for_remote(&st, &req.prompt, "Claude").map_err(ApiError)?;
-    account_runtime_images_for_remote(&st, &req.images, "Claude").map_err(ApiError)?;
+        account_runtime_prompt_for_remote(&st, &run_context, &req.prompt, "Claude")
+            .map_err(ApiError)?;
+    account_runtime_images_for_remote(&run_context, &req.images, "Claude").map_err(ApiError)?;
     req.prompt = prompt;
     req.interactive_tool_approval = crate::claude_bridge::claude_interactive_tool_approval(&req);
     let endpoint = account_runtime_tool_endpoint(
         &st,
         &headers,
         req.milim_context.as_ref(),
+        &run_context,
         req.model.as_deref().unwrap_or_default(),
         &req.prompt,
     )?;
@@ -624,13 +642,11 @@ async fn account_runtime_mcp_call(registry: &ToolRegistry, name: &str, args: Val
 }
 
 fn account_runtime_workspace_prompt(
-    st: &AppState,
-    cwd: Option<&str>,
+    run_context: &RunContext,
     prompt: &str,
     family: &str,
 ) -> String {
-    let folder = cwd.map(PathBuf::from).or_else(|| workspace_snapshot(st));
-    let context = crate::workspace_context::resolve(folder.as_deref());
+    let context = crate::workspace_context::resolve(run_context.workspace());
     match crate::workspace_context::formatted(&context, Some(family)) {
         Some(instructions) => format!("{instructions}\n\nUser request:\n{prompt}"),
         None => prompt.to_string(),
@@ -639,10 +655,11 @@ fn account_runtime_workspace_prompt(
 
 fn account_runtime_prompt_for_remote(
     st: &AppState,
+    run_context: &RunContext,
     prompt: &str,
     runtime: &str,
 ) -> milim_core::Result<(String, BTreeMap<String, String>)> {
-    match st.privacy.mode() {
+    match run_context.privacy_mode() {
         PrivacyMode::Off => Ok((prompt.to_string(), BTreeMap::new())),
         PrivacyMode::Block => {
             let detections = st.privacy.scan_text(prompt);
@@ -664,17 +681,56 @@ fn account_runtime_prompt_for_remote(
 }
 
 fn account_runtime_images_for_remote(
-    st: &AppState,
+    run_context: &RunContext,
     images: &[crate::codex_bridge::AccountImage],
     runtime: &str,
 ) -> milim_core::Result<()> {
     if images.is_empty() {
         return Ok(());
     }
-    if st.privacy.mode() != PrivacyMode::Off {
+    if run_context.privacy_mode() != PrivacyMode::Off {
         return Err(Error::InvalidRequest(format!(
             "blocked by the privacy gate: {runtime} image pixels can only be sent in Privacy Off because images cannot be safely redacted"
         )));
     }
     crate::codex_bridge::validate_account_images(images)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use milim_inference::test_backend::TestBackend;
+
+    #[test]
+    fn account_runtime_privacy_uses_the_captured_mode() {
+        let state = AppState::new(
+            Arc::new(TestBackend::new()),
+            milim_core::config::ServerConfiguration::default(),
+        );
+        state.privacy.set(PrivacyMode::Block);
+        let blocked = RunContext::from_account_runtime(&state, None, None).unwrap();
+        state.privacy.set(PrivacyMode::Off);
+
+        assert!(account_runtime_prompt_for_remote(
+            &state,
+            &blocked,
+            "contact person@example.com",
+            "test runtime",
+        )
+        .is_err());
+
+        let allowed = RunContext::from_account_runtime(&state, None, None).unwrap();
+        state.privacy.set(PrivacyMode::Block);
+        assert_eq!(
+            account_runtime_prompt_for_remote(
+                &state,
+                &allowed,
+                "contact person@example.com",
+                "test runtime",
+            )
+            .unwrap()
+            .0,
+            "contact person@example.com"
+        );
+    }
 }

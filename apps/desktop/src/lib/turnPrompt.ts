@@ -99,6 +99,7 @@ export function buildTurnPromptContext({
   accountRuntimeKind,
   sandbox,
   computerUse,
+  privacy = "off",
   previewTools,
   previewSurface,
   activeAgentId,
@@ -133,6 +134,7 @@ export function buildTurnPromptContext({
   accountRuntimeKind?: "codex" | "claude" | "opencode" | "pi";
   sandbox: boolean;
   computerUse: boolean;
+  privacy?: "off" | "redact" | "block";
   previewTools?: boolean;
   previewSurface?: PreviewSurfaceTarget | null;
   activeAgentId?: string | null;
@@ -243,6 +245,8 @@ export function buildTurnPromptContext({
     enabledSkills,
     runMemoryContext,
     toolContext: {
+      workspace: folder.trim() || null,
+      privacy_mode: privacy,
       tool_approval_policy: toolApproval,
       tool_approval_grant: toolApprovalGrant,
       interactive_tool_approval: toolApproval === "review" && !planMode && !toolApprovalGrant,
@@ -280,6 +284,7 @@ export async function prepareTurnPromptContext({
   model,
   sandbox,
   computerUse,
+  privacy = "off",
   previewTools,
   previewSurface,
   activeAgentId,
@@ -311,6 +316,7 @@ export async function prepareTurnPromptContext({
   model: string;
   sandbox: boolean;
   computerUse: boolean;
+  privacy?: "off" | "redact" | "block";
   previewTools?: boolean;
   previewSurface?: PreviewSurfaceTarget | null;
   activeAgentId?: string | null;
@@ -373,6 +379,7 @@ export async function prepareTurnPromptContext({
     accountRuntimeKind,
     sandbox,
     computerUse,
+    privacy,
     previewTools,
     previewSurface,
     activeAgentId,

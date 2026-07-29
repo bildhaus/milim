@@ -13,7 +13,7 @@ Release artifacts target Windows and macOS. Linux packaging is intentionally dis
 - **Keep one canonical thread.** Workspace context, conversation, and review history remain together instead of fragmenting by provider.
 - **Hot-swap models.** Switch the next turn between hosted providers, local Ollama or LM Studio models, and separately installed Codex, Claude, OpenCode, or Pi runtimes.
 - **Keep local control.** Project selection, model routing, tool approvals, local persistence, and outbound privacy boundaries stay explicit.
-- **Review before changes land.** Built-in Git views keep proposed edits, diffs, checkpoints, and approval decisions beside the thread.
+- **Approve execution, then review the result.** Review is the new-chat default for consequential tool calls; built-in Git views keep resulting diffs, checkpoints, and recovery beside the thread.
 
 ### Power tools
 
@@ -27,7 +27,7 @@ Milim keeps provider-backed chat and installed account runtimes distinct. Provid
 
 Download the Windows portable EXE or macOS universal DMG from the [latest GitHub release](https://github.com/oshtz/milim/releases/latest). The desktop app embeds the server, so normal desktop use does not require a separate `milim serve` process.
 
-On first run, connect a model source, optionally choose a workspace folder, review the connection, and open Milim. Preferences and power tools remain available after setup. See the [full quickstart](https://docs.milim.ai/quickstart) for provider choices, privacy modes, and common setup failures.
+On first run, choose a runtime, optionally choose a workspace folder, and open Milim. The two advances focus the composer without sending a task. Preferences and power tools remain available after setup. See the [full quickstart](https://docs.milim.ai/quickstart) for the safe-change, resulting-diff, and same-thread runtime-switch loop.
 
 ### Run the desktop app from source
 
@@ -94,7 +94,7 @@ pnpm -C apps/site build
 
 | Topic | Reference |
 |---|---|
-| First run and CLI basics | [Quickstart](docs/wiki/quickstart.md) |
+| First run and the core desktop loop | [Quickstart](docs/wiki/quickstart.md) |
 | Desktop workflows and controls | [Desktop app](docs/wiki/desktop.md) |
 | Providers, local models, and runtime lanes | [Models and providers](docs/wiki/models.md) |
 | Compatible endpoints and authentication | [API](docs/wiki/api.md) |
@@ -107,6 +107,8 @@ The public documentation site is generated from `docs/wiki/*.md`; those pages ar
 ## Third-party account runtimes
 
 Codex, Claude, OpenCode, and Pi integrations invoke separately installed tools and do not bundle their CLIs, credentials, subscriptions, or provider access. Authentication and direct provider communication remain governed by each tool and provider. Milim is not affiliated with or endorsed by Anthropic, and Claude usage remains subject to Anthropic's terms. Review the [account-runtime reference](docs/account-runtimes.md) before enabling permissive tool modes.
+
+On Windows, Milim refreshes the current system and user executable search path at startup, so account runtimes and host tools installed after sign-in are available without launching Milim from a terminal.
 
 ## License
 

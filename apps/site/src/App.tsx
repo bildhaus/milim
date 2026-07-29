@@ -81,7 +81,7 @@ const quickstartSteps = [
   {
     step: "develop",
     title: "Start a dev thread",
-    body: "Optionally pick a workspace, keep one thread across model switches, and review proposed changes before they land.",
+    body: "Make one safe change in Review, inspect the resulting diff, then continue the same thread with another runtime.",
   },
 ];
 
@@ -90,7 +90,7 @@ const faqItems = [
     id: "faq-machine-boundary",
     question: "Does anything leave my machine?",
     answer:
-      "Local runtimes stay on loopback. Hosted providers are called only when you choose them, and remote requests can pass through redact or block mode first.",
+      "Local runtimes stay on loopback. Hosted providers are called only when you choose them. New chats default to Privacy Off; choose Redact or Block before sending when that boundary is required.",
   },
   {
     id: "faq-providers",
@@ -132,8 +132,8 @@ const features = [
   },
   {
     id: "review",
-    title: "Nothing lands without approval",
-    body: "Edits and tool calls arrive as proposals with a readable diff. The agent suggests; you decide what actually touches the repo.",
+    title: "Approve execution, inspect results",
+    body: "Review is the default: consequential calls pause with exact arguments. After approval, inspect the resulting diff. Open can auto-approve ordinary eligible requests.",
     visual: true,
   },
   {
@@ -168,7 +168,7 @@ const chapters: Array<{ id?: string; title: string; kicker: string; body: string
   {
     title: "Diff review",
     kicker: "approval",
-    body: "Inspect tool output and proposed Git changes beside the thread before accepting what lands in the repository.",
+    body: "Approve consequential calls before execution, then inspect the resulting Git diff beside the thread and undo from the turn checkpoint when needed.",
     kind: "tools",
   },
 ];
@@ -176,7 +176,7 @@ const chapters: Array<{ id?: string; title: string; kicker: string; body: string
 const chapterVisuals: Record<ChapterKind, { label: string; foot: string }> = {
   models: { label: "model router", foot: "one thread / four sources" },
   privacy: { label: "outbound gate", foot: "local passthrough / remote redacted" },
-  tools: { label: "review queue", foot: "3 changes / approval required" },
+  tools: { label: "result review", foot: "3 changes / checkpoint ready" },
   memory: { label: "thread context", foot: "workspace and history retained" },
 };
 
@@ -721,9 +721,9 @@ function formatBytes(size?: number) {
 
 function ReviewGlyph() {
   return (
-    <div className="chapter-visual feature-glyph" aria-label="Proposed edits waiting on approval" role="img">
+    <div className="chapter-visual feature-glyph" aria-label="Resulting edits ready for review" role="img">
       <div className="chapter-visual-bar">
-        <span>awaiting approval</span>
+        <span>resulting diff</span>
         <i />
       </div>
       <div className="chapter-visual-body">
@@ -733,7 +733,7 @@ function ReviewGlyph() {
           <li className="review-del"><b>D</b><s>auth/legacy.rs</s><em>−42</em></li>
         </ul>
       </div>
-      <p className="chapter-visual-foot">3 files staged / none written yet</p>
+      <p className="chapter-visual-foot">3 files changed / inspect or undo</p>
     </div>
   );
 }
@@ -810,8 +810,8 @@ function MiniAppShell() {
             </pre>
             <div className="mini-diff-review">
               <span>inline review ready</span>
-              <em>Reject</em>
-              <em className="mini-review-approve">Approve</em>
+              <em>Undo</em>
+              <em className="mini-review-approve">Open Git</em>
             </div>
           </div>
           <div className="mini-composer-card">
@@ -835,7 +835,7 @@ function MiniAppShell() {
               </div>
             </div>
             <div className="mini-composer-input">
-              <span>Switch models, review the diff, then approve.</span>
+              <span>Continue with another model, then review the resulting diff.</span>
             </div>
             <div className="mini-composer-bar">
               <div className="mini-composer-tools">

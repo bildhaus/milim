@@ -119,6 +119,10 @@ pub struct WorkerRun {
     pub tasks: Vec<WorkerPlanTask>,
     #[serde(default)]
     pub context: Option<String>,
+    #[serde(default)]
+    pub workspace: Option<String>,
+    #[serde(default)]
+    pub privacy_mode: Option<String>,
     pub error: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -242,6 +246,13 @@ pub const THREAD_MIGRATIONS: &[Migration] = &[
         name: "worker_run_context",
         sql: "ALTER TABLE worker_runs ADD COLUMN context TEXT;",
     },
+    Migration {
+        version: 5,
+        name: "worker_run_origin",
+        sql: "ALTER TABLE worker_runs ADD COLUMN workspace TEXT;
+              ALTER TABLE worker_runs ADD COLUMN privacy_mode TEXT
+                CHECK (privacy_mode IS NULL OR privacy_mode IN ('off', 'redact', 'block'));",
+    },
 ];
 
 /// CRUD over parent/child thread rows.
@@ -331,14 +342,62 @@ impl ThreadStore {
         tasks: Vec<WorkerPlanTask>,
         context: Option<&str>,
     ) -> Result<WorkerRun> {
+        self.create_worker_run_with_origin(
+            parent_thread_id,
+            parent_turn_id,
+            policy,
+            runtime,
+            tasks,
+            context,
+            None,
+            "off",
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_worker_run_with_origin(
+        &self,
+        parent_thread_id: &str,
+        parent_turn_id: Option<&str>,
+        policy: DelegationPolicy,
+        runtime: WorkerRuntime,
+        tasks: Vec<WorkerPlanTask>,
+        context: Option<&str>,
+        workspace: Option<&str>,
+        privacy_mode: &str,
+    ) -> Result<WorkerRun> {
+        if workspace.is_some_and(|value| value.trim().is_empty()) {
+            return Err(Error::InvalidRequest(
+                "worker run workspace must not be empty".to_string(),
+            ));
+        }
+        if !matches!(privacy_mode, "off" | "redact" | "block") {
+            return Err(Error::InvalidRequest(
+                "worker run privacy_mode must be off, redact, or block".to_string(),
+            ));
+        }
         let id = uuid::Uuid::new_v4().to_string();
         let tasks = serde_json::to_string(&tasks)?;
         let db = self.db.lock().expect("threads db poisoned");
-        db.conn().execute(
-            "INSERT INTO worker_runs (id, parent_thread_id, parent_turn_id, policy, runtime, status, tasks, context)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'proposed', ?6, ?7)",
-            params![id, parent_thread_id, parent_turn_id, policy.as_str(), runtime.as_str(), tasks, context],
-        ).map_err(sqlite)?;
+        db.conn()
+            .execute(
+                "INSERT INTO worker_runs (
+                id, parent_thread_id, parent_turn_id, policy, runtime, status, tasks,
+                context, workspace, privacy_mode
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'proposed', ?6, ?7, ?8, ?9)",
+                params![
+                    id,
+                    parent_thread_id,
+                    parent_turn_id,
+                    policy.as_str(),
+                    runtime.as_str(),
+                    tasks,
+                    context,
+                    workspace,
+                    privacy_mode
+                ],
+            )
+            .map_err(sqlite)?;
         drop(db);
         self.get_worker_run(&id)?
             .ok_or_else(|| Error::Other("worker run insert did not return a row".to_string()))
@@ -347,7 +406,7 @@ impl ThreadStore {
     pub fn get_worker_run(&self, id: &str) -> Result<Option<WorkerRun>> {
         let db = self.db.lock().expect("threads db poisoned");
         db.conn().query_row(
-            "SELECT id, parent_thread_id, parent_turn_id, policy, runtime, status, tasks, error, created_at, updated_at, finished_at, context
+            "SELECT id, parent_thread_id, parent_turn_id, policy, runtime, status, tasks, error, created_at, updated_at, finished_at, context, workspace, privacy_mode
              FROM worker_runs WHERE id = ?1",
             params![id], row_to_worker_run,
         ).optional().map_err(sqlite)
@@ -356,7 +415,7 @@ impl ThreadStore {
     pub fn list_worker_runs(&self, parent_thread_id: &str, limit: usize) -> Result<Vec<WorkerRun>> {
         let db = self.db.lock().expect("threads db poisoned");
         let mut stmt = db.conn().prepare(
-            "SELECT id, parent_thread_id, parent_turn_id, policy, runtime, status, tasks, error, created_at, updated_at, finished_at, context
+            "SELECT id, parent_thread_id, parent_turn_id, policy, runtime, status, tasks, error, created_at, updated_at, finished_at, context, workspace, privacy_mode
              FROM worker_runs WHERE parent_thread_id = ?1 ORDER BY created_at DESC LIMIT ?2"
         ).map_err(sqlite)?;
         let rows = stmt
@@ -937,6 +996,8 @@ fn row_to_worker_run(r: &rusqlite::Row) -> rusqlite::Result<WorkerRun> {
         updated_at: r.get(9)?,
         finished_at: r.get(10)?,
         context: r.get(11)?,
+        workspace: r.get(12)?,
+        privacy_mode: r.get(13)?,
     })
 }
 
@@ -1040,7 +1101,7 @@ mod tests {
     fn persists_and_finishes_worker_run() {
         let s = store();
         let run = s
-            .create_worker_run(
+            .create_worker_run_with_origin(
                 "parent-1",
                 Some("turn-1"),
                 DelegationPolicy::Ask,
@@ -1055,9 +1116,13 @@ mod tests {
                     access: WorkerAccess::ReadOnly,
                 }],
                 Some("Current request: check"),
+                Some("C:\\repo"),
+                "redact",
             )
             .unwrap();
         assert_eq!(run.context.as_deref(), Some("Current request: check"));
+        assert_eq!(run.workspace.as_deref(), Some("C:\\repo"));
+        assert_eq!(run.privacy_mode.as_deref(), Some("redact"));
         let worker = s
             .create_worker(
                 "parent-1",
@@ -1089,6 +1154,27 @@ mod tests {
         assert!(s.get_worker_run(&run.id).unwrap().is_none());
         assert!(s.get(&worker.id).unwrap().is_none());
         assert!(s.events(&worker.id, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn migration_keeps_legacy_worker_runs_readable_without_origin() {
+        let db = Database::open_in_memory().unwrap();
+        db.migrate_scoped("threads", &THREAD_MIGRATIONS[..4])
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO worker_runs (
+                    id, parent_thread_id, policy, runtime, status, tasks
+                 ) VALUES ('legacy', 'parent-1', 'ask', 'managed', 'done', '[]')",
+                [],
+            )
+            .unwrap();
+
+        let store = ThreadStore::new(db).unwrap();
+        let run = store.get_worker_run("legacy").unwrap().unwrap();
+        assert_eq!(run.status, WorkerRunStatus::Done);
+        assert!(run.workspace.is_none());
+        assert!(run.privacy_mode.is_none());
     }
 
     #[test]

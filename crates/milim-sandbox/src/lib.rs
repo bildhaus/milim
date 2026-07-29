@@ -69,37 +69,50 @@ impl DockerBackend {
     /// Whether the Docker daemon is reachable.
     pub async fn available(&self) -> bool {
         let mut version_cmd = Command::new(&self.docker_bin);
-        version_cmd.args(["version", "--format", "{{.Server.Version}}"]);
+        version_cmd
+            .args(["version", "--format", "{{.Server.Version}}"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
         #[cfg(windows)]
         version_cmd.creation_flags(milim_core::proc::CREATE_NO_WINDOW);
-        let daemon_reachable = version_cmd
-            .output()
-            .await
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-
-        if !daemon_reachable {
+        if !command_succeeds_within(&mut version_cmd, Duration::from_secs(5)).await {
             return false;
         }
 
         let mut probe_cmd = Command::new(&self.docker_bin);
-        probe_cmd.args([
-            "run",
-            "--rm",
-            "--network",
-            "none",
-            "--memory",
-            "512m",
-            "alpine",
-            "true",
-        ]);
+        probe_cmd
+            .args([
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--memory",
+                "512m",
+                "alpine",
+                "true",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
         #[cfg(windows)]
         probe_cmd.creation_flags(milim_core::proc::CREATE_NO_WINDOW);
-        probe_cmd
-            .output()
-            .await
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        command_succeeds_within(&mut probe_cmd, Duration::from_secs(5)).await
+    }
+}
+
+async fn command_succeeds_within(command: &mut Command, timeout: Duration) -> bool {
+    let Ok(mut child) = command.spawn() else {
+        return false;
+    };
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => status.success(),
+        Ok(Err(_)) => false,
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            false
+        }
     }
 }
 

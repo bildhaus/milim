@@ -35,6 +35,7 @@ let previousOnboardingState = null;
 try {
   session = await launchTauriDev(milimHome);
   collectErrors(session.page, consoleErrors);
+  await installModelCatalogFixture(session.page);
   previousOnboardingState = await setOnboardingOverride(session.page);
   await reloadForOnboarding(session.page);
 
@@ -42,6 +43,7 @@ try {
   await assertOnboardingCoversApp(session.page);
   await assertStepperAboveContent(session.page);
   await assertStoryActionLayout(session.page);
+  await assertLargeModelCatalogSearch(session.page);
   await session.page.screenshot({ path: screenshots.onboarding, fullPage: false });
 
   await session.page.getByRole("button", { name: "Skip for now" }).click();
@@ -192,6 +194,37 @@ async function assertStepperAboveContent(page) {
   }
 }
 
+async function installModelCatalogFixture(page) {
+  const data = Array.from({ length: 200 }, (_, index) => ({
+    id: `onboarding-model-${index + 1}`,
+    owned_by: index % 2 === 0 ? "OpenAI" : "Anthropic",
+  }));
+  await page.route("**/v1/models", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({ object: "list", data }),
+  }));
+}
+
+async function assertLargeModelCatalogSearch(page) {
+  const targetId = "onboarding-model-200";
+  const search = page.getByRole("textbox", { name: "Search models" });
+  await search.waitFor();
+  await search.fill(targetId);
+  const results = page.locator(".onboarding-model-picker .mp-item");
+  await page.waitForFunction(
+    () => document.querySelectorAll(".onboarding-model-picker .mp-item").length === 1,
+  );
+  const result = results.first();
+  if (!(await result.innerText()).includes(targetId)) {
+    throw new Error("The 200-model onboarding catalog did not return model 200.");
+  }
+  await result.locator(".mp-pick").click();
+  await page.waitForFunction(
+    (model) => document.querySelector(".onboarding-model-summary strong")?.textContent?.trim() === model,
+    targetId,
+  );
+}
+
 async function setOnboardingOverride(page) {
   await page.waitForFunction(() => Boolean(window.__TAURI_INTERNALS__?.invoke), { timeout: 60_000 });
   await page.waitForFunction(() => document.readyState !== "loading", { timeout: 60_000 });
@@ -275,11 +308,13 @@ async function completeOnboarding(page) {
 
   await page.getByRole("button", { name: /Continue/ }).click();
   await page.getByRole("heading", { name: "Choose a workspace" }).waitFor();
-  await page.getByRole("button", { name: /Continue/ }).click();
-  await page.getByRole("heading", { name: "Your workspace is ready" }).waitFor();
-  await page.getByRole("button", { name: "Open Milim" }).click();
+  await page.getByTestId("onboarding-flow").getByRole("button", { name: "Open Milim", exact: true }).click();
   await page.getByTestId("onboarding-flow").waitFor({ state: "detached" });
-  await page.getByTestId("composer-input").waitFor();
+  const composer = page.getByTestId("composer-input");
+  await composer.waitFor();
+  await page.waitForFunction(
+    () => document.activeElement?.matches('[data-testid="composer-input"]'),
+  );
 }
 
 function collectErrors(page, errors) {

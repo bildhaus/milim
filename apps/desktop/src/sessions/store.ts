@@ -54,7 +54,7 @@ import {
 import { useSettings } from "../settings/store.js";
 
 const COMPOSER_DRAFTS_KEY = "milim.sessionDrafts";
-const STREAMING_PERSIST_MARKER = "__deferStreamingWrite";
+const LEGACY_STREAMING_PERSIST_MARKER = "__deferStreamingWrite";
 let sessionComposerDrafts: Record<string, string> = {};
 let sessionComposerDraftsPersistTimer: ReturnType<typeof setTimeout> | null =
   null;
@@ -106,13 +106,6 @@ const sessionPersistStorage = {
   ...sessionStateStorage,
   setItem: (name, value) => {
     if (!useSessions.persist.hasHydrated()) return undefined;
-    if (
-      value.state &&
-      typeof value.state === "object" &&
-      STREAMING_PERSIST_MARKER in value.state
-    ) {
-      return undefined;
-    }
     return sessionStateStorage.setItem(name, value);
   },
 } satisfies typeof sessionStateStorage;
@@ -3178,7 +3171,9 @@ export const useSessions = create<SessionState>()(
               const workers = record.workers.slice();
               const worker = workers[workerIndex];
               const events = [
-                ...(worker.events ?? []).filter((item) => item.id !== event.id),
+                ...(worker.events ?? []).filter(
+                  (item) => item.id !== event.id && item.seq !== event.seq,
+                ),
                 event,
               ].sort((a, b) => a.seq - b.seq);
               workers[workerIndex] = {
@@ -3538,7 +3533,11 @@ export const useSessions = create<SessionState>()(
       storage: sessionPersistStorage as PersistStorage<Partial<SessionState>>,
       merge: (persisted, current) => {
         const state = (persisted ?? {}) as Partial<SessionState>;
-        if ((state as Record<string, unknown> | undefined)?.[STREAMING_PERSIST_MARKER])
+        if (
+          (state as Record<string, unknown> | undefined)?.[
+            LEGACY_STREAMING_PERSIST_MARKER
+          ]
+        )
           return current;
         const normalizedSessions =
           state.sessions?.map((session) =>
@@ -3611,21 +3610,18 @@ export const useSessions = create<SessionState>()(
           sidebar: normalizeSidebarState(state.sidebar, active.sessions),
         };
       },
-      partialize: (state) =>
-        state.generatingSessionIds.length
-          ? { [STREAMING_PERSIST_MARKER]: true }
-          : {
-              sessions: sessionsForPersistence(
-                state.sessions,
-                state.generatingSessionIds,
-              ),
-              projects: state.projects,
-              previewRuntimesByKey: state.previewRuntimesByKey,
-              activeId: state.activeId,
-              archiveRetentionDays: state.archiveRetentionDays,
-              queuedMessagesBySession: state.queuedMessagesBySession,
-              sidebar: state.sidebar,
-            },
+      partialize: (state) => ({
+        sessions: sessionsForPersistence(
+          state.sessions,
+          state.generatingSessionIds,
+        ),
+        projects: state.projects,
+        previewRuntimesByKey: state.previewRuntimesByKey,
+        activeId: state.activeId,
+        archiveRetentionDays: state.archiveRetentionDays,
+        queuedMessagesBySession: state.queuedMessagesBySession,
+        sidebar: state.sidebar,
+      }),
     },
   ),
 );

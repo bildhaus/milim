@@ -169,17 +169,9 @@ pub(crate) async fn mobile_companion_thread(
 pub(crate) async fn mobile_companion_thread_events(
     State(st): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<HashMap<String, String>>,
 ) -> Result<Response, ApiError> {
     let bridge = mobile_bridge(&st)?;
-    let key = bearer_token(&headers)
-        .map(str::to_string)
-        .or_else(|| query.get("key").cloned())
-        .ok_or_else(|| {
-            ApiError(Error::Unauthorized(
-                "missing mobile companion device key".to_string(),
-            ))
-        })?;
+    let key = companion_device_key(&headers)?.to_string();
     bridge
         .authenticate_device(&key, now_unix())
         .ok_or_else(|| {

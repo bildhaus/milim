@@ -1,5 +1,12 @@
-import type { Worker, WorkerRunRecord } from "../src/api.js";
+import type {
+  ChatMessage,
+  ThreadEvent,
+  Worker,
+  WorkerRunRecord,
+} from "../src/api.js";
 import {
+  appendWorkerRunSynthesisOnce,
+  rememberWorkerThreadEvent,
   workerRunReadyForSynthesis,
   workerRunSynthesisId,
 } from "../src/lib/workerRuns.js";
@@ -83,4 +90,44 @@ assert(
     content: "Worker results",
   }) === "current-run",
   "current synthesis messages should use their explicit Run id",
+);
+
+const synthesis = {
+  role: "system",
+  workerRunId: "run-1",
+  content: "Worker results",
+} satisfies ChatMessage;
+const firstSynthesis = appendWorkerRunSynthesisOnce([], synthesis);
+assert(firstSynthesis, "the first terminal event should claim parent synthesis");
+assert(
+  appendWorkerRunSynthesisOnce(firstSynthesis, synthesis) === null,
+  "a duplicate terminal event must not synthesize the parent again",
+);
+
+const replayedEvents = new Map<string, ThreadEvent[]>();
+for (let seq = 1; seq <= 3; seq += 1) {
+  rememberWorkerThreadEvent(replayedEvents, {
+    id: `event-${seq}`,
+    thread_id: "terminal-child",
+    seq,
+    kind: "token",
+    payload: { text: String(seq) },
+    created_at: `2026-07-20T00:00:0${seq}Z`,
+  });
+}
+assert(
+  replayedEvents.get("terminal-child")?.length === 3,
+  "backfilled events for a terminal child must accumulate across replay frames",
+);
+rememberWorkerThreadEvent(replayedEvents, {
+  id: "event-2-replayed",
+  thread_id: "terminal-child",
+  seq: 2,
+  kind: "token",
+  payload: { text: "duplicate" },
+  created_at: "2026-07-20T00:00:02Z",
+});
+assert(
+  replayedEvents.get("terminal-child")?.length === 3,
+  "replayed child events must deduplicate by sequence",
 );

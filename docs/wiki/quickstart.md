@@ -6,25 +6,32 @@ title: Quickstart
 summary: Connect any model runtime, optionally pick a workspace, keep one canonical thread, switch models inline, and review the result.
 group: Start
 order: 20
-updated: 2026-07-28
+updated: 2026-07-29
 ---
 
-Aim for the core loop first: connect a model source, optionally select a workspace, continue one canonical thread across models, and review proposed changes before accepting them. Switching models changes the next turn; it does not reset workspace context or conversation history.
+Aim for one safe core loop: connect a runtime, optionally select a workspace, approve one small change, inspect the resulting diff, and continue the same thread with another model. Switching models changes the next turn; it does not reset workspace context or conversation history.
 
-## First run checklist
+## First run
 
 | Step | What to check |
 |---|---|
 | Install or run | Use a release build for normal use. Use `pnpm -C apps/desktop tauri:dev` only when working on the app. |
-| Connect a runtime | The first panel detects Codex, Claude, OpenCode, Pi, Ollama, and LM Studio, and can connect a hosted provider. Select any reachable model. |
-| Select a workspace | The folder is optional for chat. Pick one before asking for host file reads, shell commands, Git actions, or folder-backed previews. |
-| Review setup | Confirm the selected model and optional workspace, then open Milim. Onboarding does not run or prefill a task. |
-| Check the model chip | The chip shows provider, runtime lane, setup status, capabilities, favorite state, and reasoning effort where supported. |
-| Send a useful prompt | Ask for a repo map, failing-test diagnosis, small docs edit, or test command. A generic hello only proves chat works. |
-| Switch and continue | Pick another model from the same chip. Provider models use Milim tools when workspace/tool context is active; Codex, Claude, OpenCode, and Pi use account-runtime bridges. |
-| Review the result | Check the selected model, tool timeline, workspace, and Git diff before accepting changes. |
+| Runtime | The searchable picker detects hosted providers, Ollama, LM Studio, Codex, Claude, OpenCode, and Pi. Cached provider models appear first; slower runtime results join as they arrive. Select any reachable model, then choose **Continue**. |
+| Workspace | A folder is optional for chat and required for repository work. Choose one or skip it, then select **Open Milim**. The composer receives focus and no task is sent automatically. |
 
-## Desktop app
+Onboarding reaches the composer in two advances: Runtime → optional Workspace → app. Provider, privacy, approval, and workspace choices remain editable from the thread.
+
+## Prove the safe change loop
+
+1. Start an empty chat in a small Git-backed repository. Before the first send, confirm the summary above the composer shows the intended runtime destination, workspace, Privacy mode, and Approval mode. New chats default to Privacy **Off** and Approval **Review**.
+2. Send a bounded request, for example: `Read README.md, correct one clear documentation error, and run the smallest relevant check.`
+3. In Review, read-only inspection can proceed automatically. A command, file write, or other consequential call pauses before execution and shows its exact arguments. Approve or deny that call. Open mode can auto-approve ordinary eligible tool requests; connector input and authorization remain interactive.
+4. After execution, inspect the changed-files card and select **Review changes** to open the resulting Git diff. This is the diff produced by the approved action, not a virtual patch waiting to be applied. If review is unavailable, use **Retry** or **Open Git**; use **Undo** to restore the pre-turn checkpoint.
+5. On the latest completed answer, choose the permanently visible **Continue with…** action and select a different runtime. Edit the prepared continuation if useful, then send it in the same thread. **Review with…** and **Retry with…** remain in the adjacent menu.
+
+The model chip shows the selected provider/runtime route, setup status, capabilities, favorite state, and reasoning effort where supported. Provider models use Milim tools when workspace or tool context is active; Codex, Claude, OpenCode, and Pi use their account-runtime bridges.
+
+## Run the desktop app from source
 
 ```powershell Run the desktop app
 corepack enable
@@ -34,38 +41,9 @@ pnpm -C apps/desktop tauri:dev
 
 The desktop app embeds the server in-process. There is no separate `milim serve` process for normal desktop use.
 
-On first run, follow Runtime, optional Workspace, and Ready. Memory, privacy, sandbox, computer use, imports, and other power tools remain available after setup through thread controls, Settings, and the collapsed sidebar Tools launcher.
+Memory, sandbox, computer use, imports, Agents, Workers, Skills, MCP, Schedules, Media, and Pull Requests remain available after setup through thread controls, Settings, and the collapsed sidebar **Tools** launcher. Standalone server setup and CLI commands live in the [API reference](api).
 
-## CLI server
-
-```powershell Run the CLI server
-cargo build --release
-$env:MILIM_REMOTE_BASE_URL = "http://localhost:11434/v1"
-cargo run -p milim-cli -- serve
-cargo run -p milim-cli -- status
-cargo run -p milim-cli -- models
-```
-
-```powershell OpenAI-compatible chat
-curl http://127.0.0.1:7377/v1/chat/completions `
-  -H "Content-Type: application/json" `
-  -d '{"model":"llama3.2","messages":[{"role":"user","content":"hello"}],"stream":true}'
-```
-
-## CLI commands
-
-| Command | Use |
-|---|---|
-| `serve [--port N] [--expose]` | Start the HTTP server. |
-| `status [--url URL] [--port N] [--token T] [--json]` | Probe a running server. |
-| `models [--url URL] [--port N] [--token T] [--json]` | List server models. |
-| `run [--url URL] [--port N] [--token T] <model> [prompt...]` | One-shot chat or interactive REPL through a running server. |
-| `keys identity` | Print this machine identity address. |
-| `keys mint [--audience A] [--label L] [--expires-secs N]` | Mint an `msk-v1` access token. |
-| `mcp [--url URL] [--port N] [--token T]` | Run a stdio MCP bridge to the local server. |
-| `version` | Print the binary version. |
-
-## Before a longer run
+## Troubleshooting
 
 | Signal | Meaning |
 |---|---|

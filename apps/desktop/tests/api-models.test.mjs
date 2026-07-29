@@ -28,6 +28,10 @@ const providersCss = readFileSync(
   join(root, "src", "components", "ProvidersManager.css"),
   "utf8",
 );
+const onboarding = readFileSync(
+  join(root, "src", "components", "OnboardingFlow.tsx"),
+  "utf8",
+);
 const picker =
   api.match(
     /async function listCodexModelsForPicker\(\): Promise<ModelInfo\[]> \{[\s\S]*?\n\}\n\nexport interface CodexAccountResponse/,
@@ -43,6 +47,10 @@ const codexRun =
 const claudeRun =
   api.match(
     /export async function streamClaudeRun\([\s\S]*?\n\): Promise<void> \{/,
+  )?.[0] ?? "";
+const providerRun =
+  api.match(
+    /export async function streamChat\([\s\S]*?\n\): Promise<void> \{[\s\S]*?\n\}\n\nfunction reasoningEffortBody/,
   )?.[0] ?? "";
 
 assert.match(api, /const ACCOUNT_RUNTIME_PICKER_TIMEOUT_MS = 12000;/);
@@ -124,10 +132,22 @@ assert.match(
 );
 assert.match(
   api,
-  /const providerRefresh = refreshProviderModelsAtStartup\(\);\s*onModels\(await listModelsDetailed\(accountRuntimeEnabled\)\);\s*if \(await providerRefresh\)\s*onModels\(await listModelsDetailed\(accountRuntimeEnabled\)\);/,
+  /const cachedProviderModels = await listProviderModelsForPicker\(\s*STARTUP_PROVIDER_PICKER_TIMEOUT_MS/,
 );
+assert.match(api, /await Promise\.allSettled\(\[\.\.\.runtimeLoads, refreshedProviderLoad\]\)/);
+assert.match(api, /if \(initialModels\.length\) emit\(\)/);
 assert.match(app, /loadStartupModels\(\s*\(models\) =>/);
 assert.match(chatCatalogController, /loadStartupModels\(\s*\(nextModels\) =>/);
+assert.match(chatCatalogController, /modelsRef\.current/);
+assert.match(api, /afterSeq\?: number/);
+assert.match(api, /url\.searchParams\.set\(\s*"after_seq"/);
+assert.match(onboarding, /<ModelPicker/);
+assert.match(
+  onboarding,
+  /const STEPS:[\s\S]*label: "Runtime"[\s\S]*label: "Workspace"/,
+);
+assert.doesNotMatch(onboarding, /label: "Ready"/);
+assert.match(onboarding, /"Open Milim"/);
 for (const runtime of ["codex", "claude", "opencode", "pi"]) {
   assert.match(providersManager, new RegExp(`${runtime}-enabled-toggle`));
 }
@@ -160,5 +180,10 @@ assert.match(claudeRun, /session_id\?: string;/);
 assert.match(claudeRun, /tool_approval_policy\?: ToolApprovalMode;/);
 assert.match(claudeRun, /tool_approval_grant\?: boolean;/);
 assert.match(claudeRun, /plan_mode\?: boolean;/);
+assert.ok(providerRun, "Provider chat stream should exist");
+assert.match(providerRun, /toolContext\?: AgentToolContext/);
+assert.match(providerRun, /\{ workspace: toolContext\.workspace \}/);
+assert.match(providerRun, /\{ privacy_mode: toolContext\.privacy_mode \}/);
+assert.doesNotMatch(providerRun, /tool_approval_policy: toolContext/);
 assert.match(api, /\/codex\/login\/chatgpt-device/);
 assert.match(api, /\/codex\/login\/api-key/);

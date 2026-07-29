@@ -1,5 +1,10 @@
 import { strict as assert } from "node:assert";
-import type { ChatMessage, ModelInfo, ReasoningEffort } from "../src/api.js";
+import type {
+  AgentToolContext,
+  ChatMessage,
+  ModelInfo,
+  ReasoningEffort,
+} from "../src/api.js";
 import { checkpointMessage } from "../src/lib/contextCompaction.js";
 import {
   accountRuntimeNotReadyForTurn,
@@ -20,6 +25,10 @@ const tinyModel: ModelInfo = {
   context_length: 1200,
 };
 const effort: ReasoningEffort = "medium";
+const toolContext: AgentToolContext = {
+  workspace: "C:\\work",
+  privacy_mode: "block",
+};
 
 function user(content: string): ChatMessage {
   return { role: "user", content };
@@ -142,6 +151,7 @@ const setupSettings = {
   sandbox: false,
   computerUse: false,
   memory: true,
+  privacy: "block" as const,
   activeAgentId: "agent-1",
   toolApproval: "guarded" as const,
   delegationPolicy: "ask" as const,
@@ -295,6 +305,7 @@ const noCompaction = await prepareTurnOutbound({
   model: "tiny",
   models: [tinyModel],
   folder: "C:\\work",
+  toolContext,
   reasoningEffort: effort,
   compactionInFlightRef: idleRef,
   setChatNotice: () =>
@@ -332,6 +343,7 @@ const compacted = await prepareTurnOutbound({
   model: "tiny",
   models: [tinyModel],
   folder: "C:\\work",
+  toolContext,
   reasoningEffort: effort,
   compactionInFlightRef: busyRef,
   setChatNotice: (notice) => notices.push(notice?.message ?? null),
@@ -345,6 +357,7 @@ const compacted = await prepareTurnOutbound({
     assert.equal(sessionId, "s2");
     assert.equal(model, "tiny");
     assert.equal(options.folder, "C:\\work");
+    assert.equal(options.toolContext, toolContext);
     assert.equal(options.reasoningEffort, effort);
     assert.equal(options.auto, true);
     assert.equal(options.signal, compactionSignal);
@@ -384,6 +397,7 @@ const nativeHistory = await prepareTurnOutbound({
   model: "tiny",
   models: [tinyModel],
   folder: "C:\\work",
+  toolContext,
   reasoningEffort: effort,
   compactionInFlightRef: { current: false },
   setChatNotice: () =>

@@ -111,6 +111,7 @@ export function Composer({
   tools = [],
   workspaceFolder = "",
   workspaceProjects = [],
+  workspaceChangeStartsNewChat = false,
   onWorkspaceFolder,
   onPickWorkspaceFolder,
   listWorkspaceFiles,
@@ -142,6 +143,7 @@ export function Composer({
   tools?: ToolInfo[];
   workspaceFolder?: string;
   workspaceProjects?: WorkspaceProject[];
+  workspaceChangeStartsNewChat?: boolean;
   onWorkspaceFolder: (folder: string) => void;
   onPickWorkspaceFolder: () => void;
   listWorkspaceFiles: (workspace: string, query: string, limit?: number) => Promise<WorkspaceFileSuggestion[]>;
@@ -198,6 +200,9 @@ export function Composer({
   const activeWorkspaceLabel = activeWorkspaceFolder
     ? workspaceProjects.find((project) => project.folder === activeWorkspaceFolder)?.name ?? folderLabel(activeWorkspaceFolder)
     : "No project";
+  const workspaceControlLabel = workspaceChangeStartsNewChat
+    ? "Start new chat in..."
+    : activeWorkspaceLabel;
   const showWorkspaceSelector = true;
   const availableSlashCommands = autocompleteSources.commands ? SLASH_COMMANDS : [];
   const suggestions = useMemo(() => {
@@ -815,7 +820,11 @@ export function Composer({
                 className={"project-chip" + (activeWorkspaceFolder ? " active" : "")}
                 data-testid="composer-project-selector"
                 title={activeWorkspaceFolder || "Don't work in a project"}
-                aria-label={`Project, current ${activeWorkspaceLabel}`}
+                aria-label={
+                  workspaceChangeStartsNewChat
+                    ? `Start new chat in another project, current ${activeWorkspaceLabel}`
+                    : `Project, current ${activeWorkspaceLabel}`
+                }
                 aria-expanded={projectOpen}
                 aria-haspopup="menu"
                 onClick={() => {
@@ -825,11 +834,19 @@ export function Composer({
                 }}
               >
                 <Folder size={14} />
-                <span>{activeWorkspaceLabel}</span>
+                <span>{workspaceControlLabel}</span>
                 <ChevronDown size={12} />
               </button>
               {projectOpen && (
-                <div className="menu project-chip-menu" role="menu" aria-label="Project">
+                <div
+                  className="menu project-chip-menu"
+                  role="menu"
+                  aria-label={
+                    workspaceChangeStartsNewChat
+                      ? "Start new chat in"
+                      : "Project"
+                  }
+                >
                   <button
                     type="button"
                     role="menuitem"
@@ -838,7 +855,11 @@ export function Composer({
                     onClick={() => applyWorkspaceFolder("")}
                   >
                     <Folder size={14} />
-                    <span>Don't work in a project</span>
+                    <span>
+                      {workspaceChangeStartsNewChat
+                        ? "Start without a project"
+                        : "Don't work in a project"}
+                    </span>
                   </button>
                   {workspaceProjects.length > 0 && <div className="menu-sep" />}
                   {workspaceProjects.map((project) => (
@@ -857,7 +878,11 @@ export function Composer({
                   <div className="menu-sep" />
                   <button type="button" role="menuitem" className="menu-item" onClick={pickWorkspaceFolder}>
                     <FolderOpen size={14} />
-                    <span>Choose folder...</span>
+                    <span>
+                      {workspaceChangeStartsNewChat
+                        ? "Start in another folder..."
+                        : "Choose folder..."}
+                    </span>
                   </button>
                 </div>
               )}

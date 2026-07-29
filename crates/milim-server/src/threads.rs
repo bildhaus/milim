@@ -699,4 +699,63 @@ mod tests {
             THREAD_STATUS_STOPPED
         );
     }
+
+    #[tokio::test]
+    async fn lagged_worker_events_replay_all_stored_sequences() {
+        let supervisor = supervisor();
+        let store = supervisor.store();
+        let run = store
+            .create_worker_run(
+                "parent-1",
+                Some("turn-1"),
+                milim_agents::DelegationPolicy::Ask,
+                WorkerRuntime::Managed,
+                vec![],
+                None,
+            )
+            .unwrap();
+        let worker = store
+            .create_worker(
+                "parent-1",
+                "Worker",
+                "test-echo",
+                None,
+                "work",
+                Some(&run.id),
+                WorkerRuntime::Managed,
+                WorkerAccess::ReadOnly,
+            )
+            .unwrap();
+        let mut live = supervisor.subscribe();
+        for index in 0..2_505 {
+            let event = store
+                .append_event(&worker.id, "token", json!({ "index": index }))
+                .unwrap();
+            supervisor
+                .events
+                .send(SupervisorEvent::ChildThreadEvent {
+                    thread: worker.clone(),
+                    event,
+                })
+                .unwrap();
+        }
+        assert!(matches!(
+            live.recv().await,
+            Err(broadcast::error::RecvError::Lagged(_))
+        ));
+
+        let mut cursor = 0;
+        let mut sequences = Vec::with_capacity(2_505);
+        loop {
+            let page = supervisor
+                .worker_events_after(&run.id, cursor, 1_000)
+                .unwrap();
+            if page.is_empty() {
+                break;
+            }
+            cursor = page.last().unwrap().1.seq;
+            sequences.extend(page.into_iter().map(|(_, event)| event.seq));
+        }
+        assert_eq!(sequences, (1..=2_505).collect::<Vec<_>>());
+    }
 }

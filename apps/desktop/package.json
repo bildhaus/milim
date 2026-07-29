@@ -1,7 +1,7 @@
 {
   "name": "milim-desktop",
   "private": true,
-  "version": "0.2.7",
+  "version": "0.2.8",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -21,7 +21,7 @@
     "test:onboarding": "node tests/run-ts-test.mjs tests/onboarding-store.test.ts",
     "test:user-state-storage": "node tests/run-ts-test.mjs tests/user-state-storage.test.ts tests/theme-store.test.ts",
     "test:update": "node tests/run-ts-test.mjs tests/update-service.test.ts tests/update-store.test.ts",
-    "test:api-models": "node tests/api-models.test.mjs && node tests/api-model-discovery.test.mjs && node tests/api-model-startup.test.mjs && node tests/inspector-controller.test.mjs",
+    "test:api-models": "node tests/api-models.test.mjs && node tests/api-model-discovery.test.mjs && node tests/api-model-startup.test.mjs && node tests/inspector-controller.test.mjs && node tests/chat-run-context-contract.test.mjs",
     "test:git-refresh": "node tests/run-ts-test.mjs tests/git-refresh.test.ts tests/pull-requests.test.ts tests/empty-starter-suggestions.test.ts tests/git-diff-renderer.test.ts tests/git-commit-message-models.test.ts tests/turn-workspace.test.ts tests/turn-changes-card.test.tsx",
     "test:media": "node tests/run-ts-test.mjs tests/generated-media-rendering.test.tsx && cargo test --manifest-path ../../Cargo.toml -p milim-server media_",
     "test:mobile-companion": "cargo test --manifest-path ../../Cargo.toml -p milim-server mobile_companion",
@@ -33,6 +33,7 @@
     "test:tauri-command-palette": "node tests/tauri-webview-e2e.mjs --command-palette-only",
     "test:tauri-settings": "node tests/tauri-webview-e2e.mjs --settings-only",
     "test:tauri-turn-changes": "node tests/tauri-webview-e2e.mjs --turn-changes-only",
+    "test:tauri-mobile-auth": "node tests/tauri-webview-e2e.mjs --mobile-auth-only",
     "test:tauri-mcp-apps": "node tests/tauri-webview-e2e.mjs --mcp-apps-only",
     "perf:tauri-dev": "node tests/tauri-dev-perf.mjs",
     "package:release": "node scripts/package-release.mjs",

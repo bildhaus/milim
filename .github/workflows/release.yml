@@ -43,6 +43,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if gh release view "${MILIM_RELEASE_TAG}" >/dev/null 2>&1; then
+            if [ "$(gh release view "${MILIM_RELEASE_TAG}" --json isDraft --jq '.isDraft')" != "true" ]; then
+              echo "::error::Refusing to edit published release ${MILIM_RELEASE_TAG}; publish a new version instead."
+              exit 1
+            fi
             gh release edit "${MILIM_RELEASE_TAG}" \
               --notes-file apps/desktop/release-notes.md
           else
@@ -149,7 +153,11 @@ jobs:
           mkdir -p release-artifacts/updater-checksums
           cp "$alias_dmg.sha256" release-artifacts/updater-checksums/
           for attempt in 1 2 3; do
-            if gh release upload "${{ env.MILIM_RELEASE_TAG }}" "$alias_dmg" "$alias_dmg.sha256" --clobber; then
+            if [ "$(gh release view "${{ env.MILIM_RELEASE_TAG }}" --json isDraft --jq '.isDraft')" != "true" ]; then
+              echo "::error::Refusing to upload assets to published release ${{ env.MILIM_RELEASE_TAG }}."
+              exit 1
+            fi
+            if gh release upload "${{ env.MILIM_RELEASE_TAG }}" "$alias_dmg" "$alias_dmg.sha256"; then
               break
             fi
             if [ "$attempt" -eq 3 ]; then
@@ -186,7 +194,11 @@ jobs:
             exit 1
           fi
           for attempt in 1 2 3; do
-            if gh release upload "${{ env.MILIM_RELEASE_TAG }}" "$app_zip" "$app_zip.sha256" --clobber; then
+            if [ "$(gh release view "${{ env.MILIM_RELEASE_TAG }}" --json isDraft --jq '.isDraft')" != "true" ]; then
+              echo "::error::Refusing to upload assets to published release ${{ env.MILIM_RELEASE_TAG }}."
+              exit 1
+            fi
+            if gh release upload "${{ env.MILIM_RELEASE_TAG }}" "$app_zip" "$app_zip.sha256"; then
               break
             fi
             if [ "$attempt" -eq 3 ]; then
@@ -226,7 +238,11 @@ jobs:
           New-Item -ItemType Directory -Force -Path $checksumDir | Out-Null
           Copy-Item -LiteralPath $aliasChecksum -Destination $checksumDir
           for ($attempt = 1; $attempt -le 3; $attempt++) {
-            gh release upload "${{ env.MILIM_RELEASE_TAG }}" $aliasExe $aliasChecksum --clobber
+            $isDraft = gh release view "${{ env.MILIM_RELEASE_TAG }}" --json isDraft --jq '.isDraft'
+            if ($LASTEXITCODE -ne 0 -or $isDraft.Trim() -ne "true") {
+              throw "Refusing to upload assets to published release ${{ env.MILIM_RELEASE_TAG }}."
+            }
+            gh release upload "${{ env.MILIM_RELEASE_TAG }}" $aliasExe $aliasChecksum
             if ($LASTEXITCODE -eq 0) {
               break
             }
@@ -291,7 +307,11 @@ jobs:
           fi
           cat release-checksums/*.sha256 | sort -k2 > release-published/SHA256SUMS.txt
           for attempt in 1 2 3; do
-            if gh release upload "${MILIM_RELEASE_TAG}" release-published/manifest.json release-published/SHA256SUMS.txt --repo "${GITHUB_REPOSITORY}" --clobber; then
+            if [ "$(gh release view "${MILIM_RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq '.isDraft')" != "true" ]; then
+              echo "::error::Refusing to upload assets to published release ${MILIM_RELEASE_TAG}."
+              exit 1
+            fi
+            if gh release upload "${MILIM_RELEASE_TAG}" release-published/manifest.json release-published/SHA256SUMS.txt --repo "${GITHUB_REPOSITORY}"; then
               break
             fi
             if [ "$attempt" -eq 3 ]; then

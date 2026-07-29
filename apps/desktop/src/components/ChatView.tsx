@@ -75,6 +75,7 @@ import {
   piRuntimeModel,
   wireMessageContent,
   type AgentEvent,
+  type AgentToolContext,
   type AccountNativeWorkerLifecycle,
   type ArtifactFileStatus,
   type ArtifactOpenTarget,
@@ -106,7 +107,6 @@ import {
   type SavedArtifactFile,
   type ScheduleRunEvent,
   type TokenUsage,
-  type ThreadEvent,
   type WorkspaceFileSuggestion,
   type WorkspaceCheckpoint,
   type WorkspaceGitActionResult,
@@ -149,6 +149,8 @@ import {
   type ArtifactRevisionGroup,
 } from "../lib/artifactRevisions";
 import {
+  appendWorkerRunSynthesisOnce,
+  rememberWorkerThreadEvent,
   workerRunReadyForSynthesis,
   workerRunSynthesisId,
 } from "../lib/workerRuns";
@@ -218,7 +220,11 @@ import {
   type GoalSettings,
 } from "../lib/goals";
 import { isNearScrollBottom } from "../lib/scroll";
-import { mergeModelListsForPicker, providerOwnsModel } from "../lib/modelPicker";
+import {
+  mergeModelListsForPicker,
+  modelDevProfile,
+  providerOwnsModel,
+} from "../lib/modelPicker";
 import { assessHotSwap, type HotSwapAssessment } from "../lib/hotSwap";
 import {
   approvalWaitDuration,
@@ -269,6 +275,7 @@ import {
   runModelChatTurn,
   runSelectedAccountRuntimeTurn,
   runToolAgentTurn,
+  utilityAccountRuntimeMilimContext,
 } from "../lib/turnRuntime";
 import {
   autoApprovableToolApprovals,
@@ -326,8 +333,8 @@ import {
 import { PreviewPanel } from "./PreviewPanel";
 import { QuickSummaryPanel } from "./QuickSummaryPanel";
 import {
-  turnChangesFromDiff,
-  type TurnChanges,
+  turnReviewFromDiff,
+  type TurnReviewState,
 } from "./TurnChangesCard";
 import { SheetDialog } from "./SheetDialog";
 import { WorkspaceLauncherButton } from "./WorkspaceLauncher";
@@ -370,7 +377,27 @@ const MESSAGE_ESTIMATED_HEIGHT = 152;
 const MESSAGE_VIRTUAL_OVERSCAN_PX = 900;
 const MESSAGE_ROW_GAP = 12;
 const RECENT_THREAD_SWITCHER_CLOSE_MS = 1600;
+const EVENT_STREAM_RECONNECT_MAX_MS = 5_000;
 const previewArtifactCache = new WeakMap<ChatMessage, ChatArtifact[] | null>();
+
+function waitForEventReconnect(
+  signal: AbortSignal,
+  attempt: number,
+): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      window.clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = window.setTimeout(
+      done,
+      Math.min(500 * 2 ** attempt, EVENT_STREAM_RECONNECT_MAX_MS),
+    );
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
 
 function documentVisible(): boolean {
   return typeof document === "undefined" || document.visibilityState === "visible";
@@ -1499,7 +1526,8 @@ export function ChatView({
   const [gitStatus, setGitStatus] = useState<WorkspaceGitStatus | null>(null);
   const [gitStatusLoading, setGitStatusLoading] = useState(false);
   const [gitPanelView, setGitPanelView] = useState<GitPanelView>("changes");
-  const [turnChanges, setTurnChanges] = useState<TurnChanges | null>(null);
+  const [turnReview, setTurnReview] = useState<TurnReviewState | null>(null);
+  const [turnReviewRevision, setTurnReviewRevision] = useState(0);
   const [gitDiffRequest, setGitDiffRequest] = useState<
     (GitPanelDiffRequest & { sessionId: string; folder: string }) | null
   >(null);
@@ -1869,6 +1897,7 @@ export function ChatView({
     sessionMessages,
     runTurn,
   });
+  const persistingTurnIdsRef = useRef<Set<string>>(new Set());
   const {
     activeMediaTarget,
     mediaAdvanced,
@@ -2028,29 +2057,52 @@ export function ChatView({
       !latestTurnCheckpoint ||
       !previewRuntimeFoldersEqual(latestTurnCheckpoint.folder, folder)
     ) {
-      setTurnChanges(null);
+      setTurnReview(null);
       return;
     }
 
     let cancelled = false;
+    setTurnReview({
+      key: latestTurnChangesKey,
+      status: "checking",
+      checkpoint: latestTurnCheckpoint,
+    });
     void (async () => {
       try {
         const selected = await setWorkspace(latestTurnCheckpoint.folder);
-        if (!selected || cancelled) return;
+        if (cancelled) return;
+        if (!selected) {
+          setTurnReview({
+            key: latestTurnChangesKey,
+            status: "unavailable",
+            checkpoint: latestTurnCheckpoint,
+            message: "The turn workspace is unavailable.",
+          });
+          return;
+        }
         const result = await runWorkspaceGitAction("diff", {
           diff_scope: "last_turn",
           diff_base: latestTurnCheckpoint.ref,
         });
         if (cancelled) return;
-        setTurnChanges(
-          turnChangesFromDiff(
+        setTurnReview(
+          turnReviewFromDiff(
             latestTurnChangesKey,
             latestTurnCheckpoint,
             result,
           ),
         );
-      } catch {
-        if (!cancelled) setTurnChanges(null);
+      } catch (error) {
+        if (!cancelled)
+          setTurnReview({
+            key: latestTurnChangesKey,
+            status: "unavailable",
+            checkpoint: latestTurnCheckpoint,
+            message:
+              error instanceof Error
+                ? error.message
+                : "Git could not load this turn's diff.",
+          });
       }
     })();
     return () => {
@@ -2063,6 +2115,7 @@ export function ChatView({
     latestTurnChangesKey,
     latestTurnCheckpoint,
     latestTurnMessage,
+    turnReviewRevision,
   ]);
 
   const chatScrollRef = useRef<HTMLDivElement>(null);
@@ -2223,14 +2276,6 @@ export function ChatView({
     return thread.status === "queued" || thread.status === "running";
   }
 
-  function rememberedChildEvents(event: ThreadEvent): ThreadEvent[] {
-    const existing = childThreadEventsRef.current.get(event.thread_id) ?? [];
-    if (existing.some((item) => item.id === event.id)) return existing;
-    const next = [...existing, event];
-    childThreadEventsRef.current.set(event.thread_id, next);
-    return next;
-  }
-
   function stopChildThreadEventsIfIdle(parentId: string) {
     const live = childThreadLiveIdsRef.current.get(parentId);
     if (live?.size) return;
@@ -2253,7 +2298,7 @@ export function ChatView({
 
     const store = useSessions.getState();
     const events = ev.event
-      ? rememberedChildEvents(ev.event)
+      ? rememberWorkerThreadEvent(childThreadEventsRef.current, ev.event)
       : childThreadEventsRef.current.get(thread.id);
     if (ev.type === "child_thread_started") {
       store.upsertChildThread(parentId, thread, events);
@@ -2265,8 +2310,6 @@ export function ChatView({
     ) {
       store.updateChildThread(thread, events);
     }
-    if (!isLiveChildThread(thread))
-      childThreadEventsRef.current.delete(thread.id);
     if (
       !isLiveChildThread(thread) &&
       !generationControllersRef.current.has(parentId)
@@ -2283,16 +2326,34 @@ export function ChatView({
       parentId,
       childThreadLiveIdsRef.current.get(parentId) ?? new Set(),
     );
-    void streamChildThreadEvents(
-      parentId,
-      (ev) => applyPushedChildThreadEvent(parentId, ev),
-      controller.signal,
-    )
-      .catch((error) => {
-        if (!controller.signal.aborted)
-          console.warn("child thread event stream failed", error);
-      })
-      .finally(() => {
+    void (async () => {
+      let afterSeq = 0;
+      let retry = 0;
+      while (!controller.signal.aborted) {
+        try {
+          await streamChildThreadEvents(
+            parentId,
+            (event) => {
+              if (event.event?.seq)
+                afterSeq = Math.max(afterSeq, event.event.seq);
+              retry = 0;
+              applyPushedChildThreadEvent(parentId, event);
+            },
+            controller.signal,
+            afterSeq,
+          );
+        } catch (error) {
+          if (!controller.signal.aborted)
+            console.warn("child thread event stream failed", error);
+        }
+        if (controller.signal.aborted) break;
+        const live = childThreadLiveIdsRef.current.get(parentId);
+        if (!live?.size && !generationControllersRef.current.has(parentId))
+          break;
+        await waitForEventReconnect(controller.signal, retry);
+        retry = Math.min(retry + 1, 4);
+      }
+    })().finally(() => {
         if (
           childThreadEventControllersRef.current.get(parentId) === controller
         ) {
@@ -2343,17 +2404,17 @@ export function ChatView({
       workerRunReconcileRetriesRef.current.delete(canonical.run.id);
 
       const currentMessages = sessionMessages(sessionId);
-      const alreadySynthesized = currentMessages.some(
-        (message) => workerRunSynthesisId(message) === canonical.run.id,
+      const nextMessages = appendWorkerRunSynthesisOnce(
+        currentMessages,
+        workerRunSynthesisMessage(canonical),
       );
-
       approvedWorkerRunsRef.current.delete(canonical.run.id);
       workerRunEventControllersRef.current.get(canonical.run.id)?.abort();
-      const nextMessages = alreadySynthesized
-        ? currentMessages
-        : [...currentMessages, workerRunSynthesisMessage(canonical)];
-      if (!alreadySynthesized)
-        setMessages(sessionId, nextMessages, { autoTitle: false });
+      if (!nextMessages) {
+        store.setWorkerRunPending(sessionId, canonical.run.id, false);
+        return;
+      }
+      setMessages(sessionId, nextMessages, { autoTitle: false });
       const settings = store.getSettings(sessionId);
       if (settings.goal.status === "waiting_for_worker_approval") {
         const runningGoal = updateGoalState(sessionId, {
@@ -2406,12 +2467,64 @@ export function ChatView({
     if (workerRunEventControllersRef.current.has(run.id)) return;
     const controller = new AbortController();
     workerRunEventControllersRef.current.set(run.id, controller);
-    void streamWorkerRunEvents(run.id, applyWorkerRunEvent, controller.signal)
-      .catch((error) => {
-        if (!controller.signal.aborted)
-          console.warn("worker run event stream failed", error);
-      })
-      .finally(() => {
+    void (async () => {
+      const persisted = useSessions
+        .getState()
+        .workerRuns.find((item) => item.run.id === run.id);
+      let afterSeq = (persisted?.workers ?? []).reduce(
+        (runMax, worker) =>
+          Math.max(
+            runMax,
+            ...(worker.events ?? []).map((event) => event.seq),
+          ),
+        0,
+      );
+      let retry = 0;
+      while (!controller.signal.aborted) {
+        let terminalEvent = false;
+        try {
+          await streamWorkerRunEvents(
+            run.id,
+            (event) => {
+              if (event.event?.seq)
+                afterSeq = Math.max(afterSeq, event.event.seq);
+              retry = 0;
+              applyWorkerRunEvent(event);
+              terminalEvent = Boolean(
+                event.run &&
+                  ["done", "partial", "stopped", "error"].includes(
+                    event.run.status,
+                  ),
+              );
+              if (terminalEvent) controller.abort();
+            },
+            controller.signal,
+            afterSeq,
+          );
+        } catch (error) {
+          if (!controller.signal.aborted)
+            console.warn("worker run event stream failed", error);
+        }
+        if (controller.signal.aborted && !terminalEvent) break;
+        try {
+          const canonical = await getWorkerRun(run.id);
+          useSessions.getState().upsertWorkerRun(canonical);
+          await maybeResumeAfterWorkerRun(canonical);
+          if (
+            ["done", "partial", "stopped", "error"].includes(
+              canonical.run.status,
+            )
+          )
+            break;
+        } catch (error) {
+          if (!controller.signal.aborted)
+            console.warn("worker run reconciliation failed", error);
+        }
+        if (controller.signal.aborted) break;
+        await waitForEventReconnect(controller.signal, retry);
+        retry = Math.min(retry + 1, 4);
+      }
+    })().finally(() => {
         if (workerRunEventControllersRef.current.get(run.id) === controller)
           workerRunEventControllersRef.current.delete(run.id);
       });
@@ -3940,14 +4053,18 @@ export function ChatView({
   ): Promise<void> {
     const prefs = useUiPreferences.getState();
     if (!prefs.autoTitleChats || !prefs.aiThreadNames) return;
-    const session = useSessions
-      .getState()
-      .sessions.find((item) => item.id === sessionId);
+    const store = useSessions.getState();
+    const session = store.sessions.find((item) => item.id === sessionId);
     if (
       !session ||
       session.messages.filter((message) => message.role === "user").length !== 1
     )
       return;
+    const titleSettings = store.getSettings(sessionId);
+    const titleToolContext: AgentToolContext = {
+      workspace: titleSettings.folder.trim() || null,
+      privacy_mode: titleSettings.privacy,
+    };
     if (!shouldReplaceThreadTitle(session.title, session.messages)) return;
     const namingModel = (prefs.aiThreadNameModel || turnModel).trim();
     const namingModelInfo = pickerModels.find(
@@ -3980,7 +4097,11 @@ export function ChatView({
             ].join("\n"),
           },
         ],
-        { maxTokens: 16, temperature: 0 },
+        {
+          maxTokens: 16,
+          temperature: 0,
+          toolContext: titleToolContext,
+        },
       );
     } catch (error) {
       console.warn(
@@ -4015,6 +4136,7 @@ export function ChatView({
     options: {
       auto: boolean;
       folder: string;
+      toolContext: AgentToolContext;
       reasoningEffort: ReasoningEffort;
       signal?: AbortSignal;
     },
@@ -4069,6 +4191,7 @@ export function ChatView({
           promptMessages,
           options.folder,
           options.reasoningEffort,
+          options.toolContext,
           options.signal,
         );
       } else if (claudeModel) {
@@ -4079,6 +4202,7 @@ export function ChatView({
           promptMessages,
           options.folder,
           options.reasoningEffort,
+          options.toolContext,
           options.signal,
         );
       } else if (opencodeModel) {
@@ -4088,6 +4212,7 @@ export function ChatView({
           opencodeModel,
           promptMessages,
           options.folder,
+          options.toolContext,
           options.signal,
         );
       } else if (piModel) {
@@ -4098,6 +4223,7 @@ export function ChatView({
           promptMessages,
           options.folder,
           options.reasoningEffort,
+          options.toolContext,
           options.signal,
         );
       } else {
@@ -4109,6 +4235,7 @@ export function ChatView({
             temperature: 0,
             reasoningEffort: summaryReasoningEffort,
             signal: options.signal,
+            toolContext: options.toolContext,
           },
         );
         summary = {
@@ -4155,6 +4282,7 @@ export function ChatView({
     promptMessages: ChatMessage[],
     folder: string,
     reasoningEffort: ReasoningEffort,
+    toolContext: AgentToolContext,
     signal?: AbortSignal,
   ): Promise<CompactionSummaryResult> {
     let text = "";
@@ -4170,6 +4298,7 @@ export function ChatView({
         cwd: folder.trim() || undefined,
         reasoningEffort,
         images: runtimeInput.images,
+        toolContext,
       }),
       (ev: CodexRunEvent) => {
         if (ev.type === "token" && ev.text) text += ev.text;
@@ -4195,6 +4324,7 @@ export function ChatView({
     promptMessages: ChatMessage[],
     folder: string,
     reasoningEffort: ReasoningEffort,
+    toolContext: AgentToolContext,
     signal?: AbortSignal,
   ): Promise<CompactionSummaryResult> {
     let text = "";
@@ -4210,6 +4340,7 @@ export function ChatView({
         cwd: folder.trim() || undefined,
         reasoningEffort,
         images: runtimeInput.images,
+        toolContext,
       }),
       (ev: ClaudeRunEvent) => {
         if (ev.type === "token" && ev.text) text += ev.text;
@@ -4234,6 +4365,7 @@ export function ChatView({
     model: string,
     promptMessages: ChatMessage[],
     folder: string,
+    toolContext: AgentToolContext,
     signal?: AbortSignal,
   ): Promise<CompactionSummaryResult> {
     let text = "";
@@ -4248,6 +4380,11 @@ export function ChatView({
       images: runtimeInput.images,
       tool_approval_policy: "guarded",
       plan_mode: true,
+      milim_context: utilityAccountRuntimeMilimContext({
+        toolContext,
+        toolApproval: "guarded",
+        planMode: true,
+      }),
     }, (ev: OpenCodeRunEvent) => {
       if (ev.type === "token" && ev.text) text += ev.text;
       else if (ev.type === "warning") warning = ev.message;
@@ -4264,6 +4401,7 @@ export function ChatView({
     promptMessages: ChatMessage[],
     folder: string,
     reasoningEffort: ReasoningEffort,
+    toolContext: AgentToolContext,
     signal?: AbortSignal,
   ): Promise<CompactionSummaryResult> {
     let text = "";
@@ -4280,6 +4418,11 @@ export function ChatView({
       persist_session: false,
       tool_approval_policy: "guarded",
       plan_mode: true,
+      milim_context: utilityAccountRuntimeMilimContext({
+        toolContext,
+        toolApproval: "guarded",
+        planMode: true,
+      }),
     }, (ev: PiRunEvent) => {
       if (ev.type === "token" && ev.text) text += ev.text;
       else if (ev.type === "warning") warning = ev.message;
@@ -4308,8 +4451,15 @@ export function ChatView({
     }
     const selectedModel = requireChatModel();
     if (!selectedModel) return;
+    const targetSessionId = activeId;
+    const sessionsStore = useSessions.getState();
+    const targetSettings = sessionsStore.getSettings(targetSessionId);
+    const toolContext: AgentToolContext = {
+      workspace: targetSettings.folder.trim() || null,
+      privacy_mode: targetSettings.privacy,
+    };
     const currentMessages =
-      useSessions.getState().sessions.find((session) => session.id === activeId)
+      sessionsStore.sessions.find((session) => session.id === targetSessionId)
         ?.messages ?? messages;
     if (!currentMessages.length) {
       setChatNotice({
@@ -4332,20 +4482,25 @@ export function ChatView({
         pickerModels,
       );
       const checkpoint = await createCompactionCheckpoint(
-        activeId,
+        targetSessionId,
         split.head,
         selectedModel,
         {
           auto: false,
-          folder,
+          folder: targetSettings.folder,
+          toolContext,
           reasoningEffort,
         },
       );
       const store = useSessions.getState();
-      store.setMessages(activeId, [...split.head, checkpoint, ...split.tail], {
-        autoTitle: false,
-      });
-      store.clearAccountRuntime(activeId);
+      store.setMessages(
+        targetSessionId,
+        [...split.head, checkpoint, ...split.tail],
+        {
+          autoTitle: false,
+        },
+      );
+      store.clearAccountRuntime(targetSessionId);
       setChatNotice({
         tone: "info",
         message:
@@ -4496,6 +4651,17 @@ export function ChatView({
     const loop = goalLoopRef.current;
     if (loop?.sessionId === sessionId) loop.decisionController = controller;
     try {
+      const decisionSettings = useSessions.getState().getSettings(sessionId);
+      const decisionWorkspace = decisionSettings.folder.trim();
+      const decisionToolContext: AgentToolContext = {
+        workspace: decisionWorkspace || null,
+        privacy_mode: decisionSettings.privacy,
+      };
+      const decisionMilimContext = utilityAccountRuntimeMilimContext({
+        toolContext: decisionToolContext,
+        toolApproval: "review",
+        planMode: false,
+      });
       const decisionMessages = goalDecisionMessages(
         currentGoal,
         latestMessages,
@@ -4519,11 +4685,12 @@ export function ChatView({
             model: codexModel,
             prompt: runtimeInput.prompt,
             images: runtimeInput.images,
-            cwd: folder.trim() || undefined,
+            cwd: decisionWorkspace || undefined,
             reasoning_effort: decisionReasoningEffort,
             tool_approval_policy: "review",
             tool_approval_grant: false,
             plan_mode: false,
+            milim_context: decisionMilimContext,
           },
           (ev: CodexRunEvent) => {
             if (ev.type === "token" && ev.text) content += ev.text;
@@ -4542,11 +4709,12 @@ export function ChatView({
             model: claudeModel,
             prompt: runtimeInput.prompt,
             images: runtimeInput.images,
-            cwd: folder.trim() || undefined,
+            cwd: decisionWorkspace || undefined,
             reasoning_effort: decisionReasoningEffort,
             tool_approval_policy: "review",
             tool_approval_grant: false,
             plan_mode: false,
+            milim_context: decisionMilimContext,
           },
           (ev: ClaudeRunEvent) => {
             if (ev.type === "token" && ev.text) content += ev.text;
@@ -4564,10 +4732,11 @@ export function ChatView({
           model: opencodeModel,
           prompt: runtimeInput.prompt,
           images: runtimeInput.images,
-          cwd: folder.trim() || undefined,
+          cwd: decisionWorkspace || undefined,
           tool_approval_policy: "review",
           tool_approval_grant: false,
           plan_mode: false,
+          milim_context: decisionMilimContext,
         }, (ev: OpenCodeRunEvent) => {
           if (ev.type === "token" && ev.text) content += ev.text;
           else if (ev.type === "warning") runtimeWarning = ev.message;
@@ -4582,12 +4751,17 @@ export function ChatView({
           model: piModel,
           prompt: runtimeInput.prompt,
           images: runtimeInput.images,
-          cwd: folder.trim() || undefined,
+          cwd: decisionWorkspace || undefined,
           reasoning_effort: decisionReasoningEffort,
           persist_session: false,
           tool_approval_policy: "guarded",
           tool_approval_grant: false,
           plan_mode: true,
+          milim_context: utilityAccountRuntimeMilimContext({
+            toolContext: decisionToolContext,
+            toolApproval: "guarded",
+            planMode: true,
+          }),
         }, (ev: PiRunEvent) => {
           if (ev.type === "token" && ev.text) content += ev.text;
           else if (ev.type === "warning") runtimeWarning = ev.message;
@@ -4600,6 +4774,7 @@ export function ChatView({
           signal: controller.signal,
           maxTokens: 500,
           temperature: 0,
+          toolContext: decisionToolContext,
         });
       }
       return parseGoalDecision(content);
@@ -4933,7 +5108,11 @@ export function ChatView({
   }
 
   function startChatInFolder(nextFolder: string) {
-    void createInteractiveChat({ folder: nextFolder });
+    if (messages.length === 0) {
+      updateThreadSettings(activeId, { folder: nextFolder });
+    } else {
+      void createInteractiveChat({ folder: nextFolder });
+    }
     setChatNotice(null);
     focusComposer();
   }
@@ -5491,6 +5670,7 @@ export function ChatView({
     const turnSandbox = turnSettings.sandbox;
     const turnComputerUse = turnSettings.computerUse;
     const turnMemory = turnSettings.memory;
+    const turnPrivacy = turnSettings.privacy;
     const turnActiveAgentId = turnSettings.activeAgentId ?? null;
     const turnToolApproval = turnSettings.toolApproval;
     const turnDelegationPolicy =
@@ -5513,6 +5693,31 @@ export function ChatView({
     const opencodeModel = turnSetup.opencodeModel;
     const piModel = turnSetup.piModel;
     const store = useSessions.getState();
+    if (persistingTurnIdsRef.current.has(id)) {
+      return {
+        status: "skipped",
+        messages: sessionMessages(id, convo),
+        error: "This turn is still being saved.",
+      };
+    }
+    persistingTurnIdsRef.current.add(id);
+    try {
+      setMessages(id, convo, { autoTitle: autoTitleChats });
+      await flushDeferredUserStateWrites("milim.sessions");
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setChatNotice({
+        tone: "error",
+        message: `Milim could not save this turn, so it was not sent: ${detail}`,
+      });
+      return {
+        status: "error",
+        messages: sessionMessages(id, convo),
+        error: detail,
+      };
+    } finally {
+      persistingTurnIdsRef.current.delete(id);
+    }
     const controller = claimTurnGeneration({
       sessionId: id,
       store,
@@ -5609,6 +5814,7 @@ export function ChatView({
         model: turnModel,
         sandbox: turnSandbox,
         computerUse: turnComputerUse,
+        privacy: turnPrivacy,
         previewSurface:
           sidePanelVisible &&
           (inspectorTab === "preview" || inspectorTab === "code")
@@ -5745,6 +5951,7 @@ export function ChatView({
         model: turnModel,
         models: pickerModels,
         folder: turnFolder,
+        toolContext: promptContext.toolContext,
         reasoningEffort: turnReasoningEffort,
         compactionInFlightRef,
         setChatNotice,
@@ -6606,6 +6813,12 @@ export function ChatView({
   });
 
   const emptyThread = messages.length === 0;
+  const firstSendModel = pickerModels.find((item) => item.id === model);
+  const firstSendRoute = modelDevProfile(firstSendModel, model, {
+    providers,
+    toolIntent: modelToolIntent,
+    planMode,
+  });
   const activeAssistantRuntime = useMemo(() => {
     if (!busy) return { run: null, streamParts: undefined };
     let run: RunTrace | null = null;
@@ -6781,6 +6994,8 @@ export function ChatView({
       setBatonRequest({ action, messageIndex }),
     undoTurnChanges,
     reviewTurnChanges,
+    retryTurnReview: () => setTurnReviewRevision((value) => value + 1),
+    openGit: () => openGitPanel(),
     editResend,
     editMessageInPlace,
     approveToolApproval,
@@ -6878,10 +7093,10 @@ export function ChatView({
                       previewAppBusy={previewAppBusy}
                       previewAppStatus={activePreviewAppStatus}
                       toolApproval={toolApproval}
-                      turnChanges={
+                      turnReview={
                         isLastAssistant &&
-                        turnChanges?.key === messageTurnChangesKey
-                          ? turnChanges
+                        turnReview?.key === messageTurnChangesKey
+                          ? turnReview
                           : null
                       }
                       actionsRef={messageRowActionsRef}
@@ -6998,6 +7213,32 @@ export function ChatView({
                   ) : undefined
                 }
               />
+              {emptyThread && model.trim() && (
+                <section
+                  className="first-send-summary"
+                  data-testid="first-send-summary"
+                  aria-label="First send summary"
+                >
+                  <span>
+                    <strong>Destination</strong>
+                    <em>{firstSendRoute.routeLabel}</em>
+                  </span>
+                  <span title={folder || undefined}>
+                    <strong>Workspace</strong>
+                    <em>{folder.trim() || "None"}</em>
+                  </span>
+                  <span>
+                    <strong>Privacy</strong>
+                    <em>{privacy[0].toUpperCase() + privacy.slice(1)}</em>
+                  </span>
+                  <span>
+                    <strong>Approval</strong>
+                    <em>
+                      {toolApproval[0].toUpperCase() + toolApproval.slice(1)}
+                    </em>
+                  </span>
+                </section>
+              )}
               <QueuedMessageTray
                 items={queuedMessages}
                 busy={busy}
@@ -7065,6 +7306,7 @@ export function ChatView({
                 tools={composerTools}
                 workspaceFolder={folder}
                 workspaceProjects={workspaceProjects}
+                workspaceChangeStartsNewChat={!emptyThread}
                 onWorkspaceFolder={startChatInFolder}
                 onPickWorkspaceFolder={() => void pickProjectFolder()}
                 listWorkspaceFiles={listWorkspaceFiles}

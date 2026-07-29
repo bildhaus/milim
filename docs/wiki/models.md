@@ -6,12 +6,12 @@ title: Models and providers
 summary: Model-agnostic dev chat routing across provider APIs, local runtimes, Codex, Claude, OpenCode, and Pi bridges.
 group: Core
 order: 40
-updated: 2026-07-23
+updated: 2026-07-29
 ---
 
 Model routing is provider-agnostic and centered on the active dev thread. The provider registry stores enabled remotes and their model metadata, then the desktop model picker merges local API runtime models, provider models, account runtime models, and media-capable models. Duplicate provider model ids stay provider-scoped in the picker and route back to the selected provider; provider sections with fewer visible models appear first.
 
-On desktop startup, the picker reads the cached catalog while a single live refresh checks enabled chat providers. It reads the catalog once more after that refresh completes, without requiring a trip through provider settings. Provider, Codex, Claude, OpenCode, and Pi discovery are isolated so a slow or unavailable lane does not suppress successful lanes. Enabled account-runtime probes allow the CLI bridge's full startup window and retry once after a transient failure.
+On desktop startup, the picker emits the last usable provider catalog immediately while one live refresh checks enabled chat providers. Codex, Claude, OpenCode, and Pi probe independently and merge into the visible catalog as each lane finishes; a CLI that consumes its full startup timeout does not delay cached provider models. A failed or empty provider refresh and a failed account probe preserve already visible rows rather than clearing the picker. Enabled account-runtime probes allow the CLI bridge's full startup window and retry once after a transient failure.
 
 The model chip and picker classify the selected model into one runtime lane: plain chat, Milim tools, Codex runtime, Claude runtime, OpenCode runtime, Pi runtime, or media. Switching models changes the next turn for the active thread without resetting workspace context, memory, previews, artifacts, approvals, or queued messages.
 

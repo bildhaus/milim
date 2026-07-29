@@ -6,7 +6,7 @@ title: Privacy and security
 summary: Local and remote data boundaries, Google Workspace access, privacy modes, redaction, blocking, bearer auth, and CORS boundaries.
 group: Local data
 order: 70
-updated: 2026-07-25
+updated: 2026-07-29
 ---
 
 Privacy settings are easiest to reason about as a routing question: what stays local, what goes to a provider, and which gate runs before a remote send.
@@ -20,6 +20,8 @@ Privacy settings are easiest to reason about as a routing question: what stays l
 | `block` | Remote sends containing detected PII fail closed before the provider call. |
 
 The scanner is deterministic regex-based detection for common email, phone, token-like, IP, URL, and secret-looking strings. It does not infer names or sensitive meaning from natural language.
+
+New desktop chats default to `off`. The first-send summary shows the selected runtime destination, workspace, Privacy mode, and Review status before a remote turn leaves the composer.
 
 Because image content cannot be scanned or redacted by the text privacy gate, remote provider and account-runtime requests with image parts are blocked in `redact` and `block` modes. Switch to `off` only when sending those pixels to that provider or account runtime is intended. Local Ollama and LM Studio image inputs stay on the configured local endpoint and remain allowed.
 
@@ -35,7 +37,7 @@ Because image content cannot be scanned or redacted by the text privacy gate, re
 | OpenCode and Pi | Text is scanned/redacted/blocked before `/opencode/run` or `/pi/run`; image pixels require Privacy Off before native ACP/RPC input is built. |
 | Local Ollama or LM Studio | Not scanned by Milim because the configured local runtime receives the prompt on the machine. |
 
-The gate is process-global. The desktop syncs the active setting through `POST /privacy/mode`, and the router reads that same setting when a remote request is about to leave.
+Each desktop run snapshots its selected privacy mode and canonical workspace when the request starts. That immutable context is reused for every inference iteration, tool call, delegation, approval, and retry, so changing another thread cannot redirect or reclassify an in-flight run. Legacy API clients may omit the run mode; the server then snapshots the current `POST /privacy/mode` default once at request start. An invalid explicit mode or workspace is rejected instead of falling back.
 
 ## Data boundary
 

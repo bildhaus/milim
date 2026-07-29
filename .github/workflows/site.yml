@@ -5,12 +5,14 @@ on:
     paths:
       - "apps/site/**"
       - "docs/wiki/**"
+      - "VERSION"
       - ".github/workflows/site.yml"
   push:
     branches: [main]
     paths:
       - "apps/site/**"
       - "docs/wiki/**"
+      - "VERSION"
       - ".github/workflows/site.yml"
   workflow_dispatch:
 

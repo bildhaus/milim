@@ -6,10 +6,42 @@ title: HTTP API surface
 summary: OpenAI-compatible, Anthropic-compatible, Ollama-compatible, providers, media, workspace, MCP, Agents, Worker Runs, memory, privacy, skills, schedules, mobile, and account runtime routes.
 group: Reference
 order: 90
-updated: 2026-07-23
+updated: 2026-07-29
 ---
 
 The standalone server accepts static bearer keys or `msk-v1` access keys when configured in `~/.milim/config/server.json`. The desktop app uses its own per-launch bearer token and resolves the actual loopback port through Tauri.
+
+## Run the standalone server
+
+```powershell Run the CLI server
+cargo build --release
+$env:MILIM_REMOTE_BASE_URL = "http://localhost:11434/v1"
+cargo run -p milim-cli -- serve
+```
+
+In another terminal:
+
+```powershell Probe the CLI server
+cargo run -p milim-cli -- status
+cargo run -p milim-cli -- models
+```
+
+```powershell OpenAI-compatible chat
+curl http://127.0.0.1:7377/v1/chat/completions `
+  -H "Content-Type: application/json" `
+  -d '{"model":"llama3.2","messages":[{"role":"user","content":"hello"}],"stream":true}'
+```
+
+| Command | Use |
+|---|---|
+| `serve [--port N] [--expose]` | Start the HTTP server. |
+| `status [--url URL] [--port N] [--token T] [--json]` | Probe a running server. |
+| `models [--url URL] [--port N] [--token T] [--json]` | List server models. |
+| `run [--url URL] [--port N] [--token T] <model> [prompt...]` | One-shot chat or interactive REPL through a running server. |
+| `keys identity` | Print this machine identity address. |
+| `keys mint [--audience A] [--label L] [--expires-secs N]` | Mint an `msk-v1` access token. |
+| `mcp [--url URL] [--port N] [--token T]` | Run a stdio MCP bridge to the local server. |
+| `version` | Print the binary version. |
 
 ## Compatible APIs
 
@@ -41,7 +73,7 @@ Root aliases are also mounted for OpenAI chat, completions, models, and embeddin
 | Preview apps | `GET /preview-apps/{runtime_id}`, `POST /preview-apps/{runtime_id}/stage`, `POST /preview-apps/{runtime_id}/start`, command-free workspace HTML `POST /preview-apps/{runtime_id}/static`, `POST /preview-apps/{runtime_id}/stop`, `POST /preview-apps/{runtime_id}/restart`, `GET /preview-apps/{runtime_id}/logs` |
 | MCP | `GET /mcp/tools`, `POST /mcp/call`, host-only `POST /mcp/apps/resources/read`, host-only `POST /mcp/apps/tools/call`, ephemeral `GET /mcp/apps/views/{id}`, `GET/POST /mcp/servers`, `POST /mcp/servers/test`, `POST /mcp/servers/{id}/test`, `DELETE /mcp/servers/{id}` |
 | Agents | `POST /agents/run`, `GET/POST /agents`, `GET/PUT/DELETE /agents/{id}`, `POST /agents/{id}/run` |
-| Worker Runs | `GET/POST /worker-runs`, `GET/DELETE /worker-runs/{id}`, `GET /worker-runs/{id}/events`, `POST /worker-runs/{id}/start`, `POST /worker-runs/{id}/stop`, `POST /worker-runs/{id}/tasks/{task_id}/retry`; writer diff review/apply routes are scoped to a worker in the Run. |
+| Worker Runs | `GET/POST /worker-runs`, `GET/DELETE /worker-runs/{id}`, cursor-aware `GET /worker-runs/{id}/events?after_seq=N`, `POST /worker-runs/{id}/start`, `POST /worker-runs/{id}/stop`, `POST /worker-runs/{id}/tasks/{task_id}/retry`; writer diff review/apply routes are scoped to a worker in the Run. |
 | Threads | `GET /threads/{id}` (`include_events=true&event_limit=N` returns `event_count` and `events_truncated`), `DELETE /threads/{id}`, `GET /threads/{id}/children`, `GET /threads/{id}/events`, `POST /threads/{id}/stop` |
 | Memory | `POST /memory/ingest`, `POST /memory/search`, `POST /memory/register`, `POST /memory/graph/search`, `GET /memory/scopes`, `GET /memory/nodes` |
 | Workspace context | `GET /workspace/context` |
@@ -72,6 +104,12 @@ The authenticated MCP Apps POST routes are for the desktop host, not iframe code
 
 Streamed run requests accept optional `interactive_tool_approval`. In Review, a consequential call emits `tool_approval_required { approval_id, call_id, name, arguments, effect }`; resolve it with authenticated `POST /tool-approvals/{approval_id}` and `{ "decision": "approve" | "deny" }`. A successful first resolution returns `204`, an expired/unknown id returns `404`, and a repeated resolution returns `409`. The stream then emits `tool_approval_resolved`. Approvals are ephemeral, exact, and one-shot. `tool_approval_grant: true` remains the explicit whole-run option for headless callers.
 
+`POST /agents/run` accepts optional `workspace` and `privacy_mode` (`off`, `redact`, or `block`). Desktop sends both. Legacy callers may omit them, in which case the server snapshots its current defaults once at request start. An explicit invalid path or mode returns `400`; the server does not silently substitute a different context. New Worker Runs persist the originating workspace and privacy mode. Completed legacy Runs remain readable, but a legacy Run with no captured context cannot be approved or retried.
+
+Worker and child event streams drain stored rows before live broadcast. Pass `after_seq` when reconnecting, deduplicate the monotonic `seq` values client-side, and reconcile terminal state through the canonical Run or thread GET route.
+
+Mobile event streams require `Authorization: Bearer <paired-device-key>` on fetch-based SSE requests. A request authenticated only by a query-string key returns `401`; query parameters are ignored when a valid authorization header is present. Existing paired device keys remain valid after a mobile page reload.
+
 The built-in `memory_register` tool accepts `content`, optional `title`, and optional `scope` (`personal` or `project`). The lower-level `/memory/*` HTTP routes remain compatible with scoped node records.
 
 ## msk-v1 keys
@@ -99,6 +137,7 @@ Set `authRequired: true` in `server.json` to make `milim serve` accept keys mint
 
 | Status | Usually means |
 |---|---|
+| 400 | An explicit workspace, privacy mode, cursor, or other request value is invalid. |
 | 401 | Missing or invalid bearer token or access key. |
 | 404 | Route group is not mounted in this build or the id does not exist. |
 | 409 | Local state rejected the requested mutation. |

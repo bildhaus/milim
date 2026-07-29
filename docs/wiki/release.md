@@ -6,7 +6,7 @@ title: Release and verification
 summary: Release artifacts, updater behavior, verification commands, and site build checks.
 group: Reference
 order: 110
-updated: 2026-07-28
+updated: 2026-07-29
 ---
 
 Release work should verify the Rust workspace, desktop app, site docs, and platform artifacts without reintroducing Linux packaging as a release target.
@@ -19,11 +19,11 @@ Release work should verify the Rust workspace, desktop app, site docs, and platf
 | macOS | `milim-macos-universal.dmg` and `milim.app.zip` from the latest GitHub release. |
 | Linux | Not packaged as a release artifact. The Rust server and Tauri app remain source-buildable. |
 
-Release builds run desktop verification on both macOS and Windows. macOS release artifacts require the Apple signing secrets and intentionally enable Tauri's macOS private API for transparent preview activity overlay windows. The workflow publishes `manifest.json` plus an aggregate `SHA256SUMS.txt` from the current release run. Updater assets are verified with SHA-256 sidecars and the aggregate checksum file.
+Release builds run desktop verification on both macOS and Windows. macOS release artifacts require the Apple signing secrets and intentionally enable Tauri's macOS private API for transparent preview activity overlay windows. The workflow publishes `manifest.json` plus an aggregate `SHA256SUMS.txt` from the current release run. Updater assets are verified with SHA-256 sidecars and the aggregate checksum file. A rerun may repair an unpublished draft, but every edit and asset upload rechecks draft status; published releases are immutable and require a new version.
 
 ## Updater behavior
 
-The desktop app checks GitHub Releases for the latest platform artifact on startup unless it checked within the last 120 minutes, then keeps the existing 12-hour background check cadence. Automatic checks download updates by default, verify their SHA-256 checksum, and stage them in the local update directory; users can disable automatic downloads in Settings. A staged update appears in the top bar as a Restart to update action, and one click flushes pending thread state before handing it to the existing Windows portable EXE or macOS app replacement flow without another confirmation. A failed flush aborts installation and leaves the staged update ready to retry. Updates that have not finished downloading retain the confirmation step. The top-bar dialog and Settings update panel show byte-based download progress, falling back to an indeterminate bar when the server does not provide a total size. Installation and restart never occur without an explicit user action.
+The desktop app checks GitHub Releases for the latest platform artifact on startup unless it checked within the last 120 minutes, then keeps the existing 12-hour background check cadence. Automatic checks download updates by default, verify their SHA-256 checksum, and stage them in the local update directory; users can disable automatic downloads in Settings. A staged update appears in the top bar as a Restart to update action, and one click flushes pending thread state before handing it to the existing Windows portable EXE or macOS app replacement flow without another confirmation. Quit allows up to two seconds for pending state to flush, then quit and restart signal both embedded servers and allow up to three seconds to stop active workers and previews. A failed update flush aborts installation and leaves the staged update ready to retry. Updates that have not finished downloading retain the confirmation step. The top-bar dialog and Settings update panel show byte-based download progress, falling back to an indeterminate bar when the server does not provide a total size. Installation and restart never occur without an explicit user action.
 
 Each release entry in `apps/desktop/src/update/releases.json` supplies the Markdown body created for its GitHub Release and may contain up to three bundled in-app update cards. A summary-only maintenance release uses an empty card array and shows no in-app deck. Desktop verification rejects larger decks; published versions `0.2.2` and `0.2.3` predate this limit and remain unchanged as the only exceptions. Verification also fails when `VERSION` has no matching, valid entry. After onboarding is complete, a non-empty deck appears on the first startup of that exact installed version and records dismissal in machine-local storage; Developer → Release UI can replay it without changing that state. The deck uses the installed version already loaded by the updater and does not fetch release notes at startup.
 
@@ -38,6 +38,6 @@ pnpm -C apps/site build
 
 ## Docs site
 
-The public docs site imports markdown from `docs/wiki/*.md` using Vite raw imports. The per-section search index is generated from headings and body text, so new sections become searchable without adding keywords in TypeScript. After Vite builds, the site emits route-specific title, description, canonical, Open Graph, and Twitter metadata plus a small Cloudflare Pages Worker that serves the correct static HTML for `docs.milim.ai` while keeping the landing page on `milim.ai`.
+The public docs site imports markdown from `docs/wiki/*.md` using Vite raw imports. The per-section search index is generated from headings and body text, so new sections become searchable without adding keywords in TypeScript. After Vite builds, the site emits route-specific title, description, canonical, Open Graph, and Twitter metadata plus a small Cloudflare Pages Worker that serves the correct static HTML for `docs.milim.ai` while keeping the landing page on `milim.ai`. Changes to `VERSION` run the same site build and production deployment path so release-facing version surfaces stay current.
 
 Use `docs/account-runtimes.md` as the style template for new long-form reference docs: short intro, route table, then behavior notes.

@@ -1,10 +1,11 @@
 import type { MilimUsageSummary } from "../lib/usageMetrics";
 
 export function MilimUsageRidgeline({ usage }: { usage: MilimUsageSummary }) {
+  if (!usage.hasUsage) return null;
   const months = visibleUsageMonths(usage);
   const width = 440;
   const gradientId = "usage-ridge-fill-gradient";
-  const amplitude = usage.hasUsage ? 40 : 0;
+  const amplitude = 40;
   const lineSpacing = 17;
   const lineWidth = 1.35;
   const topPad = amplitude + 8;

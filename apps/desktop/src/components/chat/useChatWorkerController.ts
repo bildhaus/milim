@@ -21,6 +21,7 @@ export function useChatWorkerController() {
       );
       childThreadEventControllersRef.current.clear();
       childThreadLiveIdsRef.current.clear();
+      childThreadEventsRef.current.clear();
       workerRunEventControllersRef.current.forEach((controller) =>
         controller.abort(),
       );

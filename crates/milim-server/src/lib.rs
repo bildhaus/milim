@@ -454,19 +454,25 @@ where
     .await
 }
 
-/// Await a shutdown signal and stop active child threads before the server exits.
+/// Await a shutdown signal and stop active work before the server exits.
 pub async fn with_graceful_shutdown<S>(state: AppState, shutdown: S)
 where
     S: Future<Output = ()>,
 {
     shutdown.await;
-    if let Err(err) = state.preview_runtime.stop_all().await {
-        tracing::warn!("failed to stop preview apps during shutdown: {err}");
-    }
     if let Some(threads) = state.threads.as_ref() {
         if let Err(err) = threads.stop_running_children("stopped by server shutdown") {
             tracing::warn!("failed to stop child threads during shutdown: {err}");
         }
+        if let Err(err) = threads
+            .store()
+            .update_non_terminal_worker_runs("stopped by server shutdown")
+        {
+            tracing::warn!("failed to stop worker runs during shutdown: {err}");
+        }
+    }
+    if let Err(err) = state.preview_runtime.stop_all().await {
+        tracing::warn!("failed to stop preview apps during shutdown: {err}");
     }
 }
 
@@ -482,11 +488,25 @@ pub async fn serve_mobile_companion_listener(
     state: AppState,
     listener: tokio::net::TcpListener,
 ) -> std::io::Result<()> {
+    serve_mobile_companion_listener_with_graceful_shutdown(state, listener, std::future::pending())
+        .await
+}
+
+/// Serve only the phone-facing companion surface with caller-controlled shutdown.
+pub async fn serve_mobile_companion_listener_with_graceful_shutdown<S>(
+    state: AppState,
+    listener: tokio::net::TcpListener,
+    shutdown: S,
+) -> std::io::Result<()>
+where
+    S: Future<Output = ()> + Send + 'static,
+{
     let app = build_mobile_companion_router(state);
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown)
     .await
 }
 

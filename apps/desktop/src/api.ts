@@ -387,6 +387,7 @@ export interface RunTrace {
 
 const DEFAULT_BASE = "http://127.0.0.1:7377";
 const BASE = DEFAULT_BASE;
+const STARTUP_PROVIDER_PICKER_TIMEOUT_MS = 900;
 const ACCOUNT_RUNTIME_PICKER_TIMEOUT_MS = 12000;
 const ACCOUNT_RUNTIME_PICKER_RETRY_DELAY_MS = 500;
 const inTauri =
@@ -1552,6 +1553,7 @@ export async function streamChat(
   onReasoning?: (t: string) => void,
   onUsage?: (usage: TokenUsage) => void,
   reasoningEffort?: ReasoningEffort,
+  toolContext?: AgentToolContext,
 ): Promise<void> {
   const resp = await authFetch(`${BASE}/v1/chat/completions`, {
     method: "POST",
@@ -1562,6 +1564,12 @@ export async function streamChat(
       stream: true,
       stream_options: { include_usage: true },
       ...reasoningEffortBody(reasoningEffort),
+      ...(toolContext?.workspace !== undefined
+        ? { workspace: toolContext.workspace }
+        : {}),
+      ...(toolContext?.privacy_mode !== undefined
+        ? { privacy_mode: toolContext.privacy_mode }
+        : {}),
     }),
     signal,
   });
@@ -1623,15 +1631,18 @@ export interface ChatCompletionResult {
   finishReason?: string;
 }
 
+type ChatCompletionOptions = {
+  signal?: AbortSignal;
+  maxTokens?: number;
+  temperature?: number;
+  reasoningEffort?: ReasoningEffort;
+  toolContext?: Pick<AgentToolContext, "workspace" | "privacy_mode">;
+};
+
 export async function completeChatWithMetrics(
   model: string,
   messages: ChatMessage[],
-  options: {
-    signal?: AbortSignal;
-    maxTokens?: number;
-    temperature?: number;
-    reasoningEffort?: ReasoningEffort;
-  } = {},
+  options: ChatCompletionOptions = {},
 ): Promise<ChatCompletionResult> {
   const resp = await authFetch(`${BASE}/v1/chat/completions`, {
     method: "POST",
@@ -1643,6 +1654,12 @@ export async function completeChatWithMetrics(
       temperature: options.temperature ?? 0,
       max_tokens: options.maxTokens ?? 500,
       ...reasoningEffortBody(options.reasoningEffort),
+      ...(options.toolContext?.workspace !== undefined
+        ? { workspace: options.toolContext.workspace }
+        : {}),
+      ...(options.toolContext?.privacy_mode !== undefined
+        ? { privacy_mode: options.toolContext.privacy_mode }
+        : {}),
     }),
     signal: options.signal,
   });
@@ -1685,12 +1702,7 @@ export async function requestComposerCompletion(
 export async function completeChat(
   model: string,
   messages: ChatMessage[],
-  options: {
-    signal?: AbortSignal;
-    maxTokens?: number;
-    temperature?: number;
-    reasoningEffort?: ReasoningEffort;
-  } = {},
+  options: ChatCompletionOptions = {},
 ): Promise<string> {
   const { content } = await completeChatWithMetrics(model, messages, options);
   return content;
@@ -1857,9 +1869,11 @@ export function isUsableChatModel(model: string): boolean {
   return id.length > 0 && id !== "mock-echo";
 }
 
-async function listProviderModelsForPicker(): Promise<ModelInfo[]> {
+async function listProviderModelsForPicker(
+  timeoutMs = 2500,
+): Promise<ModelInfo[]> {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 2500);
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const r = await authFetch(`${BASE}/v1/models`, { signal: ctrl.signal });
     if (!r.ok) return [];
@@ -1928,11 +1942,78 @@ export async function loadStartupModels(
   onModels: (models: ModelInfo[]) => void,
   accountRuntimeEnabled: Readonly<AccountRuntimeEnablement> =
     DEFAULT_ACCOUNT_RUNTIME_ENABLEMENT,
+  initialModels: readonly ModelInfo[] = [],
 ): Promise<void> {
   const providerRefresh = refreshProviderModelsAtStartup();
-  onModels(await listModelsDetailed(accountRuntimeEnabled));
-  if (await providerRefresh)
-    onModels(await listModelsDetailed(accountRuntimeEnabled));
+  const lanes: Record<
+    "provider" | AccountRuntimeKind,
+    ModelInfo[]
+  > = {
+    provider: [],
+    codex: [],
+    claude: [],
+    opencode: [],
+    pi: [],
+  };
+  for (const model of initialModels) {
+    const runtime = accountRuntimeKind(model.id);
+    if (runtime) {
+      if (accountRuntimeEnabled[runtime]) lanes[runtime].push(model);
+    } else {
+      lanes.provider.push(model);
+    }
+  }
+  const emit = () => {
+    const byKey = new Map<string, ModelInfo>();
+    for (const models of Object.values(lanes)) {
+      for (const model of models) {
+        byKey.set(`${model.provider_id || model.owned_by}\0${model.id}`, model);
+      }
+    }
+    onModels(Array.from(byKey.values()));
+  };
+  const loadLane = async (
+    lane: keyof typeof lanes,
+    load: () => Promise<ModelInfo[]>,
+  ) => {
+    const models = await load();
+    if (models.length) {
+      lanes[lane] = models;
+      emit();
+    }
+  };
+
+  const runtimeLoads = [
+    accountRuntimeEnabled.codex
+      ? loadLane("codex", listCodexModelsForPicker)
+      : Promise.resolve(),
+    accountRuntimeEnabled.claude
+      ? loadLane("claude", listClaudeModelsForPicker)
+      : Promise.resolve(),
+    accountRuntimeEnabled.opencode
+      ? loadLane("opencode", listOpenCodeModelsForPicker)
+      : Promise.resolve(),
+    accountRuntimeEnabled.pi
+      ? loadLane("pi", listPiModelsForPicker)
+      : Promise.resolve(),
+  ];
+  if (initialModels.length) emit();
+  const cachedProviderModels = await listProviderModelsForPicker(
+    STARTUP_PROVIDER_PICKER_TIMEOUT_MS,
+  );
+  if (cachedProviderModels.length) lanes.provider = cachedProviderModels;
+  emit();
+
+  const refreshedProviderLoad = providerRefresh.then(async (refreshed) => {
+    if (!refreshed) return;
+    const models = await listProviderModelsForPicker(
+      STARTUP_PROVIDER_PICKER_TIMEOUT_MS,
+    );
+    if (!models.length) return;
+    lanes.provider = models;
+    emit();
+  });
+  await Promise.allSettled([...runtimeLoads, refreshedProviderLoad]);
 }
 
 function numberOrUndefined(value: unknown): number | undefined {
@@ -3062,6 +3143,8 @@ export type WorkerRunStatus =
   | "error";
 
 export interface AgentToolContext {
+  workspace?: string | null;
+  privacy_mode?: PrivacyMode;
   tool_approval_policy?: ToolApprovalMode;
   tool_approval_grant?: boolean;
   interactive_tool_approval?: boolean;
@@ -3125,6 +3208,8 @@ export interface WorkerRun {
   id: string;
   parent_thread_id: string;
   parent_turn_id?: string | null;
+  workspace?: string | null;
+  privacy_mode?: PrivacyMode | null;
   policy: WorkerRunPolicy;
   runtime: WorkerRunRuntime;
   status: WorkerRunStatus;
@@ -3151,6 +3236,8 @@ export interface WorkerRunRecord {
 export interface CreateWorkerRunRequest {
   parent_thread_id: string;
   parent_turn_id?: string;
+  workspace?: string | null;
+  privacy_mode?: PrivacyMode;
   policy?: WorkerRunPolicy;
   runtime?: Exclude<WorkerRunRuntime, "legacy">;
   model?: string;
@@ -3351,11 +3438,15 @@ export async function streamWorkerRunEvents(
   id: string,
   onEvent: (ev: AgentEvent) => void,
   signal?: AbortSignal,
+  afterSeq?: number,
 ): Promise<void> {
-  const resp = await authFetch(
-    `${BASE}/worker-runs/${encodeURIComponent(id)}/events`,
-    signal ? { signal } : undefined,
-  );
+  const url = new URL(`${BASE}/worker-runs/${encodeURIComponent(id)}/events`);
+  if (typeof afterSeq === "number" && Number.isFinite(afterSeq))
+    url.searchParams.set(
+      "after_seq",
+      String(Math.max(0, Math.floor(afterSeq))),
+    );
+  const resp = await authFetch(url.toString(), signal ? { signal } : undefined);
   if (!resp.ok || !resp.body)
     throw new Error(
       await responseErrorMessage(resp, `worker run events HTTP ${resp.status}`),

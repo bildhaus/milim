@@ -78,11 +78,20 @@ export function BatonMenu({
       }}
     >
       <button
+        type="button"
+        className="msg-act msg-act-text baton-continue"
+        data-testid="baton-continue"
+        onClick={() => choose("continue")}
+      >
+        <ArrowRight size={13} />
+        <span>Continue with...</span>
+      </button>
+      <button
         ref={triggerRef}
         type="button"
         className="msg-act baton-menu-trigger"
-        title="Work with another model"
-        aria-label="Work with another model"
+        title="More model handoff actions"
+        aria-label="More model handoff actions"
         aria-haspopup="menu"
         aria-expanded={open}
         data-testid="baton-menu-trigger"
@@ -99,10 +108,6 @@ export function BatonMenu({
           data-native-preview-blocker="true"
           style={position}
         >
-          <button type="button" role="menuitem" onClick={() => choose("continue")}>
-            <ArrowRight size={14} />
-            <span><strong>Continue with...</strong><small>Finish from the current state</small></span>
-          </button>
           <button type="button" role="menuitem" onClick={() => choose("review")}>
             <Eye size={14} />
             <span><strong>Review with...</strong><small>Get a read-only second opinion</small></span>

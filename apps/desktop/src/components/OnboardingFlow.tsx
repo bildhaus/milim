@@ -7,7 +7,7 @@ import {
   getOpenCodeStatus,
   getPiStatus,
   isCliPathWarningMessage,
-  listModelsDetailed,
+  loadStartupModels,
   openExternalUrl,
   PROVIDER_PRESETS,
   saveProvider,
@@ -21,12 +21,12 @@ import {
   type PiStatusResponse,
   type ProviderDiscovery,
 } from "../api";
-import { modelDisplayName } from "../lib/modelPicker";
 import { useOnboarding, type OnboardingSetupPath, type OnboardingStepId } from "../onboarding/store";
 import { DEFAULT_THREAD_SETTINGS, useSessions } from "../sessions/store";
 import { useSettings } from "../settings/store";
 import { ArrowRight, Check, PlusSquare, Search, X } from "./icons";
 import { Logo } from "./Logo";
+import { ModelPicker } from "./ModelPicker";
 import { ProviderIcon, providerBrandForProvider, type ProviderBrand } from "./ProviderIcon";
 import { SheetDialog } from "./SheetDialog";
 import { Select } from "./ui";
@@ -37,7 +37,6 @@ type NoticeTone = "info" | "success" | "warning" | "error";
 const STEPS: StepDefinition[] = [
   { id: "model", label: "Runtime" },
   { id: "context", label: "Workspace" },
-  { id: "finish", label: "Ready" },
 ];
 
 type RuntimeStatuses = {
@@ -68,7 +67,6 @@ function pathLabel(path: OnboardingSetupPath | null): string {
 function stepTitle(step: OnboardingStepId): string {
   if (step === "model") return "Choose the runtime";
   if (step === "context") return "Choose the workspace";
-  if (step === "finish") return "Review setup";
   return "Configure Milim";
 }
 
@@ -160,26 +158,43 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
 
   async function refreshModels(selectFirst = false, preferredOwner?: string) {
     setModelsLoading(true);
-    try {
-      const next = await listModelsDetailed(accountRuntimeEnabled);
-      setModels(next);
-      if (!next.length)
-        setProviderNotice({ tone: "info", message: "No chat models found. Connect a provider or start a local runtime." });
-      const preferred = preferredOwner
-        ? next.find((model) => model.owned_by.toLowerCase() === preferredOwner.toLowerCase())
-        : null;
-      const modelToSelect = preferred ?? next[0];
-      if (selectFirst && modelToSelect?.id) {
+    let firstCatalog = true;
+    let selected = false;
+    let latest: ModelInfo[] = [];
+    const firstResult = new Promise<void>((resolve) => {
+      void loadStartupModels((next) => {
+        latest = next;
+        setModels(next);
+        if (firstCatalog) {
+          firstCatalog = false;
+          setModelsLoading(false);
+          resolve();
+        }
+        if (!selectFirst || selected) return;
+        const preferred = preferredOwner
+          ? next.find((model) => model.owned_by.toLowerCase() === preferredOwner.toLowerCase())
+          : null;
+        const modelToSelect = preferred ?? (preferredOwner ? null : next[0]);
+        if (!modelToSelect) return;
+        selected = true;
         updateThreadSettings(activeId, { model: modelToSelect.id });
         onboarding.markStepComplete("model");
-      }
-      await onModelsChanged?.();
-    } catch (error) {
-      setProviderNotice({ tone: "error", message: error instanceof Error ? error.message : "Model refresh failed." });
-      setModels([]);
-    } finally {
-      setModelsLoading(false);
-    }
+      }, accountRuntimeEnabled, models).then(() => {
+        if (!latest.length) {
+          setProviderNotice({ tone: "info", message: "No chat models found. Connect a provider or start a local runtime." });
+        }
+        if (selectFirst && !selected && latest[0]) {
+          updateThreadSettings(activeId, { model: latest[0].id });
+          onboarding.markStepComplete("model");
+        }
+        void onModelsChanged?.();
+      }).catch((error) => {
+        setModelsLoading(false);
+        setProviderNotice({ tone: "error", message: error instanceof Error ? error.message : "Model refresh failed." });
+        if (firstCatalog) resolve();
+      });
+    });
+    await firstResult;
   }
 
   useEffect(() => {
@@ -195,7 +210,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
 
   useEffect(() => {
     if (steps.some((item) => item.id === step)) return;
-    setStep("finish");
+    setStep("context");
   }, [step, steps]);
 
   async function refreshAccountRuntimes(refreshCodex = false) {
@@ -385,11 +400,13 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
       setProviderNotice({ tone: "error", message: "Connect and select a reachable chat model before continuing." });
       return;
     }
-    const next = steps[Math.min(currentIndex + 1, steps.length - 1)];
     if (step === "context") {
       updateThreadSettings(activeId, { folder: folderDraft.trim() });
       onboarding.markStepComplete("context");
+      finish();
+      return;
     }
+    const next = steps[Math.min(currentIndex + 1, steps.length - 1)];
     setStep(next.id);
   }
 
@@ -405,6 +422,11 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
       return;
     }
     onboarding.complete();
+    window.requestAnimationFrame(() => {
+      document
+        .querySelector<HTMLTextAreaElement>('[data-testid="composer-input"]')
+        ?.focus();
+    });
   }
 
   function dismiss() {
@@ -635,19 +657,16 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
                 {providerNotice && <p className={`onboarding-notice ${providerNotice.tone}`}>{providerNotice.message}</p>}
 
                 {models.length > 0 && (
-                  <div className="onboarding-model-list">
+                  <div className="onboarding-model-picker">
                     <span className="onboarding-mini-title">Available models</span>
-                    {models.map((modelInfo) => (
-                      <button
-                        key={`${modelInfo.owned_by}:${modelInfo.id}`}
-                        type="button"
-                        className={"onboarding-model-row" + (modelInfo.id === selectedModel ? " active" : "")}
-                        onClick={() => selectModel(modelInfo.id)}
-                      >
-                        <span>{modelDisplayName(modelInfo)}</span>
-                        <small>{modelInfo.owned_by}</small>
-                      </button>
-                    ))}
+                    <ModelPicker
+                      models={models}
+                      model={selectedModel}
+                      onModel={({ model }) => selectModel(model)}
+                      onClose={() => {}}
+                      showManagementActions={false}
+                      searchPlaceholder="Search available models..."
+                    />
                   </div>
                 )}
               </div>
@@ -690,30 +709,6 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
             </section>
           )}
 
-          {step === "finish" && (
-            <section className="onboarding-panel onboarding-split-panel" aria-labelledby="onboarding-finish-title">
-              <OnboardingStory
-                tone="ready"
-                title="Setup is ready."
-                body="Open the app with one reachable model and the workspace you chose. Preferences stay available when you need them."
-                details={[threadSettings.folder ? "Project ready" : "No project", selectedModelReady ? "Model ready" : "Model missing"]}
-              />
-              <div className="onboarding-step-body">
-                <div className="onboarding-panel-head">
-                  <h3 id="onboarding-finish-title">Your workspace is ready</h3>
-                  <p>Review the connection, then open Milim. No task will run automatically.</p>
-                </div>
-                {!selectedModelReady && (
-                  <p className="onboarding-notice error">A selected, reachable chat model is required before setup can finish.</p>
-                )}
-                <div className="onboarding-summary">
-                  <span><strong>Setup path</strong>{pathLabel(onboarding.selectedSetupPath)}</span>
-                  <span><strong>Model</strong>{selectedModelReady ? selectedModel : "Not ready"}</span>
-                  <span><strong>Workspace</strong>{threadSettings.folder || "Not set (optional)"}</span>
-                </div>
-              </div>
-            </section>
-          )}
         </main>
       </div>
 
@@ -722,16 +717,10 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
           Skip for now
         </button>
         <div className="onboarding-footer-actions">
-          {step === "finish" ? (
-            <button className="btn-accent" type="button" onClick={finish}>
-              Open Milim
-            </button>
-          ) : (
-            <button className="btn-accent" type="button" onClick={nextStep}>
-              <span>Continue</span>
-              <ArrowRight size={14} />
-            </button>
-          )}
+          <button className="btn-accent" type="button" onClick={nextStep}>
+            <span>{step === "context" ? "Open Milim" : "Continue"}</span>
+            <ArrowRight size={14} />
+          </button>
         </div>
       </div>
     </SheetDialog>
