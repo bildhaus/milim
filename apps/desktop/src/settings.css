@@ -565,6 +565,9 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
+.settings-choice-grid.three-up {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
 .sidebar-rail-style-field .settings-choice-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
@@ -2953,6 +2956,9 @@
   .settings-detail-head {
     align-items: flex-start;
     gap: 12px;
+  }
+  .settings-choice-grid.three-up {
+    grid-template-columns: 1fr;
   }
   .appearance-choice-grid,
   .appearance-chat-layout-grid,

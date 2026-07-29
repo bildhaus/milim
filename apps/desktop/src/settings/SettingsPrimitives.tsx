@@ -52,7 +52,7 @@ export function SettingsChoiceGroup<T extends string>({
   }
 
   return (
-    <div className="settings-choice-grid" role="radiogroup" aria-label={ariaLabel ?? testIdPrefix.replace(/-/g, " ")}>
+    <div className={`settings-choice-grid${options.length === 3 ? " three-up" : ""}`} role="radiogroup" aria-label={ariaLabel ?? testIdPrefix.replace(/-/g, " ")}>
       {options.map((option, index) => {
         const selected = option.value === value;
         return (
