@@ -5743,38 +5743,6 @@ html[data-dark="true"] .preview-control-cursor {
   padding: 7px 9px 5px;
   border-bottom: 1px solid var(--border-primary);
 }
-.first-send-summary {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.8fr) auto auto;
-  gap: 10px;
-  padding: 6px 10px;
-  border-bottom: 1px solid var(--border-primary);
-  color: var(--tertiary-text);
-  font-size: 10px;
-}
-.first-send-summary span {
-  display: grid;
-  min-width: 0;
-  gap: 1px;
-}
-.first-send-summary strong {
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-.first-send-summary em {
-  overflow: hidden;
-  color: var(--secondary-text);
-  font-style: normal;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-@media (max-width: 620px) {
-  .first-send-summary {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
 .chips { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; flex-wrap: wrap; }
 .chip-wrap { position: relative; }
 .context-chip-wrap { margin-left: auto; }

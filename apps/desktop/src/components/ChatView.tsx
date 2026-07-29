@@ -222,7 +222,6 @@ import {
 import { isNearScrollBottom } from "../lib/scroll";
 import {
   mergeModelListsForPicker,
-  modelDevProfile,
   providerOwnsModel,
 } from "../lib/modelPicker";
 import { assessHotSwap, type HotSwapAssessment } from "../lib/hotSwap";
@@ -6824,12 +6823,6 @@ export function ChatView({
   });
 
   const emptyThread = messages.length === 0;
-  const firstSendModel = pickerModels.find((item) => item.id === model);
-  const firstSendRoute = modelDevProfile(firstSendModel, model, {
-    providers,
-    toolIntent: modelToolIntent,
-    planMode,
-  });
   const activeAssistantRuntime = useMemo(() => {
     if (!busy) return { run: null, streamParts: undefined };
     let run: RunTrace | null = null;
@@ -7224,32 +7217,6 @@ export function ChatView({
                   ) : undefined
                 }
               />
-              {emptyThread && model.trim() && (
-                <section
-                  className="first-send-summary"
-                  data-testid="first-send-summary"
-                  aria-label="First send summary"
-                >
-                  <span>
-                    <strong>Destination</strong>
-                    <em>{firstSendRoute.routeLabel}</em>
-                  </span>
-                  <span title={folder || undefined}>
-                    <strong>Workspace</strong>
-                    <em>{folder.trim() || "None"}</em>
-                  </span>
-                  <span>
-                    <strong>Privacy</strong>
-                    <em>{privacy[0].toUpperCase() + privacy.slice(1)}</em>
-                  </span>
-                  <span>
-                    <strong>Approval</strong>
-                    <em>
-                      {toolApproval[0].toUpperCase() + toolApproval.slice(1)}
-                    </em>
-                  </span>
-                </section>
-              )}
               <QueuedMessageTray
                 items={queuedMessages}
                 busy={busy}
