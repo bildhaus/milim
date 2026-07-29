@@ -59,17 +59,15 @@ pub(crate) struct OpenCodeRunRequest {
 pub(crate) async fn status() -> Result<Value> {
     let version = command_output(&["--version"]).await;
     match version {
-        Ok(version) => match command_output(&["models"]).await {
-            Ok(models) => {
-                let models = parse_models(&models);
-                Ok(json!({
-                    "available": true,
-                    "authenticated": !models.is_empty(),
-                    "version": version.trim(),
-                    "models": models,
-                    "error": if models.is_empty() { Value::String("OpenCode has no configured models.".into()) } else { Value::Null },
-                }))
-            }
+        Ok(version) => match model_catalog().await {
+            Ok((models, model_capabilities)) => Ok(json!({
+                "available": true,
+                "authenticated": !models.is_empty(),
+                "version": version.trim(),
+                "models": models,
+                "model_capabilities": model_capabilities,
+                "error": if models.is_empty() { Value::String("OpenCode has no configured models.".into()) } else { Value::Null },
+            })),
             Err(error) => Ok(json!({
                 "available": true,
                 "authenticated": false,
@@ -88,8 +86,8 @@ pub(crate) async fn status() -> Result<Value> {
 }
 
 pub(crate) async fn models() -> Result<Value> {
-    let output = command_output(&["models"]).await?;
-    Ok(json!({ "models": parse_models(&output) }))
+    let (models, model_capabilities) = model_catalog().await?;
+    Ok(json!({ "models": models, "model_capabilities": model_capabilities }))
 }
 
 pub(crate) fn run_stream(
@@ -541,6 +539,14 @@ async fn command_output(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+async fn model_catalog() -> Result<(Vec<String>, BTreeMap<String, Value>)> {
+    let output = match command_output(&["models", "--verbose", "--pure"]).await {
+        Ok(output) => output,
+        Err(_) => command_output(&["models"]).await?,
+    };
+    Ok((parse_models(&output), parse_model_capabilities(&output)))
+}
+
 async fn preflight_policy(cwd: &std::path::Path, overlay: &Value) -> Result<()> {
     let expected = overlay.get("permission").cloned().unwrap_or(Value::Null);
     let mut command = opencode_command();
@@ -652,6 +658,59 @@ fn parse_models(output: &str) -> Vec<String> {
         .collect()
 }
 
+fn parse_model_capabilities(output: &str) -> BTreeMap<String, Value> {
+    let mut result = BTreeMap::new();
+    let mut id: Option<&str> = None;
+    let mut lines = Vec::new();
+    for line in output.lines() {
+        let trimmed = line.trim();
+        let is_id =
+            !trimmed.is_empty() && trimmed.contains('/') && !trimmed.contains(char::is_whitespace);
+        if is_id {
+            insert_model_capabilities(&mut result, id, &lines);
+            id = Some(trimmed);
+            lines.clear();
+        } else if id.is_some() {
+            lines.push(line);
+        }
+    }
+    insert_model_capabilities(&mut result, id, &lines);
+    result
+}
+
+fn insert_model_capabilities(
+    result: &mut BTreeMap<String, Value>,
+    id: Option<&str>,
+    lines: &[&str],
+) {
+    let (Some(id), Ok(raw)) = (id, serde_json::from_str::<Value>(&lines.join("\n"))) else {
+        return;
+    };
+    let variants = raw.get("variants").and_then(Value::as_object);
+    let efforts = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+        .into_iter()
+        .filter(|effort| {
+            variants.is_some_and(|variants| {
+                variants.values().any(|variant| {
+                    variant.get("reasoningEffort").and_then(Value::as_str) == Some(*effort)
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    result.insert(
+        id.to_string(),
+        json!({
+            "display_name": raw.get("name").and_then(Value::as_str),
+            "context_length": raw.pointer("/limit/context").and_then(Value::as_u64),
+            "max_prompt_tokens": raw.pointer("/limit/input").and_then(Value::as_u64),
+            "max_completion_tokens": raw.pointer("/limit/output").and_then(Value::as_u64),
+            "image_input": raw.pointer("/capabilities/input/image").and_then(Value::as_bool),
+            "tool_use": raw.pointer("/capabilities/toolcall").and_then(Value::as_bool),
+            "supported_efforts": efforts,
+        }),
+    );
+}
+
 fn config_has_value(result: &Value, id: &str, value: &str) -> bool {
     result
         .get("configOptions")
@@ -747,6 +806,28 @@ mod tests {
             parse_models("openai/gpt-5\n heading text \nanthropic/sonnet"),
             vec!["openai/gpt-5", "anthropic/sonnet"]
         );
+    }
+
+    #[test]
+    fn verbose_models_keep_capabilities() {
+        let output = r#"opencode/north-mini-code-free
+{
+  "name": "North Mini Code Free",
+  "limit": { "context": 256000, "output": 64000 },
+  "capabilities": { "toolcall": true, "input": { "image": false } },
+  "variants": {
+    "none": { "reasoningEffort": "none" },
+    "high": { "reasoningEffort": "high" }
+  }
+}"#;
+        let metadata = parse_model_capabilities(output);
+        let model = &metadata["opencode/north-mini-code-free"];
+        assert_eq!(model["display_name"], "North Mini Code Free");
+        assert_eq!(model["context_length"], 256000);
+        assert_eq!(model["max_completion_tokens"], 64000);
+        assert_eq!(model["image_input"], false);
+        assert_eq!(model["tool_use"], true);
+        assert_eq!(model["supported_efforts"], json!(["none", "high"]));
     }
 
     #[test]

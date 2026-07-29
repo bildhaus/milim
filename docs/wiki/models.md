@@ -25,6 +25,8 @@ Every provider and runtime group can be collapsed. The layout is shared by the c
 
 Hot Swap assesses the selected target before committing the change. Full-parity swaps stay one-click. Smaller context windows, explicitly unsupported image/tool input, unavailable setup, or stale account-runtime history open a preflight. Unknown image capability allows an attempted send without falsely claiming support; explicit false blocks the capability claim, and explicit provider metadata wins over model-name fallbacks. Codex and Claude native sessions can receive image pixels, so account-runtime targets are no longer degraded solely because they are account runtimes.
 
+OpenCode model rows use the CLI's verbose catalog for context, output, image, tool-use, and reasoning metadata when the installed version exposes it. Failed or canceled account-runtime turns clear only the affected native session before the next send so a prompt persisted by the CLI cannot be replayed into divergent history.
+
 ## Provider kinds
 
 | Kind | Examples | Implements |
@@ -76,7 +78,7 @@ Each account runtime keeps its native skill catalog. Milim does not copy all ena
 | Codex | Use `/codex/login/device`, `/codex/login/chatgpt-device`, or `/codex/login/api-key`. | Milim stores the returned Codex thread id on the Milim chat when persistence is enabled. |
 | Installed Claude CLI | Install Anthropic's official `claude` CLI separately and run `claude auth login` outside Milim. | Milim stores one Claude session id per Milim chat, uses `--session-id` for new native sessions and `--resume` for existing project transcripts, and asks before stopping a matching local Claude CLI process if Claude reports the session is already in use. |
 | OpenCode | Install and configure OpenCode separately. | Milim stores the native ACP session id and applies its approval overlay; no-folder chats use a private managed ACP directory without native filesystem tools. |
-| Pi | Install Pi separately and authenticate with Pi's `/login`. | Milim stores one Pi session id and sync cursor per chat; side calls use `--no-session`. Embedded runs disable discovered extensions, while normal Pi context, prompt, and skill discovery remains active. |
+| Pi | Install Pi separately and authenticate with Pi's `/login`; catalog discovery confirms configuration, while the first turn verifies the current credential. | Milim stores one Pi session id and sync cursor per chat; side calls use `--no-session`. Embedded runs disable discovered extensions, while normal Pi context, prompt, and skill discovery remains active. |
 
 Codex model metadata is authoritative when `inputModalities` is present. Claude aliases advertise image input. For OpenAI, Anthropic, Gemini, and Groq families without explicit metadata, the picker uses conservative current-family Vision labels; custom compatible servers with unknown metadata are allowed to attempt standard `image_url` parts but cannot be guaranteed.
 

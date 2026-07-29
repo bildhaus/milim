@@ -149,7 +149,7 @@ pub(crate) fn run_stream(
                 }
             };
             if let Some(error) = pi_error_message(&message) {
-                yield sse(&json!({ "type": "error", "message": error }));
+                yield sse(&json!({ "type": "error", "message": actionable_pi_error(error) }));
                 break;
             }
             match message.get("type").and_then(Value::as_str).unwrap_or_default() {
@@ -330,6 +330,18 @@ fn tool_effect(name: &str) -> &'static str {
         "bash" => "command",
         "write" | "edit" => "mutating",
         _ => "unknown",
+    }
+}
+
+fn actionable_pi_error(message: &str) -> String {
+    let normalized = message.to_ascii_lowercase();
+    if normalized.contains("authentication token has been invalidated")
+        || normalized.contains("authentication token is invalid")
+        || normalized.contains("unauthorized")
+    {
+        "Pi sign-in expired. Open Pi, run /login, then refresh models in Milim.".into()
+    } else {
+        message.to_string()
     }
 }
 
@@ -906,6 +918,10 @@ mod tests {
         assert_eq!(
             pi_error_message(&message),
             Some("Your authentication token has been invalidated. Please try signing in again.")
+        );
+        assert_eq!(
+            actionable_pi_error(pi_error_message(&message).unwrap()),
+            "Pi sign-in expired. Open Pi, run /login, then refresh models in Milim."
         );
     }
 }

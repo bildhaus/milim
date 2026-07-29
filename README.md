@@ -21,6 +21,8 @@ Agents, Workers, skills, schedules, MCP servers and Apps, media generation, Goog
 
 Milim keeps provider-backed chat and installed account runtimes distinct. Provider models use Milim's tool-agent loop, while account runtimes retain their native sessions and tools behind the same visible approval policy. Changing a running thread to Open also clears ordinary pending tool approvals; connector input and authorization remain interactive. Changing the selected model affects the next turn without turning each model into a separate project history.
 
+Failed or canceled native-runtime turns discard that runtime's native session before the next send, preventing a partially persisted prompt from being replayed into divergent history.
+
 ## Get started
 
 ### Install the desktop app

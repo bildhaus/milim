@@ -359,7 +359,7 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
       const status = await getPiStatus();
       setPiStatus(status);
       if (showNote) setPiNote(status.available && status.authenticated
-        ? { tone: "ready", message: `Pi connected with ${status.provider_count ?? 0} provider${status.provider_count === 1 ? "" : "s"} and ${status.models?.length ?? 0} available models.` }
+        ? { tone: "ready", message: `Pi found ${status.provider_count ?? 0} configured provider${status.provider_count === 1 ? "" : "s"} and ${status.models?.length ?? 0} models. Sign-in is verified when a turn starts.` }
         : { tone: status.available ? "warning" : "error", message: status.error || "Install Pi and use /login in its terminal, then refresh." });
     } catch (error) {
       setPiStatus(null);

@@ -6149,7 +6149,15 @@ export function ChatView({
         );
       }
       if (pendingApprovals.length) snapshot();
-      if (resultStatus === "done" && assistantStart.state.started) {
+      const runtimeKind = accountRuntimeKind(turnModel);
+      if (
+        assistantStart.state.started &&
+        runtimeKind &&
+        runRef.current?.context &&
+        (resultStatus === "error" || resultStatus === "aborted")
+      ) {
+        store.clearAccountRuntimeKind(id, runtimeKind);
+      } else if (resultStatus === "done" && assistantStart.state.started) {
         if (codexModel) {
           store.setAccountRuntime(id, {
             codexLastSyncedMessageId: assistantMessageId,

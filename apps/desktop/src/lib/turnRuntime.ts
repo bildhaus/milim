@@ -974,6 +974,8 @@ export async function runAccountRuntimeTurn(
     setOpenCodeSessionId: params.kind === "opencode" ? params.setSessionId : undefined,
     setPiSessionId: params.kind === "pi" ? params.setSessionId : undefined,
     appendImage: params.kind === "codex" ? params.appendImage : undefined,
+    runRef,
+    snapshot,
   });
   const input = accountRuntimeInputFromMessages(outbound);
   const interactiveToolApproval =

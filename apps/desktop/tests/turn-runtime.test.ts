@@ -602,6 +602,8 @@ let accountBeginLength = 0;
 let accountSkippedAutoCompaction: boolean | undefined;
 let accountPreparedSignal: AbortSignal | undefined;
 let accountStreamSignal: AbortSignal | undefined;
+let accountRun: RunTrace | null = null;
+let accountSnapshots = 0;
 const accountMetrics: Array<{ usage?: TokenUsage; cost_usd?: number }> = [];
 const codexResult = await runAccountRuntimeTurn({
   kind: "codex",
@@ -663,6 +665,33 @@ const codexResult = await runAccountRuntimeTurn({
     assert.deepEqual(request.milim_context?.enabled_skills, ["review"]);
     codexPrompt = request.prompt;
     onEvent({ type: "thread", thread_id: "codex-thread-2", model: "gpt-5" });
+    onEvent({
+      type: "tool",
+      id: "shell-1",
+      name: "shell",
+      status: "running",
+      detail: "echo traced",
+    });
+    onEvent({
+      type: "tool_approval_required",
+      approval_id: "approval-1",
+      call_id: "shell-1",
+      name: "shell",
+      arguments: "echo traced",
+      effect: "command",
+    });
+    onEvent({
+      type: "tool_approval_resolved",
+      approval_id: "approval-1",
+      call_id: "shell-1",
+      decision: "approve",
+    });
+    onEvent({
+      type: "tool",
+      id: "shell-1",
+      name: "shell",
+      status: "done",
+    });
     onEvent({ type: "warning", message: "temporary runtime notice" });
     onEvent({
       type: "done",
@@ -672,6 +701,17 @@ const codexResult = await runAccountRuntimeTurn({
     });
   },
   signal: accountSignal,
+  runRef: {
+    get current() {
+      return accountRun;
+    },
+    set current(next) {
+      accountRun = next;
+    },
+  },
+  snapshot: () => {
+    accountSnapshots += 1;
+  },
 });
 assert.equal(codexResult.status, "done");
 assert.equal(accountBeginLength, 3);
@@ -683,6 +723,11 @@ assert(codexPrompt.includes("System:\nSystem rule"));
 assert(codexPrompt.includes("User:\nlatest user"));
 assert(!codexPrompt.includes("old assistant"));
 assert.equal(accountMetrics[0].usage?.total_tokens, 2);
+assert.equal(accountRun?.status, "done");
+assert.equal(accountRun?.steps[0].arguments, "echo traced");
+assert.equal(accountRun?.steps[0].approval?.status, "approved");
+assert(accountRun?.steps[0].endedAt);
+assert(accountSnapshots >= 6);
 
 let claudePrompt = "";
 const accountWarnings: ChatStreamPart[] = [];

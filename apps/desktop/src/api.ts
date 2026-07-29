@@ -2250,6 +2250,18 @@ export interface OpenCodeStatusResponse {
   authenticated: boolean;
   version?: string | null;
   models?: string[];
+  model_capabilities?: Record<
+    string,
+    {
+      display_name?: string | null;
+      context_length?: number | null;
+      max_prompt_tokens?: number | null;
+      max_completion_tokens?: number | null;
+      image_input?: boolean | null;
+      tool_use?: boolean | null;
+      supported_efforts?: ReasoningEffort[];
+    }
+  >;
   error?: string | null;
 }
 
@@ -2499,11 +2511,31 @@ async function listOpenCodeModelsForPicker(): Promise<ModelInfo[]> {
     if (!status.available || !status.authenticated) return [];
     return (status.models ?? [])
       .filter((model) => model.trim())
-      .map((model) => ({
-        id: `${OPENCODE_MODEL_PREFIX}${model.trim()}`,
-        owned_by: "Local OpenCode CLI",
-        capabilities: { imageInput: true, toolUse: true },
-      }));
+      .map((model) => {
+        const id = model.trim();
+        const metadata = status.model_capabilities?.[id];
+        return {
+          id: `${OPENCODE_MODEL_PREFIX}${id}`,
+          display_id: metadata?.display_name ?? undefined,
+          owned_by: "Local OpenCode CLI",
+          context_length: numberOrUndefined(metadata?.context_length),
+          max_prompt_tokens: numberOrUndefined(metadata?.max_prompt_tokens),
+          max_completion_tokens: numberOrUndefined(
+            metadata?.max_completion_tokens,
+          ),
+          capabilities: {
+            imageInput: metadata?.image_input ?? undefined,
+            toolUse: metadata?.tool_use ?? undefined,
+          },
+          reasoning: metadata?.supported_efforts?.length
+            ? {
+                supported_efforts: metadata.supported_efforts,
+                default_enabled: true,
+                mandatory: false,
+              }
+            : undefined,
+        };
+      });
   });
 }
 

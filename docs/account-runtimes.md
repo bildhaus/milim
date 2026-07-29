@@ -10,19 +10,21 @@ After a Milim chat has a native Codex thread id, Claude session id, OpenCode ses
 
 Every account-runtime turn must report an explicit completion, error, or intentional terminal notice. If a runtime exits or closes its stream without one, Milim shows a runtime error instead of treating an empty response as success.
 
+Failed or canceled turns clear only the affected native session before the next send. This prevents a prompt that the CLI persisted before the failure from being replayed into divergent native history.
+
 ## OpenCode
 
 Milim invokes the user-installed `opencode acp` process once per turn and speaks ACP v1 JSON-RPC over stdio. `GET /opencode/status` and `GET /opencode/models` discover configured models without refreshing OpenCode's network cache; `POST /opencode/run` creates or resumes the native session, applies the exact selected model, streams normalized events, and forwards permission requests to Milim's one-shot approval cards. Plan, Guarded, Review, and Open map to a Milim-owned permission overlay. Guarded and Review refuse to run when `opencode debug config` shows that higher-precedence configuration weakened the promised policy.
 
 OpenCode also supports chats without a workspace folder. Milim supplies a private managed ACP directory for protocol compatibility and disables OpenCode's native filesystem tools; Milim-owned tools remain available.
 
-OpenCode remains responsible for its providers, credentials, instructions, and plugins. Milim does not bundle the CLI or read its credentials. Images use the existing outbound privacy gate and require Privacy Off.
+OpenCode remains responsible for its providers, credentials, instructions, and plugins. Milim does not bundle the CLI or read its credentials. Images use the existing outbound privacy gate and require Privacy Off. When supported by the installed CLI, verbose discovery supplies the picker with exact context, output, image, tool-use, and reasoning metadata.
 
 ## Pi
 
 Milim invokes the separately installed `pi` CLI in offline JSONL RPC mode. `GET /pi/status` reports availability, version, authentication/configuration state, provider count, normalized model metadata, and an actionable error; `GET /pi/models` returns the normalized catalog; `POST /pi/run` starts or resumes a Milim-owned Pi session with the exact `provider/model`, reasoning level, prompt, image inputs, workspace, and approval fields. Pi model ids use the `pi:<provider>/<model>` desktop prefix. Milim stores `piSessionId` plus its last-synced Milim message cursor so later turns resume Pi's native JSONL session without replaying already-owned history. Compaction and other side calls are ephemeral and do not reuse that session.
 
-Install Pi separately and authenticate inside Pi with `/login`. Pi owns its credentials and provider configuration; Milim neither reads nor stores them. Pi is useful as a distinct lean agent experience with its own detailed multi-provider catalog and subscription-backed providers such as GitHub Copilot, even where individual models overlap OpenCode or saved Milim providers.
+Install Pi separately and authenticate inside Pi with `/login`. Pi owns its credentials and provider configuration; Milim neither reads nor stores them. Catalog discovery confirms configured providers and models, while the first turn verifies the current credential; known expired-token failures show a `/login` recovery message. Pi is useful as a distinct lean agent experience with its own detailed multi-provider catalog and subscription-backed providers such as GitHub Copilot, even where individual models overlap OpenCode or saved Milim providers.
 
 Embedded runs always pass `--offline --no-extensions`. This prevents user or project extensions from executing startup code outside Milim's approval boundary while leaving Pi's context files, prompt templates, and skills on their normal discovery path. Plan and Guarded expose only `read`, `grep`, `find`, and `ls`. Review loads one temporary Milim-owned extension that pauses `bash`, `write`, `edit`, and any unknown tool call and forwards the exact generated arguments to Milim's one-shot approval broker. Open exposes Pi's built-in tools without prompts. The temporary extension is removed after the run; standalone Pi settings are never modified.
 

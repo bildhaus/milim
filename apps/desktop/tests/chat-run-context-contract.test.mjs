@@ -82,6 +82,11 @@ assert.ok(
 );
 assert.match(runTurn, /persistingTurnIdsRef\.current\.has\(id\)/);
 assert.match(runTurn, /Milim could not save this turn, so it was not sent/);
+assert.match(
+  runTurn,
+  /runtimeKind[\s\S]*runRef\.current\?\.context[\s\S]*resultStatus === "error"[\s\S]*resultStatus === "aborted"[\s\S]*clearAccountRuntimeKind\(id, runtimeKind\)/,
+  "failed or canceled native turns must discard their divergent runtime session",
+);
 
 for (const [name, body] of [
   [
