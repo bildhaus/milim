@@ -2389,6 +2389,14 @@ async function runSettingsLayoutCheck(page) {
     await ridgeline.waitFor();
   }
   await openSettings(page);
+  await page.getByTestId("settings-section-chat").click();
+  await page.getByTestId("new-thread-behavior-configured").click();
+  const openApprovalDefault = page.getByTestId("default-approval-open");
+  await openApprovalDefault.scrollIntoViewIfNeeded();
+  await openApprovalDefault.click();
+  if (await openApprovalDefault.getAttribute("aria-checked") !== "true") {
+    throw new Error("Open should be selectable as the configured new-chat approval default.");
+  }
   await page.getByTestId("settings-section-appearance").click();
   const ridgelineToggle = page.getByTestId("empty-chat-ridgeline-toggle");
   await ridgelineToggle.scrollIntoViewIfNeeded();

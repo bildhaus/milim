@@ -174,8 +174,10 @@ useSettings.getState().setNewThreadBehavior("configured");
 useSettings.getState().setConfiguredThreadDefaults({ model: "provider:model", toolApproval: "review", privacy: "redact" });
 equal(useSettings.getState().configuredThreadDefaults.model, "provider:model", "configured model should persist");
 equal(useSettings.getState().configuredThreadDefaults.toolApproval, "review", "review should be a valid configured approval");
-useSettings.getState().setConfiguredThreadDefaults({ toolApproval: "open" as never });
-equal(useSettings.getState().configuredThreadDefaults.toolApproval, "review", "open should never persist as a global approval default");
+useSettings.getState().setConfiguredThreadDefaults({ toolApproval: "open" });
+equal(useSettings.getState().configuredThreadDefaults.toolApproval, "open", "open should be a valid configured approval");
+useSettings.getState().setConfiguredThreadDefaults({ toolApproval: "invalid" as never });
+equal(useSettings.getState().configuredThreadDefaults.toolApproval, "review", "invalid approval defaults should normalize to review");
 useSettings.getState().setUnavailableModelPolicy("blocked");
 equal(useSettings.getState().unavailableModelPolicy, "blocked", "blocked fallback should persist");
 

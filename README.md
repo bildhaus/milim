@@ -13,7 +13,7 @@ Release artifacts target Windows and macOS. Linux packaging is intentionally dis
 - **Keep one canonical thread.** Workspace context, conversation, and review history remain together instead of fragmenting by provider.
 - **Hot-swap models.** Switch the next turn between hosted providers, local Ollama or LM Studio models, and separately installed Codex, Claude, OpenCode, or Pi runtimes.
 - **Keep local control.** Project selection, model routing, tool approvals, local persistence, and outbound privacy boundaries stay explicit.
-- **Approve execution, then review the result.** Review is the new-chat default for consequential tool calls; built-in Git views keep resulting diffs, checkpoints, and recovery beside the thread.
+- **Approve execution, then review the result.** Review is the new-chat default for consequential tool calls; configured defaults may opt into Open, while changing workspace folders resets approval to Review. Built-in Git views keep resulting diffs, checkpoints, and recovery beside the thread.
 
 ### Power tools
 
