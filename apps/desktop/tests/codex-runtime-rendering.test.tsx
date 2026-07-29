@@ -49,9 +49,19 @@ try {
   }));
   assert(googleEdit.includes("Approval required"), "approval prompt should explain why the run is paused");
   assert(googleEdit.includes("Google Docs edit"), "approval prompt should present tool names readably");
-  assert(googleEdit.includes("<summary>Review exact request</summary>"), "exact arguments should use a compact disclosure");
-  assert(googleEdit.includes("replace_text"), "the exact request should remain reviewable");
+  assert(googleEdit.includes("<summary>Review request</summary>"), "arguments should use a compact disclosure");
+  assert(googleEdit.includes("<dt>File</dt>") && googleEdit.includes("document-1"), "request fields should use readable labels");
+  assert(googleEdit.includes("<dt>Changes</dt>") && googleEdit.includes("Replace text"), "nested request values should be readable");
+  assert(!googleEdit.includes("<pre") && !googleEdit.includes("&quot;file_id&quot;"), "approval details should not render as JSON");
   assert(googleEdit.indexOf(">Deny<") < googleEdit.indexOf(">Approve<"), "the primary approval action should be last");
+
+  const plainText = renderToStaticMarkup(createElement(ToolApprovalPrompt, {
+    part: {
+      ...approvalPart({ kind: "command" }),
+      detail: "Run the formatter in the selected workspace.",
+    },
+  }));
+  assert(plainText.includes("Run the formatter in the selected workspace."), "plain-text requests should remain readable");
 
   const form = renderApproval({
     kind: "mcp_form",
@@ -74,7 +84,9 @@ try {
     permissions: { network: { domains: ["example.com"] } },
   });
   assert(permission.includes("Needs network"), "permission reason should render");
+  assert(permission.includes("<dt>Network access</dt>") && permission.includes("<dt>Domains</dt>"), "permission labels should be readable");
   assert(permission.includes("example.com"), "exact requested permission should render");
+  assert(!permission.includes("<pre"), "permissions should not render as JSON");
   assert(permission.includes("Allow once"), "permission approval should be turn-scoped in the UI");
 
   const unsupported = renderApproval({

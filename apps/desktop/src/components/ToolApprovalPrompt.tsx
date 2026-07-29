@@ -15,6 +15,32 @@ import { Check, Shield, X } from "./icons";
 
 type ApprovalPart = Extract<ChatStreamPart, { kind: "event" }>;
 
+const HIDDEN_APPROVAL_FIELDS = new Set([
+  "approvalId",
+  "availableDecisions",
+  "environmentId",
+  "itemId",
+  "threadId",
+  "turnId",
+]);
+
+const APPROVAL_FIELD_LABELS: Record<string, string> = {
+  additionalPermissions: "Requested access",
+  command: "Command",
+  cwd: "Folder",
+  domains: "Domains",
+  file_id: "File",
+  fileId: "File",
+  fileSystem: "File access",
+  grantRoot: "Write access",
+  network: "Network access",
+  operations: "Changes",
+  path: "File",
+  permissions: "Requested access",
+  reason: "Reason",
+  url: "Link",
+};
+
 function approvalTitle(label: string): string {
   return label
     .replace(/^Approve\s+/i, "")
@@ -25,12 +51,74 @@ function approvalTitle(label: string): string {
     );
 }
 
-function formatApprovalDetail(detail: string): string {
+function humanizeApprovalText(value: string): string {
+  const text = value
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[_-]+/g, " ")
+    .trim();
+  return text ? `${text[0].toUpperCase()}${text.slice(1)}` : value;
+}
+
+function approvalFieldLabel(field: string): string {
+  return APPROVAL_FIELD_LABELS[field] ?? humanizeApprovalText(field);
+}
+
+function approvalDetail(detail: string): unknown {
   try {
-    return JSON.stringify(JSON.parse(detail), null, 2);
+    return JSON.parse(detail);
   } catch {
     return detail;
   }
+}
+
+function ApprovalValue({ value, field }: { value: unknown; field?: string }) {
+  if (value == null) return <span className="composer-approval-empty">None</span>;
+  if (typeof value === "boolean") return <span>{value ? "Yes" : "No"}</span>;
+  if (Array.isArray(value)) {
+    const items = value.filter((item) => item != null);
+    if (!items.length) return <span className="composer-approval-empty">None</span>;
+    if (field === "command" && items.every((item) => typeof item === "string")) {
+      return <code>{items.join(" ")}</code>;
+    }
+    return (
+      <ol className="composer-approval-list">
+        {items.map((item, index) => (
+          <li key={index}><ApprovalValue value={item} /></li>
+        ))}
+      </ol>
+    );
+  }
+  if (typeof value === "object") {
+    const entries = Object.entries(value).filter(
+      ([key, item]) => !HIDDEN_APPROVAL_FIELDS.has(key) && item != null,
+    );
+    if (!entries.length) return <span className="composer-approval-empty">No additional details</span>;
+    return (
+      <dl className="composer-approval-fields">
+        {entries.map(([key, item]) => (
+          <div key={key}>
+            <dt>{approvalFieldLabel(key)}</dt>
+            <dd><ApprovalValue value={item} field={key} /></dd>
+          </div>
+        ))}
+      </dl>
+    );
+  }
+  const text = String(value);
+  const readable = field && ["action", "kind", "type"].includes(field)
+    ? humanizeApprovalText(text)
+    : text;
+  return field && ["command", "cwd", "grantRoot", "path", "url"].includes(field)
+    ? <code>{readable}</code>
+    : <span>{readable}</span>;
+}
+
+function ApprovalDetail({ value }: { value: unknown }) {
+  return (
+    <div className="composer-approval-request">
+      <ApprovalValue value={value} />
+    </div>
+  );
 }
 
 export function ToolApprovalPrompt({
@@ -46,6 +134,11 @@ export function ToolApprovalPrompt({
   );
   const [error, setError] = useState("");
   const title = approvalTitle(part.label);
+  const showReview = part.detail && (
+    !part.approvalRequest ||
+    part.approvalRequest.kind === "command" ||
+    part.approvalRequest.kind === "file_change"
+  );
 
   async function decide(decision: "approve" | "deny") {
     if (!part.approvalId || resolving) return;
@@ -83,10 +176,10 @@ export function ToolApprovalPrompt({
           <strong>{title}</strong>
         </span>
       </header>
-      {part.detail && (
+      {showReview && (
         <details className="composer-approval-details">
-          <summary>Review exact request</summary>
-          <pre className="stream-approval-arguments">{formatApprovalDetail(part.detail)}</pre>
+          <summary>Review request</summary>
+          <ApprovalDetail value={approvalDetail(part.detail!)} />
         </details>
       )}
       <ApprovalRequestBody
@@ -148,8 +241,10 @@ function ApprovalRequestBody({
       {request?.kind === "permissions" && (
         <>
           {request.reason && <p>{request.reason}</p>}
-          {request.cwd && <code className="stream-approval-path">{request.cwd}</code>}
-          <pre className="stream-approval-arguments">{JSON.stringify(request.permissions ?? {}, null, 2)}</pre>
+          <ApprovalDetail value={{
+            cwd: request.cwd,
+            permissions: request.permissions ?? {},
+          }} />
         </>
       )}
       {request?.kind === "mcp_form" && (
