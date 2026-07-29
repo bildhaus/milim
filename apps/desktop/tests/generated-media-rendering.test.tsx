@@ -55,7 +55,7 @@ try {
   assert(manager.includes("send-btn media-composer-send-btn"), "Generation should reuse the chat send-button treatment");
   assert(manager.includes('aria-label="Generate image"'), "The icon-only generation action should retain an accessible label");
   assert(manager.includes('data-testid="media-studio-resize-handle"'), "The studio should expose a keyboard-operable resize handle");
-  assert(manager.includes("media-sheet-resize-glyph"), "The resize handle should use an inset three-line glyph");
+  assert(!manager.includes("media-sheet-resize-glyph"), "The resize handle should not render a panel-specific glyph");
   assert(manager.includes("Ctrl/Cmd + Enter"), "The generation shortcut should be shown outside the primary action label");
   assert(manager.includes("Quick generations here. Iteration stays in chat."), "The studio should explain its role without competing with chat");
   assert(manager.includes("Prompt sent unchanged"), "The privacy summary should remain concise in the generator rail");
@@ -171,6 +171,8 @@ try {
   assert(styleSource.includes(".inline-media-parameter-controls"), "The shared inline media controls should retain compact parameter layout");
   assert(styleSource.includes("grid-auto-rows: max-content"), "Library cards should not stretch to fill an otherwise empty sidebar");
   assert(styleSource.includes(".inline-media-popover::before"), "The media settings surface should keep nested dropdown backdrop blur working");
+  assert(styleSource.includes("border-bottom-right-radius: max(0px, calc(var(--card-radius) - 6px))"), "Resizable panels should use the shared inset theme-radius corner curve");
+  assert(styleSource.includes("mask-composite: intersect"), "The resize curve tails should fade without dimming the corner");
 
   const apiSource = readFileSync(resolve(process.cwd(), "src/api.ts"), "utf8");
   assert(apiSource.includes("new URL(`${BASE}/media/library`)"), "The desktop API should list the media library");

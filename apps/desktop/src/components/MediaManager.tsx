@@ -1001,19 +1001,6 @@ export function MediaManager({
           onKeyDown={resizeStudioWithKeyboard}
           onDoubleClick={resetStudioSize}
         >
-          <svg
-            className="media-sheet-resize-glyph"
-            width="15"
-            height="15"
-            viewBox="0 0 16 16"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.6"
-            strokeLinecap="round"
-            aria-hidden="true"
-          >
-            <path d="M4 13 13 4M8 13l5-5M12 13l1-1" />
-          </svg>
         </button>
       </div>
     </SheetDialog>
