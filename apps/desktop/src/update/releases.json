@@ -1,4 +1,9 @@
 {
+  "0.2.10": {
+    "version": "0.2.10",
+    "summary": "Milim 0.2.10 makes account runtimes easier to scan and gives thread, popover, and settings layouts more breathing room.",
+    "items": []
+  },
   "0.2.9": {
     "version": "0.2.9",
     "summary": "Milim 0.2.9 includes the latest reliability and desktop workflow improvements.",
