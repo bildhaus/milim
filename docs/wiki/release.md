@@ -19,7 +19,7 @@ Release work should verify the Rust workspace, desktop app, site docs, and platf
 | macOS | `milim-macos-universal.dmg` and `milim.app.zip` from the latest GitHub release. |
 | Linux | Not packaged as a release artifact. The Rust server and Tauri app remain source-buildable. |
 
-Release builds run desktop verification on both macOS and Windows. macOS release artifacts require the Apple signing secrets and intentionally enable Tauri's macOS private API for transparent preview activity overlay windows. The workflow publishes `manifest.json` plus an aggregate `SHA256SUMS.txt` from the current release run. Updater assets are verified with SHA-256 sidecars and the aggregate checksum file. A rerun may repair an unpublished draft, but every edit and asset upload rechecks draft status; published releases are immutable and require a new version.
+Pull requests and release tags run full desktop verification in CI. Release packaging jobs do not repeat that suite: Tauri runs the production frontend build before compiling each platform artifact, then the workflow smoke-tests the packaged binary and verifies its manifest. macOS release artifacts require the Apple signing secrets and intentionally enable Tauri's macOS private API for transparent preview activity overlay windows. The workflow publishes `manifest.json` plus an aggregate `SHA256SUMS.txt` from the current release run. Updater assets are verified with SHA-256 sidecars and the aggregate checksum file. A rerun may repair an unpublished draft, but every edit and asset upload rechecks draft status; published releases are immutable and require a new version.
 
 ## Updater behavior
 
@@ -38,6 +38,6 @@ pnpm -C apps/site build
 
 ## Docs site
 
-The public docs site imports markdown from `docs/wiki/*.md` using Vite raw imports. The per-section search index is generated from headings and body text, so new sections become searchable without adding keywords in TypeScript. After Vite builds, the site emits route-specific title, description, canonical, Open Graph, and Twitter metadata plus a small Cloudflare Pages Worker that serves the correct static HTML for `docs.milim.ai` while keeping the landing page on `milim.ai`. Changes to `VERSION` run the same site build and production deployment path so release-facing version surfaces stay current.
+The public docs site imports markdown from `docs/wiki/*.md` using Vite raw imports. The per-section search index is generated from headings and body text, so new sections become searchable without adding keywords in TypeScript. After Vite builds, the site emits route-specific title, description, canonical, Open Graph, and Twitter metadata plus a small Cloudflare Pages Worker that serves the correct static HTML for `docs.milim.ai` while keeping the landing page on `milim.ai`. Matching pull requests run the `Build` job; matching `main` pushes run `Deploy`, which builds once before publishing to Cloudflare Pages. Changes to `VERSION` use that production deployment path so release-facing version surfaces stay current.
 
 Use `docs/account-runtimes.md` as the style template for new long-form reference docs: short intro, route table, then behavior notes.

@@ -84,6 +84,7 @@ jobs:
           cache-dependency-path: apps/desktop/pnpm-lock.yaml
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: false
           workspaces: |
             . -> target
             apps/desktop/src-tauri -> target
@@ -117,11 +118,6 @@ jobs:
           done
           exit "$missing"
       - run: pnpm -C apps/desktop install --frozen-lockfile
-      - name: Run pnpm -C apps/desktop verify
-        env:
-          GITHUB_REF_TYPE: tag
-          GITHUB_REF_NAME: ${{ env.MILIM_RELEASE_TAG }}
-        run: pnpm -C apps/desktop verify
       - name: Build macOS app and DMG
         if: matrix.os == 'macos-latest'
         env:

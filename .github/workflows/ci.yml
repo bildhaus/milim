@@ -2,7 +2,6 @@ name: CI
 
 on:
   push:
-    branches: [main]
     tags: ["v*"]
   pull_request:
 
@@ -77,14 +76,3 @@ jobs:
       - name: Tauri Rust tests
         run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
       - run: pnpm -C apps/desktop verify
-
-  optional-features:
-    name: Optional feature smoke
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 20
