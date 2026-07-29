@@ -1479,14 +1479,17 @@
 .session-side {
   position: relative;
   flex: none;
-  min-width: 48px;
+  min-width: 0;
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 2px;
   height: 24px;
 }
-.session-side.session-side-wide {
+.session-item:is(:hover, :focus-within, .delete-pending) .session-side {
+  min-width: 48px;
+}
+.session-item:is(:hover, :focus-within, .delete-pending) .session-side-wide {
   min-width: 70px;
 }
 .session-side-indicator {
