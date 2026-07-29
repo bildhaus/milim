@@ -2995,10 +2995,7 @@ pub(crate) async fn thread_events(
     let initial_after_seq = query.after_seq.unwrap_or(0).max(0);
     let stream = async_stream::stream! {
         let mut last_seq = initial_after_seq;
-        loop {
-            let Ok(backfill) = supervisor.child_events_after(&id, last_seq, event_limit) else {
-                break;
-            };
+        while let Ok(backfill) = supervisor.child_events_after(&id, last_seq, event_limit) {
             let drained = backfill.len() < event_limit;
             let previous_seq = last_seq;
             for (thread, event) in backfill {
@@ -3034,12 +3031,9 @@ pub(crate) async fn thread_events(
                     yield Ok::<Event, Infallible>(Event::default().data(data));
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    loop {
-                        let Ok(backfill) =
-                            supervisor.child_events_after(&id, last_seq, event_limit)
-                        else {
-                            break;
-                        };
+                    while let Ok(backfill) =
+                        supervisor.child_events_after(&id, last_seq, event_limit)
+                    {
                         let drained = backfill.len() < event_limit;
                         let previous_seq = last_seq;
                         for (thread, event) in backfill {
@@ -3503,10 +3497,7 @@ pub(crate) async fn worker_run_events(
     let initial_after_seq = query.after_seq.unwrap_or(0).max(0);
     let stream = async_stream::stream! {
         let mut last_seq = initial_after_seq;
-        loop {
-            let Ok(backfill) = supervisor.worker_events_after(&id, last_seq, limit) else {
-                break;
-            };
+        while let Ok(backfill) = supervisor.worker_events_after(&id, last_seq, limit) {
             let drained = backfill.len() < limit;
             let previous_seq = last_seq;
             for (worker, event) in backfill {
@@ -3548,11 +3539,9 @@ pub(crate) async fn worker_run_events(
                 }
                 Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    loop {
-                        let Ok(backfill) = supervisor.worker_events_after(&id, last_seq, limit)
-                        else {
-                            break;
-                        };
+                    while let Ok(backfill) =
+                        supervisor.worker_events_after(&id, last_seq, limit)
+                    {
                         let drained = backfill.len() < limit;
                         let previous_seq = last_seq;
                         for (worker, event) in backfill {
