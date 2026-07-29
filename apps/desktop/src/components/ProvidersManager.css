@@ -275,7 +275,7 @@
 .provider-account-panel {
   display: grid;
   gap: 10px;
-  padding: 10px;
+  padding: 12px;
   border: 1px solid color-mix(in srgb, var(--border-primary) 74%, transparent);
   border-radius: 8px;
   background: transparent;
@@ -290,10 +290,10 @@
 .provider-account-card {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(220px, 1fr) auto auto;
   align-items: center;
-  gap: 12px;
-  padding: 9px 0;
+  gap: 14px;
+  padding: 12px 0;
 }
 
 .provider-account-card + .provider-account-card {
@@ -304,8 +304,12 @@
   min-width: 0;
   display: grid;
   grid-template-columns: auto auto minmax(0, 1fr);
-  align-items: start;
+  align-items: center;
   gap: 8px;
+}
+
+.provider-account-main > .provider-status-dot {
+  margin-top: 0;
 }
 
 .provider-account-main > div {
@@ -345,6 +349,24 @@
 .provider-account-card .btn-accent:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+.provider-account-update {
+  justify-self: end;
+}
+
+.provider-account-update-status {
+  color: var(--tertiary-text);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.provider-account-refresh {
+  display: grid;
+  width: 30px;
+  min-width: 30px;
+  padding: 0 !important;
+  place-items: center;
 }
 
 .provider-quick-panel {
@@ -670,6 +692,13 @@
   align-items: center;
   justify-content: flex-end;
   gap: 6px;
+}
+
+.provider-account-actions .ui-toggle-row {
+  gap: 6px;
+  color: var(--tertiary-text);
+  font-size: 11.5px;
+  white-space: nowrap;
 }
 
 .account-import-sheet {
@@ -1185,6 +1214,27 @@
   .providers-detail-head,
   .provider-enabled-row {
     grid-template-columns: 1fr;
+  }
+
+  .provider-account-card {
+    grid-template-areas:
+      "main main"
+      "update actions";
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: 8px;
+  }
+
+  .provider-account-main {
+    grid-area: main;
+  }
+
+  .provider-account-update {
+    grid-area: update;
+    justify-self: start;
+  }
+
+  .provider-account-actions {
+    grid-area: actions;
   }
 
   .account-import-controls {

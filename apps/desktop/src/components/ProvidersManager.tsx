@@ -429,41 +429,58 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
     return version ? ` · v${version}` : "";
   }
 
-  function runtimeUpdateButton(runtime: AccountRuntimeKind, available: boolean) {
+  function runtimeUpdateControl(runtime: AccountRuntimeKind, available: boolean) {
     const updating = updatingRuntime === runtime;
     const confirming = confirmRuntimeUpdate === runtime;
     const status = runtimeUpdates[runtime];
     const updateAvailable = status?.update_available;
     const installed = status?.available ?? available;
+    if (!installed) {
+      return <span className="provider-account-update" aria-hidden="true" />;
+    }
+    if (!accountRuntimeEnabled[runtime]) {
+      return (
+        <span className="provider-account-update provider-account-update-status">
+          {updateAvailable === true
+            ? "Update available"
+            : updateAvailable === false
+              ? "Up to date"
+              : null}
+        </span>
+      );
+    }
+    if (updateAvailable === false) {
+      return (
+        <span className="provider-account-update provider-account-update-status">
+          Up to date
+        </span>
+      );
+    }
     return (
       <button
-        className={updateAvailable === true ? "btn-accent" : "btn-ghost"}
+        className={
+          "provider-account-update " +
+          (updateAvailable === true ? "btn-accent" : "btn-ghost")
+        }
         data-testid={`${runtime}-update`}
         type="button"
         onClick={() => void runRuntimeUpdate(runtime)}
         title={
           updateAvailable === true
             ? `Update to v${status?.latest_version ?? "latest"}`
-            : updateAvailable === false
-              ? `${ACCOUNT_RUNTIME_LABEL[runtime]} is up to date`
-              : status?.update_error ?? undefined
+            : status?.update_error ?? undefined
         }
-        disabled={
-          updatingRuntime !== null ||
-          !accountRuntimeEnabled[runtime] ||
-          !installed ||
-          updateAvailable === false
-        }
+        disabled={updatingRuntime !== null}
       >
         {updating
           ? "Updating..."
           : confirming
             ? "Confirm update"
             : updateAvailable === true
-              ? "Update available"
-              : updateAvailable === false
-                ? "Up to date"
-                : "Update"}
+              ? status?.latest_version
+                ? `Update to v${status.latest_version}`
+                : "Update available"
+              : "Update"}
       </button>
     );
   }
@@ -850,15 +867,9 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
             <div className="providers-section-head">
               <h4 id="provider-account-title">Account runtimes</h4>
               <p>
-                Codex, the installed Claude CLI, OpenCode, and Pi use their
-                own desktop tooling. Disable one to hide its models and block
-                new runs without signing out.
-              </p>
-              <p>
-                Milim does not include Claude Code, provide Anthropic
-                credentials, or manage Claude credentials. It only invokes the
-                official Claude CLI installed and authenticated separately on
-                this machine.
+                These runtimes use separately installed tools and credentials.
+                Disable one to hide its models and block new runs without
+                signing out.
               </p>
             </div>
             <div className="provider-account-grid">
@@ -870,8 +881,10 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                 <div className="provider-account-main">
                   <span
                     className={
-                      "provider-status-dot " + (codexReady ? "ready" : "off")
+                      "provider-status-dot " +
+                      (accountRuntimeEnabled.codex && codexReady ? "ready" : "off")
                     }
+                    aria-hidden="true"
                   />
                   <ProviderIcon brand="codex" size={24} />
                   <div>
@@ -879,19 +892,12 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                     <span>
                       {!accountRuntimeEnabled.codex
                         ? "Disabled"
-                        : `${codexAccount?.account?.email ?? "ChatGPT account runtime"}${runtimeVersion("codex")}`}
+                        : `${codexReady ? "Ready · " : ""}${codexAccount?.account?.email ?? "ChatGPT account runtime"}${runtimeVersion("codex")}`}
                     </span>
                   </div>
                 </div>
+                {runtimeUpdateControl("codex", codexReady)}
                 <div className="provider-account-actions">
-                  <Toggle
-                    checked={accountRuntimeEnabled.codex}
-                    onChange={(enabled) =>
-                      updateAccountRuntimeEnabled("codex", enabled)
-                    }
-                    ariaLabel="Enable Codex runtime"
-                    testId="codex-enabled-toggle"
-                  />
                   {codexReady && (
                     <button
                       className="btn-ghost"
@@ -902,7 +908,6 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                       Import chats
                     </button>
                   )}
-                  {runtimeUpdateButton("codex", codexReady)}
                   <button
                     className="btn-ghost"
                     data-testid="codex-connect"
@@ -918,34 +923,57 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                         ? "Disconnect"
                         : "Connect"}
                   </button>
+                  <Toggle
+                    checked={accountRuntimeEnabled.codex}
+                    onChange={(enabled) =>
+                      updateAccountRuntimeEnabled("codex", enabled)
+                    }
+                    label="Enabled"
+                    ariaLabel="Enable Codex runtime"
+                    testId="codex-enabled-toggle"
+                  />
                 </div>
               </div>
               <div className={"provider-account-card " + (openCodeReady ? "ready" : "off")}>
                 <div className="provider-account-main">
-                  <span className={"provider-status-dot " + (openCodeReady ? "ready" : "off")} />
+                  <span
+                    className={
+                      "provider-status-dot " +
+                      (accountRuntimeEnabled.opencode && openCodeReady ? "ready" : "off")
+                    }
+                    aria-hidden="true"
+                  />
                   <ProviderIcon brand="opencode" size={24} />
                   <div>
-                    <strong>Installed OpenCode CLI</strong>
+                    <strong>OpenCode CLI</strong>
                     <span>{!accountRuntimeEnabled.opencode
                       ? "Disabled"
                       : openCodeStatus?.available
-                      ? `${openCodeStatus.models?.length ?? 0} configured model${openCodeStatus.models?.length === 1 ? "" : "s"}${runtimeVersion("opencode")}`
+                      ? `${openCodeReady ? "Ready · " : ""}${openCodeStatus.models?.length ?? 0} configured model${openCodeStatus.models?.length === 1 ? "" : "s"}${runtimeVersion("opencode")}`
                       : "Install OpenCode separately and configure its providers."}</span>
                   </div>
                 </div>
+                {runtimeUpdateControl("opencode", Boolean(openCodeStatus?.available))}
                 <div className="provider-account-actions">
+                  <button
+                    className="btn-ghost provider-account-refresh"
+                    type="button"
+                    title={openCodeBusy ? "Refreshing OpenCode status" : "Refresh OpenCode status"}
+                    aria-label={openCodeBusy ? "Refreshing OpenCode status" : "Refresh OpenCode status"}
+                    onClick={() => void refreshOpenCodeStatus(true)}
+                    disabled={openCodeBusy || !accountRuntimeEnabled.opencode}
+                  >
+                    <Refresh size={13} />
+                  </button>
                   <Toggle
                     checked={accountRuntimeEnabled.opencode}
                     onChange={(enabled) =>
                       updateAccountRuntimeEnabled("opencode", enabled)
                     }
+                    label="Enabled"
                     ariaLabel="Enable OpenCode runtime"
                     testId="opencode-enabled-toggle"
                   />
-                  {runtimeUpdateButton("opencode", Boolean(openCodeStatus?.available))}
-                  <button className="btn-ghost" type="button" onClick={() => void refreshOpenCodeStatus(true)} disabled={openCodeBusy || !accountRuntimeEnabled.opencode}>
-                    {openCodeBusy ? "Checking..." : "Refresh"}
-                  </button>
                 </div>
               </div>
               <div
@@ -956,31 +984,26 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                 <div className="provider-account-main">
                   <span
                     className={
-                      "provider-status-dot " + (claudeReady ? "ready" : "off")
+                      "provider-status-dot " +
+                      (accountRuntimeEnabled.claude && claudeReady ? "ready" : "off")
                     }
+                    aria-hidden="true"
                   />
                   <ProviderIcon brand="claude" size={24} />
                   <div>
-                    <strong>Installed Claude CLI</strong>
+                    <strong>Claude CLI</strong>
                     <span>
                       {!accountRuntimeEnabled.claude
                         ? "Disabled"
-                        : `${claudeAccountLabel ??
+                        : `${claudeReady ? "Ready · " : ""}${claudeAccountLabel ??
                             (claudeStatus?.available
                               ? "Run `claude auth login`, then refresh."
                               : "Install Anthropic's official Claude CLI separately.")}${runtimeVersion("claude")}`}
                     </span>
                   </div>
                 </div>
+                {runtimeUpdateControl("claude", Boolean(claudeStatus?.available))}
                 <div className="provider-account-actions">
-                  <Toggle
-                    checked={accountRuntimeEnabled.claude}
-                    onChange={(enabled) =>
-                      updateAccountRuntimeEnabled("claude", enabled)
-                    }
-                    ariaLabel="Enable Claude runtime"
-                    testId="claude-enabled-toggle"
-                  />
                   {accountRuntimeEnabled.claude && (
                     <button
                       className="btn-ghost"
@@ -991,44 +1014,69 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                       Import chats
                     </button>
                   )}
-                  {runtimeUpdateButton("claude", Boolean(claudeStatus?.available))}
                   <button
-                    className="btn-ghost"
+                    className="btn-ghost provider-account-refresh"
                     data-testid="claude-code-status"
                     type="button"
+                    title={claudeBusy ? "Refreshing Claude status" : "Refresh Claude status"}
+                    aria-label={claudeBusy ? "Refreshing Claude status" : "Refresh Claude status"}
                     onClick={() => void refreshClaudeStatus(true)}
                     disabled={claudeBusy || !accountRuntimeEnabled.claude}
                   >
-                    {claudeBusy ? "Checking..." : "Refresh"}
+                    <Refresh size={13} />
                   </button>
+                  <Toggle
+                    checked={accountRuntimeEnabled.claude}
+                    onChange={(enabled) =>
+                      updateAccountRuntimeEnabled("claude", enabled)
+                    }
+                    label="Enabled"
+                    ariaLabel="Enable Claude runtime"
+                    testId="claude-enabled-toggle"
+                  />
                 </div>
               </div>
               <div className={"provider-account-card " + (piReady ? "ready" : "off")}>
                 <div className="provider-account-main">
-                  <span className={"provider-status-dot " + (piReady ? "ready" : "off")} />
+                  <span
+                    className={
+                      "provider-status-dot " +
+                      (accountRuntimeEnabled.pi && piReady ? "ready" : "off")
+                    }
+                    aria-hidden="true"
+                  />
                   <ProviderIcon brand="pi" size={24} />
                   <div>
-                    <strong>Installed Pi CLI</strong>
+                    <strong>Pi CLI</strong>
                     <span>{!accountRuntimeEnabled.pi
                       ? "Disabled"
                       : piStatus?.available
-                      ? `${piStatus.provider_count ?? 0} provider${piStatus.provider_count === 1 ? "" : "s"} / ${piStatus.models?.length ?? 0} model${piStatus.models?.length === 1 ? "" : "s"}${runtimeVersion("pi")}`
+                      ? `${piReady ? "Ready · " : ""}${piStatus.provider_count ?? 0} provider${piStatus.provider_count === 1 ? "" : "s"} / ${piStatus.models?.length ?? 0} model${piStatus.models?.length === 1 ? "" : "s"}${runtimeVersion("pi")}`
                       : "Install Pi separately and use /login in its terminal."}</span>
                   </div>
                 </div>
+                {runtimeUpdateControl("pi", Boolean(piStatus?.available))}
                 <div className="provider-account-actions">
+                  <button
+                    className="btn-ghost provider-account-refresh"
+                    data-testid="pi-status"
+                    type="button"
+                    title={piBusy ? "Refreshing Pi status" : "Refresh Pi status"}
+                    aria-label={piBusy ? "Refreshing Pi status" : "Refresh Pi status"}
+                    onClick={() => void refreshPiStatus(true)}
+                    disabled={piBusy || !accountRuntimeEnabled.pi}
+                  >
+                    <Refresh size={13} />
+                  </button>
                   <Toggle
                     checked={accountRuntimeEnabled.pi}
                     onChange={(enabled) =>
                       updateAccountRuntimeEnabled("pi", enabled)
                     }
+                    label="Enabled"
                     ariaLabel="Enable Pi runtime"
                     testId="pi-enabled-toggle"
                   />
-                  {runtimeUpdateButton("pi", Boolean(piStatus?.available))}
-                  <button className="btn-ghost" data-testid="pi-status" type="button" onClick={() => void refreshPiStatus(true)} disabled={piBusy || !accountRuntimeEnabled.pi}>
-                    {piBusy ? "Checking..." : "Refresh"}
-                  </button>
                 </div>
               </div>
             </div>

@@ -1479,14 +1479,21 @@
 .session-side {
   position: relative;
   flex: none;
-  min-width: 48px;
+  min-width: 0;
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 2px;
   height: 24px;
 }
-.session-side.session-side-wide {
+.session-side:hover,
+.session-side:focus-within,
+.session-item.delete-pending .session-side {
+  min-width: 48px;
+}
+.session-side-wide:hover,
+.session-side-wide:focus-within,
+.session-item.delete-pending .session-side-wide {
   min-width: 70px;
 }
 .session-side-indicator {
@@ -1575,14 +1582,14 @@
   background: color-mix(in srgb, var(--error) 12%, transparent);
   color: var(--error);
 }
-.session-item:hover .session-side-indicator,
-.session-item:focus-within .session-side-indicator,
+.session-side:hover .session-side-indicator,
+.session-side:focus-within .session-side-indicator,
 .session-item.delete-pending .session-side-indicator {
   opacity: 0;
   visibility: hidden;
 }
-.session-item:hover .session-side-actions,
-.session-item:focus-within .session-side-actions,
+.session-side:hover .session-side-actions,
+.session-side:focus-within .session-side-actions,
 .session-item.delete-pending .session-side-actions {
   opacity: 1;
   pointer-events: auto;

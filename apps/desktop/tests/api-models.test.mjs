@@ -101,7 +101,7 @@ assert.match(
   api,
   /`\$\{BASE\}\/account-runtimes\/\$\{encodeURIComponent\(runtime\)\}\/update`/,
 );
-assert.match(providersManager, /<strong>Installed Pi CLI<\/strong>/);
+assert.match(providersManager, /<strong>Pi CLI<\/strong>/);
 assert.match(providersManager, /piStatus\.provider_count/);
 assert.match(api, /export async function listClaudeThreads/);
 assert.match(api, /export async function importClaudeThread/);
@@ -115,20 +115,21 @@ assert.match(providersManager, /setRuntimeImportGroupSelected/);
 assert.match(providersManager, /Importing \$\{progress\.current\} of \$\{progress\.total\}/);
 assert.doesNotMatch(providersManager, />Recover chats</);
 for (const runtime of ["codex", "claude", "opencode", "pi"]) {
-  assert.match(providersManager, new RegExp(`runtimeUpdateButton\\("${runtime}"`));
+  assert.match(providersManager, new RegExp(`runtimeUpdateControl\\("${runtime}"`));
 }
 assert.match(providersManager, /data-testid=\{`\$\{runtime\}-update`\}/);
 assert.match(providersManager, /updateAvailable === true \? "btn-accent" : "btn-ghost"/);
-assert.match(providersManager, /updateAvailable === false/);
+assert.match(providersManager, /if \(!installed\)/);
+assert.match(providersManager, /if \(!accountRuntimeEnabled\[runtime\]\)/);
 assert.match(providersManager, /"Update available"/);
-assert.match(providersManager, /"Up to date"/);
+assert.match(providersManager, /provider-account-update-status/);
 assert.match(
   providersManager,
   /confirmRuntimeUpdate !== runtime[\s\S]*click Confirm update/,
 );
 assert.match(
   providersCss,
-  /\.provider-account-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\);[^}]*gap:\s*0;/,
+  /\.provider-account-card\s*\{[^}]*grid-template-columns:\s*minmax\(220px,\s*1fr\)\s+auto\s+auto;/,
 );
 assert.match(
   api,

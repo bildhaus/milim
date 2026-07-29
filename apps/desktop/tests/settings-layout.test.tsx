@@ -75,6 +75,17 @@ try {
     ariaLabel: "Test choice",
   }));
   assert(choiceMarkup.includes('role="radiogroup" aria-label="Test choice"'), "Choice groups should expose a useful accessible name");
+  const threeChoiceMarkup = renderToStaticMarkup(createElement(SettingsChoiceGroup, {
+    value: "one",
+    options: [
+      { value: "one", label: "One", detail: "First" },
+      { value: "two", label: "Two", detail: "Second" },
+      { value: "three", label: "Three", detail: "Third" },
+    ],
+    onChange: () => {},
+    testIdPrefix: "three-choice",
+  }));
+  assert(threeChoiceMarkup.includes('class="settings-choice-grid three-up"'), "Three-choice groups should use a balanced three-column layout");
   equal(settingsChoiceNextIndex("ArrowRight", 1, 2), 0, "Right arrow should wrap choices");
   equal(settingsChoiceNextIndex("ArrowUp", 0, 2), 1, "Up arrow should wrap choices");
   equal(settingsChoiceNextIndex("Home", 1, 2), 0, "Home should select the first choice");
