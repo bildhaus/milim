@@ -349,7 +349,11 @@ export function useChatMediaController({
   }, [activeMediaTarget?.provider.id, activeMediaTarget?.model]);
 
   useEffect(() => {
-    if (!activeMediaTarget) return;
+    if (!activeMediaTarget) {
+      setMediaSchema(null);
+      setMediaSchemaLoading(false);
+      return;
+    }
     const kind = activeMediaTarget.supportedKinds.includes(mediaKind)
       ? mediaKind
       : activeMediaTarget.kind;
@@ -358,6 +362,7 @@ export function useChatMediaController({
       activeMediaTarget.model,
     );
     let cancelled = false;
+    setMediaSchema(null);
     setMediaSchemaLoading(true);
     setMediaError(null);
     void getMediaModelSchema(
@@ -409,7 +414,11 @@ export function useChatMediaController({
     if (!activeMediaTarget) return;
     let parsed: unknown;
     try {
-      parsed = parseControlValue(control, value);
+      parsed =
+        typeof value === "string" &&
+        (control.kind === "array" || control.kind === "json")
+          ? value
+          : parseControlValue(control, value);
     } catch (error) {
       setMediaError(error instanceof Error ? error.message : String(error));
       return;
@@ -428,6 +437,12 @@ export function useChatMediaController({
       },
     });
     setMediaError(null);
+  }
+
+  function updateInlineMediaKind(kind: MediaKind) {
+    setMediaSchema(null);
+    setMediaSchemaLoading(true);
+    setMediaKind(kind);
   }
 
   async function pollInlineMediaStatus(
@@ -480,6 +495,17 @@ export function useChatMediaController({
       return;
     }
     if (generationControllersRef.current.has(activeId)) return;
+    if (
+      mediaSchemaLoading ||
+      !mediaSchema ||
+      mediaSchema.provider_id !== target.provider.id ||
+      mediaSchema.model !== target.model
+    ) {
+      const message = "Media settings are still loading. Try again in a moment.";
+      setMediaError(message);
+      setChatNotice({ tone: "error", message });
+      return;
+    }
 
     let requestInput: Record<string, unknown>;
     try {
@@ -566,7 +592,7 @@ export function useChatMediaController({
     sendMediaPrompt,
     setMediaAdvanced,
     setMediaError,
-    setMediaKind,
+    setMediaKind: updateInlineMediaKind,
     setMediaParameterValues,
     updateInlineMediaAdvanced,
     updateInlineMediaParameter,

@@ -15,11 +15,10 @@ import type {
   ChatMessage,
   ChatStreamPart,
   ChildThreadInfo,
-  ClaudeRunEvent,
-  CodexRunEvent,
-  OpenCodeRunEvent,
-  PiRunEvent,
   ContextSnapshot,
+  HarnessEvent,
+  HarnessEventEnvelope,
+  HarnessRunRequest,
   MemoryNotice,
   ModelInfo,
   ProviderLimitInfo,
@@ -120,80 +119,11 @@ function contextSnapshot(
 }
 
 type ChatStreamEventPart = Extract<ChatStreamPart, { kind: "event" }>;
-type AccountRuntimeEvent =
-  | CodexRunEvent
-  | ClaudeRunEvent
-  | OpenCodeRunEvent
-  | PiRunEvent;
-type AccountRuntimeImageEvent = Extract<CodexRunEvent, { type: "image" }>;
-type StreamCodexRunFn = (
-  request: {
-    model: string;
-    prompt: string;
-    cwd?: string;
-    reasoning_effort?: ReasoningEffort;
-    thread_id?: string;
-    persist_thread?: boolean;
-    tool_approval_policy?: ToolApprovalMode;
-    tool_approval_grant?: boolean;
-    interactive_tool_approval?: boolean;
-    plan_mode?: boolean;
-    images?: AccountRuntimeImage[];
-    milim_context?: AccountRuntimeMilimContext;
-  },
-  onEvent: (event: CodexRunEvent) => void,
-  signal?: AbortSignal,
-) => Promise<void>;
-type StreamClaudeRunFn = (
-  request: {
-    model: string;
-    prompt: string;
-    cwd?: string;
-    reasoning_effort?: ReasoningEffort;
-    session_id?: string;
-    tool_approval_policy?: ToolApprovalMode;
-    tool_approval_grant?: boolean;
-    interactive_tool_approval?: boolean;
-    plan_mode?: boolean;
-    allow_session_recovery?: boolean;
-    images?: AccountRuntimeImage[];
-    milim_context?: AccountRuntimeMilimContext;
-  },
-  onEvent: (event: ClaudeRunEvent) => void,
-  signal?: AbortSignal,
-) => Promise<void>;
-type StreamOpenCodeRunFn = (
-  request: {
-    model: string;
-    prompt: string;
-    cwd?: string;
-    session_id?: string;
-    tool_approval_policy?: ToolApprovalMode;
-    tool_approval_grant?: boolean;
-    interactive_tool_approval?: boolean;
-    plan_mode?: boolean;
-    images?: AccountRuntimeImage[];
-    milim_context?: AccountRuntimeMilimContext;
-  },
-  onEvent: (event: OpenCodeRunEvent) => void,
-  signal?: AbortSignal,
-) => Promise<void>;
-type StreamPiRunFn = (
-  request: {
-    model: string;
-    prompt: string;
-    cwd?: string;
-    reasoning_effort?: ReasoningEffort;
-    session_id?: string;
-    persist_session?: boolean;
-    tool_approval_policy?: ToolApprovalMode;
-    tool_approval_grant?: boolean;
-    interactive_tool_approval?: boolean;
-    plan_mode?: boolean;
-    images?: AccountRuntimeImage[];
-    milim_context?: AccountRuntimeMilimContext;
-  },
-  onEvent: (event: PiRunEvent) => void,
+type AccountRuntimeImageEvent = Extract<HarnessEvent, { type: "image_generated" }>;
+type StreamHarnessRunFn = (
+  harnessId: "codex" | "claude" | "opencode" | "pi",
+  request: HarnessRunRequest,
+  onEvent: (event: HarnessEventEnvelope) => void,
   signal?: AbortSignal,
 ) => Promise<void>;
 type StreamChatFn = (
@@ -216,9 +146,6 @@ type StreamAgentRunFn = (
   toolContext?: AgentToolContext,
   reasoningEffort?: ReasoningEffort,
 ) => Promise<void>;
-
-export type CodexRunRequest = Parameters<StreamCodexRunFn>[0];
-export type ClaudeRunRequest = Parameters<StreamClaudeRunFn>[0];
 
 export function utilityAccountRuntimeMilimContext({
   toolContext,
@@ -245,76 +172,12 @@ export function utilityAccountRuntimeMilimContext({
   };
 }
 
-export function codexCompactionSummaryRequest({
-  model,
-  prompt,
-  cwd,
-  reasoningEffort,
-  images,
-  toolContext,
-}: {
-  model: string;
-  prompt: string;
-  cwd?: string;
-  reasoningEffort?: ReasoningEffort;
-  images?: AccountRuntimeImage[];
-  toolContext: AgentToolContext;
-}): CodexRunRequest {
-  return {
-    model,
-    prompt,
-    cwd,
-    reasoning_effort: reasoningEffort,
-    images,
-    persist_thread: false,
-    tool_approval_policy: "guarded",
-    tool_approval_grant: false,
-    plan_mode: true,
-    milim_context: utilityAccountRuntimeMilimContext({
-      toolContext,
-      toolApproval: "guarded",
-      planMode: true,
-    }),
-  };
-}
-
-export function claudeCompactionSummaryRequest({
-  model,
-  prompt,
-  cwd,
-  reasoningEffort,
-  images,
-  toolContext,
-}: {
-  model: string;
-  prompt: string;
-  cwd?: string;
-  reasoningEffort?: ReasoningEffort;
-  images?: AccountRuntimeImage[];
-  toolContext: AgentToolContext;
-}): ClaudeRunRequest {
-  return {
-    model,
-    prompt,
-    cwd,
-    reasoning_effort: reasoningEffort,
-    images,
-    tool_approval_policy: "guarded",
-    tool_approval_grant: false,
-    plan_mode: true,
-    milim_context: utilityAccountRuntimeMilimContext({
-      toolContext,
-      toolApproval: "guarded",
-      planMode: true,
-    }),
-  };
-}
-
 export const CLAUDE_SESSION_RECOVERY_REQUIRED =
   "CLAUDE_SESSION_RECOVERY_REQUIRED";
 
 export type AccountRuntimeEventState = {
   done: boolean;
+  cancelled: string | null;
   warning: string | null;
   error: string | null;
   sessionRecoveryRequired: string | null;
@@ -584,7 +447,7 @@ export function accountRuntimePromptMessages(
     : [...contextMessages, ...convo.slice(-1)];
 }
 
-export function createAccountRuntimeEventHandler({
+export function createHarnessEventHandler({
   append,
   appendThinking,
   flush,
@@ -592,9 +455,7 @@ export function createAccountRuntimeEventHandler({
   completeStreamEvent,
   captureRuntimeMetrics,
   captureProviderLimit,
-  setCodexThreadId,
-  setOpenCodeSessionId = () => {},
-  setPiSessionId = () => {},
+  setNativeSessionId,
   appendImage,
   onNativeWorker,
   onToolCompleted,
@@ -612,9 +473,7 @@ export function createAccountRuntimeEventHandler({
     cost_usd?: number;
   }) => void;
   captureProviderLimit?: (limit?: ProviderLimitInfo) => void;
-  setCodexThreadId?: (threadId: string) => void;
-  setOpenCodeSessionId?: (sessionId: string) => void;
-  setPiSessionId?: (sessionId: string) => void;
+  setNativeSessionId?: (sessionId: string) => void;
   appendImage?: (event: AccountRuntimeImageEvent) => void;
   onNativeWorker?: (lifecycle: AccountNativeWorkerLifecycle) => void;
   onToolCompleted?: (name: string) => void;
@@ -623,10 +482,11 @@ export function createAccountRuntimeEventHandler({
   now?: () => number;
 }): {
   state: AccountRuntimeEventState;
-  handle: (event: AccountRuntimeEvent) => void;
+  handle: (envelope: HarnessEventEnvelope) => void;
 } {
   const state: AccountRuntimeEventState = {
     done: false,
+    cancelled: null,
     warning: null,
     error: null,
     sessionRecoveryRequired: null,
@@ -635,19 +495,24 @@ export function createAccountRuntimeEventHandler({
   const settledToolIds = new Set<string>();
   return {
     state,
-    handle(event) {
-      if (event.type === "token") {
+    handle(envelope) {
+      const event = envelope.event;
+      if (event.type === "text_delta") {
         if (event.text) append(event.text);
-      } else if (event.type === "reasoning") {
+      } else if (event.type === "reasoning_delta") {
         if (event.text) appendThinking(event.text);
-      } else if (event.type === "tool") {
+      } else if (
+        event.type === "tool_started"
+        || event.type === "tool_updated"
+        || event.type === "tool_finished"
+      ) {
         flush();
         const part = accountRuntimeToolPart(event);
         const run = runRef?.current;
         const toolId = event.id || event.name;
-        if (part.status === "running") {
+        if (event.type !== "tool_finished") {
           const step = run && lastOpenStep(run.steps, event.name ?? undefined, event.id);
-          if (activeToolIds.has(toolId)) {
+          if (event.type === "tool_updated" || activeToolIds.has(toolId)) {
             if (step && event.detail) step.arguments = event.detail;
             completeStreamEvent(toolId, part);
           } else {
@@ -661,14 +526,21 @@ export function createAccountRuntimeEventHandler({
           activeToolIds.delete(toolId);
           const step = run && lastOpenStep(run.steps, event.name ?? undefined, event.id);
           if (step) {
-            if (part.status === "error") step.error = event.detail || `${event.name ?? "Tool"} failed`;
+            if (part.status === "error") {
+              step.error =
+                event.error ||
+                event.detail ||
+                `${event.name ?? "Tool"} failed`;
+            } else if (event.result != null) {
+              step.result = event.result;
+            }
             step.endedAt = now();
           }
           completeStreamEvent(toolId, part);
           if (part.status === "done") onToolCompleted?.(event.name);
         }
         snapshot?.();
-      } else if (event.type === "tool_approval_required") {
+      } else if (event.type === "approval_requested") {
         flush();
         const step = runRef?.current && (
           lastOpenStep(runRef.current.steps, event.name, event.call_id)
@@ -684,7 +556,19 @@ export function createAccountRuntimeEventHandler({
         }
         appendStreamEvent(toolApprovalPart(event));
         snapshot?.();
-      } else if (event.type === "tool_approval_resolved") {
+      } else if (event.type === "approval_status") {
+        flush();
+        const step = runRef?.current?.steps
+          .slice()
+          .reverse()
+          .find((candidate) => candidate.approval?.id === event.approval_id);
+        if (step?.approval) step.approval.status = event.status;
+        completeStreamEvent(
+          `approval:${event.approval_id}`,
+          toolApprovalPart({ ...event, name: step?.name, arguments: step?.arguments }),
+        );
+        snapshot?.();
+      } else if (event.type === "approval_resolved") {
         flush();
         const step = runRef?.current?.steps
           .slice()
@@ -703,31 +587,55 @@ export function createAccountRuntimeEventHandler({
           }),
         );
         snapshot?.();
-      } else if (event.type === "thread") {
-        setCodexThreadId?.(event.thread_id);
-      } else if (event.type === "session") {
-        setOpenCodeSessionId?.(event.session_id);
-        setPiSessionId?.(event.session_id);
-      } else if (event.type === "image") {
-        appendImage?.(event);
-      } else if (event.type === "native_worker") {
-        onNativeWorker?.(event.lifecycle);
-      } else if (event.type === "rate_limit") {
-        captureProviderLimit?.(event.limit);
-      } else if (event.type === "protocol_notice") {
+      } else if (event.type === "approval_failed") {
         flush();
-        appendStreamEvent(statusPart(event.message, event.detail ?? undefined, "warning"));
+        const step = runRef?.current?.steps
+          .slice()
+          .reverse()
+          .find((candidate) => candidate.approval?.id === event.approval_id);
+        if (step?.approval) {
+          step.approval.status = "failed";
+          step.approval.resolvedAt = now();
+        }
+        completeStreamEvent(
+          `approval:${event.approval_id}`,
+          toolApprovalPart({ ...event, name: step?.name, arguments: step?.arguments }),
+        );
         snapshot?.();
-      } else if (event.type === "done") {
+      } else if (event.type === "session_established") {
+        setNativeSessionId?.(event.native_session_id);
+      } else if (event.type === "image_generated") {
+        appendImage?.(event);
+      } else if (event.type === "native_worker_updated") {
+        onNativeWorker?.(event.lifecycle);
+      } else if (event.type === "limit_updated") {
+        captureProviderLimit?.(event.limit);
+      } else if (event.type === "runtime_notice") {
+        if (event.level === "warning" && event.code === "runtime_warning") {
+          state.warning = event.message;
+        } else {
+          flush();
+          appendStreamEvent(statusPart(event.message, event.detail ?? undefined, "warning"));
+          snapshot?.();
+        }
+      } else if (event.type === "usage_updated") {
         captureRuntimeMetrics(event);
-        if (event.status !== "running") state.done = true;
-      } else if (event.type === "warning") {
-        state.warning = event.message;
       } else if (event.type === "session_recovery_required") {
         state.sessionRecoveryRequired = event.message;
-      } else if (event.type === "error") {
+      } else if (event.type === "turn_completed") {
         captureRuntimeMetrics(event);
-        state.error = event.message;
+        state.done = true;
+      } else if (event.type === "turn_cancelled") {
+        captureRuntimeMetrics(event);
+        state.cancelled = event.message ?? "Harness turn was cancelled.";
+      } else if (event.type === "turn_failed") {
+        captureRuntimeMetrics(event);
+        if (
+          event.code !== "runtime_warning"
+          && event.code !== "session_recovery_required"
+        ) {
+          state.error = event.message;
+        }
       }
     },
   };
@@ -859,11 +767,11 @@ type RunAccountRuntimeTurnParams = {
   models?: ModelInfo[];
   runRef?: { current: RunTrace | null };
   snapshot?: () => void;
+  stream: StreamHarnessRunFn;
 } & (
   | {
       kind: "codex";
       threadId?: string;
-      stream: StreamCodexRunFn;
       setThreadId: (threadId: string) => void;
       appendImage?: (event: AccountRuntimeImageEvent) => void;
     }
@@ -871,20 +779,17 @@ type RunAccountRuntimeTurnParams = {
       kind: "claude";
       sessionId?: string;
       hadSession: boolean;
-      stream: StreamClaudeRunFn;
     }
   | {
       kind: "opencode";
       sessionId?: string;
       hadSession: boolean;
-      stream: StreamOpenCodeRunFn;
       setSessionId: (sessionId: string) => void;
     }
   | {
       kind: "pi";
       sessionId?: string;
       hadSession: boolean;
-      stream: StreamPiRunFn;
       setSessionId: (sessionId: string) => void;
     }
 );
@@ -960,7 +865,7 @@ export async function runAccountRuntimeTurn(
         lastSyncedMessageId,
       )
     : messagesForModelContext(contextMessages, prepared.conversation);
-  const events = createAccountRuntimeEventHandler({
+  const events = createHarnessEventHandler({
     append,
     appendThinking,
     flush,
@@ -970,10 +875,15 @@ export async function runAccountRuntimeTurn(
     captureProviderLimit,
     onNativeWorker,
     onToolCompleted,
-    setCodexThreadId: params.kind === "codex" ? params.setThreadId : undefined,
-    setOpenCodeSessionId: params.kind === "opencode" ? params.setSessionId : undefined,
-    setPiSessionId: params.kind === "pi" ? params.setSessionId : undefined,
+    setNativeSessionId:
+      params.kind === "codex"
+        ? params.setThreadId
+        : params.kind === "opencode" || params.kind === "pi"
+          ? params.setSessionId
+          : undefined,
     appendImage: params.kind === "codex" ? params.appendImage : undefined,
+    runRef,
+    snapshot,
   });
   const input = accountRuntimeInputFromMessages(outbound);
   const interactiveToolApproval =
@@ -997,81 +907,28 @@ export async function runAccountRuntimeTurn(
     snapshot?.();
   }
 
-  if (params.kind === "codex") {
-    await params.stream(
-      {
-        model,
-        prompt: input.prompt,
-        images: input.images,
-        cwd: workspace,
-        reasoning_effort: reasoningEffort,
-        thread_id: params.threadId,
-        persist_thread: true,
-        tool_approval_policy: toolApproval,
-        tool_approval_grant: toolApprovalGrant,
-        interactive_tool_approval: interactiveToolApproval,
-        plan_mode: planMode,
-        milim_context: milimContext,
-      },
-      events.handle,
-      signal,
-    );
-  } else if (params.kind === "claude") {
-    await params.stream(
-      {
-        model,
-        prompt: input.prompt,
-        images: input.images,
-        cwd: workspace,
-        reasoning_effort: reasoningEffort,
-        session_id: params.sessionId,
-        tool_approval_policy: toolApproval,
-        tool_approval_grant: toolApprovalGrant,
-        interactive_tool_approval: interactiveToolApproval,
-        plan_mode: planMode,
-        allow_session_recovery: allowClaudeSessionRecovery,
-        milim_context: milimContext,
-      },
-      events.handle,
-      signal,
-    );
-  } else if (params.kind === "opencode") {
-    await params.stream(
-      {
-        model,
-        prompt: input.prompt,
-        images: input.images,
-        cwd: workspace,
-        session_id: params.sessionId,
-        tool_approval_policy: toolApproval,
-        tool_approval_grant: toolApprovalGrant,
-        interactive_tool_approval: interactiveToolApproval,
-        plan_mode: planMode,
-        milim_context: milimContext,
-      },
-      events.handle,
-      signal,
-    );
-  } else {
-    await params.stream(
-      {
-        model,
-        prompt: input.prompt,
-        images: input.images,
-        cwd: workspace,
-        reasoning_effort: reasoningEffort,
-        session_id: params.sessionId,
-        persist_session: true,
-        tool_approval_policy: toolApproval,
-        tool_approval_grant: toolApprovalGrant,
-        interactive_tool_approval: interactiveToolApproval,
-        plan_mode: planMode,
-        milim_context: milimContext,
-      },
-      events.handle,
-      signal,
-    );
-  }
+  await params.stream(
+    params.kind,
+    {
+      model,
+      prompt: input.prompt,
+      images: input.images,
+      cwd: workspace,
+      reasoning_effort: reasoningEffort,
+      native_session_id:
+        params.kind === "codex" ? params.threadId : params.sessionId,
+      persist_session: params.kind === "codex" || params.kind === "pi",
+      tool_approval_policy: toolApproval,
+      tool_approval_grant: toolApprovalGrant,
+      interactive_tool_approval: interactiveToolApproval,
+      plan_mode: planMode,
+      allow_session_recovery:
+        params.kind === "claude" ? allowClaudeSessionRecovery : undefined,
+      milim_context: milimContext,
+    },
+    events.handle,
+    signal,
+  );
 
   if (events.state.sessionRecoveryRequired) {
     flush();
@@ -1094,6 +951,9 @@ export async function runAccountRuntimeTurn(
   }
 
   throwIfTurnAborted(signal);
+  if (events.state.cancelled) {
+    throw new Error(events.state.cancelled);
+  }
   if (events.state.error) {
     throw new Error(events.state.error);
   }
@@ -1149,10 +1009,7 @@ export async function runSelectedAccountRuntimeTurn({
   ensureClaudeSessionId,
   setOpenCodeSessionId = () => {},
   setPiSessionId = () => {},
-  streamCodexRun,
-  streamClaudeRun,
-  streamOpenCodeRun,
-  streamPiRun,
+  streamHarnessRun,
   ...common
 }: Omit<
   RunAccountRuntimeTurnParams,
@@ -1185,10 +1042,7 @@ export async function runSelectedAccountRuntimeTurn({
   ensureClaudeSessionId: () => string;
   setOpenCodeSessionId?: (sessionId: string) => void;
   setPiSessionId?: (sessionId: string) => void;
-  streamCodexRun: StreamCodexRunFn;
-  streamClaudeRun: StreamClaudeRunFn;
-  streamOpenCodeRun?: StreamOpenCodeRunFn;
-  streamPiRun?: StreamPiRunFn;
+  streamHarnessRun: StreamHarnessRunFn;
 }): Promise<null | { status: "done" | "skipped"; error?: string }> {
   if (codexModel) {
     return runAccountRuntimeTurn({
@@ -1198,7 +1052,7 @@ export async function runSelectedAccountRuntimeTurn({
       threadId: accountRuntime?.codexThreadId ?? undefined,
       lastSyncedMessageId:
         accountRuntime?.codexLastSyncedMessageId ?? undefined,
-      stream: streamCodexRun,
+      stream: streamHarnessRun,
       setThreadId: setCodexThreadId,
       appendImage,
     });
@@ -1212,12 +1066,10 @@ export async function runSelectedAccountRuntimeTurn({
       sessionId: ensureClaudeSessionId(),
       lastSyncedMessageId:
         accountRuntime?.claudeLastSyncedMessageId ?? undefined,
-      stream: streamClaudeRun,
+      stream: streamHarnessRun,
     });
   }
   if (opencodeModel) {
-    if (!streamOpenCodeRun)
-      throw new Error("OpenCode runtime bridge is unavailable.");
     return runAccountRuntimeTurn({
       ...common,
       kind: "opencode",
@@ -1226,12 +1078,11 @@ export async function runSelectedAccountRuntimeTurn({
       sessionId: accountRuntime?.opencodeSessionId ?? undefined,
       lastSyncedMessageId:
         accountRuntime?.opencodeLastSyncedMessageId ?? undefined,
-      stream: streamOpenCodeRun,
+      stream: streamHarnessRun,
       setSessionId: setOpenCodeSessionId,
     });
   }
   if (piModel) {
-    if (!streamPiRun) throw new Error("Pi runtime bridge is unavailable.");
     return runAccountRuntimeTurn({
       ...common,
       kind: "pi",
@@ -1240,7 +1091,7 @@ export async function runSelectedAccountRuntimeTurn({
       sessionId: accountRuntime?.piSessionId ?? undefined,
       lastSyncedMessageId:
         accountRuntime?.piLastSyncedMessageId ?? undefined,
-      stream: streamPiRun,
+      stream: streamHarnessRun,
       setSessionId: setPiSessionId,
     });
   }
@@ -1541,6 +1392,19 @@ export function createAgentRunEventHandler({
         appendStreamEvent(toolApprovalPart(event));
         break;
       }
+      case "tool_approval_status": {
+        if (!event.status) break;
+        const step = run.steps
+          .slice()
+          .reverse()
+          .find((candidate) => candidate.approval?.id === event.approval_id);
+        if (step?.approval) step.approval.status = event.status;
+        completeStreamEvent(
+          `approval:${event.approval_id}`,
+          toolApprovalPart({ ...event, name: step?.name, arguments: step?.arguments }),
+        );
+        break;
+      }
       case "tool_approval_resolved": {
         const step = lastOpenStep(run.steps, undefined, event.call_id);
         if (step?.approval && event.approval_id === step.approval.id) {
@@ -1554,6 +1418,21 @@ export function createAgentRunEventHandler({
             name: step?.name,
             arguments: step?.arguments,
           }),
+        );
+        break;
+      }
+      case "tool_approval_failed": {
+        const step = run.steps
+          .slice()
+          .reverse()
+          .find((candidate) => candidate.approval?.id === event.approval_id);
+        if (step?.approval) {
+          step.approval.status = "failed";
+          step.approval.resolvedAt = now();
+        }
+        completeStreamEvent(
+          `approval:${event.approval_id}`,
+          toolApprovalPart({ ...event, name: step?.name, arguments: step?.arguments }),
         );
         break;
       }

@@ -194,11 +194,22 @@ try {
     "The shared picker should retain all 200 discoverable models",
   );
 
-  const { ControlBar } = (await server.ssrLoadModule(
+  const { ControlBar, modelPickerPlacement } = (await server.ssrLoadModule(
     "/src/components/ControlBar.tsx",
   )) as {
     ControlBar: ComponentType<Record<string, unknown>>;
+    modelPickerPlacement: (triggerTop: number, triggerBottom: number, viewportHeight: number) => {
+      top: string;
+      bottom: string;
+      maxHeight: number;
+    };
   };
+  const constrainedPicker = modelPickerPlacement(260, 286, 675);
+  assert(constrainedPicker.bottom === "calc(100% + 6px)", "Chat picker should prefer its existing upward placement");
+  assert(constrainedPicker.maxHeight === 246, "Chat picker should fit the usable space above its trigger");
+  const flippedPicker = modelPickerPlacement(80, 106, 675);
+  assert(flippedPicker.top === "calc(100% + 6px)", "Chat picker should open below when there is too little room above");
+  assert(flippedPicker.maxHeight === 440, "A flipped picker should retain its normal maximum height when space allows");
   const controlBarMarkup = renderToStaticMarkup(
     createElement(ControlBar, {
       models,

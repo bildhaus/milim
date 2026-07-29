@@ -60,9 +60,10 @@ assert.match(
 );
 assert.match(goalDecision, /privacy_mode: decisionSettings\.privacy/);
 assert.ok(
-  (goalDecision.match(/milim_context:/g) ?? []).length === 4,
-  "every account-runtime goal decision must carry immutable context",
+  (goalDecision.match(/milim_context:/g) ?? []).length === 1,
+  "the canonical harness goal decision must carry immutable context",
 );
+assert.match(goalDecision, /: decisionMilimContext/);
 assert.match(goalDecision, /toolContext: decisionToolContext/);
 assert.doesNotMatch(goalDecision, /cwd: folder\.trim\(\)/);
 
@@ -82,6 +83,11 @@ assert.ok(
 );
 assert.match(runTurn, /persistingTurnIdsRef\.current\.has\(id\)/);
 assert.match(runTurn, /Milim could not save this turn, so it was not sent/);
+assert.match(
+  runTurn,
+  /runtimeKind[\s\S]*runRef\.current\?\.context[\s\S]*resultStatus === "error"[\s\S]*resultStatus === "aborted"[\s\S]*clearAccountRuntimeKind\(id, runtimeKind\)/,
+  "failed or canceled native turns must discard their divergent runtime session",
+);
 
 for (const [name, body] of [
   [

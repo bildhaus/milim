@@ -16,6 +16,10 @@
   cursor: wait;
 }
 
+.generated-media-thumbnail.passive {
+  cursor: inherit;
+}
+
 .generated-media-thumbnail img,
 .generated-media-thumbnail video {
   display: block;
@@ -45,6 +49,10 @@
 .generated-media-audio audio {
   width: 100%;
   min-width: 0;
+}
+
+.generated-media-audio.passive {
+  justify-content: center;
 }
 
 .generated-media-overlay {

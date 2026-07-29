@@ -10,19 +10,35 @@ After a Milim chat has a native Codex thread id, Claude session id, OpenCode ses
 
 Every account-runtime turn must report an explicit completion, error, or intentional terminal notice. If a runtime exits or closes its stream without one, Milim shows a runtime error instead of treating an empty response as success.
 
+Review approvals use a shared lifecycle: requested, user-decided, delivered to the runtime, then acknowledged when the runtime resumes. The decision endpoint is idempotent for identical retries and does not report success until the runtime adapter accepts the response. Delivery failures, disconnects, and post-delivery silence terminalize the turn with an actionable error; only the human decision wait is unbounded. Persisted transcripts retain nonterminal lifecycle states and reconcile them as interrupted after restart.
+
+Each adapter maps the normalized Approve/Deny choice to its own protocol. Codex selects only from the request's advertised `availableDecisions`—including `cancel` rather than assuming `decline`—while Claude, OpenCode, and Pi keep their native response shapes.
+
+Failed or canceled turns clear only the affected native session before the next send. This prevents a prompt that the CLI persisted before the failure from being replayed into divergent native history.
+
+All account-runtime tool events keep their full input text behind the transcript's visual ellipsis. Claude no longer truncates structured tool inputs server-side, while OpenCode and Pi also preserve completion results and error details in the shared run trace.
+
+## Canonical run-event boundary
+
+Desktop turns for all four built-ins use `POST /harnesses/{id}/run`, where `id` is `codex`, `claude`, `opencode`, or `pi`. The common request keeps the existing prompt, images, workspace, reasoning, approval, plan, privacy/Milim context, and model fields; `native_session_id` and `persist_session` replace the bridge-specific session field names at this facade only.
+
+The response is SSE. Every JSON event has `schema_version: 1`, a per-run `run_id`, increasing `seq`, `at_ms`, `harness_id`, and one canonical application event. The event vocabulary covers native session and turn identity, text and reasoning deltas, tool start/update/finish, approval lifecycle, usage and limits, generated images, native workers, runtime and recovery notices, and exactly one completed, failed, or cancelled terminal event. Bridge protocol names, ACP update tags, and JSON-RPC correlation ids do not cross this desktop boundary.
+
+This is normalization, not a runtime cutover. Codex, Claude, OpenCode, and Pi still use their current native adapters, session stores, approval behavior, and management sidebands. The existing `/codex/run`, `/claude/run`, `/opencode/run`, and `/pi/run` request and SSE contracts remain available for compatibility.
+
 ## OpenCode
 
 Milim invokes the user-installed `opencode acp` process once per turn and speaks ACP v1 JSON-RPC over stdio. `GET /opencode/status` and `GET /opencode/models` discover configured models without refreshing OpenCode's network cache; `POST /opencode/run` creates or resumes the native session, applies the exact selected model, streams normalized events, and forwards permission requests to Milim's one-shot approval cards. Plan, Guarded, Review, and Open map to a Milim-owned permission overlay. Guarded and Review refuse to run when `opencode debug config` shows that higher-precedence configuration weakened the promised policy.
 
 OpenCode also supports chats without a workspace folder. Milim supplies a private managed ACP directory for protocol compatibility and disables OpenCode's native filesystem tools; Milim-owned tools remain available.
 
-OpenCode remains responsible for its providers, credentials, instructions, and plugins. Milim does not bundle the CLI or read its credentials. Images use the existing outbound privacy gate and require Privacy Off.
+OpenCode remains responsible for its providers, credentials, instructions, and plugins. Milim does not bundle the CLI or read its credentials. Images use the existing outbound privacy gate and require Privacy Off. When supported by the installed CLI, verbose discovery supplies the picker with exact context, output, image, tool-use, and reasoning metadata.
 
 ## Pi
 
 Milim invokes the separately installed `pi` CLI in offline JSONL RPC mode. `GET /pi/status` reports availability, version, authentication/configuration state, provider count, normalized model metadata, and an actionable error; `GET /pi/models` returns the normalized catalog; `POST /pi/run` starts or resumes a Milim-owned Pi session with the exact `provider/model`, reasoning level, prompt, image inputs, workspace, and approval fields. Pi model ids use the `pi:<provider>/<model>` desktop prefix. Milim stores `piSessionId` plus its last-synced Milim message cursor so later turns resume Pi's native JSONL session without replaying already-owned history. Compaction and other side calls are ephemeral and do not reuse that session.
 
-Install Pi separately and authenticate inside Pi with `/login`. Pi owns its credentials and provider configuration; Milim neither reads nor stores them. Pi is useful as a distinct lean agent experience with its own detailed multi-provider catalog and subscription-backed providers such as GitHub Copilot, even where individual models overlap OpenCode or saved Milim providers.
+Install Pi separately and authenticate inside Pi with `/login`. Pi owns its credentials and provider configuration; Milim neither reads nor stores them. Catalog discovery confirms configured providers and models, while the first turn verifies the current credential; known expired-token failures show a `/login` recovery message. Pi is useful as a distinct lean agent experience with its own detailed multi-provider catalog and subscription-backed providers such as GitHub Copilot, even where individual models overlap OpenCode or saved Milim providers.
 
 Embedded runs always pass `--offline --no-extensions`. This prevents user or project extensions from executing startup code outside Milim's approval boundary while leaving Pi's context files, prompt templates, and skills on their normal discovery path. Plan and Guarded expose only `read`, `grep`, `find`, and `ls`. Review loads one temporary Milim-owned extension that pauses `bash`, `write`, `edit`, and any unknown tool call and forwards the exact generated arguments to Milim's one-shot approval broker. Open exposes Pi's built-in tools without prompts. The temporary extension is removed after the run; standalone Pi settings are never modified.
 
@@ -45,7 +61,7 @@ Codex uses the installed Codex CLI app-server.
 | `POST /codex/logout` | Logs out through Codex app-server. |
 | `GET /codex/models` | Lists Codex models and forwards Codex model metadata to the picker. |
 | `GET /codex/rate-limits` | Reads Codex account rate-limit state. |
-| `GET /codex/threads` | Lists active or archived interactive Codex threads in cursor-based pages of 25, with optional `search`. |
+| `GET /codex/threads` | Lists active or archived interactive Codex threads in cursor-based pages of 25, with optional `search`; `all=true` drains the matching catalog into one response. |
 | `GET /codex/threads/{id}` | Reads one importable user/assistant transcript without changing or deleting the Codex thread. |
 | `POST /codex/run` | Starts or resumes a Codex app-server thread with Milim's selected tool approval and workspace sandbox policy. |
 
@@ -67,7 +83,9 @@ Normal Codex processes initialize against the stable app-server API. Milim start
 
 Codex warnings, configuration warnings, model reroutes/verifications, and deprecation notices appear as nonterminal run events. Unknown server requests receive JSON-RPC method-not-found responses instead of blocking the app-server stream.
 
-The Providers screen exposes **Import chats** after Codex is connected. Search and page through active or archived app-server history, then import one selected chat. Import keeps only visible user/assistant text, replaces media-only messages with an omission marker, and omits reasoning, tool records, and local file references. Milim attaches the original Codex thread id and the final imported message as its sync cursor, so the next Codex turn resumes without replaying the imported transcript. The new Milim chat has current local timestamps and no selected model; choose a Codex model before continuing. An already-imported thread opens its existing Milim chat. Milim remains authoritative after this one-time import and does not continuously merge Codex history.
+The Providers screen exposes **Import chats** after Codex is connected. The picker loads the complete matching history, groups it by recorded project folder, and supports All, Active, and Archived scopes. Select a whole project, the no-project group, or individual chats; project selection is not narrowed by search, and existing imports are excluded. Missing folders remain visible under their recorded project but are display-only and never become the imported Milim workspace. Selected chats import sequentially, continue past individual failures, and remain in the dialog for review or retry.
+
+Import keeps only visible user/assistant text, replaces media-only messages with an omission marker, and omits reasoning, tool records, and local file references. Milim attaches the original Codex thread id and the final imported message as its sync cursor, so the next Codex turn resumes without replaying the imported transcript. New Milim chats have current local timestamps and no selected model; choose a Codex model before continuing. Milim remains authoritative after this one-time import and does not continuously merge Codex history.
 
 Legacy histories use stable `thread/read`. When Codex explicitly reports paginated history, chat import alone starts a narrowly experimental process and pages `thread/turns/list`; normal account operations and turns remain stable-only.
 
@@ -90,13 +108,15 @@ Claude CLI integration boundaries:
 | Surface | Behavior |
 |---|---|
 | `GET /claude/status` | Checks installed CLI availability, auth state, account metadata, model aliases, and optional per-alias image capability metadata. |
-| `GET /claude/threads` | Lists locally retained top-level Claude chats in cursor-based pages of 25, with optional `search`. |
+| `GET /claude/threads` | Lists locally retained top-level Claude chats in cursor-based pages of 25, with optional `search`; `all=true` returns the complete matching catalog. |
 | `GET /claude/threads/{id}` | Reads the selected chat's active importable user/assistant branch without changing its Claude transcript. |
 | `POST /claude/run` | Runs `claude -p --input-format stream-json --output-format stream-json` with Milim's selected tool approval mode. |
 
 `/claude/run` accepts `model`, `prompt`, the same optional base64 `images` array as Codex, optional `cwd`, optional `reasoning_effort`, optional `session_id`, optional `allow_session_recovery`, and Milim tool approval fields. A request may be image-only. Milim pipes a native user message containing text and Anthropic base64 image blocks into the CLI; no OCR or prompt-only image note is used. Milim desktop stores one Claude session id per Milim chat. New native sessions pass it as `--session-id`; existing Claude project transcripts pass it as `--resume`, so reopening a chat restores the same installed Claude CLI session instead of colliding with the existing transcript file. One-off side calls omit `session_id` and use `--no-session-persistence`.
 
-The Claude account card also exposes **Import chats**. Milim searches locally retained top-level UUID transcripts under Claude Code's project history, pages them newest-first, and imports one selected active branch at a time. Import keeps human prompts and assistant text, joins assistant fragments around omitted tool activity, replaces media-only prompts with an omission marker, and omits reasoning, tools, task notifications, attachments, and internal command scaffolding. Existing imports open instead of duplicating. A retained project folder attaches the native session and sync cursor for `--resume`; a missing project imports as transcript-only and leaves the session stale so Milim's existing Fresh/Resume choice appears before continuation. This is a one-time local import, not continuous synchronization or Claude.ai cloud history access.
+The Claude account card also exposes **Import chats**. Milim searches locally retained top-level UUID transcripts under Claude Code's project history and groups the complete newest-first catalog by recorded project folder. Select a whole project, the no-project group, or individual chats; search does not reduce project-wide selection, and existing imports open instead of duplicating. Selected chats import sequentially and failed transcripts remain selected for retry.
+
+Import keeps human prompts and assistant text, joins assistant fragments around omitted tool activity, replaces media-only prompts with an omission marker, and omits reasoning, tools, task notifications, attachments, and internal command scaffolding. A retained project folder attaches the native session and sync cursor for `--resume`; a missing project remains grouped under its recorded path but imports as transcript-only and leaves the session stale so Milim's existing Fresh/Resume choice appears before continuation. This is a one-time local import, not continuous synchronization or Claude.ai cloud history access.
 
 If Claude reports that a persisted session id is already in use, Milim emits a recovery-required event and asks before trying to stop a matching local `claude`/`node` process for that exact session id and retrying once. Milim does not delete Claude session registry files by default.
 

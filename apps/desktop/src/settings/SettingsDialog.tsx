@@ -256,6 +256,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const experimentalHashlinePatch = useUiPreferences((s) => s.experimentalHashlinePatch);
   const chatLayoutStyle = useUiPreferences((s) => s.chatLayoutStyle);
   const sidebarRailStyle = useUiPreferences((s) => s.sidebarRailStyle);
+  const settledThreadsEnabled = useUiPreferences((s) => s.settledThreadsEnabled);
   const showEmptyChatRidgeline = useUiPreferences((s) => s.showEmptyChatRidgeline);
   const autoColorThreadNames = useUiPreferences((s) => s.autoColorThreadNames);
   const messageWidth = useUiPreferences((s) => s.messageWidth);
@@ -303,6 +304,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const setExperimentalHashlinePatch = useUiPreferences((s) => s.setExperimentalHashlinePatch);
   const setChatLayoutStyle = useUiPreferences((s) => s.setChatLayoutStyle);
   const setSidebarRailStyle = useUiPreferences((s) => s.setSidebarRailStyle);
+  const setSettledThreadsEnabled = useUiPreferences((s) => s.setSettledThreadsEnabled);
   const setShowEmptyChatRidgeline = useUiPreferences((s) => s.setShowEmptyChatRidgeline);
   const setAutoColorThreadNames = useUiPreferences((s) => s.setAutoColorThreadNames);
   const setMessageWidth = useUiPreferences((s) => s.setMessageWidth);
@@ -1164,13 +1166,14 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                     <div className="setting-field"><span className="setting-mini-title">Tool approval</span><SettingsChoiceGroup value={configuredThreadDefaults.toolApproval} onChange={(toolApproval) => updateConfiguredDefaults({ toolApproval })} testIdPrefix="default-approval" options={[
                       { value: "review", label: "Review", detail: "Approve each mutating action." },
                       { value: "guarded", label: "Guarded", detail: "Only read-only tools are available." },
+                      { value: "open", label: "Open", detail: "Run without approval in trusted workspaces." },
                     ]} /></div>
                     <div className="setting-field"><span className="setting-mini-title">Delegation</span><SettingsChoiceGroup value={configuredThreadDefaults.delegationPolicy} onChange={(delegationPolicy) => updateConfiguredDefaults({ delegationPolicy })} testIdPrefix="default-delegation" options={[
                       { value: "off", label: "Off", detail: "Do not delegate." },
                       { value: "ask", label: "Ask", detail: "Pause on delegation proposals." },
                       { value: "auto", label: "Automatic", detail: "Allow eligible delegation." },
                     ]} /></div>
-                    <p className="sheet-hint">Computer Use, Plan Mode, goals, temporary instructions, and running state always reset. Open approval is intentionally unavailable as a global default.</p>
+                    <p className="sheet-hint">Computer Use, Plan Mode, goals, temporary instructions, and running state always reset. Changing the workspace folder resets approval to Review.</p>
                   </>
                 ) : null}
               </div>
@@ -1749,6 +1752,18 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                     onChange={setAutoColorThreadNames}
                     ariaLabel="Automatically color project thread names"
                     testId="auto-color-thread-names-toggle"
+                  />
+                </div>
+                <div className="setting-toggle-row">
+                  <div>
+                    <strong>Settled threads</strong>
+                    <span>Move finished threads into a compact tier at the bottom of the sidebar.</span>
+                  </div>
+                  <Toggle
+                    checked={settledThreadsEnabled}
+                    onChange={setSettledThreadsEnabled}
+                    ariaLabel="Settled threads"
+                    testId="settled-threads-toggle"
                   />
                 </div>
               </div>

@@ -19,6 +19,7 @@ pub use threads::{
 };
 
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -67,9 +68,21 @@ impl Default for AgentRunConfig {
 
 #[derive(Debug)]
 pub struct ToolApprovalBroker {
-    pending: Mutex<HashMap<String, Option<tokio::sync::oneshot::Sender<ApprovalDecision>>>>,
+    pending: Mutex<HashMap<String, ApprovalEntry>>,
     external: Mutex<HashMap<String, ExternalApprovalMeta>>,
     notices: tokio::sync::broadcast::Sender<ApprovalNotice>,
+}
+
+pub const APPROVAL_DELIVERY_TIMEOUT: Duration = Duration::from_secs(15);
+pub const APPROVAL_RUNTIME_ACK_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Debug)]
+struct ApprovalEntry {
+    sender: Option<tokio::sync::oneshot::Sender<ApprovalDecision>>,
+    decision: Option<bool>,
+    response_fingerprint: Option<u64>,
+    snapshot: ApprovalSnapshot,
+    updates: tokio::sync::watch::Sender<ApprovalSnapshot>,
 }
 
 #[derive(Debug, Clone)]
@@ -89,13 +102,38 @@ pub struct ApprovalNotice {
     pub name: String,
     pub arguments: String,
     pub effect: ToolEffect,
+    pub state: ApprovalState,
     pub decision: Option<&'static str>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalState {
+    Requested,
+    Decided,
+    Delivered,
+    Acknowledged,
+    Failed,
+    Canceled,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ApprovalSnapshot {
+    pub approval_id: String,
+    pub state: ApprovalState,
+    pub decision: Option<&'static str>,
+    pub error: Option<String>,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum ApprovalResolve {
     Resolved,
     AlreadyResolved,
+    Conflict,
+    Failed,
     Missing,
 }
 
@@ -115,12 +153,43 @@ impl ToolApprovalBroker {
     pub fn request(self: &Arc<Self>) -> PendingApproval {
         let id = uuid::Uuid::new_v4().to_string();
         let (sender, receiver) = tokio::sync::oneshot::channel();
+        let now = approval_now_ms();
+        let snapshot = ApprovalSnapshot {
+            approval_id: id.clone(),
+            state: ApprovalState::Requested,
+            decision: None,
+            error: None,
+            created_at_ms: now,
+            updated_at_ms: now,
+        };
+        let (updates, _) = tokio::sync::watch::channel(snapshot.clone());
         let mut pending = self.pending.lock().expect("tool approval broker poisoned");
         // ponytail: resolved ids are diagnostic only; discard them once the small cap is reached.
         if pending.len() >= 2048 {
-            pending.retain(|_, sender| sender.is_some());
+            let removed = pending
+                .iter()
+                .filter_map(|(id, entry)| {
+                    approval_state_terminal(entry.snapshot.state).then_some(id.clone())
+                })
+                .collect::<Vec<_>>();
+            for id in &removed {
+                pending.remove(id);
+            }
+            let mut external = self.external.lock().expect("tool approval broker poisoned");
+            for id in removed {
+                external.remove(&id);
+            }
         }
-        pending.insert(id.clone(), Some(sender));
+        pending.insert(
+            id.clone(),
+            ApprovalEntry {
+                sender: Some(sender),
+                decision: None,
+                response_fingerprint: None,
+                snapshot,
+                updates,
+            },
+        );
         PendingApproval {
             id,
             receiver,
@@ -138,32 +207,49 @@ impl ToolApprovalBroker {
         approved: bool,
         response: Option<Value>,
     ) -> ApprovalResolve {
-        let mut pending = self.pending.lock().expect("tool approval broker poisoned");
-        match pending.get_mut(id) {
-            Some(sender @ Some(_)) => {
-                let sender = sender.take().expect("checked sender");
-                let _ = sender.send(ApprovalDecision { approved, response });
-                if let Some(meta) = self
-                    .external
-                    .lock()
-                    .expect("tool approval broker poisoned")
-                    .get(id)
+        let response_fingerprint = approval_response_fingerprint(&response);
+        let decision = ApprovalDecision { approved, response };
+        let (result, snapshot) = {
+            let mut pending = self.pending.lock().expect("tool approval broker poisoned");
+            let Some(entry) = pending.get_mut(id) else {
+                return ApprovalResolve::Missing;
+            };
+            if entry.snapshot.state != ApprovalState::Requested {
+                let result = if entry.decision == Some(approved)
+                    && entry.response_fingerprint == Some(response_fingerprint)
                 {
-                    let _ = self.notices.send(ApprovalNotice {
-                        run_id: meta.run_id.clone(),
-                        approval_id: id.to_string(),
-                        call_id: meta.call_id.clone(),
-                        name: meta.name.clone(),
-                        arguments: meta.arguments.clone(),
-                        effect: meta.effect,
-                        decision: Some(if approved { "approve" } else { "deny" }),
-                    });
-                }
-                ApprovalResolve::Resolved
+                    ApprovalResolve::AlreadyResolved
+                } else if matches!(
+                    entry.snapshot.state,
+                    ApprovalState::Failed | ApprovalState::Canceled
+                ) {
+                    ApprovalResolve::Failed
+                } else {
+                    ApprovalResolve::Conflict
+                };
+                return result;
             }
-            Some(None) => ApprovalResolve::AlreadyResolved,
-            None => ApprovalResolve::Missing,
+            let Some(sender) = entry.sender.take() else {
+                return ApprovalResolve::Failed;
+            };
+            entry.decision = Some(approved);
+            entry.response_fingerprint = Some(response_fingerprint);
+            if sender.send(decision).is_err() {
+                transition_entry(
+                    entry,
+                    ApprovalState::Failed,
+                    Some("approval receiver disconnected before delivery".to_string()),
+                );
+                (ApprovalResolve::Failed, Some(entry.snapshot.clone()))
+            } else {
+                transition_entry(entry, ApprovalState::Decided, None);
+                (ApprovalResolve::Resolved, Some(entry.snapshot.clone()))
+            }
+        };
+        if let Some(snapshot) = snapshot {
+            self.publish_notice(id, &snapshot);
         }
+        result
     }
 
     pub fn request_external(
@@ -193,13 +279,151 @@ impl ToolApprovalBroker {
             name,
             arguments,
             effect,
+            state: ApprovalState::Requested,
             decision: None,
+            error: None,
         });
         pending
     }
 
+    pub fn snapshot(&self, id: &str) -> Option<ApprovalSnapshot> {
+        self.pending
+            .lock()
+            .expect("tool approval broker poisoned")
+            .get(id)
+            .map(|entry| entry.snapshot.clone())
+    }
+
+    pub async fn wait_for_delivery(&self, id: &str, timeout: Duration) -> Option<ApprovalSnapshot> {
+        let mut updates = self
+            .pending
+            .lock()
+            .expect("tool approval broker poisoned")
+            .get(id)
+            .map(|entry| entry.updates.subscribe())?;
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let snapshot = updates.borrow().clone();
+            if matches!(
+                snapshot.state,
+                ApprovalState::Delivered
+                    | ApprovalState::Acknowledged
+                    | ApprovalState::Failed
+                    | ApprovalState::Canceled
+            ) {
+                return Some(snapshot);
+            }
+            match tokio::time::timeout_at(deadline, updates.changed()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => return self.snapshot(id),
+                Err(_) => {
+                    self.fail(id, "runtime did not accept the approval decision in time");
+                    return self.snapshot(id);
+                }
+            }
+        }
+    }
+
+    pub fn mark_delivered(&self, id: &str) -> Option<ApprovalSnapshot> {
+        self.transition(id, ApprovalState::Delivered, None)
+    }
+
+    pub fn acknowledge(&self, id: &str) -> Option<ApprovalSnapshot> {
+        self.transition(id, ApprovalState::Acknowledged, None)
+    }
+
+    pub fn fail(&self, id: &str, error: impl Into<String>) -> Option<ApprovalSnapshot> {
+        self.transition(id, ApprovalState::Failed, Some(error.into()))
+    }
+
+    pub fn acknowledge_run(&self, run_id: &str) {
+        let ids = self.external_ids(run_id);
+        for id in ids {
+            if self
+                .snapshot(&id)
+                .is_some_and(|snapshot| snapshot.state == ApprovalState::Delivered)
+            {
+                self.acknowledge(&id);
+            }
+        }
+    }
+
+    pub fn fail_run(&self, run_id: &str, error: &str) {
+        for id in self.external_ids(run_id) {
+            if self
+                .snapshot(&id)
+                .is_some_and(|snapshot| !approval_state_terminal(snapshot.state))
+            {
+                self.fail(&id, error.to_string());
+            }
+        }
+    }
+
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<ApprovalNotice> {
         self.notices.subscribe()
+    }
+
+    fn transition(
+        &self,
+        id: &str,
+        state: ApprovalState,
+        error: Option<String>,
+    ) -> Option<ApprovalSnapshot> {
+        let snapshot = {
+            let mut pending = self.pending.lock().expect("tool approval broker poisoned");
+            let entry = pending.get_mut(id)?;
+            let allowed = match state {
+                ApprovalState::Delivered => entry.snapshot.state == ApprovalState::Decided,
+                ApprovalState::Acknowledged => entry.snapshot.state == ApprovalState::Delivered,
+                ApprovalState::Failed | ApprovalState::Canceled => {
+                    !approval_state_terminal(entry.snapshot.state)
+                }
+                ApprovalState::Requested | ApprovalState::Decided => false,
+            };
+            if !allowed {
+                return Some(entry.snapshot.clone());
+            }
+            if matches!(state, ApprovalState::Failed | ApprovalState::Canceled) {
+                entry.sender.take();
+            }
+            transition_entry(entry, state, error);
+            entry.snapshot.clone()
+        };
+        self.publish_notice(id, &snapshot);
+        Some(snapshot)
+    }
+
+    fn external_ids(&self, run_id: &str) -> Vec<String> {
+        self.external
+            .lock()
+            .expect("tool approval broker poisoned")
+            .iter()
+            .filter_map(|(id, meta)| (meta.run_id == run_id).then_some(id.clone()))
+            .collect()
+    }
+
+    fn publish_notice(&self, id: &str, snapshot: &ApprovalSnapshot) {
+        let meta = {
+            let mut external = self.external.lock().expect("tool approval broker poisoned");
+            if approval_state_terminal(snapshot.state) {
+                external.remove(id)
+            } else {
+                external.get(id).cloned()
+            }
+        };
+        if let Some(meta) = meta {
+            let _ = self.notices.send(ApprovalNotice {
+                run_id: meta.run_id,
+                approval_id: id.to_string(),
+                call_id: meta.call_id,
+                name: meta.name,
+                arguments: meta.arguments,
+                effect: meta.effect,
+                state: snapshot.state,
+                decision: snapshot.decision,
+                error: snapshot.error.clone(),
+            });
+        }
     }
 }
 
@@ -216,10 +440,46 @@ impl Default for ToolApprovalBroker {
 
 impl PendingApproval {
     pub async fn wait(&mut self) -> ApprovalDecision {
-        (&mut self.receiver).await.unwrap_or(ApprovalDecision {
-            approved: false,
-            response: None,
-        })
+        match (&mut self.receiver).await {
+            Ok(decision) => decision,
+            Err(_) => {
+                if let Some(broker) = self.broker.upgrade() {
+                    broker.fail(&self.id, "approval request was canceled");
+                }
+                ApprovalDecision {
+                    approved: false,
+                    response: None,
+                }
+            }
+        }
+    }
+
+    pub fn mark_delivered(&self) -> Option<ApprovalSnapshot> {
+        self.broker.upgrade()?.mark_delivered(&self.id)
+    }
+
+    pub fn deliver(&self) -> std::result::Result<ApprovalSnapshot, String> {
+        let snapshot = self
+            .mark_delivered()
+            .ok_or_else(|| "approval transaction expired".to_string())?;
+        if matches!(
+            snapshot.state,
+            ApprovalState::Delivered | ApprovalState::Acknowledged
+        ) {
+            Ok(snapshot)
+        } else {
+            Err(snapshot
+                .error
+                .unwrap_or_else(|| "approval decision is no longer deliverable".to_string()))
+        }
+    }
+
+    pub fn acknowledge(&self) -> Option<ApprovalSnapshot> {
+        self.broker.upgrade()?.acknowledge(&self.id)
+    }
+
+    pub fn fail(&self, error: impl Into<String>) -> Option<ApprovalSnapshot> {
+        self.broker.upgrade()?.fail(&self.id, error)
     }
 }
 
@@ -228,19 +488,53 @@ impl Drop for PendingApproval {
         let Some(broker) = self.broker.upgrade() else {
             return;
         };
-        let mut pending = broker
-            .pending
-            .lock()
-            .expect("tool approval broker poisoned");
-        if pending.get(&self.id).is_some_and(Option::is_some) {
-            pending.remove(&self.id);
+        match broker.snapshot(&self.id).map(|snapshot| snapshot.state) {
+            Some(ApprovalState::Requested) => {
+                broker.transition(
+                    &self.id,
+                    ApprovalState::Canceled,
+                    Some("approval request was abandoned".to_string()),
+                );
+            }
+            Some(ApprovalState::Decided) => {
+                broker.fail(&self.id, "approval delivery was interrupted");
+            }
+            _ => {}
         }
-        broker
-            .external
-            .lock()
-            .expect("tool approval broker poisoned")
-            .remove(&self.id);
     }
+}
+
+fn transition_entry(entry: &mut ApprovalEntry, state: ApprovalState, error: Option<String>) {
+    entry.snapshot.state = state;
+    entry.snapshot.decision = entry
+        .decision
+        .map(|approved| if approved { "approve" } else { "deny" });
+    entry.snapshot.error = error;
+    entry.snapshot.updated_at_ms = approval_now_ms();
+    entry.updates.send_replace(entry.snapshot.clone());
+}
+
+fn approval_state_terminal(state: ApprovalState) -> bool {
+    matches!(
+        state,
+        ApprovalState::Acknowledged | ApprovalState::Failed | ApprovalState::Canceled
+    )
+}
+
+fn approval_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn approval_response_fingerprint(response: &Option<Value>) -> u64 {
+    // ponytail: process-local idempotency only; use a durable digest if approvals cross restarts.
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    response.as_ref().map(Value::to_string).hash(&mut hasher);
+    hasher.finish()
 }
 
 impl AgentRunConfig {
@@ -595,6 +889,8 @@ pub fn run_agent_stream_with_config(
                             effect,
                         };
                         let approved = pending.wait().await.approved;
+                        let _ = pending.deliver();
+                        pending.acknowledge();
                         yield AgentEvent::ToolApprovalResolved {
                             approval_id: pending.id.clone(),
                             call_id: call.id.clone(),
@@ -1080,7 +1376,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approval_broker_is_exact_one_shot_and_cleans_abandoned_calls() {
+    async fn approval_broker_tracks_delivery_and_idempotent_resolution() {
         let broker = Arc::new(ToolApprovalBroker::default());
         let mut pending = broker.request();
         let id = pending.id.clone();
@@ -1088,18 +1384,38 @@ mod tests {
             broker.resolve_with_response(&id, true, Some(json!({ "name": "Milim" }))),
             ApprovalResolve::Resolved
         );
-        assert_eq!(broker.resolve(&id, true), ApprovalResolve::AlreadyResolved);
+        assert_eq!(
+            broker.resolve_with_response(&id, true, Some(json!({ "name": "Milim" }))),
+            ApprovalResolve::AlreadyResolved
+        );
+        assert_eq!(broker.resolve(&id, false), ApprovalResolve::Conflict);
         let decision = pending.wait().await;
         assert!(decision.approved);
         assert_eq!(decision.response, Some(json!({ "name": "Milim" })));
+        assert_eq!(broker.snapshot(&id).unwrap().state, ApprovalState::Decided);
+        pending.mark_delivered();
+        assert_eq!(
+            broker
+                .wait_for_delivery(&id, Duration::from_millis(10))
+                .await
+                .unwrap()
+                .state,
+            ApprovalState::Delivered
+        );
+        pending.acknowledge();
+        assert_eq!(
+            broker.snapshot(&id).unwrap().state,
+            ApprovalState::Acknowledged
+        );
         drop(pending);
 
         let abandoned = broker.request();
         let abandoned_id = abandoned.id.clone();
         drop(abandoned);
+        assert_eq!(broker.resolve(&abandoned_id, true), ApprovalResolve::Failed);
         assert_eq!(
-            broker.resolve(&abandoned_id, true),
-            ApprovalResolve::Missing
+            broker.snapshot(&abandoned_id).unwrap().state,
+            ApprovalState::Canceled
         );
     }
 
@@ -1118,14 +1434,26 @@ mod tests {
         assert_eq!(requested.run_id, "run-1");
         assert_eq!(requested.call_id.as_deref(), Some("call-1"));
         assert_eq!(requested.decision, None);
+        assert_eq!(requested.state, ApprovalState::Requested);
 
         assert_eq!(
             broker.resolve(&pending.id, false),
             ApprovalResolve::Resolved
         );
-        let resolved = notices.recv().await.unwrap();
-        assert_eq!(resolved.decision, Some("deny"));
+        let decided = notices.recv().await.unwrap();
+        assert_eq!(decided.decision, Some("deny"));
+        assert_eq!(decided.state, ApprovalState::Decided);
         assert!(!pending.wait().await.approved);
+        pending.mark_delivered();
+        assert_eq!(
+            notices.recv().await.unwrap().state,
+            ApprovalState::Delivered
+        );
+        broker.acknowledge_run("run-1");
+        assert_eq!(
+            notices.recv().await.unwrap().state,
+            ApprovalState::Acknowledged
+        );
     }
 
     #[tokio::test]

@@ -7,7 +7,6 @@ import {
   type KeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { createPortal } from "react-dom";
 import {
   deleteMediaLibraryItem,
   generateMedia,
@@ -58,18 +57,42 @@ import { ComposerSurface } from "./ComposerSurface";
 import { GeneratedMedia } from "./GeneratedMedia";
 import { InlineMediaControls } from "./InlineMediaControls";
 import { ModelPicker } from "./ModelPicker";
+import { ProvidersManager } from "./ProvidersManager";
 import { SheetDialog } from "./SheetDialog";
 import { Select } from "./ui";
 
 type MediaModelCatalog = Record<string, Partial<Record<MediaKind, MediaModelInfo[]>>>;
+type GenerationPhase = "idle" | "submitting" | "failed";
+type LibraryAction = "refresh" | "delete" | "reveal";
+type LibraryFeedback = { id: string; label: string; message: string };
 
-export function MediaManager({
-  onClose,
-  onManageProviders,
-}: {
-  onClose: () => void;
-  onManageProviders?: () => void;
-}) {
+function schemaDraftFromInput(schema: MediaModelSchema, input: Record<string, unknown>) {
+  const advanced = structuredClone(input);
+  const values: Record<string, unknown> = {};
+  for (const control of schema.controls) {
+    if (!control.path.length) continue;
+    let source: unknown = input;
+    let target: unknown = advanced;
+    for (const segment of control.path.slice(0, -1)) {
+      source = source && typeof source === "object" && !Array.isArray(source)
+        ? (source as Record<string, unknown>)[segment]
+        : undefined;
+      target = target && typeof target === "object" && !Array.isArray(target)
+        ? (target as Record<string, unknown>)[segment]
+        : undefined;
+    }
+    const key = control.path[control.path.length - 1];
+    if (source && typeof source === "object" && !Array.isArray(source) && Object.prototype.hasOwnProperty.call(source, key)) {
+      values[control.key] = (source as Record<string, unknown>)[key];
+    }
+    if (target && typeof target === "object" && !Array.isArray(target)) {
+      delete (target as Record<string, unknown>)[key];
+    }
+  }
+  return { advanced, values };
+}
+
+export function MediaManager({ onClose }: { onClose: () => void }) {
   const mediaSettings = useSettings((s) => s.media);
   const setMediaSettings = useSettings((s) => s.setMediaSettings);
   const savedStudioWidth = useUiPreferences((s) => s.mediaStudioWidth);
@@ -90,11 +113,13 @@ export function MediaManager({
   const [modelPickerStyle, setModelPickerStyle] = useState<CSSProperties>();
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [modelSchema, setModelSchema] = useState<MediaModelSchema | null>(null);
+  const [schemaVersion, setSchemaVersion] = useState(0);
   const [parameterValues, setParameterValues] = useState<Record<string, unknown>>({});
   const [modelsLoading, setModelsLoading] = useState(false);
   const [schemaLoading, setSchemaLoading] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [generationPhase, setGenerationPhase] = useState<GenerationPhase>("idle");
+  const [generationError, setGenerationError] = useState<string | null>(null);
+  const [stageRequest, setStageRequest] = useState<{ kind: MediaKind; model: string } | null>(null);
   const [results, setResults] = useState<MediaGenerationResult[]>([]);
   const [libraryItems, setLibraryItems] = useState<MediaLibraryItem[]>([]);
   const [libraryCursor, setLibraryCursor] = useState<string | null>(null);
@@ -105,15 +130,45 @@ export function MediaManager({
   const [libraryLoading, setLibraryLoading] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [selectedLibraryId, setSelectedLibraryId] = useState("");
+  const [libraryListError, setLibraryListError] = useState<string | null>(null);
+  const [libraryAction, setLibraryAction] = useState<{ id: string; action: LibraryAction } | null>(null);
+  const [libraryActionError, setLibraryActionError] = useState<LibraryFeedback | null>(null);
+  const [libraryNotice, setLibraryNotice] = useState<LibraryFeedback | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState("");
+  const [providersOpen, setProvidersOpen] = useState(false);
+  const [providersVersion, setProvidersVersion] = useState(0);
+  const [stageVariantIndex, setStageVariantIndex] = useState(0);
   const [privacyMode, setPrivacyModeLabel] = useState("off");
   const pollingKeys = useRef<Set<string>>(new Set());
+  const generationInFlightRef = useRef(false);
+  const generationRunRef = useRef(0);
   const libraryRequest = useRef(0);
-  const libraryVisibilityInitialized = useRef(false);
+  const libraryLoadingRef = useRef(false);
+  const libraryLoadedRef = useRef(false);
+  const providerRequest = useRef(0);
   const reusedModelRef = useRef<string | null>(null);
+  const reusedInputRef = useRef<{
+    providerId: string;
+    model: string;
+    kind: MediaKind;
+    input: Record<string, unknown>;
+  } | null>(null);
+  const preserveProviderDraftRef = useRef(false);
   const resizeCleanupRef = useRef<(() => void) | null>(null);
+  const deleteConfirmTimerRef = useRef<number | null>(null);
+  const promptRef = useRef<HTMLTextAreaElement>(null);
   const modelPickerTriggerRef = useRef<HTMLButtonElement>(null);
   const modelPickerPopoverRef = useRef<HTMLDivElement>(null);
+  const libraryToggleRef = useRef<HTMLButtonElement>(null);
+  const variantRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const libraryCardRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
+  const selectedLibraryIdRef = useRef("");
+  const libraryFiltersRef = useRef({
+    query: "",
+    kind: "" as MediaKind | "",
+    provider: "",
+    status: "" as MediaLibraryStatus | "",
+  });
   const metadataProvider = Boolean(selectedProvider && supportsMediaMetadataProvider(selectedProvider));
   const mediaPickerRoutes = useMemo(() => {
     const routes = new Map<string, { provider: ProviderInfo; info: MediaModelInfo; kinds: MediaKind[] }>();
@@ -154,15 +209,36 @@ export function MediaManager({
   const selectedModelLabel = selectedModelInfo?.name
     ? `${selectedModelInfo.name} (${selectedModelInfo.id})`
     : model;
-  const selectedLibraryItem = libraryItems.find((item) => item.id === selectedLibraryId)
-    ?? (!selectedLibraryId ? libraryItems[0] ?? null : null);
+  const selectedLibraryItem = libraryItems.find((item) => item.id === selectedLibraryId) ?? null;
   const latestResult = results[0] ?? null;
+  const busy = generationPhase === "submitting";
+  selectedLibraryIdRef.current = selectedLibraryId;
+  libraryLoadingRef.current = libraryLoading;
+  libraryFiltersRef.current = {
+    query: libraryQuery,
+    kind: libraryKind,
+    provider: libraryProvider,
+    status: libraryStatus,
+  };
 
   useEffect(() => {
     setStudioSize(normalizeMediaStudioSize(savedStudioWidth, savedStudioHeight));
   }, [savedStudioWidth, savedStudioHeight]);
 
-  useEffect(() => () => resizeCleanupRef.current?.(), []);
+  useEffect(() => () => {
+    resizeCleanupRef.current?.();
+    generationRunRef.current += 1;
+    if (deleteConfirmTimerRef.current !== null) window.clearTimeout(deleteConfirmTimerRef.current);
+  }, []);
+
+  useEffect(() => {
+    const textarea = promptRef.current;
+    if (!textarea) return;
+    textarea.style.height = "0px";
+    const height = Math.min(textarea.scrollHeight, 150);
+    textarea.style.height = `${height}px`;
+    textarea.style.overflowY = textarea.scrollHeight > height ? "auto" : "hidden";
+  }, [prompt, providersOpen]);
 
   useEffect(() => {
     if (!modelPickerOpen) return;
@@ -170,9 +246,9 @@ export function MediaManager({
       const target = event.target;
       if (!(target instanceof Node)) return;
       if (modelPickerTriggerRef.current?.contains(target) || modelPickerPopoverRef.current?.contains(target)) return;
-      setModelPickerOpen(false);
+      closeModelPicker(false);
     };
-    const closeOnResize = () => setModelPickerOpen(false);
+    const closeOnResize = () => closeModelPicker(false);
     document.addEventListener("mousedown", closeOnOutsideClick);
     window.addEventListener("resize", closeOnResize);
     return () => {
@@ -182,34 +258,24 @@ export function MediaManager({
   }, [modelPickerOpen]);
 
   useEffect(() => {
+    if (deleteConfirmTimerRef.current !== null) window.clearTimeout(deleteConfirmTimerRef.current);
+    deleteConfirmTimerRef.current = null;
     setConfirmDeleteId("");
-  }, [selectedLibraryId]);
+    setLibraryActionError(null);
+  }, [selectedLibraryId, libraryQuery, libraryKind, libraryProvider, libraryStatus, libraryOpen]);
 
   useEffect(() => {
-    listProviders().then((next) => {
-      const media = mediaProviders(next);
-      const saved = useSettings.getState().media;
-      const initialProvider = media.find((provider) => provider.id === saved.providerId) ?? media[0];
-      const initialModel = initialProvider
-        ? saved.modelByProvider[initialProvider.id] || defaultMediaModel(initialProvider)
-        : "";
-      const key = initialProvider ? mediaPreferenceKey(initialProvider.id, initialModel) : "";
-      setProviders(next);
-      setProviderId((current) => current || initialProvider?.id || "");
-      setModel((current) => current || initialModel);
-      setAdvanced((current) => current === DEFAULT_MEDIA_ADVANCED_INPUT && key
-        ? saved.advancedByProviderModel[key] ?? defaultMediaAdvanced(initialProvider)
-        : current);
-      setParameterValues(key ? saved.parametersByProviderModel[key] ?? {} : {});
-    });
+    void refreshProviders();
     getPrivacyMode()
       .then(setPrivacyModeLabel)
       .catch(() => undefined);
   }, []);
 
   useEffect(() => {
+    const quiet = !libraryLoadedRef.current;
     const timer = window.setTimeout(() => {
-      void loadLibrary();
+      libraryLoadedRef.current = true;
+      void loadLibrary(undefined, false, quiet);
     }, 150);
     return () => window.clearTimeout(timer);
   }, [libraryQuery, libraryKind, libraryProvider, libraryStatus]);
@@ -220,21 +286,20 @@ export function MediaManager({
       const running = libraryItems.filter((item) => item.save_state === "running");
       if (running.length) {
         void Promise.all(running.map((item) => refreshMediaLibraryItem(item.id)))
-          .then(() => loadLibrary())
-          .catch(() => loadLibrary());
+          .then(() => loadLibrary(undefined, false, true))
+          .catch(() => loadLibrary(undefined, false, true));
       } else {
-        void loadLibrary();
+        void loadLibrary(undefined, false, true);
       }
     }, 3000);
     return () => window.clearInterval(timer);
-  }, [libraryItems.map((item) => `${item.id}:${item.save_state}`).join("\u0000")]);
-
-  useEffect(() => {
-    if (!selectedProvider) return;
-    setProviderId(selectedProvider.id);
-    setMediaSettings({ providerId: selectedProvider.id });
-    setModel((current) => current || mediaSettings.modelByProvider[selectedProvider.id] || defaultMediaModel(selectedProvider));
-  }, [selectedProvider]);
+  }, [
+    libraryItems.map((item) => `${item.id}:${item.save_state}`).join("\u0000"),
+    libraryQuery,
+    libraryKind,
+    libraryProvider,
+    libraryStatus,
+  ]);
 
   useEffect(() => {
     if (!available.length) {
@@ -261,7 +326,7 @@ export function MediaManager({
     return () => {
       cancelled = true;
     };
-  }, [available.map((provider) => provider.id).join("\u0000")]);
+  }, [available.map((provider) => provider.id).join("\u0000"), providersVersion]);
 
   useEffect(() => {
     if (!selectedProvider || !metadataProvider) {
@@ -273,7 +338,10 @@ export function MediaManager({
     }
     let cancelled = false;
     setModelsLoading(true);
-    setError(null);
+    setModelOptions([]);
+    setModelSchema(null);
+    setSchemaLoading(true);
+    setGenerationError(null);
     listMediaModels(selectedProvider.id, kind)
       .then((models) => {
         if (cancelled) return;
@@ -296,9 +364,15 @@ export function MediaManager({
         if (nextModel && nextModel !== model) {
           applyModel(nextModel, selectedProvider);
         }
+        if (!nextModel || !models.some((item) => item.id === nextModel)) {
+          preserveProviderDraftRef.current = false;
+        }
       })
       .catch((e) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+        if (!cancelled) {
+          preserveProviderDraftRef.current = false;
+          setGenerationError(e instanceof Error ? e.message : String(e));
+        }
       })
       .finally(() => {
         if (!cancelled) setModelsLoading(false);
@@ -306,25 +380,44 @@ export function MediaManager({
     return () => {
       cancelled = true;
     };
-  }, [selectedProvider?.id, metadataProvider, kind]);
+  }, [selectedProvider?.id, metadataProvider, kind, providersVersion]);
 
   useEffect(() => {
-    if (!selectedProvider || !metadataProvider || !model.trim()) {
+    const selectedModelReady = modelOptions.some((item) => item.id === model);
+    if (!selectedProvider || !metadataProvider || !model.trim() || modelsLoading || !selectedModelReady) {
       setModelSchema(null);
+      setSchemaLoading(Boolean(selectedProvider && metadataProvider && model.trim() && modelsLoading));
       return;
     }
     let cancelled = false;
     const key = mediaPreferenceKey(selectedProvider.id, model.trim());
     setSchemaLoading(true);
+    setGenerationError(null);
     getMediaModelSchema(selectedProvider.id, model.trim(), kind)
       .then((schema) => {
         if (cancelled) return;
         setModelSchema(schema);
-        const saved = useSettings.getState().media.parametersByProviderModel[key];
-        setParameterValues({ ...schemaDefaults(schema), ...saved });
+        const reused = reusedInputRef.current;
+        if (
+          reused &&
+          reused.providerId === selectedProvider.id &&
+          reused.model === model &&
+          reused.kind === kind
+        ) {
+          reusedInputRef.current = null;
+          applyReusedInput(schema, reused.input);
+        } else if (preserveProviderDraftRef.current) {
+          preserveProviderDraftRef.current = false;
+        } else {
+          const saved = useSettings.getState().media.parametersByProviderModel[key];
+          setParameterValues({ ...schemaDefaults(schema), ...saved });
+        }
       })
       .catch((e) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+        if (!cancelled) {
+          preserveProviderDraftRef.current = false;
+          setGenerationError(e instanceof Error ? e.message : String(e));
+        }
       })
       .finally(() => {
         if (!cancelled) setSchemaLoading(false);
@@ -332,15 +425,114 @@ export function MediaManager({
     return () => {
       cancelled = true;
     };
-  }, [selectedProvider?.id, metadataProvider, kind, model]);
+  }, [
+    selectedProvider?.id,
+    metadataProvider,
+    kind,
+    model,
+    modelsLoading,
+    modelOptions.map((item) => item.id).join("\u0000"),
+    schemaVersion,
+  ]);
+
+  function resetGenerationFeedback() {
+    if (generationInFlightRef.current) return;
+    setGenerationPhase("idle");
+    setGenerationError(null);
+  }
+
+  function applyReusedInput(schema: MediaModelSchema, input: Record<string, unknown>) {
+    const draft = schemaDraftFromInput(schema, input);
+    setAdvanced(JSON.stringify(draft.advanced, null, 2));
+    setParameterValues({ ...schemaDefaults(schema), ...draft.values });
+  }
+
+  function initializeProvider(provider: ProviderInfo, preserveDraft = false) {
+    const saved = useSettings.getState().media;
+    const nextModel = saved.modelByProvider[provider.id] || defaultMediaModel(provider);
+    const key = mediaPreferenceKey(provider.id, nextModel);
+    preserveProviderDraftRef.current = preserveDraft && supportsMediaMetadataProvider(provider);
+    setProviderId(provider.id);
+    setModel(nextModel);
+    setModelOptions([]);
+    setModelSchema(null);
+    setModelsLoading(supportsMediaMetadataProvider(provider));
+    setSchemaLoading(Boolean(nextModel.trim() && supportsMediaMetadataProvider(provider)));
+    setGenerationPhase("idle");
+    setGenerationError(null);
+    if (!preserveDraft) {
+      setAdvanced(saved.advancedByProviderModel[key] ?? defaultMediaAdvanced(provider));
+      setParameterValues(saved.parametersByProviderModel[key] ?? {});
+    }
+    setMediaSettings({
+      providerId: provider.id,
+      modelByProvider: {
+        ...saved.modelByProvider,
+        [provider.id]: nextModel,
+      },
+    });
+  }
+
+  async function refreshProviders(preserveDraft = false) {
+    const request = ++providerRequest.current;
+    try {
+      const next = await listProviders();
+      if (request !== providerRequest.current) return;
+      const media = mediaProviders(next);
+      const currentProvider = media.find((provider) => provider.id === providerId);
+      const savedProvider = media.find((provider) => provider.id === useSettings.getState().media.providerId);
+      const nextProvider = currentProvider ?? savedProvider ?? media[0] ?? null;
+      if (preserveDraft && nextProvider?.id === providerId) {
+        preserveProviderDraftRef.current = supportsMediaMetadataProvider(nextProvider);
+      }
+      setProviders(next);
+      setProvidersVersion((version) => version + 1);
+      if (nextProvider?.id !== providerId) {
+        if (nextProvider) initializeProvider(nextProvider, preserveDraft);
+        else {
+          preserveProviderDraftRef.current = false;
+          setProviderId("");
+          setModel("");
+          setModelOptions([]);
+          setModelSchema(null);
+          setModelsLoading(false);
+          setSchemaLoading(false);
+        }
+      }
+    } catch (e) {
+      if (request === providerRequest.current) {
+        setGenerationError(e instanceof Error ? e.message : String(e));
+      }
+    }
+  }
 
   function applyModel(nextModel: string, provider = selectedProvider) {
+    const providerChanged = provider?.id !== selectedProvider?.id;
+    const identityChanged = providerChanged || nextModel !== model;
     setModel(nextModel);
+    if (identityChanged) {
+      setModelSchema(null);
+      setSchemaLoading(Boolean(provider && nextModel.trim() && supportsMediaMetadataProvider(provider)));
+      if (providerChanged) {
+        setModelOptions([]);
+        setModelsLoading(Boolean(provider && supportsMediaMetadataProvider(provider)));
+      }
+    } else if (!modelSchema && provider && nextModel.trim() && supportsMediaMetadataProvider(provider)) {
+      setSchemaLoading(true);
+      setSchemaVersion((version) => version + 1);
+    }
+    resetGenerationFeedback();
     if (!provider) return;
     const key = mediaPreferenceKey(provider.id, nextModel);
     const saved = useSettings.getState().media;
-    setAdvanced(saved.advancedByProviderModel[key] ?? defaultMediaAdvanced(provider));
-    setParameterValues(saved.parametersByProviderModel[key] ?? {});
+    const reused = reusedInputRef.current;
+    const preserveValues = preserveProviderDraftRef.current || Boolean(
+      reused && reused.providerId === provider.id && reused.model === nextModel,
+    );
+    if (!preserveValues) {
+      setAdvanced(saved.advancedByProviderModel[key] ?? defaultMediaAdvanced(provider));
+      setParameterValues(saved.parametersByProviderModel[key] ?? {});
+    }
     setMediaSettings({
       providerId: provider.id,
       modelByProvider: {
@@ -351,6 +543,8 @@ export function MediaManager({
   }
 
   function applyPickerModel(nextModel: string) {
+    preserveProviderDraftRef.current = false;
+    reusedInputRef.current = null;
     const route = mediaPickerRoutes.get(nextModel);
     if (!route) {
       applyModel(nextModel);
@@ -358,55 +552,78 @@ export function MediaManager({
     }
     const nextKind = route.kinds.includes(kind) ? kind : route.kinds[0];
     setProviderId(route.provider.id);
-    if (nextKind !== kind) setKind(nextKind);
+    if (nextKind !== kind) {
+      setKind(nextKind);
+      setModelOptions([]);
+      setModelSchema(null);
+      setModelsLoading(true);
+      setSchemaLoading(true);
+    }
     applyModel(nextModel, route.provider);
+  }
+
+  function closeModelPicker(restoreFocus = true) {
+    setModelPickerOpen(false);
+    if (restoreFocus) window.requestAnimationFrame(() => modelPickerTriggerRef.current?.focus());
   }
 
   function toggleMediaModelPicker() {
     if (modelPickerOpen) {
-      setModelPickerOpen(false);
+      closeModelPicker(false);
       return;
     }
-    const rect = modelPickerTriggerRef.current?.getBoundingClientRect();
-    if (!rect) return;
+    const trigger = modelPickerTriggerRef.current;
+    const sheet = trigger?.closest<HTMLElement>(".media-sheet");
+    const rect = trigger?.getBoundingClientRect();
+    const bounds = sheet?.getBoundingClientRect();
+    if (!rect || !bounds) return;
     const edge = 12;
     const gap = 6;
-    const width = Math.min(480, window.innerWidth - edge * 2);
-    const maxHeight = Math.min(440, window.innerHeight - edge * 2);
-    const left = Math.max(edge, Math.min(window.innerWidth - width - edge, rect.right - width));
-    const below = rect.bottom + gap;
-    setModelPickerStyle(below + maxHeight <= window.innerHeight - edge
-      ? { left, top: below, width, maxHeight }
-      : { left, bottom: window.innerHeight - rect.top + gap, width, maxHeight });
+    const width = Math.min(480, bounds.width - edge * 2);
+    const left = Math.max(edge, Math.min(bounds.width - width - edge, rect.right - bounds.left - width));
+    const below = Math.max(0, bounds.bottom - edge - rect.bottom - gap);
+    const above = Math.max(0, rect.top - bounds.top - gap - edge);
+    const openBelow = below >= above;
+    const maxHeight = Math.min(440, openBelow ? below : above);
+    setModelPickerStyle(openBelow
+      ? { left, top: rect.bottom - bounds.top + gap, width, maxHeight }
+      : { left, bottom: bounds.bottom - rect.top + gap, width, maxHeight });
     setModelPickerOpen(true);
   }
 
-  async function loadLibrary(cursor?: string, append = false) {
+  async function loadLibrary(cursor?: string, append = false, quiet = false) {
+    if (quiet && libraryLoadingRef.current) return;
     const request = ++libraryRequest.current;
-    setLibraryLoading(true);
+    if (!quiet) {
+      libraryLoadingRef.current = true;
+      setLibraryLoading(true);
+      setLibraryListError(null);
+    }
     try {
+      const filters = libraryFiltersRef.current;
       const page = await listMediaLibrary({
-        query: libraryQuery.trim() || undefined,
-        kind: libraryKind || undefined,
-        provider: libraryProvider || undefined,
-        status: libraryStatus || undefined,
+        query: filters.query.trim() || undefined,
+        kind: filters.kind || undefined,
+        provider: filters.provider || undefined,
+        status: filters.status || undefined,
         cursor,
         limit: 40,
       });
       if (request !== libraryRequest.current) return;
       setLibraryItems((current) => append ? [...current, ...page.items] : page.items);
       setLibraryCursor(page.next_cursor ?? null);
-      if (!libraryVisibilityInitialized.current) {
-        libraryVisibilityInitialized.current = true;
-        setLibraryOpen(page.items.length > 0);
-      }
       if (!append) {
-        setSelectedLibraryId((current) => page.items.some((item) => item.id === current) ? current : page.items[0]?.id ?? "");
+        setSelectedLibraryId((current) => page.items.some((item) => item.id === current) ? current : "");
       }
     } catch (e) {
-      if (request === libraryRequest.current) setError(e instanceof Error ? e.message : String(e));
+      if (!quiet && request === libraryRequest.current) {
+        setLibraryListError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
-      if (request === libraryRequest.current) setLibraryLoading(false);
+      if (request === libraryRequest.current) {
+        libraryLoadingRef.current = false;
+        setLibraryLoading(false);
+      }
     }
   }
 
@@ -428,6 +645,7 @@ export function MediaManager({
 
   function updateAdvanced(value: string) {
     setAdvanced(value);
+    resetGenerationFeedback();
     if (!selectedProvider || !model.trim()) return;
     const key = mediaPreferenceKey(selectedProvider.id, model.trim());
     const saved = useSettings.getState().media;
@@ -443,13 +661,16 @@ export function MediaManager({
     if (!selectedProvider || !model.trim()) return;
     let parsed: unknown;
     try {
-      parsed = parseControlValue(control, value);
+      parsed = typeof value === "string" && (control.kind === "array" || control.kind === "json")
+        ? value
+        : parseControlValue(control, value);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setGenerationError(e instanceof Error ? e.message : String(e));
       return;
     }
     const next = { ...parameterValues, [control.key]: parsed };
     setParameterValues(next);
+    resetGenerationFeedback();
     const key = mediaPreferenceKey(selectedProvider.id, model.trim());
     const saved = useSettings.getState().media;
     setMediaSettings({
@@ -460,14 +681,16 @@ export function MediaManager({
     });
   }
 
-  async function pollMediaStatus(initial: MediaGenerationResult) {
+  async function pollMediaStatus(initial: MediaGenerationResult, run: number) {
     const key = `${initial.provider_id}:${initial.id}`;
     if (pollingKeys.current.has(key) || !shouldPollMediaStatus(initial)) return;
     pollingKeys.current.add(key);
     let current = initial;
     try {
       for (let attempt = 0; attempt < mediaPollingMaxAttempts(initial); attempt += 1) {
+        if (run !== generationRunRef.current) break;
         await new Promise((resolve) => window.setTimeout(resolve, 3000));
+        if (run !== generationRunRef.current) break;
         const next = await getMediaStatus({
           provider_id: current.provider_id,
           id: current.id,
@@ -476,67 +699,133 @@ export function MediaManager({
           status_url: current.urls.status,
           kind: current.kind as MediaKind,
         });
+        if (run !== generationRunRef.current) break;
         current = next;
         setResults((items) => items.map((item) => (
           item.provider_id === next.provider_id && item.id === next.id ? { ...item, ...next } : item
         )));
-        void loadLibrary();
+        void loadLibrary(undefined, false, true);
         if (isTerminalMediaStatus(next.status) || next.media.length > 0) break;
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (run === generationRunRef.current) {
+        setGenerationError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
       pollingKeys.current.delete(key);
     }
   }
 
   async function submit() {
+    if (generationInFlightRef.current) return;
     const provider = selectedProvider;
     if (!provider) {
-      setError("Add an enabled Replicate, fal, or OpenRouter provider first.");
+      setGenerationPhase("failed");
+      setGenerationError("Add an enabled Replicate, fal, or OpenRouter media provider first.");
       return;
     }
     if (!model.trim()) {
-      setError("Model id is required.");
+      setGenerationPhase("failed");
+      setGenerationError("Choose a media model before generating.");
       return;
     }
-    if (metadataProvider && (modelsLoading || !modelOptions.some((item) => item.id === model))) {
-      setError("Choose an available media model before generating.");
+    if (
+      modelsLoading ||
+      schemaLoading ||
+      (metadataProvider && (!modelSchema || !modelOptions.some((item) => item.id === model)))
+    ) {
+      setGenerationPhase("failed");
+      setGenerationError("Wait for the selected model and its settings to finish loading.");
       return;
     }
     if (!prompt.trim()) {
-      setError("Prompt is required.");
+      setGenerationPhase("failed");
+      setGenerationError("Write a prompt before generating.");
       return;
     }
-    setBusy(true);
-    setError(null);
+    let input: Record<string, unknown>;
+    try {
+      input = inputWithSchemaControls(advanced, metadataProvider ? modelSchema : null, parameterValues);
+    } catch (e) {
+      setGenerationPhase("failed");
+      setGenerationError(e instanceof Error ? e.message : String(e));
+      return;
+    }
+
+    const run = ++generationRunRef.current;
+    generationInFlightRef.current = true;
+    setGenerationPhase("submitting");
+    setGenerationError(null);
+    setStageRequest({ kind, model: model.trim() });
+    setSelectedLibraryId("");
+    setResults([]);
+    setStageVariantIndex(0);
     try {
       const result = await generateMedia({
         provider_id: provider.id,
         kind,
         model: model.trim(),
         prompt: prompt.trim(),
-        input: inputWithSchemaControls(advanced, metadataProvider ? modelSchema : null, parameterValues),
+        input,
       });
-      setResults((current) => [result, ...current].slice(0, 8));
+      if (run !== generationRunRef.current) return;
+      setResults([result]);
+      setGenerationPhase("idle");
       if (result.library_id) setSelectedLibraryId(result.library_id);
-      void loadLibrary();
-      void pollMediaStatus(result);
+      void loadLibrary(undefined, false, true);
+      void pollMediaStatus(result, run);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (run === generationRunRef.current) {
+        setGenerationPhase("failed");
+        setGenerationError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
-      setBusy(false);
+      generationInFlightRef.current = false;
     }
   }
 
   function reuseLibraryItem(item: MediaLibraryItem) {
     const provider = available.find((candidate) => candidate.id === item.provider_id);
-    reusedModelRef.current = item.model;
+    const input = structuredClone(item.input ?? {});
+    const sameIdentity = Boolean(
+      provider &&
+      selectedProvider?.id === provider.id &&
+      item.kind === kind &&
+      item.model === model,
+    );
+    const reuseWithCurrentSchema = sameIdentity ? modelSchema : null;
+    const catalogChanged = provider?.id !== selectedProvider?.id || item.kind !== kind;
+    reusedModelRef.current = catalogChanged ? item.model : null;
+    reusedInputRef.current = reuseWithCurrentSchema ? null : {
+      providerId: item.provider_id,
+      model: item.model,
+      kind: item.kind,
+      input,
+    };
+    preserveProviderDraftRef.current = false;
     setKind(item.kind);
     setPrompt(item.prompt);
-    setAdvanced(JSON.stringify(item.input ?? {}, null, 2));
-    setParameterValues({});
+    if (reuseWithCurrentSchema) {
+      applyReusedInput(reuseWithCurrentSchema, input);
+    } else {
+      setAdvanced(JSON.stringify(input, null, 2));
+      setParameterValues({});
+    }
+    resetGenerationFeedback();
+    setLibraryActionError(null);
+    setLibraryNotice({ id: item.id, label: item.prompt, message: "Settings loaded." });
     if (provider) {
+      if (!sameIdentity) {
+        setModelSchema(null);
+        setSchemaLoading(supportsMediaMetadataProvider(provider));
+      } else if (!modelSchema && !schemaLoading) {
+        setSchemaLoading(true);
+        setSchemaVersion((version) => version + 1);
+      }
+      if (catalogChanged) {
+        setModelOptions([]);
+        setModelsLoading(supportsMediaMetadataProvider(provider));
+      }
       setProviderId(provider.id);
       setModel(item.model);
       setMediaSettings({
@@ -549,61 +838,113 @@ export function MediaManager({
     } else {
       setProviderId(item.provider_id);
       setModel(item.model);
-      setError(`The original provider ${item.provider} is unavailable. Choose another provider before generating.`);
+      setModelOptions([]);
+      setModelSchema(null);
+      setModelsLoading(false);
+      setSchemaLoading(false);
+      setGenerationError(`The original provider ${item.provider} is unavailable. Choose another provider before generating.`);
     }
   }
 
   async function refreshSelected() {
     if (!selectedLibraryItem) return;
-    setLibraryLoading(true);
-    setError(null);
+    const id = selectedLibraryItem.id;
+    const label = selectedLibraryItem.prompt;
+    setLibraryAction({ id, action: "refresh" });
+    setLibraryActionError(null);
+    setLibraryNotice(null);
     try {
-      const next = await refreshMediaLibraryItem(selectedLibraryItem.id);
+      const next = await refreshMediaLibraryItem(id);
       setLibraryItems((items) => items.map((item) => item.id === next.id ? next : item));
-      window.setTimeout(() => void loadLibrary(), next.save_state === "saving" ? 800 : 0);
+      setLibraryNotice({ id, label, message: "Library item refreshed." });
+      window.setTimeout(
+        () => void loadLibrary(undefined, false, true),
+        next.save_state === "saving" ? 800 : 0,
+      );
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setLibraryActionError({ id, label, message: e instanceof Error ? e.message : String(e) });
     } finally {
-      setLibraryLoading(false);
+      setLibraryAction((current) => current?.id === id ? null : current);
     }
   }
 
   async function deleteSelected() {
     if (!selectedLibraryItem) return;
-    if (confirmDeleteId !== selectedLibraryItem.id) {
-      setConfirmDeleteId(selectedLibraryItem.id);
+    const id = selectedLibraryItem.id;
+    const label = selectedLibraryItem.prompt;
+    if (confirmDeleteId !== id) {
+      if (deleteConfirmTimerRef.current !== null) window.clearTimeout(deleteConfirmTimerRef.current);
+      setConfirmDeleteId(id);
+      setLibraryActionError(null);
+      setLibraryNotice(null);
+      deleteConfirmTimerRef.current = window.setTimeout(() => {
+        setConfirmDeleteId((current) => current === id ? "" : current);
+        deleteConfirmTimerRef.current = null;
+      }, 3000);
       return;
     }
-    setLibraryLoading(true);
-    setError(null);
+    if (deleteConfirmTimerRef.current !== null) window.clearTimeout(deleteConfirmTimerRef.current);
+    deleteConfirmTimerRef.current = null;
+    setConfirmDeleteId("");
+    const itemIndex = libraryItems.findIndex((item) => item.id === id);
+    setLibraryAction({ id, action: "delete" });
+    setLibraryActionError(null);
+    setLibraryNotice(null);
     try {
-      await deleteMediaLibraryItem(selectedLibraryItem.id);
-      setConfirmDeleteId("");
-      setSelectedLibraryId("");
-      await loadLibrary();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
+      await deleteMediaLibraryItem(id);
+      libraryRequest.current += 1;
+      libraryLoadingRef.current = false;
       setLibraryLoading(false);
+      const remaining = libraryItems.filter((item) => item.id !== id);
+      setConfirmDeleteId("");
+      setLibraryItems(remaining);
+      if (selectedLibraryIdRef.current === id) {
+        const adjacent = remaining[Math.min(Math.max(itemIndex, 0), remaining.length - 1)] ?? null;
+        setSelectedLibraryId(adjacent?.id ?? "");
+        window.requestAnimationFrame(() => {
+          const adjacentCard = adjacent ? libraryCardRefs.current.get(adjacent.id) : null;
+          (adjacentCard ?? libraryToggleRef.current)?.focus();
+        });
+      }
+      setLibraryNotice({ id, label, message: "Deleted from local library." });
+      void loadLibrary(undefined, false, true);
+    } catch (e) {
+      setConfirmDeleteId("");
+      setLibraryActionError({ id, label, message: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setLibraryAction((current) => current?.id === id ? null : current);
     }
   }
 
   async function revealSelected() {
-    const path = selectedLibraryItem?.media[0]?.local_path;
+    if (!selectedLibraryItem) return;
+    const id = selectedLibraryItem.id;
+    const label = selectedLibraryItem.prompt;
+    const index = Math.min(stageVariantIndex, Math.max(0, selectedLibraryItem.media.length - 1));
+    const path = selectedLibraryItem.media[index]?.local_path;
     if (!path) return;
-    setError(null);
+    setLibraryAction({ id, action: "reveal" });
+    setLibraryActionError(null);
+    setLibraryNotice(null);
     try {
       await openArtifactLocation(path, "folder");
+      setLibraryNotice({ id, label, message: "Opened output location." });
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setLibraryActionError({ id, label, message: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setLibraryAction((current) => current?.id === id ? null : current);
     }
   }
 
-  function onStudioKeyDown(event: KeyboardEvent<HTMLDivElement>) {
-    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-      event.preventDefault();
-      if (!busy) void submit();
-    }
+  function onPromptKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (
+      !(event.ctrlKey || event.metaKey) ||
+      event.key !== "Enter" ||
+      event.nativeEvent.isComposing ||
+      event.nativeEvent.keyCode === 229
+    ) return;
+    event.preventDefault();
+    if (canGenerate) void submit();
   }
 
   function startStudioResize(event: ReactPointerEvent<HTMLButtonElement>) {
@@ -681,10 +1022,27 @@ export function MediaManager({
     setMediaStudioSize(size.width, size.height);
   }
 
-  const stageMedia = selectedLibraryItem?.media[0] ?? latestResult?.media[0];
-  const stageModel = selectedLibraryItem?.model ?? latestResult?.model ?? model;
-  const stageKind = selectedLibraryItem?.kind ?? latestResult?.kind ?? kind;
-  const stageStatus = selectedLibraryItem?.save_state ?? latestResult?.save_state ?? (busy ? "running" : null);
+  const stageItems = selectedLibraryItem?.media ?? latestResult?.media ?? [];
+  const stageSourceKey = selectedLibraryItem
+    ? `library:${selectedLibraryItem.id}`
+    : latestResult
+      ? latestResult.library_id
+        ? `library:${latestResult.library_id}`
+        : `result:${latestResult.provider_id}:${latestResult.id}`
+      : generationPhase;
+  const activeStageRequest = !selectedLibraryItem && !latestResult && generationPhase !== "idle"
+    ? stageRequest
+    : null;
+  const stageModel = selectedLibraryItem?.model ?? latestResult?.model ?? activeStageRequest?.model ?? model;
+  const stageKind = selectedLibraryItem?.kind ?? latestResult?.kind ?? activeStageRequest?.kind ?? kind;
+  const stageStatus = selectedLibraryItem?.save_state
+    ?? latestResult?.save_state
+    ?? (latestResult && !isTerminalMediaStatus(latestResult.status) ? "running" : null)
+    ?? (generationPhase === "submitting" ? "running" : generationPhase === "failed" ? "failed" : null);
+  const selectedVariantIndex = stageItems.length
+    ? Math.min(stageVariantIndex, stageItems.length - 1)
+    : 0;
+  const stageMedia = stageItems[selectedVariantIndex];
   const stageEmptyTitle = stageStatus === "running"
     ? `Generating ${stageKind}...`
     : stageStatus === "saving"
@@ -702,17 +1060,76 @@ export function MediaManager({
   const showLibraryFilters = libraryItems.length > 0 || Boolean(
     libraryQuery.trim() || libraryKind || libraryProvider || libraryStatus,
   );
+  const hasLibraryFilters = Boolean(libraryQuery.trim() || libraryKind || libraryProvider || libraryStatus);
+  const modelKindLabel = kind === "music" ? "audio" : kind;
+  const modelKindWithArticle = `${/^[aeiou]/.test(modelKindLabel) ? "an" : "a"} ${modelKindLabel}`;
   const mediaSettingsLabel = selectedProvider
-    ? `${selectedProvider.name} · ${model || `Choose a ${kind} model`}`
-    : "Choose a provider";
+    ? `${selectedProvider.name} · ${model || `Choose ${modelKindWithArticle} model`}`
+    : "Add a media provider";
   const selectedProviderAvailable = Boolean(selectedProvider);
   const selectedModelAvailable = metadataProvider
     ? !modelsLoading && modelOptions.some((item) => item.id === model)
     : Boolean(model.trim());
+  const canGenerate = Boolean(
+    prompt.trim()
+    && selectedProviderAvailable
+    && selectedModelAvailable
+    && model.trim()
+    && !modelsLoading
+    && !schemaLoading
+    && (!metadataProvider || Boolean(modelSchema))
+    && !busy
+  );
+  const loadedCount = `${libraryItems.length}${libraryCursor ? "+" : ""}`;
+  const loadedCountDescription = libraryCursor
+    ? `${libraryItems.length} loaded, more available`
+    : `${libraryItems.length} loaded`;
+  const selectedLibraryBusy = libraryAction && libraryAction.id === selectedLibraryItem?.id
+    ? libraryAction.action
+    : null;
+  const deleteConfirmationArmed = confirmDeleteId === selectedLibraryItem?.id;
   const mediaSheetStyle = {
     width: studioSize.width,
     height: studioSize.height,
   } satisfies CSSProperties;
+
+  useEffect(() => {
+    setStageVariantIndex(0);
+  }, [stageSourceKey]);
+
+  useEffect(() => {
+    setStageVariantIndex((current) => Math.min(current, Math.max(0, stageItems.length - 1)));
+    variantRefs.current.length = stageItems.length;
+  }, [stageItems.length]);
+
+  function selectVariant(index: number, focus = false) {
+    if (!stageItems.length) return;
+    const next = Math.max(0, Math.min(stageItems.length - 1, index));
+    setStageVariantIndex(next);
+    if (focus) window.requestAnimationFrame(() => variantRefs.current[next]?.focus());
+  }
+
+  function onVariantKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    let next: number | null = null;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") next = (index + 1) % stageItems.length;
+    if (event.key === "ArrowLeft" || event.key === "ArrowUp") next = (index - 1 + stageItems.length) % stageItems.length;
+    if (event.key === "Home") next = 0;
+    if (event.key === "End") next = stageItems.length - 1;
+    if (next === null) return;
+    event.preventDefault();
+    selectVariant(next, true);
+  }
+
+  if (providersOpen) {
+    return (
+      <ProvidersManager
+        onClose={() => {
+          setProvidersOpen(false);
+          void refreshProviders(true);
+        }}
+      />
+    );
+  }
 
   return (
     <SheetDialog
@@ -722,11 +1139,11 @@ export function MediaManager({
       style={mediaSheetStyle}
       onClose={onClose}
     >
-      <div className="media-studio" onKeyDown={onStudioKeyDown}>
+      <div className="media-studio">
         <div className="sheet-header media-studio-header">
           <div>
             <h2>Media studio</h2>
-            <p>Quick generations here. Iteration stays in chat.</p>
+            <p>Generate, compare outputs, and reuse saved settings.</p>
           </div>
           <button className="icon-btn" type="button" onClick={onClose} title="Close" aria-label="Close media studio">
             <X size={15} />
@@ -734,7 +1151,7 @@ export function MediaManager({
         </div>
 
         <div className="media-grid">
-          <section className="media-form media-composer-dock" aria-label="Media generator">
+          <section className="media-form media-composer-dock" aria-label="Media generator" aria-busy={busy}>
             <ComposerSurface className="media-composer-surface">
               <div className="control-bar media-control-bar">
                 <div className="chips">
@@ -745,15 +1162,20 @@ export function MediaManager({
                       data-testid="media-model-picker-trigger"
                       type="button"
                       title={mediaSettingsLabel}
-                      aria-label={`Choose ${kind} model${selectedModelLabel ? `, current model ${selectedModelLabel}` : ""}`}
-                      aria-haspopup="dialog"
-                      aria-expanded={modelPickerOpen}
-                      disabled={!selectedProvider && !onManageProviders}
-                      onClick={selectedProvider ? toggleMediaModelPicker : onManageProviders}
+                      aria-label={selectedProvider
+                        ? `Choose ${modelKindWithArticle} model${selectedModelLabel ? `, current model ${selectedModelLabel}` : ""}`
+                        : "Add media provider"}
+                      aria-haspopup={selectedProvider ? "dialog" : undefined}
+                      aria-expanded={selectedProvider ? modelPickerOpen : undefined}
+                      onClick={selectedProvider ? toggleMediaModelPicker : () => setProvidersOpen(true)}
                     >
                       <span className={`dot ${selectedModelAvailable ? "dot-green" : "dot-yellow"}`} />
-                      <span className="chip-label">{modelsLoading ? `Loading ${kind} models...` : selectedModelLabel || `Choose a ${kind} model`}</span>
-                      <ChevronDown size={12} className="chip-chev" />
+                      <span className="chip-label">
+                        {selectedProvider
+                          ? modelsLoading ? `Loading ${modelKindLabel} models...` : selectedModelLabel || `Choose ${modelKindWithArticle} model`
+                          : "Add media provider"}
+                      </span>
+                      {selectedProvider && <ChevronDown size={12} className="chip-chev" />}
                     </button>
                   </div>
                   <div className="control-inline-slot">
@@ -766,11 +1188,17 @@ export function MediaManager({
                       schemaLoading={schemaLoading}
                       parameterValues={parameterValues}
                       advanced={advanced}
-                      error={error}
+                      error={null}
                       onKindChange={(nextKind) => {
+                        preserveProviderDraftRef.current = false;
+                        reusedInputRef.current = null;
                         setKind(nextKind);
                         setModel("");
+                        setModelOptions([]);
                         setModelSchema(null);
+                        setSchemaLoading(false);
+                        setModelsLoading(Boolean(selectedProvider && metadataProvider));
+                        resetGenerationFeedback();
                       }}
                       onParameterChange={updateParameter}
                       onAdvancedChange={updateAdvanced}
@@ -779,16 +1207,28 @@ export function MediaManager({
                 </div>
               </div>
 
+              {generationError && (
+                <div className="artifact-error media-generator-alert" data-testid="media-generation-error" role="alert">
+                  {generationError}
+                </div>
+              )}
+
               <div className="composer comfortable media-composer-box">
                 <div className="composer-input-wrap">
                   <textarea
+                    ref={promptRef}
                     className="composer-input media-composer-prompt"
                     data-testid="media-prompt-input"
                     value={prompt}
-                    rows={3}
+                    rows={1}
+                    dir="auto"
                     aria-label="Media prompt"
                     placeholder={kind === "music" ? "Warm instrumental synthwave with a steady pulse..." : "Product photo on a clean workbench, natural side light..."}
-                    onChange={(e) => setPrompt(e.target.value)}
+                    onChange={(e) => {
+                      setPrompt(e.target.value);
+                      resetGenerationFeedback();
+                    }}
+                    onKeyDown={onPromptKeyDown}
                   />
                 </div>
                 <div className="composer-bar media-composer-bar">
@@ -805,7 +1245,7 @@ export function MediaManager({
                     type="button"
                     title={`${busy ? "Generating" : `Generate ${kind}`} (Ctrl/Cmd + Enter)`}
                     aria-label={busy ? `Generating ${kind}` : `Generate ${kind}`}
-                    disabled={busy || !selectedProviderAvailable || !selectedModelAvailable}
+                    disabled={!canGenerate}
                     onClick={() => void submit()}
                   >
                     <ArrowUp size={17} />
@@ -822,62 +1262,139 @@ export function MediaManager({
                 <div className="media-stage-title">
                   <strong>Output</strong>
                   <span title={stageModel}>{stageModel || "Nothing selected"}</span>
+                  {stageItems.length > 1 && (
+                    <span className="media-output-count">{stageItems.length} outputs</span>
+                  )}
                 </div>
                 <div className="media-stage-head-actions">
                   {stageStatus && stageStatus !== "ready" && <span className={`media-status ${stageStatus}`} role="status" aria-live="polite">{stageStatus}</span>}
                   <button
+                    ref={libraryToggleRef}
                     className={`btn-ghost media-library-toggle${libraryOpen ? " active" : ""}`}
                     type="button"
-                    aria-label={`${libraryOpen ? "Close" : "Open"} local library, ${libraryItems.length} ${libraryItems.length === 1 ? "item" : "items"}`}
+                    aria-label={`${libraryOpen ? "Close" : "Open"} local library, ${loadedCountDescription}`}
                     aria-controls="media-library-sidebar"
                     aria-expanded={libraryOpen}
                     onClick={() => {
-                      libraryVisibilityInitialized.current = true;
-                      setLibraryOpen((open) => !open);
+                      const nextOpen = !libraryOpen;
+                      setLibraryOpen(nextOpen);
+                      if (nextOpen && !libraryItems.length && !libraryLoading) void loadLibrary();
                     }}
                   >
                     <Sidebar size={14} />
                     <span>Library</span>
-                    <span className="media-library-count" aria-hidden="true">{libraryItems.length}</span>
+                    <span className="media-library-count" aria-hidden="true">{loadedCount}</span>
                   </button>
                 </div>
               </div>
-              <div className={`media-stage-preview${stageMedia ? " has-media" : ""}`}>
-                {stageMedia ? (
+              <div className={`media-stage-preview${stageItems.length ? " has-media" : ""}`} aria-busy={busy}>
+                {stageItems.length && stageKind === "music" ? (
+                  <div className="media-stage-audio-list">
+                    {stageItems.map((item, index) => (
+                      <GeneratedMedia
+                        key={`${item.url}:${index}`}
+                        item={item}
+                        alt={`Generated audio ${index + 1} of ${stageItems.length} from ${stageModel}`}
+                        onOpenExternal={(url) => void openExternalUrl(url)}
+                      />
+                    ))}
+                  </div>
+                ) : stageMedia ? (
                   <GeneratedMedia
                     item={stageMedia}
-                    alt={`Generated ${stageKind} from ${stageModel}`}
+                    alt={`Generated ${stageKind} ${selectedVariantIndex + 1} of ${stageItems.length} from ${stageModel}`}
                     onOpenExternal={(url) => void openExternalUrl(url)}
                   />
                 ) : (
-                  <div className="media-empty">
+                  <div
+                    className="media-empty"
+                    data-testid={stageStatus === "running" ? "media-generation-progress" : undefined}
+                    role={stageStatus === "running" ? "status" : undefined}
+                    aria-live={stageStatus === "running" ? "polite" : undefined}
+                  >
                     <Image size={28} />
                     <strong>{stageEmptyTitle}</strong>
                     <span>{stageEmptyDetail}</span>
                   </div>
                 )}
               </div>
+              {stageKind !== "music" && stageItems.length > 1 && (
+                <div className="media-variant-strip" data-testid="media-variant-strip" role="listbox" aria-label="Output variants">
+                  {stageItems.map((item, index) => (
+                    <button
+                      ref={(node) => {
+                        variantRefs.current[index] = node;
+                      }}
+                      className={selectedVariantIndex === index ? "active" : ""}
+                      data-testid="media-variant"
+                      key={`${item.url}:${index}`}
+                      type="button"
+                      role="option"
+                      aria-label={`Show variant ${index + 1} of ${stageItems.length}`}
+                      aria-selected={selectedVariantIndex === index}
+                      tabIndex={selectedVariantIndex === index ? 0 : -1}
+                      onClick={() => selectVariant(index)}
+                      onKeyDown={(event) => onVariantKeyDown(event, index)}
+                    >
+                      <GeneratedMedia
+                        item={item}
+                        alt={`Variant ${index + 1} of ${stageItems.length}`}
+                        interactive={false}
+                        pressed={selectedVariantIndex === index}
+                      />
+                      <span className="media-variant-number">{index + 1}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
               {selectedLibraryItem && (
                 <div className="media-stage-meta">
                   <p>{selectedLibraryItem.prompt}</p>
-                  <div className="media-stage-actions">
-                    <button className="btn-ghost" type="button" onClick={() => reuseLibraryItem(selectedLibraryItem)}>Use settings</button>
+                  <div className="media-stage-actions" aria-busy={Boolean(selectedLibraryBusy)}>
+                    <button className="btn-ghost" type="button" disabled={Boolean(selectedLibraryBusy)} onClick={() => reuseLibraryItem(selectedLibraryItem)}>Use settings</button>
                     {(selectedLibraryItem.save_state === "running" || selectedLibraryItem.save_state === "failed") && (
-                      <button className="btn-ghost" type="button" disabled={libraryLoading} onClick={() => void refreshSelected()}>
-                        <Refresh size={13} /> Refresh
+                      <button className="btn-ghost" type="button" disabled={Boolean(selectedLibraryBusy)} onClick={() => void refreshSelected()}>
+                        <Refresh size={13} /> {selectedLibraryBusy === "refresh" ? "Refreshing..." : "Refresh"}
                       </button>
                     )}
-                    {selectedLibraryItem.media[0]?.local_path && (
-                      <button className="btn-ghost" type="button" onClick={() => void revealSelected()}>
-                        <FolderOpen size={13} /> Reveal
+                    {selectedLibraryItem.media[selectedVariantIndex]?.local_path && (
+                      <button className="btn-ghost" type="button" disabled={Boolean(selectedLibraryBusy)} onClick={() => void revealSelected()}>
+                        <FolderOpen size={13} /> {selectedLibraryBusy === "reveal" ? "Opening..." : "Reveal"}
                       </button>
                     )}
-                    <button className="btn-ghost danger" type="button" disabled={libraryLoading} onClick={() => void deleteSelected()}>
+                    <button
+                      className="btn-ghost danger"
+                      type="button"
+                      aria-describedby={deleteConfirmationArmed && !selectedLibraryBusy ? "media-delete-confirmation" : undefined}
+                      disabled={Boolean(selectedLibraryBusy)}
+                      onClick={() => void deleteSelected()}
+                    >
                       {confirmDeleteId === selectedLibraryItem.id ? <Check size={13} /> : <Trash size={13} />}
-                      {confirmDeleteId === selectedLibraryItem.id ? "Confirm delete" : "Delete"}
+                      {selectedLibraryBusy === "delete" ? "Deleting..." : confirmDeleteId === selectedLibraryItem.id ? "Confirm delete" : "Delete"}
                     </button>
                   </div>
+                  {deleteConfirmationArmed && !selectedLibraryBusy && (
+                    <div id="media-delete-confirmation" className="media-delete-confirmation" role="status">
+                      Delete again within 3 seconds to permanently remove this item and its local files.
+                    </div>
+                  )}
                   {selectedLibraryItem.error && <div className="artifact-error" role="alert">{selectedLibraryItem.error}</div>}
+                  {libraryActionError?.id === selectedLibraryItem.id && (
+                    <div className="artifact-error media-library-action-error" role="alert">{libraryActionError.message}</div>
+                  )}
+                  {libraryNotice?.id === selectedLibraryItem.id && (
+                    <div className="media-library-notice" role="status" aria-live="polite">{libraryNotice.message}</div>
+                  )}
+                </div>
+              )}
+              {libraryActionError && libraryActionError.id !== selectedLibraryItem?.id && (
+                <div className="artifact-error media-library-global-feedback" role="alert">
+                  {libraryActionError.label}: {libraryActionError.message}
+                </div>
+              )}
+              {libraryNotice && libraryNotice.id !== selectedLibraryItem?.id && (
+                <div className="media-library-notice media-library-global-feedback" role="status" aria-live="polite">
+                  {libraryNotice.label}: {libraryNotice.message}
                 </div>
               )}
             </div>
@@ -886,7 +1403,10 @@ export function MediaManager({
               <div className="media-library-head">
                 <div>
                   <span className="media-eyebrow">Local library</span>
-                  <strong>{libraryItems.length ? `${libraryItems.length} shown` : "Generated media"}</strong>
+                  <strong>{loadedCount} loaded</strong>
+                  {libraryLoading && libraryItems.length > 0 && (
+                    <span className="media-library-updating" role="status">Updating...</span>
+                  )}
                 </div>
                 <div className="media-library-search">
                   <Search size={13} aria-hidden="true" />
@@ -895,7 +1415,7 @@ export function MediaManager({
               </div>
               {showLibraryFilters && (
                 <div className="media-library-filters">
-                  <div className="media-filter-tabs" aria-label="Filter library by media type">
+                  <div className="media-filter-tabs" role="group" aria-label="Filter library by media type">
                     {(["", "image", "video", "music"] as const).map((value) => (
                       <button key={value || "all"} type="button" className={libraryKind === value ? "active" : ""} aria-pressed={libraryKind === value} onClick={() => setLibraryKind(value)}>
                         {value || "All"}
@@ -905,12 +1425,14 @@ export function MediaManager({
                   <Select
                     value={libraryProvider}
                     placeholder="All providers"
+                    ariaLabel="Provider filter"
                     options={[{ label: "All providers", value: "" }, ...available.map((provider) => ({ label: provider.name, value: provider.id }))]}
                     onChange={setLibraryProvider}
                   />
                   <Select
                     value={libraryStatus}
                     placeholder="Any status"
+                    ariaLabel="Status filter"
                     options={[
                       { label: "Any status", value: "" },
                       { label: "Ready", value: "ready" },
@@ -920,40 +1442,75 @@ export function MediaManager({
                     ]}
                     onChange={(value) => setLibraryStatus(value as MediaLibraryStatus | "")}
                   />
+                  {hasLibraryFilters && (
+                    <button
+                      className="btn-ghost media-clear-filters"
+                      type="button"
+                      onClick={() => {
+                        setLibraryQuery("");
+                        setLibraryKind("");
+                        setLibraryProvider("");
+                        setLibraryStatus("");
+                      }}
+                    >
+                      Clear filters
+                    </button>
+                  )}
                 </div>
               )}
 
+              {libraryListError && (
+                <div className="artifact-error media-library-list-error" role="alert">
+                  <span>{libraryListError}</span>
+                  <button className="btn-ghost" type="button" onClick={() => void loadLibrary()}>Retry</button>
+                </div>
+              )}
               <div className="media-library-grid" aria-busy={libraryLoading}>
                 {libraryItems.map((item) => (
-                  <article
+                  <button
+                    ref={(node) => {
+                      if (node) libraryCardRefs.current.set(item.id, node);
+                      else libraryCardRefs.current.delete(item.id);
+                    }}
                     className={`media-library-card${item.id === selectedLibraryItem?.id ? " active" : ""}`}
                     data-testid="media-library-item"
+                    type="button"
+                    aria-label={`Select ${item.kind}: ${item.prompt}, ${item.provider}, ${item.model}, ${item.save_state}${item.media.length > 1 ? `, ${item.media.length} outputs` : ""}`}
                     aria-current={item.id === selectedLibraryItem?.id ? "true" : undefined}
                     key={item.id}
+                    onClick={() => {
+                      setLibraryNotice(null);
+                      setLibraryActionError(null);
+                      setSelectedLibraryId(item.id);
+                    }}
                   >
-                    <div className="media-library-thumb">
-                      {item.media[0] && item.kind !== "music" ? (
-                        <GeneratedMedia item={item.media[0]} alt={`Select generated ${item.kind} from ${item.model}`} onActivate={() => setSelectedLibraryId(item.id)} />
+                    <span className="media-library-thumb">
+                      {item.media[0] ? (
+                        <GeneratedMedia
+                          item={item.media[0]}
+                          alt={`Generated ${item.kind} from ${item.model}`}
+                          interactive={false}
+                          pressed={item.id === selectedLibraryItem?.id}
+                        />
                       ) : (
-                        <button type="button" onClick={() => setSelectedLibraryId(item.id)} aria-label={`Select ${item.kind} from ${item.model}`}>
-                          <Image size={20} />
-                        </button>
+                        <Image size={20} />
                       )}
                       {item.save_state !== "ready" && <span className={`media-status ${item.save_state}`}>{item.save_state}</span>}
-                    </div>
-                    <button className="media-library-card-body" type="button" onClick={() => setSelectedLibraryId(item.id)}>
+                      {item.media.length > 1 && <span className="media-output-count">{item.media.length} outputs</span>}
+                    </span>
+                    <span className="media-library-card-body">
                       <strong title={item.prompt}>{item.prompt}</strong>
                       <span className="media-library-card-meta" aria-label={`${item.provider}, ${item.model}`}>
                         <span className="media-library-card-provider">{item.provider}</span>
                         <span className="media-library-card-model" title={item.model}>{item.model.split("/").pop() || item.model}</span>
                       </span>
-                    </button>
-                  </article>
+                    </span>
+                  </button>
                 ))}
                 {!libraryItems.length && libraryLoading && (
                   <div className="media-library-empty" role="status">Loading local library...</div>
                 )}
-                {!libraryItems.length && !libraryLoading && (
+                {!libraryItems.length && !libraryLoading && !libraryListError && (
                   <div className="media-library-empty">
                     <Image size={20} />
                     <span>{libraryQuery || libraryKind || libraryProvider || libraryStatus ? "No media matches these filters." : "Completed chat and studio generations will be saved here."}</span>
@@ -968,7 +1525,7 @@ export function MediaManager({
             </aside>}
           </section>
         </div>
-        {modelPickerOpen && modelPickerStyle && createPortal(
+        {modelPickerOpen && modelPickerStyle && (
           <div
             ref={modelPickerPopoverRef}
             className="media-model-picker-popover"
@@ -979,7 +1536,8 @@ export function MediaManager({
               models={mediaPickerModels}
               model={model}
               onModel={(selection) => applyPickerModel(selection.model)}
-              onClose={() => setModelPickerOpen(false)}
+              onClose={closeModelPicker}
+              ariaLabel={`Choose ${modelKindWithArticle} model`}
               showManagementActions={false}
               favoriteIds={favoriteModelIds}
               favoritesOnlyValue={favoritesOnly}
@@ -988,8 +1546,7 @@ export function MediaManager({
               searchPlaceholder={`Search ${kind === "music" ? "audio" : kind} models...`}
               emptyMessage={`No ${kind === "music" ? "audio" : kind} models available.`}
             />
-          </div>,
-          document.body,
+          </div>
         )}
         <button
           className="media-sheet-resize-handle"
@@ -1001,19 +1558,6 @@ export function MediaManager({
           onKeyDown={resizeStudioWithKeyboard}
           onDoubleClick={resetStudioSize}
         >
-          <svg
-            className="media-sheet-resize-glyph"
-            width="15"
-            height="15"
-            viewBox="0 0 16 16"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.6"
-            strokeLinecap="round"
-            aria-hidden="true"
-          >
-            <path d="M4 13 13 4M8 13l5-5M12 13l1-1" />
-          </svg>
         </button>
       </div>
     </SheetDialog>

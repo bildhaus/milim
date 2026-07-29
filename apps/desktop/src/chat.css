@@ -5489,6 +5489,10 @@ html[data-dark="true"] .preview-control-cursor {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.composer-approval-progress {
+  margin: 0;
+  color: var(--tertiary-text);
+}
 .composer-approval-details {
   overflow: hidden;
   border: 1px solid var(--border-primary);
@@ -5508,10 +5512,46 @@ html[data-dark="true"] .preview-control-cursor {
 .composer-approval-details[open] summary {
   border-bottom: 1px solid var(--border-primary);
 }
-.composer-approval-details > .stream-approval-arguments {
-  max-height: 160px;
+.composer-approval-request {
+  max-height: 180px;
+  padding: 9px 10px;
+  overflow: auto;
+  color: var(--primary-text);
+}
+.composer-approval-fields {
+  display: grid;
+  gap: 7px;
   margin: 0;
-  border-radius: 0;
+}
+.composer-approval-fields > div {
+  display: grid;
+  grid-template-columns: minmax(88px, 0.28fr) minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+.composer-approval-fields dt {
+  color: var(--tertiary-text);
+  font-size: 11.5px;
+}
+.composer-approval-fields dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.composer-approval-fields code {
+  color: inherit;
+  white-space: pre-wrap;
+}
+.composer-approval-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+}
+.composer-approval-empty {
+  color: var(--tertiary-text);
+}
+.composer-approval-details > .composer-approval-request {
   background: transparent;
 }
 .composer-approval .stream-approval-actions {
@@ -5702,38 +5742,6 @@ html[data-dark="true"] .preview-control-cursor {
   min-width: 0;
   padding: 7px 9px 5px;
   border-bottom: 1px solid var(--border-primary);
-}
-.first-send-summary {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.8fr) auto auto;
-  gap: 10px;
-  padding: 6px 10px;
-  border-bottom: 1px solid var(--border-primary);
-  color: var(--tertiary-text);
-  font-size: 10px;
-}
-.first-send-summary span {
-  display: grid;
-  min-width: 0;
-  gap: 1px;
-}
-.first-send-summary strong {
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-.first-send-summary em {
-  overflow: hidden;
-  color: var(--secondary-text);
-  font-style: normal;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-@media (max-width: 620px) {
-  .first-send-summary {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 .chips { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; flex-wrap: wrap; }
 .chip-wrap { position: relative; }

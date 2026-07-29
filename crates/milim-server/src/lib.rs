@@ -243,6 +243,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/pi/status", get(routes::pi_status))
         .route("/pi/models", get(routes::pi_models))
         .route("/pi/run", post(routes::pi_run))
+        .route("/harnesses/{id}/run", post(routes::harness_run))
         .route(
             "/account-runtimes/updates",
             get(routes::account_runtime_updates),
@@ -281,7 +282,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/mcp/servers/{id}", delete(routes::mcp_server_delete))
         // Agents (server-side tool-use loop + named agents)
         .route("/agents/run", post(routes::agents_run))
-        .route("/tool-approvals/{id}", post(routes::tool_approval_resolve))
+        .route(
+            "/tool-approvals/{id}",
+            get(routes::tool_approval_status).post(routes::tool_approval_resolve),
+        )
         .route(
             "/agents",
             get(routes::agents_list).post(routes::agent_create),

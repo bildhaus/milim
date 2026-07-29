@@ -4,14 +4,16 @@ import type {
   ChatStreamEventIcon,
   ChatStreamPreviewPoint,
   ChatStreamPart,
-  ClaudeRunEvent,
-  CodexRunEvent,
+  HarnessEvent,
   ToolApprovalRequest,
   ToolApprovalRequestKind,
 } from "../api";
 
 type ChatStreamEventPart = Extract<ChatStreamPart, { kind: "event" }>;
-type AccountRuntimeToolEvent = Extract<CodexRunEvent | ClaudeRunEvent, { type: "tool" }>;
+type AccountRuntimeToolEvent = Extract<
+  HarnessEvent,
+  { type: "tool_started" | "tool_updated" | "tool_finished" }
+>;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -90,9 +92,11 @@ function toolEventIcon(name?: string): ChatStreamEventIcon {
     case "write_file":
     case "edit_file":
     case "patch_file":
+    case "file_change":
       return "file";
     case "shell":
     case "run_command":
+    case "command":
       return "command";
     case "memory_register":
       return "memory";
@@ -206,7 +210,7 @@ function toolDetail(name: string | undefined, args: Record<string, unknown> | nu
   const error = toolErrorMessage(result);
   if (error) return compactText(path ? `${path}: ${error}` : error, 110);
   const diffStats = name === "write_file" || name === "edit_file" || name === "patch_file" ? toolDiffStats(record) : undefined;
-  if (command) return compactText(command, 110);
+  if (command) return command;
   if (path) return compactText(diffStats ? `${path} ${diffStats}` : path);
   if (url) return compactText(url);
 
@@ -260,16 +264,19 @@ export function toolCompletedPart(ev: AgentEvent): ChatStreamEventPart {
 }
 
 export function accountRuntimeToolPart(ev: AccountRuntimeToolEvent): ChatStreamEventPart {
-  const status = ev.status === "done" || (ev.status as string) === "completed"
-    ? "done"
-    : ev.status === "error" || (ev.status as string) === "failed"
-      ? "error"
-      : "running";
+  const status = ev.type !== "tool_finished"
+    ? "running"
+    : ev.status === "completed"
+      ? "done"
+      : "error";
   return {
     kind: "event",
     eventType: "tool",
     label: ev.label || (status === "running" ? `Using ${ev.name}` : status === "error" ? `${ev.name} failed` : `Used ${ev.name}`),
-    detail: ev.detail || undefined,
+    detail:
+      (status === "error" ? ev.error : ev.detail) ||
+      ev.detail ||
+      undefined,
     icon: ev.icon || toolEventIcon(ev.name),
     name: ev.id || ev.name,
     status,
@@ -288,13 +295,21 @@ export function statusPart(label: string, detail?: string, tone: "status" | "war
 }
 
 export function toolApprovalPart(
-  event: Pick<AgentEvent, "approval_id" | "name" | "arguments" | "decision"> & {
+  event: {
+    approval_id?: string;
+    name?: string;
+    arguments?: string;
+    decision?: "approve" | "deny";
+    status?: "decided" | "delivered";
+    message?: string;
     request_kind?: ToolApprovalRequestKind;
     request?: Record<string, unknown>;
   },
 ): ChatStreamEventPart {
-  const resolved = event.decision != null;
-  const approvalRequest = !resolved && event.request_kind
+  const failed = event.message != null;
+  const progressing = event.status != null;
+  const resolved = event.decision != null && !progressing && !failed;
+  const approvalRequest = !resolved && !progressing && !failed && event.request_kind
     ? ({ kind: event.request_kind, ...(event.request ?? {}) } as ToolApprovalRequest)
     : undefined;
   const requestLabel = approvalRequest?.kind === "permissions"
@@ -306,20 +321,41 @@ export function toolApprovalPart(
         : approvalRequest?.kind === "mcp_unsupported"
           ? "Unsupported MCP request"
           : `Approve ${event.name ?? "tool"}`;
+  const outcomeTarget = event.name === "command"
+    ? "Command"
+    : event.name === "file_change"
+      ? "File change"
+      : event.name === "permissions"
+        ? "Permissions"
+        : event.name ?? "Tool";
   return {
     kind: "event",
     eventType: "status",
-    label: resolved
-      ? `${event.name ?? "Tool"} ${event.decision === "approve" ? "approved" : "denied"}`
-      : requestLabel,
-    detail: approvalRequest && approvalRequest.kind !== "command" && approvalRequest.kind !== "file_change"
-      ? "message" in approvalRequest ? approvalRequest.message : "reason" in approvalRequest ? approvalRequest.reason ?? undefined : undefined
-      : event.arguments,
+    label: failed
+      ? "Approval delivery failed"
+      : progressing
+        ? event.status === "decided" ? "Approval submitted" : "Approval delivered"
+        : resolved
+          ? `${outcomeTarget} ${event.decision === "approve" ? "approved" : "denied"}`
+          : requestLabel,
+    detail: failed
+      ? event.message
+      : resolved || progressing
+        ? undefined
+      : approvalRequest && approvalRequest.kind !== "command" && approvalRequest.kind !== "file_change"
+        ? "message" in approvalRequest ? approvalRequest.message : "reason" in approvalRequest ? approvalRequest.reason ?? undefined : undefined
+        : event.arguments,
     icon: toolEventIcon(event.name),
     name: `approval:${event.approval_id}`,
-    status: "done",
+    status: failed ? "error" : progressing ? "running" : "done",
     approvalId: event.approval_id,
-    approvalStatus: resolved ? (event.decision === "approve" ? "approved" : "denied") : "pending",
+    approvalStatus: failed
+      ? "failed"
+      : progressing
+        ? event.status
+        : resolved
+          ? (event.decision === "approve" ? "approved" : "denied")
+          : "pending",
     approvalRequest,
   };
 }

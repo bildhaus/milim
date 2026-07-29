@@ -52,6 +52,7 @@ export function InlineMediaControls({
           <Select
             value={activeKind}
             options={kindOptions}
+            ariaLabel="Media type"
             testId="inline-media-kind-select"
             onChange={(value) => onKindChange(value as MediaKind)}
           />
@@ -70,6 +71,7 @@ export function InlineMediaControls({
                 {control.kind === "select" ? (
                   <Select
                     testId={`inline-media-param-${control.key}`}
+                    ariaLabel={control.label}
                     value={controlValue(parameterValues[control.key])}
                     options={(control.options ?? []).map((option) => ({
                       value: String(option.value),
@@ -82,6 +84,7 @@ export function InlineMediaControls({
                     className="media-checkbox-input"
                     data-testid={`inline-media-param-${control.key}`}
                     type="checkbox"
+                    aria-label={control.label}
                     checked={Boolean(parameterValues[control.key])}
                     onChange={(e) => onParameterChange(control, e.target.checked)}
                   />
@@ -90,6 +93,7 @@ export function InlineMediaControls({
                     className="css-input"
                     data-testid={`inline-media-param-${control.key}`}
                     placeholder={control.placeholder}
+                    aria-label={control.label}
                     value={controlValue(parameterValues[control.key])}
                     onChange={(e) => onParameterChange(control, e.target.value)}
                   />
@@ -99,6 +103,7 @@ export function InlineMediaControls({
                     data-testid={`inline-media-param-${control.key}`}
                     type={control.kind === "url" ? "url" : control.kind === "text" ? "text" : "number"}
                     placeholder={control.placeholder}
+                    aria-label={control.label}
                     min={control.min}
                     max={control.max}
                     step={control.step}
@@ -116,6 +121,7 @@ export function InlineMediaControls({
           <textarea
             className="css-input"
             data-testid="inline-media-advanced-input"
+            aria-label="Advanced media input JSON"
             value={advanced}
             spellCheck={false}
             onChange={(e) => onAdvancedChange(e.target.value)}
@@ -123,7 +129,7 @@ export function InlineMediaControls({
         </details>
       </div>
 
-      {error && <div className="artifact-error" data-testid="inline-media-error">{error}</div>}
+      {error && <div className="artifact-error" data-testid="inline-media-error" role="alert">{error}</div>}
     </>
   );
 

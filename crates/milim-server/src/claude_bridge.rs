@@ -173,8 +173,9 @@ struct ClaudeTranscriptNode {
 pub(crate) async fn threads(
     cursor: Option<String>,
     search: Option<String>,
+    all: bool,
 ) -> Result<ClaudeThreadPage> {
-    tokio::task::spawn_blocking(move || claude_threads_sync(cursor, search))
+    tokio::task::spawn_blocking(move || claude_threads_sync(cursor, search, all))
         .await
         .map_err(|error| Error::Other(format!("Claude chat listing task failed: {error}")))?
 }
@@ -197,7 +198,11 @@ pub(crate) async fn import_thread(session_id: &str) -> Result<ClaudeImportedThre
     .map_err(|error| Error::Other(format!("Claude chat import task failed: {error}")))?
 }
 
-fn claude_threads_sync(cursor: Option<String>, search: Option<String>) -> Result<ClaudeThreadPage> {
+fn claude_threads_sync(
+    cursor: Option<String>,
+    search: Option<String>,
+    all: bool,
+) -> Result<ClaudeThreadPage> {
     let offset = match clean_optional(cursor.as_deref()) {
         Some(value) => value
             .parse::<usize>()
@@ -212,13 +217,19 @@ fn claude_threads_sync(cursor: Option<String>, search: Option<String>) -> Result
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
-    Ok(page_claude_threads(summaries, offset, search.as_deref()))
+    Ok(page_claude_threads(
+        summaries,
+        offset,
+        search.as_deref(),
+        all,
+    ))
 }
 
 fn page_claude_threads(
     mut summaries: Vec<ClaudeThreadSummary>,
     offset: usize,
     search: Option<&str>,
+    all: bool,
 ) -> ClaudeThreadPage {
     if let Some(search) = search {
         summaries.retain(|thread| {
@@ -238,9 +249,13 @@ fn page_claude_threads(
             .cmp(&left.updated_at_ms)
             .then_with(|| left.id.cmp(&right.id))
     });
-    let end = offset
-        .saturating_add(CLAUDE_THREAD_PAGE_SIZE)
-        .min(summaries.len());
+    let end = if all {
+        summaries.len()
+    } else {
+        offset
+            .saturating_add(CLAUDE_THREAD_PAGE_SIZE)
+            .min(summaries.len())
+    };
     let data = if offset < summaries.len() {
         summaries[offset..end].to_vec()
     } else {
@@ -248,7 +263,7 @@ fn page_claude_threads(
     };
     ClaudeThreadPage {
         data,
-        next_cursor: (end < summaries.len()).then(|| end.to_string()),
+        next_cursor: (!all && end < summaries.len()).then(|| end.to_string()),
     }
 }
 
@@ -684,6 +699,18 @@ enum ClaudeStreamEvent {
         call_id: String,
         decision: &'static str,
     },
+    ToolApprovalStatus {
+        approval_id: String,
+        call_id: String,
+        decision: Option<&'static str>,
+        status: &'static str,
+    },
+    ToolApprovalFailed {
+        approval_id: String,
+        call_id: String,
+        decision: Option<&'static str>,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -778,23 +805,55 @@ pub(crate) fn run_stream(
                 (stream.next().await, None)
             };
             match (event, notice) {
-                (Some(event), _) => yield event,
+                (Some(event), _) => {
+                    if let (Some(broker), Some(run_id)) =
+                        (approval_broker.as_ref(), approval_run_id.as_deref())
+                    {
+                        broker.acknowledge_run(run_id);
+                    }
+                    yield event
+                },
                 (None, Some(Ok(notice))) if Some(notice.run_id.as_str()) == approval_run_id.as_deref() => {
                     let call_id = notice.call_id.unwrap_or_else(|| notice.approval_id.clone());
-                    if let Some(decision) = notice.decision {
-                        yield sse_event(&ClaudeStreamEvent::ToolApprovalResolved {
-                            approval_id: notice.approval_id,
-                            call_id,
-                            decision,
-                        });
-                    } else {
-                        yield sse_event(&ClaudeStreamEvent::ToolApprovalRequired {
-                            approval_id: notice.approval_id,
-                            call_id,
-                            name: notice.name,
-                            arguments: notice.arguments,
-                            effect: notice.effect,
-                        });
+                    match notice.state {
+                        milim_agents::ApprovalState::Requested => {
+                            yield sse_event(&ClaudeStreamEvent::ToolApprovalRequired {
+                                approval_id: notice.approval_id,
+                                call_id,
+                                name: notice.name,
+                                arguments: notice.arguments,
+                                effect: notice.effect,
+                            });
+                        }
+                        milim_agents::ApprovalState::Decided
+                        | milim_agents::ApprovalState::Delivered => {
+                            yield sse_event(&ClaudeStreamEvent::ToolApprovalStatus {
+                                approval_id: notice.approval_id,
+                                call_id,
+                                decision: notice.decision,
+                                status: if notice.state == milim_agents::ApprovalState::Decided {
+                                    "decided"
+                                } else {
+                                    "delivered"
+                                },
+                            });
+                        }
+                        milim_agents::ApprovalState::Acknowledged => {
+                            yield sse_event(&ClaudeStreamEvent::ToolApprovalResolved {
+                                approval_id: notice.approval_id,
+                                call_id,
+                                decision: notice.decision.unwrap_or("deny"),
+                            });
+                        }
+                        milim_agents::ApprovalState::Failed
+                        | milim_agents::ApprovalState::Canceled => {
+                            yield sse_event(&ClaudeStreamEvent::ToolApprovalFailed {
+                                approval_id: notice.approval_id,
+                                call_id,
+                                decision: notice.decision,
+                                message: notice.error.unwrap_or_else(|| "Approval delivery failed".to_string()),
+                            });
+                        }
                     }
                 }
                 (None, Some(Ok(_)))
@@ -1383,7 +1442,9 @@ fn account_worker_event_from_claude(value: &ClaudeStreamEvent) -> Option<Account
         }
         ClaudeStreamEvent::RateLimit { .. }
         | ClaudeStreamEvent::ToolApprovalRequired { .. }
-        | ClaudeStreamEvent::ToolApprovalResolved { .. } => None,
+        | ClaudeStreamEvent::ToolApprovalResolved { .. }
+        | ClaudeStreamEvent::ToolApprovalStatus { .. }
+        | ClaudeStreamEvent::ToolApprovalFailed { .. } => None,
     }
 }
 
@@ -1901,20 +1962,7 @@ fn compact_json(value: Option<&Value>) -> Option<String> {
     if value.is_null() {
         return None;
     }
-    Some(compact(&value.to_string(), 110))
-}
-
-fn compact(value: &str, limit: usize) -> String {
-    let text = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    if text.chars().count() > limit {
-        let prefix = text
-            .chars()
-            .take(limit.saturating_sub(3))
-            .collect::<String>();
-        format!("{prefix}...")
-    } else {
-        text
-    }
+    Some(value.to_string())
 }
 
 fn claude_spawn_error_message(error: &std::io::Error) -> String {
@@ -2063,16 +2111,19 @@ not json
                 resumable: true,
             })
             .collect();
-        let first = page_claude_threads(summaries.clone(), 0, None);
+        let first = page_claude_threads(summaries.clone(), 0, None, false);
         assert_eq!(first.data.len(), CLAUDE_THREAD_PAGE_SIZE);
         assert_eq!(first.data[0].updated_at_ms, 29);
         assert_eq!(first.next_cursor.as_deref(), Some("25"));
-        let second = page_claude_threads(summaries.clone(), 25, None);
+        let second = page_claude_threads(summaries.clone(), 25, None, false);
         assert_eq!(second.data.len(), 5);
         assert!(second.next_cursor.is_none());
-        let filtered = page_claude_threads(summaries, 0, Some("needle"));
+        let filtered = page_claude_threads(summaries.clone(), 0, Some("needle"), false);
         assert_eq!(filtered.data.len(), 1);
         assert_eq!(filtered.data[0].id, "07");
+        let complete = page_claude_threads(summaries, 0, None, true);
+        assert_eq!(complete.data.len(), 30);
+        assert!(complete.next_cursor.is_none());
     }
 
     #[test]
@@ -2132,6 +2183,28 @@ not json
             Some(ClaudeStreamEvent::Reasoning { text }) if text == "still working"
         ));
         assert!(tools.contains_key("toolu_1"));
+    }
+
+    #[test]
+    fn tool_inputs_keep_full_copy_text() {
+        let command = format!("powershell -Command \"{}\"", "x".repeat(140));
+        let input = json!({ "command": command });
+        let expected = input.to_string();
+        let mut tools = BTreeMap::new();
+        let event = claude_tool_start_event(
+            &json!({
+                "type": "tool_use",
+                "id": "toolu-long",
+                "name": "Bash",
+                "input": input,
+            }),
+            &mut tools,
+        );
+        assert!(matches!(
+            event,
+            Some(ClaudeStreamEvent::Tool { detail: Some(detail), .. })
+                if detail == expected
+        ));
     }
 
     #[test]

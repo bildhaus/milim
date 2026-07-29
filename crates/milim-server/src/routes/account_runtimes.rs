@@ -101,6 +101,8 @@ pub(crate) struct CodexThreadsQuery {
     search: Option<String>,
     #[serde(default)]
     archived: bool,
+    #[serde(default)]
+    all: bool,
 }
 
 /// `GET /codex/threads` - page through recoverable Codex app-server threads.
@@ -111,9 +113,10 @@ pub(crate) async fn codex_threads(
     peer: Peer,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
-    let result = crate::codex_bridge::threads(query.cursor, query.search, query.archived)
-        .await
-        .map_err(ApiError)?;
+    let result =
+        crate::codex_bridge::threads(query.cursor, query.search, query.archived, query.all)
+            .await
+            .map_err(ApiError)?;
     Ok(Json(result).into_response())
 }
 
@@ -189,6 +192,8 @@ pub(crate) async fn claude_status(
 pub(crate) struct ClaudeThreadsQuery {
     cursor: Option<String>,
     search: Option<String>,
+    #[serde(default)]
+    all: bool,
 }
 
 /// `GET /claude/threads` - page through locally retained Claude CLI chats.
@@ -199,7 +204,7 @@ pub(crate) async fn claude_threads(
     peer: Peer,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
-    let result = crate::claude_bridge::threads(query.cursor, query.search)
+    let result = crate::claude_bridge::threads(query.cursor, query.search, query.all)
         .await
         .map_err(ApiError)?;
     Ok(Json(result).into_response())
@@ -504,11 +509,20 @@ pub(crate) async fn claude_approval_mcp(
             let mut pending = st
                 .tool_approvals
                 .request_external(run_id, None, name, arguments, effect);
-            let approved = pending.wait().await.approved;
+            let mut approved = pending.wait().await.approved;
+            let delivery_error = pending.deliver().err();
+            if delivery_error.is_some() {
+                approved = false;
+            }
             let payload = if approved {
                 json!({ "behavior": "allow", "updatedInput": input })
             } else {
-                json!({ "behavior": "deny", "message": "Tool call denied by user" })
+                json!({
+                    "behavior": "deny",
+                    "message": delivery_error
+                        .as_deref()
+                        .unwrap_or("Tool call denied by user")
+                })
             };
             json!({
                 "content": [{ "type": "text", "text": payload.to_string() }],
@@ -605,7 +619,14 @@ pub(crate) async fn account_runtime_tool_mcp(
                     serde_json::to_string(&args).unwrap_or_else(|_| "{}".into()),
                     effect,
                 );
-                if !pending.wait().await.approved {
+                let approved = pending.wait().await.approved;
+                let delivery_error = pending.deliver().err();
+                if let Some(error) = delivery_error {
+                    json!({
+                        "content": [{ "type": "text", "text": error }],
+                        "isError": true
+                    })
+                } else if !approved {
                     json!({
                         "content": [{ "type": "text", "text": "Tool call denied by user." }],
                         "isError": true

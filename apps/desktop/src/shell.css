@@ -1075,6 +1075,79 @@
   white-space: nowrap;
 }
 .session-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 5px; margin-top: 3px; padding-right: 1px; }
+.settled-session-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 5px;
+  padding-top: 6px;
+  border-top: 1px solid color-mix(in srgb, var(--border-primary) 62%, transparent);
+}
+.settled-session-divider {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 25px;
+  padding: 2px 6px;
+  color: var(--tertiary-text);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+.settled-session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.settled-session-item {
+  min-height: 24px;
+  margin-left: 0;
+  padding-block: 0;
+  color: var(--tertiary-text);
+  font-size: 12px;
+  animation: settled-session-enter var(--motion-fast) var(--motion-ease-out);
+}
+.settled-session-item.child-session {
+  min-height: 23px;
+  margin-left: 16px;
+}
+.settled-session-item::before,
+.settled-session-item.child-session::before {
+  display: none;
+}
+.settled-session-item .session-title {
+  color: color-mix(in srgb, var(--secondary-text) 70%, var(--tertiary-text));
+  font-size: 12px;
+}
+.settled-session-item:hover .session-title,
+.settled-session-item.active .session-title {
+  color: var(--secondary-text);
+}
+.settled-project-badge {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  color: var(--tertiary-text);
+}
+.settled-project-badge.project-colored {
+  color: var(--project-color);
+}
+.settled-session-more {
+  padding-left: 2px;
+}
+@keyframes settled-session-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .settled-session-item {
+    animation: none;
+  }
+}
 .session-section {
   --session-connector: color-mix(in srgb, var(--project-color, var(--tertiary-text)) 18%, var(--border-primary));
   position: relative;
@@ -1413,6 +1486,9 @@
   gap: 2px;
   height: 24px;
 }
+.session-side.session-side-wide {
+  min-width: 70px;
+}
 .session-side-indicator {
   transition: opacity var(--motion-fast) var(--motion-ease-out), visibility var(--motion-fast) var(--motion-ease-out);
 }
@@ -1490,6 +1566,10 @@
 .session-side-btn.confirm {
   background: var(--chip-hover);
   color: var(--primary-text);
+}
+.session-side-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 .session-side-btn.danger.confirm {
   background: color-mix(in srgb, var(--error) 12%, transparent);

@@ -26,6 +26,7 @@ const settingsOnly = process.argv.includes("--settings-only");
 const appMenuOnly = process.argv.includes("--app-menu-only");
 const turnChangesOnly = process.argv.includes("--turn-changes-only");
 const mobileAuthOnly = process.argv.includes("--mobile-auth-only");
+const mediaOnly = process.argv.includes("--media-only");
 const mcpAppKinds = ["chart", "diagram", "form", "dashboard", "viewer"];
 const screenshots = {
   avatars: join(tmpdir(), "milim-tauri-webview-agent-avatars.png"),
@@ -104,6 +105,21 @@ try {
   await resetFrontendStorage(session.page);
   if (mobileAuthOnly) {
     await runMobileAuthCheck(session.page);
+  } else if (mediaOnly) {
+    const errors = collectErrors(session.page);
+    await session.page.getByTestId("chat-shell").waitFor();
+    await dismissOnboardingIfPresent(session.page);
+    await runMediaStudioCheck(session.page);
+    consoleErrors.push(
+      ...errors.filter(
+        (message) =>
+          !(
+            message.includes("/media/library") &&
+            message.includes("500")
+          ) &&
+          !message.includes("/codex/models"),
+      ),
+    );
   } else if (turnChangesOnly) {
     const errors = collectErrors(session.page);
     turnChangesRepo = createTurnChangesRepo();
@@ -280,6 +296,523 @@ async function runMobileAuthCheck(page) {
   }
   await page.locator("#relayPanel:not(.hidden)").waitFor();
   await page.locator("#status").filter({ hasText: "Live" }).waitFor();
+}
+
+async function runMediaStudioCheck(page) {
+  const fixtureProvider = {
+    id: "e2e-media-provider",
+    name: "E2E Media",
+    kind: "fal",
+    base_url: "https://queue.fal.run",
+    enabled: true,
+    has_key: true,
+    models: [],
+  };
+  let providerAvailable = false;
+  let generationIndex = 0;
+  let deleteRequests = 0;
+  const generationBodies = [];
+  const svgData = (label, color) =>
+    `data:image/svg+xml,${encodeURIComponent(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="200" viewBox="0 0 320 200"><rect width="320" height="200" fill="${color}"/><text x="160" y="105" text-anchor="middle" font-family="sans-serif" font-size="22" fill="white">${label}</text></svg>`,
+    )}`;
+  const makeLibraryItem = (id, label, color) => {
+    const url = svgData(label, color);
+    return {
+      id,
+      provider_run_id: `run-${id}`,
+      created_at_ms: 1_700_000_000_000 + Number(id.split("-").pop() ?? 0),
+      updated_at_ms: 1_700_000_000_000 + Number(id.split("-").pop() ?? 0),
+      provider_id: fixtureProvider.id,
+      provider: fixtureProvider.name,
+      provider_kind: fixtureProvider.kind,
+      kind: "image",
+      model: "fixture/image-model",
+      prompt: `${label} prompt`,
+      input: { seed: id, aspect_ratio: "16:9" },
+      status: "succeeded",
+      save_state: "ready",
+      privacy: { mode: "off", redacted: false, detections: 0, kinds: "" },
+      urls: {},
+      media: [{
+        url,
+        source_url: url,
+        kind: "image",
+        mime: "image/svg+xml",
+        local_path: null,
+      }],
+    };
+  };
+  let libraryItems = [
+    makeLibraryItem("library-1", "Fixture one", "#7c3aed"),
+    makeLibraryItem("library-2", "Fixture two", "#0f766e"),
+    makeLibraryItem("library-3", "Fixture three", "#c2410c"),
+  ];
+  let releaseFirstGeneration;
+  const firstGenerationGate = new Promise((resolve) => {
+    releaseFirstGeneration = resolve;
+  });
+  let resolveFirstImageSchemaSeen;
+  const firstImageSchemaSeen = new Promise((resolve) => {
+    resolveFirstImageSchemaSeen = resolve;
+  });
+  let releaseFirstImageSchema;
+  const firstImageSchemaGate = new Promise((resolve) => {
+    releaseFirstImageSchema = resolve;
+  });
+  let imageSchemaRequests = 0;
+
+  await page.route("**/privacy/mode", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ mode: "off" }),
+  }));
+  await page.route("**/providers", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ providers: providerAvailable ? [fixtureProvider] : [] }),
+  }));
+  await page.route("**/providers/discover", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ providers: [] }),
+  }));
+  await page.route("**/media/models?*", (route) => {
+    const url = new URL(route.request().url());
+    const kind = url.searchParams.get("kind") || "image";
+    const label = kind[0].toUpperCase() + kind.slice(1);
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        models: [{
+          id: `fixture/${kind}-model`,
+          name: `Fixture ${label}`,
+          description: `${label} fixture model`,
+          output_modalities: [kind],
+          supported_parameters: kind === "image" ? ["aspect_ratio"] : kind === "video" ? ["duration"] : ["tempo"],
+          default_parameters: null,
+          pricing: null,
+        }],
+      }),
+    });
+  });
+  await page.route("**/media/model-schema?*", async (route) => {
+    const url = new URL(route.request().url());
+    const kind = url.searchParams.get("kind") || "image";
+    if (kind === "image") {
+      imageSchemaRequests += 1;
+      if (imageSchemaRequests === 1) {
+        resolveFirstImageSchemaSeen();
+        await firstImageSchemaGate;
+      }
+    }
+    const controls = kind === "image"
+      ? [{
+          key: "aspect_ratio",
+          label: "Image aspect ratio",
+          kind: "select",
+          path: ["aspect_ratio"],
+          options: [
+            { label: "Square", value: "1:1" },
+            { label: "Wide", value: "16:9" },
+          ],
+          default: "1:1",
+        }]
+      : kind === "video"
+        ? [{
+            key: "duration",
+            label: "Video duration",
+            kind: "number",
+            path: ["duration"],
+            min: 1,
+            max: 12,
+            default: 4,
+          }]
+        : [{
+            key: "tempo",
+            label: "Music tempo",
+            kind: "number",
+            path: ["tempo"],
+            min: 40,
+            max: 220,
+            default: 120,
+          }];
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        model: url.searchParams.get("model"),
+        provider_id: fixtureProvider.id,
+        provider: fixtureProvider.name,
+        supported_parameters: controls.map((control) => control.key),
+        controls,
+      }),
+    });
+  });
+  await page.route("**/media/generate", async (route) => {
+    generationIndex += 1;
+    const body = JSON.parse(route.request().postData() ?? "{}");
+    generationBodies.push(body);
+    if (generationIndex === 1) await firstGenerationGate;
+    const media = ["#2563eb", "#7c3aed", "#db2777"].map((color, index) => ({
+      url: svgData(`Run ${generationIndex} · ${index + 1}`, color),
+      kind: "image",
+      mime: "image/svg+xml",
+    }));
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: `generation-${generationIndex}`,
+        object: "media.generation",
+        provider_id: fixtureProvider.id,
+        provider: fixtureProvider.name,
+        provider_kind: fixtureProvider.kind,
+        kind: body.kind,
+        model: body.model,
+        status: "succeeded",
+        output: null,
+        media,
+        urls: {},
+        library_id: `generated-${generationIndex}`,
+        save_state: "ready",
+        privacy: { mode: "off", redacted: false, detections: 0, kinds: "" },
+      }),
+    });
+  });
+  await page.route("**/media/library?*", async (route) => {
+    const url = new URL(route.request().url());
+    const query = (url.searchParams.get("query") ?? "").trim().toLowerCase();
+    if (query === "fixture library failure") {
+      await route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "Fixture library unavailable" }),
+      });
+      return;
+    }
+    const kind = url.searchParams.get("kind");
+    const provider = url.searchParams.get("provider");
+    const status = url.searchParams.get("status");
+    const filtered = libraryItems.filter((item) =>
+      (!query || `${item.prompt} ${item.model}`.toLowerCase().includes(query)) &&
+      (!kind || item.kind === kind) &&
+      (!provider || item.provider_id === provider) &&
+      (!status || item.save_state === status)
+    );
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: filtered,
+        next_cursor: query || kind || provider || status ? null : "more-fixtures",
+      }),
+    });
+  });
+  await page.route("**/media/library/*", async (route) => {
+    const request = route.request();
+    if (request.method() !== "DELETE") {
+      await route.fulfill({
+        status: 405,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "Fixture supports delete only" }),
+      });
+      return;
+    }
+    deleteRequests += 1;
+    const id = decodeURIComponent(new URL(request.url()).pathname.split("/").pop() ?? "");
+    libraryItems = libraryItems.filter((item) => item.id !== id);
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ deleted: true }),
+    });
+  });
+
+  const tools = page.getByTestId("open-tools");
+  if ((await tools.getAttribute("aria-expanded")) !== "true") await tools.click();
+  await page.getByRole("button", { name: "Media", exact: true }).click();
+
+  const studio = page.getByTestId("media-generator");
+  await studio.waitFor();
+  const prompt = page.getByTestId("media-prompt-input");
+  const preservedPrompt = [
+    "Preserve this provider setup draft",
+    "with enough lines to grow",
+    "across provider setup",
+    "without collapsing",
+  ].join("\n");
+  await prompt.fill(preservedPrompt);
+
+  const kindSelect = page.getByLabel("Media type");
+  await kindSelect.waitFor();
+  await kindSelect.focus();
+  await page.keyboard.press("ArrowDown");
+  await page.getByRole("listbox", { name: "Media type" }).waitFor();
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("Enter");
+  await assertTextContains(kindSelect, "Video");
+
+  const advanced = page.getByLabel("Advanced media input JSON");
+  const advancedDraft = '{\n  "seed": 42\n}';
+  await advanced.evaluate((element) => element.closest("details")?.setAttribute("open", ""));
+  await advanced.fill(advancedDraft);
+
+  const noProviderTrigger = page.getByTestId("media-model-picker-trigger");
+  await assertAttribute(noProviderTrigger, "aria-label", "Add media provider");
+  await assertTextContains(noProviderTrigger, "Add media provider");
+  await noProviderTrigger.click();
+  await page.getByTestId("provider-overview").waitFor();
+  providerAvailable = true;
+  await page.getByTestId("close-providers").click();
+
+  await prompt.waitFor();
+  if ((await prompt.inputValue()) !== preservedPrompt) {
+    throw new Error("Media prompt draft should survive the in-place provider setup round trip.");
+  }
+  if (!await prompt.evaluate((element) => Number.parseFloat(element.style.height) > 58)) {
+    throw new Error("Media prompt height should be restored after the provider setup round trip.");
+  }
+  await kindSelect.waitFor();
+  await assertTextContains(kindSelect, "Video");
+  await advanced.evaluate((element) => element.closest("details")?.setAttribute("open", ""));
+  const advancedAfterProviderSetup = await advanced.inputValue();
+  if (advancedAfterProviderSetup !== advancedDraft) {
+    throw new Error(
+      `Advanced media input should survive the in-place provider setup round trip. ` +
+      `Expected ${JSON.stringify(advancedDraft)}, got ${JSON.stringify(advancedAfterProviderSetup)}.`,
+    );
+  }
+  await advanced.evaluate((element) => element.closest("details")?.removeAttribute("open"));
+  await page.getByLabel("Video duration").waitFor();
+  await page.getByTestId("media-generate").waitFor();
+  if (await page.getByTestId("media-generate").isDisabled()) {
+    throw new Error("The refreshed provider and model should be usable after returning to Media Studio.");
+  }
+  const configuredModelTrigger = page.getByTestId("media-model-picker-trigger");
+  await configuredModelTrigger.click();
+  const mediaModelPicker = page.getByRole("dialog", { name: "Choose a video model", exact: true });
+  await mediaModelPicker.waitFor();
+  await mediaModelPicker.getByRole("button", { name: "Favorites only", exact: true }).focus();
+  await page.keyboard.press("Tab");
+  await page.waitForFunction(() =>
+    Boolean(document.activeElement?.closest('[data-testid="media-generator"]'))
+  );
+  await mediaModelPicker.getByLabel("Search models").focus();
+  await page.keyboard.press("Escape");
+  await mediaModelPicker.waitFor({ state: "hidden" });
+  await page.waitForFunction(() =>
+    document.activeElement?.getAttribute("data-testid") === "media-model-picker-trigger"
+  );
+
+  await kindSelect.focus();
+  await page.keyboard.press("ArrowDown");
+  await page.getByRole("listbox", { name: "Media type" }).waitFor();
+  await page.keyboard.press("Home");
+  await page.keyboard.press("Enter");
+  await Promise.race([
+    firstImageSchemaSeen,
+    delay(3_000).then(() => {
+      throw new Error("Timed out waiting for the delayed image schema fixture.");
+    }),
+  ]);
+  await kindSelect.focus();
+  await page.keyboard.press("ArrowDown");
+  await page.getByRole("listbox", { name: "Media type" }).waitFor();
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("Enter");
+  await page.getByLabel("Video duration").waitFor();
+  releaseFirstImageSchema();
+  await delay(50);
+  await assertHidden(page.getByLabel("Image aspect ratio"), "stale image schema control");
+
+  await kindSelect.focus();
+  await page.keyboard.press("ArrowDown");
+  await page.getByRole("listbox", { name: "Media type" }).waitFor();
+  await page.keyboard.press("Escape");
+  await page.getByRole("listbox", { name: "Media type" }).waitFor({ state: "hidden" });
+  await page.waitForFunction(() =>
+    document.activeElement?.getAttribute("aria-label") === "Media type"
+  );
+  await kindSelect.focus();
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("Home");
+  await page.keyboard.press("Enter");
+  await page.getByLabel("Image aspect ratio").waitFor();
+
+  const firstGenerate = page.getByTestId("media-generate");
+  await prompt.fill("Generate three fixture variants");
+  await firstGenerate.click();
+  const generatingStatus = page.getByTestId("media-stage").getByRole("status");
+  await generatingStatus.filter({ hasText: "Generating image" }).waitFor();
+  await prompt.fill("Editing should not hide generation progress");
+  if (!(await firstGenerate.isDisabled())) {
+    throw new Error("Generation should stay disabled while the active request is in flight.");
+  }
+  await kindSelect.focus();
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("Enter");
+  await generatingStatus.filter({ hasText: "Generating image" }).waitFor();
+  releaseFirstGeneration();
+
+  const variants = page.getByRole("listbox", { name: "Output variants" });
+  await variants.waitFor();
+  const variantOptions = variants.getByRole("option");
+  if ((await variantOptions.count()) !== 3) {
+    throw new Error(`Expected 3 output variants, got ${await variantOptions.count()}.`);
+  }
+  await assertAttribute(variantOptions.first(), "aria-selected", "true");
+  await variantOptions.first().focus();
+  await page.keyboard.press("End");
+  await assertAttribute(variantOptions.last(), "aria-selected", "true");
+
+  const secondResponse = page.waitForResponse((response) =>
+    response.request().method() === "POST" &&
+    new URL(response.url()).pathname === "/media/generate" &&
+    response.status() === 200
+  );
+  await prompt.fill("Generate a fresh variant set");
+  await firstGenerate.click();
+  await secondResponse;
+  await page.waitForFunction(() =>
+    document.querySelector('[data-testid="media-variant"]')?.getAttribute("aria-selected") === "true"
+  );
+
+  const libraryToggle = studio.getByRole("button", { name: /local library/i });
+  const libraryCountText = await libraryToggle.innerText();
+  const libraryCountLabel = await libraryToggle.getAttribute("aria-label");
+  if (!/\d+\+/.test(libraryCountText) || !/\d+ loaded, more available/.test(libraryCountLabel ?? "")) {
+    throw new Error(
+      `Expected a plus-suffixed loaded count with an accurate accessible description, ` +
+      `got text=${JSON.stringify(libraryCountText)} aria-label=${JSON.stringify(libraryCountLabel)}.`,
+    );
+  }
+  await libraryToggle.click();
+  const library = page.getByRole("complementary", { name: "Local library", exact: true });
+  await library.waitFor();
+
+  const cards = page.getByTestId("media-library-item");
+  if ((await cards.count()) !== 3) {
+    throw new Error(`Expected 3 loaded library cards, got ${await cards.count()}.`);
+  }
+  const firstCardContract = await cards.first().evaluate((element) => ({
+    tag: element.tagName,
+    nestedInteractive: element.querySelectorAll("button, a, input, textarea, select, audio, [tabindex]").length,
+  }));
+  if (firstCardContract.tag !== "BUTTON" || firstCardContract.nestedInteractive !== 0) {
+    throw new Error(`Each library card should be one button with no nested focus targets: ${JSON.stringify(firstCardContract)}.`);
+  }
+  await cards.first().focus();
+  await page.keyboard.press("Enter");
+  await assertAttribute(cards.first(), "aria-current", "true");
+  await page.getByRole("button", { name: "Use settings", exact: true }).click();
+  await assertTextContains(page.getByLabel("Image aspect ratio"), "Wide");
+  await advanced.evaluate((element) => element.closest("details")?.setAttribute("open", ""));
+  const reusedAdvanced = JSON.parse(await advanced.inputValue());
+  if (reusedAdvanced.aspect_ratio !== undefined || reusedAdvanced.seed !== "library-1") {
+    throw new Error(`Use settings should split schema controls from Advanced input: ${JSON.stringify(reusedAdvanced)}.`);
+  }
+
+  const librarySearch = page.getByLabel("Search media library");
+  await librarySearch.fill("Fixture one");
+  const clearFilters = page.getByRole("button", { name: "Clear filters" });
+  await clearFilters.waitFor();
+  await clearFilters.click();
+  if ((await librarySearch.inputValue()) !== "") {
+    throw new Error("Clear filters should reset the library search query.");
+  }
+  await librarySearch.fill("fixture library failure");
+  const libraryAlert = library.getByRole("alert");
+  await libraryAlert.filter({ hasText: "Fixture library unavailable" }).waitFor();
+  await assertHidden(page.getByTestId("media-generation-error"), "generation error during a library-list failure");
+  await clearFilters.click();
+  await cards.first().waitFor();
+
+  const beforeNonPromptShortcuts = generationBodies.length;
+  await librarySearch.focus();
+  await page.keyboard.press("Control+Enter");
+  await delay(75);
+  await advanced.evaluate((element) => element.closest("details")?.setAttribute("open", ""));
+  await advanced.focus();
+  await page.keyboard.press("Control+Enter");
+  await delay(75);
+  await advanced.evaluate((element) => element.closest("details")?.removeAttribute("open"));
+  if (generationBodies.length !== beforeNonPromptShortcuts) {
+    throw new Error("Ctrl+Enter outside the media prompt should not submit a generation.");
+  }
+
+  await prompt.fill("IME should not submit");
+  await prompt.dispatchEvent("keydown", {
+    key: "Enter",
+    code: "Enter",
+    ctrlKey: true,
+    isComposing: true,
+  });
+  await delay(75);
+  if (generationBodies.length !== beforeNonPromptShortcuts) {
+    throw new Error("Ctrl+Enter while composing text should not submit a generation.");
+  }
+  if ((await prompt.getAttribute("dir")) !== "auto") {
+    throw new Error("The media prompt should infer text direction.");
+  }
+  await prompt.fill("line one\nline two\nline three\nline four\nline five\nline six");
+  await page.waitForFunction(() => {
+    const input = document.querySelector('[data-testid="media-prompt-input"]');
+    return input instanceof HTMLTextAreaElement && Number.parseFloat(input.style.height) > 58;
+  });
+
+  const promptShortcutResponse = page.waitForResponse((response) =>
+    response.request().method() === "POST" &&
+    new URL(response.url()).pathname === "/media/generate" &&
+    response.status() === 200
+  );
+  await prompt.press("Control+Enter");
+  await promptShortcutResponse;
+  if (generationBodies.length !== beforeNonPromptShortcuts + 1) {
+    throw new Error("Ctrl+Enter in the media prompt should submit exactly one generation.");
+  }
+
+  await cards.first().click();
+  const deleteButton = page.getByRole("button", { name: "Delete", exact: true });
+  await deleteButton.click();
+  await page.getByRole("button", { name: "Confirm delete", exact: true }).waitFor();
+  await page.getByRole("status").filter({ hasText: "Delete again within 3 seconds" }).waitFor();
+  if (deleteRequests !== 0) throw new Error("The first Delete click must not issue a request.");
+  await deleteButton.waitFor({ timeout: 4_000 });
+  if (deleteRequests !== 0) throw new Error("An expired delete confirmation must not issue a request.");
+
+  await deleteButton.click();
+  const deleteResponse = page.waitForResponse((response) =>
+    response.request().method() === "DELETE" &&
+    /\/media\/library\/library-\d+$/.test(new URL(response.url()).pathname) &&
+    response.status() === 200
+  );
+  await page.getByRole("button", { name: "Confirm delete", exact: true }).click();
+  await deleteResponse;
+  if (deleteRequests !== 1) throw new Error(`Expected one permanent-delete request, got ${deleteRequests}.`);
+  await page.getByRole("status").filter({ hasText: "Deleted from local library" }).waitFor();
+  await page.waitForFunction(() =>
+    document.activeElement?.matches('[data-testid="media-library-item"][aria-current="true"]')
+  );
+
+  for (const expectedDeleteCount of [2, 3]) {
+    await page.getByRole("button", { name: "Delete", exact: true }).click();
+    const nextDeleteResponse = page.waitForResponse((response) =>
+      response.request().method() === "DELETE" &&
+      /\/media\/library\/library-\d+$/.test(new URL(response.url()).pathname) &&
+      response.status() === 200
+    );
+    await page.getByRole("button", { name: "Confirm delete", exact: true }).click();
+    await nextDeleteResponse;
+    if (deleteRequests !== expectedDeleteCount) {
+      throw new Error(`Expected ${expectedDeleteCount} permanent-delete requests, got ${deleteRequests}.`);
+    }
+  }
+  await page.waitForFunction(() =>
+    document.activeElement?.getAttribute("aria-controls") === "media-library-sidebar"
+  );
 }
 
 function runGit(folder, args) {
@@ -2389,7 +2922,24 @@ async function runSettingsLayoutCheck(page) {
     await ridgeline.waitFor();
   }
   await openSettings(page);
+  await page.getByTestId("settings-section-chat").click();
+  await page.getByTestId("new-thread-behavior-configured").click();
+  const openApprovalDefault = page.getByTestId("default-approval-open");
+  await openApprovalDefault.scrollIntoViewIfNeeded();
+  await openApprovalDefault.click();
+  if (await openApprovalDefault.getAttribute("aria-checked") !== "true") {
+    throw new Error("Open should be selectable as the configured new-chat approval default.");
+  }
   await page.getByTestId("settings-section-appearance").click();
+  const settledThreadsToggle = page.getByTestId("settled-threads-toggle");
+  await settledThreadsToggle.scrollIntoViewIfNeeded();
+  if (await settledThreadsToggle.getAttribute("aria-checked") !== "false") {
+    throw new Error("Settled threads should default off.");
+  }
+  await settledThreadsToggle.click();
+  if (await settledThreadsToggle.getAttribute("aria-checked") !== "true") {
+    throw new Error("Settled threads should be configurable.");
+  }
   const ridgelineToggle = page.getByTestId("empty-chat-ridgeline-toggle");
   await ridgelineToggle.scrollIntoViewIfNeeded();
   if (await ridgelineToggle.getAttribute("aria-checked") !== "true") {

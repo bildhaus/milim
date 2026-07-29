@@ -48,7 +48,6 @@ import {
   GitBranch,
   GitHub,
   GitPullRequest,
-  MoreHorizontal,
   Refresh,
   Search,
   X,
@@ -965,9 +964,7 @@ export function PullRequestsManager({ onClose }: { onClose: () => void }) {
           setSize(next);
           setSavedSize(next.width, next.height);
         }}
-      >
-        <MoreHorizontal size={15} aria-hidden="true" />
-      </button>
+      />
     </SheetDialog>
   );
 

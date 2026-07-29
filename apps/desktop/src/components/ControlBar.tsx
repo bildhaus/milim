@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   type ModelInfo,
   type PrivacyMode,
@@ -47,6 +47,23 @@ const TOOL_APPROVAL_DESCRIPTION: Record<ToolApprovalMode, string> = {
   guarded: "Read-only tools only; consequential actions are unavailable.",
   open: "Run without approval in trusted workspaces.",
 };
+
+export function modelPickerPlacement(
+  triggerTop: number,
+  triggerBottom: number,
+  viewportHeight: number,
+): CSSProperties {
+  const edge = 8;
+  const gap = 6;
+  const above = Math.max(0, triggerTop - edge - gap);
+  const below = Math.max(0, viewportHeight - triggerBottom - edge - gap);
+  const openBelow = above < 160 && below > above;
+  return {
+    top: openBelow ? `calc(100% + ${gap}px)` : "auto",
+    bottom: openBelow ? "auto" : `calc(100% + ${gap}px)`,
+    maxHeight: Math.min(440, openBelow ? below : above),
+  };
+}
 
 function Monitor({ size = 13 }: { size?: number }) {
   return (
@@ -122,7 +139,9 @@ export function ControlBar({
   inlineControls?: ReactNode;
 }) {
   const [menu, setMenu] = useState<null | "model" | "context">(null);
+  const [modelPickerStyle, setModelPickerStyle] = useState<CSSProperties>();
   const ref = useRef<HTMLDivElement>(null);
+  const modelTriggerRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (!menu) return;
@@ -137,11 +156,16 @@ export function ControlBar({
       )
         setMenu(null);
     };
+    const closeOnResize = () => setMenu(null);
     document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
+    window.addEventListener("resize", closeOnResize);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      window.removeEventListener("resize", closeOnResize);
+    };
   }, [menu]);
 
-  const contextAccessibleLabel = `Session controls, Sandbox ${sandbox ? "on" : "off"}, Computer ${computerUse ? "on" : "off"}, Memory ${memory ? "on" : "off"}, Privacy ${PRIVACY_LABEL[privacy]}, Tool approval ${TOOL_APPROVAL_LABEL[toolApproval]}`;
+  const contextAccessibleLabel = `Session controls, Docker sandbox ${sandbox ? "on" : "off"}, Computer ${computerUse ? "on" : "off"}, Memory ${memory ? "on" : "off"}, Privacy ${PRIVACY_LABEL[privacy]}, Tool approval ${TOOL_APPROVAL_LABEL[toolApproval]}`;
   const showGoalChip = Boolean(goalMode) || goalChipVisible(goal);
   const goalDetail = goalMode
     ? "Ready"
@@ -172,10 +196,19 @@ export function ControlBar({
         {/* Model */}
         <div className="chip-wrap">
           <button
+            ref={modelTriggerRef}
             type="button"
             className="chip chip-model"
             data-testid="model-picker-trigger"
-            onClick={() => setMenu((m) => (m === "model" ? null : "model"))}
+            onClick={(event) => {
+              if (menu === "model") {
+                setMenu(null);
+                return;
+              }
+              const rect = event.currentTarget.getBoundingClientRect();
+              setModelPickerStyle(modelPickerPlacement(rect.top, rect.bottom, window.innerHeight));
+              setMenu("model");
+            }}
             title={`${activeModelProfile.routeDetail} ${activeModelProfile.setupDetail}`}
             aria-label={`Choose model${activeModelLabel ? `, current model ${activeModelLabel}` : ""}, ${activeModelRoute || activeModelProfile.setupLabel}`}
             aria-haspopup="dialog"
@@ -197,7 +230,11 @@ export function ControlBar({
               onManageProviders={onManageProviders}
               onManageMcp={onManageMcp}
               onManageMemory={onManageMemory}
-              onClose={() => setMenu(null)}
+              onClose={() => {
+                setMenu(null);
+                window.requestAnimationFrame(() => modelTriggerRef.current?.focus());
+              }}
+              style={modelPickerStyle}
             />
           )}
         </div>
@@ -290,7 +327,7 @@ export function ControlBar({
                   <span className="context-icon">
                     <Cube size={14} />
                   </span>
-                  <span className="context-title">Sandbox</span>
+                  <span className="context-title">Docker sandbox</span>
                   <span className="context-switch" aria-hidden="true" />
                 </button>
 

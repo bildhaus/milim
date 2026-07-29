@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import type { ModelInfo, ProviderInfo } from "../api";
 import {
@@ -77,6 +77,8 @@ export function ModelPicker({
   onFavoritesOnlyChange,
   searchPlaceholder,
   emptyMessage,
+  ariaLabel = "Choose a model",
+  style,
 }: {
   models: ModelInfo[];
   model: string;
@@ -95,6 +97,8 @@ export function ModelPicker({
   onFavoritesOnlyChange?: (favoritesOnly: boolean) => void;
   searchPlaceholder?: string;
   emptyMessage?: string;
+  ariaLabel?: string;
+  style?: CSSProperties;
 }) {
   const storedFavorites = useSettings((s) => s.favorites);
   const storedFavoritesOnly = useSettings((s) => s.favoritesOnly);
@@ -115,7 +119,18 @@ export function ModelPicker({
   }, [models, q, favorites, favoritesOnly, providers]);
   const filtering = Boolean(q.trim()) || favoritesOnly;
   return (
-    <div className="mp">
+    <div
+      className="mp"
+      role="dialog"
+      aria-label={ariaLabel}
+      style={style}
+      onKeyDown={(event) => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        event.stopPropagation();
+        onClose();
+      }}
+    >
       <div className="mp-search">
         <Search size={14} />
         <input

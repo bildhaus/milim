@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
 import type { ChatStreamPart } from "../src/api.js";
 import { liveWorkGroupSummary } from "../src/lib/streamParts.js";
+import { formatDuration } from "../src/lib/usageMetrics.js";
 
 function tool(
   label: string,
@@ -46,6 +47,7 @@ const reasoningAfterTool = liveWorkGroupSummary({
 });
 assert.equal(reasoningAfterTool?.label, "reasoning...");
 assert.equal(reasoningAfterTool?.status, "running");
+assert.equal(formatDuration(4_774_000), "1h 19m 34s");
 
 const server = await createServer({
   root: process.cwd(),

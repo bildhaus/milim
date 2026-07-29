@@ -25,15 +25,10 @@ import {
   openExternalUrl,
   runWorkspaceGitAction,
   setWorkspace,
-  streamClaudeRun,
-  streamCodexRun,
-  streamOpenCodeRun,
-  streamPiRun,
-  type ClaudeRunEvent,
+  streamHarnessRun,
   type AccountRuntimeEnablement,
-  type CodexRunEvent,
-  type OpenCodeRunEvent,
-  type PiRunEvent,
+  type HarnessEventEnvelope,
+  type HarnessRunRequest,
   type PullRequestDetails,
   type ReviewComment,
   type WorkspaceGitAction,
@@ -525,56 +520,38 @@ async function generateAccountRuntimeCommitMessage(
   let runtimeError = "";
   let runtimeWarning = "";
   const prompt = `${COMMIT_MESSAGE_SYSTEM_PROMPT}\n\n${commitMessageContext(status, diff)}`;
-  const onEvent = (event: CodexRunEvent | ClaudeRunEvent | OpenCodeRunEvent | PiRunEvent) => {
-    if (event.type === "token" && event.text) response += event.text;
-    else if (event.type === "warning") runtimeWarning = event.message;
-    else if (event.type === "error") runtimeError = event.message;
+  const onEvent = (envelope: HarnessEventEnvelope) => {
+    const event = envelope.event;
+    if (event.type === "text_delta" && event.text) response += event.text;
+    else if (event.type === "runtime_notice") {
+      if (event.level === "error") runtimeError = event.message;
+      else if (event.code === "runtime_warning")
+        runtimeWarning = event.message;
+    } else if (
+      event.type === "turn_failed" ||
+      event.type === "turn_cancelled"
+    ) {
+      runtimeError = event.message ?? "Harness turn was cancelled.";
+    }
   };
 
-  if (codexModel) {
-    await streamCodexRun(
-      {
-        model: codexModel,
-        prompt,
-        cwd: folder.trim() || undefined,
-        tool_approval_policy: "review",
-        tool_approval_grant: false,
-        plan_mode: true,
-      },
-      onEvent,
-    );
-  } else if (claudeModel) {
-    await streamClaudeRun(
-      {
-        model: claudeModel,
-        prompt,
-        cwd: folder.trim() || undefined,
-        tool_approval_policy: "review",
-        tool_approval_grant: false,
-        plan_mode: true,
-      },
-      onEvent,
-    );
-  } else if (opencodeModel) {
-    await streamOpenCodeRun({
-      model: opencodeModel,
-      prompt,
-      cwd: folder.trim() || undefined,
-      tool_approval_policy: "review",
-      tool_approval_grant: false,
-      plan_mode: true,
-    }, onEvent);
-  } else if (piModel) {
-    await streamPiRun({
-      model: piModel,
-      prompt,
-      cwd: folder.trim() || undefined,
-      persist_session: false,
-      tool_approval_policy: "review",
-      tool_approval_grant: false,
-      plan_mode: true,
-    }, onEvent);
-  }
+  const harness = codexModel
+    ? { id: "codex" as const, model: codexModel }
+    : claudeModel
+      ? { id: "claude" as const, model: claudeModel }
+      : opencodeModel
+        ? { id: "opencode" as const, model: opencodeModel }
+        : { id: "pi" as const, model: piModel! };
+  const request: HarnessRunRequest = {
+    model: harness.model,
+    prompt,
+    cwd: folder.trim() || undefined,
+    persist_session: false,
+    tool_approval_policy: "review",
+    tool_approval_grant: false,
+    plan_mode: true,
+  };
+  await streamHarnessRun(harness.id, request, onEvent);
 
   if (runtimeWarning) throw new Error(runtimeWarning);
   if (runtimeError) throw new Error(runtimeError);

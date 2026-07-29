@@ -86,6 +86,7 @@ equal(useUiPreferences.getState().developerMode, false, "developer mode should d
 equal(useUiPreferences.getState().experimentalHashlinePatch, false, "hashline patching should default off");
 equal(useUiPreferences.getState().chatLayoutStyle, "transcript", "chat layout should default to transcript");
 equal(useUiPreferences.getState().sidebarRailStyle, "regular", "collapsed sidebar rail should default to regular");
+equal(useUiPreferences.getState().settledThreadsEnabled, false, "settled threads should default off");
 equal(useUiPreferences.getState().showEmptyChatRidgeline, true, "empty-chat ridgeline should default on");
 equal(useUiPreferences.getState().messageWidth, "standard", "message width should default to standard");
 equal(useUiPreferences.getState().avatarStyle, "none", "avatar style should default to none");
@@ -249,6 +250,10 @@ useUiPreferences.getState().setSidebarRailStyle("centered");
 equal(useUiPreferences.getState().sidebarRailStyle, "centered", "collapsed sidebar rail style should update");
 equal(persistedUiState().sidebarRailStyle, "centered", "collapsed sidebar rail style should be persisted");
 
+useUiPreferences.getState().setSettledThreadsEnabled(true);
+equal(useUiPreferences.getState().settledThreadsEnabled, true, "settled threads should update");
+equal(persistedUiState().settledThreadsEnabled, true, "settled threads should be persisted");
+
 useUiPreferences.getState().setShowEmptyChatRidgeline(false);
 equal(useUiPreferences.getState().showEmptyChatRidgeline, false, "empty-chat ridgeline should update");
 equal(persistedUiState().showEmptyChatRidgeline, false, "empty-chat ridgeline should be persisted");
@@ -321,6 +326,7 @@ useUiPreferences.setState({
   experimentalHashlinePatch: false,
   chatLayoutStyle: "transcript",
   sidebarRailStyle: "regular",
+  settledThreadsEnabled: false,
   showEmptyChatRidgeline: true,
   autoColorThreadNames: false,
   messageWidth: "standard",
@@ -333,7 +339,7 @@ useUiPreferences.setState({
 });
 localStorage.setItem(
   "milim.ui",
-  '{"state":{"sidebarOpen":false,"sidebarWidth":384,"previewPanelWidth":512,"mediaStudioWidth":1040,"mediaStudioHeight":740,"uiSize":130,"windowAlwaysOnTop":true,"interfaceSounds":"loud","soundOnFinished":"yes","soundOnAttention":0,"soundOnInteractions":"sometimes","finishedSound":"error","attentionSound":"ready","composerSendShortcut":"modEnter","composerDensity":"compact","autoTitleChats":false,"aiThreadNames":true,"aiThreadNameModel":"persisted-title-model","newChatButtonAtBottom":true,"interfaceMode":"workbench","developerMode":true,"experimentalHashlinePatch":true,"chatLayoutStyle":"compact","sidebarRailStyle":"split","autoColorThreadNames":true,"messageWidth":"full","avatarStyle":"role","codeBlockTheme":"high-contrast","backgroundFit":"contain","backgroundTreatment":"blur","thinkingBlocksOpen":true,"gitPanelExpanded":true,"appShortcuts":{"newChat":"Mod+Shift+N","focusSearch":"Mod+Shift+N","focusComposer":"x","stopGeneration":"F2","toggleSidebar":"Mod+B","previousThread":"Mod+Tab"}},"version":0}',
+  '{"state":{"sidebarOpen":false,"sidebarWidth":384,"previewPanelWidth":512,"mediaStudioWidth":1040,"mediaStudioHeight":740,"uiSize":130,"windowAlwaysOnTop":true,"interfaceSounds":"loud","soundOnFinished":"yes","soundOnAttention":0,"soundOnInteractions":"sometimes","finishedSound":"error","attentionSound":"ready","composerSendShortcut":"modEnter","composerDensity":"compact","autoTitleChats":false,"aiThreadNames":true,"aiThreadNameModel":"persisted-title-model","newChatButtonAtBottom":true,"interfaceMode":"workbench","developerMode":true,"experimentalHashlinePatch":true,"chatLayoutStyle":"compact","sidebarRailStyle":"split","settledThreadsEnabled":true,"autoColorThreadNames":true,"messageWidth":"full","avatarStyle":"role","codeBlockTheme":"high-contrast","backgroundFit":"contain","backgroundTreatment":"blur","thinkingBlocksOpen":true,"gitPanelExpanded":true,"appShortcuts":{"newChat":"Mod+Shift+N","focusSearch":"Mod+Shift+N","focusComposer":"x","stopGeneration":"F2","toggleSidebar":"Mod+B","previousThread":"Mod+Tab"}},"version":0}',
 );
 await useUiPreferences.persist.rehydrate();
 equal(useUiPreferences.getState().sidebarOpen, false, "sidebar should rehydrate persisted closed state");
@@ -361,6 +367,7 @@ equal(useUiPreferences.getState().developerMode, true, "developer mode should re
 equal(useUiPreferences.getState().experimentalHashlinePatch, true, "hashline patching should rehydrate");
 equal(useUiPreferences.getState().chatLayoutStyle, "compact", "chat layout should rehydrate");
 equal(useUiPreferences.getState().sidebarRailStyle, "split", "collapsed sidebar rail style should rehydrate");
+equal(useUiPreferences.getState().settledThreadsEnabled, true, "settled threads should rehydrate");
 equal(useUiPreferences.getState().showEmptyChatRidgeline, true, "missing empty-chat ridgeline preference should keep its enabled default");
 equal(useUiPreferences.getState().autoColorThreadNames, true, "automatic thread colors should rehydrate");
 equal(useUiPreferences.getState().messageWidth, "full", "message width should rehydrate");

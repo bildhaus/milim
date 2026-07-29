@@ -189,6 +189,7 @@ export interface Session {
   };
   createdAt: number;
   updatedAt: number;
+  settledAt?: number;
   archivedAt?: number;
 }
 
@@ -1222,28 +1223,37 @@ function normalizePersistedStreamParts(message: ChatMessage): ChatMessage {
 }
 
 function normalizeStaleToolApprovals(message: ChatMessage): ChatMessage {
-  const hasPendingStep = message.run?.steps.some((step) => step.approval?.status === "pending") ?? false;
+  const incomplete = (status?: string) =>
+    status === "pending" || status === "decided" || status === "delivered";
+  const hasPendingStep = message.run?.steps.some((step) => incomplete(step.approval?.status)) ?? false;
   const hasPendingPart = message.streamParts?.some(
-    (part) => part.kind === "event" && part.approvalStatus === "pending",
+    (part) => part.kind === "event" && incomplete(part.approvalStatus),
   ) ?? false;
   if (!hasPendingStep && !hasPendingPart) return message;
   return {
     ...message,
     run: message.run ? {
       ...message.run,
-      steps: message.run.steps.map((step) => step.approval?.status === "pending"
-        ? { ...step, approval: { ...step.approval, status: "canceled", resolvedAt: step.approval.resolvedAt ?? Date.now() } }
+      steps: message.run.steps.map((step) => incomplete(step.approval?.status)
+        ? { ...step, approval: { ...step.approval, status: "failed", resolvedAt: step.approval.resolvedAt ?? Date.now() } }
         : step),
     } : undefined,
     streamParts: message.streamParts?.map((part) =>
-      part.kind === "event" && part.approvalStatus === "pending"
-        ? { ...part, label: "Tool approval canceled", approvalStatus: "canceled", status: "done" }
+      part.kind === "event" && incomplete(part.approvalStatus)
+        ? {
+            ...part,
+            label: "Tool approval interrupted",
+            detail: "The runtime stopped before acknowledging this decision.",
+            approvalStatus: "failed",
+            status: "error",
+          }
         : part
     ),
   };
 }
 
 function normalizeSessionArtifacts(session: Session): Session {
+  const settledAt = timestamp(session.settledAt);
   const archivedAt = timestamp(session.archivedAt);
   const messages = Array.isArray(session.messages) ? session.messages : [];
   const {
@@ -1258,6 +1268,7 @@ function normalizeSessionArtifacts(session: Session): Session {
   return {
     ...current,
     virtualFiles: normalizeVirtualFiles(session.virtualFiles),
+    settledAt,
     archivedAt,
     contextPanelOpen: session.contextPanelOpen === true ? true : undefined,
     contextCollapsedSectionIds: contextCollapsedSectionIds.length
@@ -1764,6 +1775,8 @@ interface SessionState {
   switchTo: (id: string) => void;
   rename: (id: string, title: string) => void;
   remove: (id: string) => void;
+  settleSession: (id: string) => void;
+  unsettleSession: (id: string) => void;
   archiveSession: (id: string) => void;
   restoreSession: (id: string) => void;
   archiveProject: (id: string) => void;
@@ -2149,6 +2162,27 @@ export const useSessions = create<SessionState>()(
             };
           }),
 
+        settleSession: (id) =>
+          set((st) => ({
+            sessions: st.sessions.map((session) =>
+              session.id === id && !session.archivedAt
+                ? {
+                    ...session,
+                    settledAt: session.settledAt ?? Date.now(),
+                  }
+                : session,
+            ),
+          })),
+
+        unsettleSession: (id) =>
+          set((st) => ({
+            sessions: st.sessions.map((session) =>
+              session.id === id && session.settledAt
+                ? { ...session, settledAt: undefined }
+                : session,
+            ),
+          })),
+
         archiveSession: (id) =>
           set((st) => {
             if (!st.sessions.some((session) => session.id === id)) return {};
@@ -2498,6 +2532,11 @@ export const useSessions = create<SessionState>()(
             if (generating) running.add(id);
             else running.delete(id);
             return {
+              sessions: st.sessions.map((session) =>
+                session.id === id && session.settledAt
+                  ? { ...session, settledAt: undefined }
+                  : session,
+              ),
               generatingSessionIds: Array.from(running),
               unreadSessionIds: generating
                 ? st.unreadSessionIds.filter((unreadId) => unreadId !== id)
@@ -2511,7 +2550,16 @@ export const useSessions = create<SessionState>()(
             const unreadIds = new Set(st.unreadSessionIds);
             if (unread && id !== st.activeId) unreadIds.add(id);
             else unreadIds.delete(id);
-            return { unreadSessionIds: Array.from(unreadIds) };
+            return {
+              sessions: unread
+                ? st.sessions.map((session) =>
+                    session.id === id && session.settledAt
+                      ? { ...session, settledAt: undefined }
+                      : session,
+                  )
+                : st.sessions,
+              unreadSessionIds: Array.from(unreadIds),
+            };
           }),
 
         enqueueQueuedMessage: (id, message) => {
@@ -3121,10 +3169,12 @@ export const useSessions = create<SessionState>()(
                 );
                 const shouldReveal =
                   next.run.status === "proposed" || next.run.status === "running";
-                if (!shouldReveal) return { ...session, messages };
+                if (!shouldReveal)
+                  return { ...session, messages, settledAt: undefined };
                 return {
                   ...session,
                   messages,
+                  settledAt: undefined,
                   inspectorOpen: true,
                   inspectorTab: "workers",
                 };

@@ -1,5 +1,5 @@
 // On-theme form controls - no native checkboxes/toggles/sliders/selects/color.
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Check, ChevronDown } from "./icons";
 
 // ---- color math ----
@@ -277,16 +277,22 @@ export function Select({
   options,
   onChange,
   placeholder = "Select...",
+  ariaLabel,
   testId,
 }: {
   value: string;
   options: Option[];
   onChange: (v: string) => void;
   placeholder?: string;
+  ariaLabel?: string;
   testId?: string;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const pendingFocusIndex = useRef<number | null>(null);
+  const menuId = useId();
 
   useEffect(() => {
     if (!open) return;
@@ -297,10 +303,73 @@ export function Select({
     return () => document.removeEventListener("mousedown", onDoc);
   }, [open]);
 
+  useEffect(() => {
+    if (!open || pendingFocusIndex.current === null) return;
+    optionRefs.current[pendingFocusIndex.current]?.focus();
+    pendingFocusIndex.current = null;
+  }, [open]);
+
+  function focusOption(index: number) {
+    if (!options.length) return;
+    const next = Math.max(0, Math.min(options.length - 1, index));
+    if (open) optionRefs.current[next]?.focus();
+    else {
+      pendingFocusIndex.current = next;
+      setOpen(true);
+    }
+  }
+
+  function closeAndFocusTrigger() {
+    setOpen(false);
+    window.requestAnimationFrame(() => triggerRef.current?.focus());
+  }
+
   const current = options.find((o) => o.value === value);
+  const currentIndex = Math.max(0, options.findIndex((option) => option.value === value));
   return (
-    <div className="ui-select" ref={ref}>
-      <button type="button" className="ui-select-btn" data-testid={testId} onClick={() => setOpen((v) => !v)}>
+    <div
+      className="ui-select"
+      ref={ref}
+      onKeyDown={(event) => {
+        if (!open) return;
+        if (event.key === "Tab") {
+          setOpen(false);
+          return;
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          event.stopPropagation();
+          closeAndFocusTrigger();
+          return;
+        }
+        const index = optionRefs.current.indexOf(event.target as HTMLButtonElement);
+        if (index < 0) return;
+        if (event.key === "ArrowDown") focusOption((index + 1) % options.length);
+        else if (event.key === "ArrowUp") focusOption((index - 1 + options.length) % options.length);
+        else if (event.key === "Home") focusOption(0);
+        else if (event.key === "End") focusOption(options.length - 1);
+        else return;
+        event.preventDefault();
+      }}
+    >
+      <button
+        ref={triggerRef}
+        type="button"
+        className="ui-select-btn"
+        data-testid={testId}
+        aria-label={ariaLabel}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={menuId}
+        onClick={() => setOpen((next) => !next)}
+        onKeyDown={(event) => {
+          if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+          event.preventDefault();
+          if (event.key === "ArrowDown") focusOption(currentIndex);
+          else if (event.key === "ArrowUp") focusOption(options.findIndex((option) => option.value === value) >= 0 ? currentIndex : options.length - 1);
+          else focusOption(event.key === "Home" ? 0 : options.length - 1);
+        }}
+      >
         <span className={"ui-select-value" + (current ? "" : " placeholder")}>
           {current?.leading}
           <span>{current?.label ?? placeholder}</span>
@@ -308,14 +377,21 @@ export function Select({
         <ChevronDown size={13} />
       </button>
       {open && (
-        <div className="ui-select-menu">
-          {options.map((o) => (
+        <div className="ui-select-menu" id={menuId} role="listbox" aria-label={ariaLabel ?? placeholder}>
+          {options.map((o, index) => (
             <button
               key={o.value}
+              ref={(node) => {
+                optionRefs.current[index] = node;
+              }}
+              type="button"
               className={"ui-select-item" + (o.value === value ? " active" : "")}
+              role="option"
+              aria-selected={o.value === value}
+              tabIndex={-1}
               onClick={() => {
                 onChange(o.value);
-                setOpen(false);
+                closeAndFocusTrigger();
               }}
             >
               {o.leading}

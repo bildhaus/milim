@@ -11,15 +11,26 @@ Release artifacts target Windows and macOS. Linux packaging is intentionally dis
 ## What Milim does
 
 - **Keep one canonical thread.** Workspace context, conversation, and review history remain together instead of fragmenting by provider.
+- **Set aside finished threads.** An opt-in Settled tier keeps completed work accessible at the bottom of the sidebar without archiving it or changing retention.
 - **Hot-swap models.** Switch the next turn between hosted providers, local Ollama or LM Studio models, and separately installed Codex, Claude, OpenCode, or Pi runtimes.
 - **Keep local control.** Project selection, model routing, tool approvals, local persistence, and outbound privacy boundaries stay explicit.
-- **Approve execution, then review the result.** Review is the new-chat default for consequential tool calls; built-in Git views keep resulting diffs, checkpoints, and recovery beside the thread.
+- **Approve execution, then review the result.** Review is the new-chat default for consequential tool calls; configured defaults may opt into Open, while changing workspace folders resets approval to Review. Built-in Git views keep resulting diffs, checkpoints, and recovery beside the thread.
 
 ### Power tools
 
 Agents, Workers, skills, schedules, MCP servers and Apps, media generation, Google Workspace, previews, and the mobile companion remain available from the app's collapsed **Tools** section. They extend the core thread without competing with the default workflow.
 
-Milim keeps provider-backed chat and installed account runtimes distinct. Provider models use Milim's tool-agent loop, while account runtimes retain their native sessions and tools behind the same visible approval policy. Changing a running thread to Open also clears ordinary pending tool approvals; connector input and authorization remain interactive. Changing the selected model affects the next turn without turning each model into a separate project history.
+Milim keeps provider-backed chat and installed account runtimes distinct. Provider models use Milim's tool-agent loop, while account runtimes retain their native sessions and tools behind the same visible approval policy. Open starts eligible worker plans immediately, flows into child tool execution, and clears ordinary pending tool approvals, including Codex requests for protected Git metadata; connector input and authorization remain interactive. Changing the selected model affects the next turn without turning each model into a separate project history.
+
+The desktop consumes one versioned `HarnessEvent` stream for Codex, Claude, OpenCode, and Pi. Their native bridges and runtime-specific account, model, quota, import, update, worker, and recovery behavior remain intact behind that boundary.
+
+Connected Codex and Claude histories can be imported by project, as selected individual chats, or as the complete no-project group; existing imports are opened instead of duplicated.
+
+Review decisions are tracked through runtime delivery and acknowledgement. A runtime that rejects, drops, or fails to resume after a decision ends the turn with a visible recovery error instead of leaving it Running indefinitely.
+
+Failed or canceled native-runtime turns discard that runtime's native session before the next send, preventing a partially persisted prompt from being replayed into divergent history.
+
+Completed assistant responses retain their provider or account runtime and model in the transcript footer. Tool inputs remain fully copyable from collapsed activity even when the row is visually clipped.
 
 ## Get started
 

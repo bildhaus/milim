@@ -43,6 +43,14 @@ const failed = toolCompletedPart({
 equal(failed.status, "error", "failed tool part should mark error status");
 equal(failed.label, "Command failed", "failed shell tool should use error label");
 
+const longCommand = `node -e "${"x".repeat(140)}"`;
+equal(toolStartedPart({
+  type: "tool_call",
+  name: "shell",
+  call_id: "call-long",
+  arguments: JSON.stringify({ command: longCommand }),
+} as never).detail, longCommand, "command detail should keep its full copyable text");
+
 const scroll = toolStartedPart({
   type: "tool_call",
   name: "scroll",
@@ -82,17 +90,31 @@ const runtime = accountRuntimeToolPart({
 equal(runtime.name, "tool-1", "account runtime tool should prefer runtime id");
 equal(runtime.label, "Using shell", "account runtime tool should default running label");
 equal(accountRuntimeToolPart({
-  type: "tool",
+  type: "tool_finished",
   id: "tool-2",
   name: "edit",
   status: "completed",
-} as never).status, "done", "ACP completed tools should normalize to done");
+}).status, "done", "completed tools should project as done");
 equal(accountRuntimeToolPart({
-  type: "tool",
+  type: "tool_updated",
   id: "tool-3",
   name: "edit",
-  status: "in_progress",
-} as never).status, "running", "ACP in-progress tools should normalize to running");
+  status: "running",
+}).status, "running", "updated tools should project as running");
+equal(accountRuntimeToolPart({
+  type: "tool_finished",
+  id: "tool-4",
+  name: "shell",
+  status: "failed",
+  detail: "full command",
+  error: "permission denied",
+}).detail, "permission denied", "account runtime failures should show their error detail");
+equal(accountRuntimeToolPart({
+  type: "tool_finished",
+  id: "tool-5",
+  name: "shell",
+  status: "cancelled",
+}).status, "error", "cancelled tools should not remain running");
 
 const warning = runtimeWarningMessage("Codex not on PATH", "Install Codex");
 assert(warning.streamParts?.[0]?.kind === "event", "runtime warning should be an event part");
@@ -109,6 +131,38 @@ const permissionApproval = toolApprovalPart({
 } as never);
 equal(permissionApproval.label, "Approve additional permissions", "permission approval should have a specific label");
 equal(permissionApproval.approvalRequest?.kind, "permissions", "permission details should survive event mapping");
+
+const commandDecision = toolApprovalPart({
+  type: "tool_approval_resolved",
+  approval_id: "approval-2",
+  name: "command",
+  arguments: "{\"availableDecisions\":[\"accept\",\"decline\"]}",
+  decision: "approve",
+} as never);
+equal(commandDecision.label, "Command approved", "command decisions should have a readable outcome");
+equal(commandDecision.detail, undefined, "resolved decisions should omit protocol payloads");
+equal(commandDecision.icon, "command", "command decisions should keep the command icon");
+
+const deliveredDecision = toolApprovalPart({
+  type: "tool_approval_status",
+  approval_id: "approval-3",
+  name: "command",
+  decision: "deny",
+  status: "delivered",
+} as never);
+equal(deliveredDecision.label, "Approval delivered", "delivery should remain distinct from runtime acknowledgement");
+equal(deliveredDecision.approvalStatus, "delivered", "delivery state should persist in the transcript");
+equal(deliveredDecision.status, "running", "delivery should remain nonterminal until runtime acknowledgement");
+
+const failedDecision = toolApprovalPart({
+  type: "tool_approval_failed",
+  approval_id: "approval-4",
+  name: "command",
+  decision: "approve",
+  message: "runtime disconnected",
+} as never);
+equal(failedDecision.approvalStatus, "failed", "delivery failures should be terminal");
+equal(failedDecision.detail, "runtime disconnected", "delivery failures should explain recovery");
 
 const appended: { sessionId: string; chunks: BufferedStreamChunk[] }[] = [];
 const batcher = createStreamUpdateBatcher("s1", {

@@ -45,7 +45,7 @@ useSettings.getState().setConfiguredThreadDefaults({
   memory: true,
   privacy: "redact",
   sandbox: true,
-  toolApproval: "review",
+  toolApproval: "open",
   workerModel: "worker-model",
   delegationPolicy: "auto",
 });
@@ -54,7 +54,7 @@ const configured = useSessions.getState().getSettings(configuredId);
 equal(configured.model, "configured-model", "configured mode should use its model");
 equal(configured.folder, "C:\\project", "configured mode should preserve project context");
 equal(configured.activeAgentId, "agent-1", "configured mode should use its agent");
-equal(configured.toolApproval, "review", "configured mode should use safe approval defaults");
+equal(configured.toolApproval, "open", "configured mode should allow an explicit Open approval default");
 equal(configured.computerUse, false, "configured mode should still reset Computer Use");
 
 export {};

@@ -2,7 +2,12 @@ import { createElement, type ComponentType } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
 import type { ChatStreamPart } from "../src/api.js";
-import { autoApprovableToolApprovals, dismissToolApproval, pendingToolApprovals } from "../src/lib/toolApproval.js";
+import {
+  autoApprovableToolApprovals,
+  dismissToolApproval,
+  pendingToolApprovals,
+  toolApprovalPrompts,
+} from "../src/lib/toolApproval.js";
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -22,6 +27,90 @@ try {
   const { ToolApprovalPrompt } = (await server.ssrLoadModule(
     "/src/components/ToolApprovalPrompt.tsx",
   )) as { ToolApprovalPrompt: ComponentType<{ part: Extract<ChatStreamPart, { kind: "event" }> }> };
+  const {
+    filterRuntimeImportGroups,
+    groupRuntimeImportThreads,
+    runtimeImportGroupSelection,
+    setRuntimeImportGroupSelected,
+  } = (await server.ssrLoadModule("/src/components/ProvidersManager.tsx")) as
+    typeof import("../src/components/ProvidersManager.js");
+
+  const importThreads = [
+    {
+      id: "project-new",
+      title: "Newest project chat",
+      preview: "Visible project preview",
+      projectPath: "C:\\work\\milim",
+      cwd: "C:\\work\\milim",
+      updatedAt: 30,
+      fallbackMeta: "openai",
+      resumable: true,
+      archived: false,
+    },
+    {
+      id: "project-old",
+      title: "Older project chat",
+      preview: "",
+      projectPath: "C:\\work\\milim",
+      cwd: "C:\\work\\milim",
+      updatedAt: 20,
+      fallbackMeta: "openai",
+      resumable: true,
+      archived: true,
+    },
+    {
+      id: "missing-project",
+      title: "Missing folder chat",
+      preview: "",
+      projectPath: "C:\\gone\\archive",
+      updatedAt: 10,
+      fallbackMeta: "openai",
+      resumable: true,
+      archived: false,
+    },
+    {
+      id: "no-project",
+      title: "Folderless chat",
+      preview: "",
+      updatedAt: 40,
+      fallbackMeta: "Claude CLI",
+      resumable: false,
+      archived: false,
+    },
+  ];
+  const importGroups = groupRuntimeImportThreads(importThreads);
+  assert(importGroups.length === 3, "runtime imports should group exact project paths");
+  assert(importGroups[0].label === "milim", "project groups should sort by latest activity");
+  assert(importGroups.at(-1)?.label === "No project", "folderless chats should remain in a final group");
+  assert(
+    filterRuntimeImportGroups(importGroups, "visible project preview")[0].threads.length === 1,
+    "chat search should narrow rows within a project",
+  );
+  assert(
+    filterRuntimeImportGroups(importGroups, "milim")[0].threads.length === 2,
+    "project search should keep the whole project visible",
+  );
+  const importedIds = new Set(["project-old"]);
+  const projectSelection = setRuntimeImportGroupSelected(
+    new Set(),
+    importGroups[0],
+    importedIds,
+    true,
+  );
+  assert(
+    projectSelection.has("project-new") && !projectSelection.has("project-old"),
+    "project selection should include every not-yet-imported chat",
+  );
+  assert(
+    runtimeImportGroupSelection(importGroups[0], projectSelection, importedIds) === "all",
+    "project selection should ignore existing imports when calculating its state",
+  );
+  projectSelection.add("project-old");
+  projectSelection.delete("project-new");
+  assert(
+    runtimeImportGroupSelection(importGroups[0], projectSelection, new Set()) === "some",
+    "project selection should expose a mixed state for partial selections",
+  );
 
   const approvalPart = (
     approvalRequest: Extract<ChatStreamPart, { kind: "event" }>["approvalRequest"],
@@ -49,9 +138,19 @@ try {
   }));
   assert(googleEdit.includes("Approval required"), "approval prompt should explain why the run is paused");
   assert(googleEdit.includes("Google Docs edit"), "approval prompt should present tool names readably");
-  assert(googleEdit.includes("<summary>Review exact request</summary>"), "exact arguments should use a compact disclosure");
-  assert(googleEdit.includes("replace_text"), "the exact request should remain reviewable");
+  assert(googleEdit.includes("<summary>Review request</summary>"), "arguments should use a compact disclosure");
+  assert(googleEdit.includes("<dt>File</dt>") && googleEdit.includes("document-1"), "request fields should use readable labels");
+  assert(googleEdit.includes("<dt>Changes</dt>") && googleEdit.includes("Replace text"), "nested request values should be readable");
+  assert(!googleEdit.includes("<pre") && !googleEdit.includes("&quot;file_id&quot;"), "approval details should not render as JSON");
   assert(googleEdit.indexOf(">Deny<") < googleEdit.indexOf(">Approve<"), "the primary approval action should be last");
+
+  const plainText = renderToStaticMarkup(createElement(ToolApprovalPrompt, {
+    part: {
+      ...approvalPart({ kind: "command" }),
+      detail: "Run the formatter in the selected workspace.",
+    },
+  }));
+  assert(plainText.includes("Run the formatter in the selected workspace."), "plain-text requests should remain readable");
 
   const form = renderApproval({
     kind: "mcp_form",
@@ -74,7 +173,9 @@ try {
     permissions: { network: { domains: ["example.com"] } },
   });
   assert(permission.includes("Needs network"), "permission reason should render");
+  assert(permission.includes("<dt>Network access</dt>") && permission.includes("<dt>Domains</dt>"), "permission labels should be readable");
   assert(permission.includes("example.com"), "exact requested permission should render");
+  assert(!permission.includes("<pre"), "permissions should not render as JSON");
   assert(permission.includes("Allow once"), "permission approval should be turn-scoped in the UI");
 
   const unsupported = renderApproval({
@@ -98,6 +199,12 @@ try {
   const pending = approvalPart({ kind: "command" });
   const secondPending = { ...pending, approvalId: "approval-2", label: "Approval 2" };
   const resolved = { ...pending, label: "shell approved", approvalStatus: "approved" as const };
+  const resolvedTranscript = renderToStaticMarkup(createElement(AssistantMessage, {
+    content: "",
+    streamParts: [resolved],
+  }));
+  assert(resolvedTranscript.includes("shell approved"), "resolved approval should keep its readable outcome");
+  assert(!resolvedTranscript.includes("&quot;command&quot;"), "resolved approval should hide its protocol payload");
   assert(
     pendingToolApprovals([{ role: "assistant", content: "", streamParts: [pending, secondPending] }]).length === 2,
     "every pending approval should attach to the composer",
@@ -111,6 +218,10 @@ try {
     ]).length === 2,
     "Open should auto-approve plain tool and permission requests but keep MCP input and authorization interactive",
   );
+  const mcpForm = approvalPart({ kind: "mcp_form", server_name: "example", message: "Input", fields: [] });
+  const openPrompts = toolApprovalPrompts([pending, approvalPart({ kind: "permissions" }), mcpForm], "open");
+  assert(!openPrompts.includes(pending), "Open should not mount a prompt for an auto-approved request");
+  assert(openPrompts.includes(mcpForm), "Open should keep requests that need user input visible");
   assert(pendingToolApprovals([{ role: "assistant", content: "", streamParts: [pending, resolved] }]).length === 0, "resolved legacy approvals should not reappear by the composer");
   const dismissed = dismissToolApproval([{ role: "assistant", content: "", streamParts: [pending] }], "approval-1", 42);
   assert(pendingToolApprovals(dismissed).length === 0, "dismissed stale approvals should leave the composer");

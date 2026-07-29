@@ -40,7 +40,7 @@ export interface ConfiguredThreadDefaults {
   memory: boolean;
   privacy: PrivacyMode;
   sandbox: boolean;
-  toolApproval: "review" | "guarded";
+  toolApproval: "review" | "guarded" | "open";
   workerModel: string;
   delegationPolicy: DelegationPolicy;
 }
@@ -184,7 +184,9 @@ function normalizeConfiguredThreadDefaults(value: unknown): ConfiguredThreadDefa
     memory: typeof settings.memory === "boolean" ? settings.memory : true,
     privacy: privacy === "redact" || privacy === "block" ? privacy : "off",
     sandbox: typeof settings.sandbox === "boolean" ? settings.sandbox : false,
-    toolApproval: settings.toolApproval === "guarded" ? "guarded" : "review",
+    toolApproval: settings.toolApproval === "guarded" || settings.toolApproval === "open"
+      ? settings.toolApproval
+      : "review",
     workerModel: typeof settings.workerModel === "string" && settings.workerModel.trim().toLowerCase() !== "mock-echo" ? settings.workerModel.trim() : "",
     delegationPolicy: delegationPolicy === "off" || delegationPolicy === "auto" ? delegationPolicy : "ask",
   };

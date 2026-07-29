@@ -142,6 +142,7 @@ pub(crate) struct CodexThreadSummary {
     pub id: String,
     pub name: Option<String>,
     pub preview: String,
+    pub project_path: Option<String>,
     pub cwd: Option<String>,
     pub model_provider: String,
     pub created_at_ms: u64,
@@ -258,6 +259,18 @@ enum CodexStreamEvent {
         approval_id: String,
         call_id: Option<String>,
         decision: &'static str,
+    },
+    ToolApprovalStatus {
+        approval_id: String,
+        call_id: Option<String>,
+        decision: &'static str,
+        status: &'static str,
+    },
+    ToolApprovalFailed {
+        approval_id: String,
+        call_id: Option<String>,
+        decision: Option<&'static str>,
+        message: String,
     },
     Tool {
         id: String,
@@ -427,35 +440,50 @@ pub(crate) async fn threads(
     cursor: Option<String>,
     search: Option<String>,
     archived: bool,
+    all: bool,
 ) -> Result<CodexThreadPage> {
     let mut proc = CodexProcess::start().await?;
-    let mut params = json!({
-        "limit": CODEX_THREAD_PAGE_SIZE,
-        "sortKey": "updated_at",
-        "sortDirection": "desc",
-        "archived": archived,
-    });
-    if let Some(cursor) = clean_optional(cursor.as_deref()) {
-        params["cursor"] = Value::String(cursor);
+    let search = clean_optional(search.as_deref());
+    let mut cursor = clean_optional(cursor.as_deref());
+    let mut seen_cursors = cursor.iter().cloned().collect::<HashSet<_>>();
+    let mut data = Vec::new();
+    loop {
+        let mut params = json!({
+            "limit": CODEX_THREAD_PAGE_SIZE,
+            "sortKey": "updated_at",
+            "sortDirection": "desc",
+            "archived": archived,
+        });
+        if let Some(value) = cursor.as_ref() {
+            params["cursor"] = Value::String(value.clone());
+        }
+        if let Some(value) = search.as_ref() {
+            params["searchTerm"] = Value::String(value.clone());
+        }
+        let result = proc.request("thread/list", Some(params)).await?;
+        data.extend(
+            result
+                .get("data")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|thread| codex_thread_summary(thread, archived)),
+        );
+        let next_cursor = extract_string(&result, &["nextCursor"]);
+        if !all || next_cursor.is_none() {
+            return Ok(CodexThreadPage {
+                data,
+                next_cursor: (!all).then_some(next_cursor).flatten(),
+            });
+        }
+        let next_cursor = next_cursor.expect("checked above");
+        if !seen_cursors.insert(next_cursor.clone()) {
+            return Err(Error::Upstream(
+                "Codex returned a repeated thread cursor".to_string(),
+            ));
+        }
+        cursor = Some(next_cursor);
     }
-    if let Some(search) = clean_optional(search.as_deref()) {
-        params["searchTerm"] = Value::String(search);
-    }
-    let result = proc.request("thread/list", Some(params)).await?;
-    let data = result
-        .get("data")
-        .and_then(Value::as_array)
-        .map(|threads| {
-            threads
-                .iter()
-                .filter_map(|thread| codex_thread_summary(thread, archived))
-                .collect()
-        })
-        .unwrap_or_default();
-    Ok(CodexThreadPage {
-        data,
-        next_cursor: extract_string(&result, &["nextCursor"]),
-    })
 }
 
 pub(crate) async fn recover_thread(thread_id: &str) -> Result<CodexRecoveredThread> {
@@ -813,11 +841,56 @@ fn run_stream_with_worker_events(
         let mut reasoning = Unredactor::new(redactions);
         let mut last_agent_message_id: Option<String> = None;
         let mut emitted_agent_text = false;
+        let mut approval_ack: Option<(
+            milim_agents::PendingApproval,
+            Option<String>,
+            &'static str,
+        )> = None;
 
         loop {
-            let msg = match proc.read_value().await {
+            let read = if approval_ack.is_some() {
+                match tokio::time::timeout(
+                    milim_agents::APPROVAL_RUNTIME_ACK_TIMEOUT,
+                    proc.read_value(),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        if let Some((pending, call_id, decision)) = approval_ack.take() {
+                            let message = "Codex did not resume after the approval decision".to_string();
+                            pending.fail(message.clone());
+                            yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalFailed {
+                                approval_id: pending.id.clone(),
+                                call_id,
+                                decision: Some(decision),
+                                message: message.clone(),
+                            }, &worker_events);
+                            yield sse_event_with_worker(&CodexStreamEvent::Error {
+                                message,
+                                usage: None,
+                                cost_usd: None,
+                            }, &worker_events);
+                        }
+                        yield Ok(Event::default().data("[DONE]"));
+                        return;
+                    }
+                }
+            } else {
+                proc.read_value().await
+            };
+            let msg = match read {
                 Ok(msg) => msg,
                 Err(e) => {
+                    if let Some((pending, call_id, decision)) = approval_ack.take() {
+                        pending.fail(e.to_string());
+                        yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalFailed {
+                            approval_id: pending.id.clone(),
+                            call_id,
+                            decision: Some(decision),
+                            message: e.to_string(),
+                        }, &worker_events);
+                    }
                     yield sse_event_with_worker(&CodexStreamEvent::Error {
                         message: e.to_string(),
                         usage: None,
@@ -827,6 +900,14 @@ fn run_stream_with_worker_events(
                     return;
                 }
             };
+            if let Some((pending, call_id, decision)) = approval_ack.take() {
+                pending.acknowledge();
+                yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalResolved {
+                    approval_id: pending.id.clone(),
+                    call_id,
+                    decision,
+                }, &worker_events);
+            }
 
             if response_id(&msg) == Some(turn_request_id) {
                 if let Some(error) = msg.get("error") {
@@ -855,9 +936,8 @@ fn run_stream_with_worker_events(
             match method {
                 "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
                     if let Some(id) = rpc_request_id(&msg) {
-                        let interactive = account_runtime_policy(req.tool_approval_policy.as_deref()) == "review"
-                            && req.interactive_tool_approval
-                            && !req.tool_approval_grant;
+                        let interactive = codex_interactive_tool_approval(&req);
+                        let mut pending_delivery = None;
                         let result = if interactive {
                             let Some(broker) = approval_broker.as_ref() else {
                                 yield sse_event_with_worker(&CodexStreamEvent::Error {
@@ -883,16 +963,58 @@ fn run_stream_with_worker_events(
                                 request: None,
                             }, &worker_events);
                             let approved = pending.wait().await.approved;
-                            yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalResolved {
+                            let decision = if approved { "approve" } else { "deny" };
+                            yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalStatus {
                                 approval_id: pending.id.clone(),
-                                call_id,
-                                decision: if approved { "approve" } else { "deny" },
+                                call_id: call_id.clone(),
+                                decision,
+                                status: "decided",
                             }, &worker_events);
-                            json!({ "decision": if approved { "accept" } else { "decline" } })
+                            let result = match codex_decision_response(params, approved, false) {
+                                Ok(result) => result,
+                                Err(error) => {
+                                    pending.fail(error.to_string());
+                                    yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalFailed {
+                                        approval_id: pending.id.clone(),
+                                        call_id,
+                                        decision: Some(decision),
+                                        message: error.to_string(),
+                                    }, &worker_events);
+                                    yield sse_event_with_worker(&CodexStreamEvent::Error {
+                                        message: error.to_string(),
+                                        usage: None,
+                                        cost_usd: None,
+                                    }, &worker_events);
+                                    yield Ok(Event::default().data("[DONE]"));
+                                    return;
+                                }
+                            };
+                            pending_delivery = Some((pending, call_id, decision));
+                            result
                         } else {
-                            codex_approval_response(&req, method)
+                            match codex_approval_response(&req, method, params) {
+                                Ok(result) => result,
+                                Err(error) => {
+                                    yield sse_event_with_worker(&CodexStreamEvent::Error {
+                                        message: error.to_string(),
+                                        usage: None,
+                                        cost_usd: None,
+                                    }, &worker_events);
+                                    yield Ok(Event::default().data("[DONE]"));
+                                    return;
+                                }
+                            }
                         };
                         if let Err(e) = proc.respond(id, result).await {
+                            if let Some((pending, call_id, decision)) = pending_delivery.take() {
+                                pending.fail(e.to_string());
+                                yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalFailed {
+                                    approval_id: pending.id.clone(),
+                                    call_id,
+                                    decision: Some(decision),
+                                    message: e.to_string(),
+                                }, &worker_events);
+                            }
                             yield sse_event_with_worker(&CodexStreamEvent::Error {
                                 message: e.to_string(),
                                 usage: None,
@@ -901,13 +1023,47 @@ fn run_stream_with_worker_events(
                             yield Ok(Event::default().data("[DONE]"));
                             return;
                         }
+                        if let Some((pending, call_id, decision)) = pending_delivery {
+                            if let Err(message) = pending.deliver() {
+                                yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalFailed {
+                                    approval_id: pending.id.clone(),
+                                    call_id,
+                                    decision: Some(decision),
+                                    message: message.clone(),
+                                }, &worker_events);
+                                yield sse_event_with_worker(&CodexStreamEvent::Error {
+                                    message,
+                                    usage: None,
+                                    cost_usd: None,
+                                }, &worker_events);
+                                yield Ok(Event::default().data("[DONE]"));
+                                return;
+                            }
+                            yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalStatus {
+                                approval_id: pending.id.clone(),
+                                call_id: call_id.clone(),
+                                decision,
+                                status: "delivered",
+                            }, &worker_events);
+                            approval_ack = Some((pending, call_id, decision));
+                        }
                     }
                 }
                 "item/permissions/requestApproval" => {
                     if let Some(id) = rpc_request_id(&msg) {
-                        let mut approved = false;
+                        let mut approved = codex_permissions_auto_approved(&req);
                         let call_id = extract_string(params, &["itemId"]);
-                        if let Some(broker) = approval_broker.as_ref() {
+                        let mut pending_delivery = None;
+                        if codex_interactive_tool_approval(&req) {
+                            let Some(broker) = approval_broker.as_ref() else {
+                                yield sse_event_with_worker(&CodexStreamEvent::Error {
+                                    message: "Codex Review approval broker is unavailable".to_string(),
+                                    usage: None,
+                                    cost_usd: None,
+                                }, &worker_events);
+                                yield Ok(Event::default().data("[DONE]"));
+                                return;
+                            };
                             let mut pending = broker.request();
                             yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalRequired {
                                 approval_id: pending.id.clone(),
@@ -919,13 +1075,25 @@ fn run_stream_with_worker_events(
                                 request: Some(permission_request_descriptor(params)),
                             }, &worker_events);
                             approved = pending.wait().await.approved;
-                            yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalResolved {
+                            let decision = if approved { "approve" } else { "deny" };
+                            yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalStatus {
                                 approval_id: pending.id.clone(),
-                                call_id,
-                                decision: if approved { "approve" } else { "deny" },
+                                call_id: call_id.clone(),
+                                decision,
+                                status: "decided",
                             }, &worker_events);
+                            pending_delivery = Some((pending, call_id.clone(), decision));
                         }
                         if let Err(e) = proc.respond(id, permission_response(params, approved)).await {
+                            if let Some((pending, call_id, decision)) = pending_delivery.take() {
+                                pending.fail(e.to_string());
+                                yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalFailed {
+                                    approval_id: pending.id.clone(),
+                                    call_id,
+                                    decision: Some(decision),
+                                    message: e.to_string(),
+                                }, &worker_events);
+                            }
                             yield sse_event_with_worker(&CodexStreamEvent::Error {
                                 message: e.to_string(),
                                 usage: None,
@@ -933,6 +1101,30 @@ fn run_stream_with_worker_events(
                             }, &worker_events);
                             yield Ok(Event::default().data("[DONE]"));
                             return;
+                        }
+                        if let Some((pending, call_id, decision)) = pending_delivery {
+                            if let Err(message) = pending.deliver() {
+                                yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalFailed {
+                                    approval_id: pending.id.clone(),
+                                    call_id,
+                                    decision: Some(decision),
+                                    message: message.clone(),
+                                }, &worker_events);
+                                yield sse_event_with_worker(&CodexStreamEvent::Error {
+                                    message,
+                                    usage: None,
+                                    cost_usd: None,
+                                }, &worker_events);
+                                yield Ok(Event::default().data("[DONE]"));
+                                return;
+                            }
+                            yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalStatus {
+                                approval_id: pending.id.clone(),
+                                call_id: call_id.clone(),
+                                decision,
+                                status: "delivered",
+                            }, &worker_events);
+                            approval_ack = Some((pending, call_id, decision));
                         }
                     }
                 }
@@ -962,12 +1154,21 @@ fn run_stream_with_worker_events(
                                     detail: Some(message),
                                 }, &worker_events);
                             }
-                            yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalResolved {
+                            let decision = if accepted { "approve" } else { "deny" };
+                            yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalStatus {
                                 approval_id: pending.id.clone(),
-                                call_id,
-                                decision: if accepted { "approve" } else { "deny" },
+                                call_id: call_id.clone(),
+                                decision,
+                                status: "decided",
                             }, &worker_events);
                             if let Err(e) = proc.respond(id, response).await {
+                                pending.fail(e.to_string());
+                                yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalFailed {
+                                    approval_id: pending.id.clone(),
+                                    call_id,
+                                    decision: Some(decision),
+                                    message: e.to_string(),
+                                }, &worker_events);
                                 yield sse_event_with_worker(&CodexStreamEvent::Error {
                                     message: e.to_string(),
                                     usage: None,
@@ -976,6 +1177,28 @@ fn run_stream_with_worker_events(
                                 yield Ok(Event::default().data("[DONE]"));
                                 return;
                             }
+                            if let Err(message) = pending.deliver() {
+                                yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalFailed {
+                                    approval_id: pending.id.clone(),
+                                    call_id,
+                                    decision: Some(decision),
+                                    message: message.clone(),
+                                }, &worker_events);
+                                yield sse_event_with_worker(&CodexStreamEvent::Error {
+                                    message,
+                                    usage: None,
+                                    cost_usd: None,
+                                }, &worker_events);
+                                yield Ok(Event::default().data("[DONE]"));
+                                return;
+                            }
+                            yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalStatus {
+                                approval_id: pending.id.clone(),
+                                call_id: call_id.clone(),
+                                decision,
+                                status: "delivered",
+                            }, &worker_events);
+                            approval_ack = Some((pending, call_id, decision));
                         } else if let Err(e) = proc
                             .respond(id, noninteractive_request_response(method).expect("known request"))
                             .await
@@ -1153,7 +1376,9 @@ fn account_worker_event_from_codex(value: &CodexStreamEvent) -> Option<AccountWo
             Some(AccountWorkerEvent::Reasoning { text: text.clone() })
         }
         CodexStreamEvent::ToolApprovalRequired { .. }
-        | CodexStreamEvent::ToolApprovalResolved { .. } => None,
+        | CodexStreamEvent::ToolApprovalResolved { .. }
+        | CodexStreamEvent::ToolApprovalStatus { .. }
+        | CodexStreamEvent::ToolApprovalFailed { .. } => None,
         CodexStreamEvent::Tool {
             id,
             name,
@@ -1397,17 +1622,24 @@ fn clean_optional(value: Option<&str>) -> Option<String> {
 }
 
 fn existing_absolute_directory(value: Option<&str>) -> Option<String> {
-    let value = clean_optional(value)?;
+    let value = absolute_path(value)?;
     let path = PathBuf::from(&value);
-    (path.is_absolute() && path.is_dir()).then_some(value)
+    path.is_dir().then_some(value)
+}
+
+fn absolute_path(value: Option<&str>) -> Option<String> {
+    let value = clean_optional(value)?;
+    PathBuf::from(&value).is_absolute().then_some(value)
 }
 
 fn codex_thread_summary(thread: &Value, archived: bool) -> Option<CodexThreadSummary> {
+    let project_path = absolute_path(extract_string(thread, &["cwd"]).as_deref());
     Some(CodexThreadSummary {
         id: extract_string(thread, &["id"])?,
         name: extract_string(thread, &["name"]),
         preview: extract_string(thread, &["preview"]).unwrap_or_default(),
-        cwd: existing_absolute_directory(extract_string(thread, &["cwd"]).as_deref()),
+        cwd: existing_absolute_directory(project_path.as_deref()),
+        project_path,
         model_provider: extract_string(thread, &["modelProvider"])
             .unwrap_or_else(|| "openai".to_string()),
         created_at_ms: thread
@@ -1576,18 +1808,20 @@ fn codex_tools_allowed(req: &CodexRunRequest) -> bool {
         }
 }
 
-fn codex_approval_policy(req: &CodexRunRequest) -> &'static str {
-    if (account_runtime_policy(req.tool_approval_policy.as_deref()) == "review"
+fn codex_permissions_auto_approved(req: &CodexRunRequest) -> bool {
+    let policy = account_runtime_policy(req.tool_approval_policy.as_deref());
+    !req.plan_mode && (policy == "open" || (policy == "review" && req.tool_approval_grant))
+}
+
+fn codex_interactive_tool_approval(req: &CodexRunRequest) -> bool {
+    account_runtime_policy(req.tool_approval_policy.as_deref()) == "review"
         && req.interactive_tool_approval
-        && !req.tool_approval_grant)
-        || !codex_tools_allowed(req)
-        || account_runtime_policy(req.tool_approval_policy.as_deref()) == "guarded"
-    {
-        "on-request"
-    } else {
-        // Matches Milim's Open mode: no per-tool prompt after the user selected Open or approved a Review run.
-        "never"
-    }
+        && !req.tool_approval_grant
+}
+
+fn codex_approval_policy(_req: &CodexRunRequest) -> &'static str {
+    // Keep escalation available for protected paths such as .git; Milim resolves the request by mode.
+    "on-request"
 }
 
 fn codex_sandbox_policy(req: &CodexRunRequest, cwd: Option<&str>) -> Value {
@@ -1612,18 +1846,50 @@ fn codex_sandbox_mode(req: &CodexRunRequest, cwd: Option<&str>) -> &'static str 
     }
 }
 
-fn codex_approval_response(req: &CodexRunRequest, method: &str) -> Value {
+fn codex_approval_response(req: &CodexRunRequest, method: &str, params: &Value) -> Result<Value> {
     let policy = account_runtime_policy(req.tool_approval_policy.as_deref());
-    let decision = if !codex_tools_allowed(req)
-        || (policy == "guarded" && method == "item/commandExecution/requestApproval")
-    {
-        "decline"
-    } else if policy == "guarded" {
-        "accept"
-    } else {
-        "acceptForSession"
+    let approved = codex_tools_allowed(req)
+        && !(policy == "guarded" && method == "item/commandExecution/requestApproval");
+    codex_decision_response(params, approved, approved && policy != "guarded")
+}
+
+fn codex_decision_response(params: &Value, approved: bool, prefer_session: bool) -> Result<Value> {
+    let available = params.get("availableDecisions").and_then(Value::as_array);
+    let has = |name: &str| {
+        available.is_some_and(|decisions| {
+            decisions.iter().any(|decision| {
+                decision.as_str() == Some(name)
+                    || decision
+                        .as_object()
+                        .is_some_and(|object| object.contains_key(name))
+            })
+        })
     };
-    json!({ "decision": decision })
+    let candidates: &[&str] = if approved && prefer_session {
+        &["acceptForSession", "accept"]
+    } else if approved {
+        &["accept", "acceptForSession"]
+    } else {
+        &["cancel", "decline"]
+    };
+    let decision = if available.is_some() {
+        candidates.iter().copied().find(|candidate| has(candidate))
+    } else if approved && prefer_session {
+        Some("acceptForSession")
+    } else if approved {
+        Some("accept")
+    } else {
+        // Older Codex app-server releases did not advertise their decision enum.
+        Some("decline")
+    };
+    decision
+        .map(|decision| json!({ "decision": decision }))
+        .ok_or_else(|| {
+            Error::Other(format!(
+                "Codex did not advertise a supported {} decision",
+                if approved { "approval" } else { "denial" }
+            ))
+        })
 }
 
 fn permission_request_descriptor(params: &Value) -> Value {
@@ -2267,7 +2533,7 @@ fn normalized_native_status(status: &str) -> String {
 
 fn command_detail(item: &Value) -> Option<String> {
     if let Some(command) = item.get("command").and_then(Value::as_str) {
-        return Some(compact(command, 110));
+        return Some(command.to_string());
     }
     item.get("command")
         .and_then(Value::as_array)
@@ -2279,7 +2545,6 @@ fn command_detail(item: &Value) -> Option<String> {
                 .join(" ")
         })
         .filter(|command| !command.trim().is_empty())
-        .map(|command| compact(&command, 110))
 }
 
 fn file_change_detail(item: &Value) -> Option<String> {
@@ -2323,7 +2588,7 @@ fn compact_json(value: Option<&Value>) -> Option<String> {
     if value.is_null() {
         return None;
     }
-    Some(compact(&value.to_string(), 110))
+    Some(value.to_string())
 }
 
 fn compact(value: &str, limit: usize) -> String {
@@ -2635,6 +2900,7 @@ mod tests {
         );
 
         req.interactive_tool_approval = true;
+        assert!(codex_interactive_tool_approval(&req));
         assert_eq!(codex_approval_policy(&req), "on-request");
         assert_eq!(
             codex_sandbox_mode(&req, req.cwd.as_deref()),
@@ -2643,7 +2909,8 @@ mod tests {
         req.interactive_tool_approval = false;
 
         req.tool_approval_grant = true;
-        assert_eq!(codex_approval_policy(&req), "never");
+        assert!(!codex_interactive_tool_approval(&req));
+        assert_eq!(codex_approval_policy(&req), "on-request");
         assert_eq!(
             codex_sandbox_mode(&req, req.cwd.as_deref()),
             "workspace-write"
@@ -2653,7 +2920,13 @@ mod tests {
             "workspaceWrite"
         );
 
+        req.tool_approval_grant = false;
+        req.tool_approval_policy = Some("open".into());
+        assert_eq!(codex_approval_policy(&req), "on-request");
+        assert!(codex_permissions_auto_approved(&req));
+
         req.plan_mode = true;
+        assert!(!codex_permissions_auto_approved(&req));
         assert_eq!(codex_sandbox_mode(&req, req.cwd.as_deref()), "read-only");
         assert_eq!(
             codex_sandbox_policy(&req, req.cwd.as_deref())["type"],
@@ -2703,6 +2976,44 @@ mod tests {
                 && url == "data:image/png;base64,abc123"
                 && prompt == "a small diagram"
         ));
+    }
+
+    #[test]
+    fn command_details_keep_full_copy_text() {
+        let command = format!("powershell -Command \"{}\"", "x".repeat(140));
+        assert_eq!(
+            command_detail(&json!({ "command": command })).as_deref(),
+            Some(command.as_str())
+        );
+        assert_eq!(
+            compact_json(Some(&json!({ "command": command }))),
+            Some(json!({ "command": command }).to_string())
+        );
+    }
+
+    #[test]
+    fn codex_decisions_follow_the_runtime_advertisement() {
+        let params = json!({
+            "availableDecisions": [
+                "accept",
+                { "acceptWithExecpolicyAmendment": { "execpolicy_amendment": ["git", "status"] } },
+                "cancel"
+            ]
+        });
+        assert_eq!(
+            codex_decision_response(&params, true, false).unwrap(),
+            json!({ "decision": "accept" })
+        );
+        assert_eq!(
+            codex_decision_response(&params, false, false).unwrap(),
+            json!({ "decision": "cancel" })
+        );
+        assert!(codex_decision_response(
+            &json!({ "availableDecisions": ["accept"] }),
+            false,
+            false,
+        )
+        .is_err());
     }
 
     #[test]
@@ -2875,6 +3186,19 @@ mod tests {
         assert_eq!(recovered.messages[1].content, "Visible answer");
         assert!(recovered.cwd.is_none());
         assert_eq!(recovered.created_at_ms, 10_000);
+    }
+
+    #[test]
+    fn thread_summary_keeps_missing_project_path_display_only() {
+        let path = std::env::temp_dir().join(format!("milim-missing-{}", uuid::Uuid::new_v4()));
+        let result = json!({
+            "id": "thread-1",
+            "preview": "preview",
+            "cwd": path.to_string_lossy(),
+        });
+        let summary = codex_thread_summary(&result, false).expect("thread summary");
+        assert_eq!(summary.project_path.as_deref(), path.to_str());
+        assert!(summary.cwd.is_none());
     }
 
     #[test]
