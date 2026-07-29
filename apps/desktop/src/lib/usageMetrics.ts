@@ -733,8 +733,9 @@ function formatMetricParts(
 export function formatDuration(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)}ms`;
   if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  const minutes = Math.floor(ms / 60_000);
-  return `${minutes}m ${Math.round((ms % 60_000) / 1000)}s`;
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m ${seconds % 60}s`;
 }
 
 export function formatTokens(tokens: number): string {
