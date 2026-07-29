@@ -174,7 +174,7 @@ export function BatonTargetSheet({
         onManageProviders={onManageProviders}
         onManageMcp={() => {}}
         onManageMemory={() => {}}
-        onClose={() => {}}
+        onClose={onClose}
         showManagementActions={false}
       />
     </SheetDialog>

@@ -680,13 +680,7 @@ function AppContent() {
           <SchedulesManager onClose={() => setSchedulesOpen(false)} />
         )}
         {mediaOpen && (
-          <MediaManager
-            onClose={() => setMediaOpen(false)}
-            onManageProviders={() => {
-              setMediaOpen(false);
-              setSettingsOpen(true);
-            }}
-          />
+          <MediaManager onClose={() => setMediaOpen(false)} />
         )}
         {pullRequestsOpen && (
           <PullRequestsManager onClose={() => setPullRequestsOpen(false)} />

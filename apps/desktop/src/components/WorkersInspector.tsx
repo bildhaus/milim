@@ -387,6 +387,12 @@ export function WorkersInspector({
     setModelPickerPurpose(purpose);
   }
 
+  function closeModelPickerAndRestoreFocus() {
+    const triggerRoot = modelPickerPurpose === "retry" ? retryModelPickerRef.current : modelPickerRef.current;
+    setModelPickerPurpose(null);
+    window.requestAnimationFrame(() => triggerRoot?.querySelector<HTMLButtonElement>('[aria-haspopup="dialog"]')?.focus());
+  }
+
   async function copyResult() {
     if (!selectedWorker || !navigator.clipboard) return;
     await navigator.clipboard.writeText(workerResult(selectedWorker));
@@ -570,7 +576,7 @@ export function WorkersInspector({
             onManageProviders={() => {}}
             onManageMcp={() => {}}
             onManageMemory={() => {}}
-            onClose={() => setModelPickerPurpose(null)}
+            onClose={closeModelPickerAndRestoreFocus}
             showManagementActions={false}
           />
         </div>,

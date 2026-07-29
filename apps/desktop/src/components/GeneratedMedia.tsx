@@ -27,11 +27,15 @@ export function GeneratedMedia({
   alt,
   onOpenExternal,
   onActivate,
+  interactive = true,
+  pressed,
 }: {
   item?: MediaResultItem | null;
   alt: string;
   onOpenExternal?: (url: string) => void;
   onActivate?: () => void;
+  interactive?: boolean;
+  pressed?: boolean;
 }) {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [source, setSource] = useState(item?.requires_auth ? "" : item?.url ?? "");
@@ -151,6 +155,14 @@ export function GeneratedMedia({
   }
 
   if (item.kind === "music") {
+    if (!interactive) {
+      return (
+        <span className="generated-media-audio passive" data-testid="generated-media-music" role="img" aria-label={alt}>
+          <Volume2 size={18} aria-hidden="true" />
+          <span>{source ? "Audio" : loadError ? "Music unavailable" : "Loading music..."}</span>
+        </span>
+      );
+    }
     return (
       <div className="generated-media-audio" data-testid="generated-media-music">
         <Volume2 size={18} aria-hidden="true" />
@@ -165,6 +177,26 @@ export function GeneratedMedia({
 
   const video = item.kind === "video";
   const canOpenExternally = isDirectWebUrl(item.url);
+  if (!interactive) {
+    return (
+      <span
+        className="generated-media-thumbnail passive"
+        data-testid={`generated-media-${video ? "video" : "image"}`}
+        role="img"
+        aria-label={alt}
+      >
+        {source ? (
+          video ? (
+            <video src={source} muted preload="metadata" aria-hidden="true" />
+          ) : (
+            <img src={source} alt="" />
+          )
+        ) : (
+          <span>{loadError ? "Media unavailable" : "Loading media..."}</span>
+        )}
+      </span>
+    );
+  }
   return (
     <>
       <button
@@ -179,7 +211,8 @@ export function GeneratedMedia({
           }
         }}
         disabled={!source}
-        aria-label={`Preview ${alt}`}
+        aria-label={onActivate ? alt : `Preview ${alt}`}
+        aria-pressed={onActivate && pressed !== undefined ? pressed : undefined}
       >
         {source ? (
           video ? (

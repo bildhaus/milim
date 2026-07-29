@@ -77,7 +77,13 @@ export function inputWithSchemaControls(
   const input = parseJsonObject(advanced);
   if (!schema) return input;
   for (const control of schema.controls) {
-    applyValueAtPath(input, control.path, values[control.key]);
+    const stored = values[control.key];
+    const value =
+      typeof stored === "string" &&
+      (control.kind === "array" || control.kind === "json")
+        ? parseControlValue(control, stored)
+        : stored;
+    applyValueAtPath(input, control.path, value);
   }
   return input;
 }
@@ -100,15 +106,23 @@ export function parseControlValue(control: MediaSchemaControl, value: string | b
   if (control.kind === "array") {
     const trimmed = value.trim();
     if (!trimmed) return [];
+    let items: unknown[];
     if (trimmed.startsWith("[")) {
       const parsed = JSON.parse(trimmed);
-      return Array.isArray(parsed) ? parsed : [];
+      if (!Array.isArray(parsed)) throw new Error(`${control.label} must be a JSON array.`);
+      items = parsed;
+    } else {
+      items = trimmed
+        .split(/\r?\n|,/)
+        .map((item) => item.trim())
+        .filter(Boolean);
     }
-    return trimmed
-      .split(/\r?\n|,/)
-      .map((item) => item.trim())
-      .filter(Boolean)
-      .map((item) => control.item_kind === "number" ? Number(item) : item);
+    if (control.item_kind !== "number") return items;
+    const numbers = items.map(Number);
+    if (numbers.some((item) => !Number.isFinite(item))) {
+      throw new Error(`${control.label} must contain only numbers.`);
+    }
+    return numbers;
   }
   if (control.kind === "json") return value.trim() ? JSON.parse(value) : {};
   const option = control.options?.find((item) => String(item.value) === value);

@@ -141,6 +141,7 @@ export function ControlBar({
   const [menu, setMenu] = useState<null | "model" | "context">(null);
   const [modelPickerStyle, setModelPickerStyle] = useState<CSSProperties>();
   const ref = useRef<HTMLDivElement>(null);
+  const modelTriggerRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (!menu) return;
@@ -195,6 +196,7 @@ export function ControlBar({
         {/* Model */}
         <div className="chip-wrap">
           <button
+            ref={modelTriggerRef}
             type="button"
             className="chip chip-model"
             data-testid="model-picker-trigger"
@@ -228,7 +230,10 @@ export function ControlBar({
               onManageProviders={onManageProviders}
               onManageMcp={onManageMcp}
               onManageMemory={onManageMemory}
-              onClose={() => setMenu(null)}
+              onClose={() => {
+                setMenu(null);
+                window.requestAnimationFrame(() => modelTriggerRef.current?.focus());
+              }}
               style={modelPickerStyle}
             />
           )}
