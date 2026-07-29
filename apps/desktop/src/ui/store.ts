@@ -90,6 +90,7 @@ interface UiPreferencesState {
   experimentalHashlinePatch: boolean;
   chatLayoutStyle: ChatLayoutStyle;
   sidebarRailStyle: SidebarRailStyle;
+  settledThreadsEnabled: boolean;
   showEmptyChatRidgeline: boolean;
   autoColorThreadNames: boolean;
   messageWidth: MessageWidth;
@@ -147,6 +148,7 @@ interface UiPreferencesState {
   setExperimentalHashlinePatch: (experimentalHashlinePatch: boolean) => void;
   setChatLayoutStyle: (chatLayoutStyle: ChatLayoutStyle) => void;
   setSidebarRailStyle: (sidebarRailStyle: SidebarRailStyle) => void;
+  setSettledThreadsEnabled: (settledThreadsEnabled: boolean) => void;
   setShowEmptyChatRidgeline: (showEmptyChatRidgeline: boolean) => void;
   setAutoColorThreadNames: (autoColorThreadNames: boolean) => void;
   setMessageWidth: (messageWidth: MessageWidth) => void;
@@ -401,6 +403,7 @@ export const useUiPreferences = create<UiPreferencesState>()(
       experimentalHashlinePatch: false,
       chatLayoutStyle: "transcript",
       sidebarRailStyle: "regular",
+      settledThreadsEnabled: false,
       showEmptyChatRidgeline: true,
       autoColorThreadNames: false,
       messageWidth: "standard",
@@ -469,6 +472,7 @@ export const useUiPreferences = create<UiPreferencesState>()(
       setExperimentalHashlinePatch: (experimentalHashlinePatch) => set({ experimentalHashlinePatch }),
       setChatLayoutStyle: (chatLayoutStyle) => set({ chatLayoutStyle: normalizeChatLayoutStyle(chatLayoutStyle) }),
       setSidebarRailStyle: (sidebarRailStyle) => set({ sidebarRailStyle: normalizeSidebarRailStyle(sidebarRailStyle) }),
+      setSettledThreadsEnabled: (settledThreadsEnabled) => set({ settledThreadsEnabled }),
       setShowEmptyChatRidgeline: (showEmptyChatRidgeline) => set({ showEmptyChatRidgeline }),
       setAutoColorThreadNames: (autoColorThreadNames) => set({ autoColorThreadNames }),
       setMessageWidth: (messageWidth) => set({ messageWidth: normalizeMessageWidth(messageWidth) }),
@@ -626,6 +630,7 @@ export const useUiPreferences = create<UiPreferencesState>()(
           experimentalHashlinePatch: typeof saved?.experimentalHashlinePatch === "boolean" ? saved.experimentalHashlinePatch : current.experimentalHashlinePatch,
           chatLayoutStyle: normalizeChatLayoutStyle(saved?.chatLayoutStyle),
           sidebarRailStyle: normalizeSidebarRailStyle(saved?.sidebarRailStyle),
+          settledThreadsEnabled: typeof saved?.settledThreadsEnabled === "boolean" ? saved.settledThreadsEnabled : false,
           showEmptyChatRidgeline: typeof saved?.showEmptyChatRidgeline === "boolean" ? saved.showEmptyChatRidgeline : true,
           autoColorThreadNames: typeof saved?.autoColorThreadNames === "boolean" ? saved.autoColorThreadNames : false,
           messageWidth: normalizeMessageWidth(saved?.messageWidth),
@@ -693,6 +698,7 @@ export const useUiPreferences = create<UiPreferencesState>()(
         experimentalHashlinePatch: state.experimentalHashlinePatch,
         chatLayoutStyle: normalizeChatLayoutStyle(state.chatLayoutStyle),
         sidebarRailStyle: normalizeSidebarRailStyle(state.sidebarRailStyle),
+        settledThreadsEnabled: state.settledThreadsEnabled,
         showEmptyChatRidgeline: state.showEmptyChatRidgeline,
         autoColorThreadNames: state.autoColorThreadNames,
         messageWidth: normalizeMessageWidth(state.messageWidth),

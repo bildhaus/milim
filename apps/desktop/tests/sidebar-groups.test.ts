@@ -46,11 +46,17 @@ type SidebarSession = {
   settings?: { folder?: string };
   retryWorkspace?: { originalFolder: string };
   parentId?: string;
+  settledAt?: number;
   archivedAt?: number;
   createdAt: number;
   updatedAt: number;
 };
-type SessionGroup = { id: string; project?: Project; sessions: SidebarSession[] };
+type SessionGroup = {
+  id: string;
+  project?: Project;
+  sessions: SidebarSession[];
+  settled?: boolean;
+};
 
 const server = await createServer({
   root: process.cwd(),
@@ -61,7 +67,7 @@ const server = await createServer({
 
 try {
   const { groupSessionsByProjects, runningWorkerParentThreadIdsKey, sidebarSectionNextRevealCount } = await server.ssrLoadModule("/src/components/Sidebar.tsx") as {
-    groupSessionsByProjects: (sessions: SidebarSession[], projects: Project[], sidebar: SessionSidebarState, query: string) => SessionGroup[];
+    groupSessionsByProjects: (sessions: SidebarSession[], projects: Project[], sidebar: SessionSidebarState, query: string, settledThreadsEnabled?: boolean) => SessionGroup[];
     runningWorkerParentThreadIdsKey: (records: Array<{ run: { parent_thread_id: string; status: string } }>) => string;
     sidebarSectionNextRevealCount: (totalSessions: number, visibleLimit: number, activeIndex: number) => number;
   };
@@ -122,6 +128,113 @@ try {
 
   const filteredGroups = groupSessionsByProjects([], [], { ...sidebar, projectFolders: [] }, "missing");
   assert(filteredGroups.length === 0, "filtered empty sidebar should still show no result groups");
+
+  const tierSessions: SidebarSession[] = [
+    {
+      id: "active-parent",
+      title: "Active parent",
+      settings: { folder },
+      createdAt: now,
+      updatedAt: now,
+    },
+    {
+      id: "settled-parent",
+      title: "Settled parent",
+      settings: { folder },
+      settledAt: now,
+      createdAt: now,
+      updatedAt: now,
+    },
+    {
+      id: "active-child",
+      title: "Active child",
+      settings: { folder },
+      parentId: "settled-parent",
+      createdAt: now,
+      updatedAt: now,
+    },
+    {
+      id: "settled-child",
+      title: "Settled child",
+      settings: { folder },
+      parentId: "active-parent",
+      settledAt: now,
+      createdAt: now,
+      updatedAt: now,
+    },
+    {
+      id: "settled-pinned",
+      title: "Pinned settled",
+      settledAt: now,
+      createdAt: now,
+      updatedAt: now,
+    },
+  ];
+  const tierSidebar = {
+    ...sidebar,
+    pinnedSessionIds: ["settled-pinned"],
+    sessionOrder: tierSessions.map((session) => session.id),
+  };
+  const currentModeGroups = groupSessionsByProjects(
+    tierSessions,
+    groups[0]?.project ? [groups[0].project] : [],
+    tierSidebar,
+    "",
+  );
+  assert(
+    currentModeGroups.find((group) => group.id === "pinned")?.sessions[0]?.id ===
+      "settled-pinned",
+    "disabled settle mode should preserve current pinned rendering",
+  );
+  assert(
+    !currentModeGroups.some((group) => group.settled),
+    "disabled settle mode should not add a settled tier",
+  );
+
+  const inboxGroups = groupSessionsByProjects(
+    tierSessions,
+    groups[0]?.project ? [groups[0].project] : [],
+    tierSidebar,
+    "",
+    true,
+  );
+  const inboxProject = inboxGroups.find(
+    (group) => group.id === projectSectionId(folder),
+  );
+  assert(
+    JSON.stringify(inboxProject?.sessions.map((session) => session.id)) ===
+      JSON.stringify(["active-parent", "active-child"]),
+    "branches split across tiers should remain visible as roots in their own tier",
+  );
+  assert(
+    !inboxGroups.some(
+      (group) =>
+        group.id === "pinned" &&
+        group.sessions.some((session) => session.id === "settled-pinned"),
+    ),
+    "settlement should temporarily override pinned placement",
+  );
+  const settledGroup = inboxGroups.at(-1);
+  assert(
+    settledGroup?.settled && settledGroup.id === "settled",
+    "settled threads should render in one global bottom tier",
+  );
+  assert(
+    JSON.stringify(settledGroup.sessions.map((session) => session.id)) ===
+      JSON.stringify(["settled-parent", "settled-child", "settled-pinned"]),
+    "settled threads should preserve existing sidebar order",
+  );
+  const settledSearch = groupSessionsByProjects(
+    tierSessions,
+    groups[0]?.project ? [groups[0].project] : [],
+    tierSidebar,
+    "Pinned settled",
+    true,
+  );
+  assert(
+    settledSearch.at(-1)?.sessions[0]?.id === "settled-pinned",
+    "search should include settled threads",
+  );
 
   assert(sidebarSectionNextRevealCount(12, 5, -1) === 5, "expanded sidebar sections should reveal a full next batch");
   assert(sidebarSectionNextRevealCount(7, 5, -1) === 2, "expanded sidebar sections should reveal only the remaining threads");

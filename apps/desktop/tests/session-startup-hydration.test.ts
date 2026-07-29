@@ -75,6 +75,7 @@ const persistedSessions = JSON.stringify({
         contextCollapsedSectionIds: ["sources", "activity", "sources", "invalid"],
         createdAt: 1,
         updatedAt: 1,
+        settledAt: 7,
       },
       {
         id: "title-only-session",
@@ -85,6 +86,7 @@ const persistedSessions = JSON.stringify({
         contextCollapsedSectionIds: "invalid",
         createdAt: 2,
         updatedAt: 2,
+        settledAt: "invalid",
       },
       {
         id: "legacy-workers-session",
@@ -200,6 +202,11 @@ assert(
 assert(
   stored.state.sessions[1]?.id === "title-only-session",
   "hydration should keep recovered title-only sessions",
+);
+assert(
+  useSessions.getState().sessions[0]?.settledAt === 7 &&
+    useSessions.getState().sessions[1]?.settledAt === undefined,
+  "hydration should preserve valid settled markers and discard invalid ones",
 );
 assert(
   Array.isArray(stored.state.sessions[1]?.messages),

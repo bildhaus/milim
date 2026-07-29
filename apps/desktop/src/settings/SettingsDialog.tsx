@@ -256,6 +256,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const experimentalHashlinePatch = useUiPreferences((s) => s.experimentalHashlinePatch);
   const chatLayoutStyle = useUiPreferences((s) => s.chatLayoutStyle);
   const sidebarRailStyle = useUiPreferences((s) => s.sidebarRailStyle);
+  const settledThreadsEnabled = useUiPreferences((s) => s.settledThreadsEnabled);
   const showEmptyChatRidgeline = useUiPreferences((s) => s.showEmptyChatRidgeline);
   const autoColorThreadNames = useUiPreferences((s) => s.autoColorThreadNames);
   const messageWidth = useUiPreferences((s) => s.messageWidth);
@@ -303,6 +304,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const setExperimentalHashlinePatch = useUiPreferences((s) => s.setExperimentalHashlinePatch);
   const setChatLayoutStyle = useUiPreferences((s) => s.setChatLayoutStyle);
   const setSidebarRailStyle = useUiPreferences((s) => s.setSidebarRailStyle);
+  const setSettledThreadsEnabled = useUiPreferences((s) => s.setSettledThreadsEnabled);
   const setShowEmptyChatRidgeline = useUiPreferences((s) => s.setShowEmptyChatRidgeline);
   const setAutoColorThreadNames = useUiPreferences((s) => s.setAutoColorThreadNames);
   const setMessageWidth = useUiPreferences((s) => s.setMessageWidth);
@@ -1750,6 +1752,18 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                     onChange={setAutoColorThreadNames}
                     ariaLabel="Automatically color project thread names"
                     testId="auto-color-thread-names-toggle"
+                  />
+                </div>
+                <div className="setting-toggle-row">
+                  <div>
+                    <strong>Settled threads</strong>
+                    <span>Move finished threads into a compact tier at the bottom of the sidebar.</span>
+                  </div>
+                  <Toggle
+                    checked={settledThreadsEnabled}
+                    onChange={setSettledThreadsEnabled}
+                    ariaLabel="Settled threads"
+                    testId="settled-threads-toggle"
                   />
                 </div>
               </div>

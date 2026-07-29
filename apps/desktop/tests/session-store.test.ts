@@ -2468,6 +2468,96 @@ equal(
 useSessions
   .getState()
   .setMessages(archiveSession, [{ role: "user", content: "archive me" }]);
+const settleBranch = useSessions.getState().forkSession(archiveSession);
+assert(settleBranch, "settled-thread test should create a branch");
+useSessions.getState().switchTo(archiveSession);
+const settledUpdatedAt = useSessions
+  .getState()
+  .sessions.find((session) => session.id === archiveSession)?.updatedAt;
+const settledOrder = [...useSessions.getState().sidebar.sessionOrder];
+useSessions.getState().settleSession(archiveSession);
+const settledAt = useSessions
+  .getState()
+  .sessions.find((session) => session.id === archiveSession)?.settledAt;
+assert(settledAt, "settling a chat should record a timestamp");
+equal(
+  useSessions
+    .getState()
+    .sessions.find((session) => session.id === settleBranch)?.settledAt,
+  undefined,
+  "settling a chat should not cascade to branches",
+);
+equal(
+  useSessions.getState().activeId,
+  archiveSession,
+  "settling the active chat should keep it active",
+);
+equal(
+  useSessions
+    .getState()
+    .sessions.find((session) => session.id === archiveSession)?.updatedAt,
+  settledUpdatedAt,
+  "settling should preserve last-activity recency",
+);
+deepEqual(
+  useSessions.getState().sidebar.sessionOrder,
+  settledOrder,
+  "settling should preserve sidebar order",
+);
+assert(
+  localStorage.getItem("milim.sessions")?.includes('"settledAt":'),
+  "settled state should persist with the session",
+);
+useSessions.getState().purgeExpiredArchives(settledAt + 8 * DAY_MS);
+assert(
+  useSessions
+    .getState()
+    .sessions.some((session) => session.id === archiveSession),
+  "settled chats should not expire under archive retention",
+);
+useSessions.getState().setSessionGenerating(archiveSession, true);
+equal(
+  useSessions
+    .getState()
+    .sessions.find((session) => session.id === archiveSession)?.settledAt,
+  undefined,
+  "generation should auto-unsettle a chat",
+);
+useSessions.getState().setSessionGenerating(archiveSession, false);
+useSessions.getState().settleSession(archiveSession);
+useSessions.getState().switchTo(settleBranch);
+useSessions.getState().setSessionUnread(archiveSession, true);
+equal(
+  useSessions
+    .getState()
+    .sessions.find((session) => session.id === archiveSession)?.settledAt,
+  undefined,
+  "unread activity should auto-unsettle a chat",
+);
+useSessions.getState().setSessionUnread(archiveSession, false);
+useSessions.getState().settleSession(archiveSession);
+useSessions.getState().upsertWorkerRun({
+  run: {
+    id: "settled-worker-run",
+    parent_thread_id: archiveSession,
+    policy: "ask",
+    runtime: "managed",
+    status: "done",
+    tasks: [],
+    created_at: "2026-07-29T00:00:00Z",
+    updated_at: "2026-07-29T00:01:00Z",
+  },
+  workers: [],
+});
+equal(
+  useSessions
+    .getState()
+    .sessions.find((session) => session.id === archiveSession)?.settledAt,
+  undefined,
+  "Worker Run updates should auto-unsettle their parent chat",
+);
+useSessions.getState().switchTo(archiveSession);
+useSessions.getState().settleSession(archiveSession);
 assert(
   useSessions
     .getState()
@@ -2482,6 +2572,12 @@ assert(
   "archiving a chat should mark it archived",
 );
 assert(
+  useSessions
+    .getState()
+    .sessions.find((session) => session.id === archiveSession)?.settledAt,
+  "archiving should preserve the independent settled marker",
+);
+assert(
   useSessions.getState().activeId !== archiveSession,
   "archiving the active chat should switch to a visible chat",
 );
@@ -2492,6 +2588,20 @@ equal(
     .sessions.find((session) => session.id === archiveSession)?.archivedAt,
   undefined,
   "restoring a chat should clear its archive marker",
+);
+assert(
+  useSessions
+    .getState()
+    .sessions.find((session) => session.id === archiveSession)?.settledAt,
+  "restoring should preserve the independent settled marker",
+);
+useSessions.getState().unsettleSession(archiveSession);
+equal(
+  useSessions
+    .getState()
+    .sessions.find((session) => session.id === archiveSession)?.settledAt,
+  undefined,
+  "unsettling should clear the marker",
 );
 useSessions.getState().archiveProject(archiveProject);
 assert(

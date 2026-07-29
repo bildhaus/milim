@@ -2398,6 +2398,15 @@ async function runSettingsLayoutCheck(page) {
     throw new Error("Open should be selectable as the configured new-chat approval default.");
   }
   await page.getByTestId("settings-section-appearance").click();
+  const settledThreadsToggle = page.getByTestId("settled-threads-toggle");
+  await settledThreadsToggle.scrollIntoViewIfNeeded();
+  if (await settledThreadsToggle.getAttribute("aria-checked") !== "false") {
+    throw new Error("Settled threads should default off.");
+  }
+  await settledThreadsToggle.click();
+  if (await settledThreadsToggle.getAttribute("aria-checked") !== "true") {
+    throw new Error("Settled threads should be configurable.");
+  }
   const ridgelineToggle = page.getByTestId("empty-chat-ridgeline-toggle");
   await ridgelineToggle.scrollIntoViewIfNeeded();
   if (await ridgelineToggle.getAttribute("aria-checked") !== "true") {
