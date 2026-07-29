@@ -82,7 +82,7 @@ The latest eligible turn ends with a compact review card whose explicit state is
 |---|---|
 | Model | Pick any discovered chat, account-runtime, or media-capable model. The chip and picker groups use branded icons for provider/runtime identity while keeping readiness as a separate status. They also show runtime lane, capabilities, favorite state, and reasoning effort where supported. |
 | Folder | Sets the host working folder. Each run captures that folder immutably; filesystem tools reject symlink/junction escapes, writes replace files atomically, directory results are sorted and bounded, and `read_file` accepts byte `offset`/`limit` ranges. |
-| Sandbox | Enables bounded Docker execution through `run_command`: no network, read-only root, dropped capabilities, no-new-privileges, memory/CPU/PID limits, output caps, timeout, and cancellation cleanup. |
+| Docker sandbox | Enables bounded Docker execution through `run_command`: no network, read-only root, dropped capabilities, no-new-privileges, memory/CPU/PID limits, output caps, timeout, and cancellation cleanup. It is separate from each installed account runtime's native sandbox. |
 | Computer use | Enables OS-level screen capture plus mouse/keyboard tools when the desktop build includes the feature. |
 | Memory | Adds scoped thread/project memory search as cheap turn context. Durable memory writes use `memory_register` only on explicit remember/save requests or already tool-capable turns. |
 | Privacy | Sets `off`, `redact`, or `block` for remote-provider and account-runtime traffic. |

@@ -274,6 +274,7 @@ import {
   autoApprovableToolApprovals,
   dismissToolApproval,
   pendingToolApprovals,
+  toolApprovalPrompts,
 } from "../lib/toolApproval";
 import {
   hasQueuedMessages,
@@ -1808,6 +1809,10 @@ export function ChatView({
     planMode,
     goal,
   } = threadSettings;
+  const visibleApprovalPrompts = useMemo(
+    () => toolApprovalPrompts(pendingApprovals, toolApproval),
+    [pendingApprovals, toolApproval],
+  );
   const autoApprovingToolIdsRef = useRef(new Set<string>());
   useEffect(() => {
     if (toolApproval !== "open") return;
@@ -7089,7 +7094,7 @@ export function ChatView({
               </div>
             )}
             <ComposerSurface>
-              {pendingApprovals.map((approval) => (
+              {visibleApprovalPrompts.map((approval) => (
                 <ToolApprovalPrompt
                   key={approval.approvalId}
                   part={approval}

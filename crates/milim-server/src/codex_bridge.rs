@@ -920,9 +920,7 @@ fn run_stream_with_worker_events(
             match method {
                 "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
                     if let Some(id) = rpc_request_id(&msg) {
-                        let interactive = account_runtime_policy(req.tool_approval_policy.as_deref()) == "review"
-                            && req.interactive_tool_approval
-                            && !req.tool_approval_grant;
+                        let interactive = codex_interactive_tool_approval(&req);
                         let mut pending_delivery = None;
                         let result = if interactive {
                             let Some(broker) = approval_broker.as_ref() else {
@@ -1040,7 +1038,16 @@ fn run_stream_with_worker_events(
                         let mut approved = codex_permissions_auto_approved(&req);
                         let call_id = extract_string(params, &["itemId"]);
                         let mut pending_delivery = None;
-                        if let Some(broker) = approval_broker.as_ref() {
+                        if codex_interactive_tool_approval(&req) {
+                            let Some(broker) = approval_broker.as_ref() else {
+                                yield sse_event_with_worker(&CodexStreamEvent::Error {
+                                    message: "Codex Review approval broker is unavailable".to_string(),
+                                    usage: None,
+                                    cost_usd: None,
+                                }, &worker_events);
+                                yield Ok(Event::default().data("[DONE]"));
+                                return;
+                            };
                             let mut pending = broker.request();
                             yield sse_event_with_worker(&CodexStreamEvent::ToolApprovalRequired {
                                 approval_id: pending.id.clone(),
@@ -1780,22 +1787,18 @@ fn codex_tools_allowed(req: &CodexRunRequest) -> bool {
 
 fn codex_permissions_auto_approved(req: &CodexRunRequest) -> bool {
     let policy = account_runtime_policy(req.tool_approval_policy.as_deref());
-    !req.plan_mode
-        && (policy == "open" || (policy == "review" && req.tool_approval_grant))
+    !req.plan_mode && (policy == "open" || (policy == "review" && req.tool_approval_grant))
 }
 
-fn codex_approval_policy(req: &CodexRunRequest) -> &'static str {
-    if (account_runtime_policy(req.tool_approval_policy.as_deref()) == "review"
+fn codex_interactive_tool_approval(req: &CodexRunRequest) -> bool {
+    account_runtime_policy(req.tool_approval_policy.as_deref()) == "review"
         && req.interactive_tool_approval
-        && !req.tool_approval_grant)
-        || !codex_tools_allowed(req)
-        || account_runtime_policy(req.tool_approval_policy.as_deref()) == "guarded"
-    {
-        "on-request"
-    } else {
-        // Matches Milim's Open mode: no per-tool prompt after the user selected Open or approved a Review run.
-        "never"
-    }
+        && !req.tool_approval_grant
+}
+
+fn codex_approval_policy(_req: &CodexRunRequest) -> &'static str {
+    // Keep escalation available for protected paths such as .git; Milim resolves the request by mode.
+    "on-request"
 }
 
 fn codex_sandbox_policy(req: &CodexRunRequest, cwd: Option<&str>) -> Value {
@@ -2874,6 +2877,7 @@ mod tests {
         );
 
         req.interactive_tool_approval = true;
+        assert!(codex_interactive_tool_approval(&req));
         assert_eq!(codex_approval_policy(&req), "on-request");
         assert_eq!(
             codex_sandbox_mode(&req, req.cwd.as_deref()),
@@ -2882,7 +2886,8 @@ mod tests {
         req.interactive_tool_approval = false;
 
         req.tool_approval_grant = true;
-        assert_eq!(codex_approval_policy(&req), "never");
+        assert!(!codex_interactive_tool_approval(&req));
+        assert_eq!(codex_approval_policy(&req), "on-request");
         assert_eq!(
             codex_sandbox_mode(&req, req.cwd.as_deref()),
             "workspace-write"
@@ -2894,7 +2899,7 @@ mod tests {
 
         req.tool_approval_grant = false;
         req.tool_approval_policy = Some("open".into());
-        assert_eq!(codex_approval_policy(&req), "never");
+        assert_eq!(codex_approval_policy(&req), "on-request");
         assert!(codex_permissions_auto_approved(&req));
 
         req.plan_mode = true;

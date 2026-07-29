@@ -164,7 +164,7 @@ export function ControlBar({
     };
   }, [menu]);
 
-  const contextAccessibleLabel = `Session controls, Sandbox ${sandbox ? "on" : "off"}, Computer ${computerUse ? "on" : "off"}, Memory ${memory ? "on" : "off"}, Privacy ${PRIVACY_LABEL[privacy]}, Tool approval ${TOOL_APPROVAL_LABEL[toolApproval]}`;
+  const contextAccessibleLabel = `Session controls, Docker sandbox ${sandbox ? "on" : "off"}, Computer ${computerUse ? "on" : "off"}, Memory ${memory ? "on" : "off"}, Privacy ${PRIVACY_LABEL[privacy]}, Tool approval ${TOOL_APPROVAL_LABEL[toolApproval]}`;
   const showGoalChip = Boolean(goalMode) || goalChipVisible(goal);
   const goalDetail = goalMode
     ? "Ready"
@@ -322,7 +322,7 @@ export function ControlBar({
                   <span className="context-icon">
                     <Cube size={14} />
                   </span>
-                  <span className="context-title">Sandbox</span>
+                  <span className="context-title">Docker sandbox</span>
                   <span className="context-switch" aria-hidden="true" />
                 </button>
 

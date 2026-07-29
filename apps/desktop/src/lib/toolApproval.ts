@@ -1,4 +1,10 @@
-import type { ChatMessage, ChatStreamPart, McpApprovalField, ToolApprovalRequest } from "../api";
+import type {
+  ChatMessage,
+  ChatStreamPart,
+  McpApprovalField,
+  ToolApprovalMode,
+  ToolApprovalRequest,
+} from "../api";
 
 type ApprovalPart = Extract<ChatStreamPart, { kind: "event" }>;
 
@@ -12,13 +18,26 @@ export function pendingToolApprovals(messages: readonly ChatMessage[]): Approval
   return [...approvals.values()].filter((part) => part.approvalStatus === "pending");
 }
 
-export function autoApprovableToolApprovals(approvals: readonly ApprovalPart[]): ApprovalPart[] {
-  return approvals.filter((part) =>
+function isAutoApprovableToolApproval(part: ApprovalPart): boolean {
+  return (
     part.approvalRequest == null ||
     part.approvalRequest.kind === "command" ||
     part.approvalRequest.kind === "file_change" ||
     part.approvalRequest.kind === "permissions"
   );
+}
+
+export function autoApprovableToolApprovals(approvals: readonly ApprovalPart[]): ApprovalPart[] {
+  return approvals.filter(isAutoApprovableToolApproval);
+}
+
+export function toolApprovalPrompts(
+  approvals: readonly ApprovalPart[],
+  mode: ToolApprovalMode,
+): ApprovalPart[] {
+  return mode === "open"
+    ? approvals.filter((part) => !isAutoApprovableToolApproval(part))
+    : [...approvals];
 }
 
 export function dismissToolApproval(
