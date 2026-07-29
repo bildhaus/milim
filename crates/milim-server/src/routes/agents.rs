@@ -1511,6 +1511,7 @@ fn agent_registry_for_mode_with_context(
                 child_registry_for_policy(st, policy, inherited, run_context),
                 policy.approval == ToolApprovalPolicy::Open
                     || (policy.approval == ToolApprovalPolicy::Review && policy.approval_granted),
+                policy.approval == ToolApprovalPolicy::Open,
                 run_context.clone(),
             );
         }
@@ -1703,6 +1704,7 @@ pub(crate) fn register_child_thread_tools(
         context,
         child_tools,
         allow_write_review,
+        false,
         run_context,
     );
 }
@@ -1715,6 +1717,7 @@ fn register_child_thread_tools_with_context(
     context: AgentMemoryContext,
     child_tools: ToolRegistry,
     allow_write_review: bool,
+    auto_approve_workers: bool,
     run_context: RunContext,
 ) {
     if context.delegation_policy != milim_agents::DelegationPolicy::Off {
@@ -1724,6 +1727,7 @@ fn register_child_thread_tools_with_context(
             context,
             child_tools,
             allow_write_review,
+            auto_approve_workers,
             run_context,
         }));
     }
@@ -1808,6 +1812,7 @@ struct DelegateWorkersTool {
     context: AgentMemoryContext,
     child_tools: ToolRegistry,
     allow_write_review: bool,
+    auto_approve_workers: bool,
     run_context: RunContext,
 }
 
@@ -2183,7 +2188,7 @@ impl Tool for DelegateWorkersTool {
         ToolEffect::ReadOnly
     }
     fn description(&self) -> &str {
-        "Delegate 1 to 4 genuinely independent tasks as one Worker Run. Do not delegate short or sequential work. Ask mode proposes a frozen plan for approval; Auto runs managed read-only workers and joins their results."
+        "Delegate 1 to 4 genuinely independent tasks as one Worker Run. Do not delegate short or sequential work. Ask mode proposes a frozen plan unless tool approval is Open; Open and Auto start eligible workers immediately."
     }
     fn input_schema(&self) -> Value {
         json!({
@@ -2208,8 +2213,14 @@ impl Tool for DelegateWorkersTool {
             args.tasks,
         )
         .await?;
-        if self.context.delegation_policy != milim_agents::DelegationPolicy::Ask
-            || !self.allow_write_review
+        let delegation_policy = if self.auto_approve_workers {
+            milim_agents::DelegationPolicy::Auto
+        } else {
+            self.context.delegation_policy
+        };
+        if !self.allow_write_review
+            || (!self.auto_approve_workers
+                && delegation_policy != milim_agents::DelegationPolicy::Ask)
         {
             for task in &mut tasks {
                 task.access = milim_agents::WorkerAccess::ReadOnly;
@@ -2222,14 +2233,14 @@ impl Tool for DelegateWorkersTool {
         let run = self.supervisor.store().create_worker_run_with_origin(
             &parent_id,
             self.context.message_id.as_deref(),
-            self.context.delegation_policy,
+            delegation_policy,
             milim_agents::WorkerRuntime::Managed,
             tasks,
             worker_context.as_deref(),
             self.run_context.workspace_text().as_deref(),
             self.run_context.privacy_mode.as_str(),
         )?;
-        if self.context.delegation_policy == milim_agents::DelegationPolicy::Ask {
+        if delegation_policy == milim_agents::DelegationPolicy::Ask {
             return Ok(
                 json!({ "ok": true, "run": run, "workers": [], "worker_run_notice": worker_run_notice(&run, &[]) }),
             );

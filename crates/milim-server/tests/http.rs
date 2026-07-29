@@ -6051,7 +6051,7 @@ async fn agent_run_can_spawn_waiting_child_thread() {
 }
 
 #[tokio::test]
-async fn agent_run_ask_waits_for_worker_approval() {
+async fn agent_run_ask_waits_for_worker_approval_unless_open() {
     use milim_server::threads::ThreadSupervisor;
     use milim_storage::Database;
 
@@ -6084,6 +6084,30 @@ async fn agent_run_ask_waits_for_worker_approval() {
 
     assert!(text.contains("\"type\":\"worker_run_proposed\""), "{text}");
     assert!(!text.contains("parent saw child"), "{text}");
+
+    let open_text = reqwest::Client::new()
+        .post(format!("{base}/agents/run"))
+        .json(&json!({
+            "model":"child-thread-tool",
+            "messages":[{"role":"user","content":"delegate this"}],
+            "thread_id":"parent-open",
+            "delegation_policy":"ask",
+            "tool_approval_policy":"open",
+            "stream":true
+        }))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(
+        open_text.contains("\"type\":\"worker_run_done\""),
+        "{open_text}"
+    );
+    assert!(!open_text.contains("\"type\":\"worker_run_proposed\""));
+    assert!(open_text.contains("parent saw child"), "{open_text}");
 }
 
 #[tokio::test]

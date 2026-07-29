@@ -40,7 +40,7 @@ const STATUS_LABEL: Record<WorkerRunStatus, string> = {
 
 const POLICY_DESCRIPTION: Record<DelegationPolicy, string> = {
   off: "The parent handles every task itself.",
-  ask: "Review a worker plan before it runs.",
+  ask: "Review a worker plan before it runs, unless approval is Open.",
   auto: "Run independent tasks automatically.",
 };
 

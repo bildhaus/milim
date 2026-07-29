@@ -86,7 +86,7 @@ The latest eligible turn ends with a compact review card whose explicit state is
 | Computer use | Enables OS-level screen capture plus mouse/keyboard tools when the desktop build includes the feature. |
 | Memory | Adds scoped thread/project memory search as cheap turn context. Durable memory writes use `memory_register` only on explicit remember/save requests or already tool-capable turns. |
 | Privacy | Sets `off`, `redact`, or `block` for remote-provider and account-runtime traffic. |
-| Approval | Sets `review`, `guarded`, or `open` tool execution policy. Review is the new-chat default: consequential calls pause before execution and the resulting diff is inspected afterward. Open can auto-approve ordinary eligible tool requests, while connector input and authorization remain interactive. Changing the workspace folder resets approval to Review, so Open must be enabled explicitly for the new project boundary. |
+| Approval | Sets `review`, `guarded`, or `open` tool execution policy. Review is the new-chat default: consequential calls pause before execution and the resulting diff is inspected afterward. Open auto-starts eligible worker plans and flows into child tool execution, while connector input and authorization remain interactive. Changing the workspace folder resets approval to Review, so Open must be enabled explicitly for the new project boundary. |
 | Plan | Keeps the turn read-only until you approve execution. |
 | Goal | Tracks a thread objective, success criteria, constraints, turn count, and continuation prompts. |
 

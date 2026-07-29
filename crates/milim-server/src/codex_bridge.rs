@@ -1037,7 +1037,7 @@ fn run_stream_with_worker_events(
                 }
                 "item/permissions/requestApproval" => {
                     if let Some(id) = rpc_request_id(&msg) {
-                        let mut approved = false;
+                        let mut approved = codex_permissions_auto_approved(&req);
                         let call_id = extract_string(params, &["itemId"]);
                         let mut pending_delivery = None;
                         if let Some(broker) = approval_broker.as_ref() {
@@ -1776,6 +1776,12 @@ fn codex_tools_allowed(req: &CodexRunRequest) -> bool {
             "review" => req.tool_approval_grant || req.interactive_tool_approval,
             _ => true,
         }
+}
+
+fn codex_permissions_auto_approved(req: &CodexRunRequest) -> bool {
+    let policy = account_runtime_policy(req.tool_approval_policy.as_deref());
+    !req.plan_mode
+        && (policy == "open" || (policy == "review" && req.tool_approval_grant))
 }
 
 fn codex_approval_policy(req: &CodexRunRequest) -> &'static str {
@@ -2886,7 +2892,13 @@ mod tests {
             "workspaceWrite"
         );
 
+        req.tool_approval_grant = false;
+        req.tool_approval_policy = Some("open".into());
+        assert_eq!(codex_approval_policy(&req), "never");
+        assert!(codex_permissions_auto_approved(&req));
+
         req.plan_mode = true;
+        assert!(!codex_permissions_auto_approved(&req));
         assert_eq!(codex_sandbox_mode(&req, req.cwd.as_deref()), "read-only");
         assert_eq!(
             codex_sandbox_policy(&req, req.cwd.as_deref())["type"],
