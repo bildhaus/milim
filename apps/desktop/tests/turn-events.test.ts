@@ -90,25 +90,31 @@ const runtime = accountRuntimeToolPart({
 equal(runtime.name, "tool-1", "account runtime tool should prefer runtime id");
 equal(runtime.label, "Using shell", "account runtime tool should default running label");
 equal(accountRuntimeToolPart({
-  type: "tool",
+  type: "tool_finished",
   id: "tool-2",
   name: "edit",
   status: "completed",
-} as never).status, "done", "ACP completed tools should normalize to done");
+}).status, "done", "completed tools should project as done");
 equal(accountRuntimeToolPart({
-  type: "tool",
+  type: "tool_updated",
   id: "tool-3",
   name: "edit",
-  status: "in_progress",
-} as never).status, "running", "ACP in-progress tools should normalize to running");
+  status: "running",
+}).status, "running", "updated tools should project as running");
 equal(accountRuntimeToolPart({
-  type: "tool",
+  type: "tool_finished",
   id: "tool-4",
   name: "shell",
   status: "failed",
   detail: "full command",
   error: "permission denied",
-} as never).detail, "permission denied", "account runtime failures should show their error detail");
+}).detail, "permission denied", "account runtime failures should show their error detail");
+equal(accountRuntimeToolPart({
+  type: "tool_finished",
+  id: "tool-5",
+  name: "shell",
+  status: "cancelled",
+}).status, "error", "cancelled tools should not remain running");
 
 const warning = runtimeWarningMessage("Codex not on PATH", "Install Codex");
 assert(warning.streamParts?.[0]?.kind === "event", "runtime warning should be an event part");

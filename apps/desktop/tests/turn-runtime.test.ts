@@ -4,19 +4,18 @@ import type {
   AgentToolContext,
   ChatMessage,
   ChatStreamPart,
-  CodexRunEvent,
+  HarnessEvent,
+  HarnessEventEnvelope,
   MemoryNotice,
   ProviderLimitInfo,
   RunTrace,
   TokenUsage,
 } from "../src/api.js";
 import {
-  claudeCompactionSummaryRequest,
   accountRuntimeInputFromMessages,
   accountRuntimePromptMessages,
-  codexCompactionSummaryRequest,
   codexPromptFromMessages,
-  createAccountRuntimeEventHandler,
+  createHarnessEventHandler,
   createAgentRunEventHandler,
   createTurnAssistantStarter,
   createTurnMetricsCapture,
@@ -30,6 +29,19 @@ import {
   runToolAgentTurn,
   utilityAccountRuntimeMilimContext,
 } from "../src/lib/turnRuntime.js";
+
+let harnessSeq = 0;
+const harnessEnvelope = (
+  event: HarnessEvent,
+  harness_id: "codex" | "claude" | "opencode" | "pi" = "codex",
+): HarnessEventEnvelope => ({
+  schema_version: 1,
+  run_id: "test-run",
+  seq: ++harnessSeq,
+  at_ms: 1,
+  harness_id,
+  event,
+});
 
 const runtimeDelta = accountRuntimePromptMessages(
   [{ role: "system", content: "Context" }],
@@ -201,10 +213,10 @@ const completed: Array<{ name: string; part: ChatStreamPart }> = [];
 const metrics: Array<{ usage?: TokenUsage; cost_usd?: number }> = [];
 const limits: ProviderLimitInfo[] = [];
 const threads: string[] = [];
-const images: Extract<CodexRunEvent, { type: "image" }>[] = [];
+const images: Extract<HarnessEvent, { type: "image_generated" }>[] = [];
 const accountCompletedTools: string[] = [];
 
-const handler = createAccountRuntimeEventHandler({
+const handler = createHarnessEventHandler({
   append: (value) => text.push(value),
   appendThinking: (value) => thinking.push(value),
   flush: () => {
@@ -216,49 +228,59 @@ const handler = createAccountRuntimeEventHandler({
   captureProviderLimit: (limit) => {
     if (limit) limits.push(limit);
   },
-  setCodexThreadId: (threadId) => threads.push(threadId),
+  setNativeSessionId: (threadId) => threads.push(threadId),
   appendImage: (event) => images.push(event),
   onToolCompleted: (name) => accountCompletedTools.push(name),
 });
 
-handler.handle({ type: "token", text: "hello" });
-handler.handle({ type: "reasoning", text: "thinking" });
-handler.handle({
-  type: "tool",
+handler.handle(harnessEnvelope({ type: "text_delta", text: "hello" }));
+handler.handle(harnessEnvelope({ type: "reasoning_delta", text: "thinking" }));
+handler.handle(harnessEnvelope({
+  type: "tool_started",
   id: "call-1",
   name: "shell",
   status: "running",
-});
-handler.handle({
-  type: "tool",
+}));
+handler.handle(harnessEnvelope({
+  type: "tool_finished",
   id: "call-1",
   name: "shell",
-  status: "done",
+  status: "completed",
   label: "Ran shell",
-});
-handler.handle({ type: "thread", thread_id: "codex-thread", model: "gpt-5" });
-handler.handle({
-  type: "image",
+}));
+handler.handle(harnessEnvelope({
+  type: "session_established",
+  native_session_id: "codex-thread",
+  model: "gpt-5",
+}));
+handler.handle(harnessEnvelope({
+  type: "image_generated",
   id: "img",
   status: "completed",
   url: "https://example.com/image.png",
-});
-handler.handle({
-  type: "rate_limit",
+}));
+handler.handle(harnessEnvelope({
+  type: "limit_updated",
   limit: { provider: "Claude", kind: "requests", remaining: 1 },
-});
-handler.handle({
-  type: "done",
+}));
+handler.handle(harnessEnvelope({
+  type: "turn_completed",
   status: "done",
   usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
   cost_usd: 0.01,
-});
-handler.handle({ type: "warning", message: "CLI missing" });
-handler.handle({
-  type: "error",
+}));
+handler.handle(harnessEnvelope({
+  type: "runtime_notice",
+  kind: "warning",
+  level: "warning",
+  code: "runtime_warning",
+  message: "CLI missing",
+}));
+handler.handle(harnessEnvelope({
+  type: "turn_failed",
   message: "boom",
   usage: { prompt_tokens: 4, completion_tokens: 5, total_tokens: 9 },
-});
+}));
 
 assert.deepEqual(text, ["hello"]);
 assert.deepEqual(thinking, ["thinking"]);
@@ -286,7 +308,7 @@ assert.deepEqual(accountCompletedTools, ["shell"]);
 const acpAppended: ChatStreamPart[] = [];
 const acpCompleted: ChatStreamPart[] = [];
 const acpTools: string[] = [];
-const acpHandler = createAccountRuntimeEventHandler({
+const acpHandler = createHarnessEventHandler({
   append: () => {},
   appendThinking: () => {},
   flush: () => {},
@@ -295,11 +317,11 @@ const acpHandler = createAccountRuntimeEventHandler({
   captureRuntimeMetrics: () => {},
   onToolCompleted: (name) => acpTools.push(name),
 });
-acpHandler.handle({ type: "done", status: "running" });
+acpHandler.handle(harnessEnvelope({ type: "usage_updated" }));
 assert.equal(acpHandler.state.done, false);
-acpHandler.handle({ type: "tool", id: "edit-1", name: "milim_google_docs_edit", status: "pending" } as never);
-acpHandler.handle({ type: "tool", id: "edit-1", name: "milim_google_docs_edit", status: "in_progress" } as never);
-acpHandler.handle({ type: "tool", id: "edit-1", name: "milim_google_docs_edit", status: "completed" } as never);
+acpHandler.handle(harnessEnvelope({ type: "tool_started", id: "edit-1", name: "milim_google_docs_edit", status: "pending" }));
+acpHandler.handle(harnessEnvelope({ type: "tool_updated", id: "edit-1", name: "milim_google_docs_edit", status: "running" }));
+acpHandler.handle(harnessEnvelope({ type: "tool_finished", id: "edit-1", name: "milim_google_docs_edit", status: "completed" }));
 assert.equal(acpAppended.length, 1);
 assert.equal(acpCompleted.length, 2);
 assert.deepEqual(acpTools, ["milim_google_docs_edit"]);
@@ -651,10 +673,11 @@ const codexResult = await runAccountRuntimeTurn({
   setThreadId: (threadId) => {
     codexThreadId = threadId;
   },
-  stream: async (request, onEvent, signal) => {
+  stream: async (harnessId, request, onEvent, signal) => {
+    assert.equal(harnessId, "codex");
     accountStreamSignal = signal;
-    assert.equal(request.thread_id, "codex-thread-1");
-    assert.equal(request.persist_thread, true);
+    assert.equal(request.native_session_id, "codex-thread-1");
+    assert.equal(request.persist_session, true);
     assert.equal(request.tool_approval_grant, true);
     assert.equal(request.milim_context?.tool_context.tool_approval_policy, "guarded");
     assert.equal(request.milim_context?.tool_context.interactive_tool_approval, false);
@@ -664,56 +687,66 @@ const codexResult = await runAccountRuntimeTurn({
     assert.equal(request.milim_context?.skill_mode, "custom");
     assert.deepEqual(request.milim_context?.enabled_skills, ["review"]);
     codexPrompt = request.prompt;
-    onEvent({ type: "thread", thread_id: "codex-thread-2", model: "gpt-5" });
-    onEvent({
-      type: "tool",
+    onEvent(harnessEnvelope({
+      type: "session_established",
+      native_session_id: "codex-thread-2",
+      model: "gpt-5",
+    }));
+    onEvent(harnessEnvelope({
+      type: "tool_started",
       id: "shell-1",
       name: "shell",
       status: "running",
       detail: "echo traced",
-    });
-    onEvent({
-      type: "tool_approval_required",
+    }));
+    onEvent(harnessEnvelope({
+      type: "approval_requested",
       approval_id: "approval-1",
       call_id: "shell-1",
       name: "shell",
       arguments: "echo traced",
       effect: "command",
-    });
-    onEvent({
-      type: "tool_approval_status",
+    }));
+    onEvent(harnessEnvelope({
+      type: "approval_status",
       approval_id: "approval-1",
       call_id: "shell-1",
       decision: "approve",
       status: "decided",
-    });
-    onEvent({
-      type: "tool_approval_status",
+    }));
+    onEvent(harnessEnvelope({
+      type: "approval_status",
       approval_id: "approval-1",
       call_id: "shell-1",
       decision: "approve",
       status: "delivered",
-    });
-    onEvent({
-      type: "tool_approval_resolved",
+    }));
+    onEvent(harnessEnvelope({
+      type: "approval_resolved",
       approval_id: "approval-1",
       call_id: "shell-1",
       decision: "approve",
-    });
-    onEvent({
-      type: "tool",
+    }));
+    onEvent(harnessEnvelope({
+      type: "tool_finished",
       id: "shell-1",
       name: "shell",
-      status: "done",
+      status: "completed",
       result: { exit_code: 0 },
-    });
-    onEvent({ type: "warning", message: "temporary runtime notice" });
-    onEvent({
-      type: "done",
-      thread_id: "codex-thread-2",
+    }));
+    onEvent(harnessEnvelope({
+      type: "runtime_notice",
+      kind: "warning",
+      level: "warning",
+      code: "runtime_warning",
+      message: "temporary runtime notice",
+    }));
+    onEvent(harnessEnvelope({
+      type: "turn_completed",
+      native_session_id: "codex-thread-2",
       status: "done",
       usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-    });
+    }));
   },
   signal: accountSignal,
   runRef: {
@@ -776,15 +809,27 @@ const claudeResult = await runAccountRuntimeTurn({
   },
   hadSession: false,
   sessionId: "claude-session-1",
-  stream: async (request, onEvent) => {
-    assert.equal(request.session_id, "claude-session-1");
+  stream: async (harnessId, request, onEvent) => {
+    assert.equal(harnessId, "claude");
+    assert.equal(request.native_session_id, "claude-session-1");
     assert.equal(request.plan_mode, true);
     claudePrompt = request.prompt;
-    onEvent({
-      type: "rate_limit",
+    onEvent(harnessEnvelope({
+      type: "limit_updated",
       limit: { provider: "Claude", kind: "tokens", remaining: 10 },
-    });
-    onEvent({ type: "warning", message: "CLI was not found on PATH" });
+    }, "claude"));
+    onEvent(harnessEnvelope({
+      type: "runtime_notice",
+      kind: "warning",
+      level: "warning",
+      code: "runtime_warning",
+      message: "CLI was not found on PATH",
+    }, "claude"));
+    onEvent(harnessEnvelope({
+      type: "turn_failed",
+      code: "runtime_warning",
+      message: "CLI was not found on PATH",
+    }, "claude"));
   },
 });
 assert.equal(claudeResult.status, "skipped");
@@ -802,37 +847,6 @@ const compactionToolContext: AgentToolContext = {
   workspace: "C:\\work",
   privacy_mode: "block",
 };
-const codexSummaryRequest = codexCompactionSummaryRequest({
-  model: "gpt-5",
-  prompt: "summarize",
-  cwd: "C:\\work",
-  reasoningEffort: "low",
-  toolContext: compactionToolContext,
-});
-assert.equal(codexSummaryRequest.thread_id, undefined);
-assert.equal(codexSummaryRequest.persist_thread, false);
-assert.equal(codexSummaryRequest.plan_mode, true);
-assert.deepEqual(codexSummaryRequest.milim_context?.tool_context, {
-  ...compactionToolContext,
-  tool_approval_policy: "guarded",
-  tool_approval_grant: false,
-  interactive_tool_approval: false,
-  plan_mode: true,
-});
-assert.equal(codexSummaryRequest.milim_context?.tool_mode, "none");
-const claudeSummaryRequest = claudeCompactionSummaryRequest({
-  model: "sonnet",
-  prompt: "summarize",
-  cwd: "C:\\work",
-  reasoningEffort: "medium",
-  toolContext: compactionToolContext,
-});
-assert.equal(claudeSummaryRequest.session_id, undefined);
-assert.equal(claudeSummaryRequest.plan_mode, true);
-assert.equal(
-  claudeSummaryRequest.milim_context?.tool_context.privacy_mode,
-  "block",
-);
 assert.deepEqual(
   utilityAccountRuntimeMilimContext({
     toolContext: compactionToolContext,
@@ -888,19 +902,26 @@ const selectedAccountResult = await runSelectedAccountRuntimeTurn({
     selectedClaudeSessions += 1;
     return "new-claude";
   },
-  streamCodexRun: async (request, onEvent) => {
-    assert.equal(request.thread_id, "stored-codex");
-    onEvent({ type: "thread", thread_id: "new-codex", model: "gpt-5" });
-    onEvent({
-      type: "image",
+  streamHarnessRun: async (harnessId, request, onEvent) => {
+    assert.equal(harnessId, "codex");
+    assert.equal(request.native_session_id, "stored-codex");
+    onEvent(harnessEnvelope({
+      type: "session_established",
+      native_session_id: "new-codex",
+      model: "gpt-5",
+    }));
+    onEvent(harnessEnvelope({
+      type: "image_generated",
       id: "img-selected",
       status: "completed",
       url: "https://example.com/selected.png",
-    });
-    onEvent({ type: "done", thread_id: "new-codex", status: "done" });
+    }));
+    onEvent(harnessEnvelope({
+      type: "turn_completed",
+      native_session_id: "new-codex",
+      status: "done",
+    }));
   },
-  streamClaudeRun: async () =>
-    assert.fail("codex should win when both account models are present"),
 });
 assert.equal(selectedAccountResult?.status, "done");
 assert.equal(selectedCodexThread, "new-codex");
@@ -942,19 +963,22 @@ const selectedPiResult = await runSelectedAccountRuntimeTurn({
   captureProviderLimit: () => {},
   setCodexThreadId: () => {},
   ensureClaudeSessionId: () => "unused-claude",
-  streamCodexRun: async () => assert.fail("Pi should not dispatch to Codex"),
-  streamClaudeRun: async () => assert.fail("Pi should not dispatch to Claude"),
   setPiSessionId: (sessionId) => { selectedPiSession = sessionId; },
-  streamPiRun: async (request, onEvent) => {
+  streamHarnessRun: async (harnessId, request, onEvent) => {
+    assert.equal(harnessId, "pi");
     assert.equal(request.model, "openai-codex/gpt-5.4");
-    assert.equal(request.session_id, "stored-pi");
+    assert.equal(request.native_session_id, "stored-pi");
     assert.equal(request.persist_session, true);
     assert.equal(request.reasoning_effort, "high");
     assert.equal(request.interactive_tool_approval, true);
     assert.deepEqual(request.images, [{ media_type: "image/png", data: "AAAA" }]);
     assert(!request.prompt.includes("Earlier Pi reply"));
-    onEvent({ type: "session", session_id: "resumed-pi", model: request.model });
-    onEvent({ type: "done", status: "done" });
+    onEvent(harnessEnvelope({
+      type: "session_established",
+      native_session_id: "resumed-pi",
+      model: request.model,
+    }, "pi"));
+    onEvent(harnessEnvelope({ type: "turn_completed", status: "done" }, "pi"));
   },
 });
 assert.equal(selectedPiResult?.status, "done");
@@ -1019,6 +1043,21 @@ await assert.rejects(
     setSessionId: () => {},
   }),
   /Pi CLI ended without reporting completion or an error/,
+);
+await assert.rejects(
+  runAccountRuntimeTurn({
+    ...silentRuntimeBase,
+    kind: "pi",
+    hadSession: true,
+    stream: async (harnessId, _request, onEvent) => {
+      onEvent(harnessEnvelope({
+        type: "turn_cancelled",
+        message: `${harnessId} runtime cancelled`,
+      }, "pi"));
+    },
+    setSessionId: () => {},
+  }),
+  /pi runtime cancelled/,
 );
 
 let toolRun: RunTrace | null = null;

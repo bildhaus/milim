@@ -40,13 +40,9 @@ const claudePicker =
   api.match(
     /async function listClaudeModelsForPicker\(\): Promise<ModelInfo\[]> \{[\s\S]*?\n\}\n\nexport async function getClaudeStatus/,
   )?.[0] ?? "";
-const codexRun =
+const harnessRun =
   api.match(
-    /export async function streamCodexRun\([\s\S]*?\n\): Promise<void> \{/,
-  )?.[0] ?? "";
-const claudeRun =
-  api.match(
-    /export async function streamClaudeRun\([\s\S]*?\n\): Promise<void> \{/,
+    /export async function streamHarnessRun\([\s\S]*?\n\): Promise<void> \{/,
   )?.[0] ?? "";
 const providerRun =
   api.match(
@@ -90,9 +86,9 @@ assert.match(api, /accountRuntimeEnabled\.opencode\s*\?\s*listOpenCodeModelsForP
 assert.match(api, /accountRuntimeEnabled\.pi\s*\?\s*listPiModelsForPicker\(\)/);
 assert.match(api, /export const PI_MODEL_PREFIX = "pi:";/);
 assert.match(api, /export async function getPiStatus/);
-assert.match(api, /export async function streamPiRun/);
+assert.match(api, /export async function streamHarnessRun/);
 assert.match(api, /`\$\{BASE\}\/pi\/status`/);
-assert.match(api, /`\$\{BASE\}\/pi\/run`/);
+assert.match(api, /\/harnesses\/\$\{encodeURIComponent\(id\)\}\/run/);
 assert.match(api, /status\.model_capabilities\?\.\[id\]/);
 assert.match(api, /imageInput: metadata\?\.image_input \?\? undefined/);
 assert.match(api, /context_length: numberOrUndefined\(metadata\?\.context_length\)/);
@@ -172,17 +168,21 @@ assert.equal(
 );
 assert.match(
   api,
-  /type:\s*"image";\s*id:\s*string;\s*status:\s*string;\s*url:\s*string/,
+  /type:\s*"image_generated";\s*id:\s*string;\s*status:\s*string;\s*url:\s*string/,
 );
-assert.match(codexRun, /thread_id\?: string;/);
-assert.match(codexRun, /persist_thread\?: boolean;/);
-assert.match(codexRun, /tool_approval_policy\?: ToolApprovalMode;/);
-assert.match(codexRun, /tool_approval_grant\?: boolean;/);
-assert.match(codexRun, /plan_mode\?: boolean;/);
-assert.match(claudeRun, /session_id\?: string;/);
-assert.match(claudeRun, /tool_approval_policy\?: ToolApprovalMode;/);
-assert.match(claudeRun, /tool_approval_grant\?: boolean;/);
-assert.match(claudeRun, /plan_mode\?: boolean;/);
+assert.ok(harnessRun, "canonical harness stream function should exist");
+assert.match(api, /export interface HarnessRunRequest \{/);
+assert.match(api, /native_session_id\?: string;/);
+assert.match(api, /persist_session\?: boolean;/);
+assert.match(api, /tool_approval_policy\?: ToolApprovalMode;/);
+assert.match(api, /tool_approval_grant\?: boolean;/);
+assert.match(api, /plan_mode\?: boolean;/);
+assert.match(api, /export interface HarnessEventEnvelope \{/);
+assert.match(api, /schema_version: typeof HARNESS_EVENT_SCHEMA_VERSION;/);
+assert.doesNotMatch(api, /export async function streamCodexRun/);
+assert.doesNotMatch(api, /export async function streamClaudeRun/);
+assert.doesNotMatch(api, /export async function streamOpenCodeRun/);
+assert.doesNotMatch(api, /export async function streamPiRun/);
 assert.ok(providerRun, "Provider chat stream should exist");
 assert.match(providerRun, /toolContext\?: AgentToolContext/);
 assert.match(providerRun, /\{ workspace: toolContext\.workspace \}/);

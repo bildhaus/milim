@@ -4,14 +4,16 @@ import type {
   ChatStreamEventIcon,
   ChatStreamPreviewPoint,
   ChatStreamPart,
-  ClaudeRunEvent,
-  CodexRunEvent,
+  HarnessEvent,
   ToolApprovalRequest,
   ToolApprovalRequestKind,
 } from "../api";
 
 type ChatStreamEventPart = Extract<ChatStreamPart, { kind: "event" }>;
-type AccountRuntimeToolEvent = Extract<CodexRunEvent | ClaudeRunEvent, { type: "tool" }>;
+type AccountRuntimeToolEvent = Extract<
+  HarnessEvent,
+  { type: "tool_started" | "tool_updated" | "tool_finished" }
+>;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -262,11 +264,11 @@ export function toolCompletedPart(ev: AgentEvent): ChatStreamEventPart {
 }
 
 export function accountRuntimeToolPart(ev: AccountRuntimeToolEvent): ChatStreamEventPart {
-  const status = ev.status === "done" || (ev.status as string) === "completed"
-    ? "done"
-    : ev.status === "error" || (ev.status as string) === "failed"
-      ? "error"
-      : "running";
+  const status = ev.type !== "tool_finished"
+    ? "running"
+    : ev.status === "completed"
+      ? "done"
+      : "error";
   return {
     kind: "event",
     eventType: "tool",

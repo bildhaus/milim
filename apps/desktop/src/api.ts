@@ -2327,90 +2327,46 @@ export type CodexLoginEvent =
   | { type: "warning"; message: string }
   | { type: "error"; message: string };
 
-export type CodexRunEvent =
-  | { type: "thread"; thread_id: string; model: string }
-  | { type: "start"; thread_id: string; turn_id: string }
-  | { type: "token"; text: string }
-  | { type: "reasoning"; text: string }
-  | ToolApprovalEvent
-  | {
-      type: "tool";
-      id: string;
-      name: string;
-      status: ChatStreamEventStatus;
-      label?: string | null;
-      detail?: string | null;
-      result?: unknown;
-      error?: string | null;
-      icon?: ChatStreamEventIcon | null;
-    }
-  | {
-      type: "image";
-      id: string;
-      status: string;
-      url: string;
-      revised_prompt?: string | null;
-      saved_path?: string | null;
-    }
-  | {
-      type: "done";
-      thread_id: string;
-      turn_id?: string | null;
-      status: string;
-      usage?: TokenUsage;
-      cost_usd?: number;
-    }
-  | { type: "native_worker"; lifecycle: AccountNativeWorkerLifecycle }
-  | { type: "protocol_notice"; kind: string; message: string; detail?: string | null }
-  | { type: "warning"; message: string }
-  | { type: "error"; message: string; usage?: TokenUsage; cost_usd?: number };
+export const HARNESS_EVENT_SCHEMA_VERSION = 1 as const;
 
-export type ClaudeRunEvent =
-  | { type: "token"; text: string }
-  | { type: "reasoning"; text: string }
-  | ToolApprovalEvent
-  | {
-      type: "tool";
-      id: string;
-      name: string;
-      status: ChatStreamEventStatus;
-      label?: string | null;
-      detail?: string | null;
-      result?: unknown;
-      error?: string | null;
-      icon?: ChatStreamEventIcon | null;
-    }
-  | { type: "rate_limit"; limit: ProviderLimitInfo }
-  | { type: "done"; status: string; usage?: TokenUsage; cost_usd?: number }
-  | { type: "native_worker"; lifecycle: AccountNativeWorkerLifecycle }
-  | { type: "warning"; message: string }
-  | { type: "session_recovery_required"; message: string }
-  | { type: "error"; message: string; usage?: TokenUsage; cost_usd?: number };
+export type HarnessImageInput = AccountRuntimeImageInput;
+export type HarnessMilimContext = AccountRuntimeMilimContext;
 
-export type OpenCodeRunEvent =
-  | { type: "session"; session_id: string; model: string }
-  | { type: "token"; text: string }
-  | { type: "reasoning"; text: string }
-  | ToolApprovalEvent
-  | {
-      type: "tool";
-      id: string;
-      name: string;
-      status: ChatStreamEventStatus;
-      label?: string | null;
-      detail?: string | null;
-      result?: unknown;
-      error?: string | null;
-      icon?: ChatStreamEventIcon | null;
-    }
-  | { type: "done"; status: string; usage?: TokenUsage; cost_usd?: number }
-  | { type: "warning"; message: string }
-  | { type: "error"; message: string; usage?: TokenUsage; cost_usd?: number };
+export interface HarnessRunRequest {
+  prompt: string;
+  images?: HarnessImageInput[];
+  model: string;
+  cwd?: string;
+  reasoning_effort?: ReasoningEffort;
+  native_session_id?: string;
+  persist_session?: boolean;
+  tool_approval_policy?: ToolApprovalMode;
+  tool_approval_grant?: boolean;
+  interactive_tool_approval?: boolean;
+  plan_mode?: boolean;
+  allow_session_recovery?: boolean;
+  milim_context?: HarnessMilimContext;
+}
 
-export type PiRunEvent = OpenCodeRunEvent;
+export type HarnessApprovalEffect =
+  | "read_only"
+  | "mutating"
+  | "command"
+  | "unknown";
 
-export interface AccountNativeWorkerLifecycle {
-  runtime: "codex" | "claude" | string;
+export interface HarnessToolEvent {
+  id: string;
+  name: string;
+  status: "pending" | "running" | "completed" | "failed" | "cancelled" | "denied";
+  label?: string;
+  detail?: string;
+  result?: unknown;
+  error?: string;
+  icon?: ChatStreamEventIcon;
+}
+
+export interface HarnessNativeWorkerLifecycle {
+  runtime: string;
   call_id: string;
   operation: string;
   status: string;
@@ -2424,6 +2380,124 @@ export interface AccountNativeWorkerLifecycle {
   prompt?: string | null;
   model?: string | null;
 }
+
+export type HarnessEvent =
+  | {
+      type: "session_established";
+      native_session_id: string;
+      model?: string;
+    }
+  | {
+      type: "turn_started";
+      native_session_id?: string;
+      native_turn_id?: string;
+    }
+  | { type: "text_delta"; text: string }
+  | { type: "reasoning_delta"; text: string }
+  | ({ type: "tool_started" } & HarnessToolEvent)
+  | ({ type: "tool_updated" } & HarnessToolEvent)
+  | ({ type: "tool_finished" } & HarnessToolEvent)
+  | {
+      type: "approval_requested";
+      approval_id: string;
+      call_id?: string;
+      name: string;
+      arguments: string;
+      effect: HarnessApprovalEffect;
+      request_kind?: ToolApprovalRequestKind;
+      request?: Record<string, unknown>;
+    }
+  | {
+      type: "approval_status";
+      approval_id: string;
+      call_id?: string;
+      decision: "approve" | "deny";
+      status: "decided" | "delivered";
+    }
+  | {
+      type: "approval_resolved";
+      approval_id: string;
+      call_id?: string;
+      decision: "approve" | "deny";
+    }
+  | {
+      type: "approval_failed";
+      approval_id: string;
+      call_id?: string;
+      decision?: "approve" | "deny";
+      message: string;
+    }
+  | {
+      type: "usage_updated";
+      usage?: TokenUsage;
+      cost_usd?: number;
+    }
+  | { type: "limit_updated"; limit: ProviderLimitInfo }
+  | {
+      type: "image_generated";
+      id: string;
+      status: string;
+      url: string;
+      revised_prompt?: string;
+      saved_path?: string;
+    }
+  | {
+      type: "native_worker_updated";
+      lifecycle: HarnessNativeWorkerLifecycle;
+    }
+  | {
+      type: "runtime_notice";
+      kind: string;
+      message: string;
+      detail?: string;
+      level?: "info" | "warning" | "error";
+      code?: string;
+    }
+  | {
+      type: "session_recovery_required";
+      message: string;
+      native_session_id?: string;
+    }
+  | {
+      type: "turn_completed";
+      native_session_id?: string;
+      native_turn_id?: string;
+      status?: string;
+      usage?: TokenUsage;
+      cost_usd?: number;
+    }
+  | {
+      type: "turn_failed";
+      message: string;
+      kind?: string;
+      code?: string;
+      status?: string;
+      native_session_id?: string;
+      native_turn_id?: string;
+      usage?: TokenUsage;
+      cost_usd?: number;
+    }
+  | {
+      type: "turn_cancelled";
+      message?: string;
+      status?: string;
+      native_session_id?: string;
+      native_turn_id?: string;
+      usage?: TokenUsage;
+      cost_usd?: number;
+    };
+
+export interface HarnessEventEnvelope {
+  schema_version: typeof HARNESS_EVENT_SCHEMA_VERSION;
+  run_id: string;
+  seq: number;
+  at_ms: number;
+  harness_id: string;
+  event: HarnessEvent;
+}
+
+/** @deprecated Use HarnessNativeWorkerLifecycle. */
+export type AccountNativeWorkerLifecycle = HarnessNativeWorkerLifecycle;
 
 export function isCliPathWarningMessage(message?: string | null): boolean {
   return Boolean(message?.includes("CLI was not found on PATH"));
@@ -2677,126 +2751,91 @@ export async function loginCodexApiKey(apiKey: string): Promise<unknown> {
   );
 }
 
-export async function streamCodexRun(
-  request: {
-    model: string;
-    prompt: string;
-    cwd?: string;
-    reasoning_effort?: ReasoningEffort;
-    thread_id?: string;
-    persist_thread?: boolean;
-    tool_approval_policy?: ToolApprovalMode;
-    tool_approval_grant?: boolean;
-    interactive_tool_approval?: boolean;
-    plan_mode?: boolean;
-    images?: AccountRuntimeImageInput[];
-    milim_context?: AccountRuntimeMilimContext;
-  },
-  onEvent: (ev: CodexRunEvent) => void,
-  signal?: AbortSignal,
-): Promise<void> {
-  const resp = await authFetch(`${BASE}/codex/run`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(request),
-    signal,
-  });
-  if (!resp.ok || !resp.body)
+const HARNESS_EVENT_TYPES = new Set<HarnessEvent["type"]>([
+  "session_established",
+  "turn_started",
+  "text_delta",
+  "reasoning_delta",
+  "tool_started",
+  "tool_updated",
+  "tool_finished",
+  "approval_requested",
+  "approval_status",
+  "approval_resolved",
+  "approval_failed",
+  "usage_updated",
+  "limit_updated",
+  "image_generated",
+  "native_worker_updated",
+  "runtime_notice",
+  "session_recovery_required",
+  "turn_completed",
+  "turn_failed",
+  "turn_cancelled",
+]);
+
+function parseHarnessEventEnvelope(value: unknown): HarnessEventEnvelope | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Harness event envelope must be an object.");
+  }
+  const envelope = value as Record<string, unknown>;
+  if (envelope.schema_version !== HARNESS_EVENT_SCHEMA_VERSION) {
     throw new Error(
-      await responseErrorMessage(resp, `Codex run HTTP ${resp.status}`),
+      `Unsupported harness event schema version: ${String(envelope.schema_version)}.`,
     );
-  await streamJsonSse(resp, onEvent);
+  }
+  const event = envelope.event;
+  if (!event || typeof event !== "object" || Array.isArray(event)) {
+    console.warn("[milim] Ignoring malformed harness event for schema version 1.");
+    return null;
+  }
+  const type = (event as Record<string, unknown>).type;
+  if (
+    typeof type !== "string" ||
+    !HARNESS_EVENT_TYPES.has(type as HarnessEvent["type"])
+  ) {
+    console.warn(
+      `[milim] Ignoring unknown harness event type for schema version 1: ${String(type)}.`,
+    );
+    return null;
+  }
+  return value as HarnessEventEnvelope;
 }
 
-export async function streamClaudeRun(
-  request: {
-    model: string;
-    prompt: string;
-    cwd?: string;
-    reasoning_effort?: ReasoningEffort;
-    session_id?: string;
-    tool_approval_policy?: ToolApprovalMode;
-    tool_approval_grant?: boolean;
-    interactive_tool_approval?: boolean;
-    plan_mode?: boolean;
-    allow_session_recovery?: boolean;
-    images?: AccountRuntimeImageInput[];
-    milim_context?: AccountRuntimeMilimContext;
-  },
-  onEvent: (ev: ClaudeRunEvent) => void,
+export async function streamHarnessRun(
+  harnessId: string,
+  request: HarnessRunRequest,
+  onEvent: (envelope: HarnessEventEnvelope) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const resp = await authFetch(`${BASE}/claude/run`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(request),
-    signal,
-  });
-  if (!resp.ok || !resp.body)
+  const id = harnessId.trim();
+  if (!id) throw new Error("Harness ID is required.");
+  const resp = await authFetch(
+    `${BASE}/harnesses/${encodeURIComponent(id)}/run`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+      signal,
+    },
+  );
+  if (!resp.ok || !resp.body) {
     throw new Error(
-      await responseErrorMessage(resp, `Claude CLI run HTTP ${resp.status}`),
+      await responseErrorMessage(resp, `Harness run HTTP ${resp.status}`),
     );
-  await streamJsonSse(resp, onEvent);
-}
-
-export async function streamOpenCodeRun(
-  request: {
-    model: string;
-    prompt: string;
-    cwd?: string;
-    session_id?: string;
-    tool_approval_policy?: ToolApprovalMode;
-    tool_approval_grant?: boolean;
-    interactive_tool_approval?: boolean;
-    plan_mode?: boolean;
-    images?: AccountRuntimeImageInput[];
-    milim_context?: AccountRuntimeMilimContext;
-  },
-  onEvent: (ev: OpenCodeRunEvent) => void,
-  signal?: AbortSignal,
-): Promise<void> {
-  const resp = await authFetch(`${BASE}/opencode/run`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(request),
-    signal,
+  }
+  let lastSeq = 0;
+  await streamJsonSse<unknown>(resp, (value) => {
+    const envelope = parseHarnessEventEnvelope(value);
+    if (!envelope) return;
+    if (!Number.isSafeInteger(envelope.seq) || envelope.seq <= lastSeq) {
+      throw new Error(
+        `Harness event sequence must increase (received ${String(envelope.seq)} after ${lastSeq}).`,
+      );
+    }
+    lastSeq = envelope.seq;
+    onEvent(envelope);
   });
-  if (!resp.ok || !resp.body)
-    throw new Error(
-      await responseErrorMessage(resp, `OpenCode CLI run HTTP ${resp.status}`),
-    );
-  await streamJsonSse(resp, onEvent);
-}
-
-export async function streamPiRun(
-  request: {
-    model: string;
-    prompt: string;
-    cwd?: string;
-    reasoning_effort?: ReasoningEffort;
-    session_id?: string;
-    persist_session?: boolean;
-    tool_approval_policy?: ToolApprovalMode;
-    tool_approval_grant?: boolean;
-    interactive_tool_approval?: boolean;
-    plan_mode?: boolean;
-    images?: AccountRuntimeImageInput[];
-    milim_context?: AccountRuntimeMilimContext;
-  },
-  onEvent: (ev: PiRunEvent) => void,
-  signal?: AbortSignal,
-): Promise<void> {
-  const resp = await authFetch(`${BASE}/pi/run`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(request),
-    signal,
-  });
-  if (!resp.ok || !resp.body)
-    throw new Error(
-      await responseErrorMessage(resp, `Pi CLI run HTTP ${resp.status}`),
-    );
-  await streamJsonSse(resp, onEvent);
 }
 
 async function streamJsonSse<T>(

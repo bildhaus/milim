@@ -66,11 +66,8 @@ import {
   streamChat,
   streamChildThreadEvents,
   streamWorkerRunEvents,
-  streamClaudeRun,
+  streamHarnessRun,
   streamCodexDeviceLogin,
-  streamCodexRun,
-  streamOpenCodeRun,
-  streamPiRun,
   opencodeRuntimeModel,
   piRuntimeModel,
   wireMessageContent,
@@ -87,11 +84,10 @@ import {
   type ChatStreamPart,
   type ChildThreadInfo,
   type DelegationPolicy,
-  type ClaudeRunEvent,
   type CodexLoginEvent,
-  type CodexRunEvent,
-  type OpenCodeRunEvent,
-  type PiRunEvent,
+  type HarnessEvent,
+  type HarnessEventEnvelope,
+  type HarnessRunRequest,
   type MediaGenerationResult,
   type MobileThreadGroup,
   type MobileThreadSummary,
@@ -262,8 +258,6 @@ import {
 import {
   CLAUDE_SESSION_RECOVERY_REQUIRED,
   accountRuntimeInputFromMessages,
-  claudeCompactionSummaryRequest,
-  codexCompactionSummaryRequest,
   createAgentRunEventHandler,
   createTurnAssistantStarter,
   createTurnMetricsCapture,
@@ -408,6 +402,47 @@ type CompactionSummaryResult = {
   costUsd?: number;
   finishReason?: string;
 };
+
+async function collectHarnessUtilityRun(
+  harnessId: "codex" | "claude" | "opencode" | "pi",
+  request: HarnessRunRequest,
+  signal?: AbortSignal,
+): Promise<CompactionSummaryResult> {
+  let content = "";
+  let warning: string | null = null;
+  let error: string | null = null;
+  let usage: TokenUsage | undefined;
+  let costUsd: number | undefined;
+  await streamHarnessRun(
+    harnessId,
+    request,
+    (envelope: HarnessEventEnvelope) => {
+      const event = envelope.event;
+      if (event.type === "text_delta" && event.text) {
+        content += event.text;
+      } else if (event.type === "runtime_notice") {
+        if (event.level === "error") error = event.message;
+        else if (event.code === "runtime_warning") warning = event.message;
+      } else if (
+        event.type === "turn_failed" ||
+        event.type === "turn_cancelled"
+      ) {
+        error = event.message ?? "Harness turn was cancelled.";
+      } else if (
+        event.type === "usage_updated" ||
+        event.type === "turn_completed"
+      ) {
+        if (event.usage) usage = event.usage;
+        if (typeof event.cost_usd === "number" && event.cost_usd > 0)
+          costUsd = event.cost_usd;
+      }
+    },
+    signal,
+  );
+  if (error) throw new Error(error);
+  if (warning) throw new Error(warning);
+  return { content, usage, costUsd };
+}
 
 function mergeTokenUsage(
   left?: TokenUsage,
@@ -1403,7 +1438,7 @@ function executePlanPrompt(plan: string): string {
 }
 
 function codexImageMediaResult(
-  ev: Extract<CodexRunEvent, { type: "image" }>,
+  ev: Extract<HarnessEvent, { type: "image_generated" }>,
   model: string,
 ): MediaGenerationResult {
   return {
@@ -4284,38 +4319,27 @@ export function ChatView({
     toolContext: AgentToolContext,
     signal?: AbortSignal,
   ): Promise<CompactionSummaryResult> {
-    let text = "";
-    let error: string | null = null;
-    let warning: string | null = null;
-    let usage: TokenUsage | undefined;
-    let costUsd: number | undefined;
     const runtimeInput = accountRuntimeInputFromMessages(promptMessages);
-    await streamCodexRun(
-      codexCompactionSummaryRequest({
+    return await collectHarnessUtilityRun(
+      "codex",
+      {
         model,
         prompt: runtimeInput.prompt,
         cwd: folder.trim() || undefined,
-        reasoningEffort,
+        reasoning_effort: reasoningEffort,
         images: runtimeInput.images,
-        toolContext,
-      }),
-      (ev: CodexRunEvent) => {
-        if (ev.type === "token" && ev.text) text += ev.text;
-        else if (ev.type === "warning") warning = ev.message;
-        else if (ev.type === "error") error = ev.message;
-        else if (ev.type === "done") {
-          usage = ev.usage;
-          costUsd =
-            typeof ev.cost_usd === "number" && ev.cost_usd > 0
-              ? ev.cost_usd
-              : undefined;
-        }
+        persist_session: false,
+        tool_approval_policy: "guarded",
+        tool_approval_grant: false,
+        plan_mode: true,
+        milim_context: utilityAccountRuntimeMilimContext({
+          toolContext,
+          toolApproval: "guarded",
+          planMode: true,
+        }),
       },
       signal,
     );
-    if (error) throw new Error(error);
-    if (warning) throw new Error(warning);
-    return { content: text, usage, costUsd };
   }
 
   async function summarizeWithClaude(
@@ -4326,38 +4350,27 @@ export function ChatView({
     toolContext: AgentToolContext,
     signal?: AbortSignal,
   ): Promise<CompactionSummaryResult> {
-    let text = "";
-    let error: string | null = null;
-    let warning: string | null = null;
-    let usage: TokenUsage | undefined;
-    let costUsd: number | undefined;
     const runtimeInput = accountRuntimeInputFromMessages(promptMessages);
-    await streamClaudeRun(
-      claudeCompactionSummaryRequest({
+    return await collectHarnessUtilityRun(
+      "claude",
+      {
         model,
         prompt: runtimeInput.prompt,
         cwd: folder.trim() || undefined,
-        reasoningEffort,
+        reasoning_effort: reasoningEffort,
         images: runtimeInput.images,
-        toolContext,
-      }),
-      (ev: ClaudeRunEvent) => {
-        if (ev.type === "token" && ev.text) text += ev.text;
-        else if (ev.type === "warning") warning = ev.message;
-        else if (ev.type === "error") error = ev.message;
-        else if (ev.type === "done") {
-          usage = ev.usage;
-          costUsd =
-            typeof ev.cost_usd === "number" && ev.cost_usd > 0
-              ? ev.cost_usd
-              : undefined;
-        }
+        persist_session: false,
+        tool_approval_policy: "guarded",
+        tool_approval_grant: false,
+        plan_mode: true,
+        milim_context: utilityAccountRuntimeMilimContext({
+          toolContext,
+          toolApproval: "guarded",
+          planMode: true,
+        }),
       },
       signal,
     );
-    if (error) throw new Error(error);
-    if (warning) throw new Error(warning);
-    return { content: text, usage, costUsd };
   }
 
   async function summarizeWithOpenCode(
@@ -4367,32 +4380,26 @@ export function ChatView({
     toolContext: AgentToolContext,
     signal?: AbortSignal,
   ): Promise<CompactionSummaryResult> {
-    let text = "";
-    let error: string | null = null;
-    let warning: string | null = null;
-    let usage: TokenUsage | undefined;
     const runtimeInput = accountRuntimeInputFromMessages(promptMessages);
-    await streamOpenCodeRun({
-      model,
-      prompt: runtimeInput.prompt,
-      cwd: folder.trim() || undefined,
-      images: runtimeInput.images,
-      tool_approval_policy: "guarded",
-      plan_mode: true,
-      milim_context: utilityAccountRuntimeMilimContext({
-        toolContext,
-        toolApproval: "guarded",
-        planMode: true,
-      }),
-    }, (ev: OpenCodeRunEvent) => {
-      if (ev.type === "token" && ev.text) text += ev.text;
-      else if (ev.type === "warning") warning = ev.message;
-      else if (ev.type === "error") error = ev.message;
-      else if (ev.type === "done") usage = ev.usage;
-    }, signal);
-    if (error) throw new Error(error);
-    if (warning) throw new Error(warning);
-    return { content: text, usage };
+    return await collectHarnessUtilityRun(
+      "opencode",
+      {
+        model,
+        prompt: runtimeInput.prompt,
+        cwd: folder.trim() || undefined,
+        images: runtimeInput.images,
+        persist_session: false,
+        tool_approval_policy: "guarded",
+        tool_approval_grant: false,
+        plan_mode: true,
+        milim_context: utilityAccountRuntimeMilimContext({
+          toolContext,
+          toolApproval: "guarded",
+          planMode: true,
+        }),
+      },
+      signal,
+    );
   }
 
   async function summarizeWithPi(
@@ -4403,34 +4410,27 @@ export function ChatView({
     toolContext: AgentToolContext,
     signal?: AbortSignal,
   ): Promise<CompactionSummaryResult> {
-    let text = "";
-    let error: string | null = null;
-    let warning: string | null = null;
-    let usage: TokenUsage | undefined;
     const runtimeInput = accountRuntimeInputFromMessages(promptMessages);
-    await streamPiRun({
-      model,
-      prompt: runtimeInput.prompt,
-      cwd: folder.trim() || undefined,
-      images: runtimeInput.images,
-      reasoning_effort: reasoningEffort,
-      persist_session: false,
-      tool_approval_policy: "guarded",
-      plan_mode: true,
-      milim_context: utilityAccountRuntimeMilimContext({
-        toolContext,
-        toolApproval: "guarded",
-        planMode: true,
-      }),
-    }, (ev: PiRunEvent) => {
-      if (ev.type === "token" && ev.text) text += ev.text;
-      else if (ev.type === "warning") warning = ev.message;
-      else if (ev.type === "error") error = ev.message;
-      else if (ev.type === "done") usage = ev.usage;
-    }, signal);
-    if (error) throw new Error(error);
-    if (warning) throw new Error(warning);
-    return { content: text, usage };
+    return await collectHarnessUtilityRun(
+      "pi",
+      {
+        model,
+        prompt: runtimeInput.prompt,
+        cwd: folder.trim() || undefined,
+        images: runtimeInput.images,
+        reasoning_effort: reasoningEffort,
+        persist_session: false,
+        tool_approval_policy: "guarded",
+        tool_approval_grant: false,
+        plan_mode: true,
+        milim_context: utilityAccountRuntimeMilimContext({
+          toolContext,
+          toolApproval: "guarded",
+          planMode: true,
+        }),
+      },
+      signal,
+    );
   }
 
   async function compactThreadManually() {
@@ -4676,98 +4676,42 @@ export function ChatView({
       const piModel = piRuntimeModel(turnModel);
       const runtimeInput = accountRuntimeInputFromMessages(decisionMessages);
       let content = "";
-      if (codexModel) {
-        let codexError: string | null = null;
-        let codexWarning: string | null = null;
-        await streamCodexRun(
+      const selectedHarness = codexModel
+        ? { id: "codex" as const, model: codexModel }
+        : claudeModel
+          ? { id: "claude" as const, model: claudeModel }
+          : opencodeModel
+            ? { id: "opencode" as const, model: opencodeModel }
+            : piModel
+              ? { id: "pi" as const, model: piModel }
+              : null;
+      if (selectedHarness) {
+        const guarded = selectedHarness.id === "pi";
+        const result = await collectHarnessUtilityRun(
+          selectedHarness.id,
           {
-            model: codexModel,
+            model: selectedHarness.model,
             prompt: runtimeInput.prompt,
             images: runtimeInput.images,
             cwd: decisionWorkspace || undefined,
-            reasoning_effort: decisionReasoningEffort,
-            tool_approval_policy: "review",
+            ...(selectedHarness.id === "opencode"
+              ? {}
+              : { reasoning_effort: decisionReasoningEffort }),
+            persist_session: false,
+            tool_approval_policy: guarded ? "guarded" : "review",
             tool_approval_grant: false,
-            plan_mode: false,
-            milim_context: decisionMilimContext,
-          },
-          (ev: CodexRunEvent) => {
-            if (ev.type === "token" && ev.text) content += ev.text;
-            else if (ev.type === "warning") codexWarning = ev.message;
-            else if (ev.type === "error") codexError = ev.message;
+            plan_mode: guarded,
+            milim_context: guarded
+              ? utilityAccountRuntimeMilimContext({
+                  toolContext: decisionToolContext,
+                  toolApproval: "guarded",
+                  planMode: true,
+                })
+              : decisionMilimContext,
           },
           controller.signal,
         );
-        if (codexWarning) throw new Error(codexWarning);
-        if (codexError) throw new Error(codexError);
-      } else if (claudeModel) {
-        let claudeError: string | null = null;
-        let claudeWarning: string | null = null;
-        await streamClaudeRun(
-          {
-            model: claudeModel,
-            prompt: runtimeInput.prompt,
-            images: runtimeInput.images,
-            cwd: decisionWorkspace || undefined,
-            reasoning_effort: decisionReasoningEffort,
-            tool_approval_policy: "review",
-            tool_approval_grant: false,
-            plan_mode: false,
-            milim_context: decisionMilimContext,
-          },
-          (ev: ClaudeRunEvent) => {
-            if (ev.type === "token" && ev.text) content += ev.text;
-            else if (ev.type === "warning") claudeWarning = ev.message;
-            else if (ev.type === "error") claudeError = ev.message;
-          },
-          controller.signal,
-        );
-        if (claudeWarning) throw new Error(claudeWarning);
-        if (claudeError) throw new Error(claudeError);
-      } else if (opencodeModel) {
-        let runtimeError: string | null = null;
-        let runtimeWarning: string | null = null;
-        await streamOpenCodeRun({
-          model: opencodeModel,
-          prompt: runtimeInput.prompt,
-          images: runtimeInput.images,
-          cwd: decisionWorkspace || undefined,
-          tool_approval_policy: "review",
-          tool_approval_grant: false,
-          plan_mode: false,
-          milim_context: decisionMilimContext,
-        }, (ev: OpenCodeRunEvent) => {
-          if (ev.type === "token" && ev.text) content += ev.text;
-          else if (ev.type === "warning") runtimeWarning = ev.message;
-          else if (ev.type === "error") runtimeError = ev.message;
-        }, controller.signal);
-        if (runtimeWarning) throw new Error(runtimeWarning);
-        if (runtimeError) throw new Error(runtimeError);
-      } else if (piModel) {
-        let runtimeError: string | null = null;
-        let runtimeWarning: string | null = null;
-        await streamPiRun({
-          model: piModel,
-          prompt: runtimeInput.prompt,
-          images: runtimeInput.images,
-          cwd: decisionWorkspace || undefined,
-          reasoning_effort: decisionReasoningEffort,
-          persist_session: false,
-          tool_approval_policy: "guarded",
-          tool_approval_grant: false,
-          plan_mode: true,
-          milim_context: utilityAccountRuntimeMilimContext({
-            toolContext: decisionToolContext,
-            toolApproval: "guarded",
-            planMode: true,
-          }),
-        }, (ev: PiRunEvent) => {
-          if (ev.type === "token" && ev.text) content += ev.text;
-          else if (ev.type === "warning") runtimeWarning = ev.message;
-          else if (ev.type === "error") runtimeError = ev.message;
-        }, controller.signal);
-        if (runtimeWarning) throw new Error(runtimeWarning);
-        if (runtimeError) throw new Error(runtimeError);
+        content = result.content;
       } else {
         content = await completeChat(turnModel, decisionMessages, {
           signal: controller.signal,
@@ -6029,10 +5973,7 @@ export function ChatView({
             store.setAccountRuntime(id, { opencodeSessionId: sessionId }),
           setPiSessionId: (sessionId) =>
             store.setAccountRuntime(id, { piSessionId: sessionId }),
-          streamCodexRun,
-          streamClaudeRun,
-          streamOpenCodeRun,
-          streamPiRun,
+          streamHarnessRun,
           signal: controller.signal,
           models: pickerModels,
           runRef,

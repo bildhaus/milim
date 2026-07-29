@@ -60,9 +60,10 @@ assert.match(
 );
 assert.match(goalDecision, /privacy_mode: decisionSettings\.privacy/);
 assert.ok(
-  (goalDecision.match(/milim_context:/g) ?? []).length === 4,
-  "every account-runtime goal decision must carry immutable context",
+  (goalDecision.match(/milim_context:/g) ?? []).length === 1,
+  "the canonical harness goal decision must carry immutable context",
 );
+assert.match(goalDecision, /: decisionMilimContext/);
 assert.match(goalDecision, /toolContext: decisionToolContext/);
 assert.doesNotMatch(goalDecision, /cwd: folder\.trim\(\)/);
 

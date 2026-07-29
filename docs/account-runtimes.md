@@ -18,6 +18,14 @@ Failed or canceled turns clear only the affected native session before the next 
 
 All account-runtime tool events keep their full input text behind the transcript's visual ellipsis. Claude no longer truncates structured tool inputs server-side, while OpenCode and Pi also preserve completion results and error details in the shared run trace.
 
+## Canonical run-event boundary
+
+Desktop turns for all four built-ins use `POST /harnesses/{id}/run`, where `id` is `codex`, `claude`, `opencode`, or `pi`. The common request keeps the existing prompt, images, workspace, reasoning, approval, plan, privacy/Milim context, and model fields; `native_session_id` and `persist_session` replace the bridge-specific session field names at this facade only.
+
+The response is SSE. Every JSON event has `schema_version: 1`, a per-run `run_id`, increasing `seq`, `at_ms`, `harness_id`, and one canonical application event. The event vocabulary covers native session and turn identity, text and reasoning deltas, tool start/update/finish, approval lifecycle, usage and limits, generated images, native workers, runtime and recovery notices, and exactly one completed, failed, or cancelled terminal event. Bridge protocol names, ACP update tags, and JSON-RPC correlation ids do not cross this desktop boundary.
+
+This is normalization, not a runtime cutover. Codex, Claude, OpenCode, and Pi still use their current native adapters, session stores, approval behavior, and management sidebands. The existing `/codex/run`, `/claude/run`, `/opencode/run`, and `/pi/run` request and SSE contracts remain available for compatibility.
+
 ## OpenCode
 
 Milim invokes the user-installed `opencode acp` process once per turn and speaks ACP v1 JSON-RPC over stdio. `GET /opencode/status` and `GET /opencode/models` discover configured models without refreshing OpenCode's network cache; `POST /opencode/run` creates or resumes the native session, applies the exact selected model, streams normalized events, and forwards permission requests to Milim's one-shot approval cards. Plan, Guarded, Review, and Open map to a Milim-owned permission overlay. Guarded and Review refuse to run when `opencode debug config` shows that higher-precedence configuration weakened the promised policy.
