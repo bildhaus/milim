@@ -43,6 +43,14 @@ const failed = toolCompletedPart({
 equal(failed.status, "error", "failed tool part should mark error status");
 equal(failed.label, "Command failed", "failed shell tool should use error label");
 
+const longCommand = `node -e "${"x".repeat(140)}"`;
+equal(toolStartedPart({
+  type: "tool_call",
+  name: "shell",
+  call_id: "call-long",
+  arguments: JSON.stringify({ command: longCommand }),
+} as never).detail, longCommand, "command detail should keep its full copyable text");
+
 const scroll = toolStartedPart({
   type: "tool_call",
   name: "scroll",
@@ -109,6 +117,17 @@ const permissionApproval = toolApprovalPart({
 } as never);
 equal(permissionApproval.label, "Approve additional permissions", "permission approval should have a specific label");
 equal(permissionApproval.approvalRequest?.kind, "permissions", "permission details should survive event mapping");
+
+const commandDecision = toolApprovalPart({
+  type: "tool_approval_resolved",
+  approval_id: "approval-2",
+  name: "command",
+  arguments: "{\"availableDecisions\":[\"accept\",\"decline\"]}",
+  decision: "approve",
+} as never);
+equal(commandDecision.label, "Command approved", "command decisions should have a readable outcome");
+equal(commandDecision.detail, undefined, "resolved decisions should omit protocol payloads");
+equal(commandDecision.icon, "command", "command decisions should keep the command icon");
 
 const appended: { sessionId: string; chunks: BufferedStreamChunk[] }[] = [];
 const batcher = createStreamUpdateBatcher("s1", {

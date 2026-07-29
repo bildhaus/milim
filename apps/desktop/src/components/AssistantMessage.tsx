@@ -99,6 +99,9 @@ function StreamEvent({
   toolApproval: ToolApprovalMode;
 }) {
   const status = part.status ?? "done";
+  const detail = part.approvalStatus && part.approvalStatus !== "pending"
+    ? undefined
+    : part.detail;
   return (
     <>
       <div
@@ -116,9 +119,9 @@ function StreamEvent({
         >
           {part.label}
         </span>
-        {part.detail && (
+        {detail && (
           <StreamEventDetail
-            detail={part.detail}
+            detail={detail}
             running={status === "running"}
           />
         )}

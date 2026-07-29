@@ -2267,7 +2267,7 @@ fn normalized_native_status(status: &str) -> String {
 
 fn command_detail(item: &Value) -> Option<String> {
     if let Some(command) = item.get("command").and_then(Value::as_str) {
-        return Some(compact(command, 110));
+        return Some(command.to_string());
     }
     item.get("command")
         .and_then(Value::as_array)
@@ -2279,7 +2279,6 @@ fn command_detail(item: &Value) -> Option<String> {
                 .join(" ")
         })
         .filter(|command| !command.trim().is_empty())
-        .map(|command| compact(&command, 110))
 }
 
 fn file_change_detail(item: &Value) -> Option<String> {
@@ -2703,6 +2702,15 @@ mod tests {
                 && url == "data:image/png;base64,abc123"
                 && prompt == "a small diagram"
         ));
+    }
+
+    #[test]
+    fn command_details_keep_full_copy_text() {
+        let command = format!("powershell -Command \"{}\"", "x".repeat(140));
+        assert_eq!(
+            command_detail(&json!({ "command": command })).as_deref(),
+            Some(command.as_str())
+        );
     }
 
     #[test]

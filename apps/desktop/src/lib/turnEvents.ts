@@ -90,9 +90,11 @@ function toolEventIcon(name?: string): ChatStreamEventIcon {
     case "write_file":
     case "edit_file":
     case "patch_file":
+    case "file_change":
       return "file";
     case "shell":
     case "run_command":
+    case "command":
       return "command";
     case "memory_register":
       return "memory";
@@ -206,7 +208,7 @@ function toolDetail(name: string | undefined, args: Record<string, unknown> | nu
   const error = toolErrorMessage(result);
   if (error) return compactText(path ? `${path}: ${error}` : error, 110);
   const diffStats = name === "write_file" || name === "edit_file" || name === "patch_file" ? toolDiffStats(record) : undefined;
-  if (command) return compactText(command, 110);
+  if (command) return command;
   if (path) return compactText(diffStats ? `${path} ${diffStats}` : path);
   if (url) return compactText(url);
 
@@ -306,15 +308,24 @@ export function toolApprovalPart(
         : approvalRequest?.kind === "mcp_unsupported"
           ? "Unsupported MCP request"
           : `Approve ${event.name ?? "tool"}`;
+  const outcomeTarget = event.name === "command"
+    ? "Command"
+    : event.name === "file_change"
+      ? "File change"
+      : event.name === "permissions"
+        ? "Permissions"
+        : event.name ?? "Tool";
   return {
     kind: "event",
     eventType: "status",
     label: resolved
-      ? `${event.name ?? "Tool"} ${event.decision === "approve" ? "approved" : "denied"}`
+      ? `${outcomeTarget} ${event.decision === "approve" ? "approved" : "denied"}`
       : requestLabel,
-    detail: approvalRequest && approvalRequest.kind !== "command" && approvalRequest.kind !== "file_change"
-      ? "message" in approvalRequest ? approvalRequest.message : "reason" in approvalRequest ? approvalRequest.reason ?? undefined : undefined
-      : event.arguments,
+    detail: resolved
+      ? undefined
+      : approvalRequest && approvalRequest.kind !== "command" && approvalRequest.kind !== "file_change"
+        ? "message" in approvalRequest ? approvalRequest.message : "reason" in approvalRequest ? approvalRequest.reason ?? undefined : undefined
+        : event.arguments,
     icon: toolEventIcon(event.name),
     name: `approval:${event.approval_id}`,
     status: "done",

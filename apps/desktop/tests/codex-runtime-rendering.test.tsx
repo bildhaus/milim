@@ -98,6 +98,12 @@ try {
   const pending = approvalPart({ kind: "command" });
   const secondPending = { ...pending, approvalId: "approval-2", label: "Approval 2" };
   const resolved = { ...pending, label: "shell approved", approvalStatus: "approved" as const };
+  const resolvedTranscript = renderToStaticMarkup(createElement(AssistantMessage, {
+    content: "",
+    streamParts: [resolved],
+  }));
+  assert(resolvedTranscript.includes("shell approved"), "resolved approval should keep its readable outcome");
+  assert(!resolvedTranscript.includes("&quot;command&quot;"), "resolved approval should hide its protocol payload");
   assert(
     pendingToolApprovals([{ role: "assistant", content: "", streamParts: [pending, secondPending] }]).length === 2,
     "every pending approval should attach to the composer",
