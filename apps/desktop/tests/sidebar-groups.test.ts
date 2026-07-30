@@ -45,6 +45,11 @@ type SidebarSession = {
   title: string;
   settings?: { folder?: string };
   retryWorkspace?: { originalFolder: string };
+  threadWorkspace?: {
+    mode: "current" | "worktree";
+    projectFolder?: string;
+    branch?: string;
+  };
   parentId?: string;
   settledAt?: number;
   archivedAt?: number;
@@ -53,6 +58,7 @@ type SidebarSession = {
 };
 type SessionGroup = {
   id: string;
+  projectId?: string;
   project?: Project;
   sessions: SidebarSession[];
   settled?: boolean;
@@ -66,10 +72,34 @@ const server = await createServer({
 });
 
 try {
-  const { groupSessionsByProjects, runningWorkerParentThreadIdsKey, sidebarSectionNextRevealCount } = await server.ssrLoadModule("/src/components/Sidebar.tsx") as {
+  const {
+    groupSessionsByProjects,
+    runningWorkerParentThreadIdsKey,
+    sidebarProjectPullRequestOwner,
+    sidebarSectionNextRevealCount,
+    sidebarThreadPullRequestOwner,
+  } = await server.ssrLoadModule("/src/components/Sidebar.tsx") as {
     groupSessionsByProjects: (sessions: SidebarSession[], projects: Project[], sidebar: SessionSidebarState, query: string, settledThreadsEnabled?: boolean) => SessionGroup[];
     runningWorkerParentThreadIdsKey: (records: Array<{ run: { parent_thread_id: string; status: string } }>) => string;
+    sidebarProjectPullRequestOwner: (
+      group: SessionGroup,
+      snapshots: Record<string, {
+        folder: string;
+        pullRequest: { number: number; headRefName: string } | null;
+        checkedAt: number;
+        stale: boolean;
+      }>,
+    ) => { session: SidebarSession; pullRequest: { number: number } } | undefined;
     sidebarSectionNextRevealCount: (totalSessions: number, visibleLimit: number, activeIndex: number) => number;
+    sidebarThreadPullRequestOwner: (
+      session: SidebarSession,
+      snapshots: Record<string, {
+        folder: string;
+        pullRequest: { number: number; headRefName: string } | null;
+        checkedAt: number;
+        stale: boolean;
+      }>,
+    ) => { session: SidebarSession; pullRequest: { number: number } } | undefined;
   };
   const { SIDEBAR_CHATS_SECTION_ID, projectSectionId } = await server.ssrLoadModule("/src/sessions/store.ts") as {
     SIDEBAR_CHATS_SECTION_ID: string;
@@ -128,6 +158,90 @@ try {
 
   const filteredGroups = groupSessionsByProjects([], [], { ...sidebar, projectFolders: [] }, "missing");
   assert(filteredGroups.length === 0, "filtered empty sidebar should still show no result groups");
+
+  const sharedOld: SidebarSession = {
+    id: "shared-old",
+    title: "Shared old",
+    settings: { folder },
+    threadWorkspace: { mode: "current", projectFolder: folder },
+    createdAt: now,
+    updatedAt: now,
+  };
+  const sharedNew: SidebarSession = {
+    ...sharedOld,
+    id: "shared-new",
+    title: "Shared new",
+  };
+  const worktreeOne: SidebarSession = {
+    id: "worktree-one",
+    title: "Worktree one",
+    settings: { folder: "C:\\worktrees\\one" },
+    threadWorkspace: {
+      mode: "worktree",
+      projectFolder: folder,
+      branch: "feature-one",
+    },
+    createdAt: now,
+    updatedAt: now,
+  };
+  const worktreeTwo: SidebarSession = {
+    ...worktreeOne,
+    id: "worktree-two",
+    title: "Worktree two",
+    settings: { folder: "C:\\worktrees\\two" },
+    threadWorkspace: {
+      mode: "worktree",
+      projectFolder: folder,
+      branch: "feature-two",
+    },
+  };
+  const pullRequestSnapshots = {
+    "shared-old": {
+      folder,
+      pullRequest: { number: 1, headRefName: "main" },
+      checkedAt: 1,
+      stale: false,
+    },
+    "shared-new": {
+      folder,
+      pullRequest: { number: 2, headRefName: "main" },
+      checkedAt: 2,
+      stale: false,
+    },
+    "worktree-one": {
+      folder: "C:\\worktrees\\one",
+      pullRequest: { number: 3, headRefName: "feature-one" },
+      checkedAt: 3,
+      stale: false,
+    },
+    "worktree-two": {
+      folder: "C:\\worktrees\\two",
+      pullRequest: { number: 4, headRefName: "feature-two" },
+      checkedAt: 4,
+      stale: false,
+    },
+  };
+  const projectPullRequestOwner = sidebarProjectPullRequestOwner(
+    {
+      id: projectSectionId(folder),
+      projectId: projectSectionId(folder),
+      sessions: [sharedOld, worktreeTwo, sharedNew, worktreeOne],
+    },
+    pullRequestSnapshots,
+  );
+  assert(
+    projectPullRequestOwner?.session.id === "shared-new",
+    "project headers should use the newest shared-checkout PR snapshot",
+  );
+  assert(
+    !sidebarThreadPullRequestOwner(sharedNew, pullRequestSnapshots),
+    "shared-checkout PRs should not remain on thread rows",
+  );
+  assert(
+    sidebarThreadPullRequestOwner(worktreeOne, pullRequestSnapshots)?.pullRequest.number === 3 &&
+      sidebarThreadPullRequestOwner(worktreeTwo, pullRequestSnapshots)?.pullRequest.number === 4,
+    "worktree threads should retain their independent PR snapshots",
+  );
 
   const tierSessions: SidebarSession[] = [
     {

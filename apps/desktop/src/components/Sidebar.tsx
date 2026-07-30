@@ -24,6 +24,7 @@ import {
 import {
   pullRequestAccessibleLabel,
   pullRequestReadiness,
+  type PullRequestSnapshot,
 } from "../lib/pullRequests";
 import { sessionRecencyLabel } from "../lib/sessionRecency.js";
 import { chatExportFilename, sessionExportPayload, sessionMarkdownExport } from "../lib/threadExport";
@@ -143,6 +144,52 @@ function projectFolderForSession(session: SidebarSessionLike): string {
       : session.settings?.folder?.trim()) ||
     session.settings?.folder?.trim() ||
     "";
+}
+
+type SidebarPullRequestOwner<T extends SidebarSessionLike> = {
+  session: T;
+  snapshot: PullRequestSnapshot;
+  pullRequest: NonNullable<PullRequestSnapshot["pullRequest"]>;
+};
+
+function pullRequestOwnerForSession<T extends SidebarSessionLike>(
+  session: T,
+  pullRequestsBySession: Record<string, PullRequestSnapshot>,
+): SidebarPullRequestOwner<T> | undefined {
+  const snapshot = pullRequestsBySession[session.id];
+  const folder = session.settings?.folder?.trim() ?? "";
+  const pullRequest =
+    snapshot?.folder === folder &&
+    (!session.threadWorkspace?.branch ||
+      snapshot.pullRequest?.headRefName === session.threadWorkspace.branch)
+      ? snapshot.pullRequest
+      : null;
+  return pullRequest ? { session, snapshot, pullRequest } : undefined;
+}
+
+export function sidebarProjectPullRequestOwner<T extends SidebarSessionLike>(
+  group: SessionGroup<T>,
+  pullRequestsBySession: Record<string, PullRequestSnapshot>,
+): SidebarPullRequestOwner<T> | undefined {
+  if (!group.projectId) return undefined;
+  let newest: SidebarPullRequestOwner<T> | undefined;
+  for (const session of group.sessions) {
+    const folder = session.settings?.folder?.trim() ?? "";
+    if (!folder || projectFolderForSession(session) !== folder) continue;
+    const owner = pullRequestOwnerForSession(session, pullRequestsBySession);
+    if (owner && (!newest || owner.snapshot.checkedAt > newest.snapshot.checkedAt))
+      newest = owner;
+  }
+  return newest;
+}
+
+export function sidebarThreadPullRequestOwner<T extends SidebarSessionLike>(
+  session: T,
+  pullRequestsBySession: Record<string, PullRequestSnapshot>,
+): SidebarPullRequestOwner<T> | undefined {
+  const folder = session.settings?.folder?.trim() ?? "";
+  if (!folder || projectFolderForSession(session) === folder) return undefined;
+  return pullRequestOwnerForSession(session, pullRequestsBySession);
 }
 
 function sortBySidebarOrder<T extends SidebarSessionLike>(sessions: T[], sidebar: SessionSidebarState): T[] {
@@ -1502,6 +1549,16 @@ export function Sidebar({
               const sectionProjectStyle = sectionProjectColor
                 ? { "--project-color": sectionProjectColor } as CSSProperties
                 : undefined;
+              const projectPullRequestOwner = sidebarProjectPullRequestOwner(
+                group,
+                pullRequestsBySession,
+              );
+              const projectPullRequestState = projectPullRequestOwner
+                ? pullRequestReadiness(
+                    projectPullRequestOwner.pullRequest,
+                    projectPullRequestOwner.snapshot.stale,
+                  )
+                : null;
               const searchActive = Boolean(query.trim());
               const totalSessions = group.sessions.length;
               const visibleLimit = searchActive
@@ -1778,6 +1835,31 @@ export function Sidebar({
                         </span>
                       </span>
                     </button>
+                    {projectPullRequestOwner && projectPullRequestState && (
+                      <button
+                        type="button"
+                        className={`session-pr-state section-pr-state ${projectPullRequestState.tone}`}
+                        title={pullRequestAccessibleLabel(
+                          projectPullRequestOwner.pullRequest,
+                          projectPullRequestOwner.snapshot.stale,
+                        )}
+                        aria-label={pullRequestAccessibleLabel(
+                          projectPullRequestOwner.pullRequest,
+                          projectPullRequestOwner.snapshot.stale,
+                        )}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          switchVisibleSession(projectPullRequestOwner.session.id);
+                          onOpenGitPanel(
+                            projectPullRequestOwner.session.id,
+                            "pull_request",
+                          );
+                        }}
+                      >
+                        <GitPullRequest size={13} />
+                        <span aria-hidden="true" />
+                      </button>
+                    )}
                     <div className="section-actions-inline">
                       {projectSection && (
                         <button
@@ -1822,15 +1904,12 @@ export function Sidebar({
                     ? { "--project-color": sessionProjectColor } as CSSProperties
                     : undefined;
                   const statusLabel = parentWorkersRunning ? "Workers running" : s.worker ? `Worker ${s.worker.status}` : generating ? "Working" : unread ? "Unread update" : "Ready";
-                  const pullRequestSnapshot = pullRequestsBySession[s.id];
-                  const pullRequest =
-                    pullRequestSnapshot?.folder ===
-                      (s.settings?.folder?.trim() ?? "") &&
-                    (!s.threadWorkspace?.branch ||
-                      pullRequestSnapshot.pullRequest?.headRefName ===
-                        s.threadWorkspace.branch)
-                      ? pullRequestSnapshot.pullRequest
-                      : null;
+                  const threadPullRequestOwner = sidebarThreadPullRequestOwner(
+                    s,
+                    pullRequestsBySession,
+                  );
+                  const pullRequestSnapshot = threadPullRequestOwner?.snapshot;
+                  const pullRequest = threadPullRequestOwner?.pullRequest ?? null;
                   const pullRequestState = pullRequest
                     ? pullRequestReadiness(
                         pullRequest,

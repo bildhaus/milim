@@ -1353,12 +1353,16 @@
   display: flex;
   align-items: center;
   gap: 1px;
+  max-width: 0;
+  margin-left: -6px;
+  overflow: hidden;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.14s ease;
+  transition: max-width var(--motion-fast) var(--motion-ease-out), opacity 0.14s ease;
 }
 .session-section-title:hover .section-actions-inline,
 .section-actions-inline:focus-within {
+  max-width: 48px;
   opacity: 1;
   pointer-events: auto;
 }
@@ -1507,6 +1511,9 @@
   background: transparent;
   color: var(--tertiary-text);
   cursor: pointer;
+}
+.section-pr-state {
+  flex: none;
 }
 .session-pr-state:hover,
 .session-pr-state:focus-visible {
