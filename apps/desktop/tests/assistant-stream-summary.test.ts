@@ -9,6 +9,7 @@ import { formatDuration } from "../src/lib/usageMetrics.js";
 function tool(
   label: string,
   status: "done" | "running" | "error",
+  detail?: string,
 ): ChatStreamPart {
   return {
     kind: "event",
@@ -17,6 +18,7 @@ function tool(
     name: "shell",
     icon: "command",
     status,
+    detail,
   };
 }
 
@@ -73,6 +75,7 @@ try {
       content: string;
       streamParts: ChatStreamPart[];
       streaming: boolean;
+      workDurationMs?: number;
     }>;
   };
   const streamParts: ChatStreamPart[] = [
@@ -90,6 +93,108 @@ try {
         streaming,
       }),
     );
+
+  const runningMarkup = renderToStaticMarkup(
+    createElement(AssistantMessage, {
+      content: "",
+      streamParts: [
+        { kind: "thinking", content: "checking the command" },
+        tool("Running command", "running", "pnpm test"),
+      ],
+      streaming: true,
+    }),
+  );
+  const runningTag = runningMarkup.match(
+    /<details[^>]+data-testid="assistant-stream-work-group"[^>]*>/,
+  )?.[0] ?? "";
+  assert.match(runningTag, /\sopen=""/, "live work should stay expanded");
+  assert.match(runningMarkup, /Running command/);
+  assert.match(runningMarkup.replace(/<[^>]+>/g, ""), /pnpm test/);
+
+  const successfulMarkup = renderToStaticMarkup(
+    createElement(AssistantMessage, {
+      content: "",
+      streamParts: [
+        tool("Ran command", "done", "pnpm test"),
+        { kind: "thinking", content: "verified the result" },
+      ],
+      streaming: false,
+      workDurationMs: 65_000,
+    }),
+  );
+  const successfulTag = successfulMarkup.match(
+    /<details[^>]+data-testid="assistant-stream-work-group"[^>]*>/,
+  )?.[0] ?? "";
+  assert.doesNotMatch(
+    successfulTag,
+    /\sopen=""/,
+    "completed work should collapse",
+  );
+  assert.match(successfulMarkup, /Worked for 1m 5s/);
+  assert.match(successfulMarkup, /1 command, 1 reasoning note/);
+
+  const failedMarkup = renderToStaticMarkup(
+    createElement(AssistantMessage, {
+      content: "",
+      streamParts: [
+        tool("Command failed", "error", "exit 1"),
+        { kind: "thinking", content: "captured the failure" },
+      ],
+      streaming: false,
+    }),
+  );
+  const failedTag = failedMarkup.match(
+    /<details[^>]+data-testid="assistant-stream-work-group"[^>]*>/,
+  )?.[0] ?? "";
+  assert.match(failedTag, /\sopen=""/, "failed work should stay expanded");
+  assert.match(failedMarkup, /Work stopped/);
+  assert.match(failedMarkup, /Command failed/);
+  assert.match(failedMarkup, /exit 1/);
+  assert.match(
+    failedMarkup,
+    /role="alert"/,
+    "failure detail should be announced",
+  );
+
+  const completedToolsMarkup = renderToStaticMarkup(
+    createElement(AssistantMessage, {
+      content: "",
+      streamParts: [
+        tool("Read file", "done", "src/App.tsx"),
+        tool("Ran command", "done", "pnpm test"),
+      ],
+      streaming: false,
+    }),
+  );
+  const completedToolsTag = completedToolsMarkup.match(
+    /<details[^>]+data-testid="assistant-stream-tool-group"[^>]*>/,
+  )?.[0] ?? "";
+  assert.doesNotMatch(
+    completedToolsTag,
+    /\sopen=""/,
+    "completed tool-only work should collapse",
+  );
+
+  const failedToolsMarkup = renderToStaticMarkup(
+    createElement(AssistantMessage, {
+      content: "",
+      streamParts: [
+        tool("Command failed", "error", "exit 1"),
+        tool("Read file", "done", "src/App.tsx"),
+      ],
+      streaming: false,
+    }),
+  );
+  const failedToolsTag = failedToolsMarkup.match(
+    /<details[^>]+data-testid="assistant-stream-tool-group"[^>]*>/,
+  )?.[0] ?? "";
+  assert.match(
+    failedToolsTag,
+    /\sopen=""/,
+    "failed tool-only work should stay expanded",
+  );
+  assert.match(failedToolsMarkup, /Work stopped/);
+  assert.match(failedToolsMarkup, /Command failed · exit 1/);
 
   const streamingMarkup = render(true);
   assert.equal(

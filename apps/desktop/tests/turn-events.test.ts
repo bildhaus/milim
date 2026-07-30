@@ -42,6 +42,7 @@ const failed = toolCompletedPart({
 } as never);
 equal(failed.status, "error", "failed tool part should mark error status");
 equal(failed.label, "Command failed", "failed shell tool should use error label");
+equal(failed.detail, "exit 1", "failed shell tool should preserve the failure detail");
 
 const longCommand = `node -e "${"x".repeat(140)}"`;
 equal(toolStartedPart({

@@ -60,7 +60,6 @@ const fallbackDownloads: ReleaseDownloads = {
 
 const navLinks = [
   { label: "Docs", href: DOCS_URL, className: "nav-docs-link" },
-  { label: "Product", href: "/#product" },
   { label: "How it works", href: "/#workflow" },
   { label: "Quickstart", href: "/#quickstart" },
   { label: "Download", href: "/#releases" },
@@ -124,60 +123,42 @@ const faqItems = [
   },
 ];
 
-const features = [
-  {
-    title: "One canonical thread",
-    body: "Conversation, workspace context, and review history stay together while the next turn moves between hosted, local, and account runtimes.",
-    wide: true,
-  },
-  {
-    id: "review",
-    title: "Approve execution, inspect results",
-    body: "Review is the default: consequential calls pause with exact arguments. After approval, inspect the resulting diff. Open can auto-approve ordinary eligible requests.",
-    visual: true,
-  },
-  {
-    title: "Local control stays visible",
-    body: "Workspace selection, provider routing, tool approval, and outbound privacy boundaries stay explicit beside the thread.",
-    full: true,
-  },
-];
-
-type ChapterKind = "models" | "privacy" | "tools" | "memory";
+type ChapterKind = "models" | "privacy" | "tools" | "review";
 
 const chapters: Array<{ id?: string; title: string; kicker: string; body: string; kind: ChapterKind }> = [
   {
-    title: "One thread",
-    kicker: "continuity",
-    body: "Keep the conversation, workspace, and review history together instead of creating a new project for every model.",
-    kind: "memory",
-  },
-  {
-    title: "Hot-swap runtimes",
-    kicker: "switching",
-    body: "Change the next turn between hosted APIs, local servers, and installed coding agents without losing the work.",
+    title: "Route the next turn",
+    kicker: "route",
+    body: "Choose a hosted provider, local server, account runtime, or compatible endpoint without leaving the canonical thread.",
     kind: "models",
   },
   {
     id: "privacy",
-    title: "Local control",
-    kicker: "boundaries",
-    body: "Choose the workspace, execution permissions, and outbound routing explicitly; local model traffic stays on loopback.",
+    title: "Check the boundary",
+    kicker: "boundary",
+    body: "Keep the workspace, destination, Privacy mode, and Approval mode visible before the turn leaves your machine or changes files.",
     kind: "privacy",
   },
   {
-    title: "Diff review",
+    title: "Approve the action",
     kicker: "approval",
-    body: "Approve consequential calls before execution, then inspect the resulting Git diff beside the thread and undo from the turn checkpoint when needed.",
+    body: "Inspection can proceed while consequential commands pause with their exact arguments and explicit approve or deny controls.",
     kind: "tools",
+  },
+  {
+    id: "review",
+    title: "Inspect the result",
+    kicker: "result",
+    body: "See changed files and totals, open the full Git diff, or undo the turn from its checkpoint.",
+    kind: "review",
   },
 ];
 
 const chapterVisuals: Record<ChapterKind, { label: string; foot: string }> = {
-  models: { label: "model router", foot: "one thread / four sources" },
-  privacy: { label: "outbound gate", foot: "local passthrough / remote redacted" },
-  tools: { label: "result review", foot: "3 changes / checkpoint ready" },
-  memory: { label: "thread context", foot: "workspace and history retained" },
+  models: { label: "next-turn router", foot: "same thread / four runtime paths" },
+  privacy: { label: "turn boundary", foot: "workspace / destination / privacy / approval" },
+  tools: { label: "approval request", foot: "exact arguments / explicit decision" },
+  review: { label: "turn result", foot: "3 files / +79 −46" },
 };
 
 const routeSources = [
@@ -187,16 +168,9 @@ const routeSources = [
   { name: "custom /v1", tag: "compatible" },
 ];
 
-const toolSteps = [
-  { name: "mcp:list_files", meta: "42ms", detail: "src/App.tsx" },
-  { name: "sandbox:run", meta: "1.8s", detail: "pnpm build" },
-  { name: "diff:review", meta: "ready", detail: "3 checks passed" },
-];
-
-const recallHits = [
-  { path: "auth/session.rs", score: "0.92" },
-  { path: "docs/wiki/auth.md", score: "0.81" },
-  { path: "api/tokens.ts", score: "0.64" },
+const approvalSteps = [
+  { name: "inspect file", meta: "allowed", detail: "apps/site/src/App.tsx" },
+  { name: "run command", meta: "waiting", detail: "pnpm -C apps/site build" },
 ];
 
 export function App() {
@@ -300,18 +274,6 @@ export function LandingPage() {
             start: "top 78%",
           },
         });
-      });
-
-      gsap.from(".feature-cell", {
-        y: 22,
-        opacity: 0,
-        duration: 0.7,
-        stagger: 0.06,
-        ease: "power3.out",
-        scrollTrigger: {
-          trigger: ".feature-grid",
-          start: "top 78%",
-        },
       });
 
       const streamLines = gsap.utils.toArray<HTMLElement>(".mini-stream-text span");
@@ -453,39 +415,12 @@ export function LandingPage() {
           <WorkbenchObject />
         </section>
 
-        <section className="feature-section reveal" id="product">
-          <div className="section-head">
-            <Eyebrow label="product" />
-            <h2>
-              one app.
-              <br />
-              no black boxes.
-            </h2>
-            <p>
-              Keep one thread, switch the model behind the next turn, control the local boundary, and review the resulting diff.
-            </p>
-          </div>
-          <div className="feature-grid">
-            {features.map((feature) => (
-              <article
-                className={`feature-cell${feature.wide ? " feature-cell-wide" : ""}${feature.visual ? " feature-cell-visual" : ""}${feature.full ? " feature-cell-full" : ""}`}
-                id={feature.id}
-                key={feature.title}
-              >
-                <h3>{feature.title}</h3>
-                <p>{feature.body}</p>
-                {feature.visual ? <ReviewGlyph /> : null}
-              </article>
-            ))}
-          </div>
-        </section>
-
         <section className="story reveal" id="workflow">
-          <div className="story-copy">
+          <div className="story-copy" id="product">
             <Eyebrow label="how it works" />
-            <h2>Switch the model without losing the work.</h2>
+            <h2>Inside a milim turn.</h2>
             <p>
-              The desktop app keeps workspace context, approvals, and review history visible. Media, schedules, mobile, Google Workspace, and MCP stay in the collapsed Tools section until needed.
+              Choose the runtime, keep the boundary visible, approve consequential actions, and inspect the result without leaving the thread.
             </p>
           </div>
           <div className="chapter-stack">
@@ -719,25 +654,6 @@ function formatBytes(size?: number) {
   return `${megabytes >= 10 ? Math.round(megabytes) : megabytes.toFixed(1)} MB`;
 }
 
-function ReviewGlyph() {
-  return (
-    <div className="chapter-visual feature-glyph" aria-label="Resulting edits ready for review" role="img">
-      <div className="chapter-visual-bar">
-        <span>resulting diff</span>
-        <i />
-      </div>
-      <div className="chapter-visual-body">
-        <ul className="review-files">
-          <li className="review-edit"><b>M</b><s>auth/session.rs</s><em>+18 −4</em></li>
-          <li className="review-add"><b>A</b><s>auth/rotate.rs</s><em>+61</em></li>
-          <li className="review-del"><b>D</b><s>auth/legacy.rs</s><em>−42</em></li>
-        </ul>
-      </div>
-      <p className="chapter-visual-foot">3 files changed / inspect or undo</p>
-    </div>
-  );
-}
-
 function WorkbenchObject() {
   return (
     <div className="hero-media workbench-object" aria-label="milim desktop workbench concept" role="img">
@@ -949,43 +865,55 @@ function ChapterVisual({ kind }: { kind: ChapterKind }) {
           </div>
         ) : null}
         {kind === "privacy" ? (
-          <div className="gate-lanes">
-            <span className="gate-line" />
-            <span className="gate-lane gate-lane-local">
-              <b>local</b>
-              <s>127.0.0.1:11434</s>
-              <em>untouched</em>
-            </span>
-            <span className="gate-lane gate-lane-remote">
-              <b>remote</b>
-              <s>email: <u>dev@example.test<i /></u></s>
-              <em>redacted</em>
-            </span>
+          <div className="boundary-panel">
+            <div className="gate-lanes">
+              <span className="gate-line" />
+              <span className="gate-lane gate-lane-local">
+                <b>local</b>
+                <s>127.0.0.1:11434</s>
+                <em>untouched</em>
+              </span>
+              <span className="gate-lane gate-lane-remote">
+                <b>remote</b>
+                <s>api.openai.com / <u>dev@example.test<i /></u></s>
+                <em>redact</em>
+              </span>
+            </div>
+            <div className="boundary-settings">
+              <span><b>workspace</b><em>milim</em></span>
+              <span><b>Privacy</b><em>Redact</em></span>
+              <span><b>Approval</b><em>Review</em></span>
+            </div>
           </div>
         ) : null}
         {kind === "tools" ? (
-          <ol className="run-timeline">
-            {toolSteps.map((step) => (
-              <li key={step.name}>
-                <b>{step.name}</b>
-                <s>{step.meta}</s>
-                <em>{step.detail}</em>
-              </li>
-            ))}
-          </ol>
-        ) : null}
-        {kind === "memory" ? (
-          <div className="recall">
-            <p className="recall-query">where is auth handled?</p>
-            <ul className="recall-hits">
-              {recallHits.map((hit) => (
-                <li key={hit.path}>
-                  <b>{hit.path}</b>
-                  <i />
-                  <s>{hit.score}</s>
+          <div className="approval-panel">
+            <ol className="run-timeline approval-timeline">
+              {approvalSteps.map((step) => (
+                <li key={step.name}>
+                  <b>{step.name}</b>
+                  <s>{step.meta}</s>
+                  <em>{step.detail}</em>
                 </li>
               ))}
+            </ol>
+            <div className="visual-actions">
+              <span>deny</span>
+              <span className="visual-action-primary">approve</span>
+            </div>
+          </div>
+        ) : null}
+        {kind === "review" ? (
+          <div className="review-result">
+            <ul className="review-files">
+              <li className="review-edit"><b>M</b><s>auth/session.rs</s><em>+18 −4</em></li>
+              <li className="review-add"><b>A</b><s>auth/rotate.rs</s><em>+61</em></li>
+              <li className="review-del"><b>D</b><s>auth/legacy.rs</s><em>−42</em></li>
             </ul>
+            <div className="visual-actions">
+              <span>undo</span>
+              <span className="visual-action-primary">review changes</span>
+            </div>
           </div>
         ) : null}
       </div>
