@@ -1215,7 +1215,7 @@ export function PreviewPanel({
             />
             {runtimeHealthy && (
               <button
-                className="preview-action preview-runtime-quick-stop"
+                className={`preview-action preview-runtime-quick-stop${runtimeStatus.kind === "static" ? " labeled" : ""}`}
                 data-testid="preview-runtime-quick-stop"
                 title="Stop app preview"
                 aria-label="Stop app preview"
@@ -1223,6 +1223,7 @@ export function PreviewPanel({
                 onClick={() => runRuntimeAction(onRuntimeStop)}
               >
                 <Square size={12} />
+                {runtimeStatus.kind === "static" && <span>Stop</span>}
               </button>
             )}
           </div>
@@ -1680,7 +1681,11 @@ export function PreviewPanel({
                           type="button"
                           data-testid="workspace-html-preview"
                           disabled={runtimeBusy}
-                          onClick={() => onPreviewWorkspaceFile(workspaceReviewFile.path)}
+                          onClick={() => {
+                            setRuntimeDetailsOpen(false);
+                            setRuntimePanelFocused(false);
+                            onPreviewWorkspaceFile(workspaceReviewFile.path);
+                          }}
                         >
                           <Eye size={12} />
                           Preview
@@ -1880,7 +1885,11 @@ function PreviewRuntimeBadge({
   buttonRef: (element: HTMLButtonElement | null) => void;
   onToggle: () => void;
 }) {
-  const label = previewRuntimeLabel(status, stale);
+  const statusLabel = previewRuntimeLabel(status, stale);
+  const label = status.kind === "static" && status.ready && !stale && !runtimeErrorMessage(status)
+    ? "Static preview"
+    : statusLabel;
+  const runtimeName = status.kind === "static" ? "Static preview" : "App runtime";
   const actionLabel = collapsible
     ? `${expanded ? "Hide" : "Show"} runtime details`
     : "Focus runtime details";
@@ -1891,7 +1900,7 @@ function PreviewRuntimeBadge({
       className={`preview-runtime-badge ${previewRuntimeTone(status, stale)}`}
       data-testid="preview-runtime-status"
       title={`${label}. ${actionLabel}`}
-      aria-label={`App runtime ${label}. ${actionLabel}`}
+      aria-label={`${runtimeName} ${statusLabel}. ${actionLabel}`}
       aria-controls="preview-runtime-details"
       aria-expanded={expanded}
       onClick={onToggle}
@@ -1933,12 +1942,13 @@ function PreviewRuntimeStatus({
   const statusText = previewRuntimeLabel(status, stale);
   const error = runtimeErrorMessage(status);
   const message = runtimeStatusMessage(status, statusText, error);
+  const compactStatic = status.kind === "static" && active && status.ready && !error;
   const runRequiresPreflight = Boolean(onPreflight && !preflight);
   return (
     <section
       ref={sectionRef}
       id="preview-runtime-details"
-      className={`preview-managed-runtime ${previewRuntimeTone(status, stale)}`}
+      className={`preview-managed-runtime ${previewRuntimeTone(status, stale)}${compactStatic ? " compact" : ""}`}
       data-testid="preview-managed-runtime"
       aria-label={status.kind === "static" ? "Static preview runtime" : "App preview runtime"}
       aria-busy={busy || preflightBusy}
@@ -1953,7 +1963,7 @@ function PreviewRuntimeStatus({
           <span className="preview-managed-runtime-dot" aria-hidden="true" />
           <div>
             <strong>{status.kind === "static" ? "Static preview" : "App runtime"}</strong>
-            <span role="status" aria-live="polite">{statusText}</span>
+            {!compactStatic && <span role="status" aria-live="polite">{statusText}</span>}
           </div>
         </div>
         <div className="preview-managed-runtime-actions">
@@ -2007,7 +2017,7 @@ function PreviewRuntimeStatus({
         </div>
       )}
       {error && <p className="preview-runtime-message error" role="alert">{error}</p>}
-      {message && <p className="preview-runtime-message" role="status" aria-live="polite">{message}</p>}
+      {!compactStatic && message && <p className="preview-runtime-message" role="status" aria-live="polite">{message}</p>}
     </section>
   );
 }

@@ -809,6 +809,12 @@ button.quick-summary-row:disabled {
   cursor: default;
   opacity: 0.46;
 }
+.preview-runtime-quick-stop.labeled {
+  width: auto;
+  padding-inline: 7px;
+  gap: 5px;
+  font-size: 10.5px;
+}
 .preview-loading {
   flex: 1;
   display: grid;
@@ -2649,6 +2655,10 @@ html[data-dark="true"] .preview-control-cursor {
   border: 1px solid var(--border-primary);
   border-radius: 8px;
   background: color-mix(in srgb, var(--input-bg) 78%, transparent);
+}
+.preview-managed-runtime.compact {
+  gap: 0;
+  padding-block: 5px;
 }
 .preview-managed-runtime-head {
   display: flex;
