@@ -1,4 +1,9 @@
 {
+  "0.2.11": {
+    "version": "0.2.11",
+    "summary": "Milim 0.2.11 makes app preview review clearer and lets interrupted queued messages continue immediately.",
+    "items": []
+  },
   "0.2.10": {
     "version": "0.2.10",
     "summary": "Milim 0.2.10 makes account runtimes easier to scan and gives thread, popover, and settings layouts more breathing room.",
