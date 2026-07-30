@@ -1,13 +1,13 @@
-import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
-import { type Agent, type ChatAttachment, type MediaKind, type SkillInfo, type ToolInfo } from "../api";
+import { type ClipboardEvent, type KeyboardEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { openExternalUrl, type Agent, type ChatAttachment, type MediaKind, type SkillInfo, type ToolInfo } from "../api";
 import type { WorkspaceFileSuggestion } from "../api";
 import { composerAutocompleteTriggerAt, composerCommandRunsOnSelection, composerSuggestionMatchScore, mcpToolTagCompletion, replaceComposerAutocompleteTrigger, skillTagCompletion } from "../lib/composerAutocomplete";
 import { canNavigateComposerHistory, moveComposerHistory, type ComposerHistoryDirection } from "../lib/composerHistory";
-import { composerTokenParts, composerTokensForText } from "../lib/composerTokens";
+import { composerDisplayForText, composerLinkClickAction, composerTokensForText, pasteComposerUrl, type ComposerToken } from "../lib/composerTokens";
 import { shortcutLabel, shortcutMatchesEvent } from "../ui/shortcuts";
 import { useUiPreferences } from "../ui/store";
 import { AgentAvatar } from "./AgentAvatar";
-import { ArrowUp, ChevronDown, Folder, FolderOpen, Paperclip, PlusSquare, Slash, Square, UserRound, X } from "./icons";
+import { ArrowUp, ChevronDown, Folder, FolderOpen, GitHub, Paperclip, PlusSquare, Slash, Square, UserRound, X } from "./icons";
 const COMPOSER_HISTORY_NOTICE_MS = 1800;
 
 function isTauriRuntime(): boolean {
@@ -91,6 +91,10 @@ function clipboardFiles(data: DataTransfer): File[] {
   return Array.from(byKey.values());
 }
 
+function isGithubLinkToken(token: ComposerToken): boolean {
+  return token.kind === "link" && token.label !== token.value;
+}
+
 export function Composer({
   value,
   onChange,
@@ -157,6 +161,7 @@ export function Composer({
   busy: boolean;
 }) {
   const ref = useRef<HTMLTextAreaElement>(null);
+  const inputWrapRef = useRef<HTMLDivElement>(null);
   const highlightRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const personaRef = useRef<HTMLDivElement>(null);
@@ -173,6 +178,11 @@ export function Composer({
   const historyDraftRef = useRef("");
   const historyNoticeTimerRef = useRef<number | null>(null);
   const completionControllerRef = useRef<AbortController | null>(null);
+  const pendingSelectionRef = useRef<{
+    start: number;
+    end: number;
+    direction: "forward" | "backward" | "none";
+  } | null>(null);
   const [personaOpen, setPersonaOpen] = useState(false);
   const [projectOpen, setProjectOpen] = useState(false);
   const [slashOpen, setSlashOpen] = useState(false);
@@ -185,6 +195,12 @@ export function Composer({
   const [historyNotice, setHistoryNotice] = useState<string | null>(null);
   const [ghostCompletion, setGhostCompletion] = useState("");
   const [imeComposing, setImeComposing] = useState(false);
+  const [hoveredLink, setHoveredLink] = useState<{
+    value: string;
+    top: number;
+    left?: number;
+    right?: number;
+  } | null>(null);
 
   const slashInput = parseSlashInput(value);
   const activeTrigger = composerAutocompleteTriggerAt(value, cursor);
@@ -264,9 +280,26 @@ export function Composer({
     () => composerTokensForText(value, { skills, tools, workspaceFiles }),
     [skills, tools, value, workspaceFiles],
   );
-  const composerHighlightParts = useMemo(() => composerTokenParts(value, composerTokens), [composerTokens, value]);
+  const composerDisplay = useMemo(
+    () => composerDisplayForText(value, composerTokens),
+    [composerTokens, value],
+  );
+  const showCompactGithubLinks = composerTokens.some(isGithubLinkToken);
   const hasTokenLayer = composerTokens.length > 0;
   const showComposerOverlay = hasTokenLayer || Boolean(ghostCompletion);
+
+  useLayoutEffect(() => {
+    const pending = pendingSelectionRef.current;
+    const input = ref.current;
+    if (!pending || !input) return;
+    pendingSelectionRef.current = null;
+    input.focus({ preventScroll: true });
+    input.setSelectionRange(
+      composerDisplay.displayOffset(pending.start, "start"),
+      composerDisplay.displayOffset(pending.end, "end"),
+      pending.direction,
+    );
+  }, [composerDisplay]);
 
   // Auto-grow the textarea up to a cap.
   useEffect(() => {
@@ -280,7 +313,7 @@ export function Composer({
       highlightRef.current.scrollTop = el.scrollTop;
       highlightRef.current.scrollLeft = el.scrollLeft;
     }
-  }, [value]);
+  }, [composerDisplay.text]);
 
   useEffect(() => {
     valueRef.current = value;
@@ -340,8 +373,12 @@ export function Composer({
   }, [suggestionPrefix, suggestionQuery, orderedSuggestions.length]);
 
   useEffect(() => {
-    if (cursor > value.length) setCursor(value.length);
-  }, [cursor, value.length]);
+    setCursor((current) => Math.min(current, value.length));
+  }, [value.length]);
+
+  useEffect(() => {
+    if (!showCompactGithubLinks) setHoveredLink(null);
+  }, [showCompactGithubLinks]);
 
   useEffect(() => {
     if (autocompleteMode === "off" || !autocompleteSources.files || suggestionPrefix !== "@" || !workspaceFolder.trim()) {
@@ -401,8 +438,43 @@ export function Composer({
     fileRef.current?.click();
   }
 
+  function rawSelection(target: HTMLTextAreaElement) {
+    const collapsed = target.selectionStart === target.selectionEnd;
+    return {
+      start: composerDisplay.rawOffset(target.selectionStart, collapsed ? "nearest" : "start"),
+      end: composerDisplay.rawOffset(target.selectionEnd, collapsed ? "nearest" : "end"),
+      direction: target.selectionDirection ?? "none",
+    };
+  }
+
   function syncCursor(target: HTMLTextAreaElement) {
-    setCursor(target.selectionStart);
+    const selection = rawSelection(target);
+    setCursor(selection.start);
+  }
+
+  function selectRawRange(
+    start: number,
+    end = start,
+    direction: "forward" | "backward" | "none" = "none",
+  ) {
+    const input = ref.current;
+    if (!input) return;
+    input.focus({ preventScroll: true });
+    input.setSelectionRange(
+      composerDisplay.displayOffset(start, "start"),
+      composerDisplay.displayOffset(end, "end"),
+      direction,
+    );
+    setCursor(start);
+  }
+
+  function queueRawSelection(
+    start: number,
+    end = start,
+    direction: "forward" | "backward" | "none" = "none",
+  ) {
+    pendingSelectionRef.current = { start, end, direction };
+    setCursor(start);
   }
 
   function syncHighlightScroll(target: HTMLTextAreaElement) {
@@ -432,13 +504,9 @@ export function Composer({
       : value.slice(0, cursor) + completion + value.slice(cursor);
     const nextCursor = (trigger?.start ?? cursor) + completion.length;
     setSlashDismissedValue(next);
+    queueRawSelection(nextCursor);
     onChange(next);
     setSlashOpen(false);
-    window.requestAnimationFrame(() => {
-      ref.current?.focus();
-      ref.current?.setSelectionRange(nextCursor, nextCursor);
-      setCursor(nextCursor);
-    });
   }
 
   function activateSuggestedCommand(commandId: string) {
@@ -449,13 +517,9 @@ export function Composer({
       : value;
     const nextCursor = trigger?.start ?? cursor;
     setSlashDismissedValue(next);
+    queueRawSelection(nextCursor);
     onChange(next);
     setSlashOpen(false);
-    window.requestAnimationFrame(() => {
-      ref.current?.focus();
-      ref.current?.setSelectionRange(nextCursor, nextCursor);
-      setCursor(nextCursor);
-    });
   }
 
   async function completeSuggestion(item: Suggestion) {
@@ -525,23 +589,31 @@ export function Composer({
 
   function recallHistory(direction: ComposerHistoryDirection, target: HTMLTextAreaElement): boolean {
     const currentIndex = historyIndex;
-    if (!canNavigateComposerHistory(target.value, target.selectionStart, target.selectionEnd, direction, currentIndex)) return false;
-    const draft = currentIndex === null ? target.value : historyDraftRef.current;
+    const selection = rawSelection(target);
+    if (!canNavigateComposerHistory(value, selection.start, selection.end, direction, currentIndex)) return false;
+    const draft = currentIndex === null ? value : historyDraftRef.current;
     const next = moveComposerHistory(sentHistory, draft, currentIndex, direction);
     if (!next) return false;
-    if (currentIndex === null) historyDraftRef.current = target.value;
-    applyingHistoryRef.current = next.value !== target.value;
+    if (currentIndex === null) historyDraftRef.current = value;
+    applyingHistoryRef.current = next.value !== value;
     setHistoryIndex(next.index);
     showHistoryNotice(next.index);
     setSlashOpen(false);
     setSlashDismissedValue(next.value);
+    queueRawSelection(next.value.length);
     onChange(next.value);
-    window.requestAnimationFrame(() => {
-      ref.current?.focus();
-      ref.current?.setSelectionRange(next.value.length, next.value.length);
-      setCursor(next.value.length);
-    });
     return true;
+  }
+
+  function copyRawSelection(event: ClipboardEvent<HTMLTextAreaElement>, cut = false) {
+    const selection = rawSelection(event.currentTarget);
+    if (selection.start === selection.end) return;
+    event.preventDefault();
+    event.clipboardData.setData("text/plain", value.slice(selection.start, selection.end));
+    if (!cut) return;
+    const next = value.slice(0, selection.start) + value.slice(selection.end);
+    queueRawSelection(selection.start);
+    onChange(next);
   }
 
   function submitComposer() {
@@ -623,22 +695,94 @@ export function Composer({
           ))}
         </div>
       )}
-      <div className="composer-input-wrap">
+      <div ref={inputWrapRef} className="composer-input-wrap">
         {showComposerOverlay && (
-          <div ref={highlightRef} className="composer-input-highlight" aria-hidden="true" data-testid="composer-token-layer">
-            {composerHighlightParts.map((part, index) =>
-              part.kind === "token" ? (
+          <div
+            ref={highlightRef}
+            className={`composer-input-highlight${showCompactGithubLinks ? " compact-github-links" : ""}`}
+            aria-hidden="true"
+            data-testid="composer-token-layer"
+          >
+            {composerDisplay.parts.map((part, index) => {
+              if (part.kind === "token") {
+                const compactGithubLink = isGithubLinkToken(part.token);
+                return (
                 <span
                   key={`${part.token.kind}-${part.token.start}-${index}`}
-                  className={`composer-token composer-token-${part.token.kind}`}
+                  className={`composer-token composer-token-${part.token.kind}${compactGithubLink ? " composer-token-github" : ""}`}
                   data-testid={`composer-token-${part.token.kind}`}
                 >
-                  {part.text}
+                  {compactGithubLink ? (
+                    <a
+                      className="composer-token-github-label"
+                      href={part.token.value}
+                      tabIndex={-1}
+                      onMouseEnter={(event) => {
+                        const wrap = inputWrapRef.current?.getBoundingClientRect();
+                        if (!wrap) return;
+                        const link = event.currentTarget.getBoundingClientRect();
+                        const alignRight = link.left + link.width / 2 > wrap.left + wrap.width / 2;
+                        setHoveredLink({
+                          value: part.token.value,
+                          top: link.top - wrap.top - 6,
+                          ...(alignRight
+                            ? { right: wrap.right - link.right }
+                            : { left: link.left - wrap.left }),
+                        });
+                      }}
+                      onMouseLeave={() => setHoveredLink(null)}
+                      onMouseDown={(event) => {
+                        if (event.button !== 0) return;
+                        event.preventDefault();
+                        if (composerLinkClickAction(event)) return;
+                        const input = ref.current;
+                        if (!input) return;
+                        if (event.shiftKey) {
+                          const selection = rawSelection(input);
+                          const target = part.rawEnd <= selection.start
+                            ? part.rawStart
+                            : part.rawEnd;
+                          const anchor = selection.start === selection.end
+                            ? selection.start
+                            : selection.direction === "backward"
+                              ? selection.end
+                              : selection.start;
+                          selectRawRange(
+                            Math.min(anchor, target),
+                            Math.max(anchor, target),
+                            target < anchor ? "backward" : "forward",
+                          );
+                          return;
+                        }
+                        selectRawRange(part.rawStart, part.rawEnd);
+                      }}
+                      onClick={(event) => {
+                        const action = composerLinkClickAction(event);
+                        event.preventDefault();
+                        if (!action) return;
+                        if (action === "sidepanel") {
+                          window.dispatchEvent(new CustomEvent("milim-open-browser-url", {
+                            detail: { url: part.token.value },
+                          }));
+                          return;
+                        }
+                        void openExternalUrl(part.token.value).catch((error) => {
+                          console.warn("failed to open composer link", error);
+                        });
+                      }}
+                      onContextMenu={() => {
+                        selectRawRange(part.rawStart, part.rawEnd);
+                      }}
+                    >
+                      <GitHub size={13} />
+                      <span className="composer-token-github-text">{part.token.label}</span>
+                    </a>
+                  ) : part.text}
                 </span>
-              ) : (
-                <span key={`text-${index}`}>{part.text}</span>
-              ),
-            )}
+                );
+              }
+              return <span key={`text-${index}`}>{part.text}</span>;
+            })}
             {ghostCompletion ? <span className="composer-ghost-text">{ghostCompletion}</span> : null}
             <span className="composer-highlight-sentinel">{"\u200b"}</span>
           </div>
@@ -648,13 +792,15 @@ export function Composer({
           className={"composer-input" + (showComposerOverlay ? " has-token-layer" : "")}
           data-testid="composer-input"
           rows={1}
-          value={value}
+          value={composerDisplay.text}
           dir="auto"
+          spellCheck
           placeholder={placeholder}
           onChange={(e) => {
-            syncCursor(e.currentTarget);
+            const edit = composerDisplay.applyEdit(e.target.value);
+            queueRawSelection(edit.cursor);
             syncHighlightScroll(e.currentTarget);
-            onChange(e.target.value);
+            onChange(edit.value);
           }}
           onCompositionStart={() => setImeComposing(true)}
           onCompositionEnd={() => setImeComposing(false)}
@@ -662,13 +808,48 @@ export function Composer({
           onKeyUp={(e) => syncCursor(e.currentTarget)}
           onSelect={(e) => syncCursor(e.currentTarget)}
           onScroll={(e) => syncHighlightScroll(e.currentTarget)}
+          onCopy={(e) => copyRawSelection(e)}
+          onCut={(e) => copyRawSelection(e, true)}
           onKeyDown={(e) => {
+            if (
+              !e.altKey
+              && !e.ctrlKey
+              && !e.metaKey
+              && e.currentTarget.selectionStart === e.currentTarget.selectionEnd
+            ) {
+              const token = composerDisplay.parts.find((candidate) =>
+                candidate.kind === "token"
+                && isGithubLinkToken(candidate.token)
+                && (
+                  ((e.key === "ArrowLeft" || e.key === "Backspace") && candidate.displayEnd === e.currentTarget.selectionStart)
+                  || ((e.key === "ArrowRight" || e.key === "Delete") && candidate.displayStart === e.currentTarget.selectionStart)
+                ),
+              );
+              if (token) {
+                e.preventDefault();
+                if (e.key === "Backspace" || e.key === "Delete") {
+                  queueRawSelection(token.rawStart);
+                  onChange(value.slice(0, token.rawStart) + value.slice(token.rawEnd));
+                  return;
+                }
+                if (e.shiftKey) {
+                  selectRawRange(
+                    token.rawStart,
+                    token.rawEnd,
+                    e.key === "ArrowLeft" ? "backward" : "forward",
+                  );
+                  return;
+                }
+                selectRawRange(e.key === "ArrowLeft" ? token.rawStart : token.rawEnd);
+                return;
+              }
+            }
             if (ghostCompletion && e.key === "Tab" && !e.shiftKey) {
               e.preventDefault();
               const next = value + ghostCompletion;
               setGhostCompletion("");
+              queueRawSelection(next.length);
               onChange(next);
-              window.requestAnimationFrame(() => ref.current?.setSelectionRange(next.length, next.length));
               return;
             }
             if (ghostCompletion && e.key === "Escape") {
@@ -709,11 +890,33 @@ export function Composer({
           }}
           onPaste={(e) => {
             const files = clipboardFiles(e.clipboardData);
-            if (!files.length) return;
+            if (files.length) {
+              e.preventDefault();
+              onAttachFiles(files);
+              return;
+            }
+            const selection = rawSelection(e.currentTarget);
+            const edit = pasteComposerUrl(
+              value,
+              selection.start,
+              selection.end,
+              e.clipboardData.getData("text/plain"),
+            );
+            if (!edit) return;
             e.preventDefault();
-            onAttachFiles(files);
+            queueRawSelection(edit.cursor);
+            onChange(edit.value);
           }}
         />
+        {hoveredLink ? (
+          <span
+            className="composer-link-tooltip"
+            role="tooltip"
+            style={{ top: hoveredLink.top, left: hoveredLink.left, right: hoveredLink.right }}
+          >
+            {hoveredLink.value}
+          </span>
+        ) : null}
       </div>
       {showSlashMenu && (
         <div className="slash-menu" data-testid="slash-menu">
