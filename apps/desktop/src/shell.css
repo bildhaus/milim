@@ -1074,7 +1074,19 @@
 .session-menu.project-menu button span {
   white-space: nowrap;
 }
-.session-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 5px; margin-top: 3px; padding-right: 1px; }
+.session-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 5px; margin: 3px -4px 0 0; padding-right: 5px; }
+.session-list::-webkit-scrollbar {
+  width: 10px;
+}
+.session-list::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--border-secondary) 30%, transparent);
+  border-width: 3px 0 3px 6px;
+  background-clip: padding-box;
+  transition: background-color var(--motion-fast) var(--motion-ease-out);
+}
+.sidebar:hover .session-list::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--border-secondary) 60%, transparent);
+}
 .settled-session-section {
   display: flex;
   flex-direction: column;
