@@ -739,23 +739,39 @@ try {
   assert(readyRuntimeMarkup.includes('data-testid="preview-runtime-quick-stop"'), "Healthy runtime should keep a one-click Stop action");
   assert(!readyRuntimeMarkup.includes("Running."), "Healthy runtime should suppress redundant running copy");
 
+  const staticRuntimeStatus = {
+    ...readyRuntimeStatus,
+    kind: "static",
+    command: null,
+    preflight: null,
+    message: "Serving index.html.",
+  };
   const staticRuntimeMarkup = renderPreviewPanel({
     artifact: urlArtifact,
     previewSource: "app",
-    runtimeStatus: {
-      ...readyRuntimeStatus,
-      kind: "static",
-      command: null,
-      preflight: null,
-      message: "Serving index.html.",
-    },
+    runtimeStatus: staticRuntimeStatus,
     runtimeStale: true,
     onRuntimeStop: () => {},
     onClose: () => {},
   });
   assert(staticRuntimeMarkup.includes("Static preview"), "Static runtime should identify itself without app command controls");
+  assert(staticRuntimeMarkup.includes("preview-managed-runtime stale compact"), "Ready static runtime details should stay compact");
+  assert(!staticRuntimeMarkup.includes("Serving index.html."), "Ready static runtime should suppress redundant serving copy");
+  assert(!staticRuntimeMarkup.includes('<span role="status" aria-live="polite">Ready · disconnected</span>'), "Ready static runtime should not repeat its status inside the compact panel");
   assert(!staticRuntimeMarkup.includes('data-testid="preview-runtime-restart"'), "Static runtime should omit Restart");
   assert(!staticRuntimeMarkup.includes('data-testid="preview-runtime-preflight"'), "Static runtime should omit command preflight");
+
+  const healthyStaticRuntimeMarkup = renderPreviewPanel({
+    artifact: urlArtifact,
+    previewSource: "app",
+    runtimeStatus: staticRuntimeStatus,
+    onRuntimeStop: () => {},
+    onClose: () => {},
+  });
+  assert(!healthyStaticRuntimeMarkup.includes('data-testid="preview-managed-runtime"'), "Healthy static runtime should use only the compact toolbar");
+  assert(healthyStaticRuntimeMarkup.includes('preview-runtime-badge-label" role="status" aria-live="polite">Static preview</span>'), "Healthy static runtime should name the preview in its compact badge");
+  assert(healthyStaticRuntimeMarkup.includes("preview-runtime-quick-stop labeled"), "Healthy static runtime should keep a compact labeled Stop action");
+  assert(!healthyStaticRuntimeMarkup.includes("Serving index.html."), "Healthy static runtime should omit serving copy from the compact toolbar");
 
   const startingRuntimeMarkup = renderPreviewPanel({
     artifact: urlArtifact,

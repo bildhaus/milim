@@ -42,7 +42,7 @@ try {
   await waitForOnboarding(session.page);
   await assertOnboardingCoversApp(session.page);
   await assertStepperAboveContent(session.page);
-  await assertStoryActionLayout(session.page);
+  await assertRefinedSplitLayout(session.page);
   await assertLargeModelCatalogSearch(session.page);
   await session.page.screenshot({ path: screenshots.onboarding, fullPage: false });
 
@@ -146,28 +146,36 @@ async function waitForOnboarding(page) {
   }
 }
 
-async function assertStoryActionLayout(page) {
+async function assertRefinedSplitLayout(page) {
+  await page.getByRole("textbox", { name: "Search models" }).waitFor();
   const metrics = await page.evaluate(() => {
     const panel = document.querySelector("#onboarding-model-title")?.closest(".onboarding-panel");
     const story = panel?.querySelector(".onboarding-story");
     const action = panel?.querySelector(".onboarding-step-body");
-    const wordmark = panel?.querySelector(".onboarding-wordmark");
-    if (!panel || !story || !action || !wordmark) return null;
-    const panelBox = panel.getBoundingClientRect();
+    const picker = panel?.querySelector(".onboarding-model-picker .mp");
+    const pickerList = picker?.querySelector(".mp-list");
+    const content = panel?.closest(".onboarding-content");
+    const footer = document.querySelector(".onboarding-footer");
+    if (!panel || !story || !action || !picker || !pickerList || !content || !footer) return null;
     const storyBox = story.getBoundingClientRect();
     const actionBox = action.getBoundingClientRect();
+    const pickerBox = picker.getBoundingClientRect();
+    const contentBox = content.getBoundingClientRect();
+    const footerBox = footer.getBoundingClientRect();
     return {
       split: storyBox.right <= actionBox.left || actionBox.right <= storyBox.left,
-      storyCentered: Math.abs((storyBox.top + storyBox.bottom) / 2 - (panelBox.top + panelBox.bottom) / 2),
-      actionCentered: Math.abs((actionBox.top + actionBox.bottom) / 2 - (panelBox.top + panelBox.bottom) / 2),
-      limit: panelBox.height * 0.12,
-      panelHeight: panelBox.height,
+      pickerInsideContent: pickerBox.top >= contentBox.top - 1 && pickerBox.bottom <= contentBox.bottom + 1,
+      pickerAboveFooter: pickerBox.bottom <= footerBox.top + 1,
+      pickerListScrollable: pickerList.scrollHeight > pickerList.clientHeight,
+      pickerBottom: pickerBox.bottom,
+      contentBottom: contentBox.bottom,
+      footerTop: footerBox.top,
     };
   });
 
   if (!metrics) throw new Error("Model onboarding story/action layout should exist.");
-  if (!metrics.split || metrics.storyCentered > metrics.limit || metrics.actionCentered > metrics.limit) {
-    throw new Error(`Model onboarding should use a centered story/action layout: ${JSON.stringify(metrics)}`);
+  if (!metrics.split || !metrics.pickerInsideContent || !metrics.pickerAboveFooter || !metrics.pickerListScrollable) {
+    throw new Error(`Model onboarding should keep the split layout and contain its picker: ${JSON.stringify(metrics)}`);
   }
 }
 
@@ -208,21 +216,48 @@ async function installModelCatalogFixture(page) {
 async function assertLargeModelCatalogSearch(page) {
   const targetId = "onboarding-model-200";
   const search = page.getByRole("textbox", { name: "Search models" });
+  const continueButton = page.getByRole("button", { name: "Continue", exact: true });
   await search.waitFor();
-  await search.fill(targetId);
-  const results = page.locator(".onboarding-model-picker .mp-item");
-  await page.waitForFunction(
-    () => document.querySelectorAll(".onboarding-model-picker .mp-item").length === 1,
-  );
-  const result = results.first();
-  if (!(await result.innerText()).includes(targetId)) {
-    throw new Error("The 200-model onboarding catalog did not return model 200.");
+  const previousPolicy = await page.evaluate(async () => {
+    const [{ useSessions }, { useSettings }] = await Promise.all([
+      import("/src/sessions/store.ts"),
+      import("/src/settings/store.ts"),
+    ]);
+    const policy = useSettings.getState().unavailableModelPolicy;
+    useSettings.setState({ unavailableModelPolicy: "blocked" });
+    const sessions = useSessions.getState();
+    sessions.updateSettings(sessions.activeId, { model: "unreachable-onboarding-model" });
+    return policy;
+  });
+
+  try {
+    await page.getByText("No reachable model selected", { exact: true }).waitFor();
+    if (!(await continueButton.isDisabled())) {
+      throw new Error("Continue should be disabled before choosing a reachable model.");
+    }
+    await search.fill(targetId);
+    const results = page.locator(".onboarding-model-picker .mp-item");
+    await page.waitForFunction(
+      () => document.querySelectorAll(".onboarding-model-picker .mp-item").length === 1,
+    );
+    const result = results.first();
+    if (!(await result.innerText()).includes(targetId)) {
+      throw new Error("The 200-model onboarding catalog did not return model 200.");
+    }
+    await result.locator(".mp-pick").click();
+    await page.waitForFunction(
+      (model) => document.querySelector(".onboarding-model-summary strong")?.textContent?.trim() === model,
+      targetId,
+    );
+    if (await continueButton.isDisabled()) {
+      throw new Error("Continue should enable after selecting a reachable model.");
+    }
+  } finally {
+    await page.evaluate(async (policy) => {
+      const { useSettings } = await import("/src/settings/store.ts");
+      useSettings.setState({ unavailableModelPolicy: policy });
+    }, previousPolicy);
   }
-  await result.locator(".mp-pick").click();
-  await page.waitForFunction(
-    (model) => document.querySelector(".onboarding-model-summary strong")?.textContent?.trim() === model,
-    targetId,
-  );
 }
 
 async function setOnboardingOverride(page) {

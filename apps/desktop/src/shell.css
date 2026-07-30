@@ -1444,22 +1444,6 @@
 .session-item.runtime-error::after {
   background: color-mix(in srgb, var(--error) 78%, transparent);
 }
-.session-status {
-  flex: none;
-  width: 6px;
-  height: 6px;
-  border-radius: 999px;
-  background: transparent;
-}
-.session-status.working {
-  background: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
-  animation: session-status-pulse 1.4s var(--motion-ease-in-out) infinite;
-}
-.session-status.unread {
-  background: var(--success);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 16%, transparent);
-}
 .session-copy {
   flex: 1;
   min-width: 0;

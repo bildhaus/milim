@@ -1539,6 +1539,11 @@ async function runStaticWorkspacePreviewCheck(page, pid) {
 
     await page.getByTestId("preview-native-browser").waitFor();
     await page.locator(".preview-native-browser-status").waitFor({ state: "hidden", timeout: 10_000 });
+    await page.getByTestId("preview-runtime-status").getByText("Static preview", { exact: true }).waitFor();
+    await page.getByTestId("preview-runtime-quick-stop").getByText("Stop", { exact: true }).waitFor();
+    if (await page.getByTestId("preview-managed-runtime").count()) {
+      throw new Error("Healthy static preview should use only the compact toolbar.");
+    }
     await waitForNewVisibleWryWebview(pid, baselineHandles);
     const html = await (await fetch(status.url)).text();
     const css = await (await fetch(new URL("style.css", status.url))).text();

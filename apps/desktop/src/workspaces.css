@@ -2330,7 +2330,6 @@ body.pull-requests-divider-resizing {
   .stream-diff-stat,
   .stream-diff-stat.live,
   .run-status.shiny-text,
-  .session-status.working,
   .session-loader.working .loader,
   .session-loader.working .loader::before,
   .session-loader.working .loader::after,

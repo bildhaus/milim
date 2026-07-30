@@ -24,7 +24,7 @@ import {
 import { useOnboarding, type OnboardingSetupPath, type OnboardingStepId } from "../onboarding/store";
 import { DEFAULT_THREAD_SETTINGS, useSessions } from "../sessions/store";
 import { useSettings } from "../settings/store";
-import { ArrowRight, Check, PlusSquare, Search, X } from "./icons";
+import { ArrowLeft, ArrowRight, Check, PlusSquare, Search, X } from "./icons";
 import { Logo } from "./Logo";
 import { ModelPicker } from "./ModelPicker";
 import { ProviderIcon, providerBrandForProvider, type ProviderBrand } from "./ProviderIcon";
@@ -84,7 +84,7 @@ function OnboardingStory({
   return (
     <div className={`onboarding-story onboarding-story-${tone}`}>
       <div className="onboarding-brand-mark" aria-hidden="true">
-        <Logo height={118} className="onboarding-wordmark" />
+        <Logo height={82} className="onboarding-wordmark" />
         <span>{details.slice(0, 2).join(" / ")}</span>
       </div>
       <div className="onboarding-story-copy">
@@ -465,11 +465,12 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
     >
       <div className="onboarding-header">
         <button className="onboarding-nav-back" type="button" onClick={previousStep} disabled={currentIndex === 0}>
-          Back
+          <ArrowLeft size={14} />
+          <span>Back</span>
         </button>
         <div className="onboarding-header-title">
-          <span>{currentIndex + 1} of {steps.length}</span>
-          <strong>{stepTitle(step)}</strong>
+          <strong>Set up Milim</strong>
+          <span>Step {currentIndex + 1} of {steps.length} · {stepTitle(step)}</span>
         </div>
         <button className="icon-btn sheet-close" type="button" onClick={dismiss} title="Close" aria-label="Close onboarding">
           <X size={15} />
@@ -531,15 +532,15 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
 
                 <div className="onboarding-setup-shell">
                   <div className="onboarding-path-list" aria-label="Model setup paths">
-                    <button className={"onboarding-path-option" + (activeSetupPath === "local_detect" ? " active" : "")} type="button" onClick={() => chooseSetupPath("local_detect")}>
+                    <button className={"onboarding-path-option" + (activeSetupPath === "local_detect" ? " active" : "")} type="button" aria-pressed={activeSetupPath === "local_detect"} onClick={() => chooseSetupPath("local_detect")}>
                       <span className="onboarding-path-icon"><Search size={14} /></span>
                       <span><strong>Detect local</strong><small>Ollama or LM Studio</small></span>
                     </button>
-                    <button className={"onboarding-path-option" + (activeSetupPath === "hosted" ? " active" : "")} type="button" onClick={() => chooseSetupPath("hosted")}>
+                    <button className={"onboarding-path-option" + (activeSetupPath === "hosted" ? " active" : "")} type="button" aria-pressed={activeSetupPath === "hosted"} onClick={() => chooseSetupPath("hosted")}>
                       <span className="onboarding-path-icon"><PlusSquare size={14} /></span>
                       <span><strong>Hosted</strong><small>OpenAI, OpenRouter, Gemini</small></span>
                     </button>
-                    <button className={"onboarding-path-option" + (activeSetupPath === "account_runtime" ? " active" : "")} type="button" onClick={() => chooseSetupPath("account_runtime")}>
+                    <button className={"onboarding-path-option" + (activeSetupPath === "account_runtime" ? " active" : "")} type="button" aria-pressed={activeSetupPath === "account_runtime"} onClick={() => chooseSetupPath("account_runtime")}>
                       <span className="onboarding-path-icon"><ProviderIcon brand="claude" /></span>
                       <span><strong>Installed agents</strong><small>Codex, Claude, OpenCode, Pi</small></span>
                     </button>
@@ -654,7 +655,11 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
                   </div>
                 </div>
 
-                {providerNotice && <p className={`onboarding-notice ${providerNotice.tone}`}>{providerNotice.message}</p>}
+                {providerNotice && (
+                  <p className={`onboarding-notice ${providerNotice.tone}`} role={providerNotice.tone === "error" ? "alert" : "status"}>
+                    {providerNotice.message}
+                  </p>
+                )}
 
                 {models.length > 0 && (
                   <div className="onboarding-model-picker">
@@ -717,7 +722,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
           Skip for now
         </button>
         <div className="onboarding-footer-actions">
-          <button className="btn-accent" type="button" onClick={nextStep}>
+          <button className="btn-accent" type="button" onClick={nextStep} disabled={step === "model" && !selectedModelReady}>
             <span>{step === "context" ? "Open Milim" : "Continue"}</span>
             <ArrowRight size={14} />
           </button>

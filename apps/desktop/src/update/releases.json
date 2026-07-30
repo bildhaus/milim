@@ -1,4 +1,9 @@
 {
+  "0.2.13": {
+    "version": "0.2.13",
+    "summary": "Milim 0.2.13 makes setup, thread activity, and previews cleaner and easier to scan while restoring animated progress feedback.",
+    "items": []
+  },
   "0.2.12": {
     "version": "0.2.12",
     "summary": "Milim 0.2.12 makes Open mode fully unrestricted across host tools, workers, Codex, and Pi, including Pi chats without a workspace folder.",

@@ -809,6 +809,12 @@ button.quick-summary-row:disabled {
   cursor: default;
   opacity: 0.46;
 }
+.preview-runtime-quick-stop.labeled {
+  width: auto;
+  padding-inline: 7px;
+  gap: 5px;
+  font-size: 10.5px;
+}
 .preview-loading {
   flex: 1;
   display: grid;
@@ -2650,6 +2656,10 @@ html[data-dark="true"] .preview-control-cursor {
   border-radius: 8px;
   background: color-mix(in srgb, var(--input-bg) 78%, transparent);
 }
+.preview-managed-runtime.compact {
+  gap: 0;
+  padding-block: 5px;
+}
 .preview-managed-runtime-head {
   display: flex;
   align-items: center;
@@ -3893,9 +3903,6 @@ html[data-dark="true"] .preview-control-cursor {
 .stream-reasoning-body .md {
   color: var(--secondary-text);
   font-size: 13px;
-}
-@keyframes session-status-pulse {
-  50% { opacity: 0.4; }
 }
 @keyframes sidebar-loader-rotate {
   0% { transform: rotate(0deg) scale(0.8); }
