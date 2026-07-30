@@ -463,10 +463,14 @@ button { font-family: inherit; }
   background: linear-gradient(110deg, currentColor 0 34%, #fff 46%, currentColor 58% 100%);
   background-repeat: no-repeat;
   background-size: 300% 100%;
-  background-position: 0 0;
+  background-position: 100% 0;
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
+  animation: shiny-text 2.4s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .shiny-text { animation: none; }
 }
 body.sidebar-pointer-dragging {
   cursor: grabbing;
