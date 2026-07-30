@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type HTMLAttributes, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import {
   SIDEBAR_CHATS_SECTION_ID,
   SIDEBAR_PINNED_SECTION_ID,
@@ -482,8 +482,20 @@ export function ProjectCustomizationDialog({
   );
 }
 
-function WorkingSessionLoader() {
-  return <span className="loader" aria-hidden="true" />;
+function WorkingSessionLoader({ className = "", ...props }: HTMLAttributes<HTMLSpanElement>) {
+  return (
+    <span className={`session-loader working${className ? ` ${className}` : ""}`} {...props}>
+      <span className="loader" aria-hidden="true" />
+    </span>
+  );
+}
+
+function UnreadSessionLoader({ className = "", ...props }: HTMLAttributes<HTMLSpanElement>) {
+  return (
+    <span className={`session-loader unread${className ? ` ${className}` : ""}`} {...props}>
+      <span className="loader" aria-hidden="true" />
+    </span>
+  );
 }
 
 function runtimePreviewState(runtime?: SessionPreviewRuntime): "running" | "error" | null {
@@ -1390,9 +1402,11 @@ export function Sidebar({
                       aria-label={`Open ${statusLabel.toLowerCase()} thread: ${session.title}`}
                       onClick={() => switchVisibleSession(session.id)}
                     >
-                      <span className={"session-loader " + (generating ? "working" : "unread")} aria-hidden="true">
-                        {generating ? <WorkingSessionLoader /> : <span className="loader" />}
-                      </span>
+                      {generating ? (
+                        <WorkingSessionLoader aria-hidden="true" />
+                      ) : (
+                        <UnreadSessionLoader aria-hidden="true" />
+                      )}
                     </button>
                   );
                 })}
@@ -1807,7 +1821,6 @@ export function Sidebar({
                   const sessionProjectStyle = sessionProjectColor
                     ? { "--project-color": sessionProjectColor } as CSSProperties
                     : undefined;
-                  const showStatus = generating || unread;
                   const statusLabel = parentWorkersRunning ? "Workers running" : s.worker ? `Worker ${s.worker.status}` : generating ? "Working" : unread ? "Unread update" : "Ready";
                   const pullRequestSnapshot = pullRequestsBySession[s.id];
                   const pullRequest =
@@ -1879,14 +1892,6 @@ export function Sidebar({
                         />
                       ) : (
                         <>
-                          <span
-                            className={"session-status" + (generating ? " working" : unread ? " unread" : "")}
-                            data-testid="session-loader"
-                            role={showStatus ? "img" : undefined}
-                            title={showStatus ? statusLabel : undefined}
-                            aria-label={showStatus ? statusLabel : undefined}
-                            aria-hidden={showStatus ? undefined : true}
-                          />
                           <span className="session-copy">
                             <HoverScrollText
                               className="session-title"
@@ -1924,13 +1929,31 @@ export function Sidebar({
                                 <span aria-hidden="true" />
                               </button>
                             )}
-                            <span
-                              className="session-side-indicator session-recency"
-                              data-testid="session-recency"
-                              title={`Updated ${new Date(s.updatedAt).toLocaleString()}`}
-                            >
-                              {sessionRecencyLabel(s.updatedAt)}
-                            </span>
+                            {generating ? (
+                              <WorkingSessionLoader
+                                className="session-side-indicator"
+                                data-testid="session-loader"
+                                role="img"
+                                title={statusLabel}
+                                aria-label={statusLabel}
+                              />
+                            ) : unread ? (
+                              <UnreadSessionLoader
+                                className="session-side-indicator"
+                                data-testid="session-loader"
+                                role="img"
+                                title={statusLabel}
+                                aria-label={statusLabel}
+                              />
+                            ) : (
+                              <span
+                                className="session-side-indicator session-recency"
+                                data-testid="session-recency"
+                                title={`Updated ${new Date(s.updatedAt).toLocaleString()}`}
+                              >
+                                {sessionRecencyLabel(s.updatedAt)}
+                              </span>
+                            )}
                             <div className="session-side-actions" aria-label="Thread actions">
                               {!s.parentId && (
                                 <button

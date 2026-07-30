@@ -3894,9 +3894,6 @@ html[data-dark="true"] .preview-control-cursor {
   color: var(--secondary-text);
   font-size: 13px;
 }
-@keyframes session-status-pulse {
-  50% { opacity: 0.4; }
-}
 @keyframes sidebar-loader-rotate {
   0% { transform: rotate(0deg) scale(0.8); }
   50% { transform: rotate(360deg) scale(1.2); }
