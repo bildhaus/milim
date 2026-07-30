@@ -1825,21 +1825,26 @@ fn codex_approval_policy(_req: &CodexRunRequest) -> &'static str {
 }
 
 fn codex_sandbox_policy(req: &CodexRunRequest, cwd: Option<&str>) -> Value {
-    if codex_sandbox_mode(req, cwd) == "workspace-write" {
-        return json!({
+    match codex_sandbox_mode(req, cwd) {
+        "danger-full-access" => json!({ "type": "dangerFullAccess" }),
+        "workspace-write" => json!({
             "type": "workspaceWrite",
             "writableRoots": [cwd.unwrap_or_default()],
             "networkAccess": true,
-        });
+        }),
+        _ => json!({ "type": "readOnly", "access": { "type": "fullAccess" } }),
     }
-    json!({ "type": "readOnly", "access": { "type": "fullAccess" } })
 }
 
 fn codex_sandbox_mode(req: &CodexRunRequest, cwd: Option<&str>) -> &'static str {
     let policy = account_runtime_policy(req.tool_approval_policy.as_deref());
-    let mutations_allowed = policy == "open"
-        || (policy == "review" && (req.tool_approval_grant || req.interactive_tool_approval));
-    if !req.plan_mode && mutations_allowed && cwd.is_some() {
+    if !req.plan_mode && policy == "open" {
+        "danger-full-access"
+    } else if !req.plan_mode
+        && policy == "review"
+        && (req.tool_approval_grant || req.interactive_tool_approval)
+        && cwd.is_some()
+    {
         "workspace-write"
     } else {
         "read-only"
@@ -2846,7 +2851,7 @@ mod tests {
         let (method, params) = codex_thread_request(&req, "gpt-5.4");
         assert_eq!(method, "thread/resume");
         assert_eq!(params["threadId"], "thread-1");
-        assert_eq!(params["sandbox"], "workspace-write");
+        assert_eq!(params["sandbox"], "danger-full-access");
         assert!(params.get("sandboxPolicy").is_none());
         assert!(params.get("ephemeral").is_none());
 
@@ -2924,6 +2929,14 @@ mod tests {
         req.tool_approval_policy = Some("open".into());
         assert_eq!(codex_approval_policy(&req), "on-request");
         assert!(codex_permissions_auto_approved(&req));
+        assert_eq!(
+            codex_sandbox_mode(&req, req.cwd.as_deref()),
+            "danger-full-access"
+        );
+        assert_eq!(
+            codex_sandbox_policy(&req, req.cwd.as_deref())["type"],
+            "dangerFullAccess"
+        );
 
         req.plan_mode = true;
         assert!(!codex_permissions_auto_approved(&req));
