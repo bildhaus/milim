@@ -63,7 +63,7 @@ assert(hasQueuedMessages(sessionId), "queued messages should be visible before d
 const ran: string[] = [];
 const successfulDrain = await drainQueuedMessages({
   sessionId,
-  queueDrainRef: { current: new Set<string>() },
+  queueDrainRef: { current: new Map() },
   generationControllersRef: { current: new Map<string, AbortController>() },
   agents,
   setChatNotice: () => {},
@@ -83,7 +83,7 @@ useSessions.getState().enqueueQueuedMessage(sessionId, { content: "fails" });
 useSessions.getState().enqueueQueuedMessage(sessionId, { content: "remains" });
 const failedDrain = await drainQueuedMessages({
   sessionId,
-  queueDrainRef: { current: new Set<string>() },
+  queueDrainRef: { current: new Map() },
   generationControllersRef: { current: new Map<string, AbortController>() },
   setChatNotice: () => {},
   sessionMessages: () => [],
@@ -94,6 +94,56 @@ equal(
   useSessions.getState().queuedMessagesBySession[sessionId]?.map((item) => item.content).join(","),
   "remains",
   "drain should leave later messages queued after a failed run",
+);
+
+useSessions.getState().shiftQueuedMessage(sessionId);
+useSessions.getState().enqueueQueuedMessage(sessionId, { content: "stopped" });
+useSessions.getState().enqueueQueuedMessage(sessionId, { content: "send after stop" });
+const joinedDrainRef = { current: new Map() };
+let finishStoppedTurn!: () => void;
+const stoppedTurn = new Promise<void>((resolve) => {
+  finishStoppedTurn = resolve;
+});
+const interruptedRuns: string[] = [];
+const interruptedDrain = drainQueuedMessages({
+  sessionId,
+  queueDrainRef: joinedDrainRef,
+  generationControllersRef: { current: new Map<string, AbortController>() },
+  setChatNotice: () => {},
+  sessionMessages: () => [],
+  runTurn: async (convo) => {
+    interruptedRuns.push(convo[convo.length - 1]?.content ?? "");
+    await stoppedTurn;
+    return { status: "aborted", messages: convo };
+  },
+});
+const joinedDrain = drainQueuedMessages({
+  sessionId,
+  queueDrainRef: joinedDrainRef,
+  generationControllersRef: { current: new Map<string, AbortController>() },
+  setChatNotice: () => {},
+  sessionMessages: () => [],
+  runTurn: async () => {
+    throw new Error("joined drain must not start another turn");
+  },
+});
+finishStoppedTurn();
+await Promise.all([interruptedDrain, joinedDrain]);
+await drainQueuedMessages({
+  sessionId,
+  queueDrainRef: joinedDrainRef,
+  generationControllersRef: { current: new Map<string, AbortController>() },
+  setChatNotice: () => {},
+  sessionMessages: () => [],
+  runTurn: async (convo) => {
+    interruptedRuns.push(convo[convo.length - 1]?.content ?? "");
+    return { status: "done", messages: convo };
+  },
+});
+equal(
+  interruptedRuns.join(","),
+  "stopped,send after stop",
+  "a joined interrupted drain should hand off to the next queued message",
 );
 
 export {};

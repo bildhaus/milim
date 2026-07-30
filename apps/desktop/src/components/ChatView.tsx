@@ -3399,7 +3399,7 @@ export function ChatView({
     if (!activePreviewAppPreflight) {
       setChatNotice({
         tone: "info",
-        message: "Review the preview preflight before running commands.",
+        message: "Review the preview commands before running them.",
       });
       return null;
     }
