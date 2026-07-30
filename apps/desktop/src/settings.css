@@ -2510,9 +2510,17 @@
   cursor: not-allowed;
 }
 .onboarding-overlay .onboarding-model-picker .mp {
-  height: clamp(150px, 24vh, 190px);
+  height: clamp(150px, calc(100dvh - 600px), 190px);
   max-height: none;
   background: var(--popover-bg);
+}
+@media (max-height: 780px) and (min-width: 761px) {
+  .onboarding-overlay .onboarding-panel {
+    padding-block: 16px;
+  }
+  .onboarding-overlay .onboarding-step-body {
+    gap: 8px;
+  }
 }
 @media (max-width: 760px) {
   .chat-body {
