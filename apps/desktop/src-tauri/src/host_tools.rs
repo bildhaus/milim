@@ -1,10 +1,9 @@
-//! Host filesystem + shell tools, rooted to the GUI's selected working folder.
+//! Host filesystem + shell tools, using the GUI's selected working folder.
 //!
 //! Unlike `milim-tools`'s fixed-root fs tools (and the Docker-sandboxed
-//! `run_command`), these operate on the **real** machine inside the folder the
-//! user picks via the desktop "Folder" chip - the workspace cell shared with
-//! `milim_server::AppState::workspace`. They refuse to run until a folder is set.
-//! Wiring these to the agent loop is what turns milim into a coding agent.
+//! `run_command`), these operate on the **real** machine. Review and Guarded
+//! keep them inside the folder selected via the desktop "Folder" chip; Open
+//! accepts full host paths while retaining that folder as the working directory.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -22,6 +21,7 @@ pub type Workspace = Arc<RwLock<Option<PathBuf>>>;
 enum ToolWorkspace {
     Live(Workspace),
     Fixed(Arc<PathBuf>),
+    FullAccess(Arc<PathBuf>),
 }
 
 /// Max bytes returned by `read_file`.
@@ -31,7 +31,9 @@ const MAX_LIST_ENTRIES: usize = 1000;
 /// The current workspace root, or an error if the user hasn't picked a folder.
 fn root_of(ws: &ToolWorkspace) -> Result<PathBuf> {
     match ws {
-        ToolWorkspace::Fixed(root) => Ok(root.as_ref().clone()),
+        ToolWorkspace::Fixed(root) | ToolWorkspace::FullAccess(root) => {
+            Ok(root.as_ref().clone())
+        }
         ToolWorkspace::Live(ws) => ws.read().ok().and_then(|g| g.clone()).ok_or_else(|| {
             Error::InvalidRequest(
                 "no working folder selected - pick one with the Folder chip first".into(),
@@ -40,9 +42,18 @@ fn root_of(ws: &ToolWorkspace) -> Result<PathBuf> {
     }
 }
 
-/// Resolve `rel` under the workspace root, rejecting `..` and absolute paths.
-fn safe_join(ws: &ToolWorkspace, rel: &str) -> Result<PathBuf> {
-    resolve_workspace_path(&root_of(ws)?, rel)
+/// Resolve a path under the workspace boundary, or from the working directory
+/// when the run explicitly has full host access.
+fn safe_join(ws: &ToolWorkspace, path: &str) -> Result<PathBuf> {
+    if matches!(ws, ToolWorkspace::FullAccess(_)) {
+        let path = PathBuf::from(path);
+        return Ok(if path.is_absolute() {
+            path
+        } else {
+            root_of(ws)?.join(path)
+        });
+    }
+    resolve_workspace_path(&root_of(ws)?, path)
 }
 
 fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
@@ -84,7 +95,11 @@ impl Tool for ReadFileTool {
         "read_file"
     }
     fn description(&self) -> &str {
-        "Read a UTF-8 text file from the working folder (path is relative to it)."
+        if matches!(self.ws, ToolWorkspace::FullAccess(_)) {
+            "Read a UTF-8 text file from anywhere on the host. Relative paths use the working folder."
+        } else {
+            "Read a UTF-8 text file from the working folder (path is relative to it)."
+        }
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{
@@ -99,6 +114,11 @@ impl Tool for ReadFileTool {
     fn scoped_to_workspace(&self, root: &Path) -> Option<Arc<dyn Tool>> {
         Some(Arc::new(Self {
             ws: ToolWorkspace::Fixed(Arc::new(root.to_path_buf())),
+        }))
+    }
+    fn with_full_access(&self, cwd: &Path) -> Option<Arc<dyn Tool>> {
+        Some(Arc::new(Self {
+            ws: ToolWorkspace::FullAccess(Arc::new(cwd.to_path_buf())),
         }))
     }
     async fn invoke(&self, args: Value) -> Result<Value> {
@@ -298,7 +318,11 @@ impl Tool for ReadFileAnchorsTool {
         "read_file_anchors"
     }
     fn description(&self) -> &str {
-        "Read a UTF-8 text file with line-numbered hash anchors for patch_file."
+        if matches!(self.ws, ToolWorkspace::FullAccess(_)) {
+            "Read a UTF-8 text file anywhere on the host with line-numbered hash anchors for patch_file. Relative paths use the working folder."
+        } else {
+            "Read a UTF-8 text file with line-numbered hash anchors for patch_file."
+        }
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]})
@@ -309,6 +333,11 @@ impl Tool for ReadFileAnchorsTool {
     fn scoped_to_workspace(&self, root: &Path) -> Option<Arc<dyn Tool>> {
         Some(Arc::new(Self {
             ws: ToolWorkspace::Fixed(Arc::new(root.to_path_buf())),
+        }))
+    }
+    fn with_full_access(&self, cwd: &Path) -> Option<Arc<dyn Tool>> {
+        Some(Arc::new(Self {
+            ws: ToolWorkspace::FullAccess(Arc::new(cwd.to_path_buf())),
         }))
     }
     async fn invoke(&self, args: Value) -> Result<Value> {
@@ -340,7 +369,11 @@ impl Tool for ListDirTool {
         "list_dir"
     }
     fn description(&self) -> &str {
-        "List entries of a directory in the working folder (path defaults to the root)."
+        if matches!(self.ws, ToolWorkspace::FullAccess(_)) {
+            "List a directory anywhere on the host. Relative paths use the working folder."
+        } else {
+            "List entries of a directory in the working folder (path defaults to the root)."
+        }
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{"path":{"type":"string"}}})
@@ -351,6 +384,11 @@ impl Tool for ListDirTool {
     fn scoped_to_workspace(&self, root: &Path) -> Option<Arc<dyn Tool>> {
         Some(Arc::new(Self {
             ws: ToolWorkspace::Fixed(Arc::new(root.to_path_buf())),
+        }))
+    }
+    fn with_full_access(&self, cwd: &Path) -> Option<Arc<dyn Tool>> {
+        Some(Arc::new(Self {
+            ws: ToolWorkspace::FullAccess(Arc::new(cwd.to_path_buf())),
         }))
     }
     async fn invoke(&self, args: Value) -> Result<Value> {
@@ -389,7 +427,11 @@ impl Tool for WriteFileTool {
         "write_file"
     }
     fn description(&self) -> &str {
-        "Create or overwrite a UTF-8 text file in the working folder."
+        if matches!(self.ws, ToolWorkspace::FullAccess(_)) {
+            "Create or overwrite a UTF-8 text file anywhere on the host. Relative paths use the working folder."
+        } else {
+            "Create or overwrite a UTF-8 text file in the working folder."
+        }
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]})
@@ -400,6 +442,11 @@ impl Tool for WriteFileTool {
     fn scoped_to_workspace(&self, root: &Path) -> Option<Arc<dyn Tool>> {
         Some(Arc::new(Self {
             ws: ToolWorkspace::Fixed(Arc::new(root.to_path_buf())),
+        }))
+    }
+    fn with_full_access(&self, cwd: &Path) -> Option<Arc<dyn Tool>> {
+        Some(Arc::new(Self {
+            ws: ToolWorkspace::FullAccess(Arc::new(cwd.to_path_buf())),
         }))
     }
     async fn invoke(&self, args: Value) -> Result<Value> {
@@ -425,7 +472,11 @@ impl Tool for EditFileTool {
         "edit_file"
     }
     fn description(&self) -> &str {
-        "Replace an exact text snippet in a file in the working folder. 'old' must appear exactly once."
+        if matches!(self.ws, ToolWorkspace::FullAccess(_)) {
+            "Replace an exact text snippet in a file anywhere on the host. Relative paths use the working folder; 'old' must appear exactly once."
+        } else {
+            "Replace an exact text snippet in a file in the working folder. 'old' must appear exactly once."
+        }
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{
@@ -440,6 +491,11 @@ impl Tool for EditFileTool {
     fn scoped_to_workspace(&self, root: &Path) -> Option<Arc<dyn Tool>> {
         Some(Arc::new(Self {
             ws: ToolWorkspace::Fixed(Arc::new(root.to_path_buf())),
+        }))
+    }
+    fn with_full_access(&self, cwd: &Path) -> Option<Arc<dyn Tool>> {
+        Some(Arc::new(Self {
+            ws: ToolWorkspace::FullAccess(Arc::new(cwd.to_path_buf())),
         }))
     }
     async fn invoke(&self, args: Value) -> Result<Value> {
@@ -477,7 +533,11 @@ impl Tool for PatchFileTool {
         "patch_file"
     }
     fn description(&self) -> &str {
-        "Patch a UTF-8 text file using LINE#HASH anchors from read_file_anchors."
+        if matches!(self.ws, ToolWorkspace::FullAccess(_)) {
+            "Patch a UTF-8 text file anywhere on the host using LINE#HASH anchors from read_file_anchors. Relative paths use the working folder."
+        } else {
+            "Patch a UTF-8 text file using LINE#HASH anchors from read_file_anchors."
+        }
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{
@@ -497,6 +557,11 @@ impl Tool for PatchFileTool {
     fn scoped_to_workspace(&self, root: &Path) -> Option<Arc<dyn Tool>> {
         Some(Arc::new(Self {
             ws: ToolWorkspace::Fixed(Arc::new(root.to_path_buf())),
+        }))
+    }
+    fn with_full_access(&self, cwd: &Path) -> Option<Arc<dyn Tool>> {
+        Some(Arc::new(Self {
+            ws: ToolWorkspace::FullAccess(Arc::new(cwd.to_path_buf())),
         }))
     }
     async fn invoke(&self, args: Value) -> Result<Value> {
@@ -595,6 +660,11 @@ impl Tool for ShellTool {
     fn scoped_to_workspace(&self, root: &Path) -> Option<Arc<dyn Tool>> {
         Some(Arc::new(Self {
             ws: ToolWorkspace::Fixed(Arc::new(root.to_path_buf())),
+        }))
+    }
+    fn with_full_access(&self, cwd: &Path) -> Option<Arc<dyn Tool>> {
+        Some(Arc::new(Self {
+            ws: ToolWorkspace::FullAccess(Arc::new(cwd.to_path_buf())),
         }))
     }
     async fn invoke(&self, args: Value) -> Result<Value> {
@@ -843,6 +913,49 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(first);
         let _ = std::fs::remove_dir_all(second);
+    }
+
+    #[test]
+    fn full_access_registry_reads_outside_the_working_folder() {
+        let root = temp_workspace();
+        let working = root.join("working");
+        let sibling = root.join("sibling");
+        std::fs::create_dir_all(&working).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        let outside = sibling.join("outside.txt");
+        std::fs::write(&outside, "visible in Open").unwrap();
+        let workspace = Arc::new(RwLock::new(Some(working.clone())));
+        let mut registry = milim_tools::ToolRegistry::new();
+        for item in host_tools(workspace) {
+            registry.register(item);
+        }
+
+        assert!(block_on(
+            registry
+                .scoped_to_workspace(&working)
+                .call("read_file", json!({"path": outside}))
+        )
+        .is_err());
+        let full_access = registry.with_full_access(&working);
+        let result = block_on(
+            full_access
+                .read_only()
+                .call("read_file", json!({"path": outside})),
+        )
+        .unwrap();
+        assert_eq!(result["content"], "visible in Open");
+        let written = sibling.join("written.txt");
+        block_on(full_access.call(
+            "write_file",
+            json!({"path": written, "content": "written in Open"}),
+        ))
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(written).unwrap(),
+            "written in Open"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

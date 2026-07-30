@@ -42,7 +42,7 @@ Install Pi separately and authenticate inside Pi with `/login`. Pi owns its cred
 
 Embedded runs always pass `--offline --no-extensions`. This prevents user or project extensions from executing startup code outside Milim's approval boundary while leaving Pi's context files, prompt templates, and skills on their normal discovery path. Plan and Guarded expose only `read`, `grep`, `find`, and `ls`. Review loads one temporary Milim-owned extension that pauses `bash`, `write`, `edit`, and any unknown tool call and forwards the exact generated arguments to Milim's one-shot approval broker. Open exposes Pi's built-in tools without prompts. The temporary extension is removed after the run; standalone Pi settings are never modified.
 
-Pi also supports chats without a workspace folder. Those runs disable all tools and project context files; selecting a folder restores the approval-mode behavior above.
+Pi also supports chats without a workspace folder. Project context files remain disabled. Open runs start in a private per-session directory under Milim's runtime data and expose Pi's built-in tools without prompts; that directory is a predictable working directory, not a filesystem sandbox. Plan, Guarded, and Review keep Pi's built-in tools disabled until a workspace folder is selected, while eligible Milim-proxied tools remain available.
 
 Images are sent as native RPC image blocks and require Privacy Off. Text uses the same server-side scan/redact/block gate as the other account runtimes. Pi discovery and startup failures are isolated from the other provider and account-runtime lanes.
 
@@ -63,9 +63,9 @@ Codex uses the installed Codex CLI app-server.
 | `GET /codex/rate-limits` | Reads Codex account rate-limit state. |
 | `GET /codex/threads` | Lists active or archived interactive Codex threads in cursor-based pages of 25, with optional `search`; `all=true` drains the matching catalog into one response. |
 | `GET /codex/threads/{id}` | Reads one importable user/assistant transcript without changing or deleting the Codex thread. |
-| `POST /codex/run` | Starts or resumes a Codex app-server thread with Milim's selected tool approval and workspace sandbox policy. |
+| `POST /codex/run` | Starts or resumes a Codex app-server thread with Milim's selected tool approval and sandbox policy. |
 
-`/codex/run` accepts `model`, `prompt`, optional `images`, optional `cwd`, optional `reasoning_effort`, optional `thread_id`, optional `persist_thread`, and Milim tool approval fields. A request is valid when the prompt is non-empty or at least one image is present. Each image is `{ "media_type": "image/png", "data": "<base64>" }`; PNG, JPEG, WebP, and GIF are accepted up to 2 MB each. Milim validates the bytes after the privacy check, writes only those bytes into a private temporary per-turn directory, sends Codex app-server `localImage` inputs, and deletes the directory when the turn ends. Caller-supplied filesystem paths are never accepted as image inputs.
+`/codex/run` accepts `model`, `prompt`, optional `images`, optional `cwd`, optional `reasoning_effort`, optional `thread_id`, optional `persist_thread`, and Milim tool approval fields. Guarded and unapproved Review turns use Codex read-only mode, approved Review turns use workspace-write, and Open uses Codex `danger-full-access`; Plan stays read-only regardless of approval mode. A request is valid when the prompt is non-empty or at least one image is present. Each image is `{ "media_type": "image/png", "data": "<base64>" }`; PNG, JPEG, WebP, and GIF are accepted up to 2 MB each. Milim validates the bytes after the privacy check, writes only those bytes into a private temporary per-turn directory, sends Codex app-server `localImage` inputs, and deletes the directory when the turn ends. Caller-supplied filesystem paths are never accepted as image inputs.
 
 Milim desktop persists the returned Codex thread id on the Milim chat and sends it back on later turns, so reopening a chat resumes the same Codex app-server thread. One-off side calls omit `persist_thread` and remain ephemeral. Any effort except `auto` is forwarded to Codex as the app-server `effort` field.
 

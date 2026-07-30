@@ -594,6 +594,10 @@ mod run_context_tests {
         workspace: PathBuf,
     }
 
+    struct FullAccessWorkspaceProbe {
+        workspace: PathBuf,
+    }
+
     #[derive(Clone, Default)]
     struct RecordingRemoteBackend {
         prompts: Arc<Mutex<Vec<String>>>,
@@ -681,10 +685,39 @@ mod run_context_tests {
             }))
         }
 
+        fn with_full_access(&self, cwd: &FsPath) -> Option<Arc<dyn Tool>> {
+            Some(Arc::new(FullAccessWorkspaceProbe {
+                workspace: cwd.to_path_buf(),
+            }))
+        }
+
         async fn invoke(&self, _args: Value) -> milim_core::Result<Value> {
             Err(Error::InvalidRequest(
                 "workspace probe was not scoped".to_string(),
             ))
+        }
+    }
+
+    #[async_trait]
+    impl Tool for FullAccessWorkspaceProbe {
+        fn name(&self) -> &str {
+            "echo"
+        }
+
+        fn description(&self) -> &str {
+            "Return the full-access working directory bound to this run."
+        }
+
+        fn input_schema(&self) -> Value {
+            json!({"type":"object"})
+        }
+
+        fn effect(&self) -> ToolEffect {
+            ToolEffect::ReadOnly
+        }
+
+        async fn invoke(&self, _args: Value) -> milim_core::Result<Value> {
+            Ok(json!({"workspace": self.workspace, "full_access": true}))
         }
     }
 
@@ -1072,6 +1105,52 @@ mod run_context_tests {
         std::fs::remove_dir_all(root).ok();
     }
 
+    #[tokio::test]
+    async fn open_registry_gives_parent_and_workers_full_access() {
+        let root = temp_workspace_root();
+        std::fs::create_dir_all(&root).unwrap();
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(WorkspaceProbe));
+        let state = AppState::new(
+            Arc::new(TestBackend::new()),
+            milim_core::config::ServerConfiguration::default(),
+        )
+        .with_tools(tools);
+        let run_context = RunContext {
+            workspace: Some(root.clone()),
+            privacy_mode: crate::privacy::PrivacyMode::Off,
+        };
+        let open = ToolRunPolicy {
+            approval: ToolApprovalPolicy::Open,
+            ..Default::default()
+        };
+        let parent = agent_base_registry_with_memory(&state, None, &open, &run_context);
+        assert_eq!(
+            parent.call("echo", json!({})).await.unwrap()["full_access"],
+            true
+        );
+        let worker = child_registry_for_policy(&state, &open, parent, &run_context).read_only();
+        assert_eq!(
+            worker.call("echo", json!({})).await.unwrap()["full_access"],
+            true
+        );
+
+        let review = ToolRunPolicy {
+            approval: ToolApprovalPolicy::Review,
+            approval_granted: true,
+            ..Default::default()
+        };
+        let scoped = agent_base_registry_with_memory(&state, None, &review, &run_context);
+        assert!(scoped
+            .call("echo", json!({}))
+            .await
+            .unwrap()
+            .get("full_access")
+            .is_none());
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
     #[test]
     fn worker_run_create_fields_distinguish_omitted_from_null() {
         let omitted: WorkerRunCreateRequest = serde_json::from_value(json!({
@@ -1221,11 +1300,25 @@ pub(crate) fn static_registry_for_run(st: &AppState) -> ToolRegistry {
 }
 
 fn static_registry_for_context(st: &AppState, context: &RunContext) -> ToolRegistry {
+    static_registry_for_context_with_access(st, context, false)
+}
+
+fn static_registry_for_context_with_access(
+    st: &AppState,
+    context: &RunContext,
+    full_access: bool,
+) -> ToolRegistry {
     let reg = st.tools.as_deref().cloned().unwrap_or_default();
     let mut reg = context
         .workspace
         .as_deref()
-        .map(|root| reg.scoped_to_workspace(root))
+        .map(|root| {
+            if full_access {
+                reg.with_full_access(root)
+            } else {
+                reg.scoped_to_workspace(root)
+            }
+        })
         .unwrap_or(reg);
     if context.workspace.is_none() {
         reg = reg.without(RUN_WORKSPACE_TOOL_NAMES);
@@ -1294,7 +1387,11 @@ fn agent_base_registry_with_memory(
     policy: &ToolRunPolicy,
     run_context: &RunContext,
 ) -> ToolRegistry {
-    let mut reg = static_registry_for_context(st, run_context);
+    let mut reg = static_registry_for_context_with_access(
+        st,
+        run_context,
+        policy.approval == ToolApprovalPolicy::Open && !policy.plan_mode,
+    );
     let workspace_unavailable =
         desktop_workspace_unavailable_for(st, run_context.workspace.as_deref());
     if policy.plan_mode {

@@ -59,6 +59,10 @@ pub trait Tool: Send + Sync {
     fn scoped_to_workspace(&self, _root: &Path) -> Option<Arc<dyn Tool>> {
         None
     }
+    /// Return a copy with unrestricted host access and a fixed working directory.
+    fn with_full_access(&self, _cwd: &Path) -> Option<Arc<dyn Tool>> {
+        None
+    }
     /// Return a copy with mutable UI targets captured for one run.
     fn scoped_for_run(&self) -> Option<Arc<dyn Tool>> {
         None
@@ -181,6 +185,25 @@ impl ToolRegistry {
                         name.clone(),
                         tool.scoped_to_workspace(root)
                             .unwrap_or_else(|| tool.clone()),
+                    )
+                })
+                .collect(),
+            aliases: self.aliases.clone(),
+        };
+        registry.retain_valid_aliases();
+        registry
+    }
+
+    /// Give host-aware tools unrestricted access while fixing their working directory.
+    pub fn with_full_access(&self, cwd: &Path) -> Self {
+        let mut registry = Self {
+            tools: self
+                .tools
+                .iter()
+                .map(|(name, tool)| {
+                    (
+                        name.clone(),
+                        tool.with_full_access(cwd).unwrap_or_else(|| tool.clone()),
                     )
                 })
                 .collect(),

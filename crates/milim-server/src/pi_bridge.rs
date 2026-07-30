@@ -497,6 +497,44 @@ fn usage_from_message(message: &Value) -> Option<Usage> {
     })
 }
 
+fn pi_run_cwd(req: &PiRunRequest, session_id: &str) -> Result<Option<PathBuf>> {
+    pi_run_cwd_at(req, session_id, milim_core::paths::Paths::resolve().root())
+}
+
+fn pi_run_cwd_at(
+    req: &PiRunRequest,
+    session_id: &str,
+    milim_root: &Path,
+) -> Result<Option<PathBuf>> {
+    if let Some(cwd) = req
+        .cwd
+        .as_deref()
+        .map(str::trim)
+        .filter(|cwd| !cwd.is_empty())
+    {
+        return Ok(Some(PathBuf::from(cwd)));
+    }
+    if req.plan_mode || req.tool_approval_policy.as_deref() != Some("open") {
+        return Ok(None);
+    }
+    let session_id = session_id.trim();
+    if session_id.is_empty()
+        || session_id.len() > 128
+        || session_id == "."
+        || session_id == ".."
+        || !session_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err(Error::InvalidRequest(
+            "Pi session id is invalid for a managed working directory.".into(),
+        ));
+    }
+    let cwd = milim_root.join("runtime").join("pi").join(session_id);
+    std::fs::create_dir_all(&cwd)?;
+    Ok(Some(cwd))
+}
+
 fn run_arguments(
     req: &PiRunRequest,
     provider: &str,
@@ -538,14 +576,22 @@ fn run_arguments(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    if req.cwd.is_none() {
+    if req
+        .cwd
+        .as_deref()
+        .map(str::trim)
+        .filter(|cwd| !cwd.is_empty())
+        .is_none()
+    {
         args.push("--no-context-files".into());
-        if proxy_tools.is_empty() {
-            args.push("--no-tools".into());
-        } else if restrictive {
-            args.extend(["--tools".into(), proxy_tools.join(",")]);
-        } else {
-            args.push("--no-builtin-tools".into());
+        if req.tool_approval_policy.as_deref() != Some("open") || req.plan_mode {
+            if proxy_tools.is_empty() {
+                args.push("--no-tools".into());
+            } else if restrictive {
+                args.extend(["--tools".into(), proxy_tools.join(",")]);
+            } else {
+                args.push("--no-builtin-tools".into());
+            }
         }
     } else if restrictive {
         let mut tools = vec![SAFE_TOOLS.to_string()];
@@ -607,8 +653,9 @@ impl PiProcess {
         } else {
             None
         };
+        let cwd = pi_run_cwd(req, session_id)?;
         let args = run_arguments(req, provider, model, session_id, extension.as_deref());
-        Self::start(&args, req.cwd.as_deref().map(Path::new), extension).await
+        Self::start(&args, cwd.as_deref(), extension).await
     }
 
     async fn start(
@@ -1016,8 +1063,36 @@ mod tests {
         let mut no_workspace = request("open");
         no_workspace.cwd = None;
         let args = run_arguments(&no_workspace, "openai-codex", "gpt", "session-3", None);
-        assert!(args.contains(&"--no-tools".to_string()));
         assert!(args.contains(&"--no-context-files".to_string()));
+        assert!(!args.contains(&"--no-tools".to_string()));
+        assert!(!args.contains(&"--no-builtin-tools".to_string()));
+
+        no_workspace.cwd = Some(" ".into());
+        let args = run_arguments(&no_workspace, "openai-codex", "gpt", "session-3", None);
+        assert!(args.contains(&"--no-context-files".to_string()));
+        assert!(!args.contains(&"--no-tools".to_string()));
+
+        no_workspace.plan_mode = true;
+        let args = run_arguments(&no_workspace, "openai-codex", "gpt", "session-3", None);
+        assert!(args.contains(&"--no-tools".to_string()));
+    }
+
+    #[test]
+    fn open_without_workspace_gets_a_safe_per_session_cwd() {
+        let root = std::env::temp_dir().join(format!("milim-pi-cwd-{}", uuid::Uuid::new_v4()));
+        let mut req = request("open");
+        req.cwd = None;
+
+        let cwd = pi_run_cwd_at(&req, "session-3", &root)
+            .unwrap()
+            .expect("managed cwd");
+        assert_eq!(cwd, root.join("runtime").join("pi").join("session-3"));
+        assert!(cwd.is_dir());
+        assert!(pi_run_cwd_at(&req, "../escape", &root).is_err());
+
+        req.plan_mode = true;
+        assert!(pi_run_cwd_at(&req, "session-4", &root).unwrap().is_none());
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
