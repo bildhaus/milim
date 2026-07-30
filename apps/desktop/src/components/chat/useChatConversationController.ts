@@ -57,7 +57,9 @@ export function useChatConversationController<
   const activeId = useSessions((state) => state.activeId);
   const generationControllersRef = useRef<Map<string, AbortController>>(new Map());
   const goalLoopRef = useRef<GoalLoopState | null>(null);
-  const queueDrainRef = useRef<Set<string>>(new Set());
+  const queueDrainRef = useRef<
+    Map<string, Promise<ConversationTurnResult | undefined>>
+  >(new Map());
   const compactionInFlightRef = useRef(false);
   const callbacksRef = useRef({ setChatNotice, sessionMessages, runTurn });
   callbacksRef.current = { setChatNotice, sessionMessages, runTurn };
@@ -260,12 +262,19 @@ export function useChatConversationController<
         !generating.has(sessionId) && !liveWorkers.has(sessionId),
     );
     if (ready.length === 0) return;
+    const activeDrains = new Set(
+      ready.filter((sessionId) => queueDrainRef.current.has(sessionId)),
+    );
     setQueueInterrupts((current) => {
       const next = { ...current };
       for (const sessionId of ready) delete next[sessionId];
       return next;
     });
-    for (const sessionId of ready) void drainQueuedMessages(sessionId);
+    for (const sessionId of ready) {
+      void drainQueuedMessages(sessionId).then(() => {
+        if (activeDrains.has(sessionId)) void drainQueuedMessages(sessionId);
+      });
+    }
   }, [
     generatingSessionIds,
     liveWorkerSessionIdsKey,

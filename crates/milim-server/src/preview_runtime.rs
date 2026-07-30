@@ -24,8 +24,6 @@ use tower_http::services::ServeDir;
 use milim_core::{Error, Result};
 
 const MAX_LOG_LINES: usize = 500;
-const MAX_FINGERPRINT_FILES: usize = 20_000;
-const MAX_FINGERPRINT_BYTES: u64 = 64 * 1024 * 1024;
 const INSTALL_MARKER_FILE: &str = ".milim-install-ok";
 #[cfg(not(test))]
 const PREVIEW_COMPILE_ERROR_QUIET_MS: u64 = 1_000;
@@ -1540,24 +1538,34 @@ fn collect_managed_files(
 
 fn fingerprint_selected_dir(dir: &Path) -> Result<String> {
     let mut files = Vec::new();
-    let mut file_count = 0_usize;
-    let mut byte_count = 0_u64;
-    collect_selected_files(dir, dir, &mut files, &mut file_count, &mut byte_count)?;
+    collect_selected_files(dir, dir, &mut files)?;
     files.sort_by(|left, right| left.0.cmp(&right.0));
-    let extra = [if dir.join("node_modules").is_dir() {
-        "node_modules=present"
-    } else {
-        "node_modules=missing"
-    }];
-    Ok(fingerprint_parts(&files, &extra))
+    let mut hash = 0xcbf29ce484222325_u64;
+    for (path, source) in files {
+        fingerprint_update(&mut hash, path.as_bytes());
+        if source.symlink_metadata()?.file_type().is_symlink() {
+            let target = std::fs::read_link(source)?;
+            fingerprint_update(&mut hash, target.to_string_lossy().as_bytes());
+        } else {
+            fingerprint_file(&mut hash, &source)?;
+        }
+    }
+    fingerprint_update(
+        &mut hash,
+        if dir.join("node_modules").is_dir() {
+            "node_modules=present"
+        } else {
+            "node_modules=missing"
+        }
+        .as_bytes(),
+    );
+    Ok(format!("fnv1a64:{hash:016x}"))
 }
 
 fn collect_selected_files(
     root: &Path,
     dir: &Path,
-    files: &mut Vec<(String, Vec<u8>)>,
-    file_count: &mut usize,
-    byte_count: &mut u64,
+    files: &mut Vec<(String, PathBuf)>,
 ) -> Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
@@ -1569,35 +1577,14 @@ fn collect_selected_files(
         }
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
-            collect_selected_files(root, &path, files, file_count, byte_count)?;
+            collect_selected_files(root, &path, files)?;
             continue;
         }
-        if file_type.is_symlink() {
-            let rel = path.strip_prefix(root).unwrap_or(&path);
-            let target = std::fs::read_link(&path)?;
-            files.push((
-                rel.to_string_lossy().replace('\\', "/"),
-                target.to_string_lossy().as_bytes().to_vec(),
-            ));
+        if !file_type.is_file() && !file_type.is_symlink() {
             continue;
-        }
-        if !file_type.is_file() {
-            continue;
-        }
-        *file_count = file_count.saturating_add(1);
-        let size = entry.metadata()?.len();
-        *byte_count = byte_count.saturating_add(size);
-        if *file_count > MAX_FINGERPRINT_FILES || *byte_count > MAX_FINGERPRINT_BYTES {
-            return Err(Error::InvalidRequest(format!(
-                "preview app source is too large to fingerprint (limit: {MAX_FINGERPRINT_FILES} files / {} MiB)",
-                MAX_FINGERPRINT_BYTES / (1024 * 1024)
-            )));
         }
         let rel = path.strip_prefix(root).unwrap_or(&path);
-        files.push((
-            rel.to_string_lossy().replace('\\', "/"),
-            std::fs::read(path)?,
-        ));
+        files.push((rel.to_string_lossy().replace('\\', "/"), path));
     }
     Ok(())
 }
@@ -1632,7 +1619,25 @@ fn fingerprint_parts(files: &[(String, Vec<u8>)], extra: &[&str]) -> String {
 }
 
 fn fingerprint_update(hash: &mut u64, value: &[u8]) {
-    for byte in (value.len() as u64).to_le_bytes().iter().chain(value) {
+    fingerprint_update_raw(hash, &(value.len() as u64).to_le_bytes());
+    fingerprint_update_raw(hash, value);
+}
+
+fn fingerprint_file(hash: &mut u64, path: &Path) -> Result<()> {
+    let mut file = std::fs::File::open(path)?;
+    fingerprint_update_raw(hash, &file.metadata()?.len().to_le_bytes());
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = std::io::Read::read(&mut file, &mut buffer)?;
+        if read == 0 {
+            return Ok(());
+        }
+        fingerprint_update_raw(hash, &buffer[..read]);
+    }
+}
+
+fn fingerprint_update_raw(hash: &mut u64, value: &[u8]) {
+    for byte in value {
         *hash ^= u64::from(*byte);
         *hash = hash.wrapping_mul(0x100000001b3);
     }
@@ -2679,6 +2684,19 @@ mod tests {
         );
         assert!(matches!(result, Err(Error::InvalidRequest(_))));
         assert!(!manager.status("thread-1").unwrap().active);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn preview_app_fingerprints_large_selected_folder_without_buffering() {
+        let root = test_root();
+        std::fs::create_dir_all(&root).unwrap();
+        let large = std::fs::File::create(root.join("large.bin")).unwrap();
+        large.set_len(64 * 1024 * 1024 + 1).unwrap();
+
+        assert!(fingerprint_selected_dir(&root)
+            .unwrap()
+            .starts_with("fnv1a64:"));
         let _ = std::fs::remove_dir_all(root);
     }
 

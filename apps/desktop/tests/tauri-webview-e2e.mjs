@@ -1501,11 +1501,18 @@ async function runStaticWorkspacePreviewCheck(page, pid) {
     "utf8",
   );
   writeFileSync(join(workspace, "style.css"), "body { color: rgb(12, 34, 56); }", "utf8");
+  writeFileSync(join(workspace, "package.json"), '{"private":true,"scripts":{"dev":"node server.js"}}', "utf8");
+  writeFileSync(join(workspace, "server.js"), "setInterval(() => {}, 1000);", "utf8");
 
   try {
     await page.getByTestId("composer-input").fill(`/folder ${workspace}`);
     await page.getByTestId("composer-send").click();
     await page.getByTestId("open-artifact-browser").click();
+    await page.getByRole("combobox", { name: "Preview source" }).selectOption("app");
+    const reviewCommands = page.getByTestId("preview-runtime-preflight");
+    await reviewCommands.getByText("Review commands", { exact: true }).waitFor();
+    await reviewCommands.click();
+    await reviewCommands.getByText("Refresh commands", { exact: true }).waitFor();
     await page.getByRole("tab", { name: "Code", exact: true }).click();
     await page.getByRole("button", { name: "Workspace", exact: true }).click();
     await page.getByRole("button", { name: "index.html", exact: true }).click();

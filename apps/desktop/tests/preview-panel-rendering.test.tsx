@@ -713,6 +713,7 @@ try {
   });
   assert(runtimeMarkup.includes('data-testid="preview-source-selector"'), "Multiple preview sources should render a compact selector");
   assert(runtimeMarkup.includes("generated-app"), "App context should use the project folder title");
+  assert(runtimeMarkup.includes("Refresh commands"), "Runtime review should name the read-only command check");
   assert(runtimeMarkup.includes('data-testid="preview-runtime-preflight-details"'), "Runtime review should show preflight details");
   assert(runtimeMarkup.includes("pnpm install --ignore-scripts"), "Runtime review should show the exact install command");
   assert(runtimeMarkup.includes("may modify the selected folder"), "Selected-folder installs should show a mutation warning");

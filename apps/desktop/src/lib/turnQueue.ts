@@ -27,7 +27,7 @@ export function hasQueuedMessages(sessionId: string): boolean {
   return Boolean(useSessions.getState().queuedMessagesBySession[sessionId]?.length);
 }
 
-export async function drainQueuedMessages({
+export function drainQueuedMessages({
   sessionId,
   fallbackModel,
   queueDrainRef,
@@ -39,17 +39,17 @@ export async function drainQueuedMessages({
 }: {
   sessionId: string;
   fallbackModel?: string;
-  queueDrainRef: { current: Set<string> };
+  queueDrainRef: { current: Map<string, Promise<TurnRunResult | undefined>> };
   generationControllersRef: { current: Map<string, AbortController> };
   agents?: AgentModel[];
   setChatNotice: (notice: ChatNotice | null) => void;
   sessionMessages: (sessionId: string) => ChatMessage[];
   runTurn: (convo: ChatMessage[], selectedModel: string, sessionId: string) => Promise<TurnRunResult>;
 }): Promise<TurnRunResult | undefined> {
-  if (queueDrainRef.current.has(sessionId)) return undefined;
-  queueDrainRef.current.add(sessionId);
-  let lastResult: TurnRunResult | undefined;
-  try {
+  const activeDrain = queueDrainRef.current.get(sessionId);
+  if (activeDrain) return activeDrain;
+  const drain = (async (): Promise<TurnRunResult | undefined> => {
+    let lastResult: TurnRunResult | undefined;
     for (;;) {
       if (generationControllersRef.current.has(sessionId)) return lastResult;
       const selectedModel = queuedModelForSession(sessionId, fallbackModel, agents);
@@ -67,7 +67,12 @@ export async function drainQueuedMessages({
       );
       if (lastResult.status !== "done") return lastResult;
     }
-  } finally {
-    queueDrainRef.current.delete(sessionId);
-  }
+  })();
+  queueDrainRef.current.set(sessionId, drain);
+  const releaseDrain = () => {
+    if (queueDrainRef.current.get(sessionId) === drain)
+      queueDrainRef.current.delete(sessionId);
+  };
+  void drain.then(releaseDrain, releaseDrain);
+  return drain;
 }

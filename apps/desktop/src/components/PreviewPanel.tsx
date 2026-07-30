@@ -1960,7 +1960,7 @@ function PreviewRuntimeStatus({
           {onPreflight && (
             <button className="preview-runtime-button" data-testid="preview-runtime-preflight" disabled={busy || preflightBusy || active} onClick={onPreflight}>
               <Terminal size={13} />
-              <span>{preflight ? "Refresh review" : "Review run"}</span>
+              <span>{preflight ? "Refresh commands" : "Review commands"}</span>
             </button>
           )}
           {!active ? (

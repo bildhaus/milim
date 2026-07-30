@@ -32,7 +32,7 @@ Desktop diagnostics are local-only under `<MILIM_HOME>/logs` (normally `~/.milim
 | Workspace tools are missing | Select a folder. Host filesystem, shell, and Git tools are removed until a workspace exists. |
 | Guarded approval cannot run shell | Switch to Open approval or use the Docker sandbox when command execution is appropriate. |
 | Sandbox run fails | Start Docker, check `MILIM_DOCKER_BIN`, and verify the daemon can run containers. |
-| App preview will not Run | Open Preview → App, choose **Review run**, confirm the folder, exact commands, and source fingerprint, then choose **Run**. Any artifact or project change invalidates the review. |
+| App preview will not Run | Open Preview → App, choose **Review commands**, confirm the folder, exact commands, and source fingerprint, then choose **Run**. Any artifact or project change invalidates the review. |
 | App preview is active but unhealthy | The process is still running but the loopback readiness probe failed or the app has a compile error. Keep the URL, inspect the runtime logs, use **Prepare fix** to queue editable context, and wait for recovery or Stop. |
 | Preview says disconnected or stale | Status polling failed. Milim keeps the last-known runtime and URL instead of clearing the inspector; confirm the embedded server is reachable, then retry or reopen the inspector. |
 | URL preview controls stay disabled | Wait for the native child webview's real page-load-ready event. Only public HTTPS and loopback HTTP URLs are accepted; creation, navigation, and load errors appear in the inspector. |
