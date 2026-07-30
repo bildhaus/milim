@@ -95,11 +95,17 @@ cargo clippy --workspace --all-targets
 pnpm -C apps/desktop verify
 pnpm -C apps/desktop verify:tester-ready
 
+# Focused runtime contract and Windows canonical-thread benchmark
+pnpm -C apps/desktop verify:runtime-conformance
+pnpm -C apps/desktop perf:canonical
+
 # Site and documentation
 pnpm -C apps/site build
 ```
 
 `verify:tester-ready` includes the broader release and Tauri smoke path. Routine desktop changes normally use `pnpm -C apps/desktop verify`; platform release work should also follow the [release guide](https://docs.milim.ai/release).
+
+`verify:runtime-conformance` exercises deterministic local runtime-contract fixtures. On Windows, `perf:canonical` builds a debug Tauri binary and records the mock-backed canonical-thread benchmark.
 
 ## Documentation
 

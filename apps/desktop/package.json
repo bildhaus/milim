@@ -36,6 +36,8 @@
     "test:tauri-mobile-auth": "node tests/tauri-webview-e2e.mjs --mobile-auth-only",
     "test:tauri-mcp-apps": "node tests/tauri-webview-e2e.mjs --mcp-apps-only",
     "perf:tauri-dev": "node tests/tauri-dev-perf.mjs",
+    "perf:canonical": "npm run verify:tauri && node tests/tauri-dev-perf.mjs --binary",
+    "verify:runtime-conformance": "node tests/runtime-conformance.mjs",
     "package:release": "node scripts/package-release.mjs",
     "release:manifest": "node scripts/generate-release-manifest.mjs",
     "verify:release-manifest": "node scripts/verify-release-manifest.mjs",

@@ -709,6 +709,14 @@ mod tests {
         assert_eq!(claude.session_id.as_deref(), Some("native-1"));
         assert!(claude.allow_session_recovery);
 
+        let opencode = native_request::<crate::opencode_bridge::OpenCodeRunRequest>(
+            &request,
+            HarnessKind::OpenCode,
+        )
+        .ok()
+        .unwrap();
+        assert_eq!(opencode.session_id.as_deref(), Some("native-1"));
+
         let request_without_persistence: HarnessRunRequest = serde_json::from_value(json!({
             "prompt": "hello",
             "model": "model"
