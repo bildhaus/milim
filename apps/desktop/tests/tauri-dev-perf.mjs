@@ -1058,6 +1058,10 @@ async function enablePerfAndBypassOnboarding(page) {
       localStorage.setItem(perfKey, "1");
       localStorage.setItem(onboardingKey, value);
       localStorage.setItem(settingsKey, settings);
+      localStorage.setItem(
+        "milim.local.update-cards.seen-version",
+        await window.__TAURI_INTERNALS__.invoke("plugin:app|version"),
+      );
       await window.__TAURI_INTERNALS__.invoke("user_state_set", {
         key: onboardingKey,
         value,
