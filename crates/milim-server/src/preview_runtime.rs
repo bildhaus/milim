@@ -5,6 +5,11 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+#[cfg(windows)]
+use std::{
+    os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+    ptr,
+};
 
 use axum::body::Body;
 use axum::extract::State;
@@ -20,6 +25,12 @@ use tokio::process::{Child, Command};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tower_http::services::ServeDir;
+#[cfg(windows)]
+use windows_sys::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+};
 
 use milim_core::{Error, Result};
 
@@ -1127,6 +1138,21 @@ async fn run_preview_app(
             return;
         }
     };
+    #[cfg(windows)]
+    let mut process_job = match process_tree_job(&child) {
+        Ok(job) => Some(job),
+        Err(error) => {
+            let _ = child.start_kill();
+            fail_run(
+                &manager,
+                &thread_id,
+                &run_id,
+                "dev_server_start_failed",
+                &format!("failed to contain dev server process tree: {error}"),
+            );
+            return;
+        }
+    };
     let pid = child.id();
     let current = manager
         .with_run_entry(&thread_id, &run_id, |entry| {
@@ -1146,14 +1172,14 @@ async fn run_preview_app(
         terminate_child(&mut child).await;
         return;
     }
-    pipe_child_logs(
+    let mut stdout_log = pipe_child_logs(
         manager.clone(),
         thread_id.clone(),
         run_id.clone(),
         child.stdout.take(),
         "stdout",
     );
-    pipe_child_logs(
+    let mut stderr_log = pipe_child_logs(
         manager.clone(),
         thread_id.clone(),
         run_id.clone(),
@@ -1200,6 +1226,10 @@ async fn run_preview_app(
                 return;
             }
             _ = wait_for_cancel(&mut cancel) => {
+                #[cfg(windows)]
+                drop(process_job.take());
+                abort_child_log(&mut stdout_log).await;
+                abort_child_log(&mut stderr_log).await;
                 terminate_child(&mut child).await;
                 let _ = manager.with_run_entry(&thread_id, &run_id, |entry| {
                     entry.pid = None;
@@ -1253,6 +1283,14 @@ async fn run_install_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
+    #[cfg(windows)]
+    let mut process_job = match process_tree_job(&child) {
+        Ok(job) => Some(job),
+        Err(error) => {
+            let _ = child.start_kill();
+            return Err(error);
+        }
+    };
     let pid = child.id();
     let current = manager.with_run_entry(thread_id, run_id, |entry| {
         if entry.active {
@@ -1263,14 +1301,14 @@ async fn run_install_command(
         terminate_child(&mut child).await;
         return Ok(CommandOutcome::Cancelled);
     }
-    pipe_child_logs(
+    let mut stdout_log = pipe_child_logs(
         manager.clone(),
         thread_id.to_string(),
         run_id.to_string(),
         child.stdout.take(),
         "stdout",
     );
-    pipe_child_logs(
+    let mut stderr_log = pipe_child_logs(
         manager.clone(),
         thread_id.to_string(),
         run_id.to_string(),
@@ -1282,6 +1320,10 @@ async fn run_install_command(
         _ = wait_for_cancel(cancel) => None,
     };
     if status.is_none() {
+        #[cfg(windows)]
+        drop(process_job.take());
+        abort_child_log(&mut stdout_log).await;
+        abort_child_log(&mut stderr_log).await;
         terminate_child(&mut child).await;
         let _ = manager.with_run_entry(thread_id, run_id, |entry| entry.pid = None);
         return Ok(CommandOutcome::Cancelled);
@@ -1680,20 +1722,26 @@ fn pipe_child_logs<T>(
     run_id: String,
     pipe: Option<T>,
     stream: &'static str,
-) where
+) -> Option<JoinHandle<()>>
+where
     T: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
-    let Some(pipe) = pipe else {
-        return;
-    };
-    tokio::spawn(async move {
+    let pipe = pipe?;
+    Some(tokio::spawn(async move {
         let mut lines = BufReader::new(pipe).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             let _ = manager.with_run_entry(&thread_id, &run_id, |entry| {
                 push_child_log(entry, stream, &line)
             });
         }
-    });
+    }))
+}
+
+async fn abort_child_log(task: &mut Option<JoinHandle<()>>) {
+    if let Some(task) = task.take() {
+        task.abort();
+        let _ = task.await;
+    }
 }
 
 fn push_child_log(entry: &mut PreviewAppEntry, stream: &str, line: &str) {
@@ -2260,12 +2308,21 @@ fn safe_relative_path(value: &str) -> Result<PathBuf> {
 fn preview_command(name: &str) -> Command {
     #[cfg(windows)]
     let command = {
-        let binary = if name == "bun" {
-            "bun.exe".to_string()
+        let mut command = if name == "npm" {
+            windows_npm_command().unwrap_or_else(|| {
+                let mut command = Command::new("cmd.exe");
+                command.args(["/D", "/S", "/C", "call", "npm.cmd"]);
+                command
+            })
+        } else if name == "bun" {
+            Command::new("bun.exe")
         } else {
-            format!("{name}.cmd")
+            let mut command = Command::new("cmd.exe");
+            command
+                .args(["/D", "/S", "/C", "call"])
+                .arg(format!("{name}.cmd"));
+            command
         };
-        let mut command = Command::new(binary);
         command.creation_flags(0x08000000);
         command
     };
@@ -2276,6 +2333,50 @@ fn preview_command(name: &str) -> Command {
         command
     };
     command
+}
+
+#[cfg(windows)]
+fn windows_npm_command() -> Option<Command> {
+    std::env::split_paths(&std::env::var_os("PATH")?).find_map(|dir| {
+        let node = dir.join("node.exe");
+        let cli = dir.join("node_modules/npm/bin/npm-cli.js");
+        if !node.is_file() || !cli.is_file() {
+            return None;
+        }
+        let mut command = Command::new(node);
+        command.arg(cli);
+        Some(command)
+    })
+}
+
+#[cfg(windows)]
+fn process_tree_job(child: &Child) -> Result<OwnedHandle> {
+    let raw_job = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
+    if raw_job.is_null() {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let job = unsafe { OwnedHandle::from_raw_handle(raw_job as _) };
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    let configured = unsafe {
+        SetInformationJobObject(
+            job.as_raw_handle() as _,
+            JobObjectExtendedLimitInformation,
+            &limits as *const _ as *const _,
+            std::mem::size_of_val(&limits) as u32,
+        )
+    };
+    if configured == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let process = child
+        .raw_handle()
+        .ok_or_else(|| Error::Other("preview process exited before containment".to_string()))?;
+    let assigned = unsafe { AssignProcessToJobObject(job.as_raw_handle() as _, process as _) };
+    if assigned == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(job)
 }
 
 #[cfg(windows)]
@@ -2946,7 +3047,6 @@ mod tests {
             "npm preinstall did not start; logs: {:?}",
             manager.logs("thread-1").unwrap()
         );
-
         let stop_started = Instant::now();
         let status = manager.stop("thread-1").await.unwrap();
         assert!(stop_started.elapsed() < Duration::from_secs(5));
