@@ -20,6 +20,7 @@ const microUiOnly = process.argv.includes("--micro-ui-only");
 const workersOnly = process.argv.includes("--workers-only");
 const mcpAppsOnly = process.argv.includes("--mcp-apps-only");
 const sidebarMotionOnly = process.argv.includes("--sidebar-motion-only");
+const inboxSidebarOnly = process.argv.includes("--inbox-sidebar-only");
 const newChatSplitOnly = process.argv.includes("--new-chat-split-only");
 const commandPaletteOnly = process.argv.includes("--command-palette-only");
 const settingsOnly = process.argv.includes("--settings-only");
@@ -45,6 +46,10 @@ const screenshots = {
   mcpAppsLight: join(tmpdir(), "milim-tauri-webview-mcp-apps-light.png"),
   mcpAppsDark: join(tmpdir(), "milim-tauri-webview-mcp-apps-dark.png"),
   turnChanges: join(tmpdir(), "milim-tauri-webview-turn-changes.png"),
+  inboxProjects: join(tmpdir(), "milim-tauri-webview-inbox-projects.png"),
+  inboxSettings: join(tmpdir(), "milim-tauri-webview-inbox-settings.png"),
+  inboxActive: join(tmpdir(), "milim-tauri-webview-inbox-active.png"),
+  inboxSettled: join(tmpdir(), "milim-tauri-webview-inbox-settled.png"),
   failure: join(tmpdir(), "milim-tauri-webview-failure.png"),
 };
 
@@ -141,6 +146,10 @@ try {
     const errors = collectErrors(session.page);
     await runSidebarSectionMotionCheck(session.page, newChatSplitOnly);
     consoleErrors.push(...errors);
+  } else if (inboxSidebarOnly) {
+    const errors = collectErrors(session.page);
+    await runInboxSidebarCheck(session.page);
+    consoleErrors.push(...errors.filter((message) => !message.includes("/codex/models")));
   } else if (mcpAppsOnly) {
     await session.page.getByTestId("chat-shell").waitFor();
     await dismissOnboardingIfPresent(session.page);
@@ -1015,6 +1024,246 @@ async function runPersistenceAndChat(page, pid) {
   await closeAgents(page);
 
   return errors;
+}
+
+async function runInboxSidebarCheck(page) {
+  const fixture = await page.evaluate(async ({ projectA, projectB }) => {
+    const invoke = window.__TAURI_INTERNALS__.invoke;
+    const now = Date.now();
+    const sessions = [
+      {
+        id: "inbox-active-new",
+        title: "Cross-project newest",
+        messages: [],
+        settings: { folder: projectA },
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: "inbox-branch",
+        title: "Flattened branch",
+        messages: [],
+        settings: { folder: projectA },
+        parentId: "inbox-active-new",
+        threadWorkspace: {
+          mode: "worktree",
+          projectFolder: projectA,
+          branch: "e2e-branch",
+        },
+        createdAt: now,
+        updatedAt: now - 10_000,
+      },
+      {
+        id: "inbox-active-old",
+        title: "Cross-project older",
+        messages: [],
+        settings: { folder: projectB },
+        createdAt: now,
+        updatedAt: now - 60_000,
+      },
+      {
+        id: "inbox-settled-a",
+        title: "Settled Alpha",
+        messages: [],
+        settings: { folder: projectB },
+        settledAt: now - 1_000,
+        createdAt: now,
+        updatedAt: now - 120_000,
+      },
+      {
+        id: "inbox-settled-b",
+        title: "Settled Beta",
+        messages: [],
+        settings: { folder: "" },
+        settledAt: now - 2_000,
+        createdAt: now,
+        updatedAt: now - 180_000,
+      },
+    ];
+    await invoke("user_state_set", {
+      key: "milim.sessions",
+      value: JSON.stringify({
+        state: {
+          sessions,
+          projects: [
+            {
+              id: `project:${projectA}`,
+              name: "Workspace A",
+              folder: projectA,
+              icon: "terminal",
+              color: "#22aa88",
+              createdAt: now,
+              updatedAt: now,
+            },
+            {
+              id: `project:${projectB}`,
+              name: "Workspace B",
+              folder: projectB,
+              icon: "code",
+              color: "#aa6622",
+              createdAt: now,
+              updatedAt: now,
+            },
+          ],
+          activeId: "inbox-active-new",
+          unreadSessionIds: [],
+          sidebar: {
+            collapsedSectionIds: [],
+            pinnedSessionIds: ["inbox-active-old"],
+            pinnedSectionIds: [],
+            sessionOrder: sessions.map((session) => session.id),
+            sectionOrder: [],
+            projectFolders: [projectA, projectB],
+          },
+        },
+        version: 0,
+      }),
+    });
+    await invoke("user_state_set", {
+      key: "milim.ui",
+      value: JSON.stringify({
+        state: { settledThreadsEnabled: false, sidebarWidth: 236 },
+        version: 0,
+      }),
+    });
+    await invoke("user_state_set", {
+      key: "milim.onboarding",
+      value: JSON.stringify({
+        state: {
+          version: 1,
+          status: "completed",
+          selectedSetupPath: null,
+          completedSteps: ["finish"],
+          developerShowOnboarding: false,
+          completedAt: now,
+        },
+        version: 0,
+      }),
+    });
+    return { sessionIds: sessions.map((session) => session.id) };
+  }, { projectA: root, projectB: join(root, "src") });
+
+  await page.reload();
+  await page.getByTestId("chat-shell").waitFor();
+  await page.getByRole("complementary", { name: "Chats" }).waitFor();
+  await page.getByRole("button", { name: "Collapse Workspace A", exact: true }).waitFor();
+  await page.getByRole("button", { name: "Collapse Workspace B", exact: true }).waitFor();
+  await page.screenshot({ path: screenshots.inboxProjects, fullPage: false });
+
+  await openSettings(page);
+  await page.getByTestId("settings-section-app").click();
+  const projectsChoice = page.getByTestId("sidebar-organization-projects");
+  const inboxChoice = page.getByTestId("sidebar-organization-inbox");
+  await assertAttribute(projectsChoice, "aria-checked", "true");
+  await inboxChoice.click();
+  await assertAttribute(inboxChoice, "aria-checked", "true");
+  await page.screenshot({ path: screenshots.inboxSettings, fullPage: false });
+  await closeSettings(page);
+
+  await page.getByRole("complementary", { name: "Thread inbox" }).waitFor();
+  if (await page.locator(".sidebar .session-section-title").count()) {
+    throw new Error("Inbox mode should not render project section headers.");
+  }
+  const pinnedIds = await page
+    .locator('[data-sidebar-section-id="pinned"] [data-sidebar-session-id]')
+    .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-sidebar-session-id")));
+  if (JSON.stringify(pinnedIds) !== JSON.stringify(["inbox-active-old"])) {
+    throw new Error(`Inbox pinned placement is wrong: ${JSON.stringify(pinnedIds)}.`);
+  }
+  const activeIds = await page
+    .locator('[data-sidebar-section-id="inbox"] [data-sidebar-session-id]')
+    .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-sidebar-session-id")));
+  if (JSON.stringify(activeIds) !== JSON.stringify(["inbox-active-new", "inbox-branch"])) {
+    throw new Error(`Inbox activity order is wrong: ${JSON.stringify(activeIds)}.`);
+  }
+  await page
+    .locator('[data-sidebar-session-id="inbox-branch"] .inbox-session-branch')
+    .getByText("e2e-branch", { exact: true })
+    .waitFor();
+  await page
+    .locator('[data-sidebar-session-id="inbox-active-new"] .inbox-session-project')
+    .getByText("Workspace A", { exact: true })
+    .waitFor();
+  const projectMetadataColor = await page
+    .locator('[data-sidebar-session-id="inbox-active-new"] .inbox-session-project')
+    .evaluate((element) => getComputedStyle(element).color);
+  if (projectMetadataColor !== "rgb(34, 170, 136)") {
+    throw new Error(`Inbox project metadata should retain the custom project color, got ${projectMetadataColor}.`);
+  }
+  if (await page.locator(".inbox-project-badge").count()) {
+    throw new Error("Inbox project metadata should not use badge chrome.");
+  }
+
+  const settledToggle = page.getByRole("button", { name: /^Settled/ });
+  await assertAttribute(settledToggle, "aria-expanded", "false");
+  if (await page.locator("#sidebar-settled-list").count()) {
+    throw new Error("Settled should start collapsed in Inbox mode.");
+  }
+  const search = page.getByTestId("sidebar-search");
+  await search.fill("Settled Alpha");
+  await assertAttribute(settledToggle, "aria-expanded", "true");
+  await page.getByText("Settled Alpha", { exact: true }).waitFor();
+  await search.fill("");
+  await page.locator("#sidebar-settled-list").waitFor({ state: "detached" });
+  await page.screenshot({ path: screenshots.inboxActive, fullPage: false });
+
+  for (const [id, title, nextId] of [
+    ["inbox-active-new", "Cross-project newest", "inbox-branch"],
+    ["inbox-branch", "Flattened branch", "inbox-active-old"],
+  ]) {
+    const row = page.locator(`[data-sidebar-session-id="${id}"]`);
+    await row.locator(".session-side").hover();
+    await page.waitForTimeout(150);
+    await row.getByRole("button", { name: `Settle ${title}`, exact: true }).click();
+    await page.locator(`[data-sidebar-session-id="${nextId}"].active`).waitFor();
+  }
+
+  const finalActive = page.locator('[data-sidebar-session-id="inbox-active-old"]');
+  await finalActive.locator(".session-side").hover();
+  await page.waitForTimeout(150);
+  await finalActive
+    .getByRole("button", { name: "Settle Cross-project older", exact: true })
+    .click();
+  await page
+    .locator('[data-sidebar-section-id="settled"] [data-sidebar-session-id="inbox-active-old"].active')
+    .waitFor();
+  await assertAttribute(settledToggle, "aria-expanded", "true");
+  if (
+    await page
+      .locator('[data-sidebar-session-id="inbox-settled-b"] .inbox-session-project')
+      .count()
+  ) {
+    throw new Error("Loose Inbox threads should omit synthetic project metadata.");
+  }
+  await page.screenshot({ path: screenshots.inboxSettled, fullPage: false });
+
+  await finalActive.locator(".session-side").hover();
+  await page.waitForTimeout(150);
+  await finalActive
+    .getByRole("button", { name: "Unsettle Cross-project older", exact: true })
+    .click();
+  await page
+    .locator('[data-sidebar-section-id="pinned"] [data-sidebar-session-id="inbox-active-old"].active')
+    .waitFor();
+
+  await page.reload();
+  await page.getByTestId("chat-shell").waitFor();
+  await page.getByRole("complementary", { name: "Thread inbox" }).waitFor();
+
+  await openSettings(page);
+  await page.getByTestId("settings-section-app").click();
+  await assertAttribute(page.getByTestId("sidebar-organization-inbox"), "aria-checked", "true");
+  await page.getByTestId("sidebar-organization-projects").click();
+  await closeSettings(page);
+  await page.getByRole("complementary", { name: "Chats" }).waitFor();
+  await page.getByRole("button", { name: "Collapse Workspace A", exact: true }).waitFor();
+  await page.locator(".sidebar").getByText("Settled Alpha", { exact: true }).waitFor();
+  if (await page.locator(".inbox-session-section").count()) {
+    throw new Error("Turning Inbox off should restore Projects rendering.");
+  }
+  if (fixture.sessionIds.length !== 5) {
+    throw new Error("Inbox fixture was not seeded completely.");
+  }
 }
 
 async function runSidebarSectionMotionCheck(page, splitOnly = false) {
@@ -2942,16 +3191,13 @@ async function runSettingsLayoutCheck(page) {
   if (await openApprovalDefault.getAttribute("aria-checked") !== "true") {
     throw new Error("Open should be selectable as the configured new-chat approval default.");
   }
+  await page.getByTestId("settings-section-app").click();
+  const projectsChoice = page.getByTestId("sidebar-organization-projects");
+  const inboxChoice = page.getByTestId("sidebar-organization-inbox");
+  await assertAttribute(projectsChoice, "aria-checked", "true");
+  await inboxChoice.click();
+  await assertAttribute(inboxChoice, "aria-checked", "true");
   await page.getByTestId("settings-section-appearance").click();
-  const settledThreadsToggle = page.getByTestId("settled-threads-toggle");
-  await settledThreadsToggle.scrollIntoViewIfNeeded();
-  if (await settledThreadsToggle.getAttribute("aria-checked") !== "false") {
-    throw new Error("Settled threads should default off.");
-  }
-  await settledThreadsToggle.click();
-  if (await settledThreadsToggle.getAttribute("aria-checked") !== "true") {
-    throw new Error("Settled threads should be configurable.");
-  }
   const ridgelineToggle = page.getByTestId("empty-chat-ridgeline-toggle");
   await ridgelineToggle.scrollIntoViewIfNeeded();
   if (await ridgelineToggle.getAttribute("aria-checked") !== "true") {

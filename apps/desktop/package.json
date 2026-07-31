@@ -31,6 +31,7 @@
     "test:tauri-dev-onboarding": "node tests/tauri-dev-onboarding-e2e.mjs",
     "test:tauri-webview": "node tests/tauri-webview-e2e.mjs",
     "test:tauri-command-palette": "node tests/tauri-webview-e2e.mjs --command-palette-only",
+    "test:tauri-inbox-sidebar": "node tests/tauri-webview-e2e.mjs --inbox-sidebar-only",
     "test:tauri-settings": "node tests/tauri-webview-e2e.mjs --settings-only",
     "test:tauri-turn-changes": "node tests/tauri-webview-e2e.mjs --turn-changes-only",
     "test:tauri-mobile-auth": "node tests/tauri-webview-e2e.mjs --mobile-auth-only",

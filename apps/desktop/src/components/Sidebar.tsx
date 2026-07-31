@@ -42,6 +42,7 @@ const SIDEBAR_COLLAPSE_OVERSHOOT = 96;
 const SIDEBAR_SNAP_ANIMATION_MS = 180;
 const SIDEBAR_DRAG_THRESHOLD = 5;
 const SIDEBAR_SECTION_PREVIEW_LIMIT = 5;
+const SIDEBAR_INBOX_SECTION_ID = "inbox";
 const SIDEBAR_SETTLED_SECTION_ID = "settled";
 const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -111,6 +112,7 @@ type SessionGroup<T extends SidebarSessionLike = SidebarSession> = {
   projectId?: string;
   project?: Project;
   sessions: T[];
+  inbox?: boolean;
   settled?: boolean;
 };
 
@@ -192,6 +194,13 @@ export function sidebarThreadPullRequestOwner<T extends SidebarSessionLike>(
   return pullRequestOwnerForSession(session, pullRequestsBySession);
 }
 
+export function sidebarInboxPullRequestOwner<T extends SidebarSessionLike>(
+  session: T,
+  pullRequestsBySession: Record<string, PullRequestSnapshot>,
+): SidebarPullRequestOwner<T> | undefined {
+  return pullRequestOwnerForSession(session, pullRequestsBySession);
+}
+
 function sortBySidebarOrder<T extends SidebarSessionLike>(sessions: T[], sidebar: SessionSidebarState): T[] {
   const order = new Map(sidebar.sessionOrder.map((id, index) => [id, index]));
   return sessions.slice().sort((a, b) => {
@@ -202,6 +211,31 @@ function sortBySidebarOrder<T extends SidebarSessionLike>(sessions: T[], sidebar
     if (bOrder != null) return 1;
     return b.updatedAt - a.updatedAt;
   });
+}
+
+function sortByRecentActivity<T extends SidebarSessionLike>(sessions: T[]): T[] {
+  return sessions.slice().sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
+}
+
+function sortBySettledActivity<T extends SidebarSessionLike>(sessions: T[]): T[] {
+  return sessions.slice().sort(
+    (a, b) =>
+      (b.settledAt ?? 0) - (a.settledAt ?? 0) ||
+      b.updatedAt - a.updatedAt ||
+      a.id.localeCompare(b.id),
+  );
+}
+
+export function nextInboxSessionIdAfterSettle<T extends SidebarSessionLike>(
+  groups: Array<SessionGroup<T>>,
+  currentId: string,
+): string | undefined {
+  return sortByRecentActivity(
+    groups
+      .filter((group) => group.inbox && !group.settled)
+      .flatMap((group) => group.sessions)
+      .filter((session) => session.id !== currentId),
+  )[0]?.id;
 }
 
 export function groupSessionsByProjects<T extends SidebarSessionLike>(
@@ -225,6 +259,7 @@ export function groupSessionsByProjects<T extends SidebarSessionLike>(
       settings?.model,
       folder,
       folderLabel(folder),
+      projectByFolder.get(folder)?.name,
       settings?.sandbox ? "sandbox" : "",
       settings?.computerUse ? "computer" : "",
       settings?.privacy,
@@ -240,6 +275,46 @@ export function groupSessionsByProjects<T extends SidebarSessionLike>(
     return !folder || !archivedProjectFolders.has(folder);
   };
   const visibleAllSessions = sessions.filter(isVisibleSession);
+  if (settledThreadsEnabled) {
+    const visibleSessions = visibleAllSessions.filter(matches);
+    const activeSessions = visibleSessions.filter((session) => !session.settledAt);
+    const pinned = sortByRecentActivity(
+      activeSessions.filter((session) => pinnedSessions.has(session.id)),
+    );
+    const inbox = sortByRecentActivity(
+      activeSessions.filter((session) => !pinnedSessions.has(session.id)),
+    );
+    const settled = sortBySettledActivity(
+      visibleSessions.filter((session) => session.settledAt),
+    );
+    return [
+      ...(pinned.length
+        ? [{
+            id: SIDEBAR_PINNED_SECTION_ID,
+            label: "Pinned",
+            sessions: pinned,
+            inbox: true,
+          }]
+        : []),
+      ...(inbox.length
+        ? [{
+            id: SIDEBAR_INBOX_SECTION_ID,
+            label: "Inbox",
+            sessions: inbox,
+            inbox: true,
+          }]
+        : []),
+      ...(settled.length
+        ? [{
+            id: SIDEBAR_SETTLED_SECTION_ID,
+            label: "Settled",
+            sessions: settled,
+            inbox: true,
+            settled: true,
+          }]
+        : []),
+    ];
+  }
   const tier = (items: T[]) => {
     const ordered = sortBySidebarOrder(items, sidebar);
     const ids = new Set(ordered.map((session) => session.id));
@@ -267,9 +342,7 @@ export function groupSessionsByProjects<T extends SidebarSessionLike>(
     return { roots, withChildren };
   };
   const activeTier = tier(
-    visibleAllSessions.filter(
-      (session) => !settledThreadsEnabled || !session.settledAt,
-    ),
+    visibleAllSessions,
   );
   const visibleSessions = activeTier.roots.filter(matches);
   const normalSessions = visibleSessions.filter(
@@ -332,21 +405,7 @@ export function groupSessionsByProjects<T extends SidebarSessionLike>(
   projectGroups.sort((a, b) => {
     return (sectionOrder.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (sectionOrder.get(b.id) ?? Number.MAX_SAFE_INTEGER);
   });
-  const settledTier = tier(
-    settledThreadsEnabled
-      ? visibleAllSessions.filter((session) => session.settledAt)
-      : [],
-  );
-  const settledRoots = settledTier.roots.filter(matches);
-  const settledGroups = settledRoots.length
-    ? [{
-        id: SIDEBAR_SETTLED_SECTION_ID,
-        label: "Settled",
-        sessions: settledTier.withChildren(settledRoots),
-        settled: true,
-      }]
-    : [];
-  return [...pinnedGroups, ...projectGroups, ...chatGroups, ...settledGroups];
+  return [...pinnedGroups, ...projectGroups, ...chatGroups];
 }
 
 const PROJECT_ICON_OPTIONS: Array<{ id: ProjectIconId; label: string }> = [
@@ -679,6 +738,7 @@ export function Sidebar({
   const [dragging, setDragging] = useState<SidebarDragItem | null>(null);
   const [dragOver, setDragOver] = useState<SidebarDragTarget | null>(null);
   const [sectionVisibleLimits, setSectionVisibleLimits] = useState<Record<string, number>>(() => ({}));
+  const [settledExpanded, setSettledExpanded] = useState(false);
 
   useEffect(() => {
     if (!open || !focusSearchAfterOpenRef.current) return;
@@ -750,6 +810,9 @@ export function Sidebar({
       ),
     [projects, query, sessions, settledThreadsEnabled, sidebarState],
   );
+  useEffect(() => {
+    if (!settledThreadsEnabled) setSettledExpanded(false);
+  }, [settledThreadsEnabled]);
   const projectByFolder = useMemo(
     () => new Map(projects.filter((project) => !project.archivedAt).map((project) => [project.folder, project])),
     [projects],
@@ -812,7 +875,11 @@ export function Sidebar({
       for (const session of visible) {
         const folder = session.settings?.folder?.trim() ?? "";
         const isolated = session.threadWorkspace?.mode === "worktree";
-        if (!folder || (session.id !== activeId && !isolated)) continue;
+        if (
+          !folder ||
+          (!settledThreadsEnabled && session.id !== activeId && !isolated)
+        )
+          continue;
         targets.set(session.id, {
           sessionId: session.id,
           folder,
@@ -821,7 +888,7 @@ export function Sidebar({
       }
     }
     return [...targets.values()];
-  }, [activeId, groupedSessions, sectionVisibleLimits]);
+  }, [activeId, groupedSessions, sectionVisibleLimits, settledThreadsEnabled]);
   const pullRequestTargetsKey = pullRequestTargets
     .map((target) => `${target.sessionId}\0${target.folder}\0${target.branch ?? ""}`)
     .join("\x01");
@@ -989,6 +1056,26 @@ export function Sidebar({
     setConfirmArchiveId(null);
   }
 
+  function settleChat(id: string) {
+    const allInboxGroups = query.trim()
+      ? groupSessionsByProjects(
+          sessions,
+          projects,
+          sidebarState,
+          "",
+          true,
+        )
+      : groupedSessions;
+    const nextId =
+      settledThreadsEnabled && id === activeId
+        ? nextInboxSessionIdAfterSettle(allInboxGroups, id)
+        : undefined;
+    settleSession(id);
+    if (nextId) switchTo(nextId);
+    else if (settledThreadsEnabled && id === activeId) setSettledExpanded(true);
+    setConfirmArchiveId(null);
+  }
+
   function openSessionContextMenu(event: ReactMouseEvent, session: SidebarSessionLike, pinned: boolean) {
     const settleDisabled =
       !session.settledAt &&
@@ -1028,7 +1115,7 @@ export function Sidebar({
         disabled: settleDisabled,
         action: () => {
           if (session.settledAt) unsettleSession(session.id);
-          else settleSession(session.id);
+          else settleChat(session.id);
           setConfirmArchiveId(null);
         },
       }] : []),
@@ -1413,7 +1500,7 @@ export function Sidebar({
 
   if (!open) {
     return (
-      <aside className="sidebar collapsed" aria-label="Chats">
+      <aside className="sidebar collapsed" aria-label={settledThreadsEnabled ? "Thread inbox" : "Chats"}>
         <div className="sidebar-rail" data-testid="sidebar-rail">
           <div className="sidebar-rail-main">
             <button className="icon-btn" title="Expand sidebar" onClick={onToggle}>
@@ -1485,7 +1572,7 @@ export function Sidebar({
 
   return (
     <>
-    <aside ref={sidebarElementRef} className={"sidebar" + (sidebarResizing ? " resizing" : "")} aria-label="Chats" style={sidebarStyle}>
+    <aside ref={sidebarElementRef} className={"sidebar" + (sidebarResizing ? " resizing" : "")} aria-label={settledThreadsEnabled ? "Thread inbox" : "Chats"} style={sidebarStyle}>
       <div className="sidebar-inner">
         <div className="sidebar-head">
           <button className="icon-btn" title="Collapse sidebar" onClick={onToggle}>
@@ -1617,22 +1704,66 @@ export function Sidebar({
               const groupSessionIds = new Set(
                 group.sessions.map((session) => session.id),
               );
-              if (group.settled) {
+              if (group.inbox) {
+                const settledSection = Boolean(group.settled);
+                const pinnedSection =
+                  group.id === SIDEBAR_PINNED_SECTION_ID;
+                const inboxSectionExpanded =
+                  !settledSection ||
+                  searchActive ||
+                  settledExpanded ||
+                  activeIndex >= 0;
                 return (
                   <section
                     key={group.id}
                     data-sidebar-section-id={group.id}
-                    className="settled-session-section"
+                    className={
+                      "inbox-session-section" +
+                      (settledSection ? " settled-session-section" : "") +
+                      (pinnedSection ? " pinned" : "")
+                    }
                   >
+                    {settledSection ? (
+                      <button
+                        className="inbox-session-divider"
+                        type="button"
+                        aria-expanded={inboxSectionExpanded}
+                        aria-controls="sidebar-settled-list"
+                        onClick={() =>
+                          setSettledExpanded(
+                            (expanded) => !expanded,
+                          )}
+                      >
+                        <ChevronDown size={12} />
+                        <span>Settled</span>
+                        <span className="inbox-session-count">
+                          {totalSessions}
+                        </span>
+                      </button>
+                    ) : pinnedSection ? (
+                      <div
+                        className="inbox-session-divider"
+                        role="heading"
+                        aria-level={2}
+                      >
+                        <Pin size={12} />
+                        <span>Pinned</span>
+                      </div>
+                    ) : (
+                      <div
+                        className="inbox-session-divider"
+                        role="heading"
+                        aria-level={2}
+                      >
+                        <PanelIcon size={12} />
+                        <span>Inbox</span>
+                      </div>
+                    )}
+                    {inboxSectionExpanded && (
                     <div
-                      className="settled-session-divider"
-                      role="heading"
-                      aria-level={2}
+                      id={settledSection ? "sidebar-settled-list" : undefined}
+                      className="inbox-session-list"
                     >
-                      <Check size={12} />
-                      <span>Settled</span>
-                    </div>
-                    <div className="settled-session-list">
                       {visibleSessions.map((s) => {
                         const folder = projectFolderForSession(s);
                         const project = projectByFolder.get(folder);
@@ -1643,26 +1774,71 @@ export function Sidebar({
                             } as CSSProperties
                           : undefined;
                         const projectLabel =
-                          project?.name ?? (folder ? folderLabel(folder) : "Chats");
+                          project?.name ?? (folder ? folderLabel(folder) : "");
                         const pinned =
                           !s.parentId &&
                           sidebarState.pinnedSessionIds.includes(s.id);
-                        const tierChild = Boolean(
-                          s.parentId && groupSessionIds.has(s.parentId),
-                        );
+                        const parentWorkersRunning =
+                          runningWorkerParentThreads.has(s.id);
+                        const workerRunning =
+                          parentWorkersRunning ||
+                          s.worker?.status === "queued" ||
+                          s.worker?.status === "running";
+                        const generating =
+                          generatingSessions.has(s.id) || workerRunning;
+                        const unread = unreadSessions.has(s.id);
+                        const runtimeState = settledSection
+                          ? null
+                          : runtimePreviewSidebarState(s);
+                        const statusLabel = parentWorkersRunning
+                          ? "Workers running"
+                          : s.worker
+                            ? `Worker ${s.worker.status}`
+                            : generating
+                              ? "Working"
+                              : unread
+                                ? "Unread update"
+                                : "Ready";
+                        const threadPullRequestOwner = settledSection
+                          ? undefined
+                          : sidebarInboxPullRequestOwner(
+                              s,
+                              pullRequestsBySession,
+                            );
+                        const pullRequestSnapshot =
+                          threadPullRequestOwner?.snapshot;
+                        const pullRequest =
+                          threadPullRequestOwner?.pullRequest ?? null;
+                        const pullRequestState = pullRequest
+                          ? pullRequestReadiness(
+                              pullRequest,
+                              pullRequestSnapshot?.stale,
+                            )
+                          : null;
+                        const branchLabel =
+                          s.threadWorkspace?.branch || "Branch";
+                        const settleDisabled =
+                          generating || unread;
+                        const rowClass =
+                          "session-item inbox-session-item" +
+                          (settledSection
+                            ? " settled-session-item"
+                            : "") +
+                          (s.id === activeId ? " active" : "") +
+                          (generating ? " generating" : "") +
+                          (runtimeState
+                            ? " runtime-preview runtime-" + runtimeState
+                            : "") +
+                          (pinned ? " pinned" : "") +
+                          (confirmArchiveId === s.id
+                            ? " delete-pending"
+                            : "");
                         return (
                           <div
                             key={s.id}
                             data-sidebar-session-id={s.id}
                             data-sidebar-session-section-id={group.id}
-                            className={
-                              "session-item settled-session-item" +
-                              (tierChild ? " child-session" : "") +
-                              (s.id === activeId ? " active" : "") +
-                              (confirmArchiveId === s.id
-                                ? " delete-pending"
-                                : "")
-                            }
+                            className={rowClass}
                             style={projectStyle}
                             onContextMenu={(event) =>
                               openSessionContextMenu(event, s, pinned)}
@@ -1697,55 +1873,162 @@ export function Sidebar({
                               />
                             ) : (
                               <>
-                                <span
-                                  className={
-                                    "settled-project-badge" +
-                                    (projectColor ? " project-colored" : "")
-                                  }
-                                  title={projectLabel}
-                                  aria-label={projectLabel}
-                                >
-                                  {folder ? (
-                                    <ProjectIcon
-                                      icon={project?.icon}
-                                      collapsed
-                                      size={11}
-                                    />
-                                  ) : (
-                                    <PanelIcon size={11} />
-                                  )}
-                                </span>
-                                <span className="session-copy">
+                                <span className="session-copy inbox-session-copy">
                                   <HoverScrollText
                                     className="session-title"
+                                    innerClassName={
+                                      generating ? "shiny-text" : undefined
+                                    }
                                     text={s.title}
                                   />
-                                </span>
-                                <div className="session-side">
-                                  <span
-                                    className="session-side-indicator session-recency"
-                                    data-testid="session-recency"
-                                    title={`Updated ${new Date(s.updatedAt).toLocaleString()}`}
-                                  >
-                                    {sessionRecencyLabel(s.updatedAt)}
+                                  {(projectLabel || s.parentId) && (
+                                  <span className="inbox-session-metadata">
+                                    {projectLabel && (
+                                      <span
+                                        className="inbox-session-project"
+                                        title={projectLabel}
+                                        aria-label={`Project: ${projectLabel}`}
+                                      >
+                                        {projectLabel}
+                                      </span>
+                                    )}
+                                    {s.parentId && (
+                                      <span
+                                        className="inbox-session-branch"
+                                        title={branchLabel}
+                                        aria-label={branchLabel}
+                                      >
+                                        <GitBranch size={9} />
+                                        <span>{branchLabel}</span>
+                                      </span>
+                                    )}
                                   </span>
+                                  )}
+                                </span>
+                                <div
+                                  className={
+                                    "session-side" +
+                                    (!settledSection
+                                      ? " session-side-wide"
+                                      : "")
+                                  }
+                                >
+                                  {pullRequest && pullRequestState && (
+                                    <button
+                                      type="button"
+                                      className={`session-side-indicator session-pr-state ${pullRequestState.tone}`}
+                                      title={pullRequestAccessibleLabel(
+                                        pullRequest,
+                                        pullRequestSnapshot?.stale,
+                                      )}
+                                      aria-label={pullRequestAccessibleLabel(
+                                        pullRequest,
+                                        pullRequestSnapshot?.stale,
+                                      )}
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        switchVisibleSession(s.id);
+                                        onOpenGitPanel(
+                                          s.id,
+                                          "pull_request",
+                                        );
+                                      }}
+                                    >
+                                      <GitPullRequest size={13} />
+                                      <span aria-hidden="true" />
+                                    </button>
+                                  )}
+                                  {generating ? (
+                                    <WorkingSessionLoader
+                                      className="session-side-indicator"
+                                      data-testid="session-loader"
+                                      role="img"
+                                      title={statusLabel}
+                                      aria-label={statusLabel}
+                                    />
+                                  ) : unread ? (
+                                    <UnreadSessionLoader
+                                      className="session-side-indicator"
+                                      data-testid="session-loader"
+                                      role="img"
+                                      title={statusLabel}
+                                      aria-label={statusLabel}
+                                    />
+                                  ) : (
+                                    <span
+                                      className="session-side-indicator session-recency"
+                                      data-testid="session-recency"
+                                      title={`Updated ${new Date(s.updatedAt).toLocaleString()}`}
+                                    >
+                                      {sessionRecencyLabel(s.updatedAt)}
+                                    </span>
+                                  )}
                                   <div
                                     className="session-side-actions"
                                     aria-label="Thread actions"
                                   >
-                                    <button
-                                      className="session-side-btn"
-                                      type="button"
-                                      aria-label={`Unsettle ${s.title}`}
-                                      title="Unsettle chat"
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        unsettleSession(s.id);
-                                        setConfirmArchiveId(null);
-                                      }}
-                                    >
-                                      <ArrowUp size={12} />
-                                    </button>
+                                    {settledSection ? (
+                                      <button
+                                        className="session-side-btn"
+                                        type="button"
+                                        aria-label={`Unsettle ${s.title}`}
+                                        title="Unsettle chat"
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          unsettleSession(s.id);
+                                          setConfirmArchiveId(null);
+                                        }}
+                                      >
+                                        <ArrowUp size={12} />
+                                      </button>
+                                    ) : (
+                                      <>
+                                        {!s.parentId && (
+                                          <button
+                                            className={
+                                              "session-side-btn" +
+                                              (pinned ? " active" : "")
+                                            }
+                                            type="button"
+                                            aria-label={
+                                              pinned
+                                                ? `Unpin ${s.title}`
+                                                : `Pin ${s.title}`
+                                            }
+                                            title={
+                                              pinned
+                                                ? "Unpin chat"
+                                                : "Pin chat"
+                                            }
+                                            aria-pressed={pinned}
+                                            onClick={(event) => {
+                                              event.stopPropagation();
+                                              setConfirmArchiveId(null);
+                                              toggleSessionPinned(s.id);
+                                            }}
+                                          >
+                                            <Pin size={12} />
+                                          </button>
+                                        )}
+                                        <button
+                                          className="session-side-btn"
+                                          type="button"
+                                          aria-label={`Settle ${s.title}`}
+                                          title={
+                                            settleDisabled
+                                              ? "Thread still active"
+                                              : "Settle chat"
+                                          }
+                                          disabled={settleDisabled}
+                                          onClick={(event) => {
+                                            event.stopPropagation();
+                                            settleChat(s.id);
+                                          }}
+                                        >
+                                          <Check size={12} />
+                                        </button>
+                                      </>
+                                    )}
                                     <button
                                       className={
                                         "session-side-btn danger" +
@@ -1790,6 +2073,7 @@ export function Sidebar({
                         </div>
                       )}
                     </div>
+                    )}
                   </section>
                 );
               }

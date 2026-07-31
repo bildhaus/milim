@@ -61,6 +61,7 @@ type SessionGroup = {
   projectId?: string;
   project?: Project;
   sessions: SidebarSession[];
+  inbox?: boolean;
   settled?: boolean;
 };
 
@@ -74,13 +75,25 @@ const server = await createServer({
 try {
   const {
     groupSessionsByProjects,
+    nextInboxSessionIdAfterSettle,
     runningWorkerParentThreadIdsKey,
+    sidebarInboxPullRequestOwner,
     sidebarProjectPullRequestOwner,
     sidebarSectionNextRevealCount,
     sidebarThreadPullRequestOwner,
   } = await server.ssrLoadModule("/src/components/Sidebar.tsx") as {
     groupSessionsByProjects: (sessions: SidebarSession[], projects: Project[], sidebar: SessionSidebarState, query: string, settledThreadsEnabled?: boolean) => SessionGroup[];
+    nextInboxSessionIdAfterSettle: (groups: SessionGroup[], currentId: string) => string | undefined;
     runningWorkerParentThreadIdsKey: (records: Array<{ run: { parent_thread_id: string; status: string } }>) => string;
+    sidebarInboxPullRequestOwner: (
+      session: SidebarSession,
+      snapshots: Record<string, {
+        folder: string;
+        pullRequest: { number: number; headRefName: string } | null;
+        checkedAt: number;
+        stale: boolean;
+      }>,
+    ) => { session: SidebarSession; pullRequest: { number: number } } | undefined;
     sidebarProjectPullRequestOwner: (
       group: SessionGroup,
       snapshots: Record<string, {
@@ -238,6 +251,10 @@ try {
     "shared-checkout PRs should not remain on thread rows",
   );
   assert(
+    sidebarInboxPullRequestOwner(sharedNew, pullRequestSnapshots)?.pullRequest.number === 2,
+    "Inbox rows should own their shared-checkout PR state",
+  );
+  assert(
     sidebarThreadPullRequestOwner(worktreeOne, pullRequestSnapshots)?.pullRequest.number === 3 &&
       sidebarThreadPullRequestOwner(worktreeTwo, pullRequestSnapshots)?.pullRequest.number === 4,
     "worktree threads should retain their independent PR snapshots",
@@ -249,15 +266,15 @@ try {
       title: "Active parent",
       settings: { folder },
       createdAt: now,
-      updatedAt: now,
+      updatedAt: 20,
     },
     {
       id: "settled-parent",
       title: "Settled parent",
       settings: { folder },
-      settledAt: now,
+      settledAt: 40,
       createdAt: now,
-      updatedAt: now,
+      updatedAt: 10,
     },
     {
       id: "active-child",
@@ -265,39 +282,58 @@ try {
       settings: { folder },
       parentId: "settled-parent",
       createdAt: now,
-      updatedAt: now,
+      updatedAt: 50,
     },
     {
       id: "settled-child",
       title: "Settled child",
       settings: { folder },
       parentId: "active-parent",
-      settledAt: now,
+      settledAt: 60,
       createdAt: now,
-      updatedAt: now,
+      updatedAt: 30,
     },
     {
       id: "settled-pinned",
       title: "Pinned settled",
-      settledAt: now,
+      settledAt: 50,
+      createdAt: now,
+      updatedAt: 40,
+    },
+    {
+      id: "other-project-active",
+      title: "Other project active",
+      settings: { folder: "C:\\workspace-b" },
+      createdAt: now,
+      updatedAt: 45,
+    },
+  ];
+  const inboxProjects = [
+    ...(groups[0]?.project ? [groups[0].project] : []),
+    {
+      id: projectSectionId("C:\\workspace-b"),
+      name: "Workspace B",
+      folder: "C:\\workspace-b",
+      icon: "code" as const,
+      color: "#aa6622",
       createdAt: now,
       updatedAt: now,
     },
   ];
   const tierSidebar = {
     ...sidebar,
-    pinnedSessionIds: ["settled-pinned"],
+    pinnedSessionIds: ["active-parent", "settled-pinned"],
     sessionOrder: tierSessions.map((session) => session.id),
   };
   const currentModeGroups = groupSessionsByProjects(
     tierSessions,
-    groups[0]?.project ? [groups[0].project] : [],
+    inboxProjects,
     tierSidebar,
     "",
   );
   assert(
     currentModeGroups.find((group) => group.id === "pinned")?.sessions[0]?.id ===
-      "settled-pinned",
+      "active-parent",
     "disabled settle mode should preserve current pinned rendering",
   );
   assert(
@@ -307,18 +343,34 @@ try {
 
   const inboxGroups = groupSessionsByProjects(
     tierSessions,
-    groups[0]?.project ? [groups[0].project] : [],
+    inboxProjects,
     tierSidebar,
     "",
     true,
   );
-  const inboxProject = inboxGroups.find(
-    (group) => group.id === projectSectionId(folder),
+  assert(
+    !inboxGroups.some(
+      (group) =>
+        group.id === projectSectionId(folder) ||
+        group.id === SIDEBAR_CHATS_SECTION_ID,
+    ),
+    "Inbox mode should omit project and empty Chats sections",
   );
   assert(
-    JSON.stringify(inboxProject?.sessions.map((session) => session.id)) ===
-      JSON.stringify(["active-parent", "active-child"]),
-    "branches split across tiers should remain visible as roots in their own tier",
+    JSON.stringify(
+      inboxGroups.find((group) => group.id === "pinned")?.sessions.map(
+        (session) => session.id,
+      ),
+    ) === JSON.stringify(["active-parent"]),
+    "Inbox mode should keep active pinned threads in a separate activity-sorted group",
+  );
+  assert(
+    JSON.stringify(
+      inboxGroups.find((group) => group.id === "inbox")?.sessions.map(
+        (session) => session.id,
+      ),
+    ) === JSON.stringify(["active-child", "other-project-active"]),
+    "Inbox mode should flatten branches and sort active threads across projects by activity",
   );
   assert(
     !inboxGroups.some(
@@ -335,12 +387,28 @@ try {
   );
   assert(
     JSON.stringify(settledGroup.sessions.map((session) => session.id)) ===
-      JSON.stringify(["settled-parent", "settled-child", "settled-pinned"]),
-    "settled threads should preserve existing sidebar order",
+      JSON.stringify(["settled-child", "settled-pinned", "settled-parent"]),
+    "settled threads should sort by settlement time",
+  );
+  assert(
+    nextInboxSessionIdAfterSettle(inboxGroups, "active-child") ===
+      "other-project-active",
+    "settling the active thread should advance to the most recently active remaining thread",
+  );
+  assert(
+    nextInboxSessionIdAfterSettle(
+      [{
+        id: "inbox",
+        sessions: [tierSessions[2]],
+        inbox: true,
+      }],
+      "active-child",
+    ) == null,
+    "settling the only active thread should keep it open",
   );
   const settledSearch = groupSessionsByProjects(
     tierSessions,
-    groups[0]?.project ? [groups[0].project] : [],
+    inboxProjects,
     tierSidebar,
     "Pinned settled",
     true,
@@ -348,6 +416,18 @@ try {
   assert(
     settledSearch.at(-1)?.sessions[0]?.id === "settled-pinned",
     "search should include settled threads",
+  );
+  const projectSearch = groupSessionsByProjects(
+    tierSessions,
+    inboxProjects,
+    tierSidebar,
+    "Workspace B",
+    true,
+  );
+  assert(
+    projectSearch.find((group) => group.id === "inbox")?.sessions[0]?.id ===
+      "other-project-active",
+    "Inbox search should match compact project metadata",
   );
 
   assert(sidebarSectionNextRevealCount(12, 5, -1) === 5, "expanded sidebar sections should reveal a full next batch");
