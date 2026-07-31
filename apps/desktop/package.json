@@ -1,7 +1,7 @@
 {
   "name": "milim-desktop",
   "private": true,
-  "version": "0.2.13",
+  "version": "0.2.14",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -31,11 +31,14 @@
     "test:tauri-dev-onboarding": "node tests/tauri-dev-onboarding-e2e.mjs",
     "test:tauri-webview": "node tests/tauri-webview-e2e.mjs",
     "test:tauri-command-palette": "node tests/tauri-webview-e2e.mjs --command-palette-only",
+    "test:tauri-inbox-sidebar": "node tests/tauri-webview-e2e.mjs --inbox-sidebar-only",
     "test:tauri-settings": "node tests/tauri-webview-e2e.mjs --settings-only",
     "test:tauri-turn-changes": "node tests/tauri-webview-e2e.mjs --turn-changes-only",
     "test:tauri-mobile-auth": "node tests/tauri-webview-e2e.mjs --mobile-auth-only",
     "test:tauri-mcp-apps": "node tests/tauri-webview-e2e.mjs --mcp-apps-only",
     "perf:tauri-dev": "node tests/tauri-dev-perf.mjs",
+    "perf:canonical": "npm run verify:tauri && node tests/tauri-dev-perf.mjs --binary",
+    "verify:runtime-conformance": "node tests/runtime-conformance.mjs",
     "package:release": "node scripts/package-release.mjs",
     "release:manifest": "node scripts/generate-release-manifest.mjs",
     "verify:release-manifest": "node scripts/verify-release-manifest.mjs",

@@ -862,71 +862,113 @@ assert.deepEqual(
   },
 );
 
-let selectedCodexThread = "";
-let selectedClaudeSessions = 0;
-let selectedImageUrl = "";
-const selectedAccountResult = await runSelectedAccountRuntimeTurn({
-  codexModel: "gpt-5",
-  claudeModel: "sonnet",
-  accountRuntime: {
-    codexThreadId: "stored-codex",
-    claudeSessionId: "stored-claude",
+const selectedRuntimeCases = [
+  {
+    kind: "codex",
+    model: "gpt-5",
+    modelSelection: { codexModel: "gpt-5" },
+    accountRuntime: { codexThreadId: "stored-codex" },
   },
-  promptContext: accountPromptContext,
-  conversation: [{ role: "user", content: "selected" }],
-  prepareOutbound: async (_contextMessages, conversation) => ({
-    conversation,
-    outbound: [],
-  }),
-  beginAssistant: () => {},
-  checkpointWorkspace: async () => {},
-  workspace: "C:\\work",
-  reasoningEffort: "medium",
-  toolApproval: "guarded",
-  toolApprovalGrant: false,
-  planMode: false,
-  append: () => {},
-  appendThinking: () => {},
-  flush: () => {},
-  appendStreamEvent: () => {},
-  completeStreamEvent: () => {},
-  captureRuntimeMetrics: () => {},
-  captureProviderLimit: () => {},
-  setCodexThreadId: (threadId) => {
-    selectedCodexThread = threadId;
+  {
+    kind: "claude",
+    model: "sonnet",
+    modelSelection: { claudeModel: "sonnet" },
+    accountRuntime: { claudeSessionId: "stored-claude" },
   },
-  appendImage: (event) => {
-    selectedImageUrl = event.url ?? "";
+  {
+    kind: "opencode",
+    model: "openai/gpt-opencode",
+    modelSelection: { opencodeModel: "openai/gpt-opencode" },
+    accountRuntime: { opencodeSessionId: "stored-opencode" },
   },
-  ensureClaudeSessionId: () => {
-    selectedClaudeSessions += 1;
-    return "new-claude";
+  {
+    kind: "pi",
+    model: "openai-codex/gpt-pi",
+    modelSelection: { piModel: "openai-codex/gpt-pi" },
+    accountRuntime: { piSessionId: "stored-pi" },
   },
-  streamHarnessRun: async (harnessId, request, onEvent) => {
-    assert.equal(harnessId, "codex");
-    assert.equal(request.native_session_id, "stored-codex");
-    onEvent(harnessEnvelope({
-      type: "session_established",
-      native_session_id: "new-codex",
-      model: "gpt-5",
-    }));
-    onEvent(harnessEnvelope({
-      type: "image_generated",
-      id: "img-selected",
-      status: "completed",
-      url: "https://example.com/selected.png",
-    }));
-    onEvent(harnessEnvelope({
-      type: "turn_completed",
-      native_session_id: "new-codex",
-      status: "done",
-    }));
-  },
-});
-assert.equal(selectedAccountResult?.status, "done");
-assert.equal(selectedCodexThread, "new-codex");
-assert.equal(selectedImageUrl, "https://example.com/selected.png");
-assert.equal(selectedClaudeSessions, 0);
+] as const;
+
+for (const selected of selectedRuntimeCases) {
+  let selectedSession = "";
+  let selectedImageUrl = "";
+  let claudeSessionReads = 0;
+  const setSelectedSession = (sessionId: string) => {
+    selectedSession = sessionId;
+  };
+  const result = await runSelectedAccountRuntimeTurn({
+    ...selected.modelSelection,
+    accountRuntime: selected.accountRuntime,
+    promptContext: accountPromptContext,
+    conversation: [{ role: "user", content: `selected ${selected.kind}` }],
+    prepareOutbound: async (_contextMessages, conversation) => ({
+      conversation,
+      outbound: [],
+    }),
+    beginAssistant: () => {},
+    checkpointWorkspace: async () => {},
+    workspace: "C:\\work",
+    reasoningEffort: "medium",
+    toolApproval: "guarded",
+    toolApprovalGrant: false,
+    planMode: false,
+    append: () => {},
+    appendThinking: () => {},
+    flush: () => {},
+    appendStreamEvent: () => {},
+    completeStreamEvent: () => {},
+    captureRuntimeMetrics: () => {},
+    captureProviderLimit: () => {},
+    setCodexThreadId: setSelectedSession,
+    appendImage: (event) => {
+      selectedImageUrl = event.url ?? "";
+    },
+    ensureClaudeSessionId: () => {
+      claudeSessionReads += 1;
+      return `stored-${selected.kind}`;
+    },
+    setOpenCodeSessionId: setSelectedSession,
+    setPiSessionId: setSelectedSession,
+    streamHarnessRun: async (harnessId, request, onEvent) => {
+      assert.equal(harnessId, selected.kind);
+      assert.equal(request.model, selected.model);
+      assert.equal(request.native_session_id, `stored-${selected.kind}`);
+      assert.equal(
+        request.persist_session,
+        selected.kind === "codex" || selected.kind === "pi",
+      );
+      onEvent(harnessEnvelope({
+        type: "session_established",
+        native_session_id: `new-${selected.kind}`,
+        model: selected.model,
+      }, selected.kind));
+      if (selected.kind === "codex") {
+        onEvent(harnessEnvelope({
+          type: "image_generated",
+          id: "img-selected",
+          status: "completed",
+          url: "https://example.com/selected.png",
+        }));
+      }
+      onEvent(harnessEnvelope({
+        type: "turn_completed",
+        native_session_id: `new-${selected.kind}`,
+        status: "done",
+      }, selected.kind));
+    },
+  });
+
+  assert.equal(result?.status, "done");
+  assert.equal(claudeSessionReads, selected.kind === "claude" ? 1 : 0);
+  assert.equal(
+    selectedSession,
+    selected.kind === "claude" ? "" : `new-${selected.kind}`,
+  );
+  assert.equal(
+    selectedImageUrl,
+    selected.kind === "codex" ? "https://example.com/selected.png" : "",
+  );
+}
 
 let selectedPiSession = "";
 const selectedPiResult = await runSelectedAccountRuntimeTurn({

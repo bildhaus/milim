@@ -8,7 +8,8 @@ export type SettingSearchEntry = {
 };
 
 export const SETTINGS_SEARCH_ENTRIES: SettingSearchEntry[] = [
-  { id: "app-window-layout", label: "Window and layout", section: "app", aliases: ["app", "general", "always on top", "sidebar", "ui size", "zoom", "account usage", "quota", "codex", "claude", "new chat"] },
+  { id: "app-window-layout", label: "Window and layout", section: "app", aliases: ["app", "general", "always on top", "ui size", "zoom", "account usage", "quota", "codex", "claude", "new chat"] },
+  { id: "app-sidebar-organization", label: "Sidebar organization", section: "app", aliases: ["sidebar", "projects", "inbox", "settle", "settled", "finished threads", "recent activity", "folders", "organization"] },
   { id: "chat-composer", label: "Composer", section: "chat", aliases: ["send shortcut", "enter", "density"] },
   { id: "chat-threads", label: "Threads", section: "chat", aliases: ["auto title", "ai names", "naming model"] },
   { id: "chat-new-thread", label: "New-chat behavior", section: "chat", aliases: ["inherit", "configured defaults", "memory", "privacy", "sandbox", "approval", "delegation"] },
@@ -18,7 +19,7 @@ export const SETTINGS_SEARCH_ENTRIES: SettingSearchEntry[] = [
   { id: "chat-ai-completion", label: "AI composer completion", section: "chat", aliases: ["ghost text", "local provider", "privacy", "tab"] },
   { id: "appearance-theme", label: "Theme", section: "appearance", aliases: ["custom", "edit", "delete", "palette"] },
   { id: "appearance-chat-surface", label: "Chat surface", section: "appearance", aliases: ["layout", "message width", "avatars"] },
-  { id: "appearance-sidebar-colors", label: "Sidebar", section: "appearance", aliases: ["collapsed rail", "regular rail", "split rail", "centered rail", "thread colors", "thread names", "automatic color", "settle", "settled", "finished threads", "inbox", "folders", "icons"] },
+  { id: "appearance-sidebar-colors", label: "Sidebar appearance", section: "appearance", aliases: ["collapsed rail", "regular rail", "split rail", "centered rail", "thread colors", "thread names", "automatic color", "icons"] },
   { id: "appearance-empty-chat-ridgeline", label: "Empty-chat ridgeline", section: "appearance", aliases: ["usage", "activity", "chart", "composer", "empty thread"] },
   { id: "appearance-code-blocks", label: "Code blocks", section: "appearance", aliases: ["theme", "syntax"] },
   { id: "appearance-interface-sounds", label: "Interface sounds", section: "appearance", aliases: ["sound", "audio", "feedback", "cuelume", "finished", "completion", "attention", "approval", "alert"] },

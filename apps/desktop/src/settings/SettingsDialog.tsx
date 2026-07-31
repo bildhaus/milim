@@ -1013,6 +1013,18 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                 </div>
               </div>
             </SettingsBlock>
+            <SettingsBlock title="Sidebar organization" data-setting-id="app-sidebar-organization" className={settingHighlightClass("app-sidebar-organization").trim()}>
+              <SettingsChoiceGroup<"projects" | "inbox">
+                value={settledThreadsEnabled ? "inbox" : "projects"}
+                onChange={(mode) => setSettledThreadsEnabled(mode === "inbox")}
+                testIdPrefix="sidebar-organization"
+                ariaLabel="Sidebar organization"
+                options={[
+                  { value: "projects", label: "Projects", detail: "Group threads by project and preserve manual ordering." },
+                  { value: "inbox", label: "Inbox", detail: "Sort active threads by recent activity and fold settled threads into the footer." },
+                ]}
+              />
+            </SettingsBlock>
             <SettingsBlock title="Window & layout" data-setting-id="app-window-layout" className={settingHighlightClass("app-window-layout").trim()}>
               <div className="setting-stack">
                 <div className="setting-toggle-row">
@@ -1752,18 +1764,6 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                     onChange={setAutoColorThreadNames}
                     ariaLabel="Automatically color project thread names"
                     testId="auto-color-thread-names-toggle"
-                  />
-                </div>
-                <div className="setting-toggle-row">
-                  <div>
-                    <strong>Settled threads</strong>
-                    <span>Move finished threads into a compact tier at the bottom of the sidebar.</span>
-                  </div>
-                  <Toggle
-                    checked={settledThreadsEnabled}
-                    onChange={setSettledThreadsEnabled}
-                    ariaLabel="Settled threads"
-                    testId="settled-threads-toggle"
                   />
                 </div>
               </div>

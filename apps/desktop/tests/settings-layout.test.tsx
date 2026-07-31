@@ -35,7 +35,12 @@ assert(source.includes('data-setting-id="system-secret-storage"'), "System setti
 assert(source.includes('testIdPrefix="browser-storage"'), "Browser storage should use the accessible choice control");
 assert(source.includes('{ value: "open", label: "Open", detail: "Run without approval in trusted workspaces." }'), "Configured chat defaults should offer Open approval");
 assert(source.includes('testIdPrefix="sidebar-rail-style"'), "Appearance settings should expose collapsed sidebar rail styles");
-assert(source.includes('testId="settled-threads-toggle"'), "Appearance settings should expose settled threads");
+assert(source.includes('data-setting-id="app-sidebar-organization"'), "General settings should expose sidebar organization");
+assert(source.includes('testIdPrefix="sidebar-organization"'), "Sidebar organization should use the accessible choice control");
+assert(source.includes('ariaLabel="Sidebar organization"'), "Sidebar organization should expose its structural label");
+assert(source.includes('{ value: "projects", label: "Projects", detail: "Group threads by project and preserve manual ordering." }'), "Sidebar organization should describe Projects mode");
+assert(source.includes('{ value: "inbox", label: "Inbox", detail: "Sort active threads by recent activity and fold settled threads into the footer." }'), "Sidebar organization should describe Inbox mode");
+assert(!source.includes('testId="settled-threads-toggle"'), "Appearance should no longer own Inbox organization");
 assert(source.includes('data-testid="browser-data-clear"'), "Browser data should have an explicit clear action");
 assert(source.includes('data-testid="developer-show-update-cards"'), "Developer settings should preview update cards");
 assert(!source.includes("filteredSettingsSections"), "Search should not switch the active section while typing");
@@ -102,7 +107,9 @@ equal(matchingSettingsEntries("worktree")[0]?.id, "workspace-new-chat", "Search 
 equal(matchingSettingsEntries("ghost text")[0]?.id, "chat-ai-completion", "Search should find composer completion");
 equal(matchingSettingsEntries("ridgeline")[0]?.id, "appearance-empty-chat-ridgeline", "Search should find the empty-chat ridgeline preference");
 equal(matchingSettingsEntries("split rail")[0]?.id, "appearance-sidebar-colors", "Search should find collapsed sidebar rail styles");
-equal(matchingSettingsEntries("settled")[0]?.id, "appearance-sidebar-colors", "Search should find settled threads");
+equal(matchingSettingsEntries("inbox")[0]?.id, "app-sidebar-organization", "Search should find Inbox organization under General");
+equal(matchingSettingsEntries("settled")[0]?.id, "app-sidebar-organization", "Search should find settled threads under General");
+equal(matchingSettingsEntries("sidebar organization")[0]?.id, "app-sidebar-organization", "Search should find the structural sidebar choice");
 equal(matchingSettingsEntries("thread colors")[0]?.id, "appearance-sidebar-colors", "Search should find automatic project thread colors");
 equal(matchingSettingsEntries("cookies")[0]?.id, "browser-data", "Search should find browser data controls");
 equal(matchingSettingsEntries("sheets")[0]?.id, "google-workspace", "Search should find Google Workspace controls");

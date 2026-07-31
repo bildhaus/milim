@@ -11,7 +11,7 @@ Release artifacts target Windows and macOS. Linux packaging is intentionally dis
 ## What Milim does
 
 - **Keep one canonical thread.** Workspace context, conversation, and review history remain together instead of fragmenting by provider.
-- **Set aside finished threads.** An opt-in Settled tier keeps completed work accessible at the bottom of the sidebar without archiving it or changing retention.
+- **Work from a thread inbox.** A General preference can flatten active work by recent activity, keep quiet project context beneath each thread, and fold completed threads into a Settled footer without archiving them.
 - **Hot-swap models.** Switch the next turn between hosted providers, local Ollama or LM Studio models, and separately installed Codex, Claude, OpenCode, or Pi runtimes.
 - **Keep local control.** Project selection, model routing, tool approvals, local persistence, and outbound privacy boundaries stay explicit.
 - **Approve execution, then review the result.** Review is the new-chat default for consequential tool calls; configured defaults may opt into Open, while changing workspace folders resets approval to Review. Built-in Git views keep resulting diffs, checkpoints, and recovery beside the thread.
@@ -95,11 +95,17 @@ cargo clippy --workspace --all-targets
 pnpm -C apps/desktop verify
 pnpm -C apps/desktop verify:tester-ready
 
+# Focused runtime contract and Windows canonical-thread benchmark
+pnpm -C apps/desktop verify:runtime-conformance
+pnpm -C apps/desktop perf:canonical
+
 # Site and documentation
 pnpm -C apps/site build
 ```
 
 `verify:tester-ready` includes the broader release and Tauri smoke path. Routine desktop changes normally use `pnpm -C apps/desktop verify`; platform release work should also follow the [release guide](https://docs.milim.ai/release).
+
+`verify:runtime-conformance` exercises deterministic local runtime-contract fixtures. On Windows, `perf:canonical` builds a debug Tauri binary and records the mock-backed canonical-thread benchmark.
 
 ## Documentation
 

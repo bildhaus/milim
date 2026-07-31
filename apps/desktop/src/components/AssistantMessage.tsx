@@ -150,24 +150,39 @@ function compactToolNames(parts: ChatStreamEventPart[]): string {
   return joined.length > 90 ? `${joined.slice(0, 89)}...` : joined;
 }
 
+function lastFailedEvent(parts: ChatStreamPart[]): ChatStreamEventPart | undefined {
+  for (let index = parts.length - 1; index >= 0; index -= 1) {
+    const part = parts[index];
+    if (part.kind === "event" && part.status === "error") return part;
+  }
+  return undefined;
+}
+
+function failureSummary(part: ChatStreamEventPart): string {
+  return part.detail ? `${part.label} · ${part.detail}` : part.label;
+}
+
 function StreamToolGroup({ group }: { group: ChatStreamToolGroup }) {
-  const status = group.parts.some((part) => part.status === "error")
-    ? "error"
-    : "done";
+  const failure = lastFailedEvent(group.parts);
+  const status = failure ? "error" : "done";
   return (
     <details
       className="stream-tool-group"
       data-testid="assistant-stream-tool-group"
+      open={failure != null}
     >
       <summary className={`stream-event stream-event-tool stream-event-${status}`}>
         <span className="stream-event-icon" aria-hidden="true">
           <StreamIcon icon="tool" status={status} />
         </span>
         <span className="stream-event-label">
-          Used {group.parts.length} tools
+          {failure ? "Work stopped" : `Used ${group.parts.length} tools`}
         </span>
-        <code className="stream-event-detail">
-          {compactToolNames(group.parts)}
+        <code
+          className="stream-event-detail"
+          role={failure ? "alert" : undefined}
+        >
+          {failure ? failureSummary(failure) : compactToolNames(group.parts)}
         </code>
       </summary>
       <div className="stream-tool-group-body">
@@ -230,24 +245,22 @@ function StreamWorkGroup({
   streaming?: boolean;
 }) {
   const liveSummary = streaming ? liveWorkGroupSummary(group) : null;
+  const failure = lastFailedEvent(group.parts);
   const status =
     liveSummary?.status ??
-    (group.parts.some(
-      (part) => part.kind === "event" && part.status === "error",
-    )
-      ? "error"
-      : "done");
+    (failure ? "error" : "done");
   return (
     <details
       className="stream-tool-group stream-work-group"
       data-testid="assistant-stream-work-group"
+      open={streaming || failure != null}
     >
       <summary
         className={`stream-event stream-event-${liveSummary?.eventType ?? "tool"} stream-event-${status}`}
       >
         <span className="stream-event-icon" aria-hidden="true">
           <StreamIcon
-            icon={liveSummary?.icon ?? "thinking"}
+            icon={liveSummary?.icon ?? failure?.icon ?? "thinking"}
             status={status}
           />
         </span>
@@ -258,7 +271,9 @@ function StreamWorkGroup({
           }
         >
           {liveSummary?.label ??
-            (durationMs != null && durationMs > 0
+            (failure
+              ? "Work stopped"
+              : durationMs != null && durationMs > 0
               ? `Worked for ${formatDuration(durationMs)}`
               : `Worked through ${group.parts.length} steps`)}
         </span>
@@ -267,6 +282,10 @@ function StreamWorkGroup({
             detail={liveSummary.detail}
             running={liveSummary.status === "running"}
           />
+        ) : failure ? (
+          <code className="stream-event-detail" role="alert">
+            {failureSummary(failure)}
+          </code>
         ) : (
           <code className="stream-event-detail">{workGroupDetail(group)}</code>
         )}
@@ -278,7 +297,8 @@ function StreamWorkGroup({
               <ThinkingBlock
                 key={`${part.kind}-${index}`}
                 content={part.content}
-                streaming={false}
+                streaming={streaming && index === group.parts.length - 1}
+                nested
               />
             );
           if (part.kind === "event")
@@ -353,9 +373,11 @@ function activityCueForParts(
 function ThinkingBlock({
   content,
   streaming,
+  nested = false,
 }: {
   content: string;
   streaming: boolean;
+  nested?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const lastContent = useRef(content);
@@ -382,15 +404,18 @@ function ThinkingBlock({
       }}
     >
       <summary
-        className={`stream-event stream-event-thinking${streaming ? " stream-event-running" : ""}`}
+        className={`stream-event stream-event-thinking${streaming && !nested ? " stream-event-running" : ""}`}
       >
         <span className="stream-event-icon" aria-hidden="true">
           <StreamIcon icon="thinking" />
         </span>
         <span
-          className={"stream-event-label" + (streaming ? " shiny-text" : "")}
+          className={
+            "stream-event-label" +
+            (streaming && !nested ? " shiny-text" : "")
+          }
         >
-          {streaming ? "reasoning..." : "Reasoning"}
+          {streaming && !nested ? "reasoning..." : "Reasoning"}
         </span>
         <span className="stream-reasoning-meta">
           {streaming ? "live" : `${charCount.toLocaleString()} chars`}

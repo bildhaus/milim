@@ -13,6 +13,10 @@ const siteWorkflow = readFileSync(
   process.env.MILIM_SITE_WORKFLOW_PATH || join(repoRoot, ".github", "workflows", "site.yml"),
   "utf8",
 );
+const desktopPackage = JSON.parse(readFileSync(join(appRoot, "package.json"), "utf8"));
+const runtimeEvidenceJobStart = ciWorkflow.indexOf("\n  runtime-evidence:");
+if (runtimeEvidenceJobStart < 0) throw new Error("CI workflow must include runtime-evidence");
+const runtimeEvidenceJob = ciWorkflow.slice(runtimeEvidenceJobStart);
 
 const expectedArtifacts = [
   { artifact: "macos-universal", os: "macos-latest", args: "--target universal-apple-darwin --bundles app,dmg" },
@@ -118,6 +122,63 @@ for (const needle of [
 ]) {
   assertIncludes(ciWorkflow, needle, "CI workflow");
 }
+for (const line of [
+  '    tags: ["v*"]',
+  "  pull_request:",
+  "  workflow_dispatch:",
+]) {
+  assertLineOccurrences(ciWorkflow, line, 1, "CI workflow trigger");
+}
+
+assertEqual(
+  desktopPackage.scripts["verify:runtime-conformance"],
+  "node tests/runtime-conformance.mjs",
+  "runtime conformance script",
+);
+assertEqual(
+  desktopPackage.scripts["perf:canonical"],
+  "npm run verify:tauri && node tests/tauri-dev-perf.mjs --binary",
+  "canonical benchmark script",
+);
+assertEqual(desktopPackage.scripts["perf:tauri-dev"], "node tests/tauri-dev-perf.mjs", "Tauri dev benchmark script");
+assertNotIncludes(desktopPackage.scripts.verify, "verify:runtime-conformance", "default desktop verification");
+assertNotIncludes(desktopPackage.scripts.verify, "perf:canonical", "default desktop verification");
+
+for (const needle of [
+  "name: Runtime evidence (Windows)",
+  "runs-on: windows-latest",
+  "pnpm -C apps/desktop install --frozen-lockfile",
+  "uses: actions/upload-artifact@v4",
+]) {
+  assertIncludes(runtimeEvidenceJob, needle, "runtime evidence job");
+}
+for (const line of [
+  "    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')",
+  "        run: pnpm -C apps/desktop verify:runtime-conformance",
+  "          MILIM_CONFORMANCE_ARTIFACT_DIR: ${{ github.workspace }}/apps/desktop/tester-artifacts/runtime-evidence",
+  "        run: pnpm -C apps/desktop perf:canonical",
+  "          MILIM_PERF_ARTIFACT_DIR: ${{ github.workspace }}/apps/desktop/tester-artifacts/runtime-evidence",
+  "        uses: actions/upload-artifact@v4",
+  "          name: runtime-evidence-windows",
+  "          path: apps/desktop/tester-artifacts/runtime-evidence",
+  "          if-no-files-found: error",
+]) {
+  assertLineOccurrences(runtimeEvidenceJob, line, 1, "runtime evidence job");
+}
+assertLineOccurrences(runtimeEvidenceJob, "        if: always()", 2, "runtime evidence job");
+
+assertBefore(
+  runtimeEvidenceJob,
+  "pnpm -C apps/desktop verify:runtime-conformance",
+  "pnpm -C apps/desktop perf:canonical",
+  "runtime evidence job",
+);
+assertBefore(
+  runtimeEvidenceJob,
+  "pnpm -C apps/desktop perf:canonical",
+  "actions/upload-artifact@v4",
+  "runtime evidence job",
+);
 
 for (const needle of ["branches: [main]", "Optional feature smoke"]) {
   assertNotIncludes(ciWorkflow, needle, "CI workflow");
@@ -135,6 +196,17 @@ function assertIncludes(text, needle, label) {
 
 function assertNotIncludes(text, needle, label) {
   if (text.includes(needle)) throw new Error(`${label} must not include ${needle}`);
+}
+
+function assertEqual(actual, expected, label) {
+  if (actual !== expected) throw new Error(`${label} must equal ${expected}`);
+}
+
+function assertLineOccurrences(text, line, count, label) {
+  const actual = text.split(/\r?\n/).filter((candidate) => candidate === line).length;
+  if (actual !== count) {
+    throw new Error(`${label} must contain ${count} exact line(s) ${line}; found ${actual}`);
+  }
 }
 
 function assertBefore(text, first, second, label) {

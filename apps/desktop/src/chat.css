@@ -5205,6 +5205,13 @@ html[data-dark="true"] .preview-control-cursor {
 .run-dot-stopped, .run-dot-aborted { background: #d29922; }
 .run-dot-error { background: #f85149; }
 @keyframes run-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) {
+  .stream-diff-stat,
+  .stream-diff-stat.live,
+  .run-dot-running {
+    animation: none;
+  }
+}
 .run-status { color: var(--primary-text); font-weight: 500; white-space: nowrap; }
 .run-status.shiny-text { background-position: 100% 0; animation: shiny-text 2.4s linear infinite; }
 @keyframes shiny-text { 62%, 100% { background-position: 0 0; } }
@@ -6342,6 +6349,9 @@ span.provider-brand-icon {
   pointer-events: none;
   user-select: none;
 }
+.composer-input-highlight.compact-github-links {
+  z-index: 2;
+}
 .composer-input {
   position: relative;
   z-index: 1;
@@ -6401,6 +6411,49 @@ span.provider-brand-icon {
   display: inline-block;
   text-decoration-thickness: 1.5px;
   text-shadow: 0.35px 0 0 currentColor, -0.35px 0 0 currentColor;
+}
+.composer-token-github {
+  text-decoration-line: none;
+  text-shadow: none;
+}
+.composer-token-github-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25em;
+  transform: translateY(1px);
+  white-space: nowrap;
+  pointer-events: auto;
+  cursor: text;
+  color: inherit;
+  font-weight: 600;
+  text-decoration: none;
+}
+.composer-token-github-label svg {
+  width: 1em;
+  height: 1em;
+}
+.composer-token-github-text {
+  text-decoration: underline;
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 2px;
+}
+.composer-link-tooltip {
+  position: absolute;
+  z-index: 100;
+  width: max-content;
+  max-width: min(480px, 100%);
+  padding: 6px 8px;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--popover-border);
+  border-radius: 8px;
+  background: var(--popover-bg);
+  box-shadow: var(--popover-shadow);
+  backdrop-filter: blur(var(--popover-blur));
+  color: var(--primary-text);
+  font-size: 11.5px;
+  line-height: 1.35;
+  pointer-events: none;
+  transform: translateY(-100%);
 }
 .composer-token-skill,
 .composer-token-mcp {

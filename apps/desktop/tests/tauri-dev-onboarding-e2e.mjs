@@ -167,14 +167,17 @@ async function assertRefinedSplitLayout(page) {
       pickerInsideContent: pickerBox.top >= contentBox.top - 1 && pickerBox.bottom <= contentBox.bottom + 1,
       pickerAboveFooter: pickerBox.bottom <= footerBox.top + 1,
       pickerListScrollable: pickerList.scrollHeight > pickerList.clientHeight,
+      contentFits: content.scrollHeight <= content.clientHeight + 1,
       pickerBottom: pickerBox.bottom,
       contentBottom: contentBox.bottom,
       footerTop: footerBox.top,
+      contentHeight: content.clientHeight,
+      contentScrollHeight: content.scrollHeight,
     };
   });
 
   if (!metrics) throw new Error("Model onboarding story/action layout should exist.");
-  if (!metrics.split || !metrics.pickerInsideContent || !metrics.pickerAboveFooter || !metrics.pickerListScrollable) {
+  if (!metrics.split || !metrics.pickerInsideContent || !metrics.pickerAboveFooter || !metrics.pickerListScrollable || !metrics.contentFits) {
     throw new Error(`Model onboarding should keep the split layout and contain its picker: ${JSON.stringify(metrics)}`);
   }
 }
