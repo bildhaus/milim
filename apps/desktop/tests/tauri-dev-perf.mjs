@@ -1646,7 +1646,7 @@ async function launchTauriBinary(milimHome, errors) {
   });
 
   try {
-    await waitForCdp(session, cdpUrl, 20_000);
+    await waitForCdp(session, cdpUrl, 90_000);
     session.browser = await chromium.connectOverCDP(cdpUrl);
     session.page = await tauriPage(
       session.browser,
