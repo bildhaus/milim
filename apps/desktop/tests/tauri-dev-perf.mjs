@@ -1073,6 +1073,9 @@ async function enablePerfAndBypassOnboarding(page) {
     });
     await reloadPage(page);
     await page.getByTestId("chat-shell").waitFor({ timeout: 20_000 });
+    await page
+      .getByTestId("onboarding-preflight")
+      .waitFor({ state: "hidden", timeout: 20_000 });
     if (
       !(await page
         .locator(".onboarding-overlay")
