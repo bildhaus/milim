@@ -1,4 +1,36 @@
 {
+  "0.2.15": {
+    "version": "0.2.15",
+    "summary": "Milim 0.2.15 adds an activity-first thread Inbox, clearer agent failures, and better constrained-window layouts.",
+    "items": [
+      {
+        "id": "thread-inbox",
+        "eyebrow": "Thread organization",
+        "title": "Work from a true thread inbox",
+        "description": "Switch between project hierarchy and a flat activity-first Inbox without losing project or settlement state.",
+        "details": [
+          "Sort active threads across projects by recent activity",
+          "Move finished work into a collapsible Settled footer",
+          "Keep project, branch, and pull-request context without badge-heavy rows"
+        ],
+        "accent": "var(--accent)",
+        "icon": "git-pull-request"
+      },
+      {
+        "id": "agent-activity-clarity",
+        "eyebrow": "Desktop workflow",
+        "title": "See active work and failures more clearly",
+        "description": "Agent activity keeps useful live steps visible and surfaces stopped work without making you dig.",
+        "details": [
+          "Keep the latest active operation expanded while a turn runs",
+          "Leave failed work open with its error detail",
+          "Fit onboarding more cleanly in shorter windows"
+        ],
+        "accent": "var(--accent)",
+        "icon": "plug"
+      }
+    ]
+  },
   "0.2.14": {
     "version": "0.2.14",
     "summary": "Milim 0.2.14 adds an activity-first thread Inbox, clearer agent failures, and better constrained-window layouts.",
