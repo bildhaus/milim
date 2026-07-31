@@ -6,7 +6,7 @@ title: Release and verification
 summary: Release artifacts, updater behavior, verification commands, and site build checks.
 group: Reference
 order: 110
-updated: 2026-07-30
+updated: 2026-07-31
 ---
 
 Release work should verify the Rust workspace, desktop app, site docs, and platform artifacts without reintroducing Linux packaging as a release target.
@@ -46,6 +46,6 @@ The canonical benchmark builds and launches a Windows Tauri/WebView2 binary. Its
 
 ## Docs site
 
-The public docs site imports markdown from `docs/wiki/*.md` using Vite raw imports. The per-section search index is generated from headings and body text, so new sections become searchable without adding keywords in TypeScript. After Vite builds, the site emits route-specific title, description, canonical, Open Graph, and Twitter metadata plus a small Cloudflare Pages Worker that serves the correct static HTML for `docs.milim.ai` while keeping the landing page on `milim.ai`. Matching pull requests run the `Build` job; matching `main` pushes run `Deploy`, which builds once before publishing to Cloudflare Pages. Changes to `VERSION` use that production deployment path so release-facing version surfaces stay current.
+The public docs site imports markdown from `docs/wiki/*.md` using Vite raw imports. The per-section search index is generated from headings and body text, so new sections become searchable without adding keywords in TypeScript. After Vite builds, the site emits route-specific title, description, canonical, Open Graph, and Twitter metadata plus a small Cloudflare Pages Worker that serves the correct static HTML for `docs.milim.ai` while keeping the landing page on `milim.ai`. Matching pull requests run the `Build` job; matching `main` pushes run `Deploy`, which builds once before publishing to Cloudflare Pages. A failed Wrangler publish retries up to five total attempts at one-minute intervals before the deployment fails. Changes to `VERSION` use that production deployment path so release-facing version surfaces stay current.
 
 Use `docs/account-runtimes.md` as the style template for new long-form reference docs: short intro, route table, then behavior notes.
