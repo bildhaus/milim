@@ -64,7 +64,17 @@ jobs:
       - run: pnpm -C apps/site install --frozen-lockfile
       - run: pnpm -C apps/site build
       - name: Deploy to Cloudflare Pages
-        run: pnpm -C apps/site exec wrangler pages deploy dist --project-name milim-site --branch main
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if pnpm -C apps/site exec wrangler pages deploy dist --project-name milim-site --branch main; then
+              break
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              exit 1
+            fi
+            echo "::warning::Cloudflare Pages deploy failed (attempt $attempt/5); retrying in 60 seconds."
+            sleep 60
+          done
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
