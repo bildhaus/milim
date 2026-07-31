@@ -146,7 +146,7 @@ assertNotIncludes(desktopPackage.scripts.verify, "perf:canonical", "default desk
 
 for (const needle of [
   "name: Runtime evidence (Windows)",
-  "runs-on: windows-latest",
+  "runs-on: windows-2022",
   "pnpm -C apps/desktop install --frozen-lockfile",
   "uses: actions/upload-artifact@v4",
 ]) {

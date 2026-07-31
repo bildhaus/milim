@@ -2008,7 +2008,13 @@ fn needs_dependency_install(dir: &Path, managed: bool) -> bool {
 }
 
 fn port_is_available(port: u16) -> bool {
-    TcpListener::bind(("127.0.0.1", port)).is_ok()
+    for _ in 0..5 {
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    false
 }
 
 fn ensure_vite_setup(dir: &Path, package: &PreviewPackage) -> Result<Vec<String>> {
