@@ -53,7 +53,7 @@ use milim_inference::{remote::RemoteBackend, unavailable::UnavailableBackend, Sh
 use milim_sandbox::{DockerBackend, RunOpts};
 use milim_server::AppState;
 use milim_storage::{Database, DatabaseOptions, EncryptedStore, JournalMode, SessionsDelta};
-use milim_tools::{atomic_write, Tool, ToolEffect, ToolRegistry};
+use milim_tools::{atomic_write, resolve_workspace_path, Tool, ToolEffect, ToolRegistry};
 
 /// Simple Rust/JS bridge example.
 #[tauri::command]
@@ -88,6 +88,9 @@ fn secret_storage_status(
 struct DesktopApiToken(String);
 
 struct DesktopApiBaseUrl(String);
+
+#[derive(Default)]
+struct WorkspaceEditorDirty(AtomicBool);
 
 struct DesktopProviders(Option<Arc<milim_server::providers::ProviderRegistry>>);
 
@@ -171,7 +174,29 @@ fn quit_after_user_state_flush(app: tauri::AppHandle) {
 
 #[tauri::command]
 fn request_desktop_quit(app: tauri::AppHandle) {
-    request_user_state_flush_then_exit(&app);
+    request_workspace_editor_leave(&app, WorkspaceEditorLeaveAction::Quit);
+}
+
+#[tauri::command]
+fn set_workspace_editor_dirty(state: tauri::State<'_, WorkspaceEditorDirty>, dirty: bool) {
+    state.0.store(dirty, Ordering::Release);
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WorkspaceEditorLeaveAction {
+    Hide,
+    Quit,
+}
+
+#[tauri::command]
+fn complete_workspace_editor_leave(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, WorkspaceEditorDirty>,
+    action: WorkspaceEditorLeaveAction,
+) {
+    state.0.store(false, Ordering::Release);
+    complete_workspace_editor_leave_action(&app, action);
 }
 
 const TAILSCALE_SERVE_PORT: u16 = 10000;
@@ -181,6 +206,7 @@ const TRAY_OPEN_ID: &str = "open";
 const TRAY_QUIT_ID: &str = "quit";
 const FLUSH_USER_STATE_EVENT: &str = "milim://flush-user-state";
 const FLUSH_USER_STATE_AND_EXIT_EVENT: &str = "milim://flush-user-state-and-exit";
+const WORKSPACE_EDITOR_LEAVE_EVENT: &str = "milim://workspace-editor-leave-requested";
 const USER_STATE_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 const DESKTOP_SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const RUNTIME_FAILED_EVENT: &str = "milim://runtime-failed";
@@ -466,10 +492,24 @@ struct WorkspaceDirectoryPage {
 }
 
 #[derive(serde::Serialize, Debug)]
-struct WorkspaceReviewFile {
+struct WorkspaceTextFile {
     path: String,
     content: String,
     size: u64,
+    revision: String,
+}
+
+#[derive(serde::Serialize, Debug, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum WorkspaceTextWriteResult {
+    Saved {
+        path: String,
+        size: u64,
+        revision: String,
+    },
+    Conflict {
+        revision: String,
+    },
 }
 
 #[derive(serde::Serialize, Debug)]
@@ -1303,6 +1343,10 @@ fn list_workspace_directory_blocking(
         if !resolved.starts_with(&root) || resolved != entry_path {
             continue;
         }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if file_type.is_dir() && skip_workspace_suggestion_dir(&name) {
+            continue;
+        }
         let kind = if file_type.is_dir() {
             "directory"
         } else if file_type.is_file() {
@@ -1315,7 +1359,7 @@ fn list_workspace_directory_blocking(
             .map_err(|error| format!("failed to inspect workspace entry: {error}"))?;
         entries.push(WorkspaceDirectoryEntry {
             path: workspace_relative_path(&root, &entry_path),
-            name: entry.file_name().to_string_lossy().to_string(),
+            name,
             kind,
             size: file_type.is_file().then_some(metadata.len()),
         });
@@ -1343,36 +1387,101 @@ fn list_workspace_directory_blocking(
 }
 
 #[tauri::command]
-async fn read_workspace_review_file(
+async fn read_workspace_text_file(
     workspace: String,
     path: String,
-) -> std::result::Result<WorkspaceReviewFile, String> {
+) -> std::result::Result<WorkspaceTextFile, String> {
+    tokio::task::spawn_blocking(move || read_workspace_text_file_blocking(&workspace, &path))
+        .await
+        .map_err(|error| format!("workspace text read task failed: {error}"))?
+}
+
+const MAX_WORKSPACE_TEXT_FILE_BYTES: u64 = 2 * 1024 * 1024;
+
+fn workspace_text_file_bytes(
+    workspace: &str,
+    path: &str,
+) -> std::result::Result<(PathBuf, Vec<u8>), String> {
+    let root = workspace_root(workspace)?;
+    let target = resolve_workspace_path(&root, path).map_err(|error| error.to_string())?;
+    let metadata = fs::metadata(&target)
+        .map_err(|error| format!("failed to inspect workspace file: {error}"))?;
+    if !metadata.is_file() {
+        return Err("workspace path is not a file".to_string());
+    }
+    if metadata.len() > MAX_WORKSPACE_TEXT_FILE_BYTES {
+        return Err("workspace file exceeds the 2 MiB limit".to_string());
+    }
+    let bytes =
+        fs::read(&target).map_err(|error| format!("failed to read workspace file: {error}"))?;
+    if bytes.contains(&0) || std::str::from_utf8(&bytes).is_err() {
+        return Err("binary files cannot be edited".to_string());
+    }
+    Ok((target, bytes))
+}
+
+fn read_workspace_text_file_blocking(
+    workspace: &str,
+    path: &str,
+) -> std::result::Result<WorkspaceTextFile, String> {
+    let (_, bytes) = workspace_text_file_bytes(workspace, path)?;
+    let size = bytes.len() as u64;
+    let revision = sha256_hex(&bytes);
+    Ok(WorkspaceTextFile {
+        path: path.to_string(),
+        content: String::from_utf8(bytes).expect("workspace text was validated as UTF-8"),
+        size,
+        revision,
+    })
+}
+
+#[tauri::command]
+async fn write_workspace_text_file(
+    workspace: String,
+    path: String,
+    content: String,
+    expected_revision: String,
+    force: Option<bool>,
+) -> std::result::Result<WorkspaceTextWriteResult, String> {
     tokio::task::spawn_blocking(move || {
-        const MAX_REVIEW_FILE_BYTES: u64 = 2 * 1024 * 1024;
-        let target = resolve_workspace_attachment_path(&workspace, &path)?;
-        let metadata = fs::metadata(&target)
-            .map_err(|error| format!("failed to inspect review file: {error}"))?;
-        if !metadata.is_file() {
-            return Err("review path is not a file".to_string());
-        }
-        if metadata.len() > MAX_REVIEW_FILE_BYTES {
-            return Err("review file exceeds the 2 MiB limit".to_string());
-        }
-        let bytes =
-            fs::read(&target).map_err(|error| format!("failed to read review file: {error}"))?;
-        if bytes.contains(&0) {
-            return Err("binary files cannot be reviewed by line".to_string());
-        }
-        let content = String::from_utf8(bytes)
-            .map_err(|_| "binary files cannot be reviewed by line".to_string())?;
-        Ok(WorkspaceReviewFile {
-            path,
-            content,
-            size: metadata.len(),
-        })
+        write_workspace_text_file_blocking(
+            &workspace,
+            &path,
+            &content,
+            &expected_revision,
+            force.unwrap_or(false),
+        )
     })
     .await
-    .map_err(|error| format!("workspace review task failed: {error}"))?
+    .map_err(|error| format!("workspace text write task failed: {error}"))?
+}
+
+fn write_workspace_text_file_blocking(
+    workspace: &str,
+    path: &str,
+    content: &str,
+    expected_revision: &str,
+    force: bool,
+) -> std::result::Result<WorkspaceTextWriteResult, String> {
+    if content.len() as u64 > MAX_WORKSPACE_TEXT_FILE_BYTES {
+        return Err("workspace file exceeds the 2 MiB limit".to_string());
+    }
+    let (target, current) = workspace_text_file_bytes(workspace, path)?;
+    let current_revision = sha256_hex(&current);
+    if !force && current_revision != expected_revision {
+        return Ok(WorkspaceTextWriteResult::Conflict {
+            revision: current_revision,
+        });
+    }
+    let content = content.as_bytes();
+    if current != content {
+        atomic_write(&target, content).map_err(|error| error.to_string())?;
+    }
+    Ok(WorkspaceTextWriteResult::Saved {
+        path: path.to_string(),
+        size: content.len() as u64,
+        revision: sha256_hex(content),
+    })
 }
 
 fn list_workspace_files_blocking(
@@ -3856,6 +3965,40 @@ fn request_user_state_flush_then_exit<R: tauri::Runtime>(app: &tauri::AppHandle<
     });
 }
 
+fn complete_workspace_editor_leave_action<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    action: WorkspaceEditorLeaveAction,
+) {
+    match action {
+        WorkspaceEditorLeaveAction::Hide => {
+            let _ = app.emit(FLUSH_USER_STATE_EVENT, ());
+            if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                let _ = window.hide();
+            }
+        }
+        WorkspaceEditorLeaveAction::Quit => request_user_state_flush_then_exit(app),
+    }
+}
+
+fn request_workspace_editor_leave<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    action: WorkspaceEditorLeaveAction,
+) {
+    if app
+        .state::<WorkspaceEditorDirty>()
+        .0
+        .load(Ordering::Acquire)
+    {
+        let action = match action {
+            WorkspaceEditorLeaveAction::Hide => "hide",
+            WorkspaceEditorLeaveAction::Quit => "quit",
+        };
+        let _ = app.emit(WORKSPACE_EDITOR_LEAVE_EVENT, action);
+    } else {
+        complete_workspace_editor_leave_action(app, action);
+    }
+}
+
 fn handle_app_menu_event<R: tauri::Runtime>(app: &tauri::AppHandle<R>, event: MenuEvent) {
     let action = match event.id().as_ref() {
         APP_MENU_NEW_CHAT_ID => "new-chat",
@@ -3864,7 +4007,7 @@ fn handle_app_menu_event<R: tauri::Runtime>(app: &tauri::AppHandle<R>, event: Me
         APP_MENU_DOCUMENTATION_ID => "documentation",
         APP_MENU_DIAGNOSTICS_ID => "diagnostics",
         APP_MENU_QUIT_ID => {
-            request_user_state_flush_then_exit(app);
+            request_workspace_editor_leave(app, WorkspaceEditorLeaveAction::Quit);
             return;
         }
         _ => return,
@@ -3944,7 +4087,9 @@ fn setup_tray<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()>
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             TRAY_OPEN_ID => show_main_window(app),
-            TRAY_QUIT_ID => request_user_state_flush_then_exit(app),
+            TRAY_QUIT_ID => {
+                request_workspace_editor_leave(app, WorkspaceEditorLeaveAction::Quit)
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| match event {
@@ -4078,6 +4223,7 @@ pub fn run() {
         .manage(UserDataState(user_data))
         .manage(DesktopPreviewRuntime(preview_runtime))
         .manage(DesktopServerRuntime(server_runtime.clone()))
+        .manage(WorkspaceEditorDirty::default())
         .manage(preview_tools_state.clone())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -4174,8 +4320,10 @@ pub fn run() {
             if window.label() == MAIN_WINDOW_LABEL {
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
-                    let _ = window.emit(FLUSH_USER_STATE_EVENT, ());
-                    let _ = window.hide();
+                    request_workspace_editor_leave(
+                        window.app_handle(),
+                        WorkspaceEditorLeaveAction::Hide,
+                    );
                 }
             }
         })
@@ -4186,6 +4334,8 @@ pub fn run() {
             restart_app,
             secret_storage_status,
             request_desktop_quit,
+            set_workspace_editor_dirty,
+            complete_workspace_editor_leave,
             api_base_url,
             api_token,
             refresh_provider_models,
@@ -4209,7 +4359,8 @@ pub fn run() {
             read_workspace_attachment_file,
             list_workspace_files,
             list_workspace_directory,
-            read_workspace_review_file,
+            read_workspace_text_file,
+            write_workspace_text_file,
             save_artifact_file,
             preview_artifact_file,
             artifact_file_status,
@@ -4306,6 +4457,7 @@ mod artifact_save_tests {
                 .as_nanos()
         ));
         fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("node_modules")).unwrap();
         fs::write(root.join("z.txt"), "z").unwrap();
         fs::write(root.join("a.txt"), "a").unwrap();
         let first =
@@ -4321,9 +4473,176 @@ mod artifact_save_tests {
         )
         .unwrap();
         assert_eq!(second.entries[0].name, "z.txt");
+        assert!(!first
+            .entries
+            .iter()
+            .chain(second.entries.iter())
+            .any(|entry| entry.name == "node_modules"));
         assert!(
             list_workspace_directory_blocking(root.to_str().unwrap(), "../", None, None,).is_err()
         );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn workspace_text_files_save_atomically_and_detect_conflicts() {
+        let root = std::env::temp_dir().join(format!(
+            "milim-workspace-text-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("notes.txt"), "first\r\n").unwrap();
+
+        let original =
+            read_workspace_text_file_blocking(root.to_str().unwrap(), "notes.txt").unwrap();
+        assert_eq!(original.content, "first\r\n");
+        let saved = write_workspace_text_file_blocking(
+            root.to_str().unwrap(),
+            "notes.txt",
+            "second\r\n",
+            &original.revision,
+            false,
+        )
+        .unwrap();
+        let WorkspaceTextWriteResult::Saved { revision, .. } = saved else {
+            panic!("expected workspace text save");
+        };
+        assert_eq!(
+            fs::read_to_string(root.join("notes.txt")).unwrap(),
+            "second\r\n"
+        );
+        assert!(matches!(
+            write_workspace_text_file_blocking(
+                root.to_str().unwrap(),
+                "notes.txt",
+                "second\r\n",
+                &revision,
+                false,
+            )
+            .unwrap(),
+            WorkspaceTextWriteResult::Saved { .. }
+        ));
+
+        fs::write(root.join("notes.txt"), "external\r\n").unwrap();
+        let conflict = write_workspace_text_file_blocking(
+            root.to_str().unwrap(),
+            "notes.txt",
+            "draft\r\n",
+            &revision,
+            false,
+        )
+        .unwrap();
+        assert!(matches!(
+            conflict,
+            WorkspaceTextWriteResult::Conflict { .. }
+        ));
+        assert_eq!(
+            fs::read_to_string(root.join("notes.txt")).unwrap(),
+            "external\r\n"
+        );
+
+        let forced = write_workspace_text_file_blocking(
+            root.to_str().unwrap(),
+            "notes.txt",
+            "draft\r\n",
+            &revision,
+            true,
+        )
+        .unwrap();
+        assert!(matches!(forced, WorkspaceTextWriteResult::Saved { .. }));
+        assert_eq!(
+            fs::read_to_string(root.join("notes.txt")).unwrap(),
+            "draft\r\n"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn workspace_text_files_reject_unsafe_or_unsupported_inputs() {
+        let root = std::env::temp_dir().join(format!(
+            "milim-workspace-text-reject-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("binary.bin"), [0_u8, 1, 2]).unwrap();
+        fs::write(
+            root.join("large.txt"),
+            vec![b'x'; MAX_WORKSPACE_TEXT_FILE_BYTES as usize + 1],
+        )
+        .unwrap();
+
+        assert!(
+            read_workspace_text_file_blocking(root.to_str().unwrap(), "../outside.txt").is_err()
+        );
+        assert!(read_workspace_text_file_blocking(root.to_str().unwrap(), "missing.txt").is_err());
+        assert!(read_workspace_text_file_blocking(root.to_str().unwrap(), "binary.bin").is_err());
+        assert!(read_workspace_text_file_blocking(root.to_str().unwrap(), "large.txt").is_err());
+        assert!(write_workspace_text_file_blocking(
+            root.to_str().unwrap(),
+            "missing.txt",
+            "new",
+            "missing",
+            true,
+        )
+        .is_err());
+        assert!(write_workspace_text_file_blocking(
+            root.to_str().unwrap(),
+            "binary.bin",
+            "text",
+            "binary",
+            true,
+        )
+        .is_err());
+        assert!(write_workspace_text_file_blocking(
+            root.to_str().unwrap(),
+            "large.txt",
+            &"x".repeat(MAX_WORKSPACE_TEXT_FILE_BYTES as usize + 1),
+            "large",
+            true,
+        )
+        .is_err());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_text_files_reject_symlinks_and_permission_failures() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = std::env::temp_dir().join(format!(
+            "milim-workspace-text-unix-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("locked")).unwrap();
+        fs::write(root.join("target.txt"), "target").unwrap();
+        fs::write(root.join("locked").join("notes.txt"), "notes").unwrap();
+        symlink(root.join("target.txt"), root.join("link.txt")).unwrap();
+        assert!(read_workspace_text_file_blocking(root.to_str().unwrap(), "link.txt").is_err());
+
+        let original =
+            read_workspace_text_file_blocking(root.to_str().unwrap(), "locked/notes.txt").unwrap();
+        fs::set_permissions(root.join("locked"), fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(write_workspace_text_file_blocking(
+            root.to_str().unwrap(),
+            "locked/notes.txt",
+            "changed",
+            &original.revision,
+            false,
+        )
+        .is_err());
+        fs::set_permissions(root.join("locked"), fs::Permissions::from_mode(0o755)).unwrap();
         fs::remove_dir_all(root).ok();
     }
 

@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,6 +50,7 @@ const screenshots = {
   inboxSettings: join(tmpdir(), "milim-tauri-webview-inbox-settings.png"),
   inboxActive: join(tmpdir(), "milim-tauri-webview-inbox-active.png"),
   inboxSettled: join(tmpdir(), "milim-tauri-webview-inbox-settled.png"),
+  workspaceCode: join(tmpdir(), "milim-tauri-webview-workspace-code.png"),
   failure: join(tmpdir(), "milim-tauri-webview-failure.png"),
 };
 
@@ -985,6 +986,7 @@ async function runPersistenceAndChat(page, pid) {
   await dismissOnboardingIfPresent(page);
   await runAppMenuCheck(page);
   await runNativePreviewOcclusionCheck(page, pid);
+  await runStaticWorkspacePreviewCheck(page, pid);
   await assertAgentOptions(page);
   await openSettings(page);
   await assertAppShortcutsPersisted(page);
@@ -1752,6 +1754,12 @@ async function runStaticWorkspacePreviewCheck(page, pid) {
   writeFileSync(join(workspace, "style.css"), "body { color: rgb(12, 34, 56); }", "utf8");
   writeFileSync(join(workspace, "package.json"), '{"private":true,"scripts":{"dev":"node server.js"}}', "utf8");
   writeFileSync(join(workspace, "server.js"), "setInterval(() => {}, 1000);", "utf8");
+  mkdirSync(join(workspace, "src"));
+  writeFileSync(join(workspace, "src", "nested.txt"), "nested fixture", "utf8");
+  mkdirSync(join(workspace, "many"));
+  for (let index = 0; index < 205; index += 1) writeFileSync(join(workspace, "many", `file-${String(index).padStart(3, "0")}.txt`), `${index}`, "utf8");
+  mkdirSync(join(workspace, "node_modules"));
+  writeFileSync(join(workspace, "node_modules", "hidden.js"), "hidden", "utf8");
 
   try {
     await page.getByTestId("composer-input").fill(`/folder ${workspace}`);
@@ -1763,8 +1771,74 @@ async function runStaticWorkspacePreviewCheck(page, pid) {
     await reviewCommands.click();
     await reviewCommands.getByText("Refresh commands", { exact: true }).waitFor();
     await page.getByRole("tab", { name: "Code", exact: true }).click();
-    await page.getByRole("button", { name: "Workspace", exact: true }).click();
+
+    const workspaceSearch = page.getByRole("textbox", { name: "Search workspace files", exact: true });
+    await workspaceSearch.fill("nested");
+    await page.getByRole("button", { name: "src/nested.txt", exact: true }).waitFor();
+    await page.getByRole("button", { name: "src/nested.txt", exact: true }).click();
+    await page.locator(".workspace-code-toolbar strong", { hasText: "src/nested.txt" }).waitFor();
+    await workspaceSearch.fill("");
+    await page.getByRole("button", { name: "src", exact: true }).click();
+    await page.getByRole("button", { name: "nested.txt", exact: true }).waitFor();
+    if (await page.getByRole("button", { name: "node_modules", exact: true }).count()) throw new Error("Excluded dependency directories should not appear in Code.");
+    await page.getByRole("button", { name: "many", exact: true }).click();
+    await page.getByRole("button", { name: "Load more", exact: true }).waitFor();
+    await page.getByRole("button", { name: "Load more", exact: true }).click();
+    await page.getByRole("button", { name: "file-204.txt", exact: true }).waitFor();
+    await page.getByRole("button", { name: "many", exact: true }).click();
     await page.getByRole("button", { name: "index.html", exact: true }).click();
+    const editor = page.locator(".workspace-code-editor .cm-content");
+    await editor.waitFor();
+
+    const replaceEditor = async (content) => {
+      await editor.click();
+      await page.keyboard.press("Control+A");
+      await page.keyboard.insertText(content);
+    };
+    const savedHtml = '<!doctype html><title>Static Fixture</title><link rel="stylesheet" href="style.css"><h1>Saved in Code</h1>';
+    await replaceEditor(savedHtml);
+    await page.keyboard.press("Control+S");
+    await waitForFileText(indexPath, savedHtml);
+    if (readFileSync(indexPath, "utf8") !== savedHtml) throw new Error("Ctrl+S did not persist the workspace editor draft.");
+
+    writeFileSync(indexPath, "<!doctype html><title>External version</title><h1>External</h1>", "utf8");
+    await replaceEditor("<!doctype html><title>Draft version</title><h1>Draft</h1>");
+    await page.keyboard.press("Control+S");
+    await page.getByRole("alert").getByText("File changed on disk", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "Reload", exact: true }).click();
+    await page.getByRole("alert").getByText("File changed on disk", { exact: true }).waitFor({ state: "hidden" });
+    if (!(await editor.innerText()).includes("External version")) throw new Error("Conflict Reload did not replace the editor with the disk version.");
+
+    const overwrittenHtml = '<!doctype html><title>Static Fixture</title><link rel="stylesheet" href="style.css"><h1>Overwrite won</h1>';
+    await replaceEditor(overwrittenHtml);
+    writeFileSync(indexPath, "<!doctype html><title>Second external version</title>", "utf8");
+    await page.keyboard.press("Control+S");
+    await page.getByRole("alert").getByText("File changed on disk", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "Overwrite", exact: true }).click();
+    await waitForFileText(indexPath, overwrittenHtml);
+    if (readFileSync(indexPath, "utf8") !== overwrittenHtml) throw new Error("Explicit conflict overwrite did not persist the draft.");
+
+    const previewHtml = '<!doctype html><title>Static Fixture</title><link rel="stylesheet" href="style.css"><h1>Static preview ready</h1>';
+    await replaceEditor(previewHtml);
+    await page.locator(".workspace-code-dirty").waitFor({ state: "attached" });
+    await page.waitForTimeout(100);
+    await page.evaluate(async () => window.__TAURI_INTERNALS__.invoke("request_desktop_quit"));
+    const quitDialog = page.getByRole("dialog", { name: "Save changes?", exact: true });
+    await quitDialog.waitFor();
+    await quitDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await page.getByLabel("Close inspector", { exact: true }).click();
+    const leaveDialog = page.getByRole("dialog", { name: "Save changes?", exact: true });
+    await leaveDialog.waitFor();
+    await leaveDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await page.getByTestId("workspace-code-editor").waitFor();
+    await editor.click();
+    await page.keyboard.press("Control+S");
+    await waitForFileText(indexPath, previewHtml);
+    await page.keyboard.press("Control+Home");
+    await page.getByTestId("preview-resize-handle").press("End");
+    await page.getByTestId("workspace-code-rail-resizer").press("Home");
+    await page.screenshot({ path: screenshots.workspaceCode, fullPage: false });
+
     const previewButton = page.getByTestId("workspace-html-preview");
     await previewButton.waitFor();
 
@@ -1790,9 +1864,7 @@ async function runStaticWorkspacePreviewCheck(page, pid) {
     await page.locator(".preview-native-browser-status").waitFor({ state: "hidden", timeout: 10_000 });
     await page.getByTestId("preview-runtime-status").getByText("Static preview", { exact: true }).waitFor();
     await page.getByTestId("preview-runtime-quick-stop").getByText("Stop", { exact: true }).waitFor();
-    if (await page.getByTestId("preview-managed-runtime").count()) {
-      throw new Error("Healthy static preview should use only the compact toolbar.");
-    }
+    if (!(await page.getByTestId("preview-managed-runtime").evaluate((element) => element.classList.contains("compact")))) throw new Error("Healthy static preview should use the compact runtime toolbar.");
     await waitForNewVisibleWryWebview(pid, baselineHandles);
     const html = await (await fetch(status.url)).text();
     const css = await (await fetch(new URL("style.css", status.url))).text();
@@ -1809,14 +1881,12 @@ async function runStaticWorkspacePreviewCheck(page, pid) {
     await page.locator(".preview-browser-tab.active > button").getByText("Static Fixture Updated", { exact: true }).waitFor({ timeout: 10_000 });
 
     await page.getByRole("tab", { name: "Code", exact: true }).click();
-    const reusedResponsePromise = page.waitForResponse(
-      (response) => response.request().method() === "POST" && response.url().endsWith("/static"),
-    );
+    await page.getByRole("button", { name: "index.html", exact: true }).click();
+    await page.getByTestId("workspace-html-preview").waitFor();
     await page.getByTestId("workspace-html-preview").click();
-    const reused = await (await reusedResponsePromise).json();
-    if (new URL(reused.url).port !== new URL(status.url).port) {
-      throw new Error(`Static preview should reuse its loopback server: ${status.url} -> ${reused.url}`);
-    }
+    await page.getByRole("tab", { name: "Preview", exact: true, selected: true }).waitFor();
+    const reusedUrl = await page.getByTestId("preview-browser-url").inputValue();
+    if (new URL(reusedUrl).port !== new URL(status.url).port) throw new Error(`Static preview should reuse its loopback server: ${status.url} -> ${reusedUrl}`);
 
     await page.getByTestId("preview-runtime-quick-stop").click();
     const deadline = Date.now() + 5_000;
@@ -1825,6 +1895,9 @@ async function runStaticWorkspacePreviewCheck(page, pid) {
         await fetch(status.url);
         await delay(50);
       } catch {
+        await page.getByLabel("Close inspector", { exact: true }).click();
+        await page.getByTestId("composer-input").fill(`/folder ${root}`);
+        await page.getByTestId("composer-send").click();
         return;
       }
     }
@@ -3349,6 +3422,8 @@ async function runUiZoomShortcutCheck(page) {
   const chip = page.getByTestId("ui-zoom-chip");
   const value = page.getByTestId("ui-zoom-value");
   const composer = page.getByTestId("composer-input");
+  const initialViewportWidth = await page.evaluate(() => document.documentElement.clientWidth);
+  await composer.fill("W".repeat(100));
 
   await page.keyboard.press("Control+=");
   await chip.waitFor();
@@ -3358,6 +3433,24 @@ async function runUiZoomShortcutCheck(page) {
   const increase = page.getByTestId("ui-zoom-increase");
   for (let step = 0; step < 3; step += 1) await increase.click();
   await value.filter({ hasText: "140%" }).waitFor();
+  await page.waitForFunction(
+    (width) => document.documentElement.clientWidth < width * 0.85,
+    initialViewportWidth,
+  );
+  const composerOverflow = await composer.evaluate((element) => ({
+    horizontal: element.scrollWidth - element.clientWidth,
+    vertical: element.scrollHeight - element.clientHeight,
+    overflowX: getComputedStyle(element).overflowX,
+    overflowY: getComputedStyle(element).overflowY,
+  }));
+  if (
+    composerOverflow.horizontal > 1 ||
+    composerOverflow.vertical > 1 ||
+    composerOverflow.overflowX !== "hidden" ||
+    composerOverflow.overflowY !== "hidden"
+  ) {
+    throw new Error(`Zoomed composer should grow without scrollbars: ${JSON.stringify(composerOverflow)}.`);
+  }
   if (!(await increase.isDisabled())) {
     throw new Error("Zoom in should be disabled at 140%.");
   }
@@ -3382,6 +3475,7 @@ async function runUiZoomShortcutCheck(page) {
   await increase.focus();
   await delay(3200);
   await chip.waitFor({ state: "hidden" });
+  await composer.fill("");
 }
 
 async function runAccountUsageTitleBarCheck(page) {
@@ -4335,6 +4429,7 @@ function collectErrors(page) {
     const text = msg.text();
     const url = msg.location().url;
     if (text.includes("Content Security Policy directive") && text.includes("http://[::1]:*")) return;
+    if (url === "about:srcdoc" && text.includes("Content Security Policy directive")) return;
     if (text.includes("404") && /\/favicon\.ico$/.test(url)) return;
     if (text.includes("favicon.ico") && text.includes("Content Security Policy directive")) return;
     if (/^Failed to load resource: the server responded with a status of (?:400 \(Bad Request\)|502 \(Bad Gateway\))$/.test(text)) {

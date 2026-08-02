@@ -981,46 +981,6 @@
   color: var(--accent-contrast);
 }
 .git-diff-comment-actions button:disabled { cursor: default; opacity: 0.45; }
-.workspace-review-browser { border-bottom: 1px solid var(--border-primary); max-height: 46%; overflow: auto; }
-.workspace-review-head { display: flex; align-items: center; gap: 6px; padding: 6px; }
-.workspace-review-head button,
-.workspace-review-tree button { display: flex; align-items: center; gap: 5px; border: 0; background: transparent; color: var(--primary-text); cursor: pointer; }
-.workspace-review-head span { color: var(--secondary-text); font-size: 11px; }
-.workspace-review-tree-toggle { margin-left: auto; }
-.workspace-review-body {
-  display: grid;
-  grid-template-columns: minmax(132px, var(--preview-file-list-width, 180px)) 7px minmax(0, 1fr);
-  min-height: 120px;
-  border-top: 1px solid var(--border-primary);
-}
-.workspace-review-body.tree-hidden { grid-template-columns: minmax(0, 1fr); }
-.workspace-review-tree { display: flex; flex-direction: column; align-items: stretch; min-width: 0; padding: 5px; overflow: auto; }
-.workspace-review-tree button { padding: 4px; text-align: left; }
-.workspace-review-resize-handle { height: 100%; }
-.workspace-review-file { min-width: 0; overflow: auto; }
-.workspace-review-file > strong { display: flex; align-items: center; gap: 8px; position: sticky; top: 0; padding: 5px 8px; background: var(--panel-bg); z-index: 1; }
-.workspace-review-file > strong > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.workspace-review-file > strong > button { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; border: 0; background: transparent; color: var(--accent); cursor: pointer; font: inherit; }
-.workspace-review-file > strong > button:disabled { cursor: default; opacity: .55; }
-.workspace-review-source { min-width: max-content; font-family: var(--mono); font-size: 12px; line-height: 1.5; }
-.workspace-review-source > button { width: 100%; padding: 0; border: 0; background: transparent; color: var(--primary-text); font: inherit; text-align: left; cursor: pointer; }
-.workspace-review-source > button.selected { background: color-mix(in srgb, var(--accent) 15%, transparent); }
-.preview-code-panel.workspace-review-only .workspace-review-browser {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  min-width: 0;
-  min-height: 0;
-  max-height: none;
-  overflow: hidden;
-  border-bottom: 0;
-}
-.preview-code-panel.workspace-review-only .workspace-review-body {
-  flex: 1;
-  min-height: 0;
-}
-
 .sidebar-search {
   display: flex;
   align-items: center;

@@ -127,6 +127,7 @@ export function Composer({
   tokens,
   contextBudgetTokens,
   busy,
+  hasReviewComments = false,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -159,6 +160,7 @@ export function Composer({
   tokens: number;
   contextBudgetTokens?: number;
   busy: boolean;
+  hasReviewComments?: boolean;
 }) {
   const ref = useRef<HTMLTextAreaElement>(null);
   const inputWrapRef = useRef<HTMLDivElement>(null);
@@ -270,7 +272,7 @@ export function Composer({
   const orderedSuggestions = useMemo(() => suggestionGroups.flatMap((group) => group.items), [suggestionGroups]);
   const autoSlashMenuOpen = autocompleteMode === "automatic" && Boolean(activeTrigger) && orderedSuggestions.length > 0 && value !== slashDismissedValue;
   const showSlashMenu = autocompleteMode !== "off" && (slashOpen || autoSlashMenuOpen);
-  const canSend = Boolean(value.trim() || attachments.length);
+  const canSend = Boolean(value.trim() || attachments.length || hasReviewComments);
   const sendShortcutLabel = composerSendShortcut === "modEnter" ? shortcutLabel("Mod+Enter") : "Enter";
   const sentHistoryKey = useMemo(() => sentHistory.join("\0"), [sentHistory]);
   const placeholder = mediaActive
@@ -305,14 +307,20 @@ export function Composer({
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
-    el.style.height = "0px";
-    const nextHeight = Math.min(el.scrollHeight, 160) + "px";
-    el.style.height = nextHeight;
-    if (highlightRef.current) {
-      highlightRef.current.style.height = nextHeight;
-      highlightRef.current.scrollTop = el.scrollTop;
-      highlightRef.current.scrollLeft = el.scrollLeft;
-    }
+    const resize = () => {
+      el.style.height = "0px";
+      const contentHeight = el.scrollHeight;
+      el.style.height = `${contentHeight}px`;
+      el.style.overflowY = contentHeight > el.clientHeight ? "auto" : "hidden";
+      if (highlightRef.current) {
+        highlightRef.current.style.height = `${el.clientHeight}px`;
+        highlightRef.current.scrollTop = el.scrollTop;
+        highlightRef.current.scrollLeft = el.scrollLeft;
+      }
+    };
+    resize();
+    window.addEventListener("resize", resize);
+    return () => window.removeEventListener("resize", resize);
   }, [composerDisplay.text]);
 
   useEffect(() => {

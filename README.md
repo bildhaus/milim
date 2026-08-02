@@ -15,6 +15,7 @@ Release artifacts target Windows and macOS. Linux packaging is intentionally dis
 - **Hot-swap models.** Switch the next turn between hosted providers, local Ollama or LM Studio models, and separately installed Codex, Claude, OpenCode, or Pi runtimes.
 - **Keep local control.** Project selection, model routing, tool approvals, local persistence, and outbound privacy boundaries stay explicit.
 - **Approve execution, then review the result.** Review is the new-chat default for consequential tool calls; configured defaults may opt into Open, while changing workspace folders resets approval to Review. Built-in Git views keep resulting diffs, checkpoints, and recovery beside the thread.
+- **Inspect and edit the workspace.** Code provides a searchable file rail and one focused editor with explicit, conflict-safe saves; generated artifacts remain available as read-only sources.
 
 ### Power tools
 
@@ -31,6 +32,8 @@ Review decisions are tracked through runtime delivery and acknowledgement. A run
 Failed or canceled native-runtime turns discard that runtime's native session before the next send, preventing a partially persisted prompt from being replayed into divergent history.
 
 Completed assistant responses retain their provider or account runtime and model in the transcript footer. Tool inputs remain fully copyable from collapsed activity even when the row is visually clipped.
+
+Git and preview review comments are sent as structured context with the next user turn for provider models and account runtimes. Live work drawers start collapsed, and approval lifecycle rows settle when the turn ends instead of remaining animated.
 
 ## Get started
 

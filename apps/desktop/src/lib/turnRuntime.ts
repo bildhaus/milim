@@ -35,6 +35,7 @@ import {
   type PreparedTurnOutbound,
   type PrepareTurnOutboundOptions,
 } from "./turnContext.js";
+import { reviewCommentsToPromptContext } from "./attachmentWire.js";
 import { estimateMessagesTokens, estimateTextTokens, messagesForModelContext, modelContextBudget } from "./contextCompaction.js";
 import {
   accountRuntimeToolPart,
@@ -388,10 +389,11 @@ function wireRuntimeMessageContent(
     message.attachments,
     selectedImages,
   );
-  if (!attachmentContext) return message.content;
-  return message.content
-    ? `${message.content}\n\n${attachmentContext}`
-    : attachmentContext;
+  return [
+    message.content,
+    attachmentContext,
+    reviewCommentsToPromptContext(message.reviewComments),
+  ].filter(Boolean).join("\n\n");
 }
 
 function attachmentsToPromptContext(

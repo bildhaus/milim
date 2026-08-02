@@ -293,6 +293,7 @@ import { useTheme } from "../theme/store";
 import { shortcutLabel, shortcutMatchesEvent } from "../ui/shortcuts";
 import { sendMilimNotification } from "../lib/nativeNotifications";
 import { createInteractiveChat } from "../lib/newChatCoordinator";
+import { requestWorkspaceEditorLeave } from "../lib/workspaceEditorGuard";
 import { isLoopbackProviderEndpoint } from "../lib/providerEndpoint.js";
 import { pendingAttentionKey, playInterfaceSound } from "../ui/sounds";
 import { DEFAULT_PREVIEW_PANEL_WIDTH, useUiPreferences } from "../ui/store";
@@ -3019,8 +3020,9 @@ export function ChatView({
     activeArtifactSelection?.revision?.totalRevisions,
   ]);
 
-  function openGitPanel(view: GitPanelView = "changes") {
+  async function openGitPanel(view: GitPanelView = "changes") {
     if (!folder.trim() || (gitStatus && !canOpenGitPanel)) return;
+    if (inspectorTab === "code" && !(await requestWorkspaceEditorLeave("navigate"))) return;
     rememberInspectorInvoker();
     clearPreviewCloseTimer();
     setPreviewPanelClosing(false);
@@ -3230,7 +3232,8 @@ export function ChatView({
     focusComposerInput();
   }
 
-  function closePreview() {
+  async function closePreview() {
+    if (inspectorTab === "code" && !(await requestWorkspaceEditorLeave("navigate"))) return;
     setDismissedPreviewKey(activeArtifactSelection?.autoOpenKey ?? null);
     if (prefersReducedMotion()) {
       clearPreviewCloseTimer();
@@ -3249,12 +3252,13 @@ export function ChatView({
     }, PREVIEW_PANEL_ANIMATION_MS);
   }
 
-  function openPreviewArtifact(
+  async function openPreviewArtifact(
     artifact: ChatArtifact,
     artifacts?: readonly ChatArtifact[],
     previewDeferred = false,
     revision?: ArtifactRevision,
   ) {
+    if (inspectorTab === "code" && !(await requestWorkspaceEditorLeave("navigate"))) return;
     rememberInspectorInvoker();
     clearPreviewCloseTimer();
     setPreviewPanelClosing(false);
@@ -3448,12 +3452,13 @@ export function ChatView({
       upsertVirtualFiles(activeId, options.files);
   }
 
-  function openArtifactSidePanel(tab: "preview" | "code" = "preview") {
+  async function openArtifactSidePanel(tab: "preview" | "code" = "preview") {
     const selection =
       activeArtifactSelection ??
       latestPreviewSelection ??
       (tab === "code" && folder.trim() ? blankWorkspaceReviewSelection() : null);
     if (!selection) return;
+    if (inspectorTab === "code" && tab !== "code" && !(await requestWorkspaceEditorLeave("navigate"))) return;
     rememberInspectorInvoker();
     clearPreviewCloseTimer();
     setPreviewPanelClosing(false);
@@ -3847,7 +3852,8 @@ export function ChatView({
     ) setActivePreviewSurface(null);
   }, [inspectorTab, sidePanelVisible]);
 
-  function openWorkersInspector(runId?: string, settings = false) {
+  async function openWorkersInspector(runId?: string, settings = false) {
+    if (inspectorTab === "code" && !(await requestWorkspaceEditorLeave("navigate"))) return;
     rememberInspectorInvoker();
     clearPreviewCloseTimer();
     setPreviewPanelClosing(false);
@@ -3856,8 +3862,9 @@ export function ChatView({
     setSessionInspectorTab(activeId, "workers");
   }
 
-  function openContextPanel() {
+  async function openContextPanel() {
     if (chatBodyWidth < CONCURRENT_PANEL_THRESHOLD && inspectorOpen) {
+      if (inspectorTab === "code" && !(await requestWorkspaceEditorLeave("navigate"))) return;
       clearPreviewCloseTimer();
       setPreviewPanelClosing(false);
       setSessionInspectorOpen(activeId, false);
@@ -5052,14 +5059,15 @@ export function ChatView({
 
   async function pickFolder() {
     const selected = await openFolderPicker();
-    if (selected) updateThreadSettings(activeId, { folder: selected });
+    if (selected && await requestWorkspaceEditorLeave("navigate")) updateThreadSettings(activeId, { folder: selected });
   }
 
-  function startChatInFolder(nextFolder: string) {
+  async function startChatInFolder(nextFolder: string) {
     if (messages.length === 0) {
+      if (!(await requestWorkspaceEditorLeave("navigate"))) return;
       updateThreadSettings(activeId, { folder: nextFolder });
     } else {
-      void createInteractiveChat({ folder: nextFolder });
+      await createInteractiveChat({ folder: nextFolder });
     }
     setChatNotice(null);
     focusComposer();
@@ -5067,7 +5075,7 @@ export function ChatView({
 
   async function pickProjectFolder() {
     const selected = await openFolderPicker();
-    if (selected) startChatInFolder(selected);
+    if (selected) await startChatInFolder(selected);
   }
 
   async function handleAttachFiles(files?: File[]) {
@@ -6406,8 +6414,9 @@ export function ChatView({
     setRecentThreadSwitcher(null);
   }
 
-  function switchVisibleSession(id: string) {
+  async function switchVisibleSession(id: string) {
     if (id === activeId) return;
+    if (!(await requestWorkspaceEditorLeave("navigate"))) return;
     switchToSession(id);
   }
 
@@ -6826,7 +6835,8 @@ export function ChatView({
     recentPreviewControlActivity;
   const canOpenArtifactPanel = Boolean(activeArtifactSelection || folder.trim());
 
-  function openPreviewInspector() {
+  async function openPreviewInspector() {
+    if (inspectorTab === "code" && !(await requestWorkspaceEditorLeave("navigate"))) return;
     rememberInspectorInvoker();
     if (activeInspectorPreviewSource === "artifact" && !canOpenArtifactPanel) {
       selectPreviewSource(
@@ -7250,6 +7260,7 @@ export function ChatView({
                 tokens={tokens}
                 contextBudgetTokens={activeContextBudget?.promptBudget}
                 busy={busy}
+                hasReviewComments={pendingReviewComments.length > 0}
               />
             </ComposerSurface>
             {emptyThread && !input.trim() && !activeMediaTarget && quickActionMode !== "hidden" && (

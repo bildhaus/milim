@@ -253,7 +253,7 @@ function StreamWorkGroup({
     <details
       className="stream-tool-group stream-work-group"
       data-testid="assistant-stream-work-group"
-      open={streaming || failure != null}
+      open={failure != null}
     >
       <summary
         className={`stream-event stream-event-${liveSummary?.eventType ?? "tool"} stream-event-${status}`}

@@ -57,6 +57,47 @@ jobs:
               --verify-tag
           fi
 
+  runtime-evidence:
+    name: Runtime evidence (Windows)
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.MILIM_RELEASE_TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 9
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            apps/desktop/src-tauri -> target
+      - run: pnpm -C apps/desktop install --frozen-lockfile
+      - name: Runtime conformance
+        run: pnpm -C apps/desktop verify:runtime-conformance
+        env:
+          MILIM_CONFORMANCE_ARTIFACT_DIR: ${{ github.workspace }}/apps/desktop/tester-artifacts/runtime-evidence
+      - name: Canonical-thread benchmark
+        if: always()
+        run: pnpm -C apps/desktop perf:canonical
+        env:
+          MILIM_PERF_ARTIFACT_DIR: ${{ github.workspace }}/apps/desktop/tester-artifacts/runtime-evidence
+      - name: Upload runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-evidence-windows
+          path: apps/desktop/tester-artifacts/runtime-evidence
+          if-no-files-found: error
+
   desktop:
     needs: create-draft-release
     strategy:
