@@ -2334,7 +2334,7 @@ fn preview_command(name: &str) -> Command {
     };
     #[cfg(not(windows))]
     let command = {
-        let mut command = Command::new(name);
+        let mut command = crate::cli_path::command(name);
         command.process_group(0);
         command
     };
@@ -2446,6 +2446,13 @@ async fn force_kill_process_tree(pid: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(windows))]
+    #[test]
+    fn preview_command_resolves_unix_executable_to_absolute_path() {
+        let command = preview_command("sh");
+        assert!(Path::new(command.as_std().get_program()).is_absolute());
+    }
 
     fn test_root() -> PathBuf {
         std::env::temp_dir().join(format!(
