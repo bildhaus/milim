@@ -4,6 +4,8 @@ use serde::de::DeserializeOwned;
 use serde_json::Map;
 
 const HARNESS_EVENT_SCHEMA_VERSION: u8 = 1;
+// ponytail: five seconds bounds post-terminal cleanup; specialize only if a runtime needs longer.
+const HARNESS_TERMINAL_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct HarnessRunRequest {
@@ -226,6 +228,18 @@ fn harness_event_stream(
                 };
                 for envelope in mapper.map_legacy(value) {
                     yield harness_sse(envelope);
+                }
+                if mapper.terminal {
+                    tokio::spawn(async move {
+                        let _ = tokio::time::timeout(
+                            HARNESS_TERMINAL_DRAIN_TIMEOUT,
+                            async move {
+                                while source.next().await.is_some() {}
+                            },
+                        )
+                        .await;
+                    });
+                    return;
                 }
             }
         }
@@ -869,13 +883,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transformer_drains_inner_stream_after_terminal() {
+    async fn transformer_finishes_at_terminal_and_drains_inner_stream() {
         let drained = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let resumed = drained.clone();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let resume = release.clone();
         let source = async_stream::stream! {
             yield Ok::<Bytes, Infallible>(Bytes::from_static(
                 b"data: {\"type\":\"done\",\"status\":\"completed\"}\n\n",
             ));
+            resume.notified().await;
             resumed.store(true, std::sync::atomic::Ordering::SeqCst);
             yield Ok(Bytes::from_static(
                 b"data: {\"type\":\"token\",\"text\":\"late\"}\n\n",
@@ -888,14 +905,26 @@ mod tests {
             HarnessEventMapper::new("codex", "run-1", None),
         ))
         .into_response();
-        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .unwrap();
+        let bytes = tokio::time::timeout(
+            Duration::from_secs(1),
+            axum::body::to_bytes(response.into_body(), 1024 * 1024),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let output = String::from_utf8(bytes.to_vec()).unwrap();
 
-        assert!(drained.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!drained.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(output.matches("\"type\":\"turn_completed\"").count(), 1);
         assert!(!output.contains("late"));
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !drained.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

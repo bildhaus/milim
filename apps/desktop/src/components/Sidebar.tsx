@@ -865,8 +865,9 @@ export function Sidebar({
     >();
     for (const group of groupedSessions) {
       if (group.settled) continue;
-      const limit =
-        sectionVisibleLimits[group.id] ?? SIDEBAR_SECTION_PREVIEW_LIMIT;
+      const limit = settledThreadsEnabled
+        ? group.sessions.length
+        : sectionVisibleLimits[group.id] ?? SIDEBAR_SECTION_PREVIEW_LIMIT;
       const activeIndex = group.sessions.findIndex(
         (session) => session.id === activeId,
       );
@@ -1648,7 +1649,7 @@ export function Sidebar({
                 : null;
               const searchActive = Boolean(query.trim());
               const totalSessions = group.sessions.length;
-              const visibleLimit = searchActive
+              const visibleLimit = searchActive || group.inbox
                 ? totalSessions
                 : Math.min(sectionVisibleLimits[group.id] ?? SIDEBAR_SECTION_PREVIEW_LIMIT, totalSessions);
               const baseVisibleSessions = group.sessions.slice(0, visibleLimit);
@@ -1658,8 +1659,8 @@ export function Sidebar({
                 : baseVisibleSessions;
               const currentShownCount = visibleSessions.length;
               const nextRevealCount = sidebarSectionNextRevealCount(totalSessions, visibleLimit, activeIndex);
-              const canShowMore = !searchActive && nextRevealCount > 0;
-              const canShowLess = !searchActive && visibleLimit > SIDEBAR_SECTION_PREVIEW_LIMIT;
+              const canShowMore = !searchActive && !group.inbox && nextRevealCount > 0;
+              const canShowLess = !searchActive && !group.inbox && visibleLimit > SIDEBAR_SECTION_PREVIEW_LIMIT;
               const sectionManuallyExpanded = visibleLimit > SIDEBAR_SECTION_PREVIEW_LIMIT;
               const shownCountLabel = `${currentShownCount} of ${totalSessions} shown`;
               const showMoreLabel = `Show ${nextRevealCount} more ${nextRevealCount === 1 ? "thread" : "threads"} in ${group.label}, ${shownCountLabel}`;
