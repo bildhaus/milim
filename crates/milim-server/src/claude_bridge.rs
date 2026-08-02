@@ -2658,11 +2658,18 @@ not json
         ));
         assert!(live_path.is_file());
 
+        let mut exited = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("milim_exited_pid_probe")
+            .spawn()
+            .unwrap();
+        let exited_pid = exited.id();
+        assert!(exited.wait().unwrap().success());
         let stale_path = root.join("stale.json");
         std::fs::write(&stale_path, "{}").unwrap();
         assert!(remove_stale_claude_session_registry_entry(
             &ClaudeSessionRegistryEntry {
-                pid: u32::MAX,
+                pid: exited_pid,
                 path: stale_path.clone(),
             }
         ));
