@@ -1133,8 +1133,7 @@ function completeEventStreamPart(
       const current = next[i];
       if (
         current.kind === "event" &&
-        current.approvalId === part.approvalId &&
-        current.approvalStatus === "pending"
+        current.approvalId === part.approvalId
       ) {
         next[i] = {
           ...current,

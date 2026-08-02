@@ -107,7 +107,7 @@ try {
   const runningTag = runningMarkup.match(
     /<details[^>]+data-testid="assistant-stream-work-group"[^>]*>/,
   )?.[0] ?? "";
-  assert.match(runningTag, /\sopen=""/, "live work should stay expanded");
+  assert.doesNotMatch(runningTag, /\sopen=""/, "live work should start collapsed");
   assert.match(runningMarkup, /Running command/);
   assert.match(runningMarkup.replace(/<[^>]+>/g, ""), /pnpm test/);
 

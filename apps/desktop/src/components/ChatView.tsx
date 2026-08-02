@@ -7250,6 +7250,7 @@ export function ChatView({
                 tokens={tokens}
                 contextBudgetTokens={activeContextBudget?.promptBudget}
                 busy={busy}
+                hasReviewComments={pendingReviewComments.length > 0}
               />
             </ComposerSurface>
             {emptyThread && !input.trim() && !activeMediaTarget && quickActionMode !== "hidden" && (

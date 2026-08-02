@@ -32,6 +32,8 @@ Failed or canceled native-runtime turns discard that runtime's native session be
 
 Completed assistant responses retain their provider or account runtime and model in the transcript footer. Tool inputs remain fully copyable from collapsed activity even when the row is visually clipped.
 
+Git and preview review comments are sent as structured context with the next user turn for provider models and account runtimes. Live work drawers start collapsed, and approval lifecycle rows settle when the turn ends instead of remaining animated.
+
 ## Get started
 
 ### Install the desktop app

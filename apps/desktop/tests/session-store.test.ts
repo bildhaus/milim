@@ -876,6 +876,24 @@ useSessions.getState().appendStreamEvent(first, {
 useSessions.getState().completeStreamEvent(first, "approval:approval-1", {
   kind: "event",
   eventType: "status",
+  label: "Approval submitted",
+  name: "approval:approval-1",
+  status: "running",
+  approvalId: "approval-1",
+  approvalStatus: "decided",
+});
+useSessions.getState().completeStreamEvent(first, "approval:approval-1", {
+  kind: "event",
+  eventType: "status",
+  label: "Approval delivered",
+  name: "approval:approval-1",
+  status: "running",
+  approvalId: "approval-1",
+  approvalStatus: "delivered",
+});
+useSessions.getState().completeStreamEvent(first, "approval:approval-1", {
+  kind: "event",
+  eventType: "status",
   label: "google_docs_edit approved",
   name: "approval:approval-1",
   status: "done",
@@ -886,7 +904,7 @@ const approvalParts = (
   useSessions.getState().sessions.find((session) => session.id === first)
     ?.messages[1].streamParts ?? []
 ).filter((part) => part.kind === "event" && part.approvalId === "approval-1");
-equal(approvalParts.length, 1, "resolved approvals should replace their pending transcript event");
+equal(approvalParts.length, 1, "approval lifecycle updates should replace the same transcript event");
 assert(approvalParts[0]?.kind === "event", "resolved approval should remain an event");
 equal(approvalParts[0].label, "google_docs_edit approved", "approval history should record the decision");
 equal(approvalParts[0].detail, "{\"file_id\":\"doc\"}", "approval history should retain the request summary");

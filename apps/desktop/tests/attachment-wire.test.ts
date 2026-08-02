@@ -150,3 +150,6 @@ const reviewJson = reviewWire.match(/<milim_review_context>(.*)<\/milim_review_c
 assert(reviewJson);
 assert.equal(JSON.parse(reviewJson).length, 20);
 assert.equal(reviewMessage.reviewComments?.length, 24);
+const accountReviewPrompt = accountRuntimeInputFromMessages([reviewMessage]).prompt;
+assert.match(accountReviewPrompt, /<milim_review_context>/);
+assert.match(accountReviewPrompt, /Comment 1/);

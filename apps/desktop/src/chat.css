@@ -6360,6 +6360,8 @@ span.provider-brand-icon {
   outline: none;
   background: transparent;
   color: var(--primary-text);
+  overflow-x: hidden;
+  overflow-y: hidden;
   user-select: text;
 }
 .composer-input.has-token-layer {

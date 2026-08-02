@@ -3349,6 +3349,8 @@ async function runUiZoomShortcutCheck(page) {
   const chip = page.getByTestId("ui-zoom-chip");
   const value = page.getByTestId("ui-zoom-value");
   const composer = page.getByTestId("composer-input");
+  const initialViewportWidth = await page.evaluate(() => document.documentElement.clientWidth);
+  await composer.fill("W".repeat(100));
 
   await page.keyboard.press("Control+=");
   await chip.waitFor();
@@ -3358,6 +3360,24 @@ async function runUiZoomShortcutCheck(page) {
   const increase = page.getByTestId("ui-zoom-increase");
   for (let step = 0; step < 3; step += 1) await increase.click();
   await value.filter({ hasText: "140%" }).waitFor();
+  await page.waitForFunction(
+    (width) => document.documentElement.clientWidth < width * 0.85,
+    initialViewportWidth,
+  );
+  const composerOverflow = await composer.evaluate((element) => ({
+    horizontal: element.scrollWidth - element.clientWidth,
+    vertical: element.scrollHeight - element.clientHeight,
+    overflowX: getComputedStyle(element).overflowX,
+    overflowY: getComputedStyle(element).overflowY,
+  }));
+  if (
+    composerOverflow.horizontal > 1 ||
+    composerOverflow.vertical > 1 ||
+    composerOverflow.overflowX !== "hidden" ||
+    composerOverflow.overflowY !== "hidden"
+  ) {
+    throw new Error(`Zoomed composer should grow without scrollbars: ${JSON.stringify(composerOverflow)}.`);
+  }
   if (!(await increase.isDisabled())) {
     throw new Error("Zoom in should be disabled at 140%.");
   }
@@ -3382,6 +3402,7 @@ async function runUiZoomShortcutCheck(page) {
   await increase.focus();
   await delay(3200);
   await chip.waitFor({ state: "hidden" });
+  await composer.fill("");
 }
 
 async function runAccountUsageTitleBarCheck(page) {
