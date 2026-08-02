@@ -4,8 +4,12 @@ use serde::de::DeserializeOwned;
 use serde_json::Map;
 
 const HARNESS_EVENT_SCHEMA_VERSION: u8 = 1;
-// ponytail: five seconds bounds post-terminal cleanup; specialize only if a runtime needs longer.
+// ponytail: five seconds bounds post-terminal cleanup; Claude must exit cleanly to release its session lock.
 const HARNESS_TERMINAL_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn harness_terminal_drain_timeout(harness_id: &str) -> Option<Duration> {
+    (harness_id != "claude").then_some(HARNESS_TERMINAL_DRAIN_TIMEOUT)
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct HarnessRunRequest {
@@ -230,14 +234,16 @@ fn harness_event_stream(
                     yield harness_sse(envelope);
                 }
                 if mapper.terminal {
+                    let timeout = harness_terminal_drain_timeout(&mapper.harness_id);
                     tokio::spawn(async move {
-                        let _ = tokio::time::timeout(
-                            HARNESS_TERMINAL_DRAIN_TIMEOUT,
-                            async move {
-                                while source.next().await.is_some() {}
-                            },
-                        )
-                        .await;
+                        let drain = async move {
+                            while source.next().await.is_some() {}
+                        };
+                        if let Some(timeout) = timeout {
+                            let _ = tokio::time::timeout(timeout, drain).await;
+                        } else {
+                            drain.await;
+                        }
                     });
                     return;
                 }
@@ -925,6 +931,15 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn claude_terminal_cleanup_is_not_timed_out() {
+        assert_eq!(harness_terminal_drain_timeout("claude"), None);
+        assert_eq!(
+            harness_terminal_drain_timeout("codex"),
+            Some(HARNESS_TERMINAL_DRAIN_TIMEOUT)
+        );
     }
 
     #[tokio::test]

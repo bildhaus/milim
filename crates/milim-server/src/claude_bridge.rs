@@ -1491,9 +1491,12 @@ async fn terminate_claude_session_processes(session_id: &str) -> bool {
     let Some(session_id) = safe_session_id_for_process_match(session_id) else {
         return false;
     };
-    let killed_from_registry = terminate_claude_registry_session_process(session_id).await;
+    let removed_stale_registry = remove_stale_claude_session_registry(session_id);
     let killed_from_command_line = terminate_claude_session_processes_impl(session_id).await;
-    killed_from_registry || killed_from_command_line
+    if killed_from_command_line {
+        remove_stale_claude_session_registry(session_id);
+    }
+    removed_stale_registry || find_claude_session_registry_entry(session_id).is_none()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1502,15 +1505,21 @@ struct ClaudeSessionRegistryEntry {
     path: PathBuf,
 }
 
-async fn terminate_claude_registry_session_process(session_id: &str) -> bool {
+fn remove_stale_claude_session_registry(session_id: &str) -> bool {
     let Some(entry) = find_claude_session_registry_entry(session_id) else {
         return false;
     };
-    let killed = terminate_process_id(entry.pid).await;
-    if killed {
-        tokio::time::sleep(Duration::from_millis(300)).await;
+    remove_stale_claude_session_registry_entry(&entry)
+}
+
+fn remove_stale_claude_session_registry_entry(entry: &ClaudeSessionRegistryEntry) -> bool {
+    if process_id_is_running(entry.pid) {
+        return false;
     }
-    killed
+    match std::fs::remove_file(&entry.path) {
+        Ok(()) => true,
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
 }
 
 fn find_claude_session_registry_entry(session_id: &str) -> Option<ClaudeSessionRegistryEntry> {
@@ -1561,24 +1570,31 @@ fn claude_session_registry_dirs() -> Vec<PathBuf> {
 }
 
 #[cfg(windows)]
-async fn terminate_process_id(pid: u32) -> bool {
-    let mut command = Command::new("taskkill");
-    command.arg("/PID").arg(pid.to_string()).arg("/F");
-    command.creation_flags(milim_core::proc::CREATE_NO_WINDOW);
-    command
-        .status()
-        .await
-        .map(|status| status.success())
-        .unwrap_or(false)
+fn process_id_is_running(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut exit_code = 0;
+        let running =
+            GetExitCodeProcess(handle, &mut exit_code) != 0 && exit_code == STILL_ACTIVE as u32;
+        CloseHandle(handle);
+        running
+    }
 }
 
 #[cfg(not(windows))]
-async fn terminate_process_id(pid: u32) -> bool {
-    Command::new("kill")
-        .arg("-TERM")
+fn process_id_is_running(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .arg("-0")
         .arg(pid.to_string())
         .status()
-        .await
         .map(|status| status.success())
         .unwrap_or(false)
 }
@@ -2624,5 +2640,42 @@ not json
             claude_session_registry_entry_from_value(&bad, PathBuf::new()),
             None
         );
+    }
+
+    #[test]
+    fn stale_registry_cleanup_preserves_live_entries() {
+        let root =
+            std::env::temp_dir().join(format!("milim-claude-registry-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+
+        let live_path = root.join("live.json");
+        std::fs::write(&live_path, "{}").unwrap();
+        assert!(!remove_stale_claude_session_registry_entry(
+            &ClaudeSessionRegistryEntry {
+                pid: std::process::id(),
+                path: live_path.clone(),
+            }
+        ));
+        assert!(live_path.is_file());
+
+        let mut exited = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("milim_exited_pid_probe")
+            .spawn()
+            .unwrap();
+        let exited_pid = exited.id();
+        assert!(exited.wait().unwrap().success());
+        let stale_path = root.join("stale.json");
+        std::fs::write(&stale_path, "{}").unwrap();
+        assert!(remove_stale_claude_session_registry_entry(
+            &ClaudeSessionRegistryEntry {
+                pid: exited_pid,
+                path: stale_path.clone(),
+            }
+        ));
+        assert!(!stale_path.exists());
+
+        std::fs::remove_file(live_path).unwrap();
+        std::fs::remove_dir(root).unwrap();
     }
 }
