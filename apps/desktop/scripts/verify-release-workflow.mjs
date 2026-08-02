@@ -14,9 +14,10 @@ const siteWorkflow = readFileSync(
   "utf8",
 );
 const desktopPackage = JSON.parse(readFileSync(join(appRoot, "package.json"), "utf8"));
-const runtimeEvidenceJobStart = ciWorkflow.indexOf("\n  runtime-evidence:");
-if (runtimeEvidenceJobStart < 0) throw new Error("CI workflow must include runtime-evidence");
-const runtimeEvidenceJob = ciWorkflow.slice(runtimeEvidenceJobStart);
+const runtimeEvidenceJobStart = releaseWorkflow.indexOf("\n  runtime-evidence:");
+const runtimeEvidenceJobEnd = releaseWorkflow.indexOf("\n  desktop:", runtimeEvidenceJobStart);
+if (runtimeEvidenceJobStart < 0 || runtimeEvidenceJobEnd < 0) throw new Error("Release workflow must include runtime-evidence before desktop packaging");
+const runtimeEvidenceJob = releaseWorkflow.slice(runtimeEvidenceJobStart, runtimeEvidenceJobEnd);
 
 const expectedArtifacts = [
   { artifact: "macos-universal", os: "macos-latest", args: "--target universal-apple-darwin --bundles app,dmg" },
@@ -73,7 +74,6 @@ for (const needle of [
   "verify:native-prompt",
   "verify:native-vad",
   "verify:native-tts",
-  "tester-artifacts",
   "verify-release-download-set",
   "verify-downloaded-release-artifact",
   "QA_EVIDENCE",
@@ -84,10 +84,10 @@ for (const needle of [
   'gh release upload "${{ env.MILIM_RELEASE_TAG }}" src-tauri/target/release/bundle/portable/*.exe --clobber',
   'gh release upload "${{ env.MILIM_RELEASE_TAG }}" src-tauri/target/release/bundle/portable/*.exe.sha256 --clobber',
   "--clobber",
-  "run: pnpm -C apps/desktop verify",
 ]) {
   assertNotIncludes(releaseWorkflow, needle, "release workflow");
 }
+assertLineOccurrences(releaseWorkflow, "      - run: pnpm -C apps/desktop verify", 0, "release workflow");
 
 assertEveryMutationGuarded(releaseWorkflow, "gh release edit", "--json isDraft --jq", "release edits");
 assertEveryMutationGuarded(releaseWorkflow, "gh release upload", "--json isDraft --jq", "release uploads");
@@ -115,7 +115,6 @@ assertIncludes(
 assertNotIncludes(siteWorkflow, "needs: check", "site workflow");
 
 for (const needle of [
-  'tags: ["v*"]',
   "pull_request:",
   "cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings",
   "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml",
@@ -123,12 +122,15 @@ for (const needle of [
   assertIncludes(ciWorkflow, needle, "CI workflow");
 }
 for (const line of [
-  '    tags: ["v*"]',
   "  pull_request:",
   "  workflow_dispatch:",
 ]) {
   assertLineOccurrences(ciWorkflow, line, 1, "CI workflow trigger");
 }
+assertNotIncludes(ciWorkflow, 'tags: ["v*"]', "CI workflow");
+assertNotIncludes(ciWorkflow, "runtime-evidence:", "CI workflow");
+assertLineOccurrences(releaseWorkflow, '    tags: ["v*"]', 1, "Release workflow trigger");
+assertOccurrences(releaseWorkflow, "tester-artifacts", 3, "Release runtime evidence paths");
 
 assertEqual(
   desktopPackage.scripts["verify:runtime-conformance"],
@@ -147,13 +149,14 @@ assertNotIncludes(desktopPackage.scripts.verify, "perf:canonical", "default desk
 for (const needle of [
   "name: Runtime evidence (Windows)",
   "runs-on: windows-2022",
+  "permissions:\n      contents: read",
+  checkoutReleaseTagRef,
   "pnpm -C apps/desktop install --frozen-lockfile",
   "uses: actions/upload-artifact@v4",
 ]) {
   assertIncludes(runtimeEvidenceJob, needle, "runtime evidence job");
 }
 for (const line of [
-  "    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')",
   "        run: pnpm -C apps/desktop verify:runtime-conformance",
   "          MILIM_CONFORMANCE_ARTIFACT_DIR: ${{ github.workspace }}/apps/desktop/tester-artifacts/runtime-evidence",
   "        run: pnpm -C apps/desktop perf:canonical",

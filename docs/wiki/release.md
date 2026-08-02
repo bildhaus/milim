@@ -19,7 +19,7 @@ Release work should verify the Rust workspace, desktop app, site docs, and platf
 | macOS | `milim-macos-universal.dmg` and `milim.app.zip` from the latest GitHub release. |
 | Linux | Not packaged as a release artifact. The Rust server and Tauri app remain source-buildable. |
 
-Pull requests and release tags run full desktop verification in CI. Release packaging jobs do not repeat that suite: Tauri runs the production frontend build before compiling each platform artifact, then the workflow smoke-tests the packaged binary and verifies its manifest. macOS release artifacts require the Apple signing secrets and intentionally enable Tauri's macOS private API for transparent preview activity overlay windows. The workflow publishes `manifest.json` plus an aggregate `SHA256SUMS.txt` from the current release run. Updater assets are verified with SHA-256 sidecars and the aggregate checksum file. A rerun may repair an unpublished draft, but every edit and asset upload rechecks draft status; published releases are immutable and require a new version.
+Pull requests run full desktop verification in CI. Release tags do not repeat that suite: the Release workflow runs Windows runtime evidence alongside production packaging, Tauri builds the frontend before compiling each platform artifact, and each packaged binary and manifest is verified. macOS release artifacts require the Apple signing secrets and intentionally enable Tauri's macOS private API for transparent preview activity overlay windows. The workflow publishes `manifest.json` plus an aggregate `SHA256SUMS.txt` from the current release run. Updater assets are verified with SHA-256 sidecars and the aggregate checksum file. A rerun may repair an unpublished draft, but every edit and asset upload rechecks draft status; published releases are immutable and require a new version.
 
 ## Updater behavior
 
@@ -40,7 +40,7 @@ pnpm -C apps/site build
 
 ## Runtime evidence
 
-Manual CI runs and `v*` tags produce a Windows-only `runtime-evidence-windows` artifact. Successful runs contain `runtime-conformance.json`, `canonical-thread.json`, and benchmark screenshots from deterministic, mock-backed scenarios; a benchmark failure adds `failure.json` and `failure.png`. These checks prove Milim's normalized event, session, approval, queue, and desktop interaction contracts; they require no credentials, make no paid or live completion calls, do not change authentication state, and do not establish live third-party compatibility.
+`v*` tags and manual Release runs produce a Windows-only `runtime-evidence-windows` artifact. Successful runs contain `runtime-conformance.json`, `canonical-thread.json`, and benchmark screenshots from deterministic, mock-backed scenarios; a benchmark failure adds `failure.json` and `failure.png`. These checks prove Milim's normalized event, session, approval, queue, and desktop interaction contracts; they require no credentials, make no paid or live completion calls, do not change authentication state, and do not establish live third-party compatibility.
 
 The canonical benchmark builds and launches a Windows Tauri/WebView2 binary. Its timing measurements are advisory and have no pass/fail budgets; functional assertions, invalid layout, console errors, and missing evidence still fail the job.
 
