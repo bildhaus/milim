@@ -1,6 +1,7 @@
 import { getWorkspaceGitStatus, runWorkspaceGitAction, setWorkspace } from "../api";
 import { useSessions, type ThreadSettings } from "../sessions/store";
 import { useUiPreferences } from "../ui/store";
+import { requestWorkspaceEditorLeave } from "./workspaceEditorGuard";
 
 type NewChatPatch = Partial<Omit<ThreadSettings, "goal">>;
 
@@ -9,6 +10,7 @@ export async function createInteractiveChat(
   options: { workspace?: "current" | "worktree" } = {},
 ): Promise<string> {
   const sessions = useSessions.getState();
+  if (!(await requestWorkspaceEditorLeave("navigate"))) return sessions.activeId;
   const folder = (settings?.folder ?? sessions.getSettings(sessions.activeId).folder).trim();
   const policy = options.workspace ?? useUiPreferences.getState().newProjectChatWorkspace;
   const id = sessions.newUserChat(settings);

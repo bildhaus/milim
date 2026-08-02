@@ -191,6 +191,10 @@ try {
       onLineClick?: () => void;
     }>;
   };
+  const { registerWorkspaceEditorGuard, requestWorkspaceEditorLeave } = await server.ssrLoadModule("/src/lib/workspaceEditorGuard.ts") as {
+    registerWorkspaceEditorGuard: (guard: (reason: "navigate" | "hide" | "quit") => Promise<boolean>) => () => void;
+    requestWorkspaceEditorLeave: (reason?: "navigate" | "hide" | "quit") => Promise<boolean>;
+  };
   const { DocumentPreview, FolderPreview, GoogleTextFormatToolbar, SheetPreview, SlidesPreview, browserLinkOpensNewTab, googleDocFitScale, googleFileKindDetail, googleSlideGestureRect, googleSlideGroupBounds, googleSlideMarqueeRect, googleSlideRectsIntersect, googleSlideSnapRect, googleSlideTextFormat, googleSlideTextSegments, googleSlideThumbnailRequestKey, googleSlideTransformGroup, googleSlidesNavigationAction, googleWorkspacePreviewNeedsLoad } = await server.ssrLoadModule("/src/components/GoogleWorkspacePreview.tsx") as {
     DocumentPreview: ComponentType<{
       fileId: string;
@@ -557,12 +561,25 @@ try {
   assert(!blockerSelector.includes('[role="menu"]') && !blockerSelector.includes("aria-modal"), "Native preview blocking should not infer visibility from semantic roles");
   assert(nativePreviewBlockedByAppUi({ querySelector: () => ({}) as Element }), "Native preview should hide behind app modal/menu UI");
   assert(!nativePreviewBlockedByAppUi({ querySelector: () => null }), "Native preview should stay visible without blocking app UI");
+  let leaveReason = "";
+  const unregisterEditorGuard = registerWorkspaceEditorGuard(async (reason) => {
+    leaveReason = reason;
+    return false;
+  });
+  assert(!(await requestWorkspaceEditorLeave("quit")) && leaveReason === "quit", "Dirty workspace navigation should route through the active editor guard");
+  unregisterEditorGuard();
+  assert(await requestWorkspaceEditorLeave("navigate"), "Workspace navigation should continue after the editor guard unmounts");
   const previewPanelSource = readFileSync("src/components/PreviewPanel.tsx", "utf8");
+  const workspaceCodePanelSource = readFileSync("src/components/WorkspaceCodePanel.tsx", "utf8");
+  const workspaceCodeEditorSource = readFileSync("src/components/WorkspaceCodeEditor.tsx", "utf8");
   assert(!previewPanelSource.includes("window.prompt"), "Preview review comments should use the themed dialog instead of a native prompt");
   assert(previewPanelSource.includes('data-testid="review-comment-dialog"'), "Preview review comments should keep a testable themed dialog");
-  assert(previewPanelSource.includes('data-testid="workspace-review-resize-handle"'), "Workspace review should expose a resizable file rail");
-  assert(previewPanelSource.includes("Hide workspace files"), "Workspace review should expose a collapsible file rail");
-  assert(previewPanelSource.includes("onPreviewWorkspaceFile(workspaceReviewFile.path)"), "Workspace HTML review should expose its Preview action");
+  assert(workspaceCodePanelSource.includes('data-testid="workspace-code-rail-resizer"'), "Workspace Code should expose a keyboard-resizable file rail");
+  assert(workspaceCodePanelSource.includes('aria-label="Collapse file rail"'), "Workspace Code should expose a collapsible file rail");
+  assert(workspaceCodePanelSource.includes("listWorkspaceFiles(workspace, query, 50)"), "Workspace Code search should use recursive native search");
+  assert(workspaceCodePanelSource.includes("writeWorkspaceTextFile"), "Workspace Code should save through the conflict-safe native API");
+  assert(workspaceCodePanelSource.includes("Reload") && workspaceCodePanelSource.includes("Overwrite"), "Workspace conflicts should keep both explicit recovery actions");
+  assert(workspaceCodeEditorSource.includes('key: "Mod-s"'), "Workspace Code should expose the platform save shortcut");
   assert(previewSurfaceIsInspectable({
     label: "main",
     kind: "artifact_iframe",
@@ -659,7 +676,8 @@ try {
   assert(codeMarkup.includes('data-testid="preview-tab-code"'), "Code-only artifacts should keep the Code tab");
   assert(codeMarkup.includes('id="inspector-panel-code"'), "Code panel should expose the linked id");
   assert(codeMarkup.includes('aria-labelledby="inspector-tab-code"'), "Code panel should be labelled by its tab");
-  assert(codeMarkup.includes('aria-label="Artifact file"'), "Multi-file code should provide a narrow-layout file selector");
+  assert(codeMarkup.includes('aria-label="Code sources"'), "Code should render one persistent source rail");
+  assert(codeMarkup.includes("Generated") && codeMarkup.includes("read-only"), "Generated artifacts should be clearly labelled read-only");
   assert(codeMarkup.includes('data-testid="preview-code-line-number" aria-hidden="true"'), "Visual line numbers should be hidden from assistive technology");
   const highlightedCodeMarkup = renderToStaticMarkup(createElement(SourceCodeView, {
     source: "/* first\nsecond */\nconst answer: number = 42;",
@@ -677,8 +695,9 @@ try {
   assert(reviewCodeMarkup.includes('<button type="button"'), "Review source should keep line-level comment controls");
   assert(reviewCodeMarkup.includes("preview-code-line selected"), "Review source should expose its selected line");
   const workspaceMarkup = renderPreviewPanel({ artifact: workspaceArtifact, activeTab: "code", workspaceFolder: "C:\\workspace", onClose: () => {} });
-  assert(workspaceMarkup.includes("workspace-review-only"), "Workspace-only review should fill the Code panel");
-  assert(!workspaceMarkup.includes('data-testid="preview-code-source"'), "Workspace-only review should omit the redundant placeholder source");
+  assert(workspaceMarkup.includes('aria-label="Search workspace files"'), "Workspace Code should lead with recursive workspace search");
+  assert(workspaceMarkup.includes("Select a workspace file"), "Opening Code directly should show the workspace editor empty state");
+  assert(!workspaceMarkup.includes('data-testid="preview-code-source"'), "Workspace-only Code should omit the generated placeholder source");
 
   const unifiedTabs = createElement("div", { className: "side-panel-switcher", role: "tablist", "aria-label": "Inspector views" },
     createElement("button", { id: "inspector-tab-preview", role: "tab", "aria-selected": true, "aria-controls": "inspector-panel-preview" }, "Preview"),

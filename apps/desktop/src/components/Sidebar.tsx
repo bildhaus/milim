@@ -14,6 +14,7 @@ import {
 } from "../sessions/store";
 import { openWorkspaceLauncher, runWorkspaceGitAction } from "../api";
 import { createInteractiveChat } from "../lib/newChatCoordinator";
+import { requestWorkspaceEditorLeave } from "../lib/workspaceEditorGuard";
 import { GIT_STATUS_REFRESH_INTERVAL_MS } from "../lib/gitRefresh";
 import { markPerfRender } from "../lib/perf";
 import { previewRuntimeKeyForThread } from "../lib/previewRuntimeKeys";
@@ -749,8 +750,9 @@ export function Sidebar({
     return () => window.cancelAnimationFrame(frame);
   }, [open]);
 
-  function switchVisibleSession(id: string) {
+  async function switchVisibleSession(id: string) {
     if (id === activeId) return;
+    if (!(await requestWorkspaceEditorLeave("navigate"))) return;
     switchTo(id);
   }
 
@@ -1023,16 +1025,18 @@ export function Sidebar({
     setConfirmArchiveId(null);
   }
 
-  function archiveChat(id: string) {
+  async function archiveChat(id: string) {
     if (confirmArchiveId !== id) {
       setConfirmArchiveId(id);
       return;
     }
+    if (id === activeId && !(await requestWorkspaceEditorLeave("navigate"))) return;
     archiveSession(id);
     setConfirmArchiveId(null);
   }
 
-  function branchChat(id: string) {
+  async function branchChat(id: string) {
+    if (id === activeId && !(await requestWorkspaceEditorLeave("navigate"))) return;
     useSessions.getState().forkSession(id);
     setConfirmArchiveId(null);
     focusComposerSoon();
@@ -1057,7 +1061,7 @@ export function Sidebar({
     setConfirmArchiveId(null);
   }
 
-  function settleChat(id: string) {
+  async function settleChat(id: string) {
     const allInboxGroups = query.trim()
       ? groupSessionsByProjects(
           sessions,
@@ -1071,6 +1075,7 @@ export function Sidebar({
       settledThreadsEnabled && id === activeId
         ? nextInboxSessionIdAfterSettle(allInboxGroups, id)
         : undefined;
+    if (nextId && !(await requestWorkspaceEditorLeave("navigate"))) return;
     settleSession(id);
     if (nextId) switchTo(nextId);
     else if (settledThreadsEnabled && id === activeId) setSettledExpanded(true);
@@ -1091,7 +1096,7 @@ export function Sidebar({
         label: session.id === activeId ? "Current chat" : "Open chat",
         icon: <FolderOpen size={13} />,
         disabled: session.id === activeId,
-        action: () => switchTo(session.id),
+        action: () => { void switchVisibleSession(session.id); },
       },
       {
         id: "rename",
@@ -1202,7 +1207,10 @@ export function Sidebar({
         icon: <Archive size={13} />,
         danger: true,
         separatorBefore: true,
-        action: () => archiveProject(group.projectId!),
+        action: async () => {
+          if (group.sessions.some((session) => session.id === activeId) && !(await requestWorkspaceEditorLeave("navigate"))) return;
+          archiveProject(group.projectId!);
+        },
       }] : []),
     ], group.label);
   }

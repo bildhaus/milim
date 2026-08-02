@@ -53,11 +53,16 @@ export interface WorkspaceDirectoryPage {
   next_cursor?: string | null;
 }
 
-export interface WorkspaceReviewFile {
+export interface WorkspaceTextFile {
   path: string;
   content: string;
   size: number;
+  revision: string;
 }
+
+export type WorkspaceTextWriteResult =
+  | { status: "saved"; path: string; size: number; revision: string }
+  | { status: "conflict"; revision: string };
 
 export type ChatArtifactKind = "code" | "json" | "csv" | "table" | "text";
 export type ChatArtifactDisposition = "file" | "inline" | "preview";
@@ -580,14 +585,31 @@ export async function listWorkspaceDirectory(
   });
 }
 
-export async function readWorkspaceReviewFile(
+export async function readWorkspaceTextFile(
   workspace: string,
   path: string,
-): Promise<WorkspaceReviewFile> {
-  if (!inTauri) throw new Error("Workspace review is only available in the desktop app.");
-  return await invoke<WorkspaceReviewFile>("read_workspace_review_file", {
+): Promise<WorkspaceTextFile> {
+  if (!inTauri) throw new Error("Workspace editing is only available in the desktop app.");
+  return await invoke<WorkspaceTextFile>("read_workspace_text_file", {
     workspace,
     path,
+  });
+}
+
+export async function writeWorkspaceTextFile(
+  workspace: string,
+  path: string,
+  content: string,
+  expectedRevision: string,
+  force = false,
+): Promise<WorkspaceTextWriteResult> {
+  if (!inTauri) throw new Error("Workspace editing is only available in the desktop app.");
+  return await invoke<WorkspaceTextWriteResult>("write_workspace_text_file", {
+    workspace,
+    path,
+    content,
+    expectedRevision,
+    force,
   });
 }
 
@@ -709,6 +731,16 @@ export async function restoreMilimBackup(path: string): Promise<string> {
 export async function requestDesktopQuit(): Promise<void> {
   if (!inTauri) return;
   await invoke("request_desktop_quit");
+}
+
+export async function setWorkspaceEditorDirty(dirty: boolean): Promise<void> {
+  if (!inTauri) return;
+  await invoke("set_workspace_editor_dirty", { dirty });
+}
+
+export async function completeWorkspaceEditorLeave(action: "hide" | "quit"): Promise<void> {
+  if (!inTauri) return;
+  await invoke("complete_workspace_editor_leave", { action });
 }
 
 export async function listWorkspaceLaunchers(

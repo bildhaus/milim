@@ -53,11 +53,18 @@
     "verify:tester-ready": "npm run verify && npm run verify:release && npm run verify:tauri-webview"
   },
   "dependencies": {
+    "@codemirror/commands": "^6.10.4",
+    "@codemirror/language": "^6.12.4",
+    "@codemirror/legacy-modes": "^6.5.3",
+    "@codemirror/state": "^6.7.1",
+    "@codemirror/view": "^6.43.7",
+    "@lezer/highlight": "^1.2.3",
     "@modelcontextprotocol/ext-apps": "1.7.4",
     "@oshtz/shatz-avatars": "file:vendor/oshtz-shatz-avatars-0.1.0.tgz",
     "@tauri-apps/api": "^2.1.1",
     "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-notification": "^2.3.3",
+    "codemirror": "^6.0.2",
     "cuelume": "0.1.2",
     "highlight.js": "^11.11.1",
     "js-tiktoken": "^1.0.21",

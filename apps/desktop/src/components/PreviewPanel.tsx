@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { cancelPreviewPicker, listWorkspaceDirectory, openExternalUrl, readWorkspaceReviewFile, setActivePreviewTarget, startPreviewPicker, takePreviewPicker, type ChatArtifact, type PreviewAppPreflight, type PreviewAppStatus, type PreviewSurfaceCapability, type PreviewSurfaceKind, type PreviewSurfaceTarget, type WorkspaceDirectoryEntry } from "../api";
+import { cancelPreviewPicker, openExternalUrl, setActivePreviewTarget, startPreviewPicker, takePreviewPicker, type ChatArtifact, type PreviewAppPreflight, type PreviewAppStatus, type PreviewSurfaceCapability, type PreviewSurfaceKind, type PreviewSurfaceTarget } from "../api";
 import type { ArtifactRevision, ArtifactRevisionGroup } from "../lib/artifactRevisions";
 import { buildArtifactPreviewDocument, previewKindForArtifact } from "../lib/artifactPreview";
 import { isFileArtifact, isPreviewableArtifact, normalizeArtifactBrowserUrl, resolveArtifactBrowserInput } from "../lib/artifacts";
@@ -11,11 +11,12 @@ import type { SessionBrowserSession, SessionBrowserTab } from "../sessions/store
 import { closePreviewWebview, createPreviewWebview, listenForPreviewWebviewNavigation, listenForPreviewWebviewNewTab, listenForPreviewWebviewShortcut, listenForPreviewWebviewTitle, movePreviewWebviewHistory, navigatePreviewWebview, reloadPreviewWebview, type PreviewBrowserStorageMode, type PreviewWebviewLoadState, type PreviewWebviewShortcut } from "../lib/previewWebview";
 import { useSettings } from "../settings/store";
 import { shortcutLabel, shortcutMatchesEvent } from "../ui/shortcuts";
+import { requestWorkspaceEditorLeave } from "../lib/workspaceEditorGuard";
 import { useContextMenu } from "./ContextMenu";
-import { ArrowLeft, ArrowRight, Bolt, Code, Copy, Download, ExternalLink, Eye, FileText, Folder, Globe, MoreHorizontal, Plus, Refresh, Sidebar, Square, Terminal, X } from "./icons";
+import { ArrowLeft, ArrowRight, Bolt, Code, Copy, Download, ExternalLink, Eye, Globe, MoreHorizontal, Plus, Refresh, Sidebar, Square, Terminal, X } from "./icons";
 import { GoogleWorkspacePreview } from "./GoogleWorkspacePreview";
 import { Logo } from "./Logo";
-import { SourceCodeView } from "./SourceCodeView";
+import { WorkspaceCodePanel } from "./WorkspaceCodePanel";
 
 const Markdown = lazy(() => import("./Markdown").then((mod) => ({ default: mod.Markdown })));
 
@@ -70,10 +71,6 @@ const LOG_DRAWER_MIN_HEIGHT = 48;
 const LOG_DRAWER_DEFAULT_HEIGHT = 142;
 const LOG_DRAWER_MAX_HEIGHT = 360;
 const LOG_DRAWER_KEYBOARD_STEP = 24;
-const CODE_SPLIT_MIN_WIDTH = 132;
-const CODE_SPLIT_DEFAULT_WIDTH = 180;
-const CODE_SPLIT_MIN_CODE_WIDTH = 160;
-const CODE_SPLIT_KEYBOARD_STEP = 24;
 const PREVIEW_CONTROL_OVERLAY_CLOSE_MS = 3400;
 const PREVIEW_CONTROL_OVERLAY_STORAGE_PREFIX = "milim-preview-control-activity:";
 const PREVIEW_TAB_IDS: Record<PreviewTab, string> = {
@@ -201,39 +198,15 @@ export function PreviewPanel({
   const [runtimePanelFocused, setRuntimePanelFocused] = useState(false);
   const [runtimeLogsClearedAt, setRuntimeLogsClearedAt] = useState(0);
   const [logDrawerHeight, setLogDrawerHeight] = useState(LOG_DRAWER_DEFAULT_HEIGHT);
-  const [codeFileListWidth, setCodeFileListWidth] = useState(CODE_SPLIT_DEFAULT_WIDTH);
-  const [codeSplitDragging, setCodeSplitDragging] = useState(false);
   const [logResizing, setLogResizing] = useState(false);
   const [iframeReadyKey, setIframeReadyKey] = useState<string | null>(null);
-  const [workspaceBrowserOpen, setWorkspaceBrowserOpen] = useState(false);
-  const [workspaceBrowserPath, setWorkspaceBrowserPath] = useState("");
-  const [workspaceEntries, setWorkspaceEntries] = useState<WorkspaceDirectoryEntry[]>([]);
-  const [workspaceCursor, setWorkspaceCursor] = useState<string | null>(null);
-  const [workspaceReviewFile, setWorkspaceReviewFile] = useState<{ path: string; content: string } | null>(null);
-  const [workspaceLineAnchor, setWorkspaceLineAnchor] = useState<number | null>(null);
-  const [workspaceTreeVisible, setWorkspaceTreeVisible] = useState(true);
   const [reviewCommentDraft, setReviewCommentDraft] = useState("");
   const [reviewCommentOpen, setReviewCommentOpen] = useState(false);
   const reviewCommentSubmitRef = useRef<((body: string) => void) | null>(null);
   const reviewCommentReturnFocusRef = useRef<HTMLElement | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const pickerRunRef = useRef(0);
-  useEffect(() => {
-    if (!workspaceBrowserOpen || !workspaceFolder?.trim()) return;
-    let canceled = false;
-    void listWorkspaceDirectory(workspaceFolder, workspaceBrowserPath)
-      .then((page) => {
-        if (canceled) return;
-        setWorkspaceEntries(page.entries);
-        setWorkspaceCursor(page.next_cursor ?? null);
-      })
-      .catch((error) => setPreviewError(error instanceof Error ? error.message : String(error)));
-    return () => { canceled = true; };
-  }, [workspaceBrowserOpen, workspaceBrowserPath, workspaceFolder]);
   const logIdRef = useRef(0);
-  const codePanelRef = useRef<HTMLDivElement | null>(null);
-  const codeSourceRef = useRef<HTMLDivElement | null>(null);
-  const codeSplitStartRef = useRef<{ clientX: number; width: number } | null>(null);
   const logResizeStartRef = useRef<{ clientY: number; height: number } | null>(null);
   const previewWasDeferredRef = useRef(previewDeferred);
   const nativeBrowserLabelsRef = useRef(new Map<string, string>());
@@ -265,9 +238,6 @@ export function PreviewPanel({
   const selectedCodeFile = codeFiles.find((file) => file.artifact.id === selectedCodeArtifactId) ?? codeFiles.find((file) => file.entry) ?? codeFiles[0];
   const selectedCodeArtifact = selectedCodeFile?.artifact ?? artifact;
   const selectedSource = selectedCodeArtifact.content;
-  const workspaceReviewLines = useMemo(() => workspaceReviewFile?.content.split(/\r?\n/) ?? [], [workspaceReviewFile?.content]);
-  const workspaceReviewIsHtml = Boolean(workspaceReviewFile && /\.html?$/i.test(workspaceReviewFile.path));
-  const workspaceReviewOnly = Boolean(workspaceFolder?.trim() && selectedCodeArtifact.id === "workspace-review");
   const runtimeLogs = useMemo(
     () => (runtimeStatus?.logs ?? []).filter((log) => log.ts > runtimeLogsClearedAt).slice(-MAX_PREVIEW_LOGS).map((log, index): PreviewLogEntry => ({
       id: log.seq == null ? -index - 1 : -log.seq - 1,
@@ -291,9 +261,6 @@ export function PreviewPanel({
   const prepareArtifactFix = onPrepareArtifactFix ?? onSendArtifactFixPrompt;
   const canPrepareFix = Boolean(selectedPreviewSource !== "url" && prepareArtifactFix && (previewError || runtimeError || errorLogs.length));
   const canSwitchRevisions = Boolean(revision && revisionGroup && revisionGroup.revisions.length > 1 && onSelectRevision);
-  const codePanelStyle = {
-    "--preview-file-list-width": `${codeFileListWidth}px`,
-  } as CSSProperties;
   const canGoBack = isUrlPreview && browserHistoryIndex > 0;
   const canGoForward = isUrlPreview && browserHistoryIndex >= 0 && browserHistoryIndex < browserHistory.length - 1;
 
@@ -328,10 +295,12 @@ export function PreviewPanel({
         ? browserUrl || "New URL"
         : title;
 
-  function setActiveTab(tab: PreviewTab) {
+  async function setActiveTab(tab: PreviewTab, focus = false): Promise<void> {
     if (tab === "preview" && !previewAvailable) return;
+    if (tab !== activeTab && activeTab === "code" && !(await requestWorkspaceEditorLeave("navigate"))) return;
     if (controlledActiveTab === undefined) setLocalActiveTab(tab);
     if (tab !== activeTab) onActiveTabChange?.(tab);
+    if (focus) tabRefs.current[tab]?.focus();
   }
 
   function updateBrowserSession(next: PreviewBrowserSession) {
@@ -440,8 +409,7 @@ export function PreviewPanel({
     const nextTab = nextPreviewTab(activeTab, event.key, tabs);
     if (!nextTab) return;
     event.preventDefault();
-    setActiveTab(nextTab);
-    tabRefs.current[nextTab]?.focus();
+    void setActiveTab(nextTab, true);
   }
 
   useEffect(() => {
@@ -489,11 +457,6 @@ export function PreviewPanel({
       setSelectedCodeArtifactId(codeFiles[0].artifact.id);
     }
   }, [codeFiles, selectedCodeArtifactId]);
-
-  useEffect(() => {
-    const sourceEl = codeSourceRef.current;
-    if (previewDeferred && activeTab === "code" && sourceEl) sourceEl.scrollTo({ top: sourceEl.scrollHeight });
-  }, [activeTab, previewDeferred, selectedSource]);
 
   useEffect(() => {
     if (previewDeferred) return;
@@ -1044,54 +1007,6 @@ export function PreviewPanel({
     }
   }
 
-  function clampCodeSplitWidth(width: number): number {
-    const max = Math.max(CODE_SPLIT_MIN_WIDTH, (codePanelRef.current?.clientWidth ?? CODE_SPLIT_DEFAULT_WIDTH + CODE_SPLIT_MIN_CODE_WIDTH) - CODE_SPLIT_MIN_CODE_WIDTH);
-    return Math.round(Math.min(Math.max(width, CODE_SPLIT_MIN_WIDTH), max));
-  }
-
-  function resizeCodeSplit(width: number) {
-    setCodeFileListWidth(clampCodeSplitWidth(width));
-  }
-
-  function startCodeSplitResize(event: PointerEvent<HTMLDivElement>) {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    codeSplitStartRef.current = { clientX: event.clientX, width: codeFileListWidth };
-    setCodeSplitDragging(true);
-    event.currentTarget.setPointerCapture(event.pointerId);
-  }
-
-  function moveCodeSplitResize(event: PointerEvent<HTMLDivElement>) {
-    const start = codeSplitStartRef.current;
-    if (!start) return;
-    resizeCodeSplit(start.width + event.clientX - start.clientX);
-  }
-
-  function endCodeSplitResize(event: PointerEvent<HTMLDivElement>) {
-    if (!codeSplitStartRef.current) return;
-    codeSplitStartRef.current = null;
-    setCodeSplitDragging(false);
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-  }
-
-  function resizeCodeSplitWithKeyboard(event: KeyboardEvent<HTMLDivElement>) {
-    if (event.key === "ArrowLeft") {
-      event.preventDefault();
-      resizeCodeSplit(codeFileListWidth - CODE_SPLIT_KEYBOARD_STEP);
-    } else if (event.key === "ArrowRight") {
-      event.preventDefault();
-      resizeCodeSplit(codeFileListWidth + CODE_SPLIT_KEYBOARD_STEP);
-    } else if (event.key === "Home") {
-      event.preventDefault();
-      resizeCodeSplit(CODE_SPLIT_MIN_WIDTH);
-    } else if (event.key === "End") {
-      event.preventDefault();
-      resizeCodeSplit(Number.MAX_SAFE_INTEGER);
-    }
-  }
-
   return (
     <aside
       ref={panelRef}
@@ -1592,203 +1507,15 @@ export function PreviewPanel({
           </div>
         )}
       </div>
-      <div
-        ref={codePanelRef}
-        id={PREVIEW_PANEL_IDS.code}
-        className={`preview-code-panel${codeFiles.length > 1 ? " with-file-list" : ""}${workspaceReviewOnly ? " workspace-review-only" : ""}`}
-        role="tabpanel"
-        aria-labelledby={PREVIEW_TAB_IDS.code}
-        hidden={activeTab !== "code" || isUrlPreview}
-        style={codePanelStyle}
-      >
-        {workspaceFolder?.trim() ? (
-          <section className="workspace-review-browser" aria-label="Workspace files">
-            <div className="workspace-review-head">
-              <button type="button" onClick={() => setWorkspaceBrowserOpen((open) => !open)}>
-                <Folder size={13} /> Workspace
-              </button>
-              {workspaceBrowserOpen && workspaceBrowserPath ? (
-                <button type="button" onClick={() => {
-                  const parts = workspaceBrowserPath.split("/").filter(Boolean);
-                  parts.pop(); setWorkspaceBrowserPath(parts.join("/")); setWorkspaceReviewFile(null);
-                }}>Back</button>
-              ) : null}
-              {workspaceBrowserOpen ? <span>{workspaceBrowserPath || "/"}</span> : null}
-              {workspaceBrowserOpen ? (
-                <button
-                  type="button"
-                  className="workspace-review-tree-toggle"
-                  title={workspaceTreeVisible ? "Hide files" : "Show files"}
-                  aria-label={workspaceTreeVisible ? "Hide workspace files" : "Show workspace files"}
-                  aria-controls="workspace-review-tree"
-                  aria-expanded={workspaceTreeVisible}
-                  onClick={() => setWorkspaceTreeVisible((visible) => !visible)}
-                >
-                  <Sidebar size={13} />
-                </button>
-              ) : null}
-            </div>
-            {workspaceBrowserOpen ? (
-              <div className={`workspace-review-body${workspaceTreeVisible ? "" : " tree-hidden"}`}>
-                {workspaceTreeVisible ? (
-                  <div id="workspace-review-tree" className="workspace-review-tree">
-                    {workspaceEntries.map((entry) => (
-                      <button type="button" key={entry.path} onClick={() => {
-                        if (entry.kind === "directory") {
-                          setWorkspaceBrowserPath(entry.path); setWorkspaceReviewFile(null);
-                        } else {
-                          void readWorkspaceReviewFile(workspaceFolder, entry.path)
-                            .then((file) => { setWorkspaceReviewFile(file); setWorkspaceLineAnchor(null); })
-                            .catch((error) => setPreviewError(error instanceof Error ? error.message : String(error)));
-                        }
-                      }}>
-                        {entry.kind === "directory" ? <Folder size={12} /> : <FileText size={12} />}
-                        {entry.name}
-                      </button>
-                    ))}
-                    {workspaceCursor ? (
-                      <button type="button" onClick={() => void listWorkspaceDirectory(workspaceFolder, workspaceBrowserPath, workspaceCursor).then((page) => {
-                        setWorkspaceEntries((current) => [...current, ...page.entries]);
-                        setWorkspaceCursor(page.next_cursor ?? null);
-                      })}>Load more</button>
-                    ) : null}
-                  </div>
-                ) : null}
-                {workspaceTreeVisible ? (
-                  <div
-                    className={`preview-code-resize-handle workspace-review-resize-handle${codeSplitDragging ? " dragging" : ""}`}
-                    data-testid="workspace-review-resize-handle"
-                    role="separator"
-                    aria-label="Resize workspace files"
-                    aria-orientation="vertical"
-                    aria-valuemin={CODE_SPLIT_MIN_WIDTH}
-                    aria-valuemax={Math.max(CODE_SPLIT_MIN_WIDTH, (codePanelRef.current?.clientWidth ?? CODE_SPLIT_DEFAULT_WIDTH + CODE_SPLIT_MIN_CODE_WIDTH) - CODE_SPLIT_MIN_CODE_WIDTH)}
-                    aria-valuenow={codeFileListWidth}
-                    tabIndex={0}
-                    onKeyDown={resizeCodeSplitWithKeyboard}
-                    onPointerDown={startCodeSplitResize}
-                    onPointerMove={moveCodeSplitResize}
-                    onPointerUp={endCodeSplitResize}
-                    onPointerCancel={endCodeSplitResize}
-                  />
-                ) : null}
-                {workspaceReviewFile ? (
-                  <div className="workspace-review-file">
-                    <strong>
-                      <span>{workspaceReviewFile.path}</span>
-                      {workspaceReviewIsHtml && onPreviewWorkspaceFile ? (
-                        <button
-                          type="button"
-                          data-testid="workspace-html-preview"
-                          disabled={runtimeBusy}
-                          onClick={() => {
-                            setRuntimeDetailsOpen(false);
-                            setRuntimePanelFocused(false);
-                            onPreviewWorkspaceFile(workspaceReviewFile.path);
-                          }}
-                        >
-                          <Eye size={12} />
-                          Preview
-                        </button>
-                      ) : null}
-                    </strong>
-                    <SourceCodeView
-                      className="workspace-review-source"
-                      source={workspaceReviewFile.content}
-                      language={workspaceReviewFile.path.split(".").pop()}
-                      ariaLabel={`${workspaceReviewFile.path} source`}
-                      selectedLine={workspaceLineAnchor}
-                      onLineClick={(lineNumber, event) => {
-                        if (!event.shiftKey || workspaceLineAnchor == null) {
-                          setWorkspaceLineAnchor(lineNumber); return;
-                        }
-                        const startLine = Math.min(workspaceLineAnchor, lineNumber);
-                        const endLine = Math.max(workspaceLineAnchor, lineNumber);
-                        const selectedText = workspaceReviewLines.slice(startLine - 1, endLine).join("\n");
-                        requestReviewComment((body) => {
-                          window.dispatchEvent(new CustomEvent("milim:add-review-comment", { detail: {
-                            id: `review-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-                            surface: "workspace", filePath: workspaceReviewFile.path, side: "new",
-                            startLine, endLine, selectedText, body, timestamp: Date.now(),
-                          } }));
-                          setWorkspaceLineAnchor(null);
-                        });
-                      }}
-                      onLineDoubleClick={(lineNumber) => {
-                        const line = workspaceReviewLines[lineNumber - 1] ?? "";
-                        requestReviewComment((body) => {
-                          window.dispatchEvent(new CustomEvent("milim:add-review-comment", { detail: {
-                            id: `review-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-                            surface: "workspace", filePath: workspaceReviewFile.path, side: "new",
-                            startLine: lineNumber, endLine: lineNumber, selectedText: line, body, timestamp: Date.now(),
-                          } }));
-                        });
-                      }}
-                    />
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-          </section>
-        ) : null}
-        {codeFiles.length > 1 && (
-          <label className="preview-file-select">
-            <span>File</span>
-            <select
-              aria-label="Artifact file"
-              value={selectedCodeArtifact.id}
-              onChange={(event) => setSelectedCodeArtifactId(event.currentTarget.value)}
-            >
-              {codeFiles.map((file) => <option key={file.artifact.id} value={file.artifact.id}>{file.path}{file.entry ? " (entry)" : ""}</option>)}
-            </select>
-          </label>
-        )}
-        {codeFiles.length > 1 && (
-          <div className="preview-file-list" data-testid="preview-code-file-list" aria-label="Artifact files">
-            {codeFiles.map((file) => (
-              <button
-                key={file.artifact.id}
-                className={`preview-file-button${file.artifact.id === selectedCodeArtifact.id ? " active" : ""}`}
-                data-testid="preview-code-file"
-                title={file.path}
-                aria-pressed={file.artifact.id === selectedCodeArtifact.id}
-                onClick={() => setSelectedCodeArtifactId(file.artifact.id)}
-              >
-                <FileText size={13} />
-                <span className="preview-file-name">{file.path}</span>
-                {file.entry && <span className="preview-file-entry">entry</span>}
-              </button>
-            ))}
-          </div>
-        )}
-        {codeFiles.length > 1 && (
-          <div
-            className={`preview-code-resize-handle${codeSplitDragging ? " dragging" : ""}`}
-            data-testid="preview-code-resize-handle"
-            role="separator"
-            aria-label="Resize file list"
-            aria-orientation="vertical"
-            aria-valuemin={CODE_SPLIT_MIN_WIDTH}
-            aria-valuemax={Math.max(CODE_SPLIT_MIN_WIDTH, (codePanelRef.current?.clientWidth ?? CODE_SPLIT_DEFAULT_WIDTH + CODE_SPLIT_MIN_CODE_WIDTH) - CODE_SPLIT_MIN_CODE_WIDTH)}
-            aria-valuenow={codeFileListWidth}
-            tabIndex={0}
-            onKeyDown={resizeCodeSplitWithKeyboard}
-            onPointerDown={startCodeSplitResize}
-            onPointerMove={moveCodeSplitResize}
-            onPointerUp={endCodeSplitResize}
-            onPointerCancel={endCodeSplitResize}
-          />
-        )}
-        {!workspaceReviewOnly && (
-          <SourceCodeView
-            ref={codeSourceRef}
-            className="preview-source"
-            testId="preview-code-source"
-            source={selectedSource}
-            language={selectedCodeArtifact.language ?? selectedCodeArtifact.filename?.split(".").pop()}
-            ariaLabel={`${artifactLabel(selectedCodeArtifact)} source`}
-          />
-        )}
+      <div id={PREVIEW_PANEL_IDS.code} className="preview-code-panel" role="tabpanel" aria-labelledby={PREVIEW_TAB_IDS.code} hidden={activeTab !== "code" || isUrlPreview}>
+        <WorkspaceCodePanel
+          workspaceFolder={workspaceFolder}
+          files={codeFiles}
+          selectedArtifactId={selectedCodeArtifactId}
+          onSelectArtifact={setSelectedCodeArtifactId}
+          onPreviewWorkspaceFile={onPreviewWorkspaceFile}
+          runtimeBusy={runtimeBusy}
+        />
       </div>
       {reviewCommentOpen && createPortal(
         <div

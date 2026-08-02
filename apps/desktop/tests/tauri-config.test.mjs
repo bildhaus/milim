@@ -212,7 +212,7 @@ for (const needle of [
   ".chat-body.inspector-stacked",
   "min-width: 360px",
   "@container preview-panel (max-width: 439px)",
-  ".preview-file-select",
+  ".workspace-code-layout",
   ".preview-overflow",
 ]) {
   if (!styles.includes(needle)) {
@@ -365,7 +365,8 @@ for (const needle of [
   "TrayIconBuilder::with_id",
   ".show_menu_on_left_click(false)",
   "TRAY_OPEN_ID => show_main_window(app)",
-  "TRAY_QUIT_ID => request_user_state_flush_then_exit(app)",
+  "TRAY_QUIT_ID => {",
+  "request_workspace_editor_leave(app, WorkspaceEditorLeaveAction::Quit)",
   "TrayIconEvent::Click",
   "WindowEvent::CloseRequested",
   "api.prevent_close()",
