@@ -89,7 +89,7 @@ impl ProcessTreeGuard {
         if let Some(pid) = self.process_group.take() {
             let group = format!("-{pid}");
             let _ = std::process::Command::new("kill")
-                .args(["-KILL", &group])
+                .args(["-KILL", "--", &group])
                 .status();
         }
     }
