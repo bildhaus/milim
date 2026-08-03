@@ -287,8 +287,8 @@ try {
   assert(managerSource.includes("event.nativeEvent.isComposing"), "The prompt shortcut should ignore IME composition");
   assert(managerSource.includes("promptRef"), "The media prompt should retain a direct auto-grow target");
   assert(managerSource.includes('textarea.style.height = `${textarea.scrollHeight}px`'), "The media prompt should grow to its full content height");
-  assert(managerSource.includes('textarea.style.overflowY = "hidden"'), "The media prompt should never introduce an inner scrollbar");
-  assert(managerSource.includes("[prompt, providersOpen]"), "The prompt should restore its auto-grown height after provider setup");
+  assert(managerSource.includes('textarea.style.overflowY = "auto"'), "The media prompt should scroll internally after reaching its layout cap");
+  assert(managerSource.includes("[composerPlacement, prompt, providersOpen]"), "The prompt should recalculate after placement or provider setup changes");
   assert(!managerSource.includes("createPortal("), "The model picker should stay inside the studio dialog and focus trap");
   assert(managerSource.includes('aria-live="polite"'), "Generation state should be announced to assistive technology");
   assert(managerSource.includes('"media-generation-progress"'), "A valid submit should expose an immediate stage progress state");
