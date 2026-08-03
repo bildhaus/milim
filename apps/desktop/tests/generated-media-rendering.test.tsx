@@ -66,10 +66,11 @@ try {
   assert(manager.includes('data-testid="inline-media-generator"'), "The media manager should expose the chat media controls");
   assert(manager.includes('data-testid="media-stage"'), "The studio should expose a dedicated output stage");
   assert(manager.includes('aria-controls="media-library-sidebar"'), "The studio should expose a local-library sidebar toggle");
-  assert(manager.includes('aria-expanded="false"'), "The local library should start closed");
-  assert(!manager.includes('id="media-library-sidebar"'), "The closed library should not leave a hidden sidebar in the accessibility tree");
+  assert(manager.includes('aria-expanded="false"'), "The server-rendered studio should keep the local library collapsed without a viewport");
+  assert(!manager.includes('id="media-library-sidebar"'), "A collapsed library should not leave a hidden sidebar in the accessibility tree");
   assert(manager.includes('data-testid="inline-media-advanced-input"'), "Raw media input should reuse the chat composer disclosure");
-  assert(manager.includes("media-composer-dock"), "The standalone generator should use a full-width composer dock");
+  assert(manager.includes("media-create-pane"), "The standalone generator should expose a dedicated Create pane");
+  assert(manager.includes("media-create-controls"), "Create controls should stack above the anchored prompt");
   assert(manager.includes("dock-surface media-composer-surface"), "The prompt should use the shared chat composer surface");
   assert(manager.includes("composer-input media-composer-prompt"), "The media prompt should use the chat composer input structure");
   assert(manager.includes("control-bar media-control-bar"), "Model selection should use the chat composer control bar");
@@ -83,11 +84,11 @@ try {
   assert(!manager.includes("media-sheet-resize-glyph"), "The resize handle should not render a panel-specific glyph");
   assert(manager.includes("Ctrl/Cmd + Enter"), "The generation shortcut should be shown outside the primary action label");
   assert(manager.includes('dir="auto"'), "The media prompt should infer left-to-right or right-to-left direction");
-  assert(manager.includes("Generate, compare outputs, and reuse saved settings."), "The studio should describe its complete quick-generation workflow");
   assert(!manager.includes("Iteration stays in chat"), "The studio should not hand users off to chat for comparison or reuse");
   assert(manager.includes("Prompt sent unchanged"), "The privacy summary should remain concise in the generator rail");
   assert(manager.includes("Your next output will appear here"), "The initial preview should explain where results appear");
-  assert(!manager.includes('data-testid="inline-media-settings-summary"'), "Media Studio should retain inline media controls");
+  assert(manager.includes('data-testid="inline-media-settings-summary"'), "Media Studio should expose a compact media-settings toggle");
+  assert(manager.includes('id="media-inline-settings"'), "Media Studio settings should expand inside the composer");
 
   const namedSelect = renderToStaticMarkup(
     createElement(Select, {
@@ -285,11 +286,21 @@ try {
   assert(!managerSource.includes("onKeyDown={onStudioKeyDown}"), "Search and advanced controls should not inherit a studio-wide generation shortcut");
   assert(managerSource.includes("event.nativeEvent.isComposing"), "The prompt shortcut should ignore IME composition");
   assert(managerSource.includes("promptRef"), "The media prompt should retain a direct auto-grow target");
-  assert(managerSource.includes("Math.min(textarea.scrollHeight, 150)"), "The media prompt should auto-grow to its existing height cap");
+  assert(managerSource.includes('textarea.style.height = `${textarea.scrollHeight}px`'), "The media prompt should grow to its full content height");
+  assert(managerSource.includes('textarea.style.overflowY = "hidden"'), "The media prompt should never introduce an inner scrollbar");
   assert(managerSource.includes("[prompt, providersOpen]"), "The prompt should restore its auto-grown height after provider setup");
   assert(!managerSource.includes("createPortal("), "The model picker should stay inside the studio dialog and focus trap");
   assert(managerSource.includes('aria-live="polite"'), "Generation state should be announced to assistive technology");
   assert(managerSource.includes('"media-generation-progress"'), "A valid submit should expose an immediate stage progress state");
+  assert(managerSource.includes("type StageRequest = { kind: MediaKind; model: string; prompt: string }"), "The visible in-flight request should snapshot its kind, model, and prompt");
+  assert(managerSource.includes("setStageRequest({ kind, model: model.trim(), prompt: prompt.trim() })"), "Generation should snapshot the submitted prompt before awaiting the provider");
+  assert(managerSource.includes('className={`media-generation-placeholder ${stageStatus}`}'), "Running and saving should fill the Output canvas");
+  assert(managerSource.includes("const mediaComposer = ("), "Media Studio should keep the existing generator controls in one composer");
+  assert(managerSource.includes("{mediaComposer}"), "The composer should render with the Output stage");
+  assert(managerSource.includes('aria-label="Composer placement"'), "Media Studio should expose an accessible composer-placement control");
+  assert(managerSource.includes("setComposerPlacement"), "Composer placement should use the persisted UI preference setter");
+  assert(managerSource.includes('className="media-generation-field" aria-hidden="true"'), "The animated generation field should remain decorative");
+  assert(managerSource.includes('stageStatus === "running" ? "shiny-text" : undefined'), "Only the active generation title should use the shared shine treatment");
   assert(managerSource.includes('setGenerationPhase("submitting")'), "Generation should enter its busy phase before awaiting the provider");
   assert(managerSource.includes("setResults([])"), "A new valid submit should clear stale stage output before waiting");
   assert(managerSource.includes("generationError"), "Generation failures should remain scoped to the generator");
@@ -334,6 +345,7 @@ try {
   assert(managerSource.includes('aria-current={item.id === selectedLibraryItem?.id ? "true" : undefined}'), "The selected library card should expose its current state");
   assert(managerSource.includes("interactive={false}"), "Library and variant thumbnails should not add nested focus targets");
   assert(managerSource.includes('<aside className="media-library"'), "The local library should render as a collapsible sidebar");
+  assert(managerSource.includes("Math.min(savedStudioWidth, window.innerWidth - 24) >= 960"), "A wide studio should open the local library initially");
   assert(!managerSource.includes("libraryVisibilityInitialized"), "Background loading should never auto-open the local library");
   assert(!managerSource.includes("libraryItems[0] ?? null"), "Background loading should not silently select the first saved item");
   assert((managerSource.match(/setConfirmDeleteId\(""\)/g) ?? []).length >= 2, "Changing selection should disarm stale delete confirmation");
@@ -365,7 +377,21 @@ try {
     "utf8",
   );
   assert(styleSource.includes(".inline-media-parameter-controls"), "The shared inline media controls should retain compact parameter layout");
-  assert(styleSource.includes("grid-auto-rows: max-content"), "Library cards should not stretch to fill an otherwise empty sidebar");
+  assert(styleSource.includes("grid-template-columns: minmax(360px, 1fr) var(--media-library-width, 280px)"), "Wide Media Studio should give Output the flexible column beside a resizable Library");
+  assert(managerSource.includes('data-testid="media-composer-resize-handle"'), "The side composer should expose an accessible resize handle");
+  assert(managerSource.includes('data-testid="media-library-resize-handle"'), "The Library should expose an accessible resize handle");
+  assert(styleSource.includes("@container media-studio (max-width: 959px)"), "Medium Media Studio should switch the library to a drawer");
+  assert(styleSource.includes("@container media-studio (max-width: 719px)"), "Narrow Media Studio should adapt both composer placements");
+  assert(styleSource.includes("grid-template-columns: 74px minmax(0, 1fr)"), "Library items should use compact thumbnail rows");
+  assert(styleSource.includes("max-width: none"), "The Output composer should span the canvas width without side gutters");
+  assert(styleSource.includes(".media-output-body.side"), "The persisted side placement should lay the composer beside Output");
+  assert(styleSource.includes("max-height: clamp(110px, 24cqh, 180px)"), "The bottom media prompt should grow before scrolling at a responsive cap");
+  assert(styleSource.includes("overflow-y: auto"), "Long media prompts should scroll inside the composer instead of expanding the studio");
+  assert(styleSource.includes(".media-inline-settings[hidden]"), "Closed Media Studio settings should leave the composer flow");
+  assert(/\.media-create-pane \.media-inline-settings \.inline-media-parameter-controls\s*\{[^}]*width:\s*auto/s.test(styleSource), "Media Studio settings should use one compact row when space allows");
+  assert(/\.media-create-pane \.media-inline-settings \.inline-media-advanced textarea\s*\{[^}]*position:\s*static/s.test(styleSource), "Advanced Media Studio settings should remain inside the composer flow");
+  assert(styleSource.includes("animation: media-generation-drift 4.8s"), "The generating canvas should use one slow bloom animation");
+  assert(styleSource.includes(".media-generation-field::before,"), "Reduced motion should disable the generating bloom");
   assert(styleSource.includes(".inline-media-popover::before"), "The media settings surface should keep nested dropdown backdrop blur working");
   assert(styleSource.includes("border-bottom-right-radius: max(0px, calc(var(--card-radius) - 6px))"), "Resizable panels should use the shared inset theme-radius corner curve");
   assert(styleSource.includes("mask-composite: intersect"), "The resize curve tails should fade without dimming the corner");

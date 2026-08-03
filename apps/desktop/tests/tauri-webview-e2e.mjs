@@ -546,6 +546,64 @@ async function runMediaStudioCheck(page) {
 
   const studio = page.getByTestId("media-generator");
   await studio.waitFor();
+  const libraryToggle = studio.getByRole("button", { name: /local library/i });
+  await assertAttribute(libraryToggle, "aria-expanded", "true");
+  const wideLayout = await studio.evaluate((element) => {
+    const grid = element.querySelector(".media-grid");
+    const library = element.querySelector(".media-library");
+    const preview = element.querySelector(".media-stage-preview");
+    const composer = element.querySelector(".media-create-pane");
+    const previewBounds = preview?.getBoundingClientRect();
+    const composerBounds = composer?.getBoundingClientRect();
+    return {
+      columns: grid ? getComputedStyle(grid).gridTemplateColumns : "",
+      libraryPosition: library ? getComputedStyle(library).position : "",
+      composerCoversPreview: Boolean(previewBounds && composerBounds && previewBounds.bottom > composerBounds.top),
+      composerSideGap: previewBounds && composerBounds ? Math.abs(previewBounds.width - composerBounds.width) : null,
+    };
+  });
+  if (
+    wideLayout.columns.split(" ").length !== 2
+    || wideLayout.libraryPosition !== "static"
+    || wideLayout.composerCoversPreview
+    || wideLayout.composerSideGap === null
+    || wideLayout.composerSideGap > 1
+  ) {
+    throw new Error(`Wide Media Studio should render flexible Output and Library columns: ${JSON.stringify(wideLayout)}.`);
+  }
+  const placementControl = page.getByTestId("media-composer-placement");
+  const sidePlacement = placementControl.getByRole("button", { name: "Side", exact: true });
+  const bottomPlacement = placementControl.getByRole("button", { name: "Bottom", exact: true });
+  await assertAttribute(bottomPlacement, "aria-pressed", "true");
+  await sidePlacement.click();
+  await page.waitForFunction(() => document.querySelector(".media-output-body")?.getAttribute("data-composer-placement") === "side");
+  const sideLayout = await studio.evaluate((element) => {
+    const preview = element.querySelector(".media-stage-preview")?.getBoundingClientRect();
+    const composer = element.querySelector(".media-create-pane")?.getBoundingClientRect();
+    return preview && composer
+      ? { composerRight: composer.right, previewLeft: preview.left, composerTop: composer.top, previewTop: preview.top }
+      : null;
+  });
+  if (!sideLayout || sideLayout.composerRight > sideLayout.previewLeft || Math.abs(sideLayout.composerTop - sideLayout.previewTop) < 1) {
+    throw new Error(`Side composer placement should use a separate column and remain bottom-aligned: ${JSON.stringify(sideLayout)}.`);
+  }
+  await bottomPlacement.click();
+  await page.waitForFunction(() => document.querySelector(".media-output-body")?.getAttribute("data-composer-placement") === "bottom");
+  const initialWidth = await studio.evaluate((element) => element.style.width);
+  await studio.evaluate((element) => { element.style.width = "800px"; });
+  await page.waitForFunction(() => getComputedStyle(document.querySelector('[data-testid="media-generator"] .media-library')).position === "absolute");
+  await studio.evaluate((element) => { element.style.width = "680px"; });
+  await page.waitForFunction(() => {
+    const grid = document.querySelector('[data-testid="media-generator"] .media-grid');
+    const stage = document.querySelector('[data-testid="media-generator"] .media-stage');
+    const create = document.querySelector('[data-testid="media-generator"] .media-create-pane');
+    return grid && stage && create && getComputedStyle(grid).gridTemplateColumns.split(" ").length === 1
+      && getComputedStyle(stage).gridRowStart === "1"
+      && getComputedStyle(create).position === "relative"
+      && create.parentElement?.classList.contains("media-output-body")
+      && create.previousElementSibling?.classList.contains("media-stage-preview");
+  });
+  await studio.evaluate((element, width) => { element.style.width = width; }, initialWidth);
   const prompt = page.getByTestId("media-prompt-input");
   const preservedPrompt = [
     "Preserve this provider setup draft",
@@ -554,8 +612,29 @@ async function runMediaStudioCheck(page) {
     "without collapsing",
   ].join("\n");
   await prompt.fill(preservedPrompt);
+  await page.waitForFunction(() => {
+    const input = document.querySelector('[data-testid="media-prompt-input"]');
+    return input instanceof HTMLTextAreaElement
+      && getComputedStyle(input).overflowY === "hidden"
+      && input.scrollHeight <= input.clientHeight + 2;
+  });
 
-  const kindSelect = page.getByLabel("Media type");
+  const mediaSettingsSummary = page.getByTestId("inline-media-settings-summary");
+  await mediaSettingsSummary.click();
+  const mediaSettingsGeometry = await studio.evaluate((element) => {
+    const preview = element.querySelector(".media-stage-preview")?.getBoundingClientRect();
+    const composer = element.querySelector(".media-create-pane")?.getBoundingClientRect();
+    const settings = element.querySelector(".media-inline-settings")?.getBoundingClientRect();
+    return {
+      settingsInsideComposer: Boolean(settings && composer && settings.top >= composer.top && settings.bottom <= composer.bottom),
+      compactSettings: Boolean(settings && settings.height <= 64),
+      composerCoversPreview: Boolean(preview && composer && preview.bottom > composer.top),
+    };
+  });
+  if (!mediaSettingsGeometry.settingsInsideComposer || !mediaSettingsGeometry.compactSettings || mediaSettingsGeometry.composerCoversPreview) {
+    throw new Error(`Media settings should expand inside the composer without covering Output: ${JSON.stringify(mediaSettingsGeometry)}.`);
+  }
+  const kindSelect = page.getByTestId("inline-media-kind-select");
   await kindSelect.waitFor();
   await kindSelect.focus();
   await page.keyboard.press("ArrowDown");
@@ -584,6 +663,7 @@ async function runMediaStudioCheck(page) {
   if (!await prompt.evaluate((element) => Number.parseFloat(element.style.height) > 58)) {
     throw new Error("Media prompt height should be restored after the provider setup round trip.");
   }
+  await mediaSettingsSummary.click();
   await kindSelect.waitFor();
   await assertTextContains(kindSelect, "Video");
   await advanced.evaluate((element) => element.closest("details")?.setAttribute("open", ""));
@@ -616,6 +696,7 @@ async function runMediaStudioCheck(page) {
     document.activeElement?.getAttribute("data-testid") === "media-model-picker-trigger"
   );
 
+  if (await mediaSettingsSummary.getAttribute("aria-expanded") !== "true") await mediaSettingsSummary.click();
   await kindSelect.focus();
   await page.keyboard.press("ArrowDown");
   await page.getByRole("listbox", { name: "Media type" }).waitFor();
@@ -654,8 +735,9 @@ async function runMediaStudioCheck(page) {
   const firstGenerate = page.getByTestId("media-generate");
   await prompt.fill("Generate three fixture variants");
   await firstGenerate.click();
-  const generatingStatus = page.getByTestId("media-stage").getByRole("status");
+  const generatingStatus = page.getByTestId("media-generation-progress");
   await generatingStatus.filter({ hasText: "Generating image" }).waitFor();
+  await assertTextContains(generatingStatus, "Generate three fixture variants");
   await prompt.fill("Editing should not hide generation progress");
   if (!(await firstGenerate.isDisabled())) {
     throw new Error("Generation should stay disabled while the active request is in flight.");
@@ -665,10 +747,15 @@ async function runMediaStudioCheck(page) {
   await page.keyboard.press("ArrowDown");
   await page.keyboard.press("Enter");
   await generatingStatus.filter({ hasText: "Generating image" }).waitFor();
+  await assertTextContains(generatingStatus, "Generate three fixture variants");
+  if ((await generatingStatus.innerText()).includes("Editing should not hide generation progress")) {
+    throw new Error("The generating canvas should describe the submitted prompt, not the edited composer draft.");
+  }
   releaseFirstGeneration();
 
   const variants = page.getByRole("listbox", { name: "Output variants" });
   await variants.waitFor();
+  await assertHidden(generatingStatus, "completed generation placeholder");
   const variantOptions = variants.getByRole("option");
   if ((await variantOptions.count()) !== 3) {
     throw new Error(`Expected 3 output variants, got ${await variantOptions.count()}.`);
@@ -690,7 +777,6 @@ async function runMediaStudioCheck(page) {
     document.querySelector('[data-testid="media-variant"]')?.getAttribute("aria-selected") === "true"
   );
 
-  const libraryToggle = studio.getByRole("button", { name: /local library/i });
   const libraryCountText = await libraryToggle.innerText();
   const libraryCountLabel = await libraryToggle.getAttribute("aria-label");
   if (!/\d+\+/.test(libraryCountText) || !/\d+ loaded, more available/.test(libraryCountLabel ?? "")) {
@@ -699,7 +785,7 @@ async function runMediaStudioCheck(page) {
       `got text=${JSON.stringify(libraryCountText)} aria-label=${JSON.stringify(libraryCountLabel)}.`,
     );
   }
-  await libraryToggle.click();
+  if ((await libraryToggle.getAttribute("aria-expanded")) !== "true") await libraryToggle.click();
   const library = page.getByRole("complementary", { name: "Local library", exact: true });
   await library.waitFor();
 
