@@ -11,7 +11,7 @@ Release artifacts target Windows and macOS. Linux packaging is intentionally dis
 ## What Milim does
 
 - **Keep one canonical thread.** Workspace context, conversation, and review history remain together instead of fragmenting by provider.
-- **Work from a thread inbox.** A General preference can show active threads without section pagination in a flat recent-activity view, keep quiet project context beneath each thread, and fold completed threads into a Settled footer without archiving them.
+- **Work from a thread inbox.** A General preference can show active threads without section pagination in a flat recent-activity view, keep quiet project context beneath each thread, and fold completed threads into a Settled footer before they can be archived.
 - **Hot-swap models.** Switch the next turn between hosted providers, local Ollama or LM Studio models, and separately installed Codex, Claude, OpenCode, or Pi runtimes.
 - **Keep local control.** Project selection, model routing, tool approvals, local persistence, and outbound privacy boundaries stay explicit.
 - **Approve execution, then review the result.** Review is the new-chat default for consequential tool calls; configured defaults may opt into Open, while changing workspace folders resets approval to Review. Built-in Git views keep resulting diffs, checkpoints, and recovery beside the thread.
@@ -23,7 +23,7 @@ Agents, Workers, skills, schedules, MCP servers and Apps, media generation, Goog
 
 Milim keeps provider-backed chat and installed account runtimes distinct. Provider models use Milim's tool-agent loop, while account runtimes retain their native sessions and tools behind the same visible approval policy. Open gives host tools and supported account runtimes unrestricted filesystem and command access, keeps the selected folder only as the working directory, starts eligible worker plans immediately, and clears ordinary pending tool approvals; connector input and authorization remain interactive. Managed read-only Workers inherit unrestricted host reads in Open, while write-review Workers still use isolated Git worktrees. Changing the selected model affects the next turn without turning each model into a separate project history.
 
-The desktop consumes one versioned `HarnessEvent` stream for Codex, Claude, OpenCode, and Pi. A terminal event finishes the visible turn immediately while native cleanup drains in the background; Claude cleanup drains through process exit so its session lock is released. Runtime-specific account, model, quota, import, update, worker, and recovery behavior remains intact behind that boundary.
+The desktop consumes one versioned `HarnessEvent` stream for Codex, Claude, OpenCode, and Pi. A terminal event finishes the visible turn immediately while native cleanup drains in the background; Claude cleanup drains through process exit so its session lock is released. Open mode also authorizes exact-session Claude recovery without an extra approval card. Runtime-specific account, model, quota, import, update, worker, and recovery behavior remains intact behind that boundary.
 
 Connected Codex and Claude histories can be imported by project, as selected individual chats, or as the complete no-project group; existing imports are opened instead of duplicated.
 

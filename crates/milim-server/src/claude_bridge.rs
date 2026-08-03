@@ -1002,6 +1002,7 @@ fn run_stream_with_worker_events(
                 return;
             }
             let _ = stdin.shutdown().await;
+            drop(stdin);
             let Some(stdout) = child.stdout.take() else {
                 yield sse_event_with_worker(&ClaudeStreamEvent::Error {
                     message: "claude stdout was not available".to_string(),
@@ -1130,7 +1131,7 @@ async fn maybe_recover_locked_session(
     req: &ClaudeRunRequest,
     retried_locked_session: &mut bool,
 ) -> bool {
-    if *retried_locked_session || !req.allow_session_recovery {
+    if *retried_locked_session || !claude_session_recovery_allowed(req) {
         return false;
     }
     let Some(session_id) = clean_optional(req.session_id.as_deref()) else {
@@ -1148,7 +1149,7 @@ fn locked_session_error_event(
     req: &ClaudeRunRequest,
     message: String,
 ) -> std::result::Result<Event, Infallible> {
-    if req.allow_session_recovery {
+    if claude_session_recovery_allowed(req) {
         return sse_event(&ClaudeStreamEvent::Error {
             message,
             usage: None,
@@ -1494,6 +1495,9 @@ async fn terminate_claude_session_processes(session_id: &str) -> bool {
     let removed_stale_registry = remove_stale_claude_session_registry(session_id);
     let killed_from_command_line = terminate_claude_session_processes_impl(session_id).await;
     if killed_from_command_line {
+        if let Some(entry) = find_claude_session_registry_entry(session_id) {
+            let _ = wait_for_process_exit(entry.pid).await;
+        }
         remove_stale_claude_session_registry(session_id);
     }
     removed_stale_registry || find_claude_session_registry_entry(session_id).is_none()
@@ -1589,6 +1593,19 @@ fn process_id_is_running(pid: u32) -> bool {
     }
 }
 
+async fn wait_for_process_exit(pid: u32) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if !process_id_is_running(pid) {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 #[cfg(not(windows))]
 fn process_id_is_running(pid: u32) -> bool {
     std::process::Command::new("kill")
@@ -1616,11 +1633,7 @@ async fn terminate_claude_session_processes_impl(session_id: &str) -> bool {
     command.creation_flags(milim_core::proc::CREATE_NO_WINDOW);
     match command.output().await {
         Ok(output) if output.status.success() => {
-            let killed = !String::from_utf8_lossy(&output.stdout).trim().is_empty();
-            if killed {
-                tokio::time::sleep(Duration::from_millis(300)).await;
-            }
-            killed
+            !String::from_utf8_lossy(&output.stdout).trim().is_empty()
         }
         _ => false,
     }
@@ -1667,9 +1680,6 @@ async fn terminate_claude_session_processes_impl(session_id: &str) -> bool {
         {
             killed = true;
         }
-    }
-    if killed {
-        tokio::time::sleep(Duration::from_millis(300)).await;
     }
     killed
 }
@@ -1853,6 +1863,13 @@ fn normalize_claude_cwd(path: &Path) -> PathBuf {
 }
 
 fn claude_project_dir_name(cwd: &str) -> String {
+    let unc_cwd;
+    let cwd = if let Some(path) = cwd.strip_prefix(r"\\?\UNC\") {
+        unc_cwd = format!(r"\\{path}");
+        unc_cwd.as_str()
+    } else {
+        cwd.strip_prefix(r"\\?\").unwrap_or(cwd)
+    };
     let normalized: String = cwd
         .chars()
         .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
@@ -1890,6 +1907,11 @@ fn account_runtime_policy(value: Option<&str>) -> &str {
         Some("open") => "open",
         _ => "guarded",
     }
+}
+
+fn claude_session_recovery_allowed(req: &ClaudeRunRequest) -> bool {
+    req.allow_session_recovery
+        || (!req.plan_mode && account_runtime_policy(req.tool_approval_policy.as_deref()) == "open")
 }
 
 fn claude_tools_allowed(req: &ClaudeRunRequest) -> bool {
@@ -2474,6 +2496,14 @@ not json
             "C--Users-USER-Documents-DEV-screenmeister"
         );
         assert_eq!(
+            claude_project_dir_name(r"\\?\C:\Users\USER\Documents\DEV\screenmeister"),
+            "C--Users-USER-Documents-DEV-screenmeister"
+        );
+        assert_eq!(
+            claude_project_dir_name(r"\\?\UNC\server\share\screenmeister"),
+            "--server-share-screenmeister"
+        );
+        assert_eq!(
             claude_project_dir_name("/Users/omer/Documents/DEV/milim"),
             "-Users-omer-Documents-DEV-milim"
         );
@@ -2509,15 +2539,18 @@ not json
         req.tool_approval_policy = Some("open".into());
         req.interactive_tool_approval = true;
         assert!(!claude_interactive_tool_approval(&req));
+        assert!(claude_session_recovery_allowed(&req));
         assert_eq!(claude_permission_mode(&req), "bypassPermissions");
         assert!(claude_denied_tools(&req).is_empty());
 
         req.tool_approval_policy = Some("review".into());
         assert!(claude_interactive_tool_approval(&req));
+        assert!(!claude_session_recovery_allowed(&req));
         assert_eq!(claude_permission_mode(&req), "manual");
         assert!(claude_denied_tools(&req).is_empty());
 
         req.plan_mode = true;
+        assert!(!claude_session_recovery_allowed(&req));
         assert_eq!(claude_permission_mode(&req), "plan");
     }
 
@@ -2620,6 +2653,31 @@ not json
             &format!("powershell {sid}"),
             sid,
         ));
+    }
+
+    #[test]
+    fn process_exit_probe() {
+        if std::env::var_os("MILIM_CLAUDE_EXIT_PROBE").is_some() {
+            std::thread::sleep(Duration::from_millis(150));
+        }
+    }
+
+    #[tokio::test]
+    async fn waits_for_claude_session_owner_to_exit() {
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("claude_bridge::tests::process_exit_probe")
+            .env("MILIM_CLAUDE_EXIT_PROBE", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+        let waiter = tokio::spawn(async move { child.wait().await.unwrap() });
+
+        assert!(wait_for_process_exit(pid).await);
+        assert!(waiter.await.unwrap().success());
     }
 
     #[test]

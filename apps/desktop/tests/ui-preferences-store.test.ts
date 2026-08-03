@@ -46,6 +46,8 @@ function persistedUiState(): Record<string, unknown> {
 
 const { DEFAULT_APP_SHORTCUTS, uiSizeShortcutDelta } = await import("../src/ui/shortcuts.js");
 const {
+  DEFAULT_MEDIA_COMPOSER_WIDTH,
+  DEFAULT_MEDIA_LIBRARY_WIDTH,
   DEFAULT_MEDIA_STUDIO_HEIGHT,
   DEFAULT_MEDIA_STUDIO_WIDTH,
   DEFAULT_SIDEBAR_WIDTH,
@@ -65,6 +67,9 @@ equal(useUiPreferences.getState().sidebarWidth, DEFAULT_SIDEBAR_WIDTH, "sidebar 
 equal(useUiPreferences.getState().previewPanelWidth, 420, "preview panel should have a default width");
 equal(useUiPreferences.getState().mediaStudioWidth, DEFAULT_MEDIA_STUDIO_WIDTH, "media studio should have a default width");
 equal(useUiPreferences.getState().mediaStudioHeight, DEFAULT_MEDIA_STUDIO_HEIGHT, "media studio should have a default height");
+equal(useUiPreferences.getState().mediaComposerPlacement, "bottom", "media composer should default below Output");
+equal(useUiPreferences.getState().mediaComposerWidth, DEFAULT_MEDIA_COMPOSER_WIDTH, "media composer should have a default width");
+equal(useUiPreferences.getState().mediaLibraryWidth, DEFAULT_MEDIA_LIBRARY_WIDTH, "media library should have a default width");
 equal(useUiPreferences.getState().uiSize, DEFAULT_UI_SIZE, "UI size should default to 100%");
 equal(useUiPreferences.getState().showAccountUsageInTitleBar, true, "title-bar account usage should default on");
 equal(useUiPreferences.getState().windowAlwaysOnTop, false, "window always-on-top should default off");
@@ -140,6 +145,15 @@ equal(useUiPreferences.getState().mediaStudioWidth, 980, "media studio width sho
 equal(useUiPreferences.getState().mediaStudioHeight, 680, "media studio height should update");
 equal(persistedUiState().mediaStudioWidth, 980, "media studio width should be persisted");
 equal(persistedUiState().mediaStudioHeight, 680, "media studio height should be persisted");
+
+useUiPreferences.getState().setMediaComposerPlacement("side");
+equal(useUiPreferences.getState().mediaComposerPlacement, "side", "media composer placement should update");
+equal(persistedUiState().mediaComposerPlacement, "side", "media composer placement should be persisted");
+
+useUiPreferences.getState().setMediaComposerWidth(336);
+useUiPreferences.getState().setMediaLibraryWidth(312);
+equal(persistedUiState().mediaComposerWidth, 336, "media composer width should be persisted");
+equal(persistedUiState().mediaLibraryWidth, 312, "media library width should be persisted");
 
 useUiPreferences.getState().setMediaStudioSize(1, 1);
 equal(useUiPreferences.getState().mediaStudioWidth, MIN_MEDIA_STUDIO_WIDTH, "media studio width should have a floor");
@@ -302,6 +316,8 @@ equal(useUiPreferences.getState().sidebarWidth, DEFAULT_SIDEBAR_WIDTH, "reset sh
 equal(useUiPreferences.getState().previewPanelWidth, 420, "reset should restore preview panel width");
 equal(useUiPreferences.getState().mediaStudioWidth, DEFAULT_MEDIA_STUDIO_WIDTH, "reset should restore media studio width");
 equal(useUiPreferences.getState().mediaStudioHeight, DEFAULT_MEDIA_STUDIO_HEIGHT, "reset should restore media studio height");
+equal(useUiPreferences.getState().mediaComposerWidth, DEFAULT_MEDIA_COMPOSER_WIDTH, "reset should restore media composer width");
+equal(useUiPreferences.getState().mediaLibraryWidth, DEFAULT_MEDIA_LIBRARY_WIDTH, "reset should restore media library width");
 
 useUiPreferences.setState({
   sidebarOpen: true,
@@ -339,7 +355,7 @@ useUiPreferences.setState({
 });
 localStorage.setItem(
   "milim.ui",
-  '{"state":{"sidebarOpen":false,"sidebarWidth":384,"previewPanelWidth":512,"mediaStudioWidth":1040,"mediaStudioHeight":740,"uiSize":130,"windowAlwaysOnTop":true,"interfaceSounds":"loud","soundOnFinished":"yes","soundOnAttention":0,"soundOnInteractions":"sometimes","finishedSound":"error","attentionSound":"ready","composerSendShortcut":"modEnter","composerDensity":"compact","autoTitleChats":false,"aiThreadNames":true,"aiThreadNameModel":"persisted-title-model","newChatButtonAtBottom":true,"interfaceMode":"workbench","developerMode":true,"experimentalHashlinePatch":true,"chatLayoutStyle":"compact","sidebarRailStyle":"split","settledThreadsEnabled":true,"autoColorThreadNames":true,"messageWidth":"full","avatarStyle":"role","codeBlockTheme":"high-contrast","backgroundFit":"contain","backgroundTreatment":"blur","thinkingBlocksOpen":true,"gitPanelExpanded":true,"appShortcuts":{"newChat":"Mod+Shift+N","focusSearch":"Mod+Shift+N","focusComposer":"x","stopGeneration":"F2","toggleSidebar":"Mod+B","previousThread":"Mod+Tab"}},"version":0}',
+  '{"state":{"sidebarOpen":false,"sidebarWidth":384,"previewPanelWidth":512,"mediaStudioWidth":1040,"mediaStudioHeight":740,"mediaComposerPlacement":"side","uiSize":130,"windowAlwaysOnTop":true,"interfaceSounds":"loud","soundOnFinished":"yes","soundOnAttention":0,"soundOnInteractions":"sometimes","finishedSound":"error","attentionSound":"ready","composerSendShortcut":"modEnter","composerDensity":"compact","autoTitleChats":false,"aiThreadNames":true,"aiThreadNameModel":"persisted-title-model","newChatButtonAtBottom":true,"interfaceMode":"workbench","developerMode":true,"experimentalHashlinePatch":true,"chatLayoutStyle":"compact","sidebarRailStyle":"split","settledThreadsEnabled":true,"autoColorThreadNames":true,"messageWidth":"full","avatarStyle":"role","codeBlockTheme":"high-contrast","backgroundFit":"contain","backgroundTreatment":"blur","thinkingBlocksOpen":true,"gitPanelExpanded":true,"appShortcuts":{"newChat":"Mod+Shift+N","focusSearch":"Mod+Shift+N","focusComposer":"x","stopGeneration":"F2","toggleSidebar":"Mod+B","previousThread":"Mod+Tab"}},"version":0}',
 );
 await useUiPreferences.persist.rehydrate();
 equal(useUiPreferences.getState().sidebarOpen, false, "sidebar should rehydrate persisted closed state");
@@ -347,6 +363,7 @@ equal(useUiPreferences.getState().sidebarWidth, 384, "sidebar should rehydrate p
 equal(useUiPreferences.getState().previewPanelWidth, 512, "preview panel should rehydrate persisted width");
 equal(useUiPreferences.getState().mediaStudioWidth, 1040, "media studio should rehydrate persisted width");
 equal(useUiPreferences.getState().mediaStudioHeight, 740, "media studio should rehydrate persisted height");
+equal(useUiPreferences.getState().mediaComposerPlacement, "side", "media composer placement should rehydrate");
 equal(useUiPreferences.getState().uiSize, 130, "UI size should rehydrate persisted value");
 equal(useUiPreferences.getState().showAccountUsageInTitleBar, true, "missing title-bar account usage preference should keep its enabled default");
 equal(useUiPreferences.getState().windowAlwaysOnTop, true, "always-on-top should rehydrate");

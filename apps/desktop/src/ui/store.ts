@@ -18,6 +18,7 @@ import {
 
 export type ComposerSendShortcut = "enter" | "modEnter";
 export type ComposerDensity = "comfortable" | "compact";
+export type MediaComposerPlacement = "side" | "bottom";
 export type ChatLayoutStyle = "transcript" | "bubbles" | "compact";
 export type SidebarRailStyle = "regular" | "split" | "centered";
 export type MessageWidth = "narrow" | "standard" | "wide" | "full";
@@ -68,6 +69,9 @@ interface UiPreferencesState {
   previewPanelWidth: number;
   mediaStudioWidth: number;
   mediaStudioHeight: number;
+  mediaComposerPlacement: MediaComposerPlacement;
+  mediaComposerWidth: number;
+  mediaLibraryWidth: number;
   pullRequestsWidth: number;
   pullRequestsHeight: number;
   pullRequestsListWidth: number;
@@ -127,6 +131,9 @@ interface UiPreferencesState {
   setSidebarWidth: (sidebarWidth: number) => void;
   setPreviewPanelWidth: (previewPanelWidth: number) => void;
   setMediaStudioSize: (width: number, height: number) => void;
+  setMediaComposerPlacement: (placement: MediaComposerPlacement) => void;
+  setMediaComposerWidth: (width: number) => void;
+  setMediaLibraryWidth: (width: number) => void;
   setPullRequestsSize: (width: number, height: number) => void;
   setPullRequestsListWidth: (width: number) => void;
   setUiSize: (uiSize: number) => void;
@@ -196,6 +203,8 @@ export const DEFAULT_PREVIEW_PANEL_WIDTH = 420;
 const MIN_PREVIEW_PANEL_WIDTH = 280;
 export const DEFAULT_MEDIA_STUDIO_WIDTH = 1120;
 export const DEFAULT_MEDIA_STUDIO_HEIGHT = 820;
+export const DEFAULT_MEDIA_COMPOSER_WIDTH = 300;
+export const DEFAULT_MEDIA_LIBRARY_WIDTH = 280;
 export const MIN_MEDIA_STUDIO_WIDTH = 560;
 export const MIN_MEDIA_STUDIO_HEIGHT = 480;
 export const DEFAULT_PULL_REQUESTS_LIST_WIDTH = 520;
@@ -381,6 +390,9 @@ export const useUiPreferences = create<UiPreferencesState>()(
       previewPanelWidth: DEFAULT_PREVIEW_PANEL_WIDTH,
       mediaStudioWidth: DEFAULT_MEDIA_STUDIO_WIDTH,
       mediaStudioHeight: DEFAULT_MEDIA_STUDIO_HEIGHT,
+      mediaComposerPlacement: "bottom",
+      mediaComposerWidth: DEFAULT_MEDIA_COMPOSER_WIDTH,
+      mediaLibraryWidth: DEFAULT_MEDIA_LIBRARY_WIDTH,
       pullRequestsWidth: DEFAULT_MEDIA_STUDIO_WIDTH,
       pullRequestsHeight: DEFAULT_MEDIA_STUDIO_HEIGHT,
       pullRequestsListWidth: DEFAULT_PULL_REQUESTS_LIST_WIDTH,
@@ -443,6 +455,9 @@ export const useUiPreferences = create<UiPreferencesState>()(
         const size = normalizeMediaStudioSize(width, height);
         set({ mediaStudioWidth: size.width, mediaStudioHeight: size.height });
       },
+      setMediaComposerPlacement: (mediaComposerPlacement) => set({ mediaComposerPlacement }),
+      setMediaComposerWidth: (mediaComposerWidth) => set({ mediaComposerWidth: normalizeSidebarWidth(mediaComposerWidth) }),
+      setMediaLibraryWidth: (mediaLibraryWidth) => set({ mediaLibraryWidth: normalizeSidebarWidth(mediaLibraryWidth) }),
       setPullRequestsSize: (width, height) => {
         const size = normalizeMediaStudioSize(width, height);
         set({ pullRequestsWidth: size.width, pullRequestsHeight: size.height });
@@ -571,6 +586,8 @@ export const useUiPreferences = create<UiPreferencesState>()(
           previewPanelWidth: DEFAULT_PREVIEW_PANEL_WIDTH,
           mediaStudioWidth: DEFAULT_MEDIA_STUDIO_WIDTH,
           mediaStudioHeight: DEFAULT_MEDIA_STUDIO_HEIGHT,
+          mediaComposerWidth: DEFAULT_MEDIA_COMPOSER_WIDTH,
+          mediaLibraryWidth: DEFAULT_MEDIA_LIBRARY_WIDTH,
           pullRequestsWidth: DEFAULT_MEDIA_STUDIO_WIDTH,
           pullRequestsHeight: DEFAULT_MEDIA_STUDIO_HEIGHT,
           pullRequestsListWidth: DEFAULT_PULL_REQUESTS_LIST_WIDTH,
@@ -600,6 +617,9 @@ export const useUiPreferences = create<UiPreferencesState>()(
             saved?.mediaStudioWidth ?? current.mediaStudioWidth,
             saved?.mediaStudioHeight ?? current.mediaStudioHeight,
           ).height,
+          mediaComposerPlacement: normalizeEnum(saved?.mediaComposerPlacement, ["side", "bottom"], "bottom"),
+          mediaComposerWidth: normalizeSidebarWidth(saved?.mediaComposerWidth ?? current.mediaComposerWidth),
+          mediaLibraryWidth: normalizeSidebarWidth(saved?.mediaLibraryWidth ?? current.mediaLibraryWidth),
           pullRequestsWidth: normalizeMediaStudioSize(
             saved?.pullRequestsWidth ?? current.pullRequestsWidth,
             saved?.pullRequestsHeight ?? current.pullRequestsHeight,
@@ -676,6 +696,9 @@ export const useUiPreferences = create<UiPreferencesState>()(
         previewPanelWidth: normalizePreviewPanelWidth(state.previewPanelWidth),
         mediaStudioWidth: normalizeMediaStudioSize(state.mediaStudioWidth, state.mediaStudioHeight).width,
         mediaStudioHeight: normalizeMediaStudioSize(state.mediaStudioWidth, state.mediaStudioHeight).height,
+        mediaComposerPlacement: normalizeEnum(state.mediaComposerPlacement, ["side", "bottom"], "bottom"),
+        mediaComposerWidth: normalizeSidebarWidth(state.mediaComposerWidth),
+        mediaLibraryWidth: normalizeSidebarWidth(state.mediaLibraryWidth),
         pullRequestsWidth: normalizeMediaStudioSize(state.pullRequestsWidth, state.pullRequestsHeight).width,
         pullRequestsHeight: normalizeMediaStudioSize(state.pullRequestsWidth, state.pullRequestsHeight).height,
         pullRequestsListWidth: normalizePullRequestsListWidth(state.pullRequestsListWidth),

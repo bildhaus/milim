@@ -45,14 +45,19 @@ import {
 } from "../lib/media";
 import { useSettings } from "../settings/store";
 import {
+  DEFAULT_MEDIA_COMPOSER_WIDTH,
+  DEFAULT_MEDIA_LIBRARY_WIDTH,
   DEFAULT_MEDIA_STUDIO_HEIGHT,
   DEFAULT_MEDIA_STUDIO_WIDTH,
+  MAX_SIDEBAR_WIDTH,
   MIN_MEDIA_STUDIO_HEIGHT,
   MIN_MEDIA_STUDIO_WIDTH,
+  MIN_SIDEBAR_WIDTH,
   normalizeMediaStudioSize,
+  normalizeSidebarWidth,
   useUiPreferences,
 } from "../ui/store";
-import { ArrowUp, Check, ChevronDown, FolderOpen, Image, Refresh, Search, Sidebar, Trash, X } from "./icons";
+import { ArrowUp, Check, ChevronDown, FolderOpen, Image, Refresh, Search, Sidebar, Sparkles, Trash, Volume2, X } from "./icons";
 import { ComposerSurface } from "./ComposerSurface";
 import { GeneratedMedia } from "./GeneratedMedia";
 import { InlineMediaControls } from "./InlineMediaControls";
@@ -65,6 +70,12 @@ type MediaModelCatalog = Record<string, Partial<Record<MediaKind, MediaModelInfo
 type GenerationPhase = "idle" | "submitting" | "failed";
 type LibraryAction = "refresh" | "delete" | "reveal";
 type LibraryFeedback = { id: string; label: string; message: string };
+type StageRequest = { kind: MediaKind; model: string; prompt: string };
+type MediaSidePanel = "composer" | "library";
+
+const MEDIA_PANEL_KEYBOARD_STEP = 32;
+const MEDIA_PANEL_COLLAPSE_OVERSHOOT = 96;
+const MEDIA_PANEL_SNAP_ANIMATION_MS = 180;
 
 function schemaDraftFromInput(schema: MediaModelSchema, input: Record<string, unknown>) {
   const advanced = structuredClone(input);
@@ -97,7 +108,13 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
   const setMediaSettings = useSettings((s) => s.setMediaSettings);
   const savedStudioWidth = useUiPreferences((s) => s.mediaStudioWidth);
   const savedStudioHeight = useUiPreferences((s) => s.mediaStudioHeight);
+  const composerPlacement = useUiPreferences((s) => s.mediaComposerPlacement);
+  const composerWidth = useUiPreferences((s) => s.mediaComposerWidth);
+  const libraryWidth = useUiPreferences((s) => s.mediaLibraryWidth);
   const setMediaStudioSize = useUiPreferences((s) => s.setMediaStudioSize);
+  const setComposerPlacement = useUiPreferences((s) => s.setMediaComposerPlacement);
+  const setComposerWidth = useUiPreferences((s) => s.setMediaComposerWidth);
+  const setLibraryWidth = useUiPreferences((s) => s.setMediaLibraryWidth);
   const [studioSize, setStudioSize] = useState(() => normalizeMediaStudioSize(savedStudioWidth, savedStudioHeight));
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const available = useMemo(() => mediaProviders(providers), [providers]);
@@ -110,6 +127,7 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
   const [modelOptions, setModelOptions] = useState<MediaModelInfo[]>([]);
   const [modelCatalog, setModelCatalog] = useState<MediaModelCatalog>({});
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [mediaSettingsOpen, setMediaSettingsOpen] = useState(false);
   const [modelPickerStyle, setModelPickerStyle] = useState<CSSProperties>();
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [modelSchema, setModelSchema] = useState<MediaModelSchema | null>(null);
@@ -119,7 +137,7 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
   const [schemaLoading, setSchemaLoading] = useState(false);
   const [generationPhase, setGenerationPhase] = useState<GenerationPhase>("idle");
   const [generationError, setGenerationError] = useState<string | null>(null);
-  const [stageRequest, setStageRequest] = useState<{ kind: MediaKind; model: string } | null>(null);
+  const [stageRequest, setStageRequest] = useState<StageRequest | null>(null);
   const [results, setResults] = useState<MediaGenerationResult[]>([]);
   const [libraryItems, setLibraryItems] = useState<MediaLibraryItem[]>([]);
   const [libraryCursor, setLibraryCursor] = useState<string | null>(null);
@@ -128,7 +146,9 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
   const [libraryProvider, setLibraryProvider] = useState("");
   const [libraryStatus, setLibraryStatus] = useState<MediaLibraryStatus | "">("");
   const [libraryLoading, setLibraryLoading] = useState(false);
-  const [libraryOpen, setLibraryOpen] = useState(false);
+  const [libraryOpen, setLibraryOpen] = useState(() => (
+    typeof window !== "undefined" && Math.min(savedStudioWidth, window.innerWidth - 24) >= 960
+  ));
   const [selectedLibraryId, setSelectedLibraryId] = useState("");
   const [libraryListError, setLibraryListError] = useState<string | null>(null);
   const [libraryAction, setLibraryAction] = useState<{ id: string; action: LibraryAction } | null>(null);
@@ -139,6 +159,7 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
   const [providersVersion, setProvidersVersion] = useState(0);
   const [stageVariantIndex, setStageVariantIndex] = useState(0);
   const [privacyMode, setPrivacyModeLabel] = useState("off");
+  const [resizingPanel, setResizingPanel] = useState<MediaSidePanel | null>(null);
   const pollingKeys = useRef<Set<string>>(new Set());
   const generationInFlightRef = useRef(false);
   const generationRunRef = useRef(0);
@@ -160,6 +181,7 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
   const modelPickerTriggerRef = useRef<HTMLButtonElement>(null);
   const modelPickerPopoverRef = useRef<HTMLDivElement>(null);
   const libraryToggleRef = useRef<HTMLButtonElement>(null);
+  const mediaGridRef = useRef<HTMLDivElement>(null);
   const variantRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const libraryCardRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
   const selectedLibraryIdRef = useRef("");
@@ -234,11 +256,15 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     const textarea = promptRef.current;
     if (!textarea) return;
+    if (composerPlacement === "side") {
+      textarea.style.height = "";
+      textarea.style.overflowY = "auto";
+      return;
+    }
     textarea.style.height = "0px";
-    const height = Math.min(textarea.scrollHeight, 150);
-    textarea.style.height = `${height}px`;
-    textarea.style.overflowY = textarea.scrollHeight > height ? "auto" : "hidden";
-  }, [prompt, providersOpen]);
+    textarea.style.height = `${textarea.scrollHeight}px`;
+    textarea.style.overflowY = "auto";
+  }, [composerPlacement, prompt, providersOpen]);
 
   useEffect(() => {
     if (!modelPickerOpen) return;
@@ -577,6 +603,7 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
     const rect = trigger?.getBoundingClientRect();
     const bounds = sheet?.getBoundingClientRect();
     if (!rect || !bounds) return;
+    setMediaSettingsOpen(false);
     const edge = 12;
     const gap = 6;
     const width = Math.min(480, bounds.width - edge * 2);
@@ -756,7 +783,7 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
     generationInFlightRef.current = true;
     setGenerationPhase("submitting");
     setGenerationError(null);
-    setStageRequest({ kind, model: model.trim() });
+    setStageRequest({ kind, model: model.trim(), prompt: prompt.trim() });
     setSelectedLibraryId("");
     setResults([]);
     setStageVariantIndex(0);
@@ -1022,6 +1049,98 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
     setMediaStudioSize(size.width, size.height);
   }
 
+  function panelWidth(panel: MediaSidePanel) {
+    const selector = panel === "composer" ? ".media-create-pane" : ".media-library";
+    const fallback = panel === "composer" ? composerWidth : libraryWidth;
+    return mediaGridRef.current?.querySelector<HTMLElement>(selector)?.getBoundingClientRect().width || fallback;
+  }
+
+  function setPanelWidth(panel: MediaSidePanel, width: number) {
+    if (panel === "composer") setComposerWidth(width);
+    else setLibraryWidth(width);
+  }
+
+  function startPanelResize(panel: MediaSidePanel, event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    resizeCleanupRef.current?.();
+
+    const target = event.currentTarget;
+    const originX = event.clientX;
+    const originWidth = panelWidth(panel);
+    let latestWidth = originWidth;
+    let snappedClosed = false;
+    let resumeTimer: number | null = null;
+    setResizingPanel(panel);
+    target.setPointerCapture(event.pointerId);
+
+    const cleanup = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+      if (resumeTimer !== null) window.clearTimeout(resumeTimer);
+      resizeCleanupRef.current = null;
+    };
+    const move = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== event.pointerId) return;
+      const delta = moveEvent.clientX - originX;
+      const rawWidth = originWidth + (panel === "composer" ? delta : -delta);
+      if (rawWidth < MIN_SIDEBAR_WIDTH - MEDIA_PANEL_COLLAPSE_OVERSHOOT) {
+        if (!snappedClosed) {
+          snappedClosed = true;
+          if (resumeTimer !== null) window.clearTimeout(resumeTimer);
+          resumeTimer = null;
+          setResizingPanel(null);
+          if (panel === "composer") setComposerPlacement("bottom");
+          else setLibraryOpen(false);
+        }
+        return;
+      }
+      if (snappedClosed) {
+        snappedClosed = false;
+        if (panel === "composer") setComposerPlacement("side");
+        else setLibraryOpen(true);
+        resumeTimer = window.setTimeout(() => {
+          setResizingPanel(panel);
+          resumeTimer = null;
+        }, MEDIA_PANEL_SNAP_ANIMATION_MS);
+      }
+      latestWidth = normalizeSidebarWidth(rawWidth);
+      mediaGridRef.current?.style.setProperty(
+        panel === "composer" ? "--media-composer-width" : "--media-library-width",
+        `${latestWidth}px`,
+      );
+      target.setAttribute("aria-valuenow", String(latestWidth));
+    };
+    const end = (endEvent: PointerEvent) => {
+      if (endEvent.pointerId !== event.pointerId) return;
+      cleanup();
+      if (latestWidth !== originWidth) setPanelWidth(panel, latestWidth);
+      setResizingPanel(null);
+      if (target.hasPointerCapture(event.pointerId)) target.releasePointerCapture(event.pointerId);
+    };
+
+    resizeCleanupRef.current = cleanup;
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+  }
+
+  function resizePanelWithKeyboard(panel: MediaSidePanel, event: KeyboardEvent<HTMLDivElement>) {
+    const current = panelWidth(panel);
+    const direction = panel === "composer" ? 1 : -1;
+    let next: number | null = null;
+    if (event.key === "ArrowLeft") next = current - MEDIA_PANEL_KEYBOARD_STEP * direction;
+    if (event.key === "ArrowRight") next = current + MEDIA_PANEL_KEYBOARD_STEP * direction;
+    if (event.key === "Home") next = MIN_SIDEBAR_WIDTH;
+    if (event.key === "End") next = MAX_SIDEBAR_WIDTH;
+    if (event.key === "Enter") next = panel === "composer" ? DEFAULT_MEDIA_COMPOSER_WIDTH : DEFAULT_MEDIA_LIBRARY_WIDTH;
+    if (next === null) return;
+    event.preventDefault();
+    setPanelWidth(panel, next);
+  }
+
   const stageItems = selectedLibraryItem?.media ?? latestResult?.media ?? [];
   const stageSourceKey = selectedLibraryItem
     ? `library:${selectedLibraryItem.id}`
@@ -1035,6 +1154,7 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
     : null;
   const stageModel = selectedLibraryItem?.model ?? latestResult?.model ?? activeStageRequest?.model ?? model;
   const stageKind = selectedLibraryItem?.kind ?? latestResult?.kind ?? activeStageRequest?.kind ?? kind;
+  const stagePrompt = selectedLibraryItem?.prompt ?? stageRequest?.prompt ?? "";
   const stageStatus = selectedLibraryItem?.save_state
     ?? latestResult?.save_state
     ?? (latestResult && !isTerminalMediaStatus(latestResult.status) ? "running" : null)
@@ -1043,8 +1163,9 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
     ? Math.min(stageVariantIndex, stageItems.length - 1)
     : 0;
   const stageMedia = stageItems[selectedVariantIndex];
+  const stageKindLabel = stageKind === "music" ? "audio" : stageKind;
   const stageEmptyTitle = stageStatus === "running"
-    ? `Generating ${stageKind}...`
+    ? `Generating ${stageKindLabel}...`
     : stageStatus === "saving"
       ? "Saving locally..."
       : stageStatus === "failed"
@@ -1063,6 +1184,8 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
   const hasLibraryFilters = Boolean(libraryQuery.trim() || libraryKind || libraryProvider || libraryStatus);
   const modelKindLabel = kind === "music" ? "audio" : kind;
   const modelKindWithArticle = `${/^[aeiou]/.test(modelKindLabel) ? "an" : "a"} ${modelKindLabel}`;
+  const mediaKindSettingsLabel = `${modelKindLabel[0].toUpperCase()}${modelKindLabel.slice(1)} settings`;
+  const MediaSettingsIcon = kind === "music" ? Volume2 : kind === "video" ? Sparkles : Image;
   const mediaSettingsLabel = selectedProvider
     ? `${selectedProvider.name} · ${model || `Choose ${modelKindWithArticle} model`}`
     : "Add a media provider";
@@ -1092,6 +1215,10 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
     width: studioSize.width,
     height: studioSize.height,
   } satisfies CSSProperties;
+  const mediaGridStyle = {
+    "--media-composer-width": `${composerWidth}px`,
+    "--media-library-width": `${libraryWidth}px`,
+  } as CSSProperties;
 
   useEffect(() => {
     setStageVariantIndex(0);
@@ -1131,6 +1258,135 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
     );
   }
 
+  const mediaComposer = (
+    <section className="media-form media-create-pane" aria-label="Media generator" aria-busy={busy}>
+      <ComposerSurface className="media-composer-surface">
+        <div className="media-create-controls">
+          <div className="control-bar media-control-bar">
+            <div className="chips">
+              <div className="chip-wrap media-model-picker-wrap">
+                <button
+                  ref={modelPickerTriggerRef}
+                  className="chip chip-model media-model-picker-trigger"
+                  data-testid="media-model-picker-trigger"
+                  type="button"
+                  title={mediaSettingsLabel}
+                  aria-label={selectedProvider
+                    ? `Choose ${modelKindWithArticle} model${selectedModelLabel ? `, current model ${selectedModelLabel}` : ""}`
+                    : "Add media provider"}
+                  aria-haspopup={selectedProvider ? "dialog" : undefined}
+                  aria-expanded={selectedProvider ? modelPickerOpen : undefined}
+                  onClick={selectedProvider ? toggleMediaModelPicker : () => {
+                    setMediaSettingsOpen(false);
+                    setProvidersOpen(true);
+                  }}
+                >
+                  <span className={`dot ${selectedModelAvailable ? "dot-green" : "dot-yellow"}`} />
+                  <span className="chip-label">
+                    {selectedProvider
+                      ? modelsLoading ? `Loading ${modelKindLabel} models...` : selectedModelLabel || `Choose ${modelKindWithArticle} model`
+                      : "Add media provider"}
+                  </span>
+                  {selectedProvider && <ChevronDown size={12} className="chip-chev" />}
+                </button>
+              </div>
+              <div className="control-inline-slot">
+                <button
+                  className={`chip media-settings-toggle${mediaSettingsOpen ? " active" : ""}`}
+                  data-testid="inline-media-settings-summary"
+                  type="button"
+                  aria-label={mediaKindSettingsLabel}
+                  aria-controls="media-inline-settings"
+                  aria-expanded={mediaSettingsOpen}
+                  onClick={() => {
+                    if (!mediaSettingsOpen) closeModelPicker(false);
+                    setMediaSettingsOpen((open) => !open);
+                  }}
+                >
+                  <MediaSettingsIcon size={13} />
+                  <span className="chip-label">{mediaKindSettingsLabel}</span>
+                </button>
+              </div>
+              <div id="media-inline-settings" className="media-inline-settings" hidden={!mediaSettingsOpen}>
+                <InlineMediaControls
+                  providerName={selectedProvider?.name || "Media"}
+                  model={model}
+                  kind={kind}
+                  supportedKinds={["image", "video", "music"]}
+                  schema={modelSchema}
+                  schemaLoading={schemaLoading}
+                  parameterValues={parameterValues}
+                  advanced={advanced}
+                  error={null}
+                  onKindChange={(nextKind) => {
+                    preserveProviderDraftRef.current = false;
+                    reusedInputRef.current = null;
+                    setKind(nextKind);
+                    setModel("");
+                    setModelOptions([]);
+                    setModelSchema(null);
+                    setSchemaLoading(false);
+                    setModelsLoading(Boolean(selectedProvider && metadataProvider));
+                    resetGenerationFeedback();
+                  }}
+                  onParameterChange={updateParameter}
+                  onAdvancedChange={updateAdvanced}
+                />
+              </div>
+            </div>
+          </div>
+
+          {generationError && (
+            <div className="artifact-error media-generator-alert" data-testid="media-generation-error" role="alert">
+              {generationError}
+            </div>
+          )}
+        </div>
+
+        <div className="composer comfortable media-composer-box">
+          <div className="composer-input-wrap">
+            <textarea
+              ref={promptRef}
+              className="composer-input media-composer-prompt"
+              data-testid="media-prompt-input"
+              value={prompt}
+              rows={1}
+              dir="auto"
+              aria-label="Media prompt"
+              placeholder={kind === "music" ? "Warm instrumental synthwave with a steady pulse..." : "Product photo on a clean workbench, natural side light..."}
+              onChange={(e) => {
+                setPrompt(e.target.value);
+                resetGenerationFeedback();
+              }}
+              onKeyDown={onPromptKeyDown}
+            />
+          </div>
+          <div className="composer-bar media-composer-bar">
+            <div className="composer-tools" />
+            <div className="composer-send media-composer-send">
+              <div className="media-privacy" data-testid="media-privacy">
+                Privacy <strong>{privacyMode}</strong>
+                <span>{privacyMode === "block" ? "PII blocks request" : privacyMode === "redact" ? "PII removed before upload" : "Prompt sent unchanged"}</span>
+              </div>
+              <kbd className="media-generate-shortcut">Ctrl/Cmd + Enter</kbd>
+              <button
+                className="send-btn media-composer-send-btn"
+                data-testid="media-generate"
+                type="button"
+                title={`${busy ? "Generating" : `Generate ${kind}`} (Ctrl/Cmd + Enter)`}
+                aria-label={busy ? `Generating ${kind}` : `Generate ${kind}`}
+                disabled={!canGenerate}
+                onClick={() => void submit()}
+              >
+                <ArrowUp size={17} />
+              </button>
+            </div>
+          </div>
+        </div>
+      </ComposerSurface>
+    </section>
+  );
+
   return (
     <SheetDialog
       title="Media studio"
@@ -1141,123 +1397,18 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
     >
       <div className="media-studio">
         <div className="sheet-header media-studio-header">
-          <div>
-            <h2>Media studio</h2>
-            <p>Generate, compare outputs, and reuse saved settings.</p>
-          </div>
+          <h2>Media studio</h2>
           <button className="icon-btn" type="button" onClick={onClose} title="Close" aria-label="Close media studio">
             <X size={15} />
           </button>
         </div>
 
-        <div className="media-grid">
-          <section className="media-form media-composer-dock" aria-label="Media generator" aria-busy={busy}>
-            <ComposerSurface className="media-composer-surface">
-              <div className="control-bar media-control-bar">
-                <div className="chips">
-                  <div className="chip-wrap media-model-picker-wrap">
-                    <button
-                      ref={modelPickerTriggerRef}
-                      className="chip chip-model media-model-picker-trigger"
-                      data-testid="media-model-picker-trigger"
-                      type="button"
-                      title={mediaSettingsLabel}
-                      aria-label={selectedProvider
-                        ? `Choose ${modelKindWithArticle} model${selectedModelLabel ? `, current model ${selectedModelLabel}` : ""}`
-                        : "Add media provider"}
-                      aria-haspopup={selectedProvider ? "dialog" : undefined}
-                      aria-expanded={selectedProvider ? modelPickerOpen : undefined}
-                      onClick={selectedProvider ? toggleMediaModelPicker : () => setProvidersOpen(true)}
-                    >
-                      <span className={`dot ${selectedModelAvailable ? "dot-green" : "dot-yellow"}`} />
-                      <span className="chip-label">
-                        {selectedProvider
-                          ? modelsLoading ? `Loading ${modelKindLabel} models...` : selectedModelLabel || `Choose ${modelKindWithArticle} model`
-                          : "Add media provider"}
-                      </span>
-                      {selectedProvider && <ChevronDown size={12} className="chip-chev" />}
-                    </button>
-                  </div>
-                  <div className="control-inline-slot">
-                    <InlineMediaControls
-                      providerName={selectedProvider?.name || "Media"}
-                      model={model}
-                      kind={kind}
-                      supportedKinds={["image", "video", "music"]}
-                      schema={modelSchema}
-                      schemaLoading={schemaLoading}
-                      parameterValues={parameterValues}
-                      advanced={advanced}
-                      error={null}
-                      onKindChange={(nextKind) => {
-                        preserveProviderDraftRef.current = false;
-                        reusedInputRef.current = null;
-                        setKind(nextKind);
-                        setModel("");
-                        setModelOptions([]);
-                        setModelSchema(null);
-                        setSchemaLoading(false);
-                        setModelsLoading(Boolean(selectedProvider && metadataProvider));
-                        resetGenerationFeedback();
-                      }}
-                      onParameterChange={updateParameter}
-                      onAdvancedChange={updateAdvanced}
-                    />
-                  </div>
-                </div>
-              </div>
-
-              {generationError && (
-                <div className="artifact-error media-generator-alert" data-testid="media-generation-error" role="alert">
-                  {generationError}
-                </div>
-              )}
-
-              <div className="composer comfortable media-composer-box">
-                <div className="composer-input-wrap">
-                  <textarea
-                    ref={promptRef}
-                    className="composer-input media-composer-prompt"
-                    data-testid="media-prompt-input"
-                    value={prompt}
-                    rows={1}
-                    dir="auto"
-                    aria-label="Media prompt"
-                    placeholder={kind === "music" ? "Warm instrumental synthwave with a steady pulse..." : "Product photo on a clean workbench, natural side light..."}
-                    onChange={(e) => {
-                      setPrompt(e.target.value);
-                      resetGenerationFeedback();
-                    }}
-                    onKeyDown={onPromptKeyDown}
-                  />
-                </div>
-                <div className="composer-bar media-composer-bar">
-                  <div className="composer-tools" />
-                  <div className="composer-send media-composer-send">
-                  <div className="media-privacy" data-testid="media-privacy">
-                    Privacy <strong>{privacyMode}</strong>
-                    <span>{privacyMode === "block" ? "PII blocks request" : privacyMode === "redact" ? "PII removed before upload" : "Prompt sent unchanged"}</span>
-                  </div>
-                  <kbd className="media-generate-shortcut">Ctrl/Cmd + Enter</kbd>
-                  <button
-                    className="send-btn media-composer-send-btn"
-                    data-testid="media-generate"
-                    type="button"
-                    title={`${busy ? "Generating" : `Generate ${kind}`} (Ctrl/Cmd + Enter)`}
-                    aria-label={busy ? `Generating ${kind}` : `Generate ${kind}`}
-                    disabled={!canGenerate}
-                    onClick={() => void submit()}
-                  >
-                    <ArrowUp size={17} />
-                  </button>
-                  </div>
-                </div>
-              </div>
-            </ComposerSurface>
-          </section>
-
-          <section className={`media-workspace${libraryOpen ? " library-open" : ""}`} aria-label="Generated media and library">
-            <div className="media-stage" data-testid="media-stage">
+        <div
+          ref={mediaGridRef}
+          className={`media-grid${libraryOpen ? " library-open" : ""}${resizingPanel ? ` resizing-${resizingPanel}` : ""}`}
+          style={mediaGridStyle}
+        >
+          <section className="media-stage" data-testid="media-stage" aria-label="Generated media">
               <div className="media-stage-head">
                 <div className="media-stage-title">
                   <strong>Output</strong>
@@ -1268,6 +1419,22 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
                 </div>
                 <div className="media-stage-head-actions">
                   {stageStatus && stageStatus !== "ready" && <span className={`media-status ${stageStatus}`} role="status" aria-live="polite">{stageStatus}</span>}
+                  <div className="media-composer-placement" role="group" aria-label="Composer placement" data-testid="media-composer-placement">
+                    <button
+                      type="button"
+                      aria-pressed={composerPlacement === "side"}
+                      onClick={() => setComposerPlacement("side")}
+                    >
+                      Side
+                    </button>
+                    <button
+                      type="button"
+                      aria-pressed={composerPlacement === "bottom"}
+                      onClick={() => setComposerPlacement("bottom")}
+                    >
+                      Bottom
+                    </button>
+                  </div>
                   <button
                     ref={libraryToggleRef}
                     className={`btn-ghost media-library-toggle${libraryOpen ? " active" : ""}`}
@@ -1287,35 +1454,62 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
                   </button>
                 </div>
               </div>
-              <div className={`media-stage-preview${stageItems.length ? " has-media" : ""}`} aria-busy={busy}>
-                {stageItems.length && stageKind === "music" ? (
-                  <div className="media-stage-audio-list">
-                    {stageItems.map((item, index) => (
-                      <GeneratedMedia
-                        key={`${item.url}:${index}`}
-                        item={item}
-                        alt={`Generated audio ${index + 1} of ${stageItems.length} from ${stageModel}`}
-                        onOpenExternal={(url) => void openExternalUrl(url)}
-                      />
-                    ))}
-                  </div>
-                ) : stageMedia ? (
-                  <GeneratedMedia
-                    item={stageMedia}
-                    alt={`Generated ${stageKind} ${selectedVariantIndex + 1} of ${stageItems.length} from ${stageModel}`}
-                    onOpenExternal={(url) => void openExternalUrl(url)}
-                  />
-                ) : (
+              <div className={`media-output-body ${composerPlacement}`} data-composer-placement={composerPlacement}>
+                <div className={`media-stage-preview${stageItems.length ? " has-media" : ""}`} aria-busy={busy}>
+                  {stageItems.length && stageKind === "music" ? (
+                    <div className="media-stage-audio-list">
+                      {stageItems.map((item, index) => (
+                        <GeneratedMedia
+                          key={`${item.url}:${index}`}
+                          item={item}
+                          alt={`Generated audio ${index + 1} of ${stageItems.length} from ${stageModel}`}
+                          onOpenExternal={(url) => void openExternalUrl(url)}
+                        />
+                      ))}
+                    </div>
+                  ) : stageMedia ? (
+                    <GeneratedMedia
+                      item={stageMedia}
+                      alt={`Generated ${stageKind} ${selectedVariantIndex + 1} of ${stageItems.length} from ${stageModel}`}
+                      onOpenExternal={(url) => void openExternalUrl(url)}
+                    />
+                  ) : stageStatus === "running" || stageStatus === "saving" ? (
+                    <div
+                      className={`media-generation-placeholder ${stageStatus}`}
+                      data-testid={stageStatus === "running" ? "media-generation-progress" : undefined}
+                      role="status"
+                      aria-live="polite"
+                    >
+                      <div className="media-generation-field" aria-hidden="true" />
+                      <div className="media-generation-copy">
+                        <strong className={stageStatus === "running" ? "shiny-text" : undefined}>{stageEmptyTitle}</strong>
+                        <span>{stageStatus === "running" && stagePrompt ? stagePrompt : stageEmptyDetail}</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="media-empty">
+                      <Image size={28} />
+                      <strong>{stageEmptyTitle}</strong>
+                      <span>{stageEmptyDetail}</span>
+                    </div>
+                  )}
+                </div>
+                {mediaComposer}
+                {composerPlacement === "side" && (
                   <div
-                    className="media-empty"
-                    data-testid={stageStatus === "running" ? "media-generation-progress" : undefined}
-                    role={stageStatus === "running" ? "status" : undefined}
-                    aria-live={stageStatus === "running" ? "polite" : undefined}
-                  >
-                    <Image size={28} />
-                    <strong>{stageEmptyTitle}</strong>
-                    <span>{stageEmptyDetail}</span>
-                  </div>
+                    className={`media-panel-resize-handle media-composer-resize-handle${resizingPanel === "composer" ? " dragging" : ""}`}
+                    data-testid="media-composer-resize-handle"
+                    role="separator"
+                    aria-label="Resize media composer; drag past minimum to move it below Output"
+                    aria-orientation="vertical"
+                    aria-valuemin={MIN_SIDEBAR_WIDTH}
+                    aria-valuemax={MAX_SIDEBAR_WIDTH}
+                    aria-valuenow={composerWidth}
+                    tabIndex={0}
+                    onPointerDown={(event) => startPanelResize("composer", event)}
+                    onKeyDown={(event) => resizePanelWithKeyboard("composer", event)}
+                    onDoubleClick={() => setComposerWidth(DEFAULT_MEDIA_COMPOSER_WIDTH)}
+                  />
                 )}
               </div>
               {stageKind !== "music" && stageItems.length > 1 && (
@@ -1397,9 +1591,23 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
                   {libraryNotice.label}: {libraryNotice.message}
                 </div>
               )}
-            </div>
+          </section>
 
-            {libraryOpen && <aside className="media-library" id="media-library-sidebar" aria-label="Local library">
+          {libraryOpen && <aside className="media-library" id="media-library-sidebar" aria-label="Local library">
+              <div
+                className={`media-panel-resize-handle media-library-resize-handle${resizingPanel === "library" ? " dragging" : ""}`}
+                data-testid="media-library-resize-handle"
+                role="separator"
+                aria-label="Resize local library; drag past minimum to close it"
+                aria-orientation="vertical"
+                aria-valuemin={MIN_SIDEBAR_WIDTH}
+                aria-valuemax={MAX_SIDEBAR_WIDTH}
+                aria-valuenow={libraryWidth}
+                tabIndex={0}
+                onPointerDown={(event) => startPanelResize("library", event)}
+                onKeyDown={(event) => resizePanelWithKeyboard("library", event)}
+                onDoubleClick={() => setLibraryWidth(DEFAULT_MEDIA_LIBRARY_WIDTH)}
+              />
               <div className="media-library-head">
                 <div>
                   <span className="media-eyebrow">Local library</span>
@@ -1522,8 +1730,7 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
                   {libraryLoading ? "Loading..." : "Load more"}
                 </button>
               )}
-            </aside>}
-          </section>
+          </aside>}
         </div>
         {modelPickerOpen && modelPickerStyle && (
           <div

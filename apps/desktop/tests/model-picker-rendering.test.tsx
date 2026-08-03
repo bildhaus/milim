@@ -214,6 +214,7 @@ try {
     createElement(ControlBar, {
       models,
       model: "gpt-5-render",
+      reasoningEffortByModel: { "gpt-5-render": "high" },
       providers,
       onModel: () => {},
       sandbox: false,
@@ -240,6 +241,7 @@ try {
   assert(controlBarMarkup.includes('data-testid="goal-mode-chip"'), "Goal mode should show its pill before a goal starts");
   assert(controlBarMarkup.includes(">Ready<"), "The pre-send Goal pill should communicate that it is ready");
   assert(controlBarMarkup.includes('data-provider-brand="openai"'), "The active model chip should render its provider icon");
+  assert(controlBarMarkup.includes('<span class="chip-detail">High</span>'), "The closed model chip should show a selected non-auto reasoning effort");
 
   const { providerBrandForModel, providerBrandForProvider } = (await server.ssrLoadModule(
     "/src/components/ProviderIcon.tsx",
