@@ -41,6 +41,8 @@ Git and preview review comments are sent as structured context with the next use
 
 Download the Windows portable EXE or macOS universal DMG from the [latest GitHub release](https://github.com/oshtz/milim/releases/latest). The desktop app embeds the server, so normal desktop use does not require a separate `milim serve` process.
 
+Milim runs as a single desktop instance. Launching it again restores and focuses the existing window, including when that window is hidden in the system tray.
+
 On first run, choose a runtime, optionally choose a workspace folder, and open Milim. The two advances focus the composer without sending a task. Preferences and power tools remain available after setup. See the [full quickstart](https://docs.milim.ai/quickstart) for the safe-change, resulting-diff, and same-thread runtime-switch loop.
 
 ### Run the desktop app from source
