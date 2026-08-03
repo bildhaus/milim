@@ -1138,7 +1138,7 @@ export function Sidebar({
         icon: <Download size={13} />,
         action: () => exportChat(session.id),
       },
-      {
+      ...(!settledThreadsEnabled || session.settledAt ? [{
         id: "archive",
         label: confirmArchiveId === session.id ? "Confirm archive" : "Archive chat",
         detail: confirmArchiveId === session.id ? "Again" : undefined,
@@ -1146,7 +1146,7 @@ export function Sidebar({
         danger: true,
         separatorBefore: true,
         action: () => archiveChat(session.id),
-      },
+      }] : []),
     ], session.title);
   }
 
@@ -2038,7 +2038,7 @@ export function Sidebar({
                                         </button>
                                       </>
                                     )}
-                                    <button
+                                    {settledSection && <button
                                       className={
                                         "session-side-btn danger" +
                                         (confirmArchiveId === s.id
@@ -2062,7 +2062,7 @@ export function Sidebar({
                                       }}
                                     >
                                       <Archive size={12} />
-                                    </button>
+                                    </button>}
                                   </div>
                                 </div>
                               </>

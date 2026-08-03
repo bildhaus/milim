@@ -1147,6 +1147,7 @@ async function runInboxSidebarCheck(page) {
 
   await page.reload();
   await page.getByTestId("chat-shell").waitFor();
+  await dismissOnboardingIfPresent(page);
   await page.getByRole("complementary", { name: "Chats" }).waitFor();
   await page.getByRole("button", { name: "Collapse Workspace A", exact: true }).waitFor();
   await page.getByRole("button", { name: "Collapse Workspace B", exact: true }).waitFor();
@@ -1209,6 +1210,20 @@ async function runInboxSidebarCheck(page) {
   await page.locator("#sidebar-settled-list").waitFor({ state: "detached" });
   await page.screenshot({ path: screenshots.inboxActive, fullPage: false });
 
+  const newestActive = page.locator('[data-sidebar-session-id="inbox-active-new"]');
+  await newestActive.locator(".session-side").hover();
+  await page.waitForTimeout(150);
+  if (await newestActive.getByRole("button", { name: "Archive Cross-project newest", exact: true }).count()) {
+    throw new Error("Active Inbox threads should offer Settle instead of Archive.");
+  }
+  await newestActive.click({ button: "right" });
+  const activeMenu = page.getByTestId("app-context-menu");
+  await activeMenu.getByText("Settle chat", { exact: true }).waitFor();
+  if (await activeMenu.getByText("Archive chat", { exact: true }).count()) {
+    throw new Error("Active Inbox thread menus should omit Archive.");
+  }
+  await page.keyboard.press("Escape");
+
   for (const [id, title, nextId] of [
     ["inbox-active-new", "Cross-project newest", "inbox-branch"],
     ["inbox-branch", "Flattened branch", "inbox-active-old"],
@@ -1241,6 +1256,9 @@ async function runInboxSidebarCheck(page) {
 
   await finalActive.locator(".session-side").hover();
   await page.waitForTimeout(150);
+  await finalActive
+    .getByRole("button", { name: "Archive Cross-project older", exact: true })
+    .waitFor();
   await finalActive
     .getByRole("button", { name: "Unsettle Cross-project older", exact: true })
     .click();
