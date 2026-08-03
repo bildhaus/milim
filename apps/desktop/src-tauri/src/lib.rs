@@ -4214,7 +4214,13 @@ pub fn run() {
     let user_data = open_user_data_store().expect("initialize user data store");
     let server_runtime = DesktopServerRuntimeState::new();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _, _| {
+        show_main_window(app);
+    }));
+
+    builder
         .manage(DesktopApiToken(api_key))
         .manage(DesktopApiBaseUrl(api_base))
         .manage(DesktopProviders(providers))

@@ -1,4 +1,9 @@
 {
+  "0.2.22": {
+    "version": "0.2.22",
+    "summary": "Milim 0.2.22 keeps one desktop instance running and restores its window when launched again.",
+    "items": []
+  },
   "0.2.21": {
     "version": "0.2.21",
     "summary": "Milim 0.2.21 closes Milim-owned background process trees on Quit and restart while carrying forward the focused workspace editor.",
