@@ -1757,6 +1757,7 @@ export function ChatView({
   const mediaSettings = useSettings((s) => s.media);
   const favoriteModels = useSettings((s) => s.favorites);
   const accountRuntimeEnabled = useSettings((s) => s.accountRuntimeEnabled);
+  const reasoningEffortByModel = useSettings((s) => s.reasoningEffortByModel);
   const configuredNewThreads = useSettings((s) => s.newThreadBehavior === "configured");
   const unavailableModelPolicy = useSettings((s) => s.unavailableModelPolicy);
   const setMediaSettings = useSettings((s) => s.setMediaSettings);
@@ -7121,6 +7122,7 @@ export function ChatView({
               <ControlBar
                 models={pickerModels}
                 model={model}
+                reasoningEffortByModel={reasoningEffortByModel}
                 providers={providers}
                 toolIntent={modelToolIntent}
                 onModel={(m) => requestHotSwap(m)}

@@ -3,11 +3,13 @@ import {
   type ModelInfo,
   type PrivacyMode,
   type ProviderInfo,
+  type ReasoningEffort,
   type RunTrace,
   type ToolApprovalMode,
 } from "../api";
 import { goalChipVisible, type GoalSettings } from "../lib/goals";
 import { modelDevProfile, modelDisplayName } from "../lib/modelPicker";
+import { REASONING_EFFORT_LABEL, reasoningEffortForModel } from "../lib/reasoningEffort";
 import { ChevronDown, Cube, Lightbulb, Pin, Sliders } from "./icons";
 import { ModelPicker, type ModelPickerSelection } from "./ModelPicker";
 import { ProviderIcon, providerBrandForModel } from "./ProviderIcon";
@@ -86,6 +88,7 @@ function Monitor({ size = 13 }: { size?: number }) {
 export function ControlBar({
   models,
   model,
+  reasoningEffortByModel,
   providers,
   toolIntent,
   onModel,
@@ -113,6 +116,7 @@ export function ControlBar({
 }: {
   models: ModelInfo[];
   model: string;
+  reasoningEffortByModel: Record<string, ReasoningEffort>;
   providers?: ProviderInfo[];
   toolIntent?: boolean;
   onModel: (selection: ModelPickerSelection) => void;
@@ -172,6 +176,8 @@ export function ControlBar({
     : goal.status[0].toUpperCase() + goal.status.slice(1);
   const activeModel = models.find((item) => item.id === model);
   const activeModelLabel = activeModel ? modelDisplayName(activeModel) : model;
+  const activeReasoningEffort = reasoningEffortForModel(reasoningEffortByModel, model, models);
+  const activeReasoningEffortLabel = activeReasoningEffort === "auto" ? "" : REASONING_EFFORT_LABEL[activeReasoningEffort];
   const activeModelProfile = modelDevProfile(activeModel, model, {
     providers,
     toolIntent,
@@ -210,13 +216,14 @@ export function ControlBar({
               setMenu("model");
             }}
             title={`${activeModelProfile.routeDetail} ${activeModelProfile.setupDetail}`}
-            aria-label={`Choose model${activeModelLabel ? `, current model ${activeModelLabel}` : ""}, ${activeModelRoute || activeModelProfile.setupLabel}`}
+            aria-label={`Choose model${activeModelLabel ? `, current model ${activeModelLabel}` : ""}${activeReasoningEffortLabel ? `, reasoning effort ${activeReasoningEffortLabel}` : ""}, ${activeModelRoute || activeModelProfile.setupLabel}`}
             aria-haspopup="dialog"
             aria-expanded={menu === "model"}
           >
             <span className={`dot ${activeModelDot}`} />
             <ProviderIcon brand={providerBrandForModel(activeModel, providers)} />
             <span className="chip-label">{activeModelLabel || "Choose model"}</span>
+            {activeReasoningEffortLabel && <span className="chip-detail">{activeReasoningEffortLabel}</span>}
             <ChevronDown size={12} className="chip-chev" />
           </button>
           {menu === "model" && (
