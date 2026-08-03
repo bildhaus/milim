@@ -6,7 +6,7 @@ title: Models and providers
 summary: Model-agnostic dev chat routing across provider APIs, local runtimes, Codex, Claude, OpenCode, and Pi bridges.
 group: Core
 order: 40
-updated: 2026-07-29
+updated: 2026-08-03
 ---
 
 Model routing is provider-agnostic and centered on the active dev thread. The provider registry stores enabled remotes and their model metadata, then the desktop model picker merges local API runtime models, provider models, account runtime models, and media-capable models. Duplicate provider model ids stay provider-scoped in the picker and route back to the selected provider; provider sections with fewer visible models appear first.
@@ -76,7 +76,7 @@ Each account runtime keeps its native skill catalog. Milim does not copy all ena
 | Runtime | Setup | Session behavior |
 |---|---|---|
 | Codex | Use `/codex/login/device`, `/codex/login/chatgpt-device`, or `/codex/login/api-key`. | Milim stores the returned Codex thread id on the Milim chat when persistence is enabled. |
-| Installed Claude CLI | Install Anthropic's official `claude` CLI separately and run `claude auth login` outside Milim. | Milim stores one Claude session id per Milim chat, uses `--session-id` for new native sessions and `--resume` for existing project transcripts, and asks before stopping a matching local Claude CLI process if Claude reports the session is already in use. Recovery removes only the matching registry entry after its recorded process is confirmed stopped. |
+| Installed Claude CLI | Install Anthropic's official `claude` CLI separately and run `claude auth login` outside Milim. | Milim stores one Claude session id per Milim chat, uses `--session-id` for new native sessions and `--resume` for existing project transcripts, and can stop only a matching local Claude CLI process if Claude reports the session is already in use. Review and Guarded ask first; Open authorizes recovery immediately. Milim waits for the recorded owner to exit before removing only the matching registry entry and retrying once. |
 | OpenCode | Install and configure OpenCode separately. | Milim stores the native ACP session id and applies its approval overlay; no-folder chats use a private managed ACP directory without native filesystem tools. |
 | Pi | Install Pi separately and authenticate with Pi's `/login`; catalog discovery confirms configuration, while the first turn verifies the current credential. | Milim stores one Pi session id and sync cursor per chat; side calls use `--no-session`. Embedded runs disable discovered extensions, while normal Pi context, prompt, and skill discovery remains active. |
 

@@ -103,7 +103,7 @@ Claude CLI integration boundaries:
 - Claude CLI usage remains subject to Anthropic's terms.
 - Anthropic documents API-key or supported cloud-provider authentication as the unambiguous path for third-party and commercial integrations; Milim does not represent subscription compatibility as an Anthropic partnership or entitlement.
 - Some permission modes may allow Claude to run local tools and commands.
-- Stale-session recovery asks before stopping a matching local Claude CLI process.
+- Stale-session recovery asks before stopping a matching local Claude CLI process unless the turn is already in Open mode.
 
 | Surface | Behavior |
 |---|---|
@@ -118,8 +118,8 @@ The Claude account card also exposes **Import chats**. Milim searches locally re
 
 Import keeps human prompts and assistant text, joins assistant fragments around omitted tool activity, replaces media-only prompts with an omission marker, and omits reasoning, tools, task notifications, attachments, and internal command scaffolding. A retained project folder attaches the native session and sync cursor for `--resume`; a missing project remains grouped under its recorded path but imports as transcript-only and leaves the session stale so Milim's existing Fresh/Resume choice appears before continuation. This is a one-time local import, not continuous synchronization or Claude.ai cloud history access.
 
-If Claude reports that a persisted session id is already in use, Milim emits a recovery-required event and asks before trying to stop a matching local `claude`/`node` process for that exact session id and retrying once. Recovery removes only the matching Claude session registry file after its recorded process is confirmed stopped; a live registry entry is preserved unless its matching process is stopped with approval.
+If Claude reports that a persisted session id is already in use, Review and Guarded emit a recovery-required event and ask before Milim tries to stop a matching local `claude`/`node` process for that exact session id and retry once. Open authorizes that recovery immediately. After stopping a match, Milim waits for the recorded owner process to exit before removing only that session's registry file and retrying; an unrelated or still-live registry owner is preserved.
 
-Milim maps `low`, `medium`, `high`, `xhigh`, and `max` to Claude CLI `--effort`; `auto`, `none`, and `minimal` are omitted. Runs map Milim approval modes onto Claude permission modes and do not set a max-turn cap. Open mode maps to Claude's `bypassPermissions` mode, which may run tools and commands without additional Claude prompts; use it only in trusted workspaces.
+Milim maps `low`, `medium`, `high`, `xhigh`, and `max` to Claude CLI `--effort`; `auto`, `none`, and `minimal` are omitted. Runs map Milim approval modes onto Claude permission modes and do not set a max-turn cap. Open mode maps to Claude's `bypassPermissions` mode and authorizes exact-session recovery without another prompt; it may run tools and commands without additional Claude prompts, so use it only in trusted workspaces.
 
 Claude CLI models in the picker advertise image input plus `low`, `medium`, `high`, `xhigh`, and `max` reasoning efforts. The built-in aliases include `sonnet`, `opus`, `haiku`, and `fable`.
