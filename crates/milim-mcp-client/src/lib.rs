@@ -21,6 +21,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{oneshot, Mutex};
 
+use milim_core::proc::ProcessTreeGuard;
 use milim_core::{Error, Result};
 use milim_storage::{create_private_file, EncryptedStore};
 use milim_tools::{atomic_write, Tool, ToolEffect, ToolUiDescriptor};
@@ -248,7 +249,8 @@ pub struct McpClient {
     pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>>,
     next_id: AtomicI64,
     capabilities: McpCapabilities,
-    // Held so the child stays alive; `kill_on_drop` cleans it up with the client.
+    // Held so the child and its descendants stay alive with the client.
+    _tree: ProcessTreeGuard,
     _child: Mutex<Child>,
 }
 
@@ -282,6 +284,8 @@ impl McpClient {
             cmd.current_dir(cwd);
         }
         cmd.env_clear().envs(base_child_env()).envs(env);
+        #[cfg(unix)]
+        cmd.process_group(0);
         // Don't flash a console window when spawning the server on Windows.
         #[cfg(windows)]
         cmd.creation_flags(milim_core::proc::CREATE_NO_WINDOW);
@@ -289,6 +293,11 @@ impl McpClient {
         let mut child = cmd
             .spawn()
             .map_err(|e| Error::Other(format!("failed to spawn MCP server '{command}': {e}")))?;
+        let tree =
+            ProcessTreeGuard::attach(child.id().ok_or_else(|| {
+                Error::Other(format!("MCP server '{command}' has no process id"))
+            })?)
+            .map_err(|e| Error::Other(format!("failed to contain MCP server '{command}': {e}")))?;
         let stdin = child
             .stdin
             .take()
@@ -373,6 +382,7 @@ impl McpClient {
             pending,
             next_id,
             capabilities,
+            _tree: tree,
             _child: Mutex::new(child),
         });
         client
@@ -542,23 +552,6 @@ impl McpClient {
         Err(Error::Other(format!(
             "MCP '{method}' exceeded {MAX_PAGES} pages"
         )))
-    }
-}
-
-impl Drop for McpClient {
-    fn drop(&mut self) {
-        #[cfg(windows)]
-        if let Ok(mut child) = self._child.try_lock() {
-            if child.try_wait().ok().flatten().is_none() {
-                let Some(pid) = child.id() else { return };
-                let mut command = std::process::Command::new("taskkill");
-                command
-                    .args(["/PID", &pid.to_string(), "/T", "/F"])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null());
-                let _ = milim_core::proc::hide_console(&mut command).spawn();
-            }
-        }
     }
 }
 
@@ -1742,6 +1735,64 @@ mod tests {
             client.call_tool("echo", json!({})).await.unwrap()["content"][0]["text"],
             "ok"
         );
+    }
+
+    #[tokio::test]
+    async fn dropping_client_kills_server_descendants() {
+        if std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let dir =
+            std::env::temp_dir().join(format!("milim-mcp-process-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_path = dir.join("child.pid");
+        let script = r#"const fs=require('fs'),cp=require('child_process'),readline=require('readline');const rl=readline.createInterface({input:process.stdin});rl.on('line',line=>{const m=JSON.parse(line);if(m.method!=='initialize')return;const child=cp.spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});fs.writeFileSync(process.env.MILIM_CHILD_PID,String(child.pid));process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result:{protocolVersion:'2025-06-18',capabilities:{},serverInfo:{name:'tree-test',version:'1'}}})+'\n')});"#;
+        let env = HashMap::from([(
+            "MILIM_CHILD_PID".to_string(),
+            pid_path.to_string_lossy().into_owned(),
+        )]);
+        let client = McpClient::connect_with_env(
+            "node",
+            &["-e".to_string(), script.to_string()],
+            None,
+            &env,
+        )
+        .await
+        .unwrap();
+        let pid: u32 = std::fs::read_to_string(&pid_path).unwrap().parse().unwrap();
+
+        drop(client);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let mut running = true;
+        while running && tokio::time::Instant::now() < deadline {
+            running = std::process::Command::new("node")
+                .args([
+                    "-e",
+                    "try{process.kill(Number(process.argv[1]),0)}catch{process.exit(1)}",
+                    &pid.to_string(),
+                ])
+                .status()
+                .is_ok_and(|status| status.success());
+            if running {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+        if running {
+            #[cfg(windows)]
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .status();
+            #[cfg(unix)]
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .status();
+        }
+        let _ = std::fs::remove_dir_all(dir);
+        assert!(!running, "MCP server descendant {pid} survived client drop");
     }
 
     #[tokio::test]

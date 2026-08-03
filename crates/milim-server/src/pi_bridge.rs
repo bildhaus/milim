@@ -12,6 +12,7 @@ use axum::response::sse::Event;
 use futures::Stream;
 use milim_agents::ToolApprovalBroker;
 use milim_core::api::openai::Usage;
+use milim_core::proc::ProcessTreeGuard;
 use milim_core::{Error, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -617,6 +618,7 @@ fn pi_error_message(message: &Value) -> Option<&str> {
 }
 
 struct PiProcess {
+    tree: Option<ProcessTreeGuard>,
     child: Option<Child>,
     stdin: Option<ChildStdin>,
     stdout: Lines<BufReader<ChildStdout>>,
@@ -675,9 +677,17 @@ impl PiProcess {
         }
         #[cfg(windows)]
         command.creation_flags(milim_core::proc::CREATE_NO_WINDOW);
+        #[cfg(unix)]
+        command.process_group(0);
         let mut child = command
             .spawn()
             .map_err(|error| Error::Upstream(format!("Pi CLI is unavailable: {error}")))?;
+        let tree = ProcessTreeGuard::attach(
+            child
+                .id()
+                .ok_or_else(|| Error::Upstream("Pi RPC process id is unavailable.".into()))?,
+        )
+        .map_err(|error| Error::Upstream(format!("failed to contain Pi RPC: {error}")))?;
         let stdin = child
             .stdin
             .take()
@@ -687,6 +697,7 @@ impl PiProcess {
             .take()
             .ok_or_else(|| Error::Upstream("Pi RPC stdout is unavailable.".into()))?;
         Ok(Self {
+            tree: Some(tree),
             child: Some(child),
             stdin: Some(stdin),
             stdout: BufReader::new(stdout).lines(),
@@ -770,6 +781,7 @@ impl PiProcess {
                 let _ = child.kill().await;
             }
         }
+        self.tree.take();
         remove_extension(self.extension_path.take());
     }
 }
@@ -787,11 +799,13 @@ impl Drop for PiProcess {
             let _ = child.start_kill();
             return;
         };
+        let tree = self.tree.take();
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             let _ = child.start_kill();
             return;
         };
         runtime.spawn(async move {
+            let _tree = tree;
             if let Ok(line) = serde_json::to_vec(&json!({ "type": "abort" })) {
                 let _ = stdin.write_all(&line).await;
                 let _ = stdin.write_all(b"\n").await;
@@ -816,7 +830,7 @@ async fn command_output(args: &[&str]) -> Result<String> {
         .stderr(Stdio::piped());
     #[cfg(windows)]
     command.creation_flags(milim_core::proc::CREATE_NO_WINDOW);
-    let output = tokio::time::timeout(STATUS_TIMEOUT, command.output())
+    let output = tokio::time::timeout(STATUS_TIMEOUT, crate::child_process::output(command))
         .await
         .map_err(|_| Error::Upstream("Pi command timed out.".into()))?
         .map_err(|error| Error::Upstream(format!("Pi CLI is unavailable: {error}")))?;

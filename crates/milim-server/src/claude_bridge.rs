@@ -12,6 +12,7 @@ use axum::response::sse::Event;
 use futures::{Stream, StreamExt};
 use milim_agents::ToolApprovalBroker;
 use milim_core::api::openai::{ReasoningEffort, Usage};
+use milim_core::proc::ProcessTreeGuard;
 use milim_core::{Error, Result};
 use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
@@ -724,28 +725,31 @@ pub(crate) async fn status() -> Result<Value> {
     command.arg("auth").arg("status");
     #[cfg(windows)]
     command.creation_flags(milim_core::proc::CREATE_NO_WINDOW);
-    let output = match tokio::time::timeout(CLAUDE_STATUS_TIMEOUT, command.output()).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(e)) => {
-            let error = claude_spawn_error_message(&e);
-            let warning = is_cli_path_warning(&error);
-            return Ok(json!({
-                "available": false,
-                "authenticated": false,
-                "models": [],
-                "error": error,
-                "warning": warning
-            }));
-        }
-        Err(_) => {
-            return Ok(json!({
-                "available": true,
-                "authenticated": false,
-                "models": [],
-                "error": "`claude auth status` timed out"
-            }));
-        }
-    };
+    let output =
+        match tokio::time::timeout(CLAUDE_STATUS_TIMEOUT, crate::child_process::output(command))
+            .await
+        {
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => {
+                let error = claude_spawn_error_message(&e);
+                let warning = is_cli_path_warning(&error);
+                return Ok(json!({
+                    "available": false,
+                    "authenticated": false,
+                    "models": [],
+                    "error": error,
+                    "warning": warning
+                }));
+            }
+            Err(_) => {
+                return Ok(json!({
+                    "available": true,
+                    "authenticated": false,
+                    "models": [],
+                    "error": "`claude auth status` timed out"
+                }));
+            }
+        };
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -953,6 +957,8 @@ fn run_stream_with_worker_events(
             }
             #[cfg(windows)]
             command.creation_flags(milim_core::proc::CREATE_NO_WINDOW);
+            #[cfg(unix)]
+            command.process_group(0);
 
             let mut child = match command.spawn() {
                 Ok(child) => child,
@@ -967,6 +973,27 @@ fn run_stream_with_worker_events(
                             cost_usd: None,
                         }, &worker_events);
                     }
+                    yield Ok(Event::default().data("[DONE]"));
+                    return;
+                }
+            };
+            let _tree = match child.id().map(ProcessTreeGuard::attach) {
+                Some(Ok(tree)) => tree,
+                Some(Err(e)) => {
+                    yield sse_event_with_worker(&ClaudeStreamEvent::Error {
+                        message: format!("failed to contain Claude CLI: {e}"),
+                        usage: None,
+                        cost_usd: None,
+                    }, &worker_events);
+                    yield Ok(Event::default().data("[DONE]"));
+                    return;
+                }
+                None => {
+                    yield sse_event_with_worker(&ClaudeStreamEvent::Error {
+                        message: "Claude CLI process id was not available".to_string(),
+                        usage: None,
+                        cost_usd: None,
+                    }, &worker_events);
                     yield Ok(Event::default().data("[DONE]"));
                     return;
                 }
@@ -1631,7 +1658,7 @@ async fn terminate_claude_session_processes_impl(session_id: &str) -> bool {
         .arg("-Command")
         .arg(script);
     command.creation_flags(milim_core::proc::CREATE_NO_WINDOW);
-    match command.output().await {
+    match crate::child_process::output(command).await {
         Ok(output) if output.status.success() => {
             !String::from_utf8_lossy(&output.stdout).trim().is_empty()
         }

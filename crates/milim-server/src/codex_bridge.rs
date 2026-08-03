@@ -12,6 +12,7 @@ use axum::response::sse::Event;
 use base64::Engine;
 use futures::{Stream, StreamExt};
 use milim_core::api::openai::{ReasoningEffort, Usage};
+use milim_core::proc::ProcessTreeGuard;
 use milim_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1429,6 +1430,7 @@ fn account_worker_event_from_codex(value: &CodexStreamEvent) -> Option<AccountWo
 }
 
 struct CodexProcess {
+    _tree: ProcessTreeGuard,
     child: Child,
     stdin: ChildStdin,
     stdout: Lines<BufReader<ChildStdout>>,
@@ -1455,10 +1457,16 @@ impl CodexProcess {
         // Don't flash a console window when spawning codex on Windows.
         #[cfg(windows)]
         command.creation_flags(milim_core::proc::CREATE_NO_WINDOW);
+        #[cfg(unix)]
+        command.process_group(0);
 
         let mut child = command
             .spawn()
             .map_err(|e| Error::Upstream(codex_spawn_error_message(&e)))?;
+        let tree = ProcessTreeGuard::attach(child.id().ok_or_else(|| {
+            Error::Upstream("codex app-server process id was not available".to_string())
+        })?)
+        .map_err(|e| Error::Upstream(format!("failed to contain codex app-server: {e}")))?;
         let stdin = child.stdin.take().ok_or_else(|| {
             Error::Upstream("codex app-server stdin was not available".to_string())
         })?;
@@ -1466,6 +1474,7 @@ impl CodexProcess {
             Error::Upstream("codex app-server stdout was not available".to_string())
         })?;
         let mut proc = Self {
+            _tree: tree,
             child,
             stdin,
             stdout: BufReader::new(stdout).lines(),

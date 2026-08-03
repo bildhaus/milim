@@ -11,6 +11,7 @@ use serde::Serialize;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
+use milim_core::proc::ProcessTreeGuard;
 use milim_core::{Error, Result};
 
 /// Options for a sandboxed run.
@@ -102,13 +103,22 @@ impl DockerBackend {
 }
 
 async fn command_succeeds_within(command: &mut Command, timeout: Duration) -> bool {
+    #[cfg(unix)]
+    command.process_group(0);
     let Ok(mut child) = command.spawn() else {
+        return false;
+    };
+    let Some(pid) = child.id() else {
+        return false;
+    };
+    let Ok(mut tree) = ProcessTreeGuard::attach(pid) else {
         return false;
     };
     match tokio::time::timeout(timeout, child.wait()).await {
         Ok(Ok(status)) => status.success(),
         Ok(Err(_)) => false,
         Err(_) => {
+            tree.terminate();
             let _ = child.kill().await;
             let _ = child.wait().await;
             false
@@ -175,9 +185,17 @@ impl DockerBackend {
             .kill_on_drop(true);
         #[cfg(windows)]
         cmd.creation_flags(milim_core::proc::CREATE_NO_WINDOW);
+        #[cfg(unix)]
+        cmd.process_group(0);
         let mut child = cmd
             .spawn()
             .map_err(|e| Error::Other(format!("docker run failed to start: {e}")))?;
+        let mut tree = ProcessTreeGuard::attach(
+            child
+                .id()
+                .ok_or_else(|| Error::Other("docker process id unavailable".into()))?,
+        )
+        .map_err(|e| Error::Other(format!("failed to contain docker process: {e}")))?;
         let stdout = child
             .stdout
             .take()
@@ -195,6 +213,7 @@ impl DockerBackend {
             }
             Err(_) => {
                 guard.terminate().await;
+                tree.terminate();
                 let _ = child.kill().await;
                 let _ = child.wait().await;
                 return Err(Error::Other(format!(

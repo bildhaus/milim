@@ -8,6 +8,7 @@
 
 mod account_runtime_update;
 mod auth;
+mod child_process;
 mod claude_bridge;
 #[cfg(not(windows))]
 mod cli_path;

@@ -10,6 +10,7 @@ use axum::response::sse::Event;
 use futures::Stream;
 use milim_agents::ToolApprovalBroker;
 use milim_core::api::openai::Usage;
+use milim_core::proc::ProcessTreeGuard;
 use milim_core::{Error, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -407,6 +408,7 @@ fn value_detail(value: &Value) -> Option<String> {
 }
 
 struct OpenCodeProcess {
+    tree: Option<ProcessTreeGuard>,
     child: Option<Child>,
     stdin: Option<ChildStdin>,
     stdout: Lines<BufReader<ChildStdout>>,
@@ -439,9 +441,16 @@ impl OpenCodeProcess {
             .kill_on_drop(true);
         #[cfg(windows)]
         command.creation_flags(milim_core::proc::CREATE_NO_WINDOW);
+        #[cfg(unix)]
+        command.process_group(0);
         let mut child = command
             .spawn()
             .map_err(|error| Error::Upstream(format!("OpenCode is unavailable: {error}")))?;
+        let tree =
+            ProcessTreeGuard::attach(child.id().ok_or_else(|| {
+                Error::Upstream("OpenCode ACP process id is unavailable.".into())
+            })?)
+            .map_err(|error| Error::Upstream(format!("failed to contain OpenCode ACP: {error}")))?;
         let stdin = child
             .stdin
             .take()
@@ -451,6 +460,7 @@ impl OpenCodeProcess {
             .take()
             .ok_or_else(|| Error::Upstream("OpenCode ACP stdout is unavailable.".into()))?;
         let mut process = Self {
+            tree: Some(tree),
             child: Some(child),
             stdin: Some(stdin),
             stdout: BufReader::new(stdout).lines(),
@@ -619,6 +629,7 @@ impl OpenCodeProcess {
                 let _ = child.kill().await;
             }
         }
+        self.tree.take();
     }
 }
 
@@ -635,11 +646,13 @@ impl Drop for OpenCodeProcess {
             return;
         };
         let session = self.active_session.take();
+        let tree = self.tree.take();
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             let _ = child.start_kill();
             return;
         };
         runtime.spawn(async move {
+            let _tree = tree;
             if let Some(session_id) = session {
                 let cancel = json!({
                     "jsonrpc": "2.0",
@@ -671,7 +684,7 @@ async fn command_output(args: &[&str]) -> Result<String> {
         .stderr(Stdio::piped());
     #[cfg(windows)]
     command.creation_flags(milim_core::proc::CREATE_NO_WINDOW);
-    let output = tokio::time::timeout(STATUS_TIMEOUT, command.output())
+    let output = tokio::time::timeout(STATUS_TIMEOUT, crate::child_process::output(command))
         .await
         .map_err(|_| Error::Upstream("OpenCode command timed out.".into()))?
         .map_err(|error| Error::Upstream(format!("OpenCode is unavailable: {error}")))?;
@@ -703,7 +716,7 @@ async fn preflight_policy(cwd: &std::path::Path, overlay: &Value) -> Result<()> 
         .stderr(Stdio::piped());
     #[cfg(windows)]
     command.creation_flags(milim_core::proc::CREATE_NO_WINDOW);
-    let output = tokio::time::timeout(STATUS_TIMEOUT, command.output())
+    let output = tokio::time::timeout(STATUS_TIMEOUT, crate::child_process::output(command))
         .await
         .map_err(|_| Error::Upstream("OpenCode permission preflight timed out.".into()))?
         .map_err(|error| {

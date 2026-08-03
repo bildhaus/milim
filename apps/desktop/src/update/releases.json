@@ -1,4 +1,23 @@
 {
+  "0.2.21": {
+    "version": "0.2.21",
+    "summary": "Milim 0.2.21 closes Milim-owned background process trees on Quit and restart while carrying forward the focused workspace editor.",
+    "items": [
+      {
+        "id": "workspace-code-editor",
+        "eyebrow": "Workspace editing",
+        "title": "Edit workspace files without leaving Milim",
+        "description": "Browse, search, edit, preview, and explicitly save one file at a time with conflict-safe writes.",
+        "details": [
+          "Expand folders inline and search the workspace recursively",
+          "Edit common code formats with line numbers, search, history, and Ctrl/Cmd+S",
+          "Protect drafts with Save, Discard, Cancel, Reload, and Overwrite flows"
+        ],
+        "accent": "var(--accent)",
+        "icon": "file-text"
+      }
+    ]
+  },
   "0.2.20": {
     "version": "0.2.20",
     "summary": "Milim 0.2.20 improves Media Studio layouts, thread controls, and Claude CLI session recovery while carrying forward the focused workspace editor.",

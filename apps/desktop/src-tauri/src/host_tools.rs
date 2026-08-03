@@ -11,6 +11,7 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+use milim_core::proc::ProcessTreeGuard;
 use milim_core::{Error, Result};
 use milim_tools::{atomic_write, read_text_range, resolve_workspace_path, Tool, ToolEffect};
 
@@ -697,10 +698,17 @@ async fn run_shell(cwd: &Path, command: &str) -> Result<Value> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
     let mut child = cmd
         .spawn()
         .map_err(|error| Error::Other(format!("shell failed to start: {error}")))?;
-    let mut guard = ProcessTreeGuard::new(child.id());
+    let mut guard = ProcessTreeGuard::attach(
+        child
+            .id()
+            .ok_or_else(|| Error::Other("shell process id unavailable".into()))?,
+    )
+    .map_err(|error| Error::Other(format!("failed to contain shell process: {error}")))?;
     let stdout = child
         .stdout
         .take()
@@ -750,7 +758,7 @@ async fn run_shell(cwd: &Path, command: &str) -> Result<Value> {
             return Err(Error::Other("shell timed out after 120 seconds".into()));
         }
     };
-    guard.disarm();
+    guard.terminate();
     let (stdout, stdout_truncated) = stdout_task
         .await
         .map_err(|error| Error::Other(format!("shell stdout task failed: {error}")))??;
@@ -764,47 +772,6 @@ async fn run_shell(cwd: &Path, command: &str) -> Result<Value> {
         "stderr_truncated": stderr_truncated,
         "exit_code": status.code(),
     }))
-}
-
-struct ProcessTreeGuard {
-    pid: Option<u32>,
-}
-
-impl ProcessTreeGuard {
-    fn new(pid: Option<u32>) -> Self {
-        Self { pid }
-    }
-
-    fn disarm(&mut self) {
-        self.pid = None;
-    }
-
-    fn terminate(&mut self) {
-        #[cfg(windows)]
-        if let Some(pid) = self.pid {
-            let mut command = std::process::Command::new("taskkill");
-            command
-                .args(["/PID", &pid.to_string(), "/T", "/F"])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null());
-            let _ = milim_core::proc::hide_console(&mut command).status();
-        }
-        self.pid = None;
-    }
-}
-
-impl Drop for ProcessTreeGuard {
-    fn drop(&mut self) {
-        #[cfg(windows)]
-        if let Some(pid) = self.pid.take() {
-            let mut command = std::process::Command::new("taskkill");
-            command
-                .args(["/PID", &pid.to_string(), "/T", "/F"])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null());
-            let _ = milim_core::proc::hide_console(&mut command).spawn();
-        }
-    }
 }
 
 #[cfg(test)]
