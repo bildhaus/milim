@@ -1777,6 +1777,14 @@ mod tests {
                 ])
                 .status()
                 .is_ok_and(|status| status.success());
+            #[cfg(target_os = "linux")]
+            if running {
+                running = std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+                    !stat
+                        .rsplit_once(") ")
+                        .is_some_and(|(_, rest)| rest.starts_with('Z'))
+                });
+            }
             if running {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
