@@ -94,7 +94,7 @@ pub(crate) async fn update(runtime: AccountRuntime) -> Result<Value> {
         .stderr(Stdio::piped());
     #[cfg(windows)]
     command.creation_flags(milim_core::proc::CREATE_NO_WINDOW);
-    let output = tokio::time::timeout(UPDATE_TIMEOUT, command.output())
+    let output = tokio::time::timeout(UPDATE_TIMEOUT, crate::child_process::output(command))
         .await
         .map_err(|_| Error::Upstream(format!("{} update timed out.", runtime.id())))?
         .map_err(|error| {
@@ -203,7 +203,7 @@ async fn installed_version(runtime: AccountRuntime) -> Result<String> {
         .stderr(Stdio::piped());
     #[cfg(windows)]
     command.creation_flags(milim_core::proc::CREATE_NO_WINDOW);
-    let output = tokio::time::timeout(VERSION_TIMEOUT, command.output())
+    let output = tokio::time::timeout(VERSION_TIMEOUT, crate::child_process::output(command))
         .await
         .map_err(|_| Error::Upstream(format!("{} version check timed out.", runtime.id())))?
         .map_err(|error| {

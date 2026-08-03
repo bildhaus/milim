@@ -5,11 +5,6 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-#[cfg(windows)]
-use std::{
-    os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
-    ptr,
-};
 
 use axum::body::Body;
 use axum::extract::State;
@@ -17,6 +12,8 @@ use axum::http::{Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
+use milim_core::proc::ProcessTreeGuard;
+use milim_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -25,14 +22,6 @@ use tokio::process::{Child, Command};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tower_http::services::ServeDir;
-#[cfg(windows)]
-use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-    SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-};
-
-use milim_core::{Error, Result};
 
 const MAX_LOG_LINES: usize = 500;
 const INSTALL_MARKER_FILE: &str = ".milim-install-ok";
@@ -1138,10 +1127,20 @@ async fn run_preview_app(
             return;
         }
     };
-    #[cfg(windows)]
-    let mut process_job = match process_tree_job(&child) {
-        Ok(job) => Some(job),
-        Err(error) => {
+    let mut process_tree = match child.id().map(ProcessTreeGuard::attach) {
+        Some(Ok(tree)) => tree,
+        None => {
+            let _ = child.start_kill();
+            fail_run(
+                &manager,
+                &thread_id,
+                &run_id,
+                "dev_server_start_failed",
+                "dev server process id was unavailable",
+            );
+            return;
+        }
+        Some(Err(error)) => {
             let _ = child.start_kill();
             fail_run(
                 &manager,
@@ -1226,8 +1225,7 @@ async fn run_preview_app(
                 return;
             }
             _ = wait_for_cancel(&mut cancel) => {
-                #[cfg(windows)]
-                drop(process_job.take());
+                process_tree.terminate();
                 abort_child_log(&mut stdout_log).await;
                 abort_child_log(&mut stderr_log).await;
                 terminate_child(&mut child).await;
@@ -1283,12 +1281,15 @@ async fn run_install_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    #[cfg(windows)]
-    let mut process_job = match process_tree_job(&child) {
-        Ok(job) => Some(job),
-        Err(error) => {
+    let mut process_tree = match child.id().map(ProcessTreeGuard::attach) {
+        Some(Ok(tree)) => tree,
+        None => {
             let _ = child.start_kill();
-            return Err(error);
+            return Err(Error::Other("install process id was unavailable".into()));
+        }
+        Some(Err(error)) => {
+            let _ = child.start_kill();
+            return Err(error.into());
         }
     };
     let pid = child.id();
@@ -1320,8 +1321,7 @@ async fn run_install_command(
         _ = wait_for_cancel(cancel) => None,
     };
     if status.is_none() {
-        #[cfg(windows)]
-        drop(process_job.take());
+        process_tree.terminate();
         abort_child_log(&mut stdout_log).await;
         abort_child_log(&mut stderr_log).await;
         terminate_child(&mut child).await;
@@ -2353,36 +2353,6 @@ fn windows_npm_command() -> Option<Command> {
         command.arg(cli);
         Some(command)
     })
-}
-
-#[cfg(windows)]
-fn process_tree_job(child: &Child) -> Result<OwnedHandle> {
-    let raw_job = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
-    if raw_job.is_null() {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    let job = unsafe { OwnedHandle::from_raw_handle(raw_job as _) };
-    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    let configured = unsafe {
-        SetInformationJobObject(
-            job.as_raw_handle() as _,
-            JobObjectExtendedLimitInformation,
-            &limits as *const _ as *const _,
-            std::mem::size_of_val(&limits) as u32,
-        )
-    };
-    if configured == 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    let process = child
-        .raw_handle()
-        .ok_or_else(|| Error::Other("preview process exited before containment".to_string()))?;
-    let assigned = unsafe { AssignProcessToJobObject(job.as_raw_handle() as _, process as _) };
-    if assigned == 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    Ok(job)
 }
 
 #[cfg(windows)]
