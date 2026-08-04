@@ -317,10 +317,17 @@ export type ChatStreamPreviewPoint = {
 };
 
 export interface McpAppDescriptor {
+  kind?: "mcp_app";
   server_id: string;
   resource_uri: string;
   tool: Record<string, unknown>;
 }
+
+export interface NativeChartDescriptor {
+  kind: "native_chart";
+}
+
+export type ToolUiDescriptor = McpAppDescriptor | NativeChartDescriptor;
 
 export type ChatStreamPart =
   | { kind: "text"; content: string }
@@ -335,7 +342,7 @@ export type ChatStreamPart =
       icon?: ChatStreamEventIcon;
       status?: ChatStreamEventStatus;
       previewPoint?: ChatStreamPreviewPoint;
-      mcpApp?: McpAppDescriptor;
+      mcpApp?: ToolUiDescriptor;
       mcpAppResult?: unknown;
       toolArguments?: string;
       approvalId?: string;
@@ -360,7 +367,7 @@ export interface RunStep {
   name: string;
   arguments?: string;
   result?: unknown;
-  mcpApp?: McpAppDescriptor;
+  mcpApp?: ToolUiDescriptor;
   mcpAppResult?: unknown;
   error?: string;
   startedAt: number;
@@ -3623,7 +3630,7 @@ export interface AgentEvent {
   name?: string;
   arguments?: string;
   result?: unknown;
-  mcp_app?: McpAppDescriptor;
+  mcp_app?: ToolUiDescriptor;
   mcp_app_result?: unknown;
   content?: string;
   message?: string;

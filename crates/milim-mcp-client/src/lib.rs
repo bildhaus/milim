@@ -1502,11 +1502,13 @@ async fn connect_one(
             schema: d.input_schema,
             effect: d.effect,
             aliases,
-            ui: d.ui_resource_uri.map(|resource_uri| ToolUiDescriptor {
-                server_id: cfg.id.clone(),
-                resource_uri,
-                tool: d.raw,
-            }),
+            ui: d
+                .ui_resource_uri
+                .map(|resource_uri| ToolUiDescriptor::McpApp {
+                    server_id: cfg.id.clone(),
+                    resource_uri,
+                    tool: d.raw,
+                }),
         }) as Arc<dyn Tool>);
     }
     let caps = client.capabilities();
@@ -1635,7 +1637,10 @@ mod tests {
         let app_result = agent.app_result.unwrap();
         assert!(app_result.get("structuredContent").is_some());
         assert!(app_result["content"][1].get("data").is_some());
-        assert_eq!(agent.ui.unwrap().server_id, "apps-a");
+        assert!(matches!(
+            agent.ui,
+            Some(ToolUiDescriptor::McpApp { server_id, .. }) if server_id == "apps-a"
+        ));
 
         let dir =
             std::env::temp_dir().join(format!("milim-mcp-apps-test-{}", uuid::Uuid::new_v4()));

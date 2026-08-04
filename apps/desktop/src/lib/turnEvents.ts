@@ -38,6 +38,10 @@ function toolArg(args: Record<string, unknown> | null, key: string): string | un
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function isRenderChartTool(name?: string): boolean {
+  return name === "render_chart" || Boolean(name?.endsWith("_render_chart"));
+}
+
 export function toolErrorMessage(result: unknown): string | undefined {
   const error = asRecord(result)?.error;
   return typeof error === "string" && error.trim() ? error.trim() : undefined;
@@ -118,6 +122,7 @@ function toolEventIcon(name?: string): ChatStreamEventIcon {
 }
 
 function toolLabel(name: string | undefined, done: boolean): string {
+  if (isRenderChartTool(name)) return done ? "Rendered chart" : "Rendering chart";
   switch (name) {
     case "read_file":
       return done ? "Read file" : "Reading file";
@@ -161,6 +166,7 @@ function toolLabel(name: string | undefined, done: boolean): string {
 }
 
 function toolFailedLabel(name: string | undefined): string {
+  if (isRenderChartTool(name)) return "Chart rendering failed";
   switch (name) {
     case "read_file":
       return "Read file failed";
@@ -269,10 +275,13 @@ export function accountRuntimeToolPart(ev: AccountRuntimeToolEvent): ChatStreamE
     : ev.status === "completed"
       ? "done"
       : "error";
+  const chart = isRenderChartTool(ev.name);
   return {
     kind: "event",
     eventType: "tool",
-    label: ev.label || (status === "running" ? `Using ${ev.name}` : status === "error" ? `${ev.name} failed` : `Used ${ev.name}`),
+    label: chart
+      ? status === "running" ? "Rendering chart" : status === "error" ? "Chart rendering failed" : "Rendered chart"
+      : ev.label || (status === "running" ? `Using ${ev.name}` : status === "error" ? `${ev.name} failed` : `Used ${ev.name}`),
     detail:
       (status === "error" ? ev.error : ev.detail) ||
       ev.detail ||
@@ -280,6 +289,9 @@ export function accountRuntimeToolPart(ev: AccountRuntimeToolEvent): ChatStreamE
     icon: ev.icon || toolEventIcon(ev.name),
     name: ev.id || ev.name,
     status,
+    mcpApp: chart ? { kind: "native_chart" } : undefined,
+    mcpAppResult: chart ? ev.result : undefined,
+    toolArguments: chart ? ev.detail : undefined,
   };
 }
 

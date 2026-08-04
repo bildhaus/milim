@@ -16,6 +16,7 @@ Release artifacts target Windows and macOS. Linux packaging is intentionally dis
 - **Keep local control.** Project selection, model routing, tool approvals, local persistence, and outbound privacy boundaries stay explicit.
 - **Approve execution, then review the result.** Review is the new-chat default for consequential tool calls; configured defaults may opt into Open, while changing workspace folders resets approval to Review. Built-in Git views keep resulting diffs, checkpoints, and recovery beside the thread.
 - **Inspect and edit the workspace.** Code provides a searchable file rail and one focused editor with explicit, conflict-safe saves; generated artifacts remain available as read-only sources.
+- **Render data inline.** The built-in `render_chart` tool places responsive, interactive native bar, line, pie, and scatter charts, including horizontal bars, directly in the transcript without an MCP App server.
 
 ### Power tools
 

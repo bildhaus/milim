@@ -20,7 +20,7 @@ use serde_json::Value;
 
 use milim_core::{Error, Result};
 
-pub use builtins::{CurrentTimeTool, EchoTool, HttpFetchTool};
+pub use builtins::{CurrentTimeTool, EchoTool, HttpFetchTool, RenderChartTool};
 pub use fs::{
     atomic_write, fs_tools, read_text_range, resolve_workspace_path, ListDirTool, ReadFileTool,
     WriteFileTool,
@@ -82,10 +82,14 @@ pub enum ToolEffect {
 
 /// Interactive UI metadata carried with an agent tool event.
 #[derive(Debug, Clone, Serialize)]
-pub struct ToolUiDescriptor {
-    pub server_id: String,
-    pub resource_uri: String,
-    pub tool: Value,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ToolUiDescriptor {
+    McpApp {
+        server_id: String,
+        resource_uri: String,
+        tool: Value,
+    },
+    NativeChart,
 }
 
 /// One tool invocation split into model-visible and app-visible results.
@@ -124,6 +128,7 @@ impl ToolRegistry {
         r.register(Arc::new(EchoTool));
         r.register(Arc::new(CurrentTimeTool));
         r.register(Arc::new(HttpFetchTool));
+        r.register(Arc::new(RenderChartTool));
         r
     }
 
@@ -385,7 +390,10 @@ mod tests {
     async fn registry_lists_and_calls() {
         let reg = ToolRegistry::with_builtins();
         let names: Vec<String> = reg.list().into_iter().map(|s| s.name).collect();
-        assert_eq!(names, vec!["current_time", "echo", "http_fetch"]); // BTreeMap → sorted
+        assert_eq!(
+            names,
+            vec!["current_time", "echo", "http_fetch", "render_chart"]
+        ); // BTreeMap → sorted
 
         let out = reg.call("echo", json!({"text": "hi"})).await.unwrap();
         assert_eq!(out["echoed"]["text"], "hi");
@@ -407,7 +415,7 @@ mod tests {
 
         let filtered = reg.without(&["echo"]);
         let names: Vec<String> = filtered.list().into_iter().map(|s| s.name).collect();
-        assert_eq!(names, vec!["current_time", "http_fetch"]);
+        assert_eq!(names, vec!["current_time", "http_fetch", "render_chart"]);
         assert!(!filtered.contains("echo"));
     }
 

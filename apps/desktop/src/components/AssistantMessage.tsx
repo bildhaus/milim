@@ -1,5 +1,5 @@
 import { lazy, memo, Suspense, useEffect, useRef, useState } from "react";
-import { type ChatArtifact, type ChatStreamEventIcon, type ChatStreamPart, type ToolApprovalMode } from "../api";
+import { type ChatArtifact, type ChatStreamEventIcon, type ChatStreamPart, type NativeChartDescriptor, type ToolApprovalMode, type ToolUiDescriptor } from "../api";
 import { markPerfRender } from "../lib/perf";
 import {
   groupCompletedStreamActivity,
@@ -19,8 +19,15 @@ const MemoizedMarkdown = lazy(() =>
 const McpAppView = lazy(() =>
   import("./McpAppView").then((mod) => ({ default: mod.McpAppView })),
 );
+const NativeChartView = lazy(() =>
+  import("./NativeChartView").then((mod) => ({ default: mod.NativeChartView })),
+);
 const STREAMING_MARKDOWN_CHAR_LIMIT = 12000;
 type ChatStreamEventPart = Extract<ChatStreamPart, { kind: "event" }>;
+
+function isNativeChart(descriptor: ToolUiDescriptor): descriptor is NativeChartDescriptor {
+  return descriptor.kind === "native_chart";
+}
 
 type AssistantMessageProps = {
   content: string;
@@ -126,15 +133,13 @@ function StreamEvent({
           />
         )}
       </div>
-      {part.mcpApp ? (
+      {part.mcpApp ? isNativeChart(part.mcpApp) ? (
+        <Suspense fallback={<div className="native-chart-state">Loading chart...</div>}>
+          <NativeChartView argumentsText={part.toolArguments} result={part.mcpAppResult} status={part.status} />
+        </Suspense>
+      ) : (
         <Suspense fallback={<div className="mcp-app-state">Loading app...</div>}>
-          <McpAppView
-            descriptor={part.mcpApp}
-            argumentsText={part.toolArguments}
-            result={part.mcpAppResult}
-            status={part.status}
-            approval={toolApproval}
-          />
+          <McpAppView descriptor={part.mcpApp} argumentsText={part.toolArguments} result={part.mcpAppResult} status={part.status} approval={toolApproval} />
         </Suspense>
       ) : null}
     </>

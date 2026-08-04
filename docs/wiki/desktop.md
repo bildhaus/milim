@@ -6,7 +6,7 @@ title: Desktop app
 summary: Unified threads, projects, composer controls, artifacts, plan mode, goals, search, rendering, settings, and slash commands.
 group: Core
 order: 30
-updated: 2026-07-30
+updated: 2026-08-04
 ---
 
 Milim is your local control plane for coding agents: use your own models and subscriptions, keep one canonical thread, review the diff, and ship.
@@ -95,6 +95,12 @@ The latest eligible turn ends with a compact review card whose explicit state is
 ## Artifacts
 
 Named artifacts from later assistant messages become selectable revisions of the same logical file or title. Revisions are immutable snapshots from chat history; preview, copy, download, diff review, apply, and save actions use the selected revision. Threads without a selected folder save/apply named artifacts into a persisted per-thread virtual project; threads with a folder write to disk. Extracted code artifacts collapse to compact source rows in the transcript; open the side panel or review a workspace diff to inspect the full source. Inline artifacts, including anonymous code fences, markdown tables, standalone JSON, and standalone CSV, remain display/export content and do not get workspace target paths, batch apply, or save controls. Saved files record the source app session, message turn, and artifact revision when available.
+
+## Native charts
+
+The built-in read-only `render_chart` tool accepts bounded structured data for bar, line, pie, and scatter charts. Bar charts may set `orientation` to `vertical` or `horizontal`; omitted orientation remains vertical, and horizontal bars place category labels on the left and values along the bottom. Optional `x_format` and `y_format` metadata provide locale-aware number, percentage-point, and currency formatting with bounded precision, compact notation, and explicit positive signs. Milim renders the result as a responsive native SVG at the exact tool-call position, persists its validated chart specification with the transcript, and exposes the same formatted data through an accessible table.
+
+Hover or focus a mark to inspect it; tapping pins its pointed tooltip until another mark or the surrounding chart is selected, and the matching category label gains emphasis. Bar and line tooltips compare every visible series at the active category, while pie and scatter tooltips remain mark-specific. Keyboard arrows follow the visual direction: left and right move within vertical-bar, line, and scatter series, while up and down move within horizontal-bar series; the other arrow pair changes series at the same category. Legend buttons show or hide series or slices, and line and scatter charts add a crosshair to the active point. Layout, tick density, direct bar labels, and label wrapping adapt to the transcript width. Bars stay square at zero, round only at the value end, use a restrained accent-derived gradient without encoding another value, and reveal outward from the baseline with a short stagger. The renderer honors reduced motion and does not require an installed MCP server, remote HTML, or network access.
 
 ## MCP Apps
 
