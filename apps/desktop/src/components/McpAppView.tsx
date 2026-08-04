@@ -72,11 +72,12 @@ export function McpAppView({
   const pendingRef = useRef<PendingApproval | null>(null);
   pendingRef.current = pending;
   const fallbackText = mcpAppFallbackText(result);
+  const tool = descriptor.tool ?? {};
   const toolTitle =
-    typeof descriptor.tool.title === "string" && descriptor.tool.title.trim()
-      ? descriptor.tool.title
-      : typeof descriptor.tool.name === "string" && descriptor.tool.name.trim()
-        ? descriptor.tool.name.replace(/[_-]+/g, " ")
+    typeof tool.title === "string" && tool.title.trim()
+      ? tool.title
+      : typeof tool.name === "string" && tool.name.trim()
+        ? tool.name.replace(/[_-]+/g, " ")
         : "Interactive view";
 
   const callTool = useCallback(
@@ -144,7 +145,7 @@ export function McpAppView({
             timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
             platform: "desktop",
             toolInfo: {
-              tool: descriptor.tool as never,
+              tool: tool as never,
             },
           },
         },

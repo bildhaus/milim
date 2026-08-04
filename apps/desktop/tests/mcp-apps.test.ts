@@ -1,5 +1,6 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { createServer } from "vite";
 import type { ChatStreamPart, McpAppDescriptor } from "../src/api.js";
 import {
   NativeChartView,
@@ -50,6 +51,23 @@ const parts: ChatStreamPart[] = [
 const grouped = groupCompletedStreamActivity(parts, false);
 assert(grouped.length === 3, "MCP App should remain at its exact transcript position");
 assert(grouped[1].kind === "event" && grouped[1].mcpApp === descriptor, "MCP App should not enter a tool group");
+
+const server = await createServer({
+  root: process.cwd(),
+  appType: "custom",
+  logLevel: "silent",
+  server: { middlewareMode: true },
+});
+try {
+  const { McpAppView } = await server.ssrLoadModule("/src/components/McpAppView.tsx");
+  const legacyAppMarkup = renderToStaticMarkup(createElement(McpAppView, {
+    descriptor: { server_id: "legacy", resource_uri: "ui://legacy" } as McpAppDescriptor,
+    approval: "review",
+  }));
+  assert(legacyAppMarkup.includes("Interactive view MCP App"), "legacy MCP App entries without tool metadata should not crash the transcript");
+} finally {
+  await server.close();
+}
 
 const chart = {
   title: "Weekly usage",

@@ -1,4 +1,23 @@
 {
+  "0.2.24": {
+    "version": "0.2.24",
+    "summary": "Milim 0.2.24 improves update reliability and composer activity while carrying forward inline charts.",
+    "items": [
+      {
+        "id": "inline-charts",
+        "eyebrow": "Data visualization",
+        "title": "Explore charts in conversations",
+        "description": "Render responsive bar, line, pie, and scatter charts where they are created.",
+        "details": [
+          "Format values, axes, and labels clearly",
+          "Inspect charts by hover, focus, tap, or keyboard",
+          "Filter series and view accessible data tables"
+        ],
+        "accent": "var(--accent)",
+        "icon": "file-text"
+      }
+    ]
+  },
   "0.2.23": {
     "version": "0.2.23",
     "summary": "Milim 0.2.23 adds responsive, interactive inline charts directly to conversations.",

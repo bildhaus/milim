@@ -15,11 +15,21 @@ function equal<T>(actual: T, expected: T, message: string) {
 }
 
 const invokeCalls: string[] = [];
+let releaseUiWrite: (() => void) | undefined;
 Object.defineProperty(globalThis, "window", {
   value: {
     __TAURI_INTERNALS__: {
       invoke: async (command: string) => {
         invokeCalls.push(command);
+        if (command === "user_state_set" && releaseUiWrite) {
+          await new Promise<void>((resolve) => {
+            const release = releaseUiWrite;
+            releaseUiWrite = () => {
+              release?.();
+              resolve();
+            };
+          });
+        }
         return null;
       },
     },
@@ -53,13 +63,30 @@ const pendingSessionWrite = writeUserStateKey(
   "milim.sessions",
   '{"state":{"sessions":[{"id":"before-update","messages":[]}]}}',
 );
+releaseUiWrite = () => {};
+const pendingUiWrite = writeUserStateKey(
+  "milim.ui",
+  '{"state":{"settledThreadsEnabled":true,"aiThreadNames":true,"autoColorThreadNames":true}}',
+);
 useUpdateStore.setState({ updatePath: "/tmp/milim.app", status: "ready" });
-await useUpdateStore.getState().installNow();
-await pendingSessionWrite;
+const install = useUpdateStore.getState().installNow();
+await new Promise((resolve) => setTimeout(resolve, 0));
+equal(
+  invokeCalls.includes("apply_update"),
+  false,
+  "pending UI preferences should block update installation",
+);
+releaseUiWrite?.();
+await Promise.all([install, pendingSessionWrite, pendingUiWrite]);
 equal(
   invokeCalls.indexOf("user_sessions_set") < invokeCalls.indexOf("apply_update"),
   true,
   "pending session state should flush before applying an update",
+);
+equal(
+  invokeCalls.indexOf("user_state_set") < invokeCalls.indexOf("apply_update"),
+  true,
+  "pending UI preferences should flush before applying an update",
 );
 
 export {};
