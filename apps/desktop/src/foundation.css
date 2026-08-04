@@ -15,6 +15,29 @@ body {
   user-select: none;
 }
 
+.app :is(
+  button,
+  label,
+  summary,
+  [role="button"],
+  [role="checkbox"],
+  [role="menuitem"],
+  [role="option"],
+  [role="radio"],
+  [role="switch"],
+  [role="tab"]
+) {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+input,
+textarea,
+[contenteditable]:not([contenteditable="false"]) {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 /* ---- Worker runs inspector ---- */
 .worker-run-event {
   width: min(100%, 430px);

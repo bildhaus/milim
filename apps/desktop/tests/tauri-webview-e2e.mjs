@@ -1073,6 +1073,7 @@ async function runPersistenceAndChat(page, pid) {
   const errors = collectErrors(page);
   await page.getByTestId("chat-shell").waitFor();
   await dismissOnboardingIfPresent(page);
+  await runTextSelectionPolicyCheck(page);
   await runAppMenuCheck(page);
   await runNativePreviewOcclusionCheck(page, pid);
   await runStaticWorkspacePreviewCheck(page, pid);
@@ -3019,6 +3020,55 @@ async function switchModelWhileAgentActive(page, agentName) {
   }
   await page.keyboard.press("Escape");
   console.log("agentModelSwitchCheck=skipped:no alternate chat model");
+}
+
+async function runTextSelectionPolicyCheck(page) {
+  const styles = await page.evaluate(() => {
+    const app = document.querySelector(".app");
+    const titlebar = document.querySelector(".topbar-thread");
+    const composer = document.querySelector('[data-testid="composer-input"]');
+    if (!(app instanceof HTMLElement) || !(titlebar instanceof HTMLElement) || !(composer instanceof HTMLElement)) {
+      throw new Error("Text selection smoke fixtures require the app shell, titlebar, and composer.");
+    }
+
+    const fixture = document.createElement("div");
+    const copyable = document.createElement("div");
+    copyable.className = "md";
+    copyable.textContent = "Copyable message text";
+    const nestedControl = document.createElement("button");
+    nestedControl.textContent = "Message action";
+    copyable.append(nestedControl);
+    const input = document.createElement("input");
+    const editable = document.createElement("div");
+    editable.contentEditable = "true";
+    fixture.append(copyable, input, editable);
+    app.append(fixture);
+
+    const result = {
+      chrome: getComputedStyle(titlebar).userSelect,
+      nestedControl: getComputedStyle(nestedControl).userSelect,
+      copyable: getComputedStyle(copyable).userSelect,
+      composer: getComputedStyle(composer).userSelect,
+      input: getComputedStyle(input).userSelect,
+      editable: getComputedStyle(editable).userSelect,
+    };
+    fixture.remove();
+    return result;
+  });
+
+  const expected = {
+    chrome: "none",
+    nestedControl: "none",
+    copyable: "text",
+    composer: "text",
+    input: "text",
+    editable: "text",
+  };
+  for (const [surface, value] of Object.entries(expected)) {
+    if (styles[surface] !== value) {
+      throw new Error(`Expected ${surface} user-select ${value}, got ${styles[surface]}.`);
+    }
+  }
 }
 
 async function runContextMenuChromeCheck(page) {
