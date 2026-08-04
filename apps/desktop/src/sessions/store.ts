@@ -10,7 +10,7 @@ import type {
   ChildThreadStatus,
   DelegationPolicy,
   MemoryNotice,
-  McpAppDescriptor,
+  ToolUiDescriptor,
   PreviewAppFile,
   PreviewAppError,
   PreviewAppKind,
@@ -1154,7 +1154,11 @@ function completeEventStreamPart(
         current.status === "running" &&
         current.callId === callId
       ) {
-        next[i] = part;
+        next[i] = {
+          ...part,
+          mcpApp: part.mcpApp ?? current.mcpApp,
+          toolArguments: part.toolArguments ?? current.toolArguments,
+        };
         return next;
       }
     }
@@ -1167,7 +1171,11 @@ function completeEventStreamPart(
       current.status === "running" &&
       current.name === name
     ) {
-      next[i] = part;
+      next[i] = {
+        ...part,
+        mcpApp: part.mcpApp ?? current.mcpApp,
+        toolArguments: part.toolArguments ?? current.toolArguments,
+      };
       return next;
     }
   }
@@ -1598,10 +1606,11 @@ function eventText(event: ThreadEvent, key: string): string {
   return typeof value === "string" ? value : "";
 }
 
-function eventMcpApp(event: ThreadEvent): McpAppDescriptor | undefined {
+function eventMcpApp(event: ThreadEvent): ToolUiDescriptor | undefined {
   const value = eventPayload(event).mcp_app;
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const app = value as Record<string, unknown>;
+  if (app.kind === "native_chart") return { kind: "native_chart" };
   if (
     typeof app.server_id !== "string" ||
     typeof app.resource_uri !== "string" ||
@@ -1609,7 +1618,7 @@ function eventMcpApp(event: ThreadEvent): McpAppDescriptor | undefined {
     typeof app.tool !== "object" ||
     Array.isArray(app.tool)
   ) return undefined;
-  return app as unknown as McpAppDescriptor;
+  return app as unknown as ToolUiDescriptor;
 }
 
 function childToolEventLabel(name: string, done: boolean): string {

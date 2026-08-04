@@ -1,4 +1,23 @@
 {
+  "0.2.23": {
+    "version": "0.2.23",
+    "summary": "Milim 0.2.23 adds responsive, interactive inline charts directly to conversations.",
+    "items": [
+      {
+        "id": "inline-charts",
+        "eyebrow": "Data visualization",
+        "title": "Explore charts directly in the conversation",
+        "description": "Ask Milim to render bar, line, pie, or scatter data as a responsive native chart at the exact point it was created.",
+        "details": [
+          "Format numbers, percentage points, and currencies with readable responsive axes and labels",
+          "Hover, focus, tap, or use the keyboard to inspect tooltips and filter series",
+          "Use vertical or horizontal bars with polished gradients, direct values, and accessible data tables"
+        ],
+        "accent": "var(--accent)",
+        "icon": "file-text"
+      }
+    ]
+  },
   "0.2.22": {
     "version": "0.2.22",
     "summary": "Milim 0.2.22 keeps one desktop instance running and restores its window when launched again.",

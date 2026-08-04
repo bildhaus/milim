@@ -45,6 +45,9 @@ const screenshots = {
   newChatSplit: join(tmpdir(), "milim-tauri-webview-new-chat-split.png"),
   mcpAppsLight: join(tmpdir(), "milim-tauri-webview-mcp-apps-light.png"),
   mcpAppsDark: join(tmpdir(), "milim-tauri-webview-mcp-apps-dark.png"),
+  nativeChartLight: join(tmpdir(), "milim-tauri-webview-native-chart-light.png"),
+  nativeChartDark: join(tmpdir(), "milim-tauri-webview-native-chart-dark.png"),
+  nativeChartNarrow: join(tmpdir(), "milim-tauri-webview-native-chart-narrow.png"),
   turnChanges: join(tmpdir(), "milim-tauri-webview-turn-changes.png"),
   inboxProjects: join(tmpdir(), "milim-tauri-webview-inbox-projects.png"),
   inboxSettings: join(tmpdir(), "milim-tauri-webview-inbox-settings.png"),
@@ -1580,6 +1583,19 @@ async function runMcpAppsCheck(page) {
       { kind: "dashboard", title: "Provider health", result: { latency: "284 ms", success: "99.7%", queue: 3 } },
       { kind: "viewer", title: "Structured result", result: { status: "ready", files: 12, changed: 3 } },
     ];
+    const nativeChart = {
+      title: "Weekly change",
+      subtitle: "Percentage-point movement by week",
+      type: "bar",
+      orientation: "horizontal",
+      x_label: "Week",
+      y_label: "Change",
+      y_format: { style: "percent", precision: 1, sign_display: "always" },
+      series: [
+        { name: "Current", points: [{ x: "Jul 6–10", y: 8.2 }, { x: "Jul 13–17", y: 3.7 }, { x: "Jul 20–24", y: -12.4 }] },
+        { name: "Previous", points: [{ x: "Jul 6–10", y: 5.4 }, { x: "Jul 13–17", y: 1.8 }, { x: "Jul 20–24", y: -8.1 }] },
+      ],
+    };
     const value = JSON.stringify({
       state: {
         sessions: [{
@@ -1591,7 +1607,18 @@ async function runMcpAppsCheck(page) {
               id: "e2e-mcp-apps-turn",
               role: "assistant",
               content: "",
-              streamParts: views.map((view, index) => ({
+              streamParts: [{
+                kind: "event",
+                eventType: "tool",
+                label: "Rendered chart",
+                name: "render_chart",
+                callId: "e2e-native-chart",
+                icon: "tool",
+                status: "done",
+                toolArguments: JSON.stringify(nativeChart),
+                mcpApp: { kind: "native_chart" },
+                mcpAppResult: nativeChart,
+              }, ...views.map((view, index) => ({
                 kind: "event",
                 eventType: "tool",
                 label: `Used show_${view.kind}`,
@@ -1616,7 +1643,7 @@ async function runMcpAppsCheck(page) {
                   structuredContent: view.result,
                   _meta: { refreshCount: 0 },
                 },
-              })),
+              }))],
             },
           ],
           settings: { model: "", instructions: "", activeAgentId: null, folder: "", sandbox: false, computerUse: false, memory: false, privacy: "off", toolApproval: "review", delegationPolicy: "off", workerModel: "", planMode: false },
@@ -1635,6 +1662,8 @@ async function runMcpAppsCheck(page) {
   await page.getByTestId("chat-shell").waitFor();
   const kinds = mcpAppKinds;
   const apps = page.getByTestId("mcp-app-view");
+  const nativeChart = page.getByTestId("native-chart-view");
+  await nativeChart.waitFor();
   await page.waitForFunction(() => document.querySelectorAll('[data-testid="mcp-app-view"]').length === 5);
   for (const kind of kinds) {
     await page
@@ -1644,6 +1673,55 @@ async function runMcpAppsCheck(page) {
   }
 
   const lightStyles = await setMcpAppsTheme(page, kinds, "Mono Light", "light");
+  await nativeChart.evaluate((element) => { element.style.setProperty("--chart-series-1", "#a6edf2"); });
+  const gradientStops = await nativeChart.locator("linearGradient").first().locator("stop").evaluateAll((stops) => stops.map((stop) => getComputedStyle(stop).stopColor));
+  if (gradientStops.length !== 2 || gradientStops[0] === gradientStops[1]) throw new Error(`Native bar gradient stops should resolve to distinct tones, got ${gradientStops.join(", ")}.`);
+  await nativeChart.screenshot({ path: screenshots.nativeChartLight });
+  const marks = nativeChart.locator('[data-chart-mark="true"]');
+  if ((await marks.count()) !== 6) throw new Error(`Expected six native chart marks, got ${await marks.count()}.`);
+  await nativeChart.getByText("horizontal bar", { exact: true }).waitFor();
+  if (!(await marks.first().getAttribute("fill"))?.startsWith("url(#")) throw new Error("Native bars should use their series gradient.");
+  await marks.first().hover();
+  const chartTooltip = nativeChart.getByTestId("native-chart-tooltip");
+  await chartTooltip.waitFor();
+  await chartTooltip.getByText("Current", { exact: true }).waitFor();
+  await chartTooltip.getByText("Previous", { exact: true }).waitFor();
+  await nativeChart.locator(".native-chart-tick.category.active").waitFor();
+  const tooltipPointer = await chartTooltip.evaluate((element) => getComputedStyle(element, "::after").content);
+  if (tooltipPointer === "none" || tooltipPointer === "normal") throw new Error("Native chart tooltip should render a directional pointer.");
+  await marks.first().focus();
+  await page.keyboard.press("ArrowDown");
+  await page.waitForFunction(() => document.activeElement?.getAttribute("data-point-index") === "1");
+  await page.keyboard.press("ArrowRight");
+  await page.waitForFunction(() =>
+    document.activeElement?.getAttribute("data-series-index") === "1" &&
+    document.activeElement?.getAttribute("data-category-index") === "1"
+  );
+  await marks.first().dispatchEvent("pointerdown", { pointerType: "touch", bubbles: true });
+  await marks.first().dispatchEvent("pointerleave", { pointerType: "touch", bubbles: true });
+  await chartTooltip.waitFor();
+  await nativeChart.locator(".native-chart-header").click();
+  await chartTooltip.waitFor({ state: "hidden" });
+  const previousLegend = nativeChart.locator(".native-chart-legend button").filter({ hasText: "Previous" });
+  await assertAttribute(previousLegend, "aria-pressed", "true");
+  await previousLegend.click();
+  await assertAttribute(previousLegend, "aria-pressed", "false");
+  if ((await marks.count()) !== 3) throw new Error(`Hiding a native chart series should leave three marks, got ${await marks.count()}.`);
+  await previousLegend.click();
+  await nativeChart.evaluate((element) => { element.style.width = "320px"; });
+  await page.waitForFunction(() => {
+    const svg = document.querySelector('[data-testid="native-chart-view"] svg');
+    const width = Number(svg?.getAttribute("viewBox")?.split(" ")[2]);
+    return width >= 280 && width <= 320;
+  });
+  await nativeChart.screenshot({ path: screenshots.nativeChartNarrow });
+  await nativeChart.evaluate((element) => { element.style.removeProperty("width"); });
+  const barAnimation = await marks.first().evaluate((element) => getComputedStyle(element).animationName);
+  if (!barAnimation.includes("native-chart-bar-reveal-horizontal")) throw new Error(`Horizontal bars should reveal from zero, got ${barAnimation}.`);
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const chartAnimation = await marks.first().evaluate((element) => getComputedStyle(element).animationName);
+  if (chartAnimation !== "none") throw new Error(`Reduced motion should disable native chart reveal animation, got ${chartAnimation}.`);
+  await page.emulateMedia({ reducedMotion: "no-preference" });
   await page.getByTestId("assistant-message").last().screenshot({ path: screenshots.mcpAppsLight });
   await captureMcpAppViewScreenshots(apps, kinds, "light");
 
@@ -1709,6 +1787,7 @@ async function runMcpAppsCheck(page) {
 
   const darkStyles = await setMcpAppsTheme(page, kinds, "Mono Dark", "dark");
   assertMcpAppsThemeStyles(lightStyles, darkStyles);
+  await nativeChart.screenshot({ path: screenshots.nativeChartDark });
   await page.getByTestId("assistant-message").last().screenshot({ path: screenshots.mcpAppsDark });
   await captureMcpAppViewScreenshots(apps, kinds, "dark");
 }
@@ -4762,6 +4841,9 @@ function printEvidencePaths(milimHome) {
   console.log(`newChatSplitScreenshot=${screenshots.newChatSplit}`);
   console.log(`mcpAppsLightScreenshot=${screenshots.mcpAppsLight}`);
   console.log(`mcpAppsDarkScreenshot=${screenshots.mcpAppsDark}`);
+  console.log(`nativeChartLightScreenshot=${screenshots.nativeChartLight}`);
+  console.log(`nativeChartDarkScreenshot=${screenshots.nativeChartDark}`);
+  console.log(`nativeChartNarrowScreenshot=${screenshots.nativeChartNarrow}`);
   console.log(`turnChangesScreenshot=${screenshots.turnChanges}`);
   for (const theme of ["light", "dark"]) {
     for (const kind of mcpAppKinds) console.log(`mcpApp${kind}Screenshot(${theme})=${mcpAppViewScreenshot(kind, theme)}`);
