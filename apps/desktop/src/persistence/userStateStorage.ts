@@ -40,6 +40,7 @@ type TestGlobal = typeof globalThis & {
 
 const memoryStorage = new Map<string, string>();
 const lastWrittenValues = new Map<string, string>();
+const pendingUserStateWrites = new Set<Promise<void>>();
 let legacyImportPromise: Promise<void> | null = null;
 
 type SessionStorageValue = StorageValue<Record<string, unknown>>;
@@ -439,10 +440,15 @@ function deferSessionWrite(value: SessionStorageValue): Promise<void> {
   return promise;
 }
 
-export async function flushDeferredUserStateWrites(
-  key?: UserStateKey,
-): Promise<void> {
+async function flushPendingUserStateWrites(): Promise<void> {
+  while (pendingUserStateWrites.size) {
+    await Promise.all([...pendingUserStateWrites]);
+  }
+}
+
+export async function flushDeferredUserStateWrites(key?: UserStateKey): Promise<void> {
   if (!key || key === SESSIONS_KEY) await flushDeferredSessionWrite();
+  if (!key) await flushPendingUserStateWrites();
 }
 
 export function installUserStateFlushHandlers(): void {
@@ -618,9 +624,15 @@ export function writeUserStateKey(
   incrementPerfCounter(`persist.${key}.write`);
   recordPerfMeasure(`persist.${key}.bytes`, sanitized.length);
   const command = stateSetCommand(key, sanitized);
-  return invokeUserState<void>(command.command, command.args).then(() => {
+  const pending = invokeUserState<void>(command.command, command.args).then(() => {
     lastWrittenValues.set(key, sanitized);
   });
+  pendingUserStateWrites.add(pending);
+  void pending.then(
+    () => pendingUserStateWrites.delete(pending),
+    () => pendingUserStateWrites.delete(pending),
+  );
+  return pending;
 }
 
 export function deleteUserStateKey(key: UserStateKey): void | Promise<boolean> {

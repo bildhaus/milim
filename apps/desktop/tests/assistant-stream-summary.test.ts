@@ -3,6 +3,7 @@ import { createElement, type ComponentType } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
 import type { ChatStreamPart } from "../src/api.js";
+import { MilimUsageRidgeline } from "../src/components/MilimUsageRidgeline.js";
 import { liveWorkGroupSummary } from "../src/lib/streamParts.js";
 import { formatDuration } from "../src/lib/usageMetrics.js";
 
@@ -50,6 +51,26 @@ const reasoningAfterTool = liveWorkGroupSummary({
 assert.equal(reasoningAfterTool?.label, "reasoning...");
 assert.equal(reasoningAfterTool?.status, "running");
 assert.equal(formatDuration(4_774_000), "1h 19m 34s");
+
+const ridgelineMarkup = renderToStaticMarkup(createElement(MilimUsageRidgeline, {
+  usage: {
+    months: Array.from({ length: 12 }, (_, index) => ({
+      key: `2026-${String(index + 1).padStart(2, "0")}`,
+      label: `Month ${index + 1}`,
+      days: [1],
+    })),
+    metrics: [],
+    threadCount: 12,
+    projectCount: 1,
+    activeDayCount: 12,
+    hasUsage: true,
+  },
+}));
+assert.equal(
+  (ridgelineMarkup.match(/class="usage-ridge-line"/g) ?? []).length,
+  3,
+  "the empty-chat ridgeline should show only the latest three months",
+);
 
 const server = await createServer({
   root: process.cwd(),

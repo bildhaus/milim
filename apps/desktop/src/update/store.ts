@@ -212,7 +212,7 @@ export const useUpdateStore = create<UpdateState>()(
           error: null,
         });
         try {
-          await flushDeferredUserStateWrites("milim.sessions");
+          await flushDeferredUserStateWrites();
           await installUpdate(updatePath);
         } catch (error) {
           set({ status: "ready", downloadProgress: null, error: formatError(error) });

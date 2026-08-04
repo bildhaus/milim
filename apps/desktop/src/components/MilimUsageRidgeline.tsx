@@ -2,7 +2,7 @@ import type { MilimUsageSummary } from "../lib/usageMetrics";
 
 export function MilimUsageRidgeline({ usage }: { usage: MilimUsageSummary }) {
   if (!usage.hasUsage) return null;
-  const months = visibleUsageMonths(usage);
+  const months = usage.months.slice(-3);
   const width = 440;
   const gradientId = "usage-ridge-fill-gradient";
   const amplitude = 40;
@@ -127,27 +127,6 @@ export function MilimUsageRidgeline({ usage }: { usage: MilimUsageSummary }) {
       </div>
     </section>
   );
-}
-
-function visibleUsageMonths(
-  usage: MilimUsageSummary,
-): MilimUsageSummary["months"] {
-  const indexed = usage.months.map((month, index) => ({ month, index }));
-  const active = indexed.filter(({ month }) =>
-    month.days.some((value) => value > 0),
-  );
-  if (active.length === 0) return usage.months.slice(-3);
-
-  const empty = indexed.filter(({ month }) =>
-    month.days.every((value) => value === 0),
-  );
-  const selected = new Set([
-    ...active.map(({ index }) => index),
-    ...empty.slice(-Math.max(0, 3 - active.length)).map(({ index }) => index),
-  ]);
-  return indexed
-    .filter(({ index }) => selected.has(index))
-    .map(({ month }) => month);
 }
 
 function ridgePath(
