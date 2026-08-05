@@ -1,4 +1,9 @@
 {
+  "0.2.27": {
+    "version": "0.2.27",
+    "summary": "Milim 0.2.27 keeps project previews running between agent turns and makes transcript and Inspector review calmer across chats.",
+    "items": []
+  },
   "0.2.26": {
     "version": "0.2.26",
     "summary": "Loopback preview reloads now fetch current local assets without clearing browser state.",
