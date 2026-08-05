@@ -134,6 +134,7 @@ import {
   extractLocalhostUrlFromRunTrace,
   hasPreviewPackageJson,
   isPreviewableArtifact,
+  normalizeArtifactBrowserUrl,
   previewRuntimeBrowserUrl,
   previewRuntimeFiles,
 } from "../lib/artifacts";
@@ -237,6 +238,7 @@ import {
   previewRuntimeFoldersEqual,
   previewRuntimeKeyForThread,
 } from "../lib/previewRuntimeKeys";
+import { listenForPreviewOpenUrl } from "../lib/previewWebview";
 import { statusPart } from "../lib/turnEvents";
 import {
   accountRuntimeNotReadyForTurn,
@@ -2951,21 +2953,15 @@ export function ChatView({
   }, [activeId, sessionsHydrated]);
 
   useEffect(() => {
-    const openUrl = (event: Event) => {
-      const url = (event as CustomEvent<{ url?: unknown }>).detail?.url;
-      if (typeof url !== "string") return;
-      let parsed: URL;
-      try {
-        parsed = new URL(url);
-      } catch {
-        return;
-      }
-      if (parsed.protocol !== "https:") return;
+    const openUrl = (value: unknown) => {
+      if (typeof value !== "string") return;
+      const url = normalizeArtifactBrowserUrl(value);
+      if (!url) return;
       const current =
         useSessions.getState().sessions.find((session) => session.id === activeId)
           ?.browserSession ??
         emptyBrowserSession();
-      const tab = emptyBrowserTab(parsed.toString());
+      const tab = emptyBrowserTab(url);
       const next = {
         ...current,
         tabs: [...current.tabs, tab],
@@ -2978,8 +2974,22 @@ export function ChatView({
       setSessionInspectorTab(activeId, "preview");
       setSessionInspectorOpen(activeId, true);
     };
-    window.addEventListener("milim-open-browser-url", openUrl);
-    return () => window.removeEventListener("milim-open-browser-url", openUrl);
+    const openWindowUrl = (event: Event) =>
+      openUrl((event as CustomEvent<{ url?: unknown }>).detail?.url);
+    let disposed = false;
+    let stopListening: () => void = () => undefined;
+    void listenForPreviewOpenUrl((request) => openUrl(request.url))
+      .then((unlisten) => {
+        if (disposed) unlisten();
+        else stopListening = unlisten;
+      })
+      .catch(() => undefined);
+    window.addEventListener("milim-open-browser-url", openWindowUrl);
+    return () => {
+      disposed = true;
+      stopListening();
+      window.removeEventListener("milim-open-browser-url", openWindowUrl);
+    };
   }, [
     activeId,
     setSessionBrowserSession,

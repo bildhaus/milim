@@ -1867,11 +1867,20 @@ async function runNativePreviewOcclusionCheck(page, pid) {
     throw new Error(`Expected a visible main WRY_WEBVIEW before preview test, got ${describeWryWebviews(baseline)}`);
   }
 
-  await page.getByTestId("open-artifact-browser").click();
   const apiBase = await page.evaluate(() => window.__TAURI_INTERNALS__.invoke("api_base_url"));
+  const previewUrl = new URL("/health", apiBase).toString();
+  await page.evaluate(
+    async (url) => window.__TAURI_INTERNALS__.invoke("plugin:event|emit", {
+      event: "milim://preview-open-url",
+      payload: { url },
+    }),
+    previewUrl,
+  );
   const input = page.getByTestId("preview-browser-url");
-  await input.fill(new URL("/health", apiBase).toString());
-  await input.press("Enter");
+  await input.waitFor();
+  if ((await input.inputValue()) !== previewUrl) {
+    throw new Error(`Preview-open event did not select ${previewUrl}.`);
+  }
   await page.getByTestId("preview-native-browser").waitFor();
   await page.locator(".preview-native-browser-status").waitFor({ state: "hidden", timeout: 10_000 });
   const preview = await waitForNewVisibleWryWebview(pid, baselineHandles);

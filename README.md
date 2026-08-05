@@ -20,7 +20,7 @@ Release artifacts target Windows and macOS. Linux packaging is intentionally dis
 
 ### Power tools
 
-Agents, Workers, skills, schedules, MCP servers and Apps, media generation, Google Workspace, previews, and the mobile companion remain available from the app's collapsed **Tools** section. Loopback preview reloads bypass the browser cache so local CSS and JavaScript changes stay current while an agent works. These tools extend the core thread without competing with the default workflow.
+Agents, Workers, skills, schedules, MCP servers and Apps, media generation, Google Workspace, previews, and the mobile companion remain available from the app's collapsed **Tools** section. Account runtimes can open HTTPS and loopback URLs directly in Milim's in-app Preview inspector; loopback reloads bypass the browser cache so local CSS and JavaScript changes stay current while an agent works. These tools extend the core thread without competing with the default workflow.
 
 Milim keeps provider-backed chat and installed account runtimes distinct. Provider models use Milim's tool-agent loop, while account runtimes retain their native sessions and tools behind the same visible approval policy. Open gives host tools and supported account runtimes unrestricted filesystem and command access, keeps the selected folder only as the working directory, starts eligible worker plans immediately, and clears ordinary pending tool approvals; connector input and authorization remain interactive. Managed read-only Workers inherit unrestricted host reads in Open, while write-review Workers still use isolated Git worktrees. Changing the selected model affects the next turn without turning each model into a separate project history.
 

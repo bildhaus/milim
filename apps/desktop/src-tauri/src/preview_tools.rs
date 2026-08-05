@@ -6,9 +6,10 @@ use milim_core::{Error, Result};
 use milim_tools::{Tool, ToolEffect};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Manager, Wry};
+use tauri::{AppHandle, Emitter, Manager, Wry};
 
 const PREVIEW_EVAL_TIMEOUT: Duration = Duration::from_secs(3);
+pub const PREVIEW_OPEN_URL_EVENT: &str = "milim://preview-open-url";
 
 const PREVIEW_ACTION_JS: &str = r##"
 try {
@@ -277,6 +278,9 @@ pub fn set_active_preview_target(
 
 pub fn preview_tools(state: SharedPreviewToolState) -> Vec<Arc<dyn Tool>> {
     vec![
+        Arc::new(PreviewOpenUrlTool {
+            state: state.clone(),
+        }),
         Arc::new(PreviewDomSnapshotTool {
             state: state.clone(),
         }),
@@ -291,6 +295,70 @@ pub fn preview_tools(state: SharedPreviewToolState) -> Vec<Arc<dyn Tool>> {
         }),
         Arc::new(PreviewScrollTool { state }),
     ]
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreviewOpenUrlArgs {
+    url: String,
+}
+
+#[derive(Clone, Serialize)]
+struct PreviewOpenUrlPayload {
+    url: String,
+}
+
+pub struct PreviewOpenUrlTool {
+    state: SharedPreviewToolState,
+}
+
+#[async_trait]
+impl Tool for PreviewOpenUrlTool {
+    fn name(&self) -> &str {
+        "preview_open_url"
+    }
+
+    fn description(&self) -> &str {
+        "Open an HTTPS or loopback HTTP URL in Milim's in-app Preview inspector. Use this instead of the OpenAI Browser plugin when the user asks for Milim's in-app browser."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "url": { "type": "string", "description": "HTTPS URL or loopback HTTP URL to open." }
+            },
+            "required": ["url"],
+            "additionalProperties": false
+        })
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::Mutating
+    }
+
+    async fn invoke(&self, args: Value) -> Result<Value> {
+        let args: PreviewOpenUrlArgs = serde_json::from_value(args).map_err(|error| {
+            Error::InvalidRequest(format!("invalid preview_open_url arguments: {error}"))
+        })?;
+        let url = crate::preview_webview::allowed_preview_url(&args.url)
+            .map_err(Error::InvalidRequest)?;
+        let app = self
+            .state
+            .app
+            .read()
+            .ok()
+            .and_then(|value| value.clone())
+            .ok_or_else(|| Error::Other("Milim desktop preview is unavailable".to_string()))?;
+        let url = url.to_string();
+        // ponytail: Open the visible task; add run-id routing if hidden background turns need this.
+        app.emit(
+            PREVIEW_OPEN_URL_EVENT,
+            PreviewOpenUrlPayload { url: url.clone() },
+        )
+        .map_err(|error| Error::Other(format!("failed to open Milim preview: {error}")))?;
+        Ok(json!({ "status": "requested", "url": url }))
+    }
 }
 
 async fn run_preview_action(
@@ -728,6 +796,7 @@ mod tests {
                 "preview_click".to_string(),
                 "preview_dom_snapshot".to_string(),
                 "preview_key_press".to_string(),
+                "preview_open_url".to_string(),
                 "preview_scroll".to_string(),
                 "preview_type_text".to_string()
             ]

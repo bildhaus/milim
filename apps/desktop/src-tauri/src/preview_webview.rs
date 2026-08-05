@@ -357,7 +357,7 @@ fn preview_webview(app: &tauri::AppHandle, label: &str) -> Result<Webview, Strin
         .ok_or_else(|| "preview webview is no longer available".to_string())
 }
 
-fn allowed_preview_url(value: &str) -> Result<Url, String> {
+pub(crate) fn allowed_preview_url(value: &str) -> Result<Url, String> {
     let url = Url::parse(value.trim()).map_err(|_| "invalid preview URL".to_string())?;
     if preview_url_allowed(&url) {
         Ok(url)

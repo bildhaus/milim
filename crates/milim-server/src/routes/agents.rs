@@ -334,13 +334,14 @@ const COMPUTER_TOOL_NAMES: &[&str] = &[
     "type_text",
     "scroll",
 ];
-const PREVIEW_TOOL_NAMES: &[&str] = &[
+const ACTIVE_PREVIEW_TOOL_NAMES: &[&str] = &[
     "preview_dom_snapshot",
     "preview_click",
     "preview_type_text",
     "preview_key_press",
     "preview_scroll",
 ];
+const PREVIEW_OPEN_TOOL_NAMES: &[&str] = &["preview_open_url"];
 const CHILD_THREAD_TOOL_NAMES: &[&str] = &[
     "delegate_workers",
     "child_thread_spawn",
@@ -1430,7 +1431,7 @@ fn agent_base_registry_with_memory(
         reg = reg.without(COMPUTER_TOOL_NAMES);
     }
     if !policy.preview_tools_enabled {
-        reg = reg.without(PREVIEW_TOOL_NAMES);
+        reg = reg.without(ACTIVE_PREVIEW_TOOL_NAMES);
     }
     if !policy.experimental_hashline_patch {
         reg = reg.without(HASHLINE_TOOL_NAMES);
@@ -1847,7 +1848,8 @@ fn worker_review_registry(st: &AppState, run_context: &RunContext) -> ToolRegist
         .without(CHILD_THREAD_TOOL_NAMES)
         .without(SANDBOX_TOOL_NAMES)
         .without(COMPUTER_TOOL_NAMES)
-        .without(PREVIEW_TOOL_NAMES);
+        .without(ACTIVE_PREVIEW_TOOL_NAMES)
+        .without(PREVIEW_OPEN_TOOL_NAMES);
     if desktop_workspace_unavailable_for(st, run_context.workspace.as_deref()) {
         reg = reg.without(DESKTOP_WORKSPACE_TOOL_NAMES);
     }
@@ -1863,7 +1865,9 @@ fn child_registry_for_policy(
     if policy.approval == ToolApprovalPolicy::Open
         || (policy.approval == ToolApprovalPolicy::Review && policy.approval_granted)
     {
-        inherited.without(CHILD_THREAD_TOOL_NAMES)
+        inherited
+            .without(CHILD_THREAD_TOOL_NAMES)
+            .without(PREVIEW_OPEN_TOOL_NAMES)
     } else {
         child_read_only_registry(st, run_context)
     }
