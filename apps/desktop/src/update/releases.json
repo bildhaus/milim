@@ -1,4 +1,9 @@
 {
+  "0.2.26": {
+    "version": "0.2.26",
+    "summary": "Loopback preview reloads now fetch current local assets without clearing browser state.",
+    "items": []
+  },
   "0.2.25": {
     "version": "0.2.25",
     "summary": "Milim 0.2.25 improves desktop text selection while carrying forward inline charts.",
