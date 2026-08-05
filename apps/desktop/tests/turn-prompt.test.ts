@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import type { ChatMessage, PreviewSurfaceTarget } from "../src/api.js";
 import { estimateTextTokens } from "../src/lib/contextCompaction.js";
+import { previewRuntimeKeyForThread } from "../src/lib/previewRuntimeKeys.js";
 import { buildTurnPromptContext, contextMessagesForTurn, folderLabel, memoryScopes, prepareTurnPromptContext, resolveTurnToolApproval, workspaceRuleMessagesForRuntime, type MemoryHit } from "../src/lib/turnPrompt.js";
 
 function user(content: string): ChatMessage {
@@ -683,6 +684,10 @@ const accountPrepared = await prepareTurnPromptContext({
 assert.equal(searched.at(-1)?.model, undefined, "account-runtime memory search should use default memory model");
 assert.equal(selectedQueries.at(-1)?.query, "use account runtime");
 assert.equal(accountPrepared.accountRuntimeMayUseTools, true);
+assert.equal(
+  accountPrepared.toolContext.preview_runtime_key,
+  previewRuntimeKeyForThread("s6", "C:\\repo"),
+);
 
 assert.deepEqual(resolveTurnToolApproval({
   useTools: false,

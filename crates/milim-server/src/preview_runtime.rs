@@ -6,6 +6,7 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{Request, StatusCode};
@@ -14,8 +15,9 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 use milim_core::proc::ProcessTreeGuard;
 use milim_core::{Error, Result};
+use milim_tools::{Tool, ToolEffect};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
 use tokio::process::{Child, Command};
@@ -784,6 +786,133 @@ impl PreviewRuntimeManager {
         update(entry);
         entry.updated_at = crate::now_unix();
         Ok(true)
+    }
+}
+
+pub(crate) fn account_runtime_preview_tools(
+    manager: Arc<PreviewRuntimeManager>,
+    thread_id: String,
+    cwd: PathBuf,
+) -> Vec<Arc<dyn Tool>> {
+    vec![
+        Arc::new(PreviewPrepareAppTool {
+            manager: manager.clone(),
+            thread_id: thread_id.clone(),
+            cwd: cwd.clone(),
+        }),
+        Arc::new(PreviewStartAppTool {
+            manager,
+            thread_id,
+            cwd,
+        }),
+    ]
+}
+
+struct PreviewPrepareAppTool {
+    manager: Arc<PreviewRuntimeManager>,
+    thread_id: String,
+    cwd: PathBuf,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreviewPrepareAppArgs {}
+
+#[async_trait]
+impl Tool for PreviewPrepareAppTool {
+    fn name(&self) -> &str {
+        "preview_prepare_app"
+    }
+
+    fn description(&self) -> &str {
+        "Return the active project's current preview status, or inspect its commands and return the fingerprint required by preview_start_app."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({ "type": "object", "properties": {}, "additionalProperties": false })
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
+    }
+
+    async fn invoke(&self, args: Value) -> Result<Value> {
+        serde_json::from_value::<PreviewPrepareAppArgs>(args).map_err(|error| {
+            Error::InvalidRequest(format!("invalid preview_prepare_app arguments: {error}"))
+        })?;
+        let status = self.manager.status(&self.thread_id)?;
+        if status.active {
+            if Path::new(&status.cwd) != self.cwd.as_path() {
+                return Err(Error::InvalidRequest(
+                    "active preview belongs to another workspace".to_string(),
+                ));
+            }
+            return serde_json::to_value(status).map_err(Into::into);
+        }
+        serde_json::to_value(self.manager.preflight(
+            &self.thread_id,
+            &PreviewAppPreflightRequest {
+                cwd: Some(self.cwd.to_string_lossy().to_string()),
+                ..Default::default()
+            },
+        )?)
+        .map_err(Into::into)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreviewStartAppArgs {
+    source_fingerprint: String,
+}
+
+struct PreviewStartAppTool {
+    manager: Arc<PreviewRuntimeManager>,
+    thread_id: String,
+    cwd: PathBuf,
+}
+
+#[async_trait]
+impl Tool for PreviewStartAppTool {
+    fn name(&self) -> &str {
+        "preview_start_app"
+    }
+
+    fn description(&self) -> &str {
+        "Start or reuse the active project's dev server as a Milim-owned preview that remains running between agent turns."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "source_fingerprint": {
+                    "type": "string",
+                    "description": "Fingerprint returned by preview_prepare_app."
+                }
+            },
+            "required": ["source_fingerprint"],
+            "additionalProperties": false
+        })
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::Command
+    }
+
+    async fn invoke(&self, args: Value) -> Result<Value> {
+        let args: PreviewStartAppArgs = serde_json::from_value(args).map_err(|error| {
+            Error::InvalidRequest(format!("invalid preview_start_app arguments: {error}"))
+        })?;
+        serde_json::to_value(self.manager.start(
+            &self.thread_id,
+            &PreviewAppStartRequest {
+                cwd: Some(self.cwd.to_string_lossy().to_string()),
+                source_fingerprint: Some(args.source_fingerprint),
+                ..Default::default()
+            },
+        )?)
+        .map_err(Into::into)
     }
 }
 
@@ -3086,6 +3215,86 @@ mod tests {
         assert!(!root.join("dev-started").exists());
         assert!(manager.status("thread-1").unwrap().pid.is_none());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn account_runtime_preview_outlives_its_tool_session() {
+        if !npm_available().await {
+            return;
+        }
+        let root = test_root();
+        std::fs::create_dir_all(root.join("node_modules")).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"private":true,"scripts":{"dev":"node server.js"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("server.js"),
+            r#"const http = require('http');
+const index = process.argv.indexOf('--port');
+const port = Number(process.argv[index + 1]);
+http.createServer((_request, response) => response.end('ok')).listen(port, '127.0.0.1');
+"#,
+        )
+        .unwrap();
+        let runtime_root = test_root();
+        let manager = Arc::new(PreviewRuntimeManager::new(runtime_root.clone()));
+        let tools = account_runtime_preview_tools(
+            manager.clone(),
+            "project-preview".to_string(),
+            root.clone(),
+        );
+        let prepared = tools[0].invoke(serde_json::json!({})).await.unwrap();
+        let fingerprint = prepared["source_fingerprint"].as_str().unwrap();
+        let started = tools[1]
+            .invoke(serde_json::json!({ "source_fingerprint": fingerprint }))
+            .await
+            .unwrap();
+        assert_eq!(started["active"], true);
+        drop(tools);
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            let status = manager.status("project-preview").unwrap();
+            if status.ready || !status.active || Instant::now() >= deadline {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        };
+        assert!(
+            status.active,
+            "server exited with its tool session: {:?}",
+            status.logs
+        );
+        assert!(status.ready, "server never became ready: {:?}", status.logs);
+
+        let next_turn_tools = account_runtime_preview_tools(
+            manager.clone(),
+            "project-preview".to_string(),
+            root.clone(),
+        );
+        let reused = next_turn_tools[0]
+            .invoke(serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(reused["active"], true);
+        assert_eq!(reused["ready"], true);
+        let wrong_project = account_runtime_preview_tools(
+            manager.clone(),
+            "project-preview".to_string(),
+            runtime_root.clone(),
+        );
+        assert!(wrong_project[0]
+            .invoke(serde_json::json!({}))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("another workspace"));
+
+        manager.stop_all().await.unwrap();
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(runtime_root);
     }
 
     #[tokio::test]

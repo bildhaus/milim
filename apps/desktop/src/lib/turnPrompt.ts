@@ -2,6 +2,7 @@ import { getWorkspaceContext, type AgentMemoryContext, type AgentSkillMode, type
 import { planModeInstructionMessages, threadArtifactInstructionMessages } from "./chatInstructions.js";
 import { estimateTextTokens } from "./contextCompaction.js";
 import { goalInstructionMessage, type GoalSettings } from "./goals.js";
+import { previewRuntimeKeyForThread } from "./previewRuntimeKeys.js";
 import { skillDiscoveryMessage, skillInstructionMessage } from "./skills.js";
 
 const MEMORY_RECALL_CANDIDATES = 20;
@@ -253,6 +254,9 @@ export function buildTurnPromptContext({
       sandbox_enabled: sandbox,
       computer_use_enabled: computerUse,
       preview_tools_enabled: previewToolsEnabled,
+      preview_runtime_key: runtimeKind && folder.trim()
+        ? previewRuntimeKeyForThread(sessionId, folder)
+        : undefined,
       preview_surface: previewSurface ?? null,
       experimental_hashline_patch: experimentalHashlinePatch,
       plan_mode: planMode,

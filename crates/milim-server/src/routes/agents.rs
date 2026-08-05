@@ -59,6 +59,7 @@ struct AccountRuntimeToolContext {
     computer_use_enabled: bool,
     #[serde(default)]
     preview_tools_enabled: bool,
+    preview_runtime_key: Option<String>,
     #[serde(default)]
     experimental_hashline_patch: bool,
     #[serde(default)]
@@ -150,6 +151,25 @@ pub(crate) fn account_runtime_tool_endpoint(
             &context.skill_mode,
             &context.enabled_skills,
         );
+        if registry.contains("preview_open_url") {
+            if let (Some(thread_id), Some(cwd)) = (
+                context
+                    .tool_context
+                    .preview_runtime_key
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty()),
+                run_context.workspace.clone(),
+            ) {
+                for tool in crate::preview_runtime::account_runtime_preview_tools(
+                    st.preview_runtime.clone(),
+                    thread_id.to_string(),
+                    cwd,
+                ) {
+                    registry.register(tool);
+                }
+            }
+        }
     }
     if registry.is_empty() {
         return Ok(None);
@@ -1024,6 +1044,52 @@ mod run_context_tests {
         .unwrap()
         .workspace
         .is_none());
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn account_runtime_preview_tools_bind_to_the_active_project() {
+        let root = temp_workspace_root();
+        std::fs::create_dir_all(&root).unwrap();
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(NamedProbe("preview_open_url")));
+        let state = AppState::new(
+            Arc::new(TestBackend::new()),
+            milim_core::config::ServerConfiguration::default(),
+        )
+        .with_tools(tools);
+        let context: AccountRuntimeMilimContext = serde_json::from_value(json!({
+            "tool_context": {
+                "workspace": root,
+                "privacy_mode": "off",
+                "tool_approval_policy": "open",
+                "preview_runtime_key": "project-test"
+            }
+        }))
+        .unwrap();
+        let run_context = RunContext::from_account_runtime(&state, Some(&context), None).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "127.0.0.1:7377".parse().unwrap());
+
+        let endpoint = account_runtime_tool_endpoint(
+            &state,
+            &headers,
+            Some(&context),
+            &run_context,
+            "test-model",
+            "preview this",
+        )
+        .map_err(|error| error.0)
+        .unwrap()
+        .unwrap();
+        let names = endpoint
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"preview_prepare_app"));
+        assert!(names.contains(&"preview_start_app"));
 
         std::fs::remove_dir_all(root).ok();
     }
