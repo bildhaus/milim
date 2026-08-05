@@ -8,7 +8,7 @@ import {
   type ChatStreamWorkGroup,
 } from "../lib/streamParts";
 import { formatDuration } from "../lib/usageMetrics";
-import { Calendar, Code, Eye, FileText, Lightbulb, Pencil, X } from "./icons";
+import { Calendar, Code, Copy, Eye, FileText, Lightbulb, Pencil, X } from "./icons";
 
 const Markdown = lazy(() =>
   import("./Markdown").then((mod) => ({ default: mod.Markdown })),
@@ -38,7 +38,53 @@ type AssistantMessageProps = {
   previewArtifactsStreaming?: boolean;
   workDurationMs?: number;
   toolApproval?: ToolApprovalMode;
+  workspaceFolder?: string;
 };
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function flexiblePathPattern(value: string): string {
+  let pattern = "";
+  let separator = false;
+  for (const char of value) {
+    if (char === "/" || char === "\\") {
+      if (!separator) pattern += "[\\\\/]+";
+      separator = true;
+    } else {
+      pattern += escapeRegExp(char);
+      separator = false;
+    }
+  }
+  return pattern;
+}
+
+function shortenWorkspacePaths(command: string, workspaceFolder?: string): string {
+  const folder = workspaceFolder?.trim().replace(/[\\/]+$/, "");
+  if (!folder) return command;
+  const path = flexiblePathPattern(folder);
+  const flags = /^[A-Za-z]:[\\/]|^\\\\/.test(folder) ? "gi" : "g";
+  const boundary = "(?=$|[\\\\/\\s\\\"'`,;)])";
+  const fileUrl = /^[A-Za-z]:[\\/]/.test(folder)
+    ? `file:\\/{2,3}${path}${boundary}`
+    : `file:\\/{2}${path}${boundary}`;
+  const shortened = command.replace(new RegExp(fileUrl, flags), ".");
+  return shortened.replace(
+    new RegExp(`(^|[\\s\\\"'=(:])${path}${boundary}`, flags),
+    "$1.",
+  );
+}
+
+export function formatCommandDisplay(command: string, workspaceFolder?: string): string {
+  const powershell = /^(?:"[^"]*[\\/](?:powershell|pwsh)(?:\.exe)?"|(?:\S*[\\/])?(?:powershell|pwsh)(?:\.exe)?)\s+(?:(?:-(?:NoLogo|NoProfile|NonInteractive|Sta|Mta)\b|-ExecutionPolicy\s+\S+)\s+)*-(?:Command|CommandWithArgs)\b\s*/i;
+  const cmd = /^(?:"[^"]*[\\/]cmd(?:\.exe)?"|(?:\S*[\\/])?cmd(?:\.exe)?)\s+(?:(?:\/[dqs])\s+)*\/c\s+/i;
+  const posixShell = /^(?:"[^"]*[\\/](?:ba|z|k)?sh"|(?:\S*[\\/])?(?:ba|z|k)?sh)\s+-[a-z]*c[a-z]*\s+/i;
+  return shortenWorkspacePaths(
+    command.replace(powershell, "").replace(cmd, "").replace(posixShell, ""),
+    workspaceFolder,
+  );
+}
 
 /** Split out a `<think>...</think>` reasoning span (reasoning models like
  *  DeepSeek-R1 / QwQ emit it inline). Handles the still-streaming case where
@@ -101,9 +147,11 @@ function StreamIcon({
 function StreamEvent({
   part,
   toolApproval,
+  workspaceFolder,
 }: {
   part: Extract<ChatStreamPart, { kind: "event" }>;
   toolApproval: ToolApprovalMode;
+  workspaceFolder?: string;
 }) {
   const status = part.status ?? "done";
   const detail = part.approvalStatus && ["approved", "denied", "canceled"].includes(part.approvalStatus)
@@ -128,8 +176,9 @@ function StreamEvent({
         </span>
         {detail && (
           <StreamEventDetail
-            detail={detail}
+            detail={isCommandEvent(part) ? formatCommandDisplay(detail, workspaceFolder) : detail}
             running={status === "running"}
+            copyText={isCommandEvent(part) ? detail : undefined}
           />
         )}
       </div>
@@ -163,18 +212,20 @@ function lastFailedEvent(parts: ChatStreamPart[]): ChatStreamEventPart | undefin
   return undefined;
 }
 
-function failureSummary(part: ChatStreamEventPart): string {
-  return part.detail ? `${part.label} · ${part.detail}` : part.label;
+function failureSummary(part: ChatStreamEventPart, workspaceFolder?: string): string {
+  const detail = part.detail && isCommandEvent(part)
+    ? formatCommandDisplay(part.detail, workspaceFolder)
+    : part.detail;
+  return detail ? `${part.label} · ${detail}` : part.label;
 }
 
-function StreamToolGroup({ group }: { group: ChatStreamToolGroup }) {
+function StreamToolGroup({ group, workspaceFolder }: { group: ChatStreamToolGroup; workspaceFolder?: string }) {
   const failure = lastFailedEvent(group.parts);
   const status = failure ? "error" : "done";
   return (
     <details
       className="stream-tool-group"
       data-testid="assistant-stream-tool-group"
-      open={failure != null}
     >
       <summary className={`stream-event stream-event-tool stream-event-${status}`}>
         <span className="stream-event-icon" aria-hidden="true">
@@ -183,12 +234,12 @@ function StreamToolGroup({ group }: { group: ChatStreamToolGroup }) {
         <span className="stream-event-label">
           {failure ? "Work stopped" : `Used ${group.parts.length} tools`}
         </span>
-        <code
-          className="stream-event-detail"
+        <StreamEventDetail
+          detail={failure ? failureSummary(failure, workspaceFolder) : compactToolNames(group.parts)}
+          running={false}
           role={failure ? "alert" : undefined}
-        >
-          {failure ? failureSummary(failure) : compactToolNames(group.parts)}
-        </code>
+          copyText={failure?.detail && isCommandEvent(failure) ? failure.detail : undefined}
+        />
       </summary>
       <div className="stream-tool-group-body">
         {group.parts.map((part, index) => (
@@ -196,6 +247,7 @@ function StreamToolGroup({ group }: { group: ChatStreamToolGroup }) {
             key={`${part.name ?? part.label}-${index}`}
             part={part}
             toolApproval="guarded"
+            workspaceFolder={workspaceFolder}
           />
         ))}
       </div>
@@ -244,13 +296,32 @@ function StreamWorkGroup({
   group,
   durationMs,
   streaming = false,
+  workspaceFolder,
 }: {
   group: ChatStreamWorkGroup;
   durationMs?: number;
   streaming?: boolean;
+  workspaceFolder?: string;
 }) {
   const liveSummary = streaming ? liveWorkGroupSummary(group) : null;
+  const latestEvent = [...group.parts].reverse().find(
+    (part): part is ChatStreamEventPart => part.kind === "event",
+  );
   const failure = lastFailedEvent(group.parts);
+  const autoOpen = liveSummary?.status === "error";
+  const [open, setOpen] = useState(autoOpen);
+  const autoOpenedRef = useRef(autoOpen);
+  useEffect(() => {
+    if (autoOpen) {
+      setOpen((current) => {
+        if (!current) autoOpenedRef.current = true;
+        return true;
+      });
+    } else if (autoOpenedRef.current) {
+      autoOpenedRef.current = false;
+      setOpen(false);
+    }
+  }, [autoOpen]);
   const status =
     liveSummary?.status ??
     (failure ? "error" : "done");
@@ -258,7 +329,13 @@ function StreamWorkGroup({
     <details
       className="stream-tool-group stream-work-group"
       data-testid="assistant-stream-work-group"
-      open={failure != null}
+      open={open}
+      onToggle={(event) => {
+        const next = event.currentTarget.open;
+        if (next === open) return;
+        autoOpenedRef.current = false;
+        setOpen(next);
+      }}
     >
       <summary
         className={`stream-event stream-event-${liveSummary?.eventType ?? "tool"} stream-event-${status}`}
@@ -284,13 +361,19 @@ function StreamWorkGroup({
         </span>
         {liveSummary?.detail ? (
           <StreamEventDetail
-            detail={liveSummary.detail}
+            detail={latestEvent && isCommandEvent(latestEvent)
+              ? formatCommandDisplay(liveSummary.detail, workspaceFolder)
+              : liveSummary.detail}
             running={liveSummary.status === "running"}
+            copyText={latestEvent && isCommandEvent(latestEvent) ? liveSummary.detail : undefined}
           />
         ) : failure ? (
-          <code className="stream-event-detail" role="alert">
-            {failureSummary(failure)}
-          </code>
+          <StreamEventDetail
+            detail={failureSummary(failure, workspaceFolder)}
+            running={false}
+            role="alert"
+            copyText={failure.detail && isCommandEvent(failure) ? failure.detail : undefined}
+          />
         ) : (
           <code className="stream-event-detail">{workGroupDetail(group)}</code>
         )}
@@ -307,7 +390,7 @@ function StreamWorkGroup({
               />
             );
           if (part.kind === "event")
-            return <StreamEvent key={`${part.kind}-${index}`} part={part} toolApproval="guarded" />;
+            return <StreamEvent key={`${part.kind}-${index}`} part={part} toolApproval="guarded" workspaceFolder={workspaceFolder} />;
           return null;
         })}
       </div>
@@ -318,27 +401,48 @@ function StreamWorkGroup({
 function StreamEventDetail({
   detail,
   running,
+  copyText,
+  role,
 }: {
   detail: string;
   running: boolean;
+  copyText?: string;
+  role?: "alert";
 }) {
   const tokens = detail.split(/(\s+)/);
   return (
-    <code className="stream-event-detail">
-      {tokens.map((token, index) => {
-        const stat = token.match(/^([+-])(\d+)$/);
-        if (!stat) return <span key={`${index}-text`}>{token}</span>;
-        const kind = stat[1] === "+" ? "added" : "removed";
-        return (
-          <span
-            key={`${index}-${token}`}
-            className={`stream-diff-stat ${kind}${running ? " live" : ""}`}
-          >
-            {token}
-          </span>
-        );
-      })}
-    </code>
+    <>
+      <code className="stream-event-detail" title={copyText ?? detail} role={role}>
+        {tokens.map((token, index) => {
+          const stat = token.match(/^([+-])(\d+)$/);
+          if (!stat) return <span key={`${index}-text`}>{token}</span>;
+          const kind = stat[1] === "+" ? "added" : "removed";
+          return (
+            <span
+              key={`${index}-${token}`}
+              className={`stream-diff-stat ${kind}${running ? " live" : ""}`}
+            >
+              {token}
+            </span>
+          );
+        })}
+      </code>
+      {copyText && (
+        <button
+          type="button"
+          className="stream-command-copy"
+          title="Copy full command"
+          aria-label="Copy full command"
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            void navigator.clipboard?.writeText(copyText);
+          }}
+        >
+          <Copy size={11} />
+        </button>
+      )}
+    </>
   );
 }
 
@@ -498,6 +602,7 @@ function AssistantMessageView({
   previewArtifactsStreaming = false,
   workDurationMs,
   toolApproval = "guarded",
+  workspaceFolder,
 }: AssistantMessageProps) {
   markPerfRender("AssistantMessage");
   if (streaming) markPerfRender("StreamingAssistantMessage");
@@ -519,7 +624,7 @@ function AssistantMessageView({
       {displayParts.map((part, index) => {
         const isLatest = index === displayParts.length - 1;
         if (part.kind === "toolGroup")
-          return <StreamToolGroup key={`${part.kind}-${index}`} group={part} />;
+          return <StreamToolGroup key={`${part.kind}-${index}`} group={part} workspaceFolder={workspaceFolder} />;
         if (part.kind === "workGroup")
           return (
             <StreamWorkGroup
@@ -527,6 +632,7 @@ function AssistantMessageView({
               group={part}
               durationMs={workGroupCount === 1 ? workDurationMs : undefined}
               streaming={streaming && isLatest}
+              workspaceFolder={workspaceFolder}
             />
           );
         if (part.kind === "thinking") {
@@ -540,7 +646,7 @@ function AssistantMessageView({
           );
         }
         if (part.kind === "event")
-          return <StreamEvent key={`${part.kind}-${index}`} part={part} toolApproval={toolApproval} />;
+          return <StreamEvent key={`${part.kind}-${index}`} part={part} toolApproval={toolApproval} workspaceFolder={workspaceFolder} />;
         return (
           <AnswerText
             key={`${part.kind}-${index}`}

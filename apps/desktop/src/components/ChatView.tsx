@@ -113,6 +113,7 @@ import {
 import {
   DEFAULT_THREAD_SETTINGS,
   getSessionComposerDraft,
+  inspectorStateForSession,
   setSessionComposerDraft,
   normalizeVirtualFilePath,
   sessionVirtualProjectFiles,
@@ -1701,13 +1702,14 @@ export function ChatView({
   const queuedMessages = useSessions(
     (s) => s.queuedMessagesBySession[s.activeId] ?? EMPTY_QUEUE,
   );
-  const inspectorTab = useSessions(
-    (s) => s.sessions.find((x) => x.id === s.activeId)?.inspectorTab ?? "preview",
+  const inspectorState = useSessions((s) =>
+    inspectorStateForSession(
+      s.inspectorByKey,
+      s.sessions.find((session) => session.id === s.activeId),
+    ),
   );
-  const inspectorOpen = useSessions(
-    (s) =>
-      s.sessions.find((x) => x.id === s.activeId)?.inspectorOpen === true,
-  );
+  const inspectorTab = inspectorState.tab;
+  const inspectorOpen = inspectorState.open;
   const contextPanelOpen = useSessions(
     (s) =>
       s.sessions.find((x) => x.id === s.activeId)?.contextPanelOpen === true,
@@ -3190,12 +3192,11 @@ export function ChatView({
     }
     setPreviewPanelClosing(true);
     previewCloseTimeoutRef.current = window.setTimeout(() => {
-      if (
-        useSessions
-          .getState()
-          .sessions.find((session) => session.id === activeId)
-          ?.inspectorTab === "git"
-      ) {
+      const state = useSessions.getState();
+      if (inspectorStateForSession(
+        state.inspectorByKey,
+        state.sessions.find((session) => session.id === activeId),
+      ).tab === "git") {
         setSessionInspectorOpen(activeId, false);
       }
       setPreviewPanelClosing(false);
@@ -7059,6 +7060,7 @@ export function ChatView({
                       busy={busy}
                       activeMediaTargetPresent={Boolean(activeMediaTarget)}
                       folderIsEmpty={!folder.trim()}
+                      workspaceFolder={folder}
                       activeRun={activeRun}
                       previewArtifacts={previewArtifactsForMessage(m)}
                       previewAppBusy={previewAppBusy}

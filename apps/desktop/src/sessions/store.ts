@@ -153,7 +153,9 @@ export interface Session {
   virtualFiles?: Record<string, SessionVirtualFile>;
   contextPanelOpen?: boolean;
   contextCollapsedSectionIds?: QuickSummarySectionId[];
+  /** @deprecated Read for workspace-keyed Inspector migration only. */
   inspectorOpen?: boolean;
+  /** @deprecated Read for workspace-keyed Inspector migration only. */
   inspectorTab?: SessionInspectorTab;
   browserSession?: SessionBrowserSession;
   /** @deprecated Read for one-release side-panel migration only. */
@@ -254,6 +256,10 @@ export interface SessionVirtualFile {
 export type SessionSidePanelMode = "artifact" | "browser" | "git";
 export type SessionArtifactPanelTab = "preview" | "code";
 export type SessionInspectorTab = "preview" | "code" | "git" | "workers";
+export type SessionInspectorState = {
+  open: boolean;
+  tab: SessionInspectorTab;
+};
 
 export interface SessionPreviewRuntime {
   kind?: PreviewAppKind | string;
@@ -643,6 +649,36 @@ function normalizeInspectorTab(
   if (legacyArtifactTab === "code") return "code";
   if (legacyMode === "artifact") return "preview";
   return undefined;
+}
+
+const DEFAULT_INSPECTOR_STATE: SessionInspectorState = {
+  open: false,
+  tab: "preview",
+};
+
+function normalizeInspectorByKey(value: unknown): Record<string, SessionInspectorState> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const states: Record<string, SessionInspectorState> = {};
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (!/^[A-Za-z0-9_.-]+$/.test(key) || !raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const entry = raw as Record<string, unknown>;
+    states[key] = {
+      open: entry.open === true,
+      tab: normalizeInspectorTab(entry.tab) ?? "preview",
+    };
+  }
+  return states;
+}
+
+function inspectorKeyForSession(session: Pick<Session, "id" | "settings">): string {
+  return previewRuntimeKeyForThread(session.id, session.settings?.folder);
+}
+
+export function inspectorStateForSession(
+  states: Record<string, SessionInspectorState>,
+  session?: Pick<Session, "id" | "settings">,
+): SessionInspectorState {
+  return session ? states[inspectorKeyForSession(session)] ?? DEFAULT_INSPECTOR_STATE : DEFAULT_INSPECTOR_STATE;
 }
 
 function normalizeSettings(
@@ -1765,6 +1801,7 @@ interface SessionState {
   workerRuns: SessionWorkerRunRecord[];
   projects: Project[];
   previewRuntimesByKey: Record<string, SessionPreviewRuntime>;
+  inspectorByKey: Record<string, SessionInspectorState>;
   pullRequestsBySession: Record<string, PullRequestSnapshot>;
   activeId: string;
   archiveRetentionDays: ArchiveRetentionDays;
@@ -1941,6 +1978,7 @@ export const useSessions = create<SessionState>()(
         workerRuns: [],
         projects: [],
         previewRuntimesByKey: {},
+        inspectorByKey: {},
         pullRequestsBySession: {},
         activeId: first.id,
         archiveRetentionDays: DEFAULT_ARCHIVE_RETENTION_DAYS,
@@ -3155,6 +3193,12 @@ export const useSessions = create<SessionState>()(
               (item) => item.run.id === record.run.id,
             );
             const next = mergeWorkerRunRecord(existing, record);
+            const shouldReveal =
+              next.run.status === "proposed" || next.run.status === "running";
+            const parent = st.sessions.find(
+              (session) => session.id === next.run.parent_thread_id,
+            );
+            const inspectorKey = parent ? inspectorKeyForSession(parent) : "";
             return {
               workerRuns: [
                 next,
@@ -3175,18 +3219,22 @@ export const useSessions = create<SessionState>()(
                     ? { ...message, workerRunId: next.run.id }
                     : message,
                 );
-                const shouldReveal =
-                  next.run.status === "proposed" || next.run.status === "running";
                 if (!shouldReveal)
                   return { ...session, messages, settledAt: undefined };
                 return {
                   ...session,
                   messages,
                   settledAt: undefined,
-                  inspectorOpen: true,
-                  inspectorTab: "workers",
                 };
               }),
+              ...(shouldReveal && inspectorKey
+                ? {
+                    inspectorByKey: {
+                      ...st.inspectorByKey,
+                      [inspectorKey]: { open: true, tab: "workers" as const },
+                    },
+                  }
+                : {}),
             };
           }),
 
@@ -3333,32 +3381,31 @@ export const useSessions = create<SessionState>()(
           })),
 
         setInspectorOpen: (id, open) =>
-          set((st) => ({
-            sessions: st.sessions.map((s) =>
-              s.id === id
-                ? {
-                    ...s,
-                    inspectorOpen: open || undefined,
-                    inspectorTab: s.inspectorTab ?? "preview",
-                    updatedAt: Date.now(),
-                  }
-                : s,
-            ),
-          })),
+          set((st) => {
+            const session = st.sessions.find((item) => item.id === id);
+            if (!session) return {};
+            const key = inspectorKeyForSession(session);
+            const current = st.inspectorByKey[key] ?? DEFAULT_INSPECTOR_STATE;
+            return {
+              inspectorByKey: {
+                ...st.inspectorByKey,
+                [key]: { ...current, open },
+              },
+            };
+          }),
 
         setInspectorTab: (id, tab) =>
-          set((st) => ({
-            sessions: st.sessions.map((s) =>
-              s.id === id
-                ? {
-                    ...s,
-                    inspectorOpen: true,
-                    inspectorTab: tab,
-                    updatedAt: Date.now(),
-                  }
-                : s,
-            ),
-          })),
+          set((st) => {
+            const session = st.sessions.find((item) => item.id === id);
+            if (!session) return {};
+            const key = inspectorKeyForSession(session);
+            return {
+              inspectorByKey: {
+                ...st.inspectorByKey,
+                [key]: { open: true, tab },
+              },
+            };
+          }),
 
         setBrowserSession: (id, browserSession) =>
           set((st) => ({
@@ -3604,8 +3651,26 @@ export const useSessions = create<SessionState>()(
         const legacyWorkerRuns = normalizedSessions
           .map(legacyWorkerRunFromSession)
           .filter((record): record is SessionWorkerRunRecord => Boolean(record));
-        const sessions = normalizedSessions.filter((session) => !session.worker);
+        const persistedSessions = normalizedSessions.filter((session) => !session.worker);
         const workerRuns = legacyWorkerRuns;
+        const inspectorByKey = normalizeInspectorByKey(state.inspectorByKey);
+        for (const session of [...persistedSessions].sort((a, b) => b.updatedAt - a.updatedAt)) {
+          const tab = normalizeInspectorTab(session.inspectorTab);
+          if (session.inspectorOpen !== true && !tab) continue;
+          const key = inspectorKeyForSession(session);
+          if (!Object.prototype.hasOwnProperty.call(inspectorByKey, key)) {
+            inspectorByKey[key] = {
+              open: session.inspectorOpen === true,
+              tab: tab ?? "preview",
+            };
+          }
+        }
+        const sessions = persistedSessions.map((session) => {
+          const next = { ...session };
+          delete next.inspectorOpen;
+          delete next.inspectorTab;
+          return next;
+        });
         const previewRuntimesByKey = normalizePreviewRuntimesByKey(
           state.previewRuntimesByKey,
         );
@@ -3656,6 +3721,7 @@ export const useSessions = create<SessionState>()(
           workerRuns,
           projects: liveProjects,
           previewRuntimesByKey,
+          inspectorByKey,
           pullRequestsBySession: {},
           activeId: active.activeId,
           archiveRetentionDays,
@@ -3675,6 +3741,7 @@ export const useSessions = create<SessionState>()(
         ),
         projects: state.projects,
         previewRuntimesByKey: state.previewRuntimesByKey,
+        inspectorByKey: state.inspectorByKey,
         activeId: state.activeId,
         archiveRetentionDays: state.archiveRetentionDays,
         queuedMessagesBySession: state.queuedMessagesBySession,
