@@ -2138,6 +2138,22 @@ async function runBrowserProfileCheck(session) {
     await navigateE2ePreviewWebview(
       session.page,
       "artifact-browser-e2e-persistent-3",
+      `${testServer.origin}/?phase=cache-reload`,
+    );
+    await testServer.waitForReport("cache-reload", "main", 10_000, (report) => report.version === "rgb(12, 34, 56)");
+    testServer.setCacheColor("rgb(65, 43, 21)");
+    await session.page.evaluate(async (label) => {
+      await window.__TAURI_INTERNALS__.invoke("preview_webview_reload", { label });
+    }, "artifact-browser-e2e-persistent-3");
+    assertBrowserReport(
+      await testServer.waitForReport("cache-reload", "main", 10_000, (report) => report.version === "rgb(65, 43, 21)"),
+      "persistent",
+      "Cache-bypassing loopback reload",
+    );
+
+    await navigateE2ePreviewWebview(
+      session.page,
+      "artifact-browser-e2e-persistent-3",
       `${testServer.origin}/?phase=blocked-navigation&blocked=1`,
     );
     await testServer.waitForReport("blocked-navigation");
@@ -2240,14 +2256,24 @@ function assertBrowserCapabilities(report) {
 
 async function startBrowserProfileServer() {
   const reports = [];
+  let cacheColor = "rgb(12, 34, 56)";
   const server = http.createServer((request, response) => {
     const url = new URL(request.url || "/", "http://127.0.0.1");
+    if (url.pathname === "/cache.css") {
+      response.writeHead(200, {
+        "content-type": "text/css; charset=utf-8",
+        "cache-control": "public, max-age=3600",
+      });
+      response.end(`#popup { color: ${cacheColor}; }`);
+      return;
+    }
     if (url.pathname === "/report") {
       reports.push({
         phase: url.searchParams.get("phase"),
         kind: url.searchParams.get("kind") || "main",
         cookie: url.searchParams.get("cookie") || "",
         storage: url.searchParams.get("storage") || "",
+        version: url.searchParams.get("version") || "",
         capabilities: JSON.parse(url.searchParams.get("capabilities") || "null"),
       });
       response.writeHead(204);
@@ -2275,6 +2301,7 @@ async function startBrowserProfileServer() {
     response.end(`<!doctype html>
 <meta charset="utf-8">
 <title>Milim browser profile test</title>
+<link rel="stylesheet" href="/cache.css">
 <style>html,body,#popup{box-sizing:border-box;width:100%;height:100%;margin:0}#popup{font:24px sans-serif}</style>
 <button id="popup" type="button">Open popup</button>
 <script>
@@ -2292,6 +2319,7 @@ async function startBrowserProfileServer() {
       + "&kind=" + encodeURIComponent(reportKind)
       + "&cookie=" + encodeURIComponent(document.cookie)
       + "&storage=" + encodeURIComponent(localStorage.getItem("milim_e2e") || "")
+      + "&version=" + encodeURIComponent(getComputedStyle(document.getElementById("popup")).color)
       + "&capabilities=" + encodeURIComponent(JSON.stringify({
         cookieEnabled: navigator.cookieEnabled,
         dynamicCode: Function("return true")(),
@@ -2325,10 +2353,13 @@ async function startBrowserProfileServer() {
   if (!address || typeof address === "string") throw new Error("Browser profile test server did not bind.");
   return {
     origin: `http://127.0.0.1:${address.port}`,
-    async waitForReport(phase, kind = "main", timeoutMs = 10_000) {
+    setCacheColor(value) {
+      cacheColor = value;
+    },
+    async waitForReport(phase, kind = "main", timeoutMs = 10_000, matches = () => true) {
       const started = Date.now();
       while (Date.now() - started < timeoutMs) {
-        const report = reports.find((candidate) => candidate.phase === phase && candidate.kind === kind);
+        const report = reports.find((candidate) => candidate.phase === phase && candidate.kind === kind && matches(candidate));
         if (report) return report;
         await delay(50);
       }

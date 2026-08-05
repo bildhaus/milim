@@ -263,9 +263,68 @@ pub fn preview_webview_navigate(
 
 #[tauri::command]
 pub fn preview_webview_reload(app: tauri::AppHandle, label: String) -> Result<(), String> {
-    preview_webview(&app, &label)?
-        .reload()
+    let webview = preview_webview(&app, &label)?;
+    if webview
+        .url()
+        .map(|url| preview_reload_bypasses_cache(&url))
+        .unwrap_or(false)
+    {
+        reload_without_cache(&webview)
+    } else {
+        webview.reload().map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(windows)]
+fn reload_without_cache(webview: &Webview) -> Result<(), String> {
+    use webview2_com::{CallDevToolsProtocolMethodCompletedHandler, CoTaskMemPWSTR};
+
+    webview
+        .with_webview(|platform_webview| {
+            let controller = platform_webview.controller();
+            let result = unsafe {
+                (|| {
+                    let core = controller.CoreWebView2()?;
+                    let fallback_core = core.clone();
+                    let handler = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(
+                        move |status, _| status.or_else(|_| fallback_core.Reload()),
+                    ));
+                    let method = CoTaskMemPWSTR::from("Page.reload");
+                    let parameters = CoTaskMemPWSTR::from(r#"{"ignoreCache":true}"#);
+                    let method = method.as_ref();
+                    let parameters = parameters.as_ref();
+                    core.CallDevToolsProtocolMethod(
+                        *method.as_pcwstr(),
+                        *parameters.as_pcwstr(),
+                        &handler,
+                    )
+                })()
+            };
+            if let Err(error) = result {
+                tracing::warn!(
+                    "cache-bypassing preview reload failed, using normal reload: {error}"
+                );
+                if let Ok(core) = unsafe { controller.CoreWebView2() } {
+                    let _ = unsafe { core.Reload() };
+                }
+            }
+        })
         .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn reload_without_cache(webview: &Webview) -> Result<(), String> {
+    webview
+        .with_webview(|platform_webview| unsafe {
+            let webview: &objc2_web_kit::WKWebView = &*platform_webview.inner().cast();
+            let _ = webview.reloadFromOrigin();
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn reload_without_cache(webview: &Webview) -> Result<(), String> {
+    webview.reload().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -378,6 +437,10 @@ fn preview_url_allowed(url: &Url) -> bool {
         || (url.scheme() == "http" && is_loopback_host(url.host_str().unwrap_or_default()))
 }
 
+fn preview_reload_bypasses_cache(url: &Url) -> bool {
+    is_loopback_host(url.host_str().unwrap_or_default())
+}
+
 fn is_preview_label(label: &str) -> bool {
     label.starts_with(PREVIEW_WEBVIEW_LABEL_PREFIX)
         && label[PREVIEW_WEBVIEW_LABEL_PREFIX.len()..]
@@ -443,6 +506,12 @@ mod tests {
         assert!(allowed_preview_url("http://[::1]:4173/").is_ok());
         assert!(allowed_preview_url("http://example.com/").is_err());
         assert!(allowed_preview_url("javascript:alert(1)").is_err());
+        assert!(preview_reload_bypasses_cache(
+            &Url::parse("http://localhost:4173/").unwrap()
+        ));
+        assert!(!preview_reload_bypasses_cache(
+            &Url::parse("https://example.com/").unwrap()
+        ));
         assert!(preview_new_tab_url_allowed(
             &Url::parse("about:blank").unwrap()
         ));
