@@ -3281,6 +3281,7 @@ export interface AgentToolContext {
   sandbox_enabled?: boolean;
   computer_use_enabled?: boolean;
   preview_tools_enabled?: boolean;
+  preview_runtime_key?: string;
   preview_surface?: PreviewSurfaceTarget | null;
   experimental_hashline_patch?: boolean;
   plan_mode?: boolean;

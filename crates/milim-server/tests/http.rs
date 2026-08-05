@@ -6536,6 +6536,7 @@ async fn agent_run_hides_preview_tools_unless_preview_is_active() {
     use milim_tools::ToolRegistry;
     let mut tools = ToolRegistry::with_builtins();
     for name in [
+        "preview_open_url",
         "preview_dom_snapshot",
         "preview_click",
         "preview_type_text",
@@ -6553,6 +6554,7 @@ async fn agent_run_hides_preview_tools_unless_preview_is_active() {
         .post(format!("{base}/agents/run"))
         .json(&json!({
             "model":"tool-listing",
+            "tool_approval_policy": "open",
             "messages":[{"role":"user","content":"what tools are available?"}]
         }))
         .send()
@@ -6565,6 +6567,10 @@ async fn agent_run_hides_preview_tools_unless_preview_is_active() {
     assert!(
         !content.contains("preview_click"),
         "inactive preview exposed preview tools: {content}"
+    );
+    assert!(
+        content.contains("preview_open_url"),
+        "inactive preview hid its opener tool: {content}"
     );
 
     let with_preview: Value = client

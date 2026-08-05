@@ -9,6 +9,7 @@ export const PREVIEW_WEBVIEW_SHORTCUT_EVENT =
   "milim://preview-webview-shortcut";
 export const PREVIEW_WEBVIEW_TITLE_EVENT =
   "milim://preview-webview-title";
+export const PREVIEW_OPEN_URL_EVENT = "milim://preview-open-url";
 
 export type PreviewWebviewLoadState =
   | "navigated"
@@ -37,6 +38,10 @@ export interface PreviewWebviewShortcut {
 export interface PreviewWebviewTitle {
   label: string;
   title: string;
+}
+
+export interface PreviewOpenUrl {
+  url: string;
 }
 
 export type PreviewBrowserStorageMode = "persistent" | "private";
@@ -137,5 +142,14 @@ export async function listenForPreviewWebviewTitle(
   return await listen<PreviewWebviewTitle>(
     PREVIEW_WEBVIEW_TITLE_EVENT,
     (event) => handler(event.payload),
+  );
+}
+
+export async function listenForPreviewOpenUrl(
+  handler: (request: PreviewOpenUrl) => void,
+): Promise<UnlistenFn> {
+  if (!IS_TAURI) return () => undefined;
+  return await listen<PreviewOpenUrl>(PREVIEW_OPEN_URL_EVENT, (event) =>
+    handler(event.payload),
   );
 }

@@ -225,6 +225,7 @@ type MessageRowProps = {
   busy: boolean;
   activeMediaTargetPresent: boolean;
   folderIsEmpty: boolean;
+  workspaceFolder: string;
   activeRun?: RunTrace | null;
   previewArtifacts?: ChatArtifact[];
   previewAppBusy: "start" | "stop" | "restart" | null;
@@ -245,6 +246,7 @@ function MessageRowView({
   busy,
   activeMediaTargetPresent,
   folderIsEmpty,
+  workspaceFolder,
   activeRun,
   previewArtifacts,
   previewAppBusy,
@@ -527,6 +529,7 @@ function MessageRowView({
                 previewArtifactsStreaming={previewArtifactsStreaming}
                 workDurationMs={m.metrics?.durationMs}
                 toolApproval={toolApproval}
+                workspaceFolder={workspaceFolder}
               />
             )}
             {renderMessageMedia(m.mediaResults)}
@@ -736,6 +739,7 @@ export const MessageRow = memo(
     prev.busy === next.busy &&
     prev.activeMediaTargetPresent === next.activeMediaTargetPresent &&
     prev.folderIsEmpty === next.folderIsEmpty &&
+    prev.workspaceFolder === next.workspaceFolder &&
     prev.activeRun === next.activeRun &&
     prev.previewArtifacts === next.previewArtifacts &&
     prev.previewAppBusy === next.previewAppBusy &&

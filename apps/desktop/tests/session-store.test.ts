@@ -37,6 +37,7 @@ const {
   SIDEBAR_CHATS_SECTION_ID,
   SIDEBAR_PINNED_SECTION_ID,
   getSessionComposerDraft,
+  inspectorStateForSession,
   setSessionComposerDraft,
   useSessions,
   projectSectionId,
@@ -98,6 +99,14 @@ function snapshot<T>(value: T): T {
   return value === undefined
     ? value
     : JSON.parse(JSON.stringify(value)) as T;
+}
+
+function inspectorFor(sessionId: string) {
+  const state = useSessions.getState();
+  return inspectorStateForSession(
+    state.inspectorByKey,
+    state.sessions.find((session) => session.id === sessionId),
+  );
 }
 
 const first = useSessions.getState().activeId;
@@ -387,8 +396,7 @@ const previewRuntimeBeforeModelSwitch = snapshot(
 const projectRuntimeBeforeModelSwitch = snapshot(
   useSessions.getState().previewRuntimesByKey[modelSwitchRuntimeKey],
 );
-const inspectorOpenBeforeModelSwitch = sessionBeforeModelSwitch.inspectorOpen;
-const inspectorTabBeforeModelSwitch = sessionBeforeModelSwitch.inspectorTab;
+const inspectorBeforeModelSwitch = snapshot(inspectorFor(modelSwitchSession));
 useSessions.getState().updateSettings(modelSwitchSession, { model: "model-after-switch" });
 const settingsAfterModelSwitch = useSessions.getState().getSettings(modelSwitchSession);
 equal(
@@ -442,15 +450,10 @@ deepEqual(
   projectRuntimeBeforeModelSwitch,
   "model switch should preserve project preview runtime",
 );
-equal(
-  sessionAfterModelSwitch.inspectorOpen,
-  inspectorOpenBeforeModelSwitch,
-  "model switch should preserve inspector open state",
-);
-equal(
-  sessionAfterModelSwitch.inspectorTab,
-  inspectorTabBeforeModelSwitch,
-  "model switch should preserve inspector tab",
+deepEqual(
+  inspectorFor(modelSwitchSession),
+  inspectorBeforeModelSwitch,
+  "model switch should preserve inspector shell state",
 );
 useSessions.getState().setPreviewRuntimeByKey(modelSwitchRuntimeKey, undefined);
 useSessions.getState().remove(modelSwitchSession);
@@ -1436,49 +1439,58 @@ equal(
 );
 useSessions.getState().setInspectorOpen(first, true);
 equal(
-  useSessions.getState().sessions.find((session) => session.id === first)
-    ?.inspectorOpen,
+  inspectorFor(first).open,
   true,
-  "inspector open state should persist per thread",
+  "inspector open state should persist for its workspace",
 );
 equal(
-  useSessions.getState().sessions.find((session) => session.id === second)
-    ?.inspectorOpen,
-  undefined,
-  "inspector state should not bleed into another thread",
+  inspectorFor(second).open,
+  false,
+  "folderless inspector state should remain thread-scoped",
 );
 assert(
-  localStorage.getItem("milim.sessions")?.includes('"inspectorOpen":true'),
+  localStorage.getItem("milim.sessions")?.includes('"inspectorByKey"'),
   "inspector open state should persist in session storage",
 );
 assert(
   !localStorage.getItem("milim.sessions")?.includes('"artifactPanelOpen"'),
   "new persistence writes should omit legacy artifact panel fields",
 );
-useSessions.getState().setInspectorOpen(first, false);
+useSessions.getState().updateSettings(second, {
+  folder: "C:\\workspace-a\\.worktrees\\second",
+});
 equal(
-  useSessions.getState().sessions.find((session) => session.id === first)
-    ?.inspectorOpen,
-  undefined,
-  "closing the inspector should persist collapsed state",
+  inspectorFor(second).open,
+  false,
+  "isolated worktree paths should keep independent inspector state",
+);
+useSessions.getState().updateSettings(second, { folder: "c:/WORKSPACE-A/" });
+deepEqual(
+  inspectorFor(second),
+  inspectorFor(first),
+  "normalized matching directories should share inspector shell state",
+);
+useSessions.getState().setInspectorOpen(second, false);
+equal(
+  inspectorFor(first).open,
+  false,
+  "closing a shared inspector should collapse it in sibling threads",
 );
 useSessions.getState().setInspectorTab(first, "workers");
 equal(
-  useSessions.getState().sessions.find((session) => session.id === first)
-    ?.inspectorTab,
+  inspectorFor(first).tab,
   "workers",
-  "inspector tab should persist per thread",
+  "inspector tab should persist per workspace",
 );
 equal(
-  useSessions.getState().sessions.find((session) => session.id === first)
-    ?.inspectorOpen,
+  inspectorFor(second).open,
   true,
-  "selecting an inspector tab should open it",
+  "selecting an inspector tab should open it for sibling threads",
 );
-  assert(
-    localStorage.getItem("milim.sessions")?.includes('"inspectorTab":"workers"'),
-    "inspector tab should persist in session storage",
-  );
+assert(
+  localStorage.getItem("milim.sessions")?.includes('"tab":"workers"'),
+  "inspector tab should persist in session storage",
+);
 useSessions.getState().setBrowserSession(first, {
   profileId: "session-browser",
   activeTabId: "slides",
@@ -1517,29 +1529,25 @@ assert(
   localStorage.getItem("milim.sessions")?.includes('"activeTabId":"slides"'),
   "browser tabs should persist in session storage",
 );
-  useSessions.getState().setInspectorOpen(first, false);
+useSessions.getState().setInspectorOpen(first, false);
 equal(
-  useSessions.getState().sessions.find((session) => session.id === first)
-    ?.inspectorOpen,
-  undefined,
+  inspectorFor(first).open,
+  false,
   "collapsing the inspector should persist closed state",
 );
 equal(
-  useSessions.getState().sessions.find((session) => session.id === first)
-    ?.inspectorTab,
+  inspectorFor(first).tab,
   "workers",
   "collapsing the inspector should preserve selected tab",
 );
 useSessions.getState().setInspectorOpen(first, true);
 equal(
-  useSessions.getState().sessions.find((session) => session.id === first)
-    ?.inspectorOpen,
+  inspectorFor(first).open,
   true,
   "reopening the inspector should restore open state",
 );
 equal(
-  useSessions.getState().sessions.find((session) => session.id === first)
-    ?.inspectorTab,
+  inspectorFor(first).tab,
   "workers",
   "reopening the inspector should keep the selected tab",
 );
@@ -1559,17 +1567,16 @@ useSessions.getState().upsertWorkerRun({
   workers: [],
 });
 equal(
-  useSessions.getState().sessions.find((session) => session.id === first)
-    ?.inspectorOpen,
+  inspectorFor(first).open,
   true,
   "proposed Worker Runs should reveal the inspector",
 );
 equal(
-  useSessions.getState().sessions.find((session) => session.id === first)
-    ?.inspectorTab,
+  inspectorFor(second).tab,
   "workers",
-  "proposed Worker Runs should select the Workers inspector",
+  "proposed Worker Runs should select the shared Workers inspector",
 );
+useSessions.getState().updateSettings(second, { folder: "" });
 useSessions.getState().setContextPanelOpen(first, false);
 useSessions.getState().setSessionUnread(first, true);
 deepEqual(

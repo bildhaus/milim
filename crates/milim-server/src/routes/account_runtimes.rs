@@ -165,6 +165,7 @@ pub(crate) async fn codex_run(
         req.model.as_deref().unwrap_or_default(),
         &req.prompt,
     )?;
+    add_account_runtime_preview_instructions(&mut req.prompt, endpoint.as_ref());
     req.milim_mcp = endpoint.clone();
     let approvals = Some(st.tool_approvals.clone());
     Ok(Sse::new(account_runtime_stream(
@@ -275,6 +276,7 @@ pub(crate) async fn opencode_run(
         &req.model,
         &req.prompt,
     )?;
+    add_account_runtime_preview_instructions(&mut req.prompt, endpoint.as_ref());
     req.milim_mcp = endpoint.clone();
     Ok(Sse::new(account_runtime_stream(
         crate::opencode_bridge::run_stream(req, redactions, Some(st.tool_approvals.clone())),
@@ -337,6 +339,7 @@ pub(crate) async fn pi_run(
         &req.model,
         &req.prompt,
     )?;
+    add_account_runtime_preview_instructions(&mut req.prompt, endpoint.as_ref());
     req.milim_mcp = endpoint.clone();
     Ok(Sse::new(account_runtime_stream(
         crate::pi_bridge::run_stream(req, redactions, Some(st.tool_approvals.clone())),
@@ -408,6 +411,7 @@ pub(crate) async fn claude_run(
         req.model.as_deref().unwrap_or_default(),
         &req.prompt,
     )?;
+    add_account_runtime_preview_instructions(&mut req.prompt, endpoint.as_ref());
     req.milim_mcp = endpoint.clone();
     let approvals = if req.interactive_tool_approval {
         let run_id = endpoint
@@ -674,6 +678,24 @@ fn account_runtime_workspace_prompt(
     }
 }
 
+const ACCOUNT_RUNTIME_PREVIEW_INSTRUCTIONS: &str = "Milim preview runtime instruction: For a local project preview, call preview_prepare_app. Reuse its URL when it reports an active preview; otherwise call preview_start_app with its source_fingerprint, poll preview_prepare_app until ready, then open the returned loopback URL with preview_open_url. The managed preview remains running between turns; do not start a preview dev server with a shell command.";
+
+fn add_account_runtime_preview_instructions(
+    prompt: &mut String,
+    endpoint: Option<&AccountRuntimeToolEndpoint>,
+) {
+    let Some(endpoint) = endpoint else {
+        return;
+    };
+    let has_tool = |name: &str| endpoint.tools.iter().any(|tool| tool.name == name);
+    if has_tool("preview_prepare_app")
+        && has_tool("preview_start_app")
+        && has_tool("preview_open_url")
+    {
+        prompt.insert_str(0, &format!("{ACCOUNT_RUNTIME_PREVIEW_INSTRUCTIONS}\n\n"));
+    }
+}
+
 fn account_runtime_prompt_for_remote(
     st: &AppState,
     run_context: &RunContext,
@@ -721,6 +743,44 @@ fn account_runtime_images_for_remote(
 mod tests {
     use super::*;
     use milim_inference::test_backend::TestBackend;
+    use milim_tools::{ToolEffect, ToolSpec};
+
+    fn preview_endpoint(names: &[&str]) -> AccountRuntimeToolEndpoint {
+        AccountRuntimeToolEndpoint {
+            run_id: "run".to_string(),
+            url: "http://127.0.0.1/mcp".to_string(),
+            authorization: "Bearer test".to_string(),
+            tools: names
+                .iter()
+                .map(|name| ToolSpec {
+                    name: (*name).to_string(),
+                    description: String::new(),
+                    input_schema: json!({}),
+                    effect: ToolEffect::ReadOnly,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn preview_instructions_are_shared_by_every_account_adapter() {
+        let endpoint = preview_endpoint(&[
+            "preview_prepare_app",
+            "preview_start_app",
+            "preview_open_url",
+        ]);
+        for runtime in ["Codex", "Claude", "OpenCode", "Pi"] {
+            let mut prompt = format!("{runtime} request");
+            add_account_runtime_preview_instructions(&mut prompt, Some(&endpoint));
+            assert!(prompt.starts_with(ACCOUNT_RUNTIME_PREVIEW_INSTRUCTIONS));
+            assert!(prompt.ends_with(&format!("{runtime} request")));
+        }
+
+        let mut prompt = "No preview tools".to_string();
+        let incomplete = preview_endpoint(&["preview_open_url"]);
+        add_account_runtime_preview_instructions(&mut prompt, Some(&incomplete));
+        assert_eq!(prompt, "No preview tools");
+    }
 
     #[test]
     fn account_runtime_privacy_uses_the_captured_mode() {

@@ -89,7 +89,7 @@ try {
   assert.equal(formatRunDuration(65_500), "1m 5s");
   assert.equal(formatRunDuration(3_665_500), "1h 1m 5s");
 
-  const { AssistantMessage } = (await server.ssrLoadModule(
+  const { AssistantMessage, formatCommandDisplay } = (await server.ssrLoadModule(
     "/src/components/AssistantMessage.tsx",
   )) as {
     AssistantMessage: ComponentType<{
@@ -97,8 +97,41 @@ try {
       streamParts: ChatStreamPart[];
       streaming: boolean;
       workDurationMs?: number;
+      workspaceFolder?: string;
     }>;
+    formatCommandDisplay: (command: string, workspaceFolder?: string) => string;
   };
+  const windowsCommand = '"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -Command Get-Content "C:\\repo\\src\\App.tsx"';
+  assert.equal(
+    formatCommandDisplay(windowsCommand, "C:\\repo"),
+    'Get-Content ".\\src\\App.tsx"',
+    "Windows shell wrappers and workspace paths should be shortened",
+  );
+  assert.equal(
+    formatCommandDisplay("/bin/bash -lc cat file:///Users/me/app/src/App.tsx", "/Users/me/app"),
+    "cat ./src/App.tsx",
+    "POSIX shell wrappers and workspace file URLs should be shortened",
+  );
+  assert.equal(
+    formatCommandDisplay("cmd.exe /d /c type file:///C:/repo/src/App.tsx", "C:\\repo"),
+    "type ./src/App.tsx",
+    "cmd wrappers and Windows workspace file URLs should be shortened",
+  );
+  assert.equal(
+    formatCommandDisplay("zsh -c cat /Users/me/app/src/App.tsx", "/Users/me/app"),
+    "cat ./src/App.tsx",
+    "zsh wrappers should be shortened",
+  );
+  assert.equal(
+    formatCommandDisplay("type C:\\repo2\\src\\App.tsx", "C:\\repo"),
+    "type C:\\repo2\\src\\App.tsx",
+    "workspace-like path prefixes should remain unchanged",
+  );
+  assert.equal(
+    formatCommandDisplay("fish -c echo unchanged"),
+    "fish -c echo unchanged",
+    "unrecognized shell wrappers should remain unchanged",
+  );
   const streamParts: ChatStreamPart[] = [
     tool("Ran first command", "done"),
     { kind: "thinking", content: "first reasoning" },
@@ -167,7 +200,7 @@ try {
   const failedTag = failedMarkup.match(
     /<details[^>]+data-testid="assistant-stream-work-group"[^>]*>/,
   )?.[0] ?? "";
-  assert.match(failedTag, /\sopen=""/, "failed work should stay expanded");
+  assert.doesNotMatch(failedTag, /\sopen=""/, "completed failed work should collapse");
   assert.match(failedMarkup, /Work stopped/);
   assert.match(failedMarkup, /Command failed/);
   assert.match(failedMarkup, /exit 1/);
@@ -209,13 +242,33 @@ try {
   const failedToolsTag = failedToolsMarkup.match(
     /<details[^>]+data-testid="assistant-stream-tool-group"[^>]*>/,
   )?.[0] ?? "";
-  assert.match(
+  assert.doesNotMatch(
     failedToolsTag,
     /\sopen=""/,
-    "failed tool-only work should stay expanded",
+    "completed failed tool-only work should collapse",
   );
   assert.match(failedToolsMarkup, /Work stopped/);
-  assert.match(failedToolsMarkup, /Command failed · exit 1/);
+  assert.match(failedToolsMarkup.replace(/<[^>]+>/g, ""), /Command failed · exit 1/);
+
+  const liveFailureMarkup = renderToStaticMarkup(
+    createElement(AssistantMessage, {
+      content: "",
+      streamParts: [
+        { kind: "thinking", content: "running the command" },
+        tool("Command failed", "error", windowsCommand),
+      ],
+      streaming: true,
+      workspaceFolder: "C:\\repo",
+    }),
+  );
+  const liveFailureTag = liveFailureMarkup.match(
+    /<details[^>]+data-testid="assistant-stream-work-group"[^>]*>/,
+  )?.[0] ?? "";
+  assert.match(liveFailureTag, /\sopen=""/, "the newest live failure should open its drawer");
+  assert.match(liveFailureMarkup, /Get-Content/);
+  assert.doesNotMatch(liveFailureMarkup.replace(/<[^>]+>/g, ""), /WindowsPowerShell/);
+  assert.match(liveFailureMarkup, /title="&quot;C:\\Windows/);
+  assert.match(liveFailureMarkup, /aria-label="Copy full command"/);
 
   const streamingMarkup = render(true);
   assert.equal(
@@ -228,6 +281,10 @@ try {
     1,
     "only the latest work group should render as reasoning",
   );
+  const recoveredTag = streamingMarkup.match(
+    /<details[^>]+data-testid="assistant-stream-work-group"[^>]*>/,
+  )?.[0] ?? "";
+  assert.doesNotMatch(recoveredTag, /\sopen=""/, "later activity should collapse an earlier failure");
   assert.equal(
     (streamingMarkup.match(/stream-event-thinking stream-event-running/g) ?? [])
       .length,

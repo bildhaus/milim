@@ -15,12 +15,12 @@ Release artifacts target Windows and macOS. Linux packaging is intentionally dis
 - **Hot-swap models.** Switch the next turn between hosted providers, local Ollama or LM Studio models, and separately installed Codex, Claude, OpenCode, or Pi runtimes.
 - **Keep local control.** Project selection, model routing, tool approvals, local persistence, and outbound privacy boundaries stay explicit.
 - **Approve execution, then review the result.** Review is the new-chat default for consequential tool calls; configured defaults may opt into Open, while changing workspace folders resets approval to Review. Built-in Git views keep resulting diffs, checkpoints, and recovery beside the thread.
-- **Inspect and edit the workspace.** Code provides a searchable file rail and one focused editor with explicit, conflict-safe saves; generated artifacts remain available as read-only sources.
+- **Inspect and edit the workspace.** Code provides a searchable file rail and one focused editor with explicit, conflict-safe saves; generated artifacts remain available as read-only sources. Threads using the same effective directory share whether the Inspector is open and its selected tab, while the Inspector's contents remain thread-specific.
 - **Render data inline.** The built-in `render_chart` tool places responsive, interactive native bar, line, pie, and scatter charts, including horizontal bars, directly in the transcript without an MCP App server.
 
 ### Power tools
 
-Agents, Workers, skills, schedules, MCP servers and Apps, media generation, Google Workspace, previews, and the mobile companion remain available from the app's collapsed **Tools** section. Loopback preview reloads bypass the browser cache so local CSS and JavaScript changes stay current while an agent works. These tools extend the core thread without competing with the default workflow.
+Agents, Workers, skills, schedules, MCP servers and Apps, media generation, Google Workspace, previews, and the mobile companion remain available from the app's collapsed **Tools** section. Account runtimes can start project previews through Milim's managed runtime and open HTTPS or loopback URLs directly in the in-app Preview inspector; managed dev servers remain available between turns, and loopback reloads bypass the browser cache so local CSS and JavaScript changes stay current while an agent works. These tools extend the core thread without competing with the default workflow.
 
 Milim keeps provider-backed chat and installed account runtimes distinct. Provider models use Milim's tool-agent loop, while account runtimes retain their native sessions and tools behind the same visible approval policy. Open gives host tools and supported account runtimes unrestricted filesystem and command access, keeps the selected folder only as the working directory, starts eligible worker plans immediately, and clears ordinary pending tool approvals; connector input and authorization remain interactive. Managed read-only Workers inherit unrestricted host reads in Open, while write-review Workers still use isolated Git worktrees. Changing the selected model affects the next turn without turning each model into a separate project history.
 
@@ -32,9 +32,9 @@ Review decisions are tracked through runtime delivery and acknowledgement. A run
 
 Failed or canceled native-runtime turns discard that runtime's native session before the next send, preventing a partially persisted prompt from being replayed into divergent history.
 
-Completed assistant responses retain their provider or account runtime and model in the transcript footer. Tool inputs remain fully copyable from collapsed activity even when the row is visually clipped.
+Completed assistant responses retain their provider or account runtime and model in the transcript footer. Command rows visually replace the current workspace with `.` and unwrap recognized shell launchers, while their tooltip and copy action preserve the exact original input.
 
-Git and preview review comments are sent as structured context with the next user turn for provider models and account runtimes. Live work drawers start collapsed, and approval lifecycle rows settle when the turn ends instead of remaining animated.
+Git and preview review comments are sent as structured context with the next user turn for provider models and account runtimes. Live work drawers open automatically only while their newest activity is a failure, collapse after recovery or turn completion, and remain manually expandable with failure details intact. Approval lifecycle rows settle when the turn ends instead of remaining animated.
 
 ## Get started
 

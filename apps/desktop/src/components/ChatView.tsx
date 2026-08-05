@@ -113,6 +113,7 @@ import {
 import {
   DEFAULT_THREAD_SETTINGS,
   getSessionComposerDraft,
+  inspectorStateForSession,
   setSessionComposerDraft,
   normalizeVirtualFilePath,
   sessionVirtualProjectFiles,
@@ -134,6 +135,7 @@ import {
   extractLocalhostUrlFromRunTrace,
   hasPreviewPackageJson,
   isPreviewableArtifact,
+  normalizeArtifactBrowserUrl,
   previewRuntimeBrowserUrl,
   previewRuntimeFiles,
 } from "../lib/artifacts";
@@ -237,6 +239,7 @@ import {
   previewRuntimeFoldersEqual,
   previewRuntimeKeyForThread,
 } from "../lib/previewRuntimeKeys";
+import { listenForPreviewOpenUrl } from "../lib/previewWebview";
 import { statusPart } from "../lib/turnEvents";
 import {
   accountRuntimeNotReadyForTurn,
@@ -1699,13 +1702,14 @@ export function ChatView({
   const queuedMessages = useSessions(
     (s) => s.queuedMessagesBySession[s.activeId] ?? EMPTY_QUEUE,
   );
-  const inspectorTab = useSessions(
-    (s) => s.sessions.find((x) => x.id === s.activeId)?.inspectorTab ?? "preview",
+  const inspectorState = useSessions((s) =>
+    inspectorStateForSession(
+      s.inspectorByKey,
+      s.sessions.find((session) => session.id === s.activeId),
+    ),
   );
-  const inspectorOpen = useSessions(
-    (s) =>
-      s.sessions.find((x) => x.id === s.activeId)?.inspectorOpen === true,
-  );
+  const inspectorTab = inspectorState.tab;
+  const inspectorOpen = inspectorState.open;
   const contextPanelOpen = useSessions(
     (s) =>
       s.sessions.find((x) => x.id === s.activeId)?.contextPanelOpen === true,
@@ -2951,21 +2955,15 @@ export function ChatView({
   }, [activeId, sessionsHydrated]);
 
   useEffect(() => {
-    const openUrl = (event: Event) => {
-      const url = (event as CustomEvent<{ url?: unknown }>).detail?.url;
-      if (typeof url !== "string") return;
-      let parsed: URL;
-      try {
-        parsed = new URL(url);
-      } catch {
-        return;
-      }
-      if (parsed.protocol !== "https:") return;
+    const openUrl = (value: unknown) => {
+      if (typeof value !== "string") return;
+      const url = normalizeArtifactBrowserUrl(value);
+      if (!url) return;
       const current =
         useSessions.getState().sessions.find((session) => session.id === activeId)
           ?.browserSession ??
         emptyBrowserSession();
-      const tab = emptyBrowserTab(parsed.toString());
+      const tab = emptyBrowserTab(url);
       const next = {
         ...current,
         tabs: [...current.tabs, tab],
@@ -2978,8 +2976,22 @@ export function ChatView({
       setSessionInspectorTab(activeId, "preview");
       setSessionInspectorOpen(activeId, true);
     };
-    window.addEventListener("milim-open-browser-url", openUrl);
-    return () => window.removeEventListener("milim-open-browser-url", openUrl);
+    const openWindowUrl = (event: Event) =>
+      openUrl((event as CustomEvent<{ url?: unknown }>).detail?.url);
+    let disposed = false;
+    let stopListening: () => void = () => undefined;
+    void listenForPreviewOpenUrl((request) => openUrl(request.url))
+      .then((unlisten) => {
+        if (disposed) unlisten();
+        else stopListening = unlisten;
+      })
+      .catch(() => undefined);
+    window.addEventListener("milim-open-browser-url", openWindowUrl);
+    return () => {
+      disposed = true;
+      stopListening();
+      window.removeEventListener("milim-open-browser-url", openWindowUrl);
+    };
   }, [
     activeId,
     setSessionBrowserSession,
@@ -3180,12 +3192,11 @@ export function ChatView({
     }
     setPreviewPanelClosing(true);
     previewCloseTimeoutRef.current = window.setTimeout(() => {
-      if (
-        useSessions
-          .getState()
-          .sessions.find((session) => session.id === activeId)
-          ?.inspectorTab === "git"
-      ) {
+      const state = useSessions.getState();
+      if (inspectorStateForSession(
+        state.inspectorByKey,
+        state.sessions.find((session) => session.id === activeId),
+      ).tab === "git") {
         setSessionInspectorOpen(activeId, false);
       }
       setPreviewPanelClosing(false);
@@ -7049,6 +7060,7 @@ export function ChatView({
                       busy={busy}
                       activeMediaTargetPresent={Boolean(activeMediaTarget)}
                       folderIsEmpty={!folder.trim()}
+                      workspaceFolder={folder}
                       activeRun={activeRun}
                       previewArtifacts={previewArtifactsForMessage(m)}
                       previewAppBusy={previewAppBusy}

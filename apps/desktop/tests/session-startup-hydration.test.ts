@@ -73,6 +73,7 @@ const persistedSessions = JSON.stringify({
         artifactPanelTab: "code",
         contextPanelOpen: true,
         contextCollapsedSectionIds: ["sources", "activity", "sources", "invalid"],
+        settings: { folder: "C:\\shared" },
         createdAt: 1,
         updatedAt: 1,
         settledAt: 7,
@@ -84,6 +85,7 @@ const persistedSessions = JSON.stringify({
         artifactPanelTab: "code",
         contextPanelOpen: "invalid",
         contextCollapsedSectionIds: "invalid",
+        settings: { folder: "C:\\code" },
         createdAt: 2,
         updatedAt: 2,
         settledAt: "invalid",
@@ -94,6 +96,7 @@ const persistedSessions = JSON.stringify({
         messages: [],
         inspectorOpen: true,
         inspectorTab: "workers",
+        settings: { folder: "c:/SHARED/" },
         createdAt: 3,
         updatedAt: 3,
       },
@@ -164,7 +167,7 @@ function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
-const { purgeExpiredArchivesAfterHydration, useSessions } =
+const { inspectorStateForSession, purgeExpiredArchivesAfterHydration, useSessions } =
   await import("../src/sessions/store.js");
 const { flushDeferredUserStateWrites } =
   await import("../src/persistence/userStateStorage.js");
@@ -195,6 +198,10 @@ if (!useSessions.persist.hasHydrated()) {
 await flushDeferredUserStateWrites("milim.sessions");
 
 const stored = JSON.parse(dbValues.get("milim.sessions") ?? "{}");
+const inspectorFor = (index: number) => {
+  const state = useSessions.getState();
+  return inspectorStateForSession(state.inspectorByKey, state.sessions[index]);
+};
 assert(
   stored.state.sessions[0]?.id === "persisted-session",
   "startup archive cleanup should preserve hydrated sessions",
@@ -213,8 +220,7 @@ assert(
   "title-only sessions should hydrate with an empty messages array",
 );
 assert(
-  useSessions.getState().sessions[1]?.inspectorOpen === true &&
-    useSessions.getState().sessions[1]?.inspectorTab === "code",
+  inspectorFor(1).open === true && inspectorFor(1).tab === "code",
   "legacy code tabs should migrate even when sidePanelMode was absent",
 );
 assert(
@@ -231,8 +237,8 @@ assert(
 );
 assert(
   useSessions.getState().sessions[2]?.contextPanelOpen === undefined &&
-    useSessions.getState().sessions[2]?.inspectorOpen === true &&
-    useSessions.getState().sessions[2]?.inspectorTab === "workers",
+    inspectorFor(2).open === true &&
+    inspectorFor(2).tab === "workers",
   "Workers inspector state should remain attached to the unified inspector",
 );
 assert(
@@ -255,21 +261,24 @@ assert(
   ),
   "hydration should regenerate stripped text stream parts from assistant content",
 );
-const migratedInspector = useSessions.getState().sessions[0];
 assert(
-  migratedInspector?.inspectorOpen === true &&
-    migratedInspector.inspectorTab === "code",
-  "hydration should migrate legacy artifact panel state to the unified inspector",
+  inspectorFor(0).open === true && inspectorFor(0).tab === "workers",
+  "the most recently updated legacy thread should seed shared inspector state",
 );
 assert(
-  stored.state.sessions[0]?.inspectorOpen === true &&
-    stored.state.sessions[0]?.inspectorTab === "code",
-  "the first post-hydration write should persist unified inspector fields",
+  Object.keys(stored.state.inspectorByKey ?? {}).length === 2 &&
+    Object.values(stored.state.inspectorByKey ?? {}).some((value) => {
+      const inspector = value as { open?: unknown; tab?: unknown };
+      return inspector.open === true && inspector.tab === "workers";
+    }),
+  "the first post-hydration write should persist folder-keyed inspector state",
 );
 assert(
   !("artifactPanelOpen" in stored.state.sessions[0]) &&
     !("sidePanelMode" in stored.state.sessions[0]) &&
-    !("artifactPanelTab" in stored.state.sessions[0]),
+    !("artifactPanelTab" in stored.state.sessions[0]) &&
+    !("inspectorOpen" in stored.state.sessions[0]) &&
+    !("inspectorTab" in stored.state.sessions[0]),
   "post-migration persistence should omit all legacy side-panel fields",
 );
 

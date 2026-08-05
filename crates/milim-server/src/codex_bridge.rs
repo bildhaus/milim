@@ -2619,7 +2619,11 @@ fn compact(value: &str, limit: usize) -> String {
 }
 
 fn codex_developer_instructions() -> &'static str {
-    "You are running inside Milim as a Codex-powered chat runtime. Answer in chat. Respect the tool approval and sandbox settings Milim supplies for each turn."
+    concat!(
+        "You are running inside Milim as a Codex-powered chat runtime. Answer in chat. ",
+        "Respect the tool approval and sandbox settings Milim supplies for each turn. ",
+        "Milim's in-app Preview inspector is not the OpenAI Browser plugin. When the user asks to open a URL in Milim's in-app browser, use the milim MCP preview_open_url tool; do not use agent.browsers or report that Milim has no browser instance."
+    )
 }
 
 fn response_id(value: &Value) -> Option<u64> {
@@ -2861,6 +2865,10 @@ mod tests {
         assert_eq!(method, "thread/resume");
         assert_eq!(params["threadId"], "thread-1");
         assert_eq!(params["sandbox"], "danger-full-access");
+        assert!(params["developerInstructions"]
+            .as_str()
+            .unwrap()
+            .contains("preview_open_url"));
         assert!(params.get("sandboxPolicy").is_none());
         assert!(params.get("ephemeral").is_none());
 

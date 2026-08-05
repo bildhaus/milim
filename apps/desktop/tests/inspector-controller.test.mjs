@@ -64,6 +64,8 @@ assert.match(api, /source_fingerprint/);
 assert.match(api, /after_seq=/);
 assert.match(store, /inspectorOpen\?: boolean/);
 assert.match(store, /inspectorTab\?: SessionInspectorTab/);
+assert.match(store, /inspectorByKey: Record<string, SessionInspectorState>/);
+assert.match(store, /inspectorStateForSession/);
 assert.match(store, /"preview" \| "code" \| "git" \| "workers"/);
 assert.doesNotMatch(store, /artifactPanelOpen: open/);
 assert.doesNotMatch(store, /sidePanelMode: mode/);
