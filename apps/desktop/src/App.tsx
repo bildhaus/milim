@@ -56,6 +56,10 @@ import {
 } from "./ui/sounds";
 import { shortcutLabel } from "./ui/shortcuts";
 import { createInteractiveChat } from "./lib/newChatCoordinator";
+import {
+  nativeBadgeThreadCount,
+  setMilimUnreadBadge,
+} from "./lib/nativeNotifications";
 import { useUiPreferences } from "./ui/store";
 
 const SettingsDialog = lazy(() =>
@@ -364,6 +368,7 @@ function AppContent() {
   const sessionIds = useSessions((s) =>
     s.sessions.map((session) => session.id).join("\0"),
   );
+  const nativeBadgeCount = useSessions(nativeBadgeThreadCount);
   const lastSessionIdsRef = useRef<Set<string> | null>(null);
   const [sessionsHydrated, setSessionsHydrated] = useState(() =>
     useSessions.persist.hasHydrated(),
@@ -406,6 +411,10 @@ function AppContent() {
       if (!ids.has(id)) void deleteThreadTree(id).catch(() => {});
     });
   }, [sessionIds, sessionsHydrated]);
+  useEffect(() => {
+    if (!sessionsHydrated) return;
+    void setMilimUnreadBadge(nativeBadgeCount).catch(() => {});
+  }, [nativeBadgeCount, sessionsHydrated]);
   useEffect(() => {
     refreshAgents();
   }, [refreshAgents]);
