@@ -10,7 +10,7 @@ Release artifacts target Windows and macOS. Linux packaging is intentionally dis
 
 ## What Milim does
 
-- **Keep one canonical thread.** Workspace context, conversation, and review history remain together instead of fragmenting by provider.
+- **Keep one canonical thread.** Workspace context, conversation, attached files, and review history remain together instead of fragmenting by provider. Add files from the picker, clipboard, or by dropping them onto the composer.
 - **Work from a thread inbox.** A General preference can show active threads without section pagination in a flat recent-activity view, keep quiet project context beneath each thread, and fold completed threads into a Settled footer before they can be archived.
 - **Hot-swap models.** Switch the next turn between hosted providers, local Ollama or LM Studio models, and separately installed Codex, Claude, OpenCode, or Pi runtimes.
 - **Keep local control.** Project selection, model routing, tool approvals, local persistence, and outbound privacy boundaries stay explicit.
