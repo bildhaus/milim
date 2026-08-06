@@ -12,6 +12,7 @@ type MarkdownProps = {
   previewArtifactsStreaming?: boolean;
   collapseArtifacts?: boolean;
   renderMermaid?: boolean;
+  sourceLinks?: boolean;
 };
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -58,12 +59,13 @@ const server = await createServer({
 });
 
 try {
-  const { Markdown, MemoizedMarkdown, hasClosedMermaidFence, isHttpHref, parseMarkdownIntoBlocks } = await server.ssrLoadModule("/src/components/Markdown.tsx") as {
+  const { Markdown, MemoizedMarkdown, hasClosedMermaidFence, isHttpHref, parseMarkdownIntoBlocks, sourceLinkDetails } = await server.ssrLoadModule("/src/components/Markdown.tsx") as {
     Markdown: ComponentType<MarkdownProps>;
     MemoizedMarkdown: ComponentType<MarkdownProps>;
     hasClosedMermaidFence: (content: string) => boolean;
     isHttpHref: (href: string | undefined) => boolean;
     parseMarkdownIntoBlocks: (content: string) => string[];
+    sourceLinkDetails: (href: string | undefined) => { host: string; path: string } | null;
   };
   const { MermaidDiagram, boundedRasterDimensions, mermaidSvgDimensions, standaloneMermaidSvg } = await server.ssrLoadModule("/src/components/MermaidDiagram.tsx") as {
     MermaidDiagram: ComponentType<{ source: string }>;
@@ -79,6 +81,7 @@ try {
     collapseArtifacts = true,
     allowHtml = false,
     renderMermaid = false,
+    sourceLinks = false,
   ): string {
     return renderToStaticMarkup(createElement(Markdown, {
       content,
@@ -89,6 +92,7 @@ try {
       previewArtifactsStreaming,
       collapseArtifacts,
       renderMermaid,
+      sourceLinks,
     }));
   }
 
@@ -111,6 +115,16 @@ try {
   assert(isHttpHref("http://localhost:5173"), "localhost http links should use the native browser opener");
   assert(!isHttpHref("#section"), "page anchors should keep default markdown behavior");
   assert(!isHttpHref("mailto:test@example.com"), "non-http links should keep default markdown behavior");
+  equal(sourceLinkDetails("https://www.prompt-kit.com/docs?ref=chat")?.host, "prompt-kit.com", "source links should show a compact host");
+  equal(sourceLinkDetails("https://www.prompt-kit.com/docs?ref=chat")?.path, "prompt-kit.com/docs", "source previews should omit query parameters");
+  equal(sourceLinkDetails("#section"), null, "page anchors should not become source links");
+
+  const ordinaryLink = renderMarkdown("[Prompt Kit](https://www.prompt-kit.com/docs)");
+  assert(!ordinaryLink.includes("md-source-link"), "ordinary Markdown surfaces should keep regular links");
+  const assistantSourceLink = renderMarkdown("[Prompt Kit](https://www.prompt-kit.com/docs?ref=chat)", undefined, false, true, false, false, true);
+  assert(assistantSourceLink.includes("md-source-link"), "assistant sources should render as source chips");
+  assert(assistantSourceLink.includes("prompt-kit.com/docs"), "source chips should expose hover path details");
+  assert(assistantSourceLink.includes("opens in browser"), "source chips should announce external navigation");
 
   const emptyFences = renderMarkdown([
     "```html",

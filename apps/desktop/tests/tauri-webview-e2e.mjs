@@ -26,6 +26,7 @@ const commandPaletteOnly = process.argv.includes("--command-palette-only");
 const settingsOnly = process.argv.includes("--settings-only");
 const appMenuOnly = process.argv.includes("--app-menu-only");
 const turnChangesOnly = process.argv.includes("--turn-changes-only");
+const chatAffordancesOnly = process.argv.includes("--chat-affordances-only");
 const mobileAuthOnly = process.argv.includes("--mobile-auth-only");
 const mediaOnly = process.argv.includes("--media-only");
 const mcpAppKinds = ["chart", "diagram", "form", "dashboard", "viewer"];
@@ -51,6 +52,8 @@ const screenshots = {
   turnChanges: join(tmpdir(), "milim-tauri-webview-turn-changes.png"),
   inboxProjects: join(tmpdir(), "milim-tauri-webview-inbox-projects.png"),
   inboxSettings: join(tmpdir(), "milim-tauri-webview-inbox-settings.png"),
+  chatSources: join(tmpdir(), "milim-tauri-webview-chat-sources.png"),
+  chatLatest: join(tmpdir(), "milim-tauri-webview-chat-latest.png"),
   inboxActive: join(tmpdir(), "milim-tauri-webview-inbox-active.png"),
   inboxSettled: join(tmpdir(), "milim-tauri-webview-inbox-settled.png"),
   workspaceCode: join(tmpdir(), "milim-tauri-webview-workspace-code.png"),
@@ -134,6 +137,10 @@ try {
     turnChangesRepo = createTurnChangesRepo();
     await runTurnChangesCheck(session.page, turnChangesRepo);
     consoleErrors.push(...errors);
+  } else if (chatAffordancesOnly) {
+    const errors = collectErrors(session.page);
+    await runChatAffordancesCheck(session.page);
+    consoleErrors.push(...errors.filter((message) => !message.includes("/codex/models")));
   } else if (browserProfileOnly) {
     const errors = collectErrors(session.page);
     await runBrowserProfileCheck(session);
@@ -206,6 +213,7 @@ try {
     session = await launchTauri(milimHome);
     consoleErrors.push(...(await runPersistenceAndChat(session.page, session.child.pid)));
     await session.page.screenshot({ path: screenshots.chat, fullPage: false });
+    await runChatAffordancesCheck(session.page);
   }
 
   if (consoleErrors.length) {
@@ -4355,6 +4363,75 @@ async function closeChatSearch(page) {
   await page.getByTestId("command-palette-input").waitFor({ state: "hidden" });
 }
 
+async function runChatAffordancesCheck(page) {
+  await page.getByTestId("chat-shell").waitFor();
+  await dismissOnboardingIfPresent(page);
+  await page.evaluate(async () => {
+    const invoke = window.__TAURI_INTERNALS__?.invoke;
+    if (!invoke) throw new Error("Tauri invoke unavailable for chat affordance fixture.");
+    const now = Date.now();
+    const messages = Array.from({ length: 36 }, (_, index) => ({
+      id: `chat-affordance-${index}`,
+      role: index % 2 ? "assistant" : "user",
+      content: index === 35
+        ? "Read [Prompt Kit docs](https://www.prompt-kit.com/docs?ref=e2e) for the source pattern."
+        : `Transcript fixture message ${index + 1}.`,
+    }));
+    await invoke("user_sessions_set", {
+      value: JSON.stringify({
+        state: {
+          sessions: [{
+            id: "e2e-chat-affordances",
+            title: "Chat affordances fixture",
+            messages,
+            createdAt: now,
+            updatedAt: now,
+          }],
+          activeId: "e2e-chat-affordances",
+        },
+        version: 0,
+      }),
+    });
+  });
+  await page.reload();
+  await page.getByTestId("chat-shell").waitFor();
+  await dismissOnboardingIfPresent(page);
+
+  const source = page.locator(".md-source-link").last();
+  await source.waitFor();
+  if (!(await source.getAttribute("aria-label"))?.includes("opens in browser")) {
+    throw new Error("Assistant source chip did not expose its external destination.");
+  }
+  await source.hover();
+  await page.waitForFunction(() => {
+    const preview = document.querySelector(".md-source-preview");
+    return preview instanceof HTMLElement && getComputedStyle(preview).opacity === "1";
+  });
+  const sourceDetail = await page.locator(".md-source-preview").last().innerText();
+  if (!sourceDetail.includes("prompt-kit.com/docs") || sourceDetail.includes("ref=e2e")) {
+    throw new Error(`Source hover detail was not compact and query-free: ${sourceDetail}`);
+  }
+  await page.screenshot({ path: screenshots.chatSources, fullPage: false });
+
+  const scroll = page.locator(".chat-scroll");
+  const canScroll = await scroll.evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event("scroll"));
+    return element.scrollHeight > element.clientHeight;
+  });
+  if (!canScroll) throw new Error("Chat affordance fixture did not create a scrollable transcript.");
+  const latest = page.getByTestId("chat-jump-latest");
+  await latest.waitFor();
+  await page.screenshot({ path: screenshots.chatLatest, fullPage: false });
+  await latest.click();
+  await page.waitForFunction(() => {
+    const element = document.querySelector(".chat-scroll");
+    return element instanceof HTMLElement &&
+      element.scrollHeight - element.scrollTop - element.clientHeight <= 32;
+  });
+  await latest.waitFor({ state: "hidden" });
+}
+
 async function seedChatSearchFixture(page, withQueuedMessages = false) {
   await page.evaluate(async ({ withQueuedMessages }) => {
     const key = "milim.sessions";
@@ -4935,6 +5012,8 @@ function printEvidencePaths(milimHome) {
   console.log(`nativeChartDarkScreenshot=${screenshots.nativeChartDark}`);
   console.log(`nativeChartNarrowScreenshot=${screenshots.nativeChartNarrow}`);
   console.log(`turnChangesScreenshot=${screenshots.turnChanges}`);
+  console.log(`chatSourcesScreenshot=${screenshots.chatSources}`);
+  console.log(`chatLatestScreenshot=${screenshots.chatLatest}`);
   for (const theme of ["light", "dark"]) {
     for (const kind of mcpAppKinds) console.log(`mcpApp${kind}Screenshot(${theme})=${mcpAppViewScreenshot(kind, theme)}`);
   }

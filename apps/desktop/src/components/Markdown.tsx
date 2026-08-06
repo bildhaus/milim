@@ -8,6 +8,7 @@ import { extractArtifactsFromContent, isPreviewableArtifact } from "../lib/artif
 import { markPerfRender } from "../lib/perf";
 import { highlightSyntax, type SyntaxNode } from "../lib/syntaxHighlight";
 import { CodeBlock } from "./CodeBlock";
+import { ExternalLink } from "./icons";
 import { MermaidDiagram } from "./MermaidDiagram";
 
 type MarkdownRehypePlugins = NonNullable<ComponentProps<typeof ReactMarkdown>["rehypePlugins"]>;
@@ -20,6 +21,7 @@ type MarkdownProps = {
   previewArtifactsStreaming?: boolean;
   collapseArtifacts?: boolean;
   renderMermaid?: boolean;
+  sourceLinks?: boolean;
 };
 
 type MarkdownRehypePlugin = MarkdownRehypePlugins[number];
@@ -147,6 +149,19 @@ export function isHttpHref(href: string | undefined): href is string {
   return Boolean(href && /^https?:\/\//i.test(href));
 }
 
+export function sourceLinkDetails(
+  href: string | undefined,
+): { host: string; path: string } | null {
+  if (!isHttpHref(href)) return null;
+  try {
+    const url = new URL(href);
+    const host = url.hostname.replace(/^www\./i, "");
+    return { host, path: url.pathname === "/" ? host : `${host}${url.pathname}` };
+  } catch {
+    return null;
+  }
+}
+
 function openMarkdownLink(event: MouseEvent<HTMLAnchorElement>, href: string | undefined): void {
   if (!isHttpHref(href)) return;
   event.preventDefault();
@@ -162,6 +177,7 @@ function MarkdownBody({
   previewArtifactsStreaming = false,
   collapseArtifacts = true,
   renderMermaid = false,
+  sourceLinks = false,
 }: MarkdownProps) {
   const effectivePreviewArtifacts = useMemo(
     () =>
@@ -199,11 +215,39 @@ function MarkdownBody({
             </CodeBlock>
           );
         },
-        a: ({ children, href }) => (
-          <a href={href} target="_blank" rel="noreferrer" onClick={(event) => openMarkdownLink(event, href)}>
-            {children}
-          </a>
-        ),
+        a: ({ children, href }) => {
+          const source = sourceLinks ? sourceLinkDetails(href) : null;
+          if (!source) {
+            return (
+              <a href={href} target="_blank" rel="noreferrer" onClick={(event) => openMarkdownLink(event, href)}>
+                {children}
+              </a>
+            );
+          }
+          const label = codeBlockText(children).trim() || source.host;
+          return (
+            <span className="md-source">
+              <a
+                className="md-source-link"
+                href={href}
+                target="_blank"
+                rel="noreferrer"
+                title={href}
+                aria-label={`${label}, ${source.host}, opens in browser`}
+                onClick={(event) => openMarkdownLink(event, href)}
+              >
+                <span>{children}</span>
+                <span className="md-source-host" aria-hidden="true">{source.host}</span>
+                <ExternalLink size={10} aria-hidden="true" />
+              </a>
+              <span className="md-source-preview" aria-hidden="true">
+                <strong>{label}</strong>
+                <span>{source.host}</span>
+                <code dir="ltr">{source.path}</code>
+              </span>
+            </span>
+          );
+        },
       }}
     >
       {content}

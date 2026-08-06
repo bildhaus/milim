@@ -308,6 +308,7 @@ import type { ModelPickerSelection } from "./ModelPicker";
 import { GoalPanel, type GoalPanelDraft } from "./GoalPanel";
 import {
   ArrowRight,
+  ChevronDown,
   Code,
   Eye,
   FileText,
@@ -2064,6 +2065,7 @@ export function ChatView({
   const previewResizeHandleRef = useRef<HTMLDivElement>(null);
   const contextLauncherRef = useRef<HTMLButtonElement>(null);
   const stickToBottomRef = useRef(true);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const {
     approvedWorkerRunsRef,
     childThreadEventControllersRef,
@@ -2188,6 +2190,12 @@ export function ChatView({
     const el = chatScrollRef.current;
     if (!el) return;
     el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
+  }
+
+  function jumpToLatest() {
+    stickToBottomRef.current = true;
+    setShowJumpToLatest(false);
+    scrollToChatBottom();
   }
 
   function isLiveChildThread(thread: ChildThreadInfo): boolean {
@@ -2498,7 +2506,9 @@ export function ChatView({
   function updateAutoScrollCoupling() {
     const el = chatScrollRef.current;
     if (!el) return;
-    stickToBottomRef.current = isNearScrollBottom(el);
+    const following = isNearScrollBottom(el);
+    stickToBottomRef.current = following;
+    setShowJumpToLatest(!following);
   }
 
   useEffect(() => {
@@ -2513,6 +2523,7 @@ export function ChatView({
 
   useEffect(() => {
     stickToBottomRef.current = true;
+    setShowJumpToLatest(false);
     scrollToChatBottom();
     setPendingAttachments([]);
     setChatNotice(null);
@@ -6872,55 +6883,70 @@ export function ChatView({
               </button>
             )}
           </div>
-          <div
-            className="chat-scroll"
-            ref={chatScrollRef}
-            onScroll={updateAutoScrollCoupling}
-          >
-            {!emptyThread && (
-              <div className="messages">
-                {messages.map((m, i) => {
-                  if (workerRunSynthesisId(m)) return null;
-                  const messageIsCompaction = isCompactionCheckpoint(m);
-                  const isApprovalMessage = Boolean(m.approval);
-                  const isLastAssistant =
-                    m.role === "assistant" &&
-                    !messageIsCompaction &&
-                    !isApprovalMessage &&
-                    i === messages.length - 1;
-                  const messageTurnChangesKey = m.workspaceCheckpoint
-                    ? `${activeId}:${m.id ?? i}:${m.workspaceCheckpoint.ref}`
-                    : "";
-                  return (
-                    <MessageRow
-                      key={m.id ?? i}
-                      activeId={activeId}
-                      appSessionId={APP_SESSION_ID}
-                      message={m}
-                      index={i}
-                      isEditing={editing === i}
-                      isLastAssistant={isLastAssistant}
-                      assistantStreaming={busy && isLastAssistant}
-                      busy={busy}
-                      activeMediaTargetPresent={Boolean(activeMediaTarget)}
-                      folderIsEmpty={!folder.trim()}
-                      workspaceFolder={folder}
-                      activeRun={activeRun}
-                      previewArtifacts={previewArtifactsForMessage(m)}
-                      previewAppBusy={previewAppBusy}
-                      previewAppStatus={activePreviewAppStatus}
-                      toolApproval={toolApproval}
-                      turnReview={
-                        isLastAssistant &&
-                        turnReview?.key === messageTurnChangesKey
-                          ? turnReview
-                          : null
-                      }
-                      actionsRef={messageRowActionsRef}
-                    />
-                  );
-                })}
-              </div>
+          <div className="chat-scroll-shell">
+            <div
+              className="chat-scroll"
+              ref={chatScrollRef}
+              onScroll={updateAutoScrollCoupling}
+            >
+              {!emptyThread && (
+                <div className="messages">
+                  {messages.map((m, i) => {
+                    if (workerRunSynthesisId(m)) return null;
+                    const messageIsCompaction = isCompactionCheckpoint(m);
+                    const isApprovalMessage = Boolean(m.approval);
+                    const isLastAssistant =
+                      m.role === "assistant" &&
+                      !messageIsCompaction &&
+                      !isApprovalMessage &&
+                      i === messages.length - 1;
+                    const messageTurnChangesKey = m.workspaceCheckpoint
+                      ? `${activeId}:${m.id ?? i}:${m.workspaceCheckpoint.ref}`
+                      : "";
+                    return (
+                      <MessageRow
+                        key={m.id ?? i}
+                        activeId={activeId}
+                        appSessionId={APP_SESSION_ID}
+                        message={m}
+                        index={i}
+                        isEditing={editing === i}
+                        isLastAssistant={isLastAssistant}
+                        assistantStreaming={busy && isLastAssistant}
+                        busy={busy}
+                        activeMediaTargetPresent={Boolean(activeMediaTarget)}
+                        folderIsEmpty={!folder.trim()}
+                        workspaceFolder={folder}
+                        activeRun={activeRun}
+                        previewArtifacts={previewArtifactsForMessage(m)}
+                        previewAppBusy={previewAppBusy}
+                        previewAppStatus={activePreviewAppStatus}
+                        toolApproval={toolApproval}
+                        turnReview={
+                          isLastAssistant &&
+                          turnReview?.key === messageTurnChangesKey
+                            ? turnReview
+                            : null
+                        }
+                        actionsRef={messageRowActionsRef}
+                      />
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            {showJumpToLatest && !emptyThread && (
+              <button
+                type="button"
+                className="chat-jump-latest"
+                data-testid="chat-jump-latest"
+                title="Jump to latest"
+                aria-label="Jump to latest message"
+                onClick={jumpToLatest}
+              >
+                <ChevronDown size={14} aria-hidden="true" />
+                <span>Latest</span>
+              </button>
             )}
           </div>
 

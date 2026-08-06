@@ -571,6 +571,7 @@ function AnswerText({
         highlight={!streaming}
         previewArtifactsStreaming={previewArtifactsStreaming}
         renderMermaid
+        sourceLinks
       />
     </Suspense>
   );
