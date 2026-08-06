@@ -1228,7 +1228,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
               <div className="setting-stack">
                 <SettingsChoiceGroup value={autocompleteMode} onChange={setAutocompleteMode} testIdPrefix="autocomplete-mode" options={[
                   { value: "automatic", label: "Automatic", detail: "/ and @ open suggestions while typing." },
-                  { value: "manual", label: "Manual", detail: "Use the button or shortcut." },
+                  { value: "manual", label: "Manual", detail: "Use the configured shortcut." },
                   { value: "off", label: "Off", detail: "Typed slash commands still execute." },
                 ]} />
                 {(["commands", "files", "skills", "mcp"] as const).map((source) => (
