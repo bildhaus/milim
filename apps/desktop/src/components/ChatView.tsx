@@ -1416,6 +1416,7 @@ export function ChatView({
   composerDraft,
   gitPanelRequest = null,
   mcpManagerRequest = 0,
+  chatSearchRequest = 0,
   onComposerDraftConsumed,
   skillsRevision = 0,
 }: {
@@ -1429,6 +1430,7 @@ export function ChatView({
     view: GitPanelView;
   } | null;
   mcpManagerRequest?: number;
+  chatSearchRequest?: number;
   onComposerDraftConsumed?: (id: number) => void;
   skillsRevision?: number;
 }) {
@@ -1676,9 +1678,11 @@ export function ChatView({
   const setPreviewPanelWidth = useUiPreferences((s) => s.setPreviewPanelWidth);
   const sidebarOpen = useUiPreferences((s) => s.sidebarOpen);
   const sidebarWidth = useUiPreferences((s) => s.sidebarWidth);
+  const threadNavigationPlacement = useUiPreferences((s) => s.threadNavigationPlacement);
   const setSidebarOpen = useUiPreferences((s) => s.setSidebarOpen);
   const appShortcuts = useUiPreferences((s) => s.appShortcuts);
   const toggleSidebar = useUiPreferences((s) => s.toggleSidebar);
+  const verticalSidebarOpen = threadNavigationPlacement === "sidebar" && sidebarOpen;
   const autoTitleChats = useUiPreferences((s) => s.autoTitleChats);
   const experimentalHashlinePatch = useUiPreferences(
     (s) => s.experimentalHashlinePatch,
@@ -2555,6 +2559,11 @@ export function ChatView({
     if (!mcpManagerRequest) return;
     setMcpOpen(true);
   }, [mcpManagerRequest]);
+
+  useEffect(() => {
+    if (!chatSearchRequest) return;
+    setChatSearchOpen(true);
+  }, [chatSearchRequest]);
 
   useEffect(() => {
     return () => {
@@ -3800,7 +3809,7 @@ export function ChatView({
     const target = event.currentTarget;
     const bodyWidth = chatBodyRef.current?.getBoundingClientRect().width ?? chatBodyWidth;
     const dockedLimit = maxPreviewPanelWidth(bodyWidth, reservedContextWidth);
-    const sidebarGain = sidebarOpen
+    const sidebarGain = verticalSidebarOpen
       ? Math.max(0, sidebarWidth - COLLAPSED_SIDEBAR_WIDTH)
       : 0;
     previewResizeStartRef.current = {
@@ -3811,7 +3820,7 @@ export function ChatView({
       pointerId: event.pointerId,
       target,
       snappedClosed: false,
-      sidebarWasOpen: sidebarOpen,
+      sidebarWasOpen: verticalSidebarOpen,
       sidebarAutoCollapsed: false,
       sidebarCollapseBoundary: dockedLimit,
       overlayBoundary: dockedLimit + sidebarGain,
@@ -3920,7 +3929,7 @@ export function ChatView({
         resizePreviewPanel(resolvedPreviewPanelWidth + PREVIEW_PANEL_KEYBOARD_STEP, true);
       } else if (resolvedPreviewPanelWidth < dockedPreviewPanelWidth) {
         resizePreviewPanel(resolvedPreviewPanelWidth + PREVIEW_PANEL_KEYBOARD_STEP, false);
-      } else if (sidebarOpen) {
+      } else if (verticalSidebarOpen) {
         setSidebarOpen(false);
       } else {
         setPreviewPanelOverlay(true);
@@ -6403,6 +6412,7 @@ export function ChatView({
       label: sidebarOpen ? "Hide sidebar" : "Show sidebar",
       keywords: ["toggle", "navigation"],
       shortcut: shortcutLabel(appShortcuts.toggleSidebar),
+      available: threadNavigationPlacement === "sidebar",
       run: toggleSidebar,
     },
     {
@@ -6470,7 +6480,10 @@ export function ChatView({
       } else if (shortcutMatchesEvent(appShortcuts.openComposerSuggestions, event)) {
         event.preventDefault();
         window.dispatchEvent(new Event("milim:open-composer-suggestions"));
-      } else if (shortcutMatchesEvent(appShortcuts.toggleSidebar, event)) {
+      } else if (
+        threadNavigationPlacement === "sidebar" &&
+        shortcutMatchesEvent(appShortcuts.toggleSidebar, event)
+      ) {
         event.preventDefault();
         toggleSidebar();
       } else if (shortcutMatchesEvent(appShortcuts.previousThread, event)) {
@@ -6492,6 +6505,7 @@ export function ChatView({
     sessionSummaries,
     switchToSession,
     threadSettings,
+    threadNavigationPlacement,
     toggleSidebar,
   ]);
 

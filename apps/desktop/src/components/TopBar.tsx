@@ -1,5 +1,5 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { MouseEvent } from "react";
+import type { MouseEvent, ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { getCodexRateLimits, isClaudeModel, isCodexModel } from "../api";
@@ -39,7 +39,13 @@ const INTERACTIVE_TITLEBAR_SELECTOR = [
   "[data-window-drag-ignore]",
 ].join(",");
 
-export function TopBar({ onOpenAppMenu }: { onOpenAppMenu: (event: MouseEvent<HTMLButtonElement>) => void }) {
+export function TopBar({
+  onOpenAppMenu,
+  threadNavigation,
+}: {
+  onOpenAppMenu: (event: MouseEvent<HTMLButtonElement>) => void;
+  threadNavigation?: ReactNode;
+}) {
   const [pinnedReady, setPinnedReady] = useState(!inTauri);
   const [updateActionRunning, setUpdateActionRunning] = useState(false);
   const [confirmingUpdate, setConfirmingUpdate] = useState(false);
@@ -229,7 +235,7 @@ export function TopBar({ onOpenAppMenu }: { onOpenAppMenu: (event: MouseEvent<HT
   }
 
   return (
-    <header className="topbar" data-tauri-drag-region onMouseDown={startWindowDrag}>
+    <header className={"topbar" + (threadNavigation ? " topbar-with-thread-navigation" : "")} data-tauri-drag-region onMouseDown={startWindowDrag}>
       <div className="topbar-side topbar-left" aria-label="Current chat" data-tauri-drag-region>
         <button
           type="button"
@@ -269,6 +275,12 @@ export function TopBar({ onOpenAppMenu }: { onOpenAppMenu: (event: MouseEvent<HT
           </span>
         )}
       </div>
+
+      {threadNavigation && (
+        <div className="topbar-thread-navigation">
+          {threadNavigation}
+        </div>
+      )}
 
       <div className="topbar-side topbar-right">
         {showUpdateButton && (

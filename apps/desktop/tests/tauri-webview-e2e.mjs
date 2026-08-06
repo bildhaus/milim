@@ -52,6 +52,8 @@ const screenshots = {
   turnChanges: join(tmpdir(), "milim-tauri-webview-turn-changes.png"),
   inboxProjects: join(tmpdir(), "milim-tauri-webview-inbox-projects.png"),
   inboxSettings: join(tmpdir(), "milim-tauri-webview-inbox-settings.png"),
+  threadBarTop: join(tmpdir(), "milim-tauri-webview-thread-bar-top.png"),
+  threadBarBottom: join(tmpdir(), "milim-tauri-webview-thread-bar-bottom.png"),
   chatSources: join(tmpdir(), "milim-tauri-webview-chat-sources.png"),
   chatLatest: join(tmpdir(), "milim-tauri-webview-chat-latest.png"),
   inboxActive: join(tmpdir(), "milim-tauri-webview-inbox-active.png"),
@@ -1127,7 +1129,7 @@ async function runPersistenceAndChat(page, pid) {
 }
 
 async function runInboxSidebarCheck(page) {
-  const fixture = await page.evaluate(async ({ projectA, projectB }) => {
+  const fixture = await page.evaluate(async ({ projectA, projectB, projectC }) => {
     const invoke = window.__TAURI_INTERNALS__.invoke;
     const now = Date.now();
     const sessions = [
@@ -1179,6 +1181,22 @@ async function runInboxSidebarCheck(page) {
         createdAt: now,
         updatedAt: now - 180_000,
       },
+      {
+        id: "thread-bar-drag-one",
+        title: "Drag thread one",
+        messages: [],
+        settings: { folder: projectC },
+        createdAt: now,
+        updatedAt: now - 240_000,
+      },
+      {
+        id: "thread-bar-drag-two",
+        title: "Drag thread two",
+        messages: [],
+        settings: { folder: projectC },
+        createdAt: now,
+        updatedAt: now - 250_000,
+      },
     ];
     await invoke("user_state_set", {
       key: "milim.sessions",
@@ -1204,6 +1222,15 @@ async function runInboxSidebarCheck(page) {
               createdAt: now,
               updatedAt: now,
             },
+            {
+              id: `project:${projectC}`,
+              name: "Workspace C",
+              folder: projectC,
+              icon: "folder",
+              color: "#7c6be8",
+              createdAt: now,
+              updatedAt: now,
+            },
           ],
           activeId: "inbox-active-new",
           unreadSessionIds: [],
@@ -1213,7 +1240,7 @@ async function runInboxSidebarCheck(page) {
             pinnedSectionIds: [],
             sessionOrder: sessions.map((session) => session.id),
             sectionOrder: [],
-            projectFolders: [projectA, projectB],
+            projectFolders: [projectA, projectB, projectC],
           },
         },
         version: 0,
@@ -1222,7 +1249,7 @@ async function runInboxSidebarCheck(page) {
     await invoke("user_state_set", {
       key: "milim.ui",
       value: JSON.stringify({
-        state: { settledThreadsEnabled: false, sidebarWidth: 236 },
+        state: { settledThreadsEnabled: false, sidebarOpen: true, sidebarWidth: 236, threadNavigationPlacement: "sidebar" },
         version: 0,
       }),
     });
@@ -1241,7 +1268,7 @@ async function runInboxSidebarCheck(page) {
       }),
     });
     return { sessionIds: sessions.map((session) => session.id) };
-  }, { projectA: root, projectB: join(root, "src") });
+  }, { projectA: root, projectB: join(root, "src"), projectC: join(root, "docs") });
 
   await page.reload();
   await page.getByTestId("chat-shell").waitFor();
@@ -1256,12 +1283,186 @@ async function runInboxSidebarCheck(page) {
   const projectsChoice = page.getByTestId("sidebar-organization-projects");
   const inboxChoice = page.getByTestId("sidebar-organization-inbox");
   await assertAttribute(projectsChoice, "aria-checked", "true");
+
+  await page.getByTestId("thread-navigation-placement-top").click();
+  if (await page.getByTestId("general-sidebar-open-toggle").count()) {
+    throw new Error("Horizontal placement should hide sidebar-only settings.");
+  }
+  await closeSettings(page);
+
+  const topBar = page.getByTestId("thread-bar");
+  await topBar.waitFor();
+  if (await page.locator(".sidebar").count()) {
+    throw new Error("Top placement should replace the sidebar instead of rendering both rails.");
+  }
+  const topProject = topBar.getByRole("button", { name: /Workspace A/ }).first();
+  await topProject.waitFor();
+  const topFlow = await page.evaluate(() => {
+    const titlebar = document.querySelector(".topbar")?.getBoundingClientRect();
+    const bar = document.querySelector(".thread-bar")?.getBoundingClientRect();
+    const project = document.querySelector(".thread-bar-project");
+    const projectStyle = project ? getComputedStyle(project) : null;
+    return {
+      nested: Boolean(document.querySelector(".topbar > .topbar-thread-navigation > .thread-bar-top")),
+      titlebarTop: titlebar?.top,
+      titlebarBottom: titlebar?.bottom,
+      barTop: bar?.top,
+      barBottom: bar?.bottom,
+      projectPaddingLeft: projectStyle ? Number.parseFloat(projectStyle.paddingLeft) : 0,
+      projectPaddingRight: projectStyle ? Number.parseFloat(projectStyle.paddingRight) : 0,
+    };
+  });
+  if (
+    !topFlow.nested ||
+    topFlow.titlebarTop == null ||
+    topFlow.titlebarBottom == null ||
+    topFlow.barTop == null ||
+    topFlow.barBottom == null ||
+    topFlow.barTop < topFlow.titlebarTop ||
+    topFlow.barBottom > topFlow.titlebarBottom ||
+    topFlow.projectPaddingLeft < 14 ||
+    topFlow.projectPaddingRight < 14
+  ) {
+    throw new Error(`Top thread navigation should share the native title bar: ${JSON.stringify(topFlow)}.`);
+  }
+  await topProject.click();
+  const topDropdown = page.getByRole("dialog", { name: "Workspace A threads" });
+  await topDropdown.waitFor();
+  const topDropdownContract = await topDropdown.evaluate((element) => {
+    const trigger = document.querySelector('.thread-bar-project[aria-expanded="true"]')?.getBoundingClientRect();
+    const dropdown = element.getBoundingClientRect();
+    const list = element.querySelector(".thread-bar-popover-list");
+    return {
+      below: Boolean(trigger && dropdown.top >= trigger.bottom),
+      overflowY: list ? getComputedStyle(list).overflowY : "",
+      rows: element.querySelectorAll("[data-sidebar-session-id]").length,
+    };
+  });
+  if (!topDropdownContract.below || topDropdownContract.overflowY !== "auto" || topDropdownContract.rows !== 2) {
+    throw new Error(`Top project dropdown contract failed: ${JSON.stringify(topDropdownContract)}.`);
+  }
+  await page.keyboard.press("Escape");
+
+  const topProjectC = topBar.getByRole("button", { name: /Workspace C/ }).first();
+  await dragLocator(page, topProjectC, topProject, 0.08, 0.5);
+  await page.waitForFunction(() => {
+    const labels = [...document.querySelectorAll(".thread-bar-project-label")].map((element) => element.textContent);
+    return labels.indexOf("Workspace C") < labels.indexOf("Workspace A");
+  });
+  await page.waitForTimeout(140);
+  await topProjectC.click();
+  const projectCDropdown = page.getByRole("dialog", { name: "Workspace C threads" });
+  const dragOne = projectCDropdown.locator('[data-sidebar-session-id="thread-bar-drag-one"]');
+  const dragTwo = projectCDropdown.locator('[data-sidebar-session-id="thread-bar-drag-two"]');
+  await dragLocator(page, dragTwo, dragOne, 0.5, 0.08);
+  await page.waitForFunction(() => {
+    const ids = [...document.querySelectorAll('[aria-label="Workspace C threads"] [data-sidebar-session-id]')]
+      .map((element) => element.getAttribute("data-sidebar-session-id"));
+    return ids.indexOf("thread-bar-drag-two") < ids.indexOf("thread-bar-drag-one");
+  });
+  await page.waitForTimeout(250);
+  const persistedDragOrder = await page.evaluate(async () => {
+    const raw = await window.__TAURI_INTERNALS__.invoke("user_state_get", { key: "milim.sessions" });
+    const state = raw ? JSON.parse(raw).state : {};
+    return {
+      sectionOrder: state.sidebar?.sectionOrder ?? [],
+      sessionOrder: state.sidebar?.sessionOrder ?? [],
+    };
+  });
+  const projectAId = `project:${root}`;
+  const projectCId = `project:${join(root, "docs")}`;
+  if (
+    persistedDragOrder.sectionOrder.indexOf(projectCId) > persistedDragOrder.sectionOrder.indexOf(projectAId) ||
+    persistedDragOrder.sessionOrder.indexOf("thread-bar-drag-two") > persistedDragOrder.sessionOrder.indexOf("thread-bar-drag-one")
+  ) {
+    throw new Error(`Horizontal drag order did not persist: ${JSON.stringify(persistedDragOrder)}.`);
+  }
+  await dragLocator(page, dragOne, topProject, 0.5, 0.5);
+  await dragOne.waitFor({ state: "detached" });
+  await page.waitForTimeout(250);
+  const movedFolder = await page.evaluate(async (sessionId) => {
+    const raw = await window.__TAURI_INTERNALS__.invoke("user_state_get", { key: "milim.sessions" });
+    return raw ? JSON.parse(raw).state?.sessions?.find((session) => session.id === sessionId)?.settings?.folder : undefined;
+  }, "thread-bar-drag-one");
+  if (movedFolder !== root) {
+    throw new Error(`Cross-project thread drop should use the existing folder move action, got ${String(movedFolder)}.`);
+  }
+  await page.evaluate(async ({ projectC, disposableIds }) => {
+    const invoke = window.__TAURI_INTERNALS__.invoke;
+    const raw = await invoke("user_state_get", { key: "milim.sessions" });
+    const parsed = raw ? JSON.parse(raw) : { state: {} };
+    const state = parsed.state ?? {};
+    state.sessions = (state.sessions ?? []).filter((session) => !disposableIds.includes(session.id));
+    state.projects = (state.projects ?? []).filter((project) => project.folder !== projectC);
+    if (state.sidebar) {
+      state.sidebar.sessionOrder = (state.sidebar.sessionOrder ?? []).filter((id) => !disposableIds.includes(id));
+      state.sidebar.sectionOrder = (state.sidebar.sectionOrder ?? []).filter((id) => id !== `project:${projectC}`);
+      state.sidebar.projectFolders = (state.sidebar.projectFolders ?? []).filter((folder) => folder !== projectC);
+    }
+    await invoke("user_state_set", { key: "milim.sessions", value: JSON.stringify(parsed) });
+  }, { projectC: join(root, "docs"), disposableIds: ["thread-bar-drag-one", "thread-bar-drag-two"] });
+  await page.reload();
+  await page.getByTestId("chat-shell").waitFor();
+  await page.locator(".thread-bar-top").waitFor();
+  await topBar.getByRole("button", { name: "Search chats" }).click();
+  await page.getByTestId("command-palette-input").waitFor();
+  await closeChatSearch(page);
+  await topBar.getByTestId("open-tools").click();
+  await page.getByRole("menu", { name: "Tools" }).getByText("MCP Servers", { exact: true }).waitFor();
+  await page.keyboard.press("Escape");
+  await page.getByTestId("app-menu-trigger").click();
+  const horizontalAppMenu = page.getByRole("menu", { name: "Milim menu" });
+  if (await horizontalAppMenu.getByText(/sidebar/i).count()) {
+    throw new Error("Horizontal placement should omit the app-menu sidebar toggle.");
+  }
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Control+B");
+  await topBar.waitFor();
+  await page.screenshot({ path: screenshots.threadBarTop, fullPage: false });
+
+  await openSettings(page);
+  await page.getByTestId("settings-section-app").click();
+  await page.getByTestId("thread-navigation-placement-bottom").click();
+  await closeSettings(page);
+  const bottomBar = page.getByTestId("thread-bar");
+  await bottomBar.waitFor();
+  const bottomFlow = await page.evaluate(() => {
+    const bar = document.querySelector(".thread-bar")?.getBoundingClientRect();
+    const chat = document.querySelector('[data-testid="chat-shell"]')?.getBoundingClientRect();
+    return { barTop: bar?.top, chatBottom: chat?.bottom };
+  });
+  if (bottomFlow.barTop == null || bottomFlow.chatBottom == null || bottomFlow.barTop + 1 < bottomFlow.chatBottom) {
+    throw new Error(`Bottom thread bar should sit below chat in document flow: ${JSON.stringify(bottomFlow)}.`);
+  }
+  const bottomProject = bottomBar.getByRole("button", { name: /Workspace A/ }).first();
+  await bottomProject.click();
+  const bottomDropdown = page.getByRole("dialog", { name: "Workspace A threads" });
+  await bottomDropdown.waitFor();
+  const bottomDropdownAbove = await bottomDropdown.evaluate((element) => {
+    const trigger = document.querySelector('.thread-bar-project[aria-expanded="true"]')?.getBoundingClientRect();
+    return Boolean(trigger && element.getBoundingClientRect().bottom <= trigger.top);
+  });
+  if (!bottomDropdownAbove) throw new Error("Bottom project dropdown should open upward.");
+  await page.keyboard.press("Escape");
+  await page.screenshot({ path: screenshots.threadBarBottom, fullPage: false });
+
+  await page.reload();
+  await page.getByTestId("chat-shell").waitFor();
+  await page.locator(".thread-bar-bottom").waitFor();
+  await openSettings(page);
+  await page.getByTestId("settings-section-app").click();
+  await assertAttribute(page.getByTestId("thread-navigation-placement-bottom"), "aria-checked", "true");
+  await page.getByTestId("thread-navigation-placement-sidebar").click();
   await inboxChoice.click();
   await assertAttribute(inboxChoice, "aria-checked", "true");
   await page.screenshot({ path: screenshots.inboxSettings, fullPage: false });
   await closeSettings(page);
 
   await page.getByRole("complementary", { name: "Thread inbox" }).waitFor();
+  const restoredSidebarWidth = await page.locator(".sidebar").evaluate((element) => Math.round(element.getBoundingClientRect().width));
+  if (restoredSidebarWidth !== 236) {
+    throw new Error(`Returning to Sidebar should restore its saved width, got ${restoredSidebarWidth}.`);
+  }
   if (await page.locator(".sidebar .session-section-title").count()) {
     throw new Error("Inbox mode should not render project section headers.");
   }
@@ -1379,9 +1580,50 @@ async function runInboxSidebarCheck(page) {
   if (await page.locator(".inbox-session-section").count()) {
     throw new Error("Turning Inbox off should restore Projects rendering.");
   }
-  if (fixture.sessionIds.length !== 5) {
+  if (fixture.sessionIds.length !== 7) {
     throw new Error("Inbox fixture was not seeded completely.");
   }
+}
+
+async function dragLocator(page, source, target, targetXRatio = 0.5, targetYRatio = 0.5) {
+  const sourceBox = await source.boundingBox();
+  const targetBox = await target.boundingBox();
+  if (!sourceBox || !targetBox) throw new Error("Drag source or target was not visible.");
+  const startX = sourceBox.x + sourceBox.width / 2;
+  const startY = sourceBox.y + sourceBox.height / 2;
+  await page.mouse.move(startX, startY);
+  await page.mouse.down();
+  const targetX = targetBox.x + targetBox.width * targetXRatio;
+  const targetY = targetBox.y + targetBox.height * targetYRatio;
+  await page.mouse.move(
+    targetX,
+    targetY,
+    { steps: 4 },
+  );
+  await page.waitForTimeout(50);
+  const direct = await source.evaluate((element) => ({
+    className: element.className,
+    pointerEvents: element.closest("[data-sidebar-section-id], [data-sidebar-session-id]")?.style.pointerEvents,
+    translate: element.closest("[data-sidebar-section-id], [data-sidebar-session-id]")?.style.translate,
+  }));
+  const targetClass = await target.evaluate((element) =>
+    element.closest("[data-sidebar-section-id], [data-sidebar-session-id]")?.className,
+  );
+  const hit = await page.evaluate(({ x, y }) => {
+    const element = document.elementFromPoint(x, y);
+    const owner = element?.closest("[data-sidebar-section-id], [data-sidebar-session-id]");
+    return {
+      className: element?.className?.baseVal ?? element?.className,
+      ownerClass: owner?.className,
+      sectionId: owner?.getAttribute("data-sidebar-section-id"),
+      sessionId: owner?.getAttribute("data-sidebar-session-id"),
+    };
+  }, { x: targetX, y: targetY });
+  if (!direct.translate || direct.pointerEvents !== "none" || !String(targetClass).includes("drag-over")) {
+    await page.mouse.up();
+    throw new Error(`Drag source or target did not activate: ${JSON.stringify({ direct, targetClass, hit, sourceBox, targetBox })}.`);
+  }
+  await page.mouse.up();
 }
 
 async function runSidebarSectionMotionCheck(page, splitOnly = false) {
@@ -5012,6 +5254,8 @@ function printEvidencePaths(milimHome) {
   console.log(`nativeChartDarkScreenshot=${screenshots.nativeChartDark}`);
   console.log(`nativeChartNarrowScreenshot=${screenshots.nativeChartNarrow}`);
   console.log(`turnChangesScreenshot=${screenshots.turnChanges}`);
+  console.log(`threadBarTopScreenshot=${screenshots.threadBarTop}`);
+  console.log(`threadBarBottomScreenshot=${screenshots.threadBarBottom}`);
   console.log(`chatSourcesScreenshot=${screenshots.chatSources}`);
   console.log(`chatLatestScreenshot=${screenshots.chatLatest}`);
   for (const theme of ["light", "dark"]) {
