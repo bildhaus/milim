@@ -1,0 +1,6 @@
+{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}}
+{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"README.md"}}}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"five_hour"}}
+{"type":"future_event","private_payload":"must-not-appear-in-diagnostics"}
+{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":2}}

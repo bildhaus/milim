@@ -1,5 +1,4 @@
 #[cfg(windows)]
-use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -281,12 +280,12 @@ fn truncate(mut value: String, max_chars: usize) -> String {
 
 #[cfg(windows)]
 fn runtime_command(name: &str) -> Command {
-    if let Some(path) = find_on_path(&format!("{name}.cmd")) {
+    if let Some(path) = crate::child_process::find_on_path(&format!("{name}.cmd")) {
         let mut command = Command::new("cmd");
         command.arg("/D").arg("/S").arg("/C").arg(path);
         return command;
     }
-    if let Some(path) = find_on_path(&format!("{name}.exe")) {
+    if let Some(path) = crate::child_process::find_on_path(&format!("{name}.exe")) {
         return Command::new(path);
     }
     Command::new(name)
@@ -295,15 +294,6 @@ fn runtime_command(name: &str) -> Command {
 #[cfg(not(windows))]
 fn runtime_command(name: &str) -> Command {
     Command::new(name)
-}
-
-#[cfg(windows)]
-fn find_on_path(name: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|path| {
-        std::env::split_paths(&path)
-            .map(|dir| dir.join(name))
-            .find(|path| path.is_file())
-    })
 }
 
 #[cfg(test)]

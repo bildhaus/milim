@@ -1,14 +1,12 @@
 //! Thin local bridge to the user's installed official `claude` CLI.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::convert::Infallible;
 use std::fs::File;
 use std::io::{BufRead, BufReader as StdBufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use axum::response::sse::Event;
 use futures::{Stream, StreamExt};
 use milim_agents::ToolApprovalBroker;
 use milim_core::api::openai::{ReasoningEffort, Usage};
@@ -20,6 +18,9 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
+use crate::account_runtime_events::{
+    canonicalize_runtime_stream, serialize_runtime_event, HarnessEvent,
+};
 use crate::codex_bridge::{
     AccountImage, AccountNativeWorkerLifecycle, AccountNativeWorkerState, AccountWorkerEvent,
 };
@@ -685,6 +686,10 @@ enum ClaudeStreamEvent {
     Warning {
         message: String,
     },
+    ProtocolNotice {
+        kind: &'static str,
+        message: String,
+    },
     SessionRecoveryRequired {
         message: String,
     },
@@ -774,20 +779,31 @@ pub(crate) async fn status() -> Result<Value> {
 }
 
 pub(crate) fn run_stream(
+    req: ClaudeRunRequest,
+    redactions: BTreeMap<String, String>,
+    approval_broker: Option<std::sync::Arc<ToolApprovalBroker>>,
+) -> impl Stream<Item = HarnessEvent> {
+    let initial_session_id = req.session_id.clone();
+    canonicalize_runtime_stream(
+        native_event_stream(req, redactions, approval_broker),
+        initial_session_id,
+    )
+}
+
+fn native_event_stream(
     mut req: ClaudeRunRequest,
     redactions: BTreeMap<String, String>,
     approval_broker: Option<std::sync::Arc<ToolApprovalBroker>>,
-) -> impl Stream<Item = std::result::Result<Event, Infallible>> {
+) -> impl Stream<Item = Value> {
     async_stream::stream! {
         let _approval_config = match ClaudeApprovalConfig::materialize(&req) {
             Ok(config) => config,
             Err(error) => {
-                yield sse_event(&ClaudeStreamEvent::Error {
+                yield runtime_event(&ClaudeStreamEvent::Error {
                     message: error.to_string(),
                     usage: None,
                     cost_usd: None,
                 });
-                yield Ok(Event::default().data("[DONE]"));
                 return;
             }
         };
@@ -821,7 +837,7 @@ pub(crate) fn run_stream(
                     let call_id = notice.call_id.unwrap_or_else(|| notice.approval_id.clone());
                     match notice.state {
                         milim_agents::ApprovalState::Requested => {
-                            yield sse_event(&ClaudeStreamEvent::ToolApprovalRequired {
+                            yield runtime_event(&ClaudeStreamEvent::ToolApprovalRequired {
                                 approval_id: notice.approval_id,
                                 call_id,
                                 name: notice.name,
@@ -831,7 +847,7 @@ pub(crate) fn run_stream(
                         }
                         milim_agents::ApprovalState::Decided
                         | milim_agents::ApprovalState::Delivered => {
-                            yield sse_event(&ClaudeStreamEvent::ToolApprovalStatus {
+                            yield runtime_event(&ClaudeStreamEvent::ToolApprovalStatus {
                                 approval_id: notice.approval_id,
                                 call_id,
                                 decision: notice.decision,
@@ -843,7 +859,7 @@ pub(crate) fn run_stream(
                             });
                         }
                         milim_agents::ApprovalState::Acknowledged => {
-                            yield sse_event(&ClaudeStreamEvent::ToolApprovalResolved {
+                            yield runtime_event(&ClaudeStreamEvent::ToolApprovalResolved {
                                 approval_id: notice.approval_id,
                                 call_id,
                                 decision: notice.decision.unwrap_or("deny"),
@@ -851,7 +867,7 @@ pub(crate) fn run_stream(
                         }
                         milim_agents::ApprovalState::Failed
                         | milim_agents::ApprovalState::Canceled => {
-                            yield sse_event(&ClaudeStreamEvent::ToolApprovalFailed {
+                            yield runtime_event(&ClaudeStreamEvent::ToolApprovalFailed {
                                 approval_id: notice.approval_id,
                                 call_id,
                                 decision: notice.decision,
@@ -867,7 +883,7 @@ pub(crate) fn run_stream(
             }
             while let Ok(worker) = worker_rx.try_recv() {
                 if matches!(worker, AccountWorkerEvent::NativeWorker { .. }) {
-                    yield sse_event(&worker);
+                    yield runtime_event(&worker);
                 }
             }
         }
@@ -934,7 +950,7 @@ fn run_stream_with_worker_events(
     req: ClaudeRunRequest,
     redactions: BTreeMap<String, String>,
     worker_events: Option<tokio::sync::mpsc::UnboundedSender<AccountWorkerEvent>>,
-) -> impl Stream<Item = std::result::Result<Event, Infallible>> {
+) -> impl Stream<Item = Value> {
     async_stream::stream! {
         let mut retried_locked_session = false;
         loop {
@@ -965,78 +981,71 @@ fn run_stream_with_worker_events(
                 Err(e) => {
                     let message = claude_spawn_error_message(&e);
                     if is_cli_path_warning(&message) {
-                        yield sse_event_with_worker(&ClaudeStreamEvent::Warning { message }, &worker_events);
+                        yield runtime_event_with_worker(&ClaudeStreamEvent::Warning { message }, &worker_events);
                     } else {
-                        yield sse_event_with_worker(&ClaudeStreamEvent::Error {
+                        yield runtime_event_with_worker(&ClaudeStreamEvent::Error {
                             message,
                             usage: None,
                             cost_usd: None,
                         }, &worker_events);
                     }
-                    yield Ok(Event::default().data("[DONE]"));
                     return;
                 }
             };
             let _tree = match child.id().map(ProcessTreeGuard::attach) {
                 Some(Ok(tree)) => tree,
                 Some(Err(e)) => {
-                    yield sse_event_with_worker(&ClaudeStreamEvent::Error {
+                    yield runtime_event_with_worker(&ClaudeStreamEvent::Error {
                         message: format!("failed to contain Claude CLI: {e}"),
                         usage: None,
                         cost_usd: None,
                     }, &worker_events);
-                    yield Ok(Event::default().data("[DONE]"));
                     return;
                 }
                 None => {
-                    yield sse_event_with_worker(&ClaudeStreamEvent::Error {
+                    yield runtime_event_with_worker(&ClaudeStreamEvent::Error {
                         message: "Claude CLI process id was not available".to_string(),
                         usage: None,
                         cost_usd: None,
                     }, &worker_events);
-                    yield Ok(Event::default().data("[DONE]"));
                     return;
                 }
             };
             let Some(mut stdin) = child.stdin.take() else {
-                yield sse_event_with_worker(&ClaudeStreamEvent::Error {
+                yield runtime_event_with_worker(&ClaudeStreamEvent::Error {
                     message: "claude stdin was not available".to_string(),
                     usage: None,
                     cost_usd: None,
                 }, &worker_events);
-                yield Ok(Event::default().data("[DONE]"));
                 return;
             };
             let input = match claude_stream_input(&req) {
                 Ok(input) => input,
                 Err(e) => {
-                    yield sse_event_with_worker(&ClaudeStreamEvent::Error {
+                    yield runtime_event_with_worker(&ClaudeStreamEvent::Error {
                         message: e.to_string(),
                         usage: None,
                         cost_usd: None,
                     }, &worker_events);
-                    yield Ok(Event::default().data("[DONE]"));
                     return;
                 }
             };
             if let Err(e) = stdin.write_all(format!("{input}\n").as_bytes()).await {
-                yield sse_event_with_worker(&ClaudeStreamEvent::Error {
+                yield runtime_event_with_worker(&ClaudeStreamEvent::Error {
                     message: format!("failed to send Claude multimodal input: {e}"),
                     usage: None,
                     cost_usd: None,
                 }, &worker_events);
-                yield Ok(Event::default().data("[DONE]"));
                 return;
             }
             let _ = stdin.shutdown().await;
             drop(stdin);
             let Some(stdout) = child.stdout.take() else {
-                yield sse_event_with_worker(&ClaudeStreamEvent::Error {
+                yield runtime_event_with_worker(&ClaudeStreamEvent::Error {
                     message: "claude stdout was not available".to_string(),
                     usage: None,
                     cost_usd: None,
                 }, &worker_events);
-                yield Ok(Event::default().data("[DONE]"));
                 return;
             };
             let stderr = child.stderr.take();
@@ -1070,18 +1079,17 @@ fn run_stream_with_worker_events(
                                     locked_session_error = Some(message);
                                 }
                             } else {
-                                yield sse_event_with_worker(&event, &worker_events);
+                                yield runtime_event_with_worker(&event, &worker_events);
                             }
                         }
                     }
                     Ok(None) => break,
                     Err(e) => {
-                        yield sse_event_with_worker(&ClaudeStreamEvent::Error {
+                        yield runtime_event_with_worker(&ClaudeStreamEvent::Error {
                             message: format!("claude stream failed: {e}"),
                             usage: None,
                             cost_usd: None,
                         }, &worker_events);
-                        yield Ok(Event::default().data("[DONE]"));
                         return;
                     }
                 }
@@ -1092,25 +1100,25 @@ fn run_stream_with_worker_events(
             let stderr = stderr_task.await.unwrap_or_default();
             let tail = content.flush();
             if !tail.is_empty() {
-                yield sse_event_with_worker(&ClaudeStreamEvent::Token { text: tail }, &worker_events);
+                yield runtime_event_with_worker(&ClaudeStreamEvent::Token { text: tail }, &worker_events);
             }
             let rtail = reasoning.flush();
             if !rtail.is_empty() {
-                yield sse_event_with_worker(&ClaudeStreamEvent::Reasoning { text: rtail }, &worker_events);
+                yield runtime_event_with_worker(&ClaudeStreamEvent::Reasoning { text: rtail }, &worker_events);
             }
 
             match status {
                 Ok(status) if status.success() => {
                     if let Some(message) = locked_session_error {
                         if maybe_recover_locked_session(&req, &mut retried_locked_session).await {
-                            yield sse_event_with_worker(&ClaudeStreamEvent::Warning {
+                            yield runtime_event_with_worker(&ClaudeStreamEvent::Warning {
                                 message: "Claude session was already in use; Milim stopped the matching local Claude CLI process and retried.".to_string(),
                             }, &worker_events);
                             continue;
                         }
                         yield locked_session_error_event(&req, message);
                     } else if !saw_terminal_event {
-                        yield sse_event_with_worker(&ClaudeStreamEvent::Error {
+                        yield runtime_event_with_worker(&ClaudeStreamEvent::Error {
                             message: claude_missing_terminal_error(&stderr),
                             usage: None,
                             cost_usd: None,
@@ -1124,7 +1132,7 @@ fn run_stream_with_worker_events(
                     if claude_session_in_use_error(&message)
                         && maybe_recover_locked_session(&req, &mut retried_locked_session).await
                     {
-                        yield sse_event_with_worker(&ClaudeStreamEvent::Warning {
+                        yield runtime_event_with_worker(&ClaudeStreamEvent::Warning {
                             message: "Claude session was already in use; Milim stopped the matching local Claude CLI process and retried.".to_string(),
                         }, &worker_events);
                         continue;
@@ -1132,7 +1140,7 @@ fn run_stream_with_worker_events(
                     if claude_session_in_use_error(&message) {
                         yield locked_session_error_event(&req, message);
                     } else {
-                        yield sse_event_with_worker(&ClaudeStreamEvent::Error {
+                        yield runtime_event_with_worker(&ClaudeStreamEvent::Error {
                             message,
                             usage: None,
                             cost_usd: None,
@@ -1141,7 +1149,7 @@ fn run_stream_with_worker_events(
                     break;
                 }
                 Err(e) => {
-                    yield sse_event_with_worker(&ClaudeStreamEvent::Error {
+                    yield runtime_event_with_worker(&ClaudeStreamEvent::Error {
                         message: format!("claude exit status failed: {e}"),
                         usage: None,
                         cost_usd: None,
@@ -1150,7 +1158,6 @@ fn run_stream_with_worker_events(
                 }
             }
         }
-        yield Ok(Event::default().data("[DONE]"));
     }
 }
 
@@ -1172,18 +1179,15 @@ async fn maybe_recover_locked_session(
     }
 }
 
-fn locked_session_error_event(
-    req: &ClaudeRunRequest,
-    message: String,
-) -> std::result::Result<Event, Infallible> {
+fn locked_session_error_event(req: &ClaudeRunRequest, message: String) -> Value {
     if claude_session_recovery_allowed(req) {
-        return sse_event(&ClaudeStreamEvent::Error {
+        return runtime_event(&ClaudeStreamEvent::Error {
             message,
             usage: None,
             cost_usd: None,
         });
     }
-    sse_event(&ClaudeStreamEvent::SessionRecoveryRequired {
+    runtime_event(&ClaudeStreamEvent::SessionRecoveryRequired {
         message: format!(
             "This Claude session appears to be in use by another Claude CLI process. Milim can try to stop the matching local Claude process and retry, or you can cancel and resume manually. Claude reported: {message}"
         ),
@@ -1198,7 +1202,10 @@ fn handle_line(
     saw_terminal_event: &mut bool,
 ) -> Vec<ClaudeStreamEvent> {
     let Ok(value) = serde_json::from_str::<Value>(line) else {
-        return Vec::new();
+        return vec![ClaudeStreamEvent::ProtocolNotice {
+            kind: "invalid_json",
+            message: "Claude emitted invalid stream JSON".to_string(),
+        }];
     };
     let mut out = Vec::new();
     if value.get("type").and_then(Value::as_str) == Some("stream_event") {
@@ -1234,7 +1241,11 @@ fn handle_line(
                     _ => {}
                 }
             }
-            _ => {}
+            Some(kind) => out.push(ClaudeStreamEvent::ProtocolNotice {
+                kind: "unsupported_stream_event",
+                message: format!("Claude emitted unsupported stream event {kind}"),
+            }),
+            None => {}
         }
     } else if value.get("type").and_then(Value::as_str) == Some("user") {
         if let Some(blocks) = value
@@ -1310,6 +1321,18 @@ fn handle_line(
         if let Some(event) = claude_tool_progress_event(&value, tools) {
             out.push(event);
         }
+    } else if !matches!(
+        value.get("type").and_then(Value::as_str),
+        Some("system" | "assistant") | None
+    ) {
+        let kind = value
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("missing");
+        out.push(ClaudeStreamEvent::ProtocolNotice {
+            kind: "unsupported_event",
+            message: format!("Claude emitted unsupported event {kind}"),
+        });
     }
     out
 }
@@ -1400,18 +1423,18 @@ fn claude_tool_icon(name: &str) -> &'static str {
     }
 }
 
-fn sse_event<T: Serialize>(value: &T) -> std::result::Result<Event, Infallible> {
-    Ok(Event::default().data(serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string())))
+fn runtime_event<T: Serialize>(value: &T) -> Value {
+    serialize_runtime_event(value)
 }
 
-fn sse_event_with_worker(
+fn runtime_event_with_worker(
     value: &ClaudeStreamEvent,
     worker_events: &Option<tokio::sync::mpsc::UnboundedSender<AccountWorkerEvent>>,
-) -> std::result::Result<Event, Infallible> {
+) -> Value {
     if let Some(event) = account_worker_event_from_claude(value) {
         publish_worker(worker_events, event);
     }
-    sse_event(value)
+    runtime_event(value)
 }
 
 fn publish_worker(
@@ -1469,6 +1492,7 @@ fn account_worker_event_from_claude(value: &ClaudeStreamEvent) -> Option<Account
             })
         }
         ClaudeStreamEvent::RateLimit { .. }
+        | ClaudeStreamEvent::ProtocolNotice { .. }
         | ClaudeStreamEvent::ToolApprovalRequired { .. }
         | ClaudeStreamEvent::ToolApprovalResolved { .. }
         | ClaudeStreamEvent::ToolApprovalStatus { .. }
@@ -2409,6 +2433,47 @@ not json
             events.first(),
             Some(ClaudeStreamEvent::RateLimit { .. })
         ));
+    }
+
+    #[test]
+    fn replays_versioned_stream_json_fixture_without_payload_diagnostics() {
+        let fixture = include_str!(
+            "../tests/fixtures/account-runtimes/claude-code-2.1.222-stream-json.jsonl"
+        );
+        let mut content = Unredactor::new(BTreeMap::new());
+        let mut reasoning = Unredactor::new(BTreeMap::new());
+        let mut tools = BTreeMap::new();
+        let mut done = false;
+        let events = fixture
+            .lines()
+            .flat_map(|line| handle_line(line, &mut content, &mut reasoning, &mut tools, &mut done))
+            .collect::<Vec<_>>();
+        let types = events
+            .iter()
+            .map(runtime_event)
+            .filter_map(|event| {
+                event
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            types,
+            [
+                "token",
+                "tool",
+                "tool",
+                "rate_limit",
+                "protocol_notice",
+                "done"
+            ]
+        );
+        assert!(!runtime_event(&events[4])
+            .to_string()
+            .contains("private_payload"));
+        assert!(done);
+        assert!(tools.is_empty());
     }
 
     #[test]

@@ -1,12 +1,10 @@
 //! Thin ACP bridge to the user-installed OpenCode CLI.
 
 use std::collections::BTreeMap;
-use std::convert::Infallible;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use axum::response::sse::Event;
 use futures::Stream;
 use milim_agents::ToolApprovalBroker;
 use milim_core::api::openai::Usage;
@@ -17,6 +15,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
+use crate::account_runtime_events::{canonicalize_runtime_stream, HarnessEvent};
 use crate::codex_bridge::AccountImage;
 use crate::privacy::Unredactor;
 
@@ -95,13 +94,24 @@ pub(crate) fn run_stream(
     req: OpenCodeRunRequest,
     redactions: BTreeMap<String, String>,
     approval_broker: Option<std::sync::Arc<ToolApprovalBroker>>,
-) -> impl Stream<Item = std::result::Result<Event, Infallible>> {
+) -> impl Stream<Item = HarnessEvent> {
+    let initial_session_id = req.session_id.clone();
+    canonicalize_runtime_stream(
+        native_event_stream(req, redactions, approval_broker),
+        initial_session_id,
+    )
+}
+
+fn native_event_stream(
+    req: OpenCodeRunRequest,
+    redactions: BTreeMap<String, String>,
+    approval_broker: Option<std::sync::Arc<ToolApprovalBroker>>,
+) -> impl Stream<Item = Value> {
     async_stream::stream! {
         let mut proc = match OpenCodeProcess::start(&req).await {
             Ok(proc) => proc,
             Err(error) => {
-                yield sse(&json!({ "type": "error", "message": error.to_string() }));
-                yield Ok(Event::default().data("[DONE]"));
+                yield json!({ "type": "error", "message": error.to_string() });
                 return;
             }
         };
@@ -110,20 +120,18 @@ pub(crate) fn run_stream(
         let session = match proc.open_session(&req).await {
             Ok(session) => session,
             Err(error) => {
-                yield sse(&json!({ "type": "error", "message": error.to_string() }));
-                yield Ok(Event::default().data("[DONE]"));
+                yield json!({ "type": "error", "message": error.to_string() });
                 return;
             }
         };
-        yield sse(&json!({ "type": "session", "session_id": session, "model": req.model }));
+        yield json!({ "type": "session", "session_id": session, "model": req.model });
         let mut tool_calls: BTreeMap<String, (String, String)> = BTreeMap::new();
         let mut approval_ack: Option<(milim_agents::PendingApproval, String, &'static str)> = None;
 
         let prompt_id = match proc.send_request("session/prompt", Some(prompt_params(&req, &session))).await {
             Ok(id) => id,
             Err(error) => {
-                yield sse(&json!({ "type": "error", "message": error.to_string() }));
-                yield Ok(Event::default().data("[DONE]"));
+                yield json!({ "type": "error", "message": error.to_string() });
                 return;
             }
         };
@@ -140,11 +148,11 @@ pub(crate) fn run_stream(
                         if let Some((pending, call_id, decision)) = approval_ack.take() {
                             let message = "OpenCode did not resume after the approval decision".to_string();
                             pending.fail(message.clone());
-                            yield sse(&json!({
+                            yield json!({
                                 "type": "tool_approval_failed", "approval_id": pending.id,
                                 "call_id": call_id, "decision": decision, "message": message
-                            }));
-                            yield sse(&json!({ "type": "error", "message": message }));
+                            });
+                            yield json!({ "type": "error", "message": message });
                         }
                         break;
                     }
@@ -157,27 +165,27 @@ pub(crate) fn run_stream(
                 Err(error) => {
                     if let Some((pending, call_id, decision)) = approval_ack.take() {
                         pending.fail(error.to_string());
-                        yield sse(&json!({
+                        yield json!({
                             "type": "tool_approval_failed", "approval_id": pending.id,
                             "call_id": call_id, "decision": decision, "message": error.to_string()
-                        }));
+                        });
                     }
-                    yield sse(&json!({ "type": "error", "message": error.to_string() }));
+                    yield json!({ "type": "error", "message": error.to_string() });
                     break;
                 }
             };
             if let Some((pending, call_id, decision)) = approval_ack.take() {
                 pending.acknowledge();
-                yield sse(&json!({
+                yield json!({
                     "type": "tool_approval_resolved", "approval_id": pending.id,
                     "call_id": call_id, "decision": decision
-                }));
+                });
             }
             if message.get("id") == Some(&prompt_id) {
                 if let Some(error) = message.get("error") {
-                    yield sse(&json!({ "type": "error", "message": rpc_error(error) }));
+                    yield json!({ "type": "error", "message": rpc_error(error) });
                 } else {
-                    yield sse(&json!({ "type": "done", "status": "done" }));
+                    yield json!({ "type": "done", "status": "done" });
                 }
                 break;
             }
@@ -194,20 +202,20 @@ pub(crate) fn run_stream(
                 let approved = if interactive {
                     let Some(broker) = approval_broker.as_ref() else {
                         let _ = proc.respond(id, permission_response(params, false)).await;
-                        yield sse(&json!({ "type": "error", "message": "OpenCode Review approval broker is unavailable." }));
+                        yield json!({ "type": "error", "message": "OpenCode Review approval broker is unavailable." });
                         break;
                     };
                     let mut pending = broker.request();
-                    yield sse(&json!({
+                    yield json!({
                         "type": "tool_approval_required", "approval_id": pending.id,
                         "call_id": call_id, "name": name, "arguments": arguments, "effect": "unknown"
-                    }));
+                    });
                     let decision = pending.wait().await.approved;
-                    yield sse(&json!({
+                    yield json!({
                         "type": "tool_approval_status", "approval_id": pending.id,
                         "call_id": call_id, "decision": if decision { "approve" } else { "deny" },
                         "status": "decided"
-                    }));
+                    });
                     pending_delivery = Some(pending);
                     decision
                 } else {
@@ -216,29 +224,29 @@ pub(crate) fn run_stream(
                 if let Err(error) = proc.respond(id, permission_response(params, approved)).await {
                     if let Some(pending) = pending_delivery.take() {
                         pending.fail(error.to_string());
-                        yield sse(&json!({
+                        yield json!({
                             "type": "tool_approval_failed", "approval_id": pending.id,
                             "call_id": call_id, "decision": if approved { "approve" } else { "deny" },
                             "message": error.to_string()
-                        }));
+                        });
                     }
-                    yield sse(&json!({ "type": "error", "message": error.to_string() }));
+                    yield json!({ "type": "error", "message": error.to_string() });
                     break;
                 }
                 if let Some(pending) = pending_delivery {
                     let decision = if approved { "approve" } else { "deny" };
                     if let Err(message) = pending.deliver() {
-                        yield sse(&json!({
+                        yield json!({
                             "type": "tool_approval_failed", "approval_id": pending.id,
                             "call_id": call_id, "decision": decision, "message": message
-                        }));
-                        yield sse(&json!({ "type": "error", "message": message }));
+                        });
+                        yield json!({ "type": "error", "message": message });
                         break;
                     }
-                    yield sse(&json!({
+                    yield json!({
                         "type": "tool_approval_status", "approval_id": pending.id,
                         "call_id": call_id, "decision": decision, "status": "delivered"
-                    }));
+                    });
                     approval_ack = Some((pending, call_id, decision));
                 }
                 continue;
@@ -249,65 +257,95 @@ pub(crate) fn run_stream(
                         .respond_error(id, -32601, "Method not found")
                         .await
                     {
-                        yield sse(&json!({ "type": "error", "message": error.to_string() }));
+                        yield json!({ "type": "error", "message": error.to_string() });
                         break;
                     }
-                    yield sse(&json!({
+                    yield json!({
                         "type": "warning",
                         "message": format!("OpenCode requested unsupported method {method}")
-                    }));
+                    });
                 }
                 continue;
             }
             let update = params.get("update").unwrap_or(&Value::Null);
-            match update.get("sessionUpdate").and_then(Value::as_str).unwrap_or_default() {
-                "agent_message_chunk" => {
-                    if let Some(text) = string_at(update, &["content", "text"]) {
-                        let text = content.push(&text);
-                        if !text.is_empty() { yield sse(&json!({ "type": "token", "text": text })); }
-                    }
-                }
-                "agent_thought_chunk" => {
-                    if let Some(text) = string_at(update, &["content", "text"]) {
-                        let text = reasoning.push(&text);
-                        if !text.is_empty() { yield sse(&json!({ "type": "reasoning", "text": text })); }
-                    }
-                }
-                "tool_call" | "tool_call_update" => {
-                    let id = string_at(update, &["toolCallId"]).unwrap_or_else(|| "opencode-tool".into());
-                    let previous = tool_calls.get(&id).cloned();
-                    let name = string_at(update, &["title"])
-                        .or_else(|| string_at(update, &["kind"]))
-                        .or_else(|| previous.as_ref().map(|(name, _)| name.clone()))
-                        .unwrap_or_else(|| "OpenCode tool".into());
-                    let detail = tool_input_detail(update)
-                        .or_else(|| previous.as_ref().map(|(_, detail)| detail.clone()));
-                    let status = string_at(update, &["status"]).unwrap_or_else(|| "running".into());
-                    let result = tool_result(update);
-                    let error = matches!(status.as_str(), "failed" | "error")
-                        .then(|| tool_error_detail(update, result.as_ref()))
-                        .flatten();
-                    if matches!(status.as_str(), "completed" | "done" | "failed" | "error") {
-                        tool_calls.remove(&id);
-                    } else if let Some(detail) = detail.as_ref() {
-                        tool_calls.insert(id.clone(), (name.clone(), detail.clone()));
-                    }
-                    yield sse(&json!({
-                        "type": "tool", "id": id, "name": name, "status": status,
-                        "detail": detail, "result": result, "error": error
-                    }));
-                }
-                "usage_update" => {
-                    if let Some(usage) = usage_from_update(update) {
-                        yield sse(&json!({ "type": "done", "status": "running", "usage": usage }));
-                    }
-                }
-                _ => {}
+            for event in open_code_update_events(
+                update,
+                &mut content,
+                &mut reasoning,
+                &mut tool_calls,
+            ) {
+                yield event;
             }
         }
         proc.finish().await;
-        yield Ok(Event::default().data("[DONE]"));
     }
+}
+
+fn open_code_update_events(
+    update: &Value,
+    content: &mut Unredactor,
+    reasoning: &mut Unredactor,
+    tool_calls: &mut BTreeMap<String, (String, String)>,
+) -> Vec<Value> {
+    let mut events = Vec::new();
+    match update
+        .get("sessionUpdate")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "agent_message_chunk" => {
+            if let Some(text) = string_at(update, &["content", "text"]) {
+                let text = content.push(&text);
+                if !text.is_empty() {
+                    events.push(json!({ "type": "token", "text": text }));
+                }
+            }
+        }
+        "agent_thought_chunk" => {
+            if let Some(text) = string_at(update, &["content", "text"]) {
+                let text = reasoning.push(&text);
+                if !text.is_empty() {
+                    events.push(json!({ "type": "reasoning", "text": text }));
+                }
+            }
+        }
+        "tool_call" | "tool_call_update" => {
+            let id = string_at(update, &["toolCallId"]).unwrap_or_else(|| "opencode-tool".into());
+            let previous = tool_calls.get(&id).cloned();
+            let name = string_at(update, &["title"])
+                .or_else(|| string_at(update, &["kind"]))
+                .or_else(|| previous.as_ref().map(|(name, _)| name.clone()))
+                .unwrap_or_else(|| "OpenCode tool".into());
+            let detail = tool_input_detail(update)
+                .or_else(|| previous.as_ref().map(|(_, detail)| detail.clone()));
+            let status = string_at(update, &["status"]).unwrap_or_else(|| "running".into());
+            let result = tool_result(update);
+            let error = matches!(status.as_str(), "failed" | "error")
+                .then(|| tool_error_detail(update, result.as_ref()))
+                .flatten();
+            if matches!(status.as_str(), "completed" | "done" | "failed" | "error") {
+                tool_calls.remove(&id);
+            } else if let Some(detail) = detail.as_ref() {
+                tool_calls.insert(id.clone(), (name.clone(), detail.clone()));
+            }
+            events.push(json!({
+                "type": "tool", "id": id, "name": name, "status": status,
+                "detail": detail, "result": result, "error": error
+            }));
+        }
+        "usage_update" => {
+            if let Some(usage) = usage_from_update(update) {
+                events.push(json!({ "type": "done", "status": "running", "usage": usage }));
+            }
+        }
+        "plan" | "current_mode_update" | "available_commands_update" | "" => {}
+        kind => events.push(json!({
+            "type": "protocol_notice",
+            "kind": "unsupported_update",
+            "message": format!("OpenCode emitted unsupported session update {kind}")
+        })),
+    }
+    events
 }
 
 fn prompt_params(req: &OpenCodeRunRequest, session_id: &str) -> Value {
@@ -622,12 +660,7 @@ impl OpenCodeProcess {
         self.finished = true;
         self.stdin.take();
         if let Some(mut child) = self.child.take() {
-            if tokio::time::timeout(CANCEL_GRACE, child.wait())
-                .await
-                .is_err()
-            {
-                let _ = child.kill().await;
-            }
+            crate::child_process::wait_or_kill(&mut child, CANCEL_GRACE).await;
         }
         self.tree.take();
     }
@@ -666,12 +699,7 @@ impl Drop for OpenCodeProcess {
                 }
             }
             drop(stdin);
-            if tokio::time::timeout(CANCEL_GRACE, child.wait())
-                .await
-                .is_err()
-            {
-                let _ = child.kill().await;
-            }
+            crate::child_process::wait_or_kill(&mut child, CANCEL_GRACE).await;
         });
     }
 }
@@ -897,16 +925,9 @@ fn rpc_error(error: &Value) -> String {
         .to_string()
 }
 
-fn sse(value: &Value) -> std::result::Result<Event, Infallible> {
-    Ok(Event::default()
-        .data(serde_json::to_string(value).unwrap_or_else(|_| {
-            "{\"type\":\"error\",\"message\":\"serialization failed\"}".into()
-        })))
-}
-
 #[cfg(windows)]
 fn opencode_command() -> Command {
-    if let Some(path) = find_on_path("opencode.cmd") {
+    if let Some(path) = crate::child_process::find_on_path("opencode.cmd") {
         let mut command = Command::new("cmd");
         command.arg("/C").arg(path);
         return command;
@@ -917,15 +938,6 @@ fn opencode_command() -> Command {
 #[cfg(not(windows))]
 fn opencode_command() -> Command {
     crate::cli_path::command("opencode")
-}
-
-#[cfg(windows)]
-fn find_on_path(name: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|path| {
-        std::env::split_paths(&path)
-            .map(|dir| dir.join(name))
-            .find(|path| path.is_file())
-    })
 }
 
 #[cfg(test)]
@@ -1062,5 +1074,47 @@ mod tests {
         .expect("standard ACP usage update");
         assert_eq!(usage.prompt_tokens, 321);
         assert_eq!(usage.total_tokens, 321);
+    }
+
+    #[test]
+    fn replays_versioned_acp_update_fixture_without_payload_diagnostics() {
+        let fixture = include_str!(
+            "../tests/fixtures/account-runtimes/opencode-cli-1.18.9-acp-session-updates.jsonl"
+        );
+        let mut content = Unredactor::new(BTreeMap::new());
+        let mut reasoning = Unredactor::new(BTreeMap::new());
+        let mut tools = BTreeMap::new();
+        let events = fixture
+            .lines()
+            .flat_map(|line| {
+                let message: Value = serde_json::from_str(line).unwrap();
+                open_code_update_events(
+                    message.pointer("/params/update").unwrap(),
+                    &mut content,
+                    &mut reasoning,
+                    &mut tools,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            events
+                .iter()
+                .filter_map(|event| event.get("type").and_then(Value::as_str))
+                .collect::<Vec<_>>(),
+            [
+                "token",
+                "reasoning",
+                "tool",
+                "tool",
+                "done",
+                "protocol_notice"
+            ]
+        );
+        assert!(!events
+            .last()
+            .unwrap()
+            .to_string()
+            .contains("privatePayload"));
+        assert!(tools.is_empty());
     }
 }

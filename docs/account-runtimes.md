@@ -26,6 +26,8 @@ The response is SSE. Every JSON event has `schema_version: 1`, a per-run `run_id
 
 This is normalization, not a runtime cutover. Codex, Claude, OpenCode, and Pi still use their current native adapters, session stores, approval behavior, and management sidebands. The existing `/codex/run`, `/claude/run`, `/opencode/run`, and `/pi/run` request and SSE contracts remain available for compatibility.
 
+Adapters produce typed canonical events inside the server. The compatibility routes serialize those events back to their legacy SSE shapes only at the HTTP boundary; the canonical route no longer calls another route or reparses its SSE/JSON output. Version-pinned native-protocol fixtures cover the installed Codex, Claude Code, OpenCode, and Pi wire shapes. Unsupported protocol updates emit metadata-only notices without copying prompt, tool, or environment payloads. Codex additionally accepts turn notifications only when their native thread and turn ids match the active request, preventing subagent or stale-turn notifications from completing or leaking into the visible turn.
+
 ## OpenCode
 
 Milim invokes the user-installed `opencode acp` process once per turn and speaks ACP v1 JSON-RPC over stdio. `GET /opencode/status` and `GET /opencode/models` discover configured models without refreshing OpenCode's network cache; `POST /opencode/run` creates or resumes the native session, applies the exact selected model, streams normalized events, and forwards permission requests to Milim's one-shot approval cards. Plan, Guarded, Review, and Open map to a Milim-owned permission overlay. Guarded and Review refuse to run when `opencode debug config` shows that higher-precedence configuration weakened the promised policy.

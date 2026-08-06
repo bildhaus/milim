@@ -1,5 +1,9 @@
 use super::*;
 
+pub(crate) type AccountHarnessStream = std::pin::Pin<
+    Box<dyn futures::Stream<Item = crate::account_runtime_events::HarnessEvent> + Send>,
+>;
+
 // ----- Codex app-server bridge -----
 
 #[derive(Deserialize)]
@@ -139,11 +143,24 @@ pub(crate) async fn codex_run(
     State(st): State<AppState>,
     headers: HeaderMap,
     peer: Peer,
-    Json(mut req): Json<crate::codex_bridge::CodexRunRequest>,
+    Json(req): Json<crate::codex_bridge::CodexRunRequest>,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
+    let stream = codex_harness_stream(&st, &headers, req)?;
+    Ok(Sse::new(crate::account_runtime_events::legacy_sse_stream(
+        "codex", stream,
+    ))
+    .keep_alive(KeepAlive::default())
+    .into_response())
+}
+
+pub(crate) fn codex_harness_stream(
+    st: &AppState,
+    headers: &HeaderMap,
+    mut req: crate::codex_bridge::CodexRunRequest,
+) -> Result<AccountHarnessStream, ApiError> {
     let run_context =
-        RunContext::from_account_runtime(&st, req.milim_context.as_ref(), req.cwd.as_deref())
+        RunContext::from_account_runtime(st, req.milim_context.as_ref(), req.cwd.as_deref())
             .map_err(ApiError)?;
     req.cwd = run_context.workspace_text();
     if req.prompt.trim().is_empty() && req.images.is_empty() {
@@ -153,13 +170,13 @@ pub(crate) async fn codex_run(
     }
     req.prompt = account_runtime_workspace_prompt(&run_context, &req.prompt, "claude");
     let (prompt, redactions) =
-        account_runtime_prompt_for_remote(&st, &run_context, &req.prompt, "Codex")
+        account_runtime_prompt_for_remote(st, &run_context, &req.prompt, "Codex")
             .map_err(ApiError)?;
     account_runtime_images_for_remote(&run_context, &req.images, "Codex").map_err(ApiError)?;
     req.prompt = prompt;
     let endpoint = account_runtime_tool_endpoint(
-        &st,
-        &headers,
+        st,
+        headers,
         req.milim_context.as_ref(),
         &run_context,
         req.model.as_deref().unwrap_or_default(),
@@ -168,14 +185,12 @@ pub(crate) async fn codex_run(
     add_account_runtime_preview_instructions(&mut req.prompt, endpoint.as_ref());
     req.milim_mcp = endpoint.clone();
     let approvals = Some(st.tool_approvals.clone());
-    Ok(Sse::new(account_runtime_stream(
+    Ok(Box::pin(account_runtime_harness_stream(
         crate::codex_bridge::run_stream(req, redactions, approvals),
-        &st,
+        st,
         endpoint.as_ref(),
         true,
-    ))
-    .keep_alive(KeepAlive::default())
-    .into_response())
+    )))
 }
 
 /// `GET /claude/status` - current installed Claude CLI auth/runtime state.
@@ -250,11 +265,24 @@ pub(crate) async fn opencode_run(
     State(st): State<AppState>,
     headers: HeaderMap,
     peer: Peer,
-    Json(mut req): Json<crate::opencode_bridge::OpenCodeRunRequest>,
+    Json(req): Json<crate::opencode_bridge::OpenCodeRunRequest>,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
+    let stream = opencode_harness_stream(&st, &headers, req)?;
+    Ok(Sse::new(crate::account_runtime_events::legacy_sse_stream(
+        "opencode", stream,
+    ))
+    .keep_alive(KeepAlive::default())
+    .into_response())
+}
+
+pub(crate) fn opencode_harness_stream(
+    st: &AppState,
+    headers: &HeaderMap,
+    mut req: crate::opencode_bridge::OpenCodeRunRequest,
+) -> Result<AccountHarnessStream, ApiError> {
     let run_context =
-        RunContext::from_account_runtime(&st, req.milim_context.as_ref(), req.cwd.as_deref())
+        RunContext::from_account_runtime(st, req.milim_context.as_ref(), req.cwd.as_deref())
             .map_err(ApiError)?;
     req.cwd = run_context.workspace_text();
     if req.prompt.trim().is_empty() && req.images.is_empty() {
@@ -264,13 +292,13 @@ pub(crate) async fn opencode_run(
     }
     req.prompt = account_runtime_workspace_prompt(&run_context, &req.prompt, "agents");
     let (prompt, redactions) =
-        account_runtime_prompt_for_remote(&st, &run_context, &req.prompt, "OpenCode")
+        account_runtime_prompt_for_remote(st, &run_context, &req.prompt, "OpenCode")
             .map_err(ApiError)?;
     account_runtime_images_for_remote(&run_context, &req.images, "OpenCode").map_err(ApiError)?;
     req.prompt = prompt;
     let endpoint = account_runtime_tool_endpoint(
-        &st,
-        &headers,
+        st,
+        headers,
         req.milim_context.as_ref(),
         &run_context,
         &req.model,
@@ -278,14 +306,12 @@ pub(crate) async fn opencode_run(
     )?;
     add_account_runtime_preview_instructions(&mut req.prompt, endpoint.as_ref());
     req.milim_mcp = endpoint.clone();
-    Ok(Sse::new(account_runtime_stream(
+    Ok(Box::pin(account_runtime_harness_stream(
         crate::opencode_bridge::run_stream(req, redactions, Some(st.tool_approvals.clone())),
-        &st,
+        st,
         endpoint.as_ref(),
         true,
-    ))
-    .keep_alive(KeepAlive::default())
-    .into_response())
+    )))
 }
 
 /// `GET /pi/status` - installed Pi CLI and configured-model state.
@@ -313,11 +339,24 @@ pub(crate) async fn pi_run(
     State(st): State<AppState>,
     headers: HeaderMap,
     peer: Peer,
-    Json(mut req): Json<crate::pi_bridge::PiRunRequest>,
+    Json(req): Json<crate::pi_bridge::PiRunRequest>,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
+    let stream = pi_harness_stream(&st, &headers, req)?;
+    Ok(Sse::new(crate::account_runtime_events::legacy_sse_stream(
+        "pi", stream,
+    ))
+    .keep_alive(KeepAlive::default())
+    .into_response())
+}
+
+pub(crate) fn pi_harness_stream(
+    st: &AppState,
+    headers: &HeaderMap,
+    mut req: crate::pi_bridge::PiRunRequest,
+) -> Result<AccountHarnessStream, ApiError> {
     let run_context =
-        RunContext::from_account_runtime(&st, req.milim_context.as_ref(), req.cwd.as_deref())
+        RunContext::from_account_runtime(st, req.milim_context.as_ref(), req.cwd.as_deref())
             .map_err(ApiError)?;
     req.cwd = run_context.workspace_text();
     if req.prompt.trim().is_empty() && req.images.is_empty() {
@@ -327,13 +366,13 @@ pub(crate) async fn pi_run(
     }
     req.prompt = account_runtime_workspace_prompt(&run_context, &req.prompt, "native");
     let (prompt, redactions) =
-        account_runtime_prompt_for_remote(&st, &run_context, &req.prompt, "Pi")
+        account_runtime_prompt_for_remote(st, &run_context, &req.prompt, "Pi")
             .map_err(ApiError)?;
     account_runtime_images_for_remote(&run_context, &req.images, "Pi").map_err(ApiError)?;
     req.prompt = prompt;
     let endpoint = account_runtime_tool_endpoint(
-        &st,
-        &headers,
+        st,
+        headers,
         req.milim_context.as_ref(),
         &run_context,
         &req.model,
@@ -341,14 +380,12 @@ pub(crate) async fn pi_run(
     )?;
     add_account_runtime_preview_instructions(&mut req.prompt, endpoint.as_ref());
     req.milim_mcp = endpoint.clone();
-    Ok(Sse::new(account_runtime_stream(
+    Ok(Box::pin(account_runtime_harness_stream(
         crate::pi_bridge::run_stream(req, redactions, Some(st.tool_approvals.clone())),
-        &st,
+        st,
         endpoint.as_ref(),
         true,
-    ))
-    .keep_alive(KeepAlive::default())
-    .into_response())
+    )))
 }
 
 /// `GET /account-runtimes/updates` - installed and latest versions for user-owned CLIs.
@@ -384,11 +421,24 @@ pub(crate) async fn claude_run(
     State(st): State<AppState>,
     headers: HeaderMap,
     peer: Peer,
-    Json(mut req): Json<crate::claude_bridge::ClaudeRunRequest>,
+    Json(req): Json<crate::claude_bridge::ClaudeRunRequest>,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
+    let stream = claude_harness_stream(&st, &headers, req)?;
+    Ok(Sse::new(crate::account_runtime_events::legacy_sse_stream(
+        "claude", stream,
+    ))
+    .keep_alive(KeepAlive::default())
+    .into_response())
+}
+
+pub(crate) fn claude_harness_stream(
+    st: &AppState,
+    headers: &HeaderMap,
+    mut req: crate::claude_bridge::ClaudeRunRequest,
+) -> Result<AccountHarnessStream, ApiError> {
     let run_context =
-        RunContext::from_account_runtime(&st, req.milim_context.as_ref(), req.cwd.as_deref())
+        RunContext::from_account_runtime(st, req.milim_context.as_ref(), req.cwd.as_deref())
             .map_err(ApiError)?;
     req.cwd = run_context.workspace_text();
     if req.prompt.trim().is_empty() && req.images.is_empty() {
@@ -398,14 +448,14 @@ pub(crate) async fn claude_run(
     }
     req.prompt = account_runtime_workspace_prompt(&run_context, &req.prompt, "agents");
     let (prompt, redactions) =
-        account_runtime_prompt_for_remote(&st, &run_context, &req.prompt, "Claude")
+        account_runtime_prompt_for_remote(st, &run_context, &req.prompt, "Claude")
             .map_err(ApiError)?;
     account_runtime_images_for_remote(&run_context, &req.images, "Claude").map_err(ApiError)?;
     req.prompt = prompt;
     req.interactive_tool_approval = crate::claude_bridge::claude_interactive_tool_approval(&req);
     let endpoint = account_runtime_tool_endpoint(
-        &st,
-        &headers,
+        st,
+        headers,
         req.milim_context.as_ref(),
         &run_context,
         req.model.as_deref().unwrap_or_default(),
@@ -439,14 +489,12 @@ pub(crate) async fn claude_run(
     } else {
         None
     };
-    Ok(Sse::new(account_runtime_stream(
+    Ok(Box::pin(account_runtime_harness_stream(
         crate::claude_bridge::run_stream(req, redactions, approvals),
-        &st,
+        st,
         endpoint.as_ref(),
         false,
-    ))
-    .keep_alive(KeepAlive::default())
-    .into_response())
+    )))
 }
 
 pub(crate) fn loopback_host(value: &str) -> Option<String> {
