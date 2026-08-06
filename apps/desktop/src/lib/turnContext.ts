@@ -13,6 +13,7 @@ import {
   isCompactionCheckpoint,
   splitCompactionTail,
 } from "./contextCompaction.js";
+import { createChatMessageId } from "./messageIds.js";
 import { runtimeWarningMessage } from "./turnEvents.js";
 
 export type TurnChatNotice = {
@@ -85,7 +86,11 @@ export function appendUserTurn(
   content: string,
   attachments?: ChatMessage["attachments"],
 ): ChatMessage[] {
-  const message: ChatMessage = { role: "user", content };
+  const message: ChatMessage = {
+    id: createChatMessageId(),
+    role: "user",
+    content,
+  };
   if (attachments !== undefined) message.attachments = attachments;
   return [...messages, message];
 }

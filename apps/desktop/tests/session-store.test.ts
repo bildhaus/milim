@@ -135,6 +135,17 @@ equal(
 );
 useSessions.getState().updateSettings(first, { toolApproval: "open" });
 useSessions.getState().setMessages(first, [{ role: "user", content: "hello" }]);
+const stableHistory = useSessions.getState().sessions.find((session) => session.id === first)!.messages;
+useSessions.getState().setMessages(first, [
+  ...stableHistory,
+  { id: "stable-new-message", role: "user", content: "next" },
+]);
+const extendedHistory = useSessions.getState().sessions.find((session) => session.id === first)!.messages;
+equal(
+  extendedHistory[0],
+  stableHistory[0],
+  "extending a thread should preserve existing message identity",
+);
 useSessions.getState().setSessionGenerating(first, true);
 deepEqual(
   useSessions.getState().generatingSessionIds,

@@ -3,6 +3,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -370,10 +371,6 @@ const EMPTY_QUEUE: QueuedMessage[] = [];
 const EMPTY_CONTEXT_SECTION_IDS: QuickSummarySectionId[] = [];
 const NON_EMPTY_USAGE_MESSAGES: ChatMessage[] = [{ role: "user", content: "" }];
 const PREVIEW_PANEL_MIN_WIDTH = 360;
-const MESSAGE_VIRTUALIZE_AFTER = 80;
-const MESSAGE_ESTIMATED_HEIGHT = 152;
-const MESSAGE_VIRTUAL_OVERSCAN_PX = 900;
-const MESSAGE_ROW_GAP = 12;
 const RECENT_THREAD_SWITCHER_CLOSE_MS = 1600;
 const EVENT_STREAM_RECONNECT_MAX_MS = 5_000;
 const previewArtifactCache = new WeakMap<ChatMessage, ChatArtifact[] | null>();
@@ -899,107 +896,6 @@ function browserPreviewSelection(
     size: tab.url.length,
   };
   return { artifact, artifacts: [artifact], previewDeferred: false };
-}
-
-type VirtualMessageItem = {
-  index: number;
-  message: ChatMessage;
-  top: number;
-};
-
-type VirtualMessageWindow = {
-  virtualized: boolean;
-  items: VirtualMessageItem[];
-  totalHeight: number;
-};
-
-function virtualIndexAt(offsets: number[], value: number): number {
-  let low = 0;
-  let high = offsets.length - 1;
-  while (low < high) {
-    const mid = Math.floor((low + high) / 2);
-    if (offsets[mid] < value) low = mid + 1;
-    else high = mid;
-  }
-  return Math.max(0, low - 1);
-}
-
-function virtualMessageWindow(
-  messages: ChatMessage[],
-  heights: readonly number[],
-  scrollTop: number,
-  viewportHeight: number,
-): VirtualMessageWindow {
-  const visible = messages.flatMap((message, index) =>
-    workerRunSynthesisId(message) ? [] : [{ index, message, top: 0 }],
-  );
-  if (visible.length <= MESSAGE_VIRTUALIZE_AFTER) {
-    return {
-      virtualized: false,
-      totalHeight: 0,
-      items: visible,
-    };
-  }
-  const offsets = new Array<number>(visible.length + 1);
-  offsets[0] = 0;
-  for (let i = 0; i < visible.length; i += 1) {
-    offsets[i + 1] =
-      offsets[i] + (heights[visible[i].index] || MESSAGE_ESTIMATED_HEIGHT);
-  }
-  const start = virtualIndexAt(
-    offsets,
-    Math.max(0, scrollTop - MESSAGE_VIRTUAL_OVERSCAN_PX),
-  );
-  const end = Math.min(
-    visible.length - 1,
-    virtualIndexAt(
-      offsets,
-      scrollTop + viewportHeight + MESSAGE_VIRTUAL_OVERSCAN_PX,
-    ) + 1,
-  );
-  const items: VirtualMessageItem[] = [];
-  for (let index = start; index <= end; index += 1) {
-    items.push({ ...visible[index], top: offsets[index] });
-  }
-  return {
-    virtualized: true,
-    items,
-    totalHeight: offsets[visible.length],
-  };
-}
-
-function MessageVirtualRow({
-  index,
-  top,
-  measure,
-  children,
-}: {
-  index: number;
-  top: number;
-  measure: (index: number, height: number) => void;
-  children: ReactNode;
-}) {
-  const rowRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    const row = rowRef.current;
-    if (!row) return;
-    const update = () =>
-      measure(index, row.getBoundingClientRect().height + MESSAGE_ROW_GAP);
-    update();
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(update);
-    observer.observe(row);
-    return () => observer.disconnect();
-  }, [index, measure, children]);
-  return (
-    <div
-      ref={rowRef}
-      className="message-virtual-row"
-      style={{ top: `${top}px` }}
-    >
-      {children}
-    </div>
-  );
 }
 
 function previewIdleStatus(
@@ -2211,17 +2107,11 @@ export function ChatView({
     new Map<string, PreviewAppFile[]>(),
   );
   const scheduleRunPollingRef = useRef(false);
-  const messageHeightsRef = useRef<number[]>([]);
   const gitStatusUpdatedAtRef = useRef<number | null>(null);
   const [previewResizing, setPreviewResizing] = useState(false);
   const [previewPanelOverlay, setPreviewPanelOverlay] = useState(false);
   const [recentThreadSwitcher, setRecentThreadSwitcher] =
     useState<RecentThreadSwitcherState | null>(null);
-  const [messageScrollSnapshot, setMessageScrollSnapshot] = useState({
-    top: 0,
-    height: 0,
-  });
-  const [messageHeightsVersion, setMessageHeightsVersion] = useState(0);
 
   useEffect(() => {
     const body = chatBodyRef.current;
@@ -2243,22 +2133,6 @@ export function ChatView({
         typeof nextInput === "function" ? nextInput(current) : nextInput;
       setSessionComposerDraft(activeId, next);
       return next;
-    });
-  }
-
-  const measureMessageRow = useCallback((index: number, height: number) => {
-    const next = Math.max(1, Math.ceil(height));
-    if (messageHeightsRef.current[index] === next) return;
-    messageHeightsRef.current[index] = next;
-    setMessageHeightsVersion((version) => version + 1);
-  }, []);
-
-  function updateMessageScrollSnapshot() {
-    const el = chatScrollRef.current;
-    if (!el) return;
-    setMessageScrollSnapshot({
-      top: el.scrollTop,
-      height: el.clientHeight,
     });
   }
 
@@ -2314,7 +2188,6 @@ export function ChatView({
     const el = chatScrollRef.current;
     if (!el) return;
     el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
-    updateMessageScrollSnapshot();
   }
 
   function isLiveChildThread(thread: ChildThreadInfo): boolean {
@@ -2626,7 +2499,6 @@ export function ChatView({
     const el = chatScrollRef.current;
     if (!el) return;
     stickToBottomRef.current = isNearScrollBottom(el);
-    updateMessageScrollSnapshot();
   }
 
   useEffect(() => {
@@ -2635,15 +2507,12 @@ export function ChatView({
     }
   }, [activeId, model, models, modelsLoaded, updateThreadSettings]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (stickToBottomRef.current) scrollToChatBottom();
-    else updateMessageScrollSnapshot();
   }, [messages]);
 
   useEffect(() => {
     stickToBottomRef.current = true;
-    messageHeightsRef.current = [];
-    setMessageHeightsVersion((version) => version + 1);
     scrollToChatBottom();
     setPendingAttachments([]);
     setChatNotice(null);
@@ -6284,7 +6153,6 @@ export function ChatView({
         reviewComments,
       };
     }
-    setMessages(activeId, conversation, { autoTitle: autoTitleChats });
     void runTurnAndDrain(
       conversation,
       selectedModel,
@@ -6807,21 +6675,6 @@ export function ChatView({
   }, [busy, messages]);
   const activeRun = activeAssistantRuntime.run;
   const activeStreamParts = activeAssistantRuntime.streamParts;
-  const virtualMessages = useMemo(
-    () =>
-      virtualMessageWindow(
-        messages,
-        messageHeightsRef.current,
-        messageScrollSnapshot.top,
-        messageScrollSnapshot.height,
-      ),
-    [
-      messages,
-      messageHeightsVersion,
-      messageScrollSnapshot.height,
-      messageScrollSnapshot.top,
-    ],
-  );
   const debugPreviewControlActivity =
     typeof window === "undefined"
       ? null
@@ -7025,18 +6878,9 @@ export function ChatView({
             onScroll={updateAutoScrollCoupling}
           >
             {!emptyThread && (
-              <div
-                className={
-                  "messages" +
-                  (virtualMessages.virtualized ? " messages-virtualized" : "")
-                }
-                style={
-                  virtualMessages.virtualized
-                    ? ({ height: virtualMessages.totalHeight } as CSSProperties)
-                    : undefined
-                }
-              >
-                {virtualMessages.items.map(({ message: m, index: i, top }) => {
+              <div className="messages">
+                {messages.map((m, i) => {
+                  if (workerRunSynthesisId(m)) return null;
                   const messageIsCompaction = isCompactionCheckpoint(m);
                   const isApprovalMessage = Boolean(m.approval);
                   const isLastAssistant =
@@ -7047,7 +6891,7 @@ export function ChatView({
                   const messageTurnChangesKey = m.workspaceCheckpoint
                     ? `${activeId}:${m.id ?? i}:${m.workspaceCheckpoint.ref}`
                     : "";
-                  const row = (
+                  return (
                     <MessageRow
                       key={m.id ?? i}
                       activeId={activeId}
@@ -7074,18 +6918,6 @@ export function ChatView({
                       }
                       actionsRef={messageRowActionsRef}
                     />
-                  );
-                  return virtualMessages.virtualized ? (
-                    <MessageVirtualRow
-                      key={m.id ?? i}
-                      index={i}
-                      top={top}
-                      measure={measureMessageRow}
-                    >
-                      {row}
-                    </MessageVirtualRow>
-                  ) : (
-                    row
                   );
                 })}
               </div>

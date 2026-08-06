@@ -41,11 +41,17 @@ function assistant(content: string): ChatMessage {
 const attachment = [
   { id: "a1", name: "note.txt", mime: "text/plain", size: 4, content: "test" },
 ];
-const appended = appendUserTurn([assistant("old")], "new", attachment);
-assert.deepEqual(appended, [
-  assistant("old"),
-  { role: "user", content: "new", attachments: attachment },
-]);
+const priorAssistant = assistant("old");
+const appended = appendUserTurn([priorAssistant], "new", attachment);
+assert.equal(appended[0], priorAssistant);
+assert.equal(typeof appended[1].id, "string");
+assert.ok(appended[1].id?.trim());
+assert.deepEqual(appended[1], {
+  id: appended[1].id,
+  role: "user",
+  content: "new",
+  attachments: attachment,
+});
 const retryWithTrailingAssistants = [
   user("u1"),
   assistant("a1"),
@@ -76,7 +82,12 @@ const edited = editResendConversation(
   " new ",
 );
 assert.deepEqual(edited, [
-  { role: "user", content: "new", attachments: attachment },
+  {
+    id: edited?.[0].id,
+    role: "user",
+    content: "new",
+    attachments: attachment,
+  },
 ]);
 assert.equal(editResendConversation([user("old")], 0, "   "), null);
 assert.equal(editResendConversation([user("old")], 2, "new"), null);

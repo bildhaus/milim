@@ -560,7 +560,8 @@ async function runCanonicalBinaryBenchmark() {
       .getByTestId("chat-shell")
       .waitFor({ timeout: 20_000 });
     await session.page
-      .locator(".messages.messages-virtualized")
+      .locator(".messages > .msg")
+      .last()
       .waitFor({ timeout: 20_000 });
     await installRuntimeSamplers(session.page);
     await waitForAnimationFrames(session.page, 2);
@@ -584,11 +585,11 @@ async function runCanonicalBinaryBenchmark() {
       `Every fixture thread must persist exactly ${report.fixture.messagesPerThread} messages.`,
     );
     const renderedRows = await session.page
-      .locator(".messages .message-virtual-row")
+      .locator(".messages > .msg")
       .count();
     ensure(
-      renderedRows > 0 && renderedRows <= 40,
-      `Virtualized transcript rendered ${renderedRows} rows; expected 1..40.`,
+      renderedRows === report.fixture.messagesPerThread,
+      `Large transcript rendered ${renderedRows} rows; expected ${report.fixture.messagesPerThread}.`,
     );
     report.fixture.persistedThreadCount = fixtureState.sessions.length;
     report.fixture.persistedMessagesPerThread = fixtureState.sessions.map(
@@ -607,12 +608,63 @@ async function runCanonicalBinaryBenchmark() {
       fullPage: false,
     });
 
+    console.log("[canonical] send from large transcript");
+    const longThreadPrompt = "Canonical long-thread optimistic send.";
+    await session.page.getByTestId("composer-input").fill(longThreadPrompt);
+    await session.page.evaluate(() => {
+      const scroll = document.querySelector(".chat-scroll");
+      if (!(scroll instanceof HTMLElement))
+        throw new Error("Chat scroll container unavailable.");
+      scroll.scrollTop = scroll.scrollHeight;
+      window.__MILIM_LONG_THREAD_SCROLL_SAMPLES__ = [];
+      let remaining = 45;
+      const sample = () => {
+        window.__MILIM_LONG_THREAD_SCROLL_SAMPLES__.push(
+          scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight,
+        );
+        remaining -= 1;
+        if (remaining > 0) requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    });
+    const longThreadSendStartedAt = Date.now();
+    await session.page.getByTestId("composer-send").click();
+    await session.page
+      .getByTestId("user-message")
+      .filter({ hasText: longThreadPrompt })
+      .waitFor({ timeout: 10_000 });
+    report.timingsMs.longThreadSendToOptimistic =
+      Date.now() - longThreadSendStartedAt;
+    await session.page
+      .getByRole("button", { name: "Stop generating" })
+      .waitFor({ state: "hidden", timeout: 20_000 });
+    await waitForAnimationFrames(session.page, 45);
+    const bottomGaps = await session.page.evaluate(
+      () => window.__MILIM_LONG_THREAD_SCROLL_SAMPLES__,
+    );
+    report.fixture.longThreadMaxBottomGap = Math.max(...bottomGaps);
+    ensure(
+      report.fixture.longThreadMaxBottomGap <= 32,
+      `Large transcript lost bottom follow by ${report.fixture.longThreadMaxBottomGap}px.`,
+    );
+    ensure(
+      (await session.page
+        .getByTestId("user-message")
+        .filter({ hasText: longThreadPrompt })
+        .count()) === 1,
+      "Long-thread optimistic prompt rendered more than once.",
+    );
+    await waitForCondition(
+      () => fakeProvider.completions.length === 3,
+      "long-thread canonical completion",
+    );
+
     const finalUpstreamModels = fakeProvider.completions.map(
       (request) => request.body?.model,
     );
     ensure(
       JSON.stringify(finalUpstreamModels) ===
-        JSON.stringify([modelA, modelB]),
+        JSON.stringify([modelA, modelB, modelB]),
       `Canonical upstream models changed after reload: ${JSON.stringify(finalUpstreamModels)}.`,
     );
     report.continuity.upstreamModels = finalUpstreamModels;

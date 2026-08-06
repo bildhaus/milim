@@ -3603,8 +3603,6 @@ html[data-dark="true"] .preview-control-cursor {
 }
 /* ---- Messages ---- */
 .messages { width: 100%; max-width: var(--chat-content-width); margin: 0 auto; display: flex; flex-direction: column; gap: 12px; padding: 8px 0 4px; user-select: text; cursor: auto; }
-.messages.messages-virtualized { position: relative; display: block; padding: 8px 0 4px; }
-.message-virtual-row { position: absolute; left: 0; right: 0; top: 0; padding-bottom: 12px; }
 .messages, .msg-content, .md, .md * { user-select: text; -webkit-user-select: text; }
 .msg { display: flex; flex-direction: column; gap: 3px; }
 .messages .msg:not(:last-child) { content-visibility: auto; contain-intrinsic-size: auto 140px; }
