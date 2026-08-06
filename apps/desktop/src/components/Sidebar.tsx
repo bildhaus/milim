@@ -1048,7 +1048,7 @@ export function Sidebar({
     event.stopPropagation();
     const trigger = event.currentTarget;
     const rect = trigger.parentElement?.getBoundingClientRect() ?? trigger.getBoundingClientRect();
-    openMenuAt({ x: rect.left, y: placement === "bottom" ? rect.top - 260 : rect.bottom + 4 }, [
+    openMenuAt({ x: rect.left, y: placement === "bottom" ? rect.top - 4 : rect.bottom + 4 }, [
       {
         id: "current-checkout",
         label: "Current checkout",
@@ -1062,13 +1062,13 @@ export function Sidebar({
         icon: <GitBranch size={13} />,
         action: () => createChat("worktree"),
       },
-    ], "New chat workspace", trigger);
+    ], "New chat workspace", trigger, placement === "bottom" ? "above" : "below");
   }
 
   function openThreadBarProjectMenu(event: ReactMouseEvent<HTMLButtonElement>) {
     const trigger = event.currentTarget;
     const rect = trigger.getBoundingClientRect();
-    openMenuAt({ x: rect.left, y: placement === "bottom" ? rect.top - 180 : rect.bottom + 4 }, [
+    openMenuAt({ x: rect.left, y: placement === "bottom" ? rect.top - 4 : rect.bottom + 4 }, [
       {
         id: "scratch",
         label: "Start from scratch",
@@ -1081,14 +1081,14 @@ export function Sidebar({
         icon: <Folder size={13} />,
         action: () => useExistingFolder(),
       },
-    ], "Project actions", trigger);
+    ], "Project actions", trigger, placement === "bottom" ? "above" : "below");
   }
 
   function openThreadBarToolsMenu(event: ReactMouseEvent<HTMLButtonElement>) {
     const trigger = event.currentTarget;
     const rect = trigger.getBoundingClientRect();
     openMenuAt(
-      { x: rect.left, y: placement === "bottom" ? rect.top - 260 : rect.bottom + 4 },
+      { x: rect.left, y: placement === "bottom" ? rect.top - 4 : rect.bottom + 4 },
       toolsActions().map((item) => ({
         id: item.key,
         label: item.label,
@@ -1097,6 +1097,7 @@ export function Sidebar({
       })),
       "Tools",
       trigger,
+      placement === "bottom" ? "above" : "below",
     );
   }
 

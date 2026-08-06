@@ -1,4 +1,9 @@
 {
+  "0.2.30": {
+    "version": "0.2.30",
+    "summary": "Milim 0.2.30 adds flexible thread navigation, inline Mermaid diagrams, and clearer, more reliable long-running conversations.",
+    "items": []
+  },
   "0.2.29": {
     "version": "0.2.29",
     "summary": "Milim keeps the composer toolbar compact and aligned, with a project picker that fits its label.",

@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { clampContextMenuPosition, shouldPreserveNativeContextMenu, type ContextMenuPoint } from "../lib/contextMenu";
 import { Check } from "./icons";
@@ -21,16 +21,21 @@ type ContextMenuState = {
   items: ContextMenuItem[];
   label?: string;
   trigger?: HTMLElement;
+  placement: "above" | "below";
 };
 
 type ContextMenuApi = {
   openContextMenu: (event: MouseEvent, items: ContextMenuItem[], label?: string) => boolean;
-  openMenuAt: (point: ContextMenuPoint, items: ContextMenuItem[], label?: string, trigger?: HTMLElement) => boolean;
+  openMenuAt: (point: ContextMenuPoint, items: ContextMenuItem[], label?: string, trigger?: HTMLElement, placement?: "above" | "below") => boolean;
   closeContextMenu: () => void;
 };
 
 const ContextMenuContext = createContext<ContextMenuApi | null>(null);
 const ESTIMATED_MENU_SIZE = { width: 240, height: 260 };
+
+function menuOrigin(point: ContextMenuPoint, height: number, placement: "above" | "below") {
+  return placement === "above" ? { x: point.x, y: point.y - height } : point;
+}
 
 export function ContextMenuProvider({ children }: { children: ReactNode }) {
   const [menu, setMenu] = useState<ContextMenuState | null>(null);
@@ -40,11 +45,11 @@ export function ContextMenuProvider({ children }: { children: ReactNode }) {
 
   const closeContextMenu = useCallback(() => setMenu(null), []);
 
-  const openMenuAt = useCallback((point: ContextMenuPoint, items: ContextMenuItem[], label?: string, trigger?: HTMLElement) => {
+  const openMenuAt = useCallback((point: ContextMenuPoint, items: ContextMenuItem[], label?: string, trigger?: HTMLElement, placement: "above" | "below" = "below") => {
     if (items.length === 0) return false;
     focusFirstItemRef.current = Boolean(trigger);
-    setMenu({ point, items, label, trigger });
-    setPosition(clampContextMenuPosition(point, ESTIMATED_MENU_SIZE, { width: window.innerWidth, height: window.innerHeight }));
+    setMenu({ point, items, label, trigger, placement });
+    setPosition(clampContextMenuPosition(menuOrigin(point, ESTIMATED_MENU_SIZE.height, placement), ESTIMATED_MENU_SIZE, { width: window.innerWidth, height: window.innerHeight }));
     return true;
   }, []);
 
@@ -55,10 +60,11 @@ export function ContextMenuProvider({ children }: { children: ReactNode }) {
     return openMenuAt({ x: event.clientX, y: event.clientY }, items, label);
   }, [openMenuAt]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!menu || !menuRef.current) return;
     const rect = menuRef.current.getBoundingClientRect();
-    const next = clampContextMenuPosition(menu.point, { width: rect.width, height: rect.height }, { width: window.innerWidth, height: window.innerHeight });
+    const size = { width: rect.width, height: rect.height };
+    const next = clampContextMenuPosition(menuOrigin(menu.point, rect.height, menu.placement), size, { width: window.innerWidth, height: window.innerHeight });
     setPosition((current) => current && current.x === next.x && current.y === next.y ? current : next);
     if (focusFirstItemRef.current) {
       focusFirstItemRef.current = false;

@@ -86,13 +86,12 @@ export function TurnChangesCard({
   onOpenGit: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  if (review.status === "no_changes") return null;
   if (review.status !== "ready") {
     const title =
       review.status === "checking"
         ? "Checking turn changes..."
-        : review.status === "no_changes"
-          ? "No workspace changes"
-          : "Change review unavailable";
+        : "Change review unavailable";
     return (
       <section
         className={`turn-changes-card ${review.status}`}

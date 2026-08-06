@@ -2,17 +2,12 @@ import type { ChatStreamEventIcon, ChatStreamEventStatus, ChatStreamPart } from 
 
 type ChatStreamEventPart = Extract<ChatStreamPart, { kind: "event" }>;
 
-export type ChatStreamToolGroup = {
-  kind: "toolGroup";
-  parts: ChatStreamEventPart[];
-};
-
 export type ChatStreamWorkGroup = {
   kind: "workGroup";
   parts: ChatStreamPart[];
 };
 
-export type ChatStreamDisplayPart = ChatStreamPart | ChatStreamToolGroup | ChatStreamWorkGroup;
+export type ChatStreamDisplayPart = ChatStreamPart | ChatStreamWorkGroup;
 
 export type WorkGroupSummary = {
   eventType: "tool" | "thinking";
@@ -58,21 +53,45 @@ function isLiveInternalPart(part: ChatStreamPart): boolean {
 }
 
 export function groupCompletedStreamActivity(parts: ChatStreamPart[], streaming: boolean): ChatStreamDisplayPart[] {
+  if (!streaming) {
+    let finalAnswerIndex = -1;
+    for (let index = parts.length - 1; index >= 0; index -= 1) {
+      const part = parts[index];
+      if (part.kind === "text" && part.content.trim()) {
+        finalAnswerIndex = index;
+        break;
+      }
+    }
+
+    const visible: ChatStreamDisplayPart[] = [];
+    const work: ChatStreamPart[] = [];
+    let workIndex = -1;
+    parts.forEach((part, index) => {
+      const collapsible =
+        (part.kind === "text" && index !== finalAnswerIndex) ||
+        isCompletedInternalPart(part);
+      if (collapsible) {
+        if (workIndex < 0) workIndex = visible.length;
+        work.push(part);
+      } else {
+        visible.push(part);
+      }
+    });
+    if (work.length) visible.splice(workIndex, 0, { kind: "workGroup", parts: work });
+    return visible;
+  }
+
   const next: ChatStreamDisplayPart[] = [];
   let group: ChatStreamPart[] = [];
-  const isInternalPart = streaming ? isLiveInternalPart : isCompletedInternalPart;
 
   const flush = () => {
     if (group.length === 1) next.push(group[0]);
-    else if (group.length > 1) {
-      const toolParts = group.filter(isCompletedToolEvent);
-      next.push(streaming || toolParts.length !== group.length ? { kind: "workGroup", parts: group } : { kind: "toolGroup", parts: toolParts });
-    }
+    else if (group.length > 1) next.push({ kind: "workGroup", parts: group });
     group = [];
   };
 
   for (const part of parts) {
-    if (isInternalPart(part)) {
+    if (isLiveInternalPart(part)) {
       group.push(part);
     } else {
       flush();

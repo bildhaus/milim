@@ -35,7 +35,7 @@ Failed or canceled native-runtime turns discard that runtime's native session be
 
 Completed assistant responses retain their provider or account runtime and model in the transcript footer. Command rows visually replace the current workspace with `.` and unwrap recognized shell launchers, while their tooltip and copy action preserve the exact original input.
 
-Git and preview review comments are sent as structured context with the next user turn for provider models and account runtimes. Live work drawers open automatically only while their newest activity is a failure, collapse after recovery or turn completion, and remain manually expandable with failure details intact. Approval lifecycle rows settle when the turn ends instead of remaining animated.
+Git and preview review comments are sent as structured context with the next user turn for provider models and account runtimes. Completed turns fold intermediate assistant updates, reasoning, and ordinary tool activity into one duration-labeled work drawer while keeping the final response and structured outputs visible. Live work drawers open automatically only while their newest activity is a failure, collapse after recovery or turn completion, and remain manually expandable with failure details intact. Approval lifecycle rows settle when the turn ends instead of remaining animated.
 
 ## Get started
 

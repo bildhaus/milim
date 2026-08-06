@@ -92,8 +92,20 @@ try {
   if (changes.status !== "ready") throw new Error("Expected ready review.");
   assert.deepEqual(changes.stats, { files: 5, additions: 5, deletions: 5 });
   assert.equal(changes.sections[0].path, "src/file-1.ts");
-  assert.equal(turnReviewFromDiff("empty", checkpoint, result("")).status, "no_changes");
+  const noChanges = turnReviewFromDiff("empty", checkpoint, result(""));
+  assert.equal(noChanges.status, "no_changes");
   assert.equal(turnReviewFromDiff("error", checkpoint, result("", false)).status, "unavailable");
+
+  const noChangesMarkup = renderToStaticMarkup(
+    createElement(TurnChangesCard, {
+      review: noChanges,
+      onUndo: () => {},
+      onReview: () => {},
+      onRetry: () => {},
+      onOpenGit: () => {},
+    }),
+  );
+  assert.equal(noChangesMarkup, "");
 
   const markup = renderToStaticMarkup(
     createElement(TurnChangesCard, {

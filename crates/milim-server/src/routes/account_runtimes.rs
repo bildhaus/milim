@@ -366,8 +366,7 @@ pub(crate) fn pi_harness_stream(
     }
     req.prompt = account_runtime_workspace_prompt(&run_context, &req.prompt, "native");
     let (prompt, redactions) =
-        account_runtime_prompt_for_remote(st, &run_context, &req.prompt, "Pi")
-            .map_err(ApiError)?;
+        account_runtime_prompt_for_remote(st, &run_context, &req.prompt, "Pi").map_err(ApiError)?;
     account_runtime_images_for_remote(&run_context, &req.images, "Pi").map_err(ApiError)?;
     req.prompt = prompt;
     let endpoint = account_runtime_tool_endpoint(

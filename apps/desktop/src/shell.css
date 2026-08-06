@@ -359,10 +359,11 @@
   gap: 4px;
 }
 .topbar-with-thread-navigation .topbar-left {
-  flex: 0 1 clamp(180px, 26vw, 380px);
-  max-width: 32vw;
+  flex: 0 0 clamp(420px, 36vw, 560px);
+  max-width: 55vw;
   padding-right: 0;
 }
+.topbar-with-thread-navigation .topbar-account-usage { flex-shrink: 0; }
 .topbar-thread-navigation {
   position: relative;
   z-index: 50;
@@ -909,6 +910,7 @@
 .thread-bar-popover .session-empty { margin: 4px; }
 
 @media (max-width: 960px) {
+  .topbar-with-thread-navigation .topbar-usage { display: none; }
   .thread-bar-action > span { display: none; }
   .thread-bar-action { width: 30px; padding: 0; }
   .thread-bar-new-chat > .new-chat,

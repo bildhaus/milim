@@ -3960,6 +3960,10 @@ html[data-dark="true"] .preview-control-cursor {
   padding: 2px 0 2px 10px;
   border-left: 1px solid var(--border-primary);
 }
+.stream-tool-group-body > .md {
+  color: var(--secondary-text);
+  font-size: 13px;
+}
 .stream-reasoning {
   margin: 0;
   border: 0;
@@ -4150,7 +4154,7 @@ html[data-dark="true"] .preview-control-cursor {
   font-size: 10.5px;
   line-height: 1.35;
 }
-.turn-changes-card:is(.checking, .no_changes, .unavailable) .turn-changes-head {
+.turn-changes-card:is(.checking, .unavailable) .turn-changes-head {
   border-bottom: 0;
 }
 .turn-changes-total,

@@ -53,6 +53,7 @@ const screenshots = {
   inboxProjects: join(tmpdir(), "milim-tauri-webview-inbox-projects.png"),
   inboxSettings: join(tmpdir(), "milim-tauri-webview-inbox-settings.png"),
   threadBarTop: join(tmpdir(), "milim-tauri-webview-thread-bar-top.png"),
+  threadBarTopNarrow: join(tmpdir(), "milim-tauri-webview-thread-bar-top-narrow.png"),
   threadBarBottom: join(tmpdir(), "milim-tauri-webview-thread-bar-bottom.png"),
   chatSources: join(tmpdir(), "milim-tauri-webview-chat-sources.png"),
   chatLatest: join(tmpdir(), "milim-tauri-webview-chat-latest.png"),
@@ -1129,6 +1130,16 @@ async function runPersistenceAndChat(page, pid) {
 }
 
 async function runInboxSidebarCheck(page) {
+  await page.route("**/codex/rate-limits", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      rateLimits: {
+        primary: { usedPercent: 48, windowDurationMins: 300, resetsAt: 1_782_660_000 },
+        secondary: { usedPercent: 60, windowDurationMins: 10_080, resetsAt: 1_782_900_000 },
+      },
+    }),
+  }));
   const fixture = await page.evaluate(async ({ projectA, projectB, projectC }) => {
     const invoke = window.__TAURI_INTERNALS__.invoke;
     const now = Date.now();
@@ -1136,8 +1147,13 @@ async function runInboxSidebarCheck(page) {
       {
         id: "inbox-active-new",
         title: "Cross-project newest",
-        messages: [],
-        settings: { folder: projectA },
+        messages: [{
+          id: "topbar-usage-fixture",
+          role: "assistant",
+          content: "Ready",
+          usage: { prompt_tokens: 1_200, completion_tokens: 300, total_tokens: 1_500 },
+        }],
+        settings: { folder: projectA, model: "codex:gpt-5.4" },
         createdAt: now,
         updatedAt: now,
       },
@@ -1249,7 +1265,7 @@ async function runInboxSidebarCheck(page) {
     await invoke("user_state_set", {
       key: "milim.ui",
       value: JSON.stringify({
-        state: { settledThreadsEnabled: false, sidebarOpen: true, sidebarWidth: 236, threadNavigationPlacement: "sidebar" },
+        state: { settledThreadsEnabled: false, sidebarOpen: true, sidebarWidth: 236, threadNavigationPlacement: "sidebar", showAccountUsageInTitleBar: true },
         version: 0,
       }),
     });
@@ -1308,6 +1324,12 @@ async function runInboxSidebarCheck(page) {
       titlebarBottom: titlebar?.bottom,
       barTop: bar?.top,
       barBottom: bar?.bottom,
+      leftWidth: document.querySelector(".topbar-left")?.getBoundingClientRect().width,
+      threadWidth: document.querySelector(".topbar-thread")?.getBoundingClientRect().width,
+      accountUsageClipped: (() => {
+        const usage = document.querySelector(".topbar-account-usage");
+        return usage instanceof HTMLElement ? usage.clientWidth < usage.scrollWidth : false;
+      })(),
       projectPaddingLeft: projectStyle ? Number.parseFloat(projectStyle.paddingLeft) : 0,
       projectPaddingRight: projectStyle ? Number.parseFloat(projectStyle.paddingRight) : 0,
     };
@@ -1320,11 +1342,40 @@ async function runInboxSidebarCheck(page) {
     topFlow.barBottom == null ||
     topFlow.barTop < topFlow.titlebarTop ||
     topFlow.barBottom > topFlow.titlebarBottom ||
+    topFlow.leftWidth == null ||
+    topFlow.leftWidth < 420 ||
+    topFlow.threadWidth == null ||
+    topFlow.threadWidth < 100 ||
+    topFlow.accountUsageClipped ||
     topFlow.projectPaddingLeft < 14 ||
     topFlow.projectPaddingRight < 14
   ) {
     throw new Error(`Top thread navigation should share the native title bar: ${JSON.stringify(topFlow)}.`);
   }
+  const topViewport = await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
+  await page.setViewportSize({ width: 800, height: 720 });
+  const narrowTopFlow = await page.evaluate(() => {
+    const title = document.querySelector(".topbar-thread");
+    const accountUsage = document.querySelector(".topbar-account-usage");
+    const threadUsage = document.querySelector(".topbar-usage");
+    return {
+      titleWidth: title?.getBoundingClientRect().width,
+      accountUsageClipped: accountUsage instanceof HTMLElement
+        ? accountUsage.clientWidth < accountUsage.scrollWidth
+        : true,
+      threadUsageHidden: !threadUsage || getComputedStyle(threadUsage).display === "none",
+    };
+  });
+  if (
+    narrowTopFlow.titleWidth == null ||
+    narrowTopFlow.titleWidth < 60 ||
+    narrowTopFlow.accountUsageClipped ||
+    !narrowTopFlow.threadUsageHidden
+  ) {
+    throw new Error(`Narrow top thread navigation should preserve the title and account usage: ${JSON.stringify(narrowTopFlow)}.`);
+  }
+  await page.screenshot({ path: screenshots.threadBarTopNarrow, fullPage: false });
+  await page.setViewportSize(topViewport);
   await topProject.click();
   const topDropdown = page.getByRole("dialog", { name: "Workspace A threads" });
   await topDropdown.waitFor();
@@ -1444,7 +1495,19 @@ async function runInboxSidebarCheck(page) {
   });
   if (!bottomDropdownAbove) throw new Error("Bottom project dropdown should open upward.");
   await page.keyboard.press("Escape");
+  const bottomToolsTrigger = bottomBar.getByTestId("open-tools");
+  await bottomToolsTrigger.click();
+  const bottomToolsMenu = page.getByRole("menu", { name: "Tools" });
+  await bottomToolsMenu.waitFor();
+  const bottomToolsGap = await bottomToolsMenu.evaluate((element) => {
+    const trigger = document.querySelector('.thread-bar-bottom [data-testid="open-tools"]')?.getBoundingClientRect();
+    return trigger ? trigger.top - element.getBoundingClientRect().bottom : null;
+  });
+  if (bottomToolsGap == null || bottomToolsGap < 0 || bottomToolsGap > 8) {
+    throw new Error(`Bottom Tools menu should hug the rail: ${String(bottomToolsGap)}px gap.`);
+  }
   await page.screenshot({ path: screenshots.threadBarBottom, fullPage: false });
+  await page.keyboard.press("Escape");
 
   await page.reload();
   await page.getByTestId("chat-shell").waitFor();

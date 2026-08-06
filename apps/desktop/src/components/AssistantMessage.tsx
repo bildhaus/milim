@@ -4,7 +4,6 @@ import { markPerfRender } from "../lib/perf";
 import {
   groupCompletedStreamActivity,
   liveWorkGroupSummary,
-  type ChatStreamToolGroup,
   type ChatStreamWorkGroup,
 } from "../lib/streamParts";
 import { formatDuration } from "../lib/usageMetrics";
@@ -195,15 +194,6 @@ function StreamEvent({
   );
 }
 
-function compactToolNames(parts: ChatStreamEventPart[]): string {
-  const names = parts.map(
-    (part) =>
-      part.name?.trim() || part.label.replace(/^Used\s+/i, "").trim() || "tool",
-  );
-  const joined = names.join(", ");
-  return joined.length > 90 ? `${joined.slice(0, 89)}...` : joined;
-}
-
 function lastFailedEvent(parts: ChatStreamPart[]): ChatStreamEventPart | undefined {
   for (let index = parts.length - 1; index >= 0; index -= 1) {
     const part = parts[index];
@@ -217,42 +207,6 @@ function failureSummary(part: ChatStreamEventPart, workspaceFolder?: string): st
     ? formatCommandDisplay(part.detail, workspaceFolder)
     : part.detail;
   return detail ? `${part.label} · ${detail}` : part.label;
-}
-
-function StreamToolGroup({ group, workspaceFolder }: { group: ChatStreamToolGroup; workspaceFolder?: string }) {
-  const failure = lastFailedEvent(group.parts);
-  const status = failure ? "error" : "done";
-  return (
-    <details
-      className="stream-tool-group"
-      data-testid="assistant-stream-tool-group"
-    >
-      <summary className={`stream-event stream-event-tool stream-event-${status}`}>
-        <span className="stream-event-icon" aria-hidden="true">
-          <StreamIcon icon="tool" status={status} />
-        </span>
-        <span className="stream-event-label">
-          {failure ? "Work stopped" : `Used ${group.parts.length} tools`}
-        </span>
-        <StreamEventDetail
-          detail={failure ? failureSummary(failure, workspaceFolder) : compactToolNames(group.parts)}
-          running={false}
-          role={failure ? "alert" : undefined}
-          copyText={failure?.detail && isCommandEvent(failure) ? failure.detail : undefined}
-        />
-      </summary>
-      <div className="stream-tool-group-body">
-        {group.parts.map((part, index) => (
-          <StreamEvent
-            key={`${part.name ?? part.label}-${index}`}
-            part={part}
-            toolApproval="guarded"
-            workspaceFolder={workspaceFolder}
-          />
-        ))}
-      </div>
-    </details>
-  );
 }
 
 function plural(count: number, singular: string): string {
@@ -271,6 +225,7 @@ function isCommandEvent(part: ChatStreamPart): boolean {
 }
 
 function workGroupDetail(group: ChatStreamWorkGroup): string {
+  const updates = group.parts.filter((part) => part.kind === "text").length;
   const reasoning = group.parts.filter(
     (part) => part.kind === "thinking",
   ).length;
@@ -283,6 +238,7 @@ function workGroupDetail(group: ChatStreamWorkGroup): string {
   ).length;
   return (
     [
+      updates ? plural(updates, "update") : null,
       commands ? plural(commands, "command") : null,
       tools ? plural(tools, "tool") : null,
       reasoning ? `${plural(reasoning, "reasoning note")}` : null,
@@ -297,11 +253,15 @@ function StreamWorkGroup({
   durationMs,
   streaming = false,
   workspaceFolder,
+  previewArtifacts,
+  onOpenPreview,
 }: {
   group: ChatStreamWorkGroup;
   durationMs?: number;
   streaming?: boolean;
   workspaceFolder?: string;
+  previewArtifacts?: ChatArtifact[];
+  onOpenPreview?: (artifact: ChatArtifact) => void;
 }) {
   const liveSummary = streaming ? liveWorkGroupSummary(group) : null;
   const latestEvent = [...group.parts].reverse().find(
@@ -357,7 +317,7 @@ function StreamWorkGroup({
               ? "Work stopped"
               : durationMs != null && durationMs > 0
               ? `Worked for ${formatDuration(durationMs)}`
-              : `Worked through ${group.parts.length} steps`)}
+              : `Worked through ${plural(group.parts.length, "step")}`)}
         </span>
         {liveSummary?.detail ? (
           <StreamEventDetail
@@ -391,7 +351,15 @@ function StreamWorkGroup({
             );
           if (part.kind === "event")
             return <StreamEvent key={`${part.kind}-${index}`} part={part} toolApproval="guarded" workspaceFolder={workspaceFolder} />;
-          return null;
+          return (
+            <AnswerText
+              key={`${part.kind}-${index}`}
+              content={part.content}
+              previewArtifacts={previewArtifacts}
+              onOpenPreview={onOpenPreview}
+              streaming={false}
+            />
+          );
         })}
       </div>
     </details>
@@ -626,8 +594,6 @@ function AssistantMessageView({
     <div className="assistant-stream">
       {displayParts.map((part, index) => {
         const isLatest = index === displayParts.length - 1;
-        if (part.kind === "toolGroup")
-          return <StreamToolGroup key={`${part.kind}-${index}`} group={part} workspaceFolder={workspaceFolder} />;
         if (part.kind === "workGroup")
           return (
             <StreamWorkGroup
@@ -636,6 +602,8 @@ function AssistantMessageView({
               durationMs={workGroupCount === 1 ? workDurationMs : undefined}
               streaming={streaming && isLatest}
               workspaceFolder={workspaceFolder}
+              previewArtifacts={previewArtifacts}
+              onOpenPreview={onOpenPreview}
             />
           );
         if (part.kind === "thinking") {
