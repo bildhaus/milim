@@ -622,6 +622,7 @@ function MessageRowView({
                   content={m.content}
                   highlight={false}
                   collapseArtifacts={false}
+                  renderMermaid
                 />
               </Suspense>
             )}

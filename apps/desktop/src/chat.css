@@ -5574,6 +5574,62 @@ g.native-chart-mark:focus-visible .native-chart-point {
 .code-action:hover { color: var(--primary-text); background: var(--chip-hover); }
 .code-action > svg { flex: 0 0 auto; }
 
+.mermaid-card {
+  margin: 0 0 10px;
+  overflow: hidden;
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  background: var(--card-bg);
+}
+.mermaid-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px;
+  border-bottom: 1px solid var(--border-primary);
+}
+.mermaid-tabs,
+.mermaid-actions { display: flex; align-items: center; gap: 4px; }
+.mermaid-tabs button,
+.mermaid-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 26px;
+  padding: 3px 7px;
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  background: var(--chip-bg);
+  color: var(--secondary-text);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.mermaid-tabs button[aria-selected="true"] {
+  border-color: var(--accent);
+  color: var(--primary-text);
+  background: var(--accent-soft);
+}
+.mermaid-tabs button:hover:not(:disabled),
+.mermaid-actions button:hover:not(:disabled) { color: var(--primary-text); background: var(--chip-hover); }
+.mermaid-tabs button:disabled,
+.mermaid-actions button:disabled { cursor: default; opacity: 0.45; }
+.mermaid-canvas { min-height: 120px; overflow: auto; padding: 14px; }
+.mermaid-svg { display: flex; justify-content: center; min-width: 0; width: 100%; }
+.mermaid-svg svg { display: block; width: auto; max-width: 100%; height: auto; max-height: 70vh; }
+.mermaid-status { padding: 34px 12px; color: var(--tertiary-text); text-align: center; }
+.mermaid-source .code-block { margin: 0; border: 0; border-radius: 0; }
+.mermaid-error,
+.mermaid-notice { padding: 7px 10px; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mermaid-error { border-bottom: 1px solid var(--border-primary); color: var(--error); }
+.mermaid-notice { border-top: 1px solid var(--border-primary); color: var(--secondary-text); }
+@media (max-width: 620px) {
+  .mermaid-header { align-items: flex-start; flex-direction: column; }
+  .mermaid-actions { width: 100%; flex-wrap: wrap; }
+}
+
 /* highlight.js token theme (Material-ish; reads well on dark) */
 .hljs { color: var(--primary-text); }
 .hljs-comment, .hljs-quote { color: var(--tertiary-text); font-style: italic; }

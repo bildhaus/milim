@@ -347,6 +347,7 @@ function collectFencedArtifacts(content: string, artifacts: ChatArtifact[]): voi
       : parsedInfo;
     const block = leadingFile ? leadingFile.content : cleanedBlock;
     if (!block.trim()) continue;
+    if (!info.filename && info.language === "mermaid") continue;
     if (!info.filename && block.trim().length < MIN_ANON_CODE_CHARS) continue;
     artifacts.push(makeArtifact(artifacts.length, {
       content: block,

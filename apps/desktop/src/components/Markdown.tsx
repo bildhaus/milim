@@ -8,6 +8,7 @@ import { extractArtifactsFromContent, isPreviewableArtifact } from "../lib/artif
 import { markPerfRender } from "../lib/perf";
 import { highlightSyntax, type SyntaxNode } from "../lib/syntaxHighlight";
 import { CodeBlock } from "./CodeBlock";
+import { MermaidDiagram } from "./MermaidDiagram";
 
 type MarkdownRehypePlugins = NonNullable<ComponentProps<typeof ReactMarkdown>["rehypePlugins"]>;
 type MarkdownProps = {
@@ -18,6 +19,7 @@ type MarkdownProps = {
   allowHtml?: boolean;
   previewArtifactsStreaming?: boolean;
   collapseArtifacts?: boolean;
+  renderMermaid?: boolean;
 };
 
 type MarkdownRehypePlugin = MarkdownRehypePlugins[number];
@@ -45,6 +47,33 @@ function classNames(value: unknown): string[] {
   if (typeof value === "string") return value.split(/\s+/).filter(Boolean);
   if (Array.isArray(value)) return value.flatMap(classNames);
   return [];
+}
+
+function codeBlockLanguage(children: ReactNode): string | null {
+  for (const child of Children.toArray(children)) {
+    if (!isValidElement(child)) continue;
+    for (const className of classNames((child.props as { className?: unknown }).className)) {
+      const language = className.match(/^(?:language|lang)-(.+)$/)?.[1]?.toLowerCase();
+      if (language) return language;
+    }
+    const nested = codeBlockLanguage((child.props as { children?: ReactNode }).children);
+    if (nested) return nested;
+  }
+  return null;
+}
+
+export function hasClosedMermaidFence(content: string): boolean {
+  let marker: { char: "`" | "~"; length: number } | null = null;
+  for (const line of content.split(/\r?\n/)) {
+    if (!marker) {
+      const opening = line.match(/^\s*((?:`{3,})|(?:~{3,}))\s*mermaid(?:\s+.*)?$/i)?.[1];
+      if (opening) marker = { char: opening[0] as "`" | "~", length: opening.length };
+      continue;
+    }
+    const closing = line.trim();
+    if (closing.length >= marker.length && [...closing].every((char) => char === marker?.char)) return true;
+  }
+  return false;
 }
 
 function textContent(node: HastNode | undefined): string {
@@ -132,6 +161,7 @@ function MarkdownBody({
   allowHtml = false,
   previewArtifactsStreaming = false,
   collapseArtifacts = true,
+  renderMermaid = false,
 }: MarkdownProps) {
   const effectivePreviewArtifacts = useMemo(
     () =>
@@ -160,6 +190,9 @@ function MarkdownBody({
           const text = normalizedCodeText(codeBlockText(children));
           const previewArtifact = previewArtifactForCodeText(text, effectivePreviewArtifacts);
           if (!previewArtifact && !text.trim()) return null;
+          if (renderMermaid && hasClosedMermaidFence(content) && codeBlockLanguage(children) === "mermaid") {
+            return <MermaidDiagram source={text} />;
+          }
           return (
             <CodeBlock previewArtifact={previewArtifact} previewStreaming={Boolean(previewArtifact && previewArtifactsStreaming)} onOpenPreview={onOpenPreview}>
               {children}

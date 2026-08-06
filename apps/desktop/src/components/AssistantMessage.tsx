@@ -570,6 +570,7 @@ function AnswerText({
         onOpenPreview={onOpenPreview}
         highlight={!streaming}
         previewArtifactsStreaming={previewArtifactsStreaming}
+        renderMermaid
       />
     </Suspense>
   );
@@ -588,6 +589,7 @@ function StreamingMarkdownText({ content }: { content: string }) {
         content={content}
         highlight={false}
         collapseArtifacts={false}
+        renderMermaid
       />
     </Suspense>
   );
