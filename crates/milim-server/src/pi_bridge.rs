@@ -1,14 +1,12 @@
 //! JSONL RPC bridge to the user-installed Pi coding agent.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::convert::Infallible;
 use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use axum::response::sse::Event;
 use futures::Stream;
 use milim_agents::ToolApprovalBroker;
 use milim_core::api::openai::Usage;
@@ -19,6 +17,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
+use crate::account_runtime_events::{canonicalize_runtime_stream, HarnessEvent};
 use crate::codex_bridge::AccountImage;
 use crate::privacy::Unredactor;
 
@@ -97,13 +96,24 @@ pub(crate) fn run_stream(
     req: PiRunRequest,
     redactions: BTreeMap<String, String>,
     approval_broker: Option<std::sync::Arc<ToolApprovalBroker>>,
-) -> impl Stream<Item = std::result::Result<Event, Infallible>> {
+) -> impl Stream<Item = HarnessEvent> {
+    let initial_session_id = req.session_id.clone();
+    canonicalize_runtime_stream(
+        native_event_stream(req, redactions, approval_broker),
+        initial_session_id,
+    )
+}
+
+fn native_event_stream(
+    req: PiRunRequest,
+    redactions: BTreeMap<String, String>,
+    approval_broker: Option<std::sync::Arc<ToolApprovalBroker>>,
+) -> impl Stream<Item = Value> {
     async_stream::stream! {
         let (provider, model_id) = match split_model(&req.model) {
             Some(parts) => parts,
             None => {
-                yield sse(&json!({ "type": "error", "message": "Pi model must use provider/model format." }));
-                yield Ok(Event::default().data("[DONE]"));
+                yield json!({ "type": "error", "message": "Pi model must use provider/model format." });
                 return;
             }
         };
@@ -111,18 +121,16 @@ pub(crate) fn run_stream(
         let mut proc = match PiProcess::start_run(&req, &provider, &model_id, &session_id).await {
             Ok(proc) => proc,
             Err(error) => {
-                yield sse(&json!({ "type": "error", "message": error.to_string() }));
-                yield Ok(Event::default().data("[DONE]"));
+                yield json!({ "type": "error", "message": error.to_string() });
                 return;
             }
         };
         if let Err(error) = proc.verify_model(&provider, &model_id).await {
-            yield sse(&json!({ "type": "error", "message": error.to_string() }));
+            yield json!({ "type": "error", "message": error.to_string() });
             proc.finish().await;
-            yield Ok(Event::default().data("[DONE]"));
             return;
         }
-        yield sse(&json!({ "type": "session", "session_id": session_id, "model": req.model }));
+        yield json!({ "type": "session", "session_id": session_id, "model": req.model });
 
         let mut prompt = json!({ "id": "milim-prompt", "type": "prompt", "message": req.prompt });
         if !req.images.is_empty() {
@@ -131,8 +139,7 @@ pub(crate) fn run_stream(
             })).collect());
         }
         if let Err(error) = proc.write_value(&prompt).await {
-            yield sse(&json!({ "type": "error", "message": error.to_string() }));
-            yield Ok(Event::default().data("[DONE]"));
+            yield json!({ "type": "error", "message": error.to_string() });
             return;
         }
 
@@ -155,11 +162,11 @@ pub(crate) fn run_stream(
                         if let Some((pending, call_id, decision)) = approval_ack.take() {
                             let message = "Pi did not resume after the approval decision".to_string();
                             pending.fail(message.clone());
-                            yield sse(&json!({
+                            yield json!({
                                 "type": "tool_approval_failed", "approval_id": pending.id,
                                 "call_id": call_id, "decision": decision, "message": message
-                            }));
-                            yield sse(&json!({ "type": "error", "message": message }));
+                            });
+                            yield json!({ "type": "error", "message": message });
                         }
                         break;
                     }
@@ -172,92 +179,47 @@ pub(crate) fn run_stream(
                 Err(error) => {
                     if let Some((pending, call_id, decision)) = approval_ack.take() {
                         pending.fail(error.to_string());
-                        yield sse(&json!({
+                        yield json!({
                             "type": "tool_approval_failed", "approval_id": pending.id,
                             "call_id": call_id, "decision": decision, "message": error.to_string()
-                        }));
+                        });
                     }
-                    yield sse(&json!({ "type": "error", "message": error.to_string() }));
+                    yield json!({ "type": "error", "message": error.to_string() });
                     break;
                 }
             };
             if let Some((pending, call_id, decision)) = approval_ack.take() {
                 pending.acknowledge();
-                yield sse(&json!({
+                yield json!({
                     "type": "tool_approval_resolved", "approval_id": pending.id,
                     "call_id": call_id, "decision": decision
-                }));
+                });
             }
             if let Some(error) = pi_error_message(&message) {
-                yield sse(&json!({ "type": "error", "message": actionable_pi_error(error) }));
+                yield json!({ "type": "error", "message": actionable_pi_error(error) });
                 break;
+            }
+            if let Some((events, settled)) = pi_passive_events(
+                &message,
+                &mut content,
+                &mut reasoning,
+                &mut tool_calls,
+                &mut final_usage,
+            ) {
+                for event in events {
+                    yield event;
+                }
+                if settled {
+                    finished = true;
+                }
+                continue;
             }
             match message.get("type").and_then(Value::as_str).unwrap_or_default() {
                 "response" if message.get("id").and_then(Value::as_str) == Some("milim-prompt") => {
                     if message.get("success").and_then(Value::as_bool) == Some(false) {
-                        yield sse(&json!({ "type": "error", "message": message.get("error").and_then(Value::as_str).unwrap_or("Pi rejected the prompt.") }));
+                        yield json!({ "type": "error", "message": message.get("error").and_then(Value::as_str).unwrap_or("Pi rejected the prompt.") });
                         break;
                     }
-                }
-                "message_update" => {
-                    let event = message.get("assistantMessageEvent").unwrap_or(&Value::Null);
-                    match event.get("type").and_then(Value::as_str).unwrap_or_default() {
-                        "text_delta" => if let Some(delta) = event.get("delta").and_then(Value::as_str) {
-                            let text = content.push(delta);
-                            if !text.is_empty() { yield sse(&json!({ "type": "token", "text": text })); }
-                        },
-                        "thinking_delta" => if let Some(delta) = event.get("delta").and_then(Value::as_str) {
-                            let text = reasoning.push(delta);
-                            if !text.is_empty() { yield sse(&json!({ "type": "reasoning", "text": text })); }
-                        },
-                        "toolcall_end" => {
-                            if let Some((call_id, name, arguments, effect)) = tool_call_from_delta(event) {
-                                tool_calls.insert(call_id, (name, arguments, effect));
-                            }
-                        }
-                        "error" => {
-                            let detail = event.get("error").and_then(Value::as_str)
-                                .or_else(|| event.pointer("/partial/errorMessage").and_then(Value::as_str))
-                                .or_else(|| message.pointer("/message/errorMessage").and_then(Value::as_str))
-                                .or_else(|| event.get("reason").and_then(Value::as_str))
-                                .unwrap_or("Pi model request failed.");
-                            yield sse(&json!({ "type": "error", "message": actionable_pi_error(detail) }));
-                        }
-                        _ => {}
-                    }
-                }
-                "message_end" => {
-                    if let Some(usage) = usage_from_message(message.get("message").unwrap_or(&Value::Null)) {
-                        final_usage = Some(usage);
-                    }
-                }
-                "tool_execution_start" => {
-                    let call_id = message.get("toolCallId").and_then(Value::as_str).unwrap_or("pi-tool").to_string();
-                    let name = message.get("toolName").and_then(Value::as_str).unwrap_or("Pi tool").to_string();
-                    let arguments = message.get("args").cloned().unwrap_or(Value::Null).to_string();
-                    let effect = tool_effect(&name);
-                    tool_calls.insert(call_id.clone(), (name.clone(), arguments.clone(), effect));
-                    yield sse(&json!({ "type": "tool", "id": call_id, "name": name, "status": "running", "detail": arguments }));
-                }
-                "tool_execution_end" => {
-                    let call_id = message.get("toolCallId").and_then(Value::as_str).unwrap_or("pi-tool").to_string();
-                    let previous = tool_calls.remove(&call_id);
-                    let name = message.get("toolName").and_then(Value::as_str).map(str::to_string)
-                        .or_else(|| previous.as_ref().map(|(name, _, _)| name.clone()))
-                        .unwrap_or_else(|| "Pi tool".into());
-                    let detail = previous.as_ref().map(|(_, arguments, _)| arguments.clone());
-                    let result = pi_tool_result(&message);
-                    let failed = message.get("isError").and_then(Value::as_bool) == Some(true);
-                    let error = failed.then(|| {
-                        message.get("error").and_then(value_detail)
-                            .or_else(|| result.as_ref().and_then(value_detail))
-                            .unwrap_or_else(|| format!("{name} failed"))
-                    });
-                    yield sse(&json!({
-                        "type": "tool", "id": call_id, "name": name,
-                        "status": if failed { "error" } else { "done" },
-                        "detail": detail, "result": result, "error": error
-                    }));
                 }
                 "extension_ui_request" => {
                     let title = message.get("title").and_then(Value::as_str).unwrap_or_default();
@@ -269,14 +231,14 @@ pub(crate) fn run_stream(
                                 "id": request_id,
                                 "confirmed": false
                             })).await {
-                                yield sse(&json!({ "type": "error", "message": error.to_string() }));
+                                yield json!({ "type": "error", "message": error.to_string() });
                                 break;
                             }
                         }
-                        yield sse(&json!({
+                        yield json!({
                             "type": "warning",
                             "message": "Pi requested an unsupported extension interaction"
-                        }));
+                        });
                         continue;
                     }
                     let call_id = title.trim_start_matches(APPROVAL_PREFIX).to_string();
@@ -286,20 +248,20 @@ pub(crate) fn run_stream(
                     let approved = if interactive {
                         let Some(broker) = approval_broker.as_ref() else {
                             let _ = proc.write_value(&json!({ "type": "extension_ui_response", "id": request_id, "confirmed": false })).await;
-                            yield sse(&json!({ "type": "error", "message": "Pi Review approval broker is unavailable." }));
+                            yield json!({ "type": "error", "message": "Pi Review approval broker is unavailable." });
                             break;
                         };
                         let mut pending = broker.request();
-                        yield sse(&json!({
+                        yield json!({
                             "type": "tool_approval_required", "approval_id": pending.id,
                             "call_id": call_id, "name": name, "arguments": arguments, "effect": effect
-                        }));
+                        });
                         let decision = pending.wait().await.approved;
-                        yield sse(&json!({
+                        yield json!({
                             "type": "tool_approval_status", "approval_id": pending.id,
                             "call_id": call_id, "decision": if decision { "approve" } else { "deny" },
                             "status": "decided"
-                        }));
+                        });
                         pending_delivery = Some(pending);
                         decision
                     } else {
@@ -308,46 +270,172 @@ pub(crate) fn run_stream(
                     if let Err(error) = proc.write_value(&json!({ "type": "extension_ui_response", "id": request_id, "confirmed": approved })).await {
                         if let Some(pending) = pending_delivery.take() {
                             pending.fail(error.to_string());
-                            yield sse(&json!({
+                            yield json!({
                                 "type": "tool_approval_failed", "approval_id": pending.id,
                                 "call_id": call_id, "decision": if approved { "approve" } else { "deny" },
                                 "message": error.to_string()
-                            }));
+                            });
                         }
-                        yield sse(&json!({ "type": "error", "message": error.to_string() }));
+                        yield json!({ "type": "error", "message": error.to_string() });
                         break;
                     }
                     if let Some(pending) = pending_delivery {
                         let decision = if approved { "approve" } else { "deny" };
                         if let Err(message) = pending.deliver() {
-                            yield sse(&json!({
+                            yield json!({
                                 "type": "tool_approval_failed", "approval_id": pending.id,
                                 "call_id": call_id, "decision": decision, "message": message
-                            }));
-                            yield sse(&json!({ "type": "error", "message": message }));
+                            });
+                            yield json!({ "type": "error", "message": message });
                             break;
                         }
-                        yield sse(&json!({
+                        yield json!({
                             "type": "tool_approval_status", "approval_id": pending.id,
                             "call_id": call_id, "decision": decision, "status": "delivered"
-                        }));
+                        });
                         approval_ack = Some((pending, call_id, decision));
                     }
                 }
                 "extension_error" => {
                     let message = message.get("error").and_then(Value::as_str).or_else(|| message.get("message").and_then(Value::as_str)).unwrap_or("Pi extension failed.");
-                    yield sse(&json!({ "type": "warning", "message": message }));
-                }
-                "agent_settled" => {
-                    yield sse(&json!({ "type": "done", "status": "done", "usage": final_usage }));
-                    finished = true;
+                    yield json!({ "type": "warning", "message": message });
                 }
                 _ => {}
             }
         }
         proc.finish().await;
-        yield Ok(Event::default().data("[DONE]"));
     }
+}
+
+fn pi_passive_events(
+    message: &Value,
+    content: &mut Unredactor,
+    reasoning: &mut Unredactor,
+    tool_calls: &mut HashMap<String, (String, String, &'static str)>,
+    final_usage: &mut Option<Usage>,
+) -> Option<(Vec<Value>, bool)> {
+    let mut events = Vec::new();
+    match message.get("type").and_then(Value::as_str)? {
+        "message_update" => {
+            let event = message.get("assistantMessageEvent").unwrap_or(&Value::Null);
+            match event
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+            {
+                "text_delta" => {
+                    if let Some(delta) = event.get("delta").and_then(Value::as_str) {
+                        let text = content.push(delta);
+                        if !text.is_empty() {
+                            events.push(json!({ "type": "token", "text": text }));
+                        }
+                    }
+                }
+                "thinking_delta" => {
+                    if let Some(delta) = event.get("delta").and_then(Value::as_str) {
+                        let text = reasoning.push(delta);
+                        if !text.is_empty() {
+                            events.push(json!({ "type": "reasoning", "text": text }));
+                        }
+                    }
+                }
+                "toolcall_end" => {
+                    if let Some((call_id, name, arguments, effect)) = tool_call_from_delta(event) {
+                        tool_calls.insert(call_id, (name, arguments, effect));
+                    }
+                }
+                "error" => {
+                    let detail = event
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .or_else(|| {
+                            event
+                                .pointer("/partial/errorMessage")
+                                .and_then(Value::as_str)
+                        })
+                        .or_else(|| {
+                            message
+                                .pointer("/message/errorMessage")
+                                .and_then(Value::as_str)
+                        })
+                        .or_else(|| event.get("reason").and_then(Value::as_str))
+                        .unwrap_or("Pi model request failed.");
+                    events.push(json!({ "type": "error", "message": actionable_pi_error(detail) }));
+                }
+                "start" | "done" | "text_start" | "text_end" | "thinking_start"
+                | "thinking_end" | "toolcall_start" | "toolcall_delta" | "" => {}
+                kind => events.push(json!({
+                    "type": "protocol_notice",
+                    "kind": "unsupported_update",
+                    "message": format!("Pi emitted unsupported assistant update {kind}")
+                })),
+            }
+        }
+        "message_end" => {
+            if let Some(usage) = usage_from_message(message.get("message").unwrap_or(&Value::Null))
+            {
+                *final_usage = Some(usage);
+            }
+        }
+        "tool_execution_start" => {
+            let call_id = message
+                .get("toolCallId")
+                .and_then(Value::as_str)
+                .unwrap_or("pi-tool")
+                .to_string();
+            let name = message
+                .get("toolName")
+                .and_then(Value::as_str)
+                .unwrap_or("Pi tool")
+                .to_string();
+            let arguments = message
+                .get("args")
+                .cloned()
+                .unwrap_or(Value::Null)
+                .to_string();
+            let effect = tool_effect(&name);
+            tool_calls.insert(call_id.clone(), (name.clone(), arguments.clone(), effect));
+            events.push(json!({
+                "type": "tool", "id": call_id, "name": name,
+                "status": "running", "detail": arguments
+            }));
+        }
+        "tool_execution_end" => {
+            let call_id = message
+                .get("toolCallId")
+                .and_then(Value::as_str)
+                .unwrap_or("pi-tool")
+                .to_string();
+            let previous = tool_calls.remove(&call_id);
+            let name = message
+                .get("toolName")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| previous.as_ref().map(|(name, _, _)| name.clone()))
+                .unwrap_or_else(|| "Pi tool".into());
+            let detail = previous.as_ref().map(|(_, arguments, _)| arguments.clone());
+            let result = pi_tool_result(message);
+            let failed = message.get("isError").and_then(Value::as_bool) == Some(true);
+            let error = failed.then(|| {
+                message
+                    .get("error")
+                    .and_then(value_detail)
+                    .or_else(|| result.as_ref().and_then(value_detail))
+                    .unwrap_or_else(|| format!("{name} failed"))
+            });
+            events.push(json!({
+                "type": "tool", "id": call_id, "name": name,
+                "status": if failed { "error" } else { "done" },
+                "detail": detail, "result": result, "error": error
+            }));
+        }
+        "agent_settled" => {
+            events.push(json!({ "type": "done", "status": "done", "usage": final_usage }));
+            return Some((events, true));
+        }
+        _ => return None,
+    }
+    Some((events, false))
 }
 
 async fn discover_models() -> Result<Vec<Value>> {
@@ -774,12 +862,7 @@ impl PiProcess {
         self.finished = true;
         self.stdin.take();
         if let Some(mut child) = self.child.take() {
-            if tokio::time::timeout(CANCEL_GRACE, child.wait())
-                .await
-                .is_err()
-            {
-                let _ = child.kill().await;
-            }
+            crate::child_process::wait_or_kill(&mut child, CANCEL_GRACE).await;
         }
         self.tree.take();
         remove_extension(self.extension_path.take());
@@ -812,12 +895,7 @@ impl Drop for PiProcess {
                 let _ = stdin.flush().await;
             }
             drop(stdin);
-            if tokio::time::timeout(CANCEL_GRACE, child.wait())
-                .await
-                .is_err()
-            {
-                let _ = child.kill().await;
-            }
+            crate::child_process::wait_or_kill(&mut child, CANCEL_GRACE).await;
         });
     }
 }
@@ -912,16 +990,9 @@ fn remove_extension(path: Option<PathBuf>) {
     }
 }
 
-fn sse(value: &Value) -> std::result::Result<Event, Infallible> {
-    Ok(Event::default()
-        .data(serde_json::to_string(value).unwrap_or_else(|_| {
-            "{\"type\":\"error\",\"message\":\"serialization failed\"}".into()
-        })))
-}
-
 #[cfg(windows)]
 fn pi_command() -> Command {
-    if let Some(path) = find_on_path("pi.cmd") {
+    if let Some(path) = crate::child_process::find_on_path("pi.cmd") {
         let mut command = Command::new("cmd");
         command.arg("/C").arg(path);
         return command;
@@ -932,15 +1003,6 @@ fn pi_command() -> Command {
 #[cfg(not(windows))]
 fn pi_command() -> Command {
     crate::cli_path::command("pi")
-}
-
-#[cfg(windows)]
-fn find_on_path(name: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|path| {
-        std::env::split_paths(&path)
-            .map(|dir| dir.join(name))
-            .find(|path| path.is_file())
-    })
 }
 
 #[cfg(test)]
@@ -1027,6 +1089,50 @@ mod tests {
         assert_eq!(usage.prompt_tokens, 15);
         assert_eq!(usage.completion_tokens, 5);
         assert_eq!(usage.total_tokens, 20);
+    }
+
+    #[test]
+    fn replays_versioned_rpc_fixture_without_payload_diagnostics() {
+        let fixture =
+            include_str!("../tests/fixtures/account-runtimes/pi-cli-0.82.1-rpc-events.jsonl");
+        let mut content = Unredactor::new(BTreeMap::new());
+        let mut reasoning = Unredactor::new(BTreeMap::new());
+        let mut tools = HashMap::new();
+        let mut usage = None;
+        let mut settled = false;
+        let events = fixture
+            .lines()
+            .flat_map(|line| {
+                let message: Value = serde_json::from_str(line).unwrap();
+                let (events, done) = pi_passive_events(
+                    &message,
+                    &mut content,
+                    &mut reasoning,
+                    &mut tools,
+                    &mut usage,
+                )
+                .unwrap();
+                settled |= done;
+                events
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            events
+                .iter()
+                .filter_map(|event| event.get("type").and_then(Value::as_str))
+                .collect::<Vec<_>>(),
+            [
+                "token",
+                "reasoning",
+                "tool",
+                "tool",
+                "protocol_notice",
+                "done"
+            ]
+        );
+        assert!(!events[4].to_string().contains("privatePayload"));
+        assert!(settled);
+        assert!(tools.is_empty());
     }
 
     #[test]

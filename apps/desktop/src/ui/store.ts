@@ -20,6 +20,7 @@ export type ComposerSendShortcut = "enter" | "modEnter";
 export type ComposerDensity = "comfortable" | "compact";
 export type MediaComposerPlacement = "side" | "bottom";
 export type ChatLayoutStyle = "transcript" | "bubbles" | "compact";
+export type ThreadNavigationPlacement = "sidebar" | "top" | "bottom";
 export type SidebarRailStyle = "regular" | "split" | "centered";
 export type MessageWidth = "narrow" | "standard" | "wide" | "full";
 export type AvatarStyle = "none" | "avatar" | "role";
@@ -93,6 +94,7 @@ interface UiPreferencesState {
   developerMode: boolean;
   experimentalHashlinePatch: boolean;
   chatLayoutStyle: ChatLayoutStyle;
+  threadNavigationPlacement: ThreadNavigationPlacement;
   sidebarRailStyle: SidebarRailStyle;
   settledThreadsEnabled: boolean;
   showEmptyChatRidgeline: boolean;
@@ -154,6 +156,7 @@ interface UiPreferencesState {
   setDeveloperMode: (developerMode: boolean) => void;
   setExperimentalHashlinePatch: (experimentalHashlinePatch: boolean) => void;
   setChatLayoutStyle: (chatLayoutStyle: ChatLayoutStyle) => void;
+  setThreadNavigationPlacement: (threadNavigationPlacement: ThreadNavigationPlacement) => void;
   setSidebarRailStyle: (sidebarRailStyle: SidebarRailStyle) => void;
   setSettledThreadsEnabled: (settledThreadsEnabled: boolean) => void;
   setShowEmptyChatRidgeline: (showEmptyChatRidgeline: boolean) => void;
@@ -258,6 +261,10 @@ function normalizeAiThreadNameModel(value: unknown): string {
 
 function normalizeChatLayoutStyle(value: unknown): ChatLayoutStyle {
   return value === "bubbles" || value === "compact" ? value : "transcript";
+}
+
+function normalizeThreadNavigationPlacement(value: unknown): ThreadNavigationPlacement {
+  return value === "top" || value === "bottom" ? value : "sidebar";
 }
 
 function normalizeSidebarRailStyle(value: unknown): SidebarRailStyle {
@@ -414,6 +421,7 @@ export const useUiPreferences = create<UiPreferencesState>()(
       developerMode: false,
       experimentalHashlinePatch: false,
       chatLayoutStyle: "transcript",
+      threadNavigationPlacement: "sidebar",
       sidebarRailStyle: "regular",
       settledThreadsEnabled: false,
       showEmptyChatRidgeline: true,
@@ -486,6 +494,7 @@ export const useUiPreferences = create<UiPreferencesState>()(
       setDeveloperMode: (developerMode) => set({ developerMode }),
       setExperimentalHashlinePatch: (experimentalHashlinePatch) => set({ experimentalHashlinePatch }),
       setChatLayoutStyle: (chatLayoutStyle) => set({ chatLayoutStyle: normalizeChatLayoutStyle(chatLayoutStyle) }),
+      setThreadNavigationPlacement: (threadNavigationPlacement) => set({ threadNavigationPlacement: normalizeThreadNavigationPlacement(threadNavigationPlacement) }),
       setSidebarRailStyle: (sidebarRailStyle) => set({ sidebarRailStyle: normalizeSidebarRailStyle(sidebarRailStyle) }),
       setSettledThreadsEnabled: (settledThreadsEnabled) => set({ settledThreadsEnabled }),
       setShowEmptyChatRidgeline: (showEmptyChatRidgeline) => set({ showEmptyChatRidgeline }),
@@ -649,6 +658,7 @@ export const useUiPreferences = create<UiPreferencesState>()(
           developerMode: typeof saved?.developerMode === "boolean" ? saved.developerMode : current.developerMode,
           experimentalHashlinePatch: typeof saved?.experimentalHashlinePatch === "boolean" ? saved.experimentalHashlinePatch : current.experimentalHashlinePatch,
           chatLayoutStyle: normalizeChatLayoutStyle(saved?.chatLayoutStyle),
+          threadNavigationPlacement: normalizeThreadNavigationPlacement(saved?.threadNavigationPlacement),
           sidebarRailStyle: normalizeSidebarRailStyle(saved?.sidebarRailStyle),
           settledThreadsEnabled: typeof saved?.settledThreadsEnabled === "boolean" ? saved.settledThreadsEnabled : false,
           showEmptyChatRidgeline: typeof saved?.showEmptyChatRidgeline === "boolean" ? saved.showEmptyChatRidgeline : true,
@@ -720,6 +730,7 @@ export const useUiPreferences = create<UiPreferencesState>()(
         developerMode: state.developerMode,
         experimentalHashlinePatch: state.experimentalHashlinePatch,
         chatLayoutStyle: normalizeChatLayoutStyle(state.chatLayoutStyle),
+        threadNavigationPlacement: normalizeThreadNavigationPlacement(state.threadNavigationPlacement),
         sidebarRailStyle: normalizeSidebarRailStyle(state.sidebarRailStyle),
         settledThreadsEnabled: state.settledThreadsEnabled,
         showEmptyChatRidgeline: state.showEmptyChatRidgeline,

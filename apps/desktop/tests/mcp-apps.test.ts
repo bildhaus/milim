@@ -49,8 +49,9 @@ const parts: ChatStreamPart[] = [
   { kind: "event", eventType: "tool", label: "Used last", status: "done" },
 ];
 const grouped = groupCompletedStreamActivity(parts, false);
-assert(grouped.length === 3, "MCP App should remain at its exact transcript position");
-assert(grouped[1].kind === "event" && grouped[1].mcpApp === descriptor, "MCP App should not enter a tool group");
+assert(grouped.length === 2, "ordinary tool activity should share one drawer around an MCP App");
+assert(grouped[0].kind === "workGroup", "ordinary tools should use the completed work drawer");
+assert(grouped[1].kind === "event" && grouped[1].mcpApp === descriptor, "MCP App should remain visible outside the work drawer");
 
 const server = await createServer({
   root: process.cwd(),

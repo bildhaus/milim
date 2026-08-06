@@ -47,29 +47,29 @@ if (streaming[1].kind === "workGroup") {
 equal(streaming[2].kind, "text", "text after live tools should keep its order");
 
 const grouped = groupCompletedStreamActivity(parts, false);
-equal(grouped.length, 4, "completed mode should collapse mixed internal activity");
-equal(grouped[0].kind, "text", "text before tools should keep its order");
-equal(grouped[1].kind, "workGroup", "tools and reasoning should become one work group");
-if (grouped[1].kind === "workGroup") {
-  equal(grouped[1].parts.length, 5, "work group should include terminal tools and reasoning");
-  assert(grouped[1].parts[0].kind === "event" && grouped[1].parts[0].name === "read_file", "work group should preserve first tool");
-  assert(grouped[1].parts[2].kind === "thinking", "work group should preserve reasoning");
-  assert(grouped[1].parts[3].kind === "event" && grouped[1].parts[3].name === "shell", "work group should preserve later tools");
-  assert(grouped[1].parts[4].kind === "event" && grouped[1].parts[4].status === "error", "work group should include failed tools");
+equal(grouped.length, 3, "completed mode should expose one work drawer and the final answer");
+equal(grouped[0].kind, "workGroup", "intermediate text, tools, and reasoning should become one work group");
+if (grouped[0].kind === "workGroup") {
+  equal(grouped[0].parts.length, 6, "work group should include intermediate text and terminal activity");
+  assert(grouped[0].parts[0].kind === "text" && grouped[0].parts[0].content === "before", "work group should include the intermediate response");
+  assert(grouped[0].parts[1].kind === "event" && grouped[0].parts[1].name === "read_file", "work group should preserve first tool");
+  assert(grouped[0].parts[3].kind === "thinking", "work group should preserve reasoning");
+  assert(grouped[0].parts[4].kind === "event" && grouped[0].parts[4].name === "shell", "work group should preserve later tools");
+  assert(grouped[0].parts[5].kind === "event" && grouped[0].parts[5].status === "error", "work group should include failed tools");
 }
-assert(grouped[2].kind === "event" && grouped[2].status === "running", "running tools should stay flat");
-equal(grouped[3].kind, "text", "text after tools should keep its order");
+assert(grouped[1].kind === "event" && grouped[1].status === "running", "running tools should stay flat");
+assert(grouped[2].kind === "text" && grouped[2].content === "after", "the final response should stay outside the drawer");
 
 const failedThenSuccessful = groupCompletedStreamActivity([
   tool("shell", "error"),
   tool("shell"),
 ], false);
 equal(failedThenSuccessful.length, 1, "failed and successful commands should share one drawer");
-assert(failedThenSuccessful[0].kind === "toolGroup", "terminal command outcomes should use the compact tool drawer");
+assert(failedThenSuccessful[0].kind === "workGroup", "terminal command outcomes should use the completed work drawer");
 
 const toolOnly = groupCompletedStreamActivity([tool("read_file"), tool("list_dir")], false);
 equal(toolOnly.length, 1, "completed tool-only rows should still collapse to a tool group");
-assert(toolOnly[0].kind === "toolGroup", "tool-only group should keep the compact tool label");
+assert(toolOnly[0].kind === "workGroup", "tool-only activity should use the completed work drawer");
 
 const liveToolOnly = groupCompletedStreamActivity([tool("read_file"), tool("list_dir")], true);
 equal(liveToolOnly.length, 1, "streaming tool-only rows should collapse to one live work group");

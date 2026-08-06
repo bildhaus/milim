@@ -6,6 +6,7 @@
 //! unchanged: streamed and non-streamed chat completions, model listing, and
 //! embeddings, with bearer auth + loopback trust, CORS, and a body-size cap.
 
+mod account_runtime_events;
 mod account_runtime_update;
 mod auth;
 mod child_process;

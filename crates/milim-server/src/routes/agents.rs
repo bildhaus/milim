@@ -226,15 +226,17 @@ impl Drop for AccountRuntimeToolLease {
     }
 }
 
-pub(crate) fn account_runtime_stream<S>(
+pub(crate) fn account_runtime_harness_stream<S>(
     stream: S,
     st: &AppState,
     endpoint: Option<&AccountRuntimeToolEndpoint>,
     relay_notices: bool,
-) -> impl futures::Stream<Item = std::result::Result<Event, Infallible>>
+) -> impl futures::Stream<Item = crate::account_runtime_events::HarnessEvent>
 where
-    S: futures::Stream<Item = std::result::Result<Event, Infallible>>,
+    S: futures::Stream<Item = crate::account_runtime_events::HarnessEvent>,
 {
+    use crate::account_runtime_events::{HarnessEvent, HarnessEventKind};
+
     let run_id = endpoint.map(|endpoint| endpoint.run_id.clone());
     let sessions = st.account_runtime_tools.clone();
     let approvals = st.tool_approvals.clone();
@@ -259,43 +261,49 @@ where
                 },
                 notice = notices.recv(), if relay_notices && run_id.is_some() => match notice {
                     Ok(notice) if Some(notice.run_id.as_str()) == run_id.as_deref() => {
-                        let value = match notice.state {
-                            milim_agents::ApprovalState::Requested => json!({
-                                "type": "tool_approval_required",
-                                "approval_id": notice.approval_id,
-                                "call_id": notice.call_id.unwrap_or_else(|| notice.approval_id.clone()),
-                                "name": notice.name,
-                                "arguments": notice.arguments,
-                                "effect": notice.effect,
-                            }),
+                        let mut fields = serde_json::Map::new();
+                        fields.insert("approval_id".to_string(), Value::String(notice.approval_id.clone()));
+                        fields.insert(
+                            "call_id".to_string(),
+                            Value::String(notice.call_id.unwrap_or(notice.approval_id)),
+                        );
+                        let kind = match notice.state {
+                            milim_agents::ApprovalState::Requested => {
+                                fields.insert("name".to_string(), Value::String(notice.name));
+                                fields.insert("arguments".to_string(), Value::String(notice.arguments));
+                                fields.insert("effect".to_string(), serde_json::to_value(notice.effect).unwrap_or(Value::String("unknown".to_string())));
+                                HarnessEventKind::ApprovalRequested
+                            }
                             milim_agents::ApprovalState::Decided
-                            | milim_agents::ApprovalState::Delivered => json!({
-                                "type": "tool_approval_status",
-                                "approval_id": notice.approval_id,
-                                "call_id": notice.call_id.unwrap_or_else(|| notice.approval_id.clone()),
-                                "decision": notice.decision,
-                                "status": if notice.state == milim_agents::ApprovalState::Decided {
-                                    "decided"
-                                } else {
-                                    "delivered"
-                                },
-                            }),
-                            milim_agents::ApprovalState::Acknowledged => json!({
-                                "type": "tool_approval_resolved",
-                                "approval_id": notice.approval_id,
-                                "call_id": notice.call_id.unwrap_or_else(|| notice.approval_id.clone()),
-                                "decision": notice.decision.unwrap_or("deny"),
-                            }),
+                            | milim_agents::ApprovalState::Delivered => {
+                                fields.insert("decision".to_string(), serde_json::to_value(notice.decision).unwrap_or(Value::String("deny".to_string())));
+                                fields.insert(
+                                    "status".to_string(),
+                                    Value::String(if notice.state == milim_agents::ApprovalState::Decided {
+                                        "decided"
+                                    } else {
+                                        "delivered"
+                                    }.to_string()),
+                                );
+                                HarnessEventKind::ApprovalStatus
+                            }
+                            milim_agents::ApprovalState::Acknowledged => {
+                                fields.insert("decision".to_string(), Value::String(notice.decision.unwrap_or("deny").to_string()));
+                                HarnessEventKind::ApprovalResolved
+                            }
                             milim_agents::ApprovalState::Failed
-                            | milim_agents::ApprovalState::Canceled => json!({
-                                "type": "tool_approval_failed",
-                                "approval_id": notice.approval_id,
-                                "call_id": notice.call_id.unwrap_or_else(|| notice.approval_id.clone()),
-                                "decision": notice.decision,
-                                "message": notice.error.unwrap_or_else(|| "Approval delivery failed".to_string()),
-                            }),
+                            | milim_agents::ApprovalState::Canceled => {
+                                if let Some(decision) = notice.decision {
+                                    fields.insert("decision".to_string(), Value::String(decision.to_string()));
+                                }
+                                fields.insert(
+                                    "message".to_string(),
+                                    Value::String(notice.error.unwrap_or_else(|| "Approval delivery failed".to_string())),
+                                );
+                                HarnessEventKind::ApprovalFailed
+                            }
                         };
-                        yield Ok(Event::default().data(value.to_string()));
+                        yield HarnessEvent::new(kind, fields);
                     }
                     Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,

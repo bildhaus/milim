@@ -37,7 +37,7 @@ use sha2::{Digest, Sha256};
 use tauri::ipc::Channel;
 use tauri::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 #[cfg(target_os = "macos")]
-use tauri::menu::{MenuBuilder, SubmenuBuilder};
+use tauri::menu::{MenuBuilder, MenuItemKind, SubmenuBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
@@ -4015,6 +4015,26 @@ fn handle_app_menu_event<R: tauri::Runtime>(app: &tauri::AppHandle<R>, event: Me
     let _ = app.emit(APP_MENU_EVENT, action);
 }
 
+#[tauri::command]
+fn set_sidebar_toggle_enabled(
+    app: tauri::AppHandle,
+    enabled: bool,
+) -> std::result::Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if let Some(MenuItemKind::MenuItem(item)) = app
+        .menu()
+        .and_then(|menu| menu.get(APP_MENU_TOGGLE_SIDEBAR_ID))
+    {
+        item.set_enabled(enabled)
+            .map_err(|error| error.to_string())?;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, enabled);
+
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 fn setup_native_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
     let settings = MenuItem::with_id(app, APP_MENU_SETTINGS_ID, "Settings", true, None::<&str>)?;
@@ -4340,6 +4360,7 @@ pub fn run() {
             restart_app,
             secret_storage_status,
             request_desktop_quit,
+            set_sidebar_toggle_enabled,
             set_workspace_editor_dirty,
             complete_workspace_editor_leave,
             api_base_url,

@@ -8,6 +8,8 @@ import { extractArtifactsFromContent, isPreviewableArtifact } from "../lib/artif
 import { markPerfRender } from "../lib/perf";
 import { highlightSyntax, type SyntaxNode } from "../lib/syntaxHighlight";
 import { CodeBlock } from "./CodeBlock";
+import { ExternalLink } from "./icons";
+import { MermaidDiagram } from "./MermaidDiagram";
 
 type MarkdownRehypePlugins = NonNullable<ComponentProps<typeof ReactMarkdown>["rehypePlugins"]>;
 type MarkdownProps = {
@@ -18,6 +20,8 @@ type MarkdownProps = {
   allowHtml?: boolean;
   previewArtifactsStreaming?: boolean;
   collapseArtifacts?: boolean;
+  renderMermaid?: boolean;
+  sourceLinks?: boolean;
 };
 
 type MarkdownRehypePlugin = MarkdownRehypePlugins[number];
@@ -45,6 +49,33 @@ function classNames(value: unknown): string[] {
   if (typeof value === "string") return value.split(/\s+/).filter(Boolean);
   if (Array.isArray(value)) return value.flatMap(classNames);
   return [];
+}
+
+function codeBlockLanguage(children: ReactNode): string | null {
+  for (const child of Children.toArray(children)) {
+    if (!isValidElement(child)) continue;
+    for (const className of classNames((child.props as { className?: unknown }).className)) {
+      const language = className.match(/^(?:language|lang)-(.+)$/)?.[1]?.toLowerCase();
+      if (language) return language;
+    }
+    const nested = codeBlockLanguage((child.props as { children?: ReactNode }).children);
+    if (nested) return nested;
+  }
+  return null;
+}
+
+export function hasClosedMermaidFence(content: string): boolean {
+  let marker: { char: "`" | "~"; length: number } | null = null;
+  for (const line of content.split(/\r?\n/)) {
+    if (!marker) {
+      const opening = line.match(/^\s*((?:`{3,})|(?:~{3,}))\s*mermaid(?:\s+.*)?$/i)?.[1];
+      if (opening) marker = { char: opening[0] as "`" | "~", length: opening.length };
+      continue;
+    }
+    const closing = line.trim();
+    if (closing.length >= marker.length && [...closing].every((char) => char === marker?.char)) return true;
+  }
+  return false;
 }
 
 function textContent(node: HastNode | undefined): string {
@@ -118,6 +149,19 @@ export function isHttpHref(href: string | undefined): href is string {
   return Boolean(href && /^https?:\/\//i.test(href));
 }
 
+export function sourceLinkDetails(
+  href: string | undefined,
+): { host: string; path: string } | null {
+  if (!isHttpHref(href)) return null;
+  try {
+    const url = new URL(href);
+    const host = url.hostname.replace(/^www\./i, "");
+    return { host, path: url.pathname === "/" ? host : `${host}${url.pathname}` };
+  } catch {
+    return null;
+  }
+}
+
 function openMarkdownLink(event: MouseEvent<HTMLAnchorElement>, href: string | undefined): void {
   if (!isHttpHref(href)) return;
   event.preventDefault();
@@ -132,6 +176,8 @@ function MarkdownBody({
   allowHtml = false,
   previewArtifactsStreaming = false,
   collapseArtifacts = true,
+  renderMermaid = false,
+  sourceLinks = false,
 }: MarkdownProps) {
   const effectivePreviewArtifacts = useMemo(
     () =>
@@ -160,17 +206,48 @@ function MarkdownBody({
           const text = normalizedCodeText(codeBlockText(children));
           const previewArtifact = previewArtifactForCodeText(text, effectivePreviewArtifacts);
           if (!previewArtifact && !text.trim()) return null;
+          if (renderMermaid && hasClosedMermaidFence(content) && codeBlockLanguage(children) === "mermaid") {
+            return <MermaidDiagram source={text} />;
+          }
           return (
             <CodeBlock previewArtifact={previewArtifact} previewStreaming={Boolean(previewArtifact && previewArtifactsStreaming)} onOpenPreview={onOpenPreview}>
               {children}
             </CodeBlock>
           );
         },
-        a: ({ children, href }) => (
-          <a href={href} target="_blank" rel="noreferrer" onClick={(event) => openMarkdownLink(event, href)}>
-            {children}
-          </a>
-        ),
+        a: ({ children, href }) => {
+          const source = sourceLinks ? sourceLinkDetails(href) : null;
+          if (!source) {
+            return (
+              <a href={href} target="_blank" rel="noreferrer" onClick={(event) => openMarkdownLink(event, href)}>
+                {children}
+              </a>
+            );
+          }
+          const label = codeBlockText(children).trim() || source.host;
+          return (
+            <span className="md-source">
+              <a
+                className="md-source-link"
+                href={href}
+                target="_blank"
+                rel="noreferrer"
+                title={href}
+                aria-label={`${label}, ${source.host}, opens in browser`}
+                onClick={(event) => openMarkdownLink(event, href)}
+              >
+                <span>{children}</span>
+                <span className="md-source-host" aria-hidden="true">{source.host}</span>
+                <ExternalLink size={10} aria-hidden="true" />
+              </a>
+              <span className="md-source-preview" aria-hidden="true">
+                <strong>{label}</strong>
+                <span>{source.host}</span>
+                <code dir="ltr">{source.path}</code>
+              </span>
+            </span>
+          );
+        },
       }}
     >
       {content}

@@ -90,6 +90,7 @@ equal("interfaceMode" in useUiPreferences.getState(), false, "obsolete interface
 equal(useUiPreferences.getState().developerMode, false, "developer mode should default off");
 equal(useUiPreferences.getState().experimentalHashlinePatch, false, "hashline patching should default off");
 equal(useUiPreferences.getState().chatLayoutStyle, "transcript", "chat layout should default to transcript");
+equal(useUiPreferences.getState().threadNavigationPlacement, "sidebar", "thread navigation should default to the sidebar");
 equal(useUiPreferences.getState().sidebarRailStyle, "regular", "collapsed sidebar rail should default to regular");
 equal(useUiPreferences.getState().settledThreadsEnabled, false, "settled threads should default off");
 equal(useUiPreferences.getState().showEmptyChatRidgeline, true, "empty-chat ridgeline should default on");
@@ -122,6 +123,12 @@ equal(useUiPreferences.getState().appShortcuts.previousThread, DEFAULT_APP_SHORT
 useUiPreferences.getState().setSidebarOpen(false);
 equal(useUiPreferences.getState().sidebarOpen, false, "sidebar should close when set");
 equal(persistedUiState().sidebarOpen, false, "sidebar preference should be persisted");
+
+useUiPreferences.getState().setThreadNavigationPlacement("top");
+equal(useUiPreferences.getState().threadNavigationPlacement, "top", "thread navigation should move to the top bar");
+equal(persistedUiState().threadNavigationPlacement, "top", "thread navigation placement should be persisted");
+useUiPreferences.getState().setThreadNavigationPlacement("bottom");
+equal(useUiPreferences.getState().threadNavigationPlacement, "bottom", "thread navigation should move to the bottom bar");
 
 useUiPreferences.getState().setSidebarWidth(320);
 equal(useUiPreferences.getState().sidebarWidth, 320, "sidebar width should update");
@@ -341,6 +348,7 @@ useUiPreferences.setState({
   developerMode: false,
   experimentalHashlinePatch: false,
   chatLayoutStyle: "transcript",
+  threadNavigationPlacement: "sidebar",
   sidebarRailStyle: "regular",
   settledThreadsEnabled: false,
   showEmptyChatRidgeline: true,
@@ -355,7 +363,7 @@ useUiPreferences.setState({
 });
 localStorage.setItem(
   "milim.ui",
-  '{"state":{"sidebarOpen":false,"sidebarWidth":384,"previewPanelWidth":512,"mediaStudioWidth":1040,"mediaStudioHeight":740,"mediaComposerPlacement":"side","uiSize":130,"windowAlwaysOnTop":true,"interfaceSounds":"loud","soundOnFinished":"yes","soundOnAttention":0,"soundOnInteractions":"sometimes","finishedSound":"error","attentionSound":"ready","composerSendShortcut":"modEnter","composerDensity":"compact","autoTitleChats":false,"aiThreadNames":true,"aiThreadNameModel":"persisted-title-model","newChatButtonAtBottom":true,"interfaceMode":"workbench","developerMode":true,"experimentalHashlinePatch":true,"chatLayoutStyle":"compact","sidebarRailStyle":"split","settledThreadsEnabled":true,"autoColorThreadNames":true,"messageWidth":"full","avatarStyle":"role","codeBlockTheme":"high-contrast","backgroundFit":"contain","backgroundTreatment":"blur","thinkingBlocksOpen":true,"gitPanelExpanded":true,"appShortcuts":{"newChat":"Mod+Shift+N","focusSearch":"Mod+Shift+N","focusComposer":"x","stopGeneration":"F2","toggleSidebar":"Mod+B","previousThread":"Mod+Tab"}},"version":0}',
+  '{"state":{"sidebarOpen":false,"sidebarWidth":384,"previewPanelWidth":512,"mediaStudioWidth":1040,"mediaStudioHeight":740,"mediaComposerPlacement":"side","uiSize":130,"windowAlwaysOnTop":true,"interfaceSounds":"loud","soundOnFinished":"yes","soundOnAttention":0,"soundOnInteractions":"sometimes","finishedSound":"error","attentionSound":"ready","composerSendShortcut":"modEnter","composerDensity":"compact","autoTitleChats":false,"aiThreadNames":true,"aiThreadNameModel":"persisted-title-model","newChatButtonAtBottom":true,"interfaceMode":"workbench","developerMode":true,"experimentalHashlinePatch":true,"chatLayoutStyle":"compact","threadNavigationPlacement":"bottom","sidebarRailStyle":"split","settledThreadsEnabled":true,"autoColorThreadNames":true,"messageWidth":"full","avatarStyle":"role","codeBlockTheme":"high-contrast","backgroundFit":"contain","backgroundTreatment":"blur","thinkingBlocksOpen":true,"gitPanelExpanded":true,"appShortcuts":{"newChat":"Mod+Shift+N","focusSearch":"Mod+Shift+N","focusComposer":"x","stopGeneration":"F2","toggleSidebar":"Mod+B","previousThread":"Mod+Tab"}},"version":0}',
 );
 await useUiPreferences.persist.rehydrate();
 equal(useUiPreferences.getState().sidebarOpen, false, "sidebar should rehydrate persisted closed state");
@@ -383,6 +391,9 @@ equal("interfaceMode" in useUiPreferences.getState(), false, "obsolete persisted
 equal(useUiPreferences.getState().developerMode, true, "developer mode should rehydrate");
 equal(useUiPreferences.getState().experimentalHashlinePatch, true, "hashline patching should rehydrate");
 equal(useUiPreferences.getState().chatLayoutStyle, "compact", "chat layout should rehydrate");
+equal(useUiPreferences.getState().threadNavigationPlacement, "bottom", "thread navigation placement should rehydrate");
+equal(useUiPreferences.getState().sidebarOpen, false, "horizontal navigation should preserve the saved sidebar open state");
+equal(useUiPreferences.getState().sidebarWidth, 384, "horizontal navigation should preserve the saved sidebar width");
 equal(useUiPreferences.getState().sidebarRailStyle, "split", "collapsed sidebar rail style should rehydrate");
 equal(useUiPreferences.getState().settledThreadsEnabled, true, "settled threads should rehydrate");
 equal(useUiPreferences.getState().showEmptyChatRidgeline, true, "missing empty-chat ridgeline preference should keep its enabled default");
@@ -400,5 +411,14 @@ equal(useUiPreferences.getState().appShortcuts.focusComposer, DEFAULT_APP_SHORTC
 equal(useUiPreferences.getState().appShortcuts.stopGeneration, "F2", "custom stop shortcut should rehydrate");
 equal(useUiPreferences.getState().appShortcuts.toggleSidebar, DEFAULT_APP_SHORTCUTS.toggleSidebar, "default sidebar shortcut should rehydrate");
 equal(useUiPreferences.getState().appShortcuts.previousThread, "Ctrl+Tab", "old previous thread shortcut should migrate");
+
+localStorage.setItem(
+  "milim.ui",
+  '{"state":{"threadNavigationPlacement":"floating","sidebarOpen":false,"sidebarWidth":360},"version":0}',
+);
+await useUiPreferences.persist.rehydrate();
+equal(useUiPreferences.getState().threadNavigationPlacement, "sidebar", "invalid thread navigation placement should fall back to the sidebar");
+equal(useUiPreferences.getState().sidebarOpen, false, "invalid placement fallback should retain the saved sidebar open state");
+equal(useUiPreferences.getState().sidebarWidth, 360, "invalid placement fallback should retain the saved sidebar width");
 
 export {};

@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type HTMLAttributes, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type HTMLAttributes, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
+import { createPortal } from "react-dom";
 import {
   SIDEBAR_CHATS_SECTION_ID,
   SIDEBAR_PINNED_SECTION_ID,
@@ -29,7 +30,7 @@ import {
 } from "../lib/pullRequests";
 import { sessionRecencyLabel } from "../lib/sessionRecency.js";
 import { chatExportFilename, sessionExportPayload, sessionMarkdownExport } from "../lib/threadExport";
-import { DEFAULT_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, normalizeSidebarWidth, useUiPreferences } from "../ui/store";
+import { DEFAULT_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, normalizeSidebarWidth, useUiPreferences, type ThreadNavigationPlacement } from "../ui/store";
 import { useTheme } from "../theme/store";
 import { GitPanel, type GitPanelView } from "./GitPanel";
 import { useContextMenu } from "./ContextMenu";
@@ -71,6 +72,7 @@ type SidebarDropPosition = "before" | "after" | "inside";
 type SidebarDragTarget = { type: "session"; id: string; sectionId: string; position: Exclude<SidebarDropPosition, "inside"> } | { type: "section"; id: string; position: SidebarDropPosition };
 type SidebarPointerDrag = {
   item: SidebarDragItem;
+  axis: "x" | "y";
   pointerId: number;
   startX: number;
   startY: number;
@@ -654,7 +656,9 @@ function createSidebarSessionsSelector() {
 
 export function Sidebar({
   open,
+  placement,
   onToggle,
+  onSearchChats,
   onOpenSettings,
   onManageSkills,
   onManageSchedules,
@@ -665,7 +669,9 @@ export function Sidebar({
   onOpenGitPanel,
 }: {
   open: boolean;
+  placement: ThreadNavigationPlacement;
   onToggle: () => void;
+  onSearchChats: () => void;
   onOpenSettings: () => void;
   onManageSkills: () => void;
   onManageSchedules: () => void;
@@ -740,6 +746,11 @@ export function Sidebar({
   const [dragOver, setDragOver] = useState<SidebarDragTarget | null>(null);
   const [sectionVisibleLimits, setSectionVisibleLimits] = useState<Record<string, number>>(() => ({}));
   const [settledExpanded, setSettledExpanded] = useState(false);
+  const [threadBarGroupId, setThreadBarGroupId] = useState<string | null>(null);
+  const threadBarRef = useRef<HTMLElement>(null);
+  const threadBarProjectsRef = useRef<HTMLDivElement>(null);
+  const threadBarPopoverRef = useRef<HTMLDivElement>(null);
+  const threadBarTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
     if (!open || !focusSearchAfterOpenRef.current) return;
@@ -775,17 +786,20 @@ export function Sidebar({
     action();
   }
 
-  function renderToolsActions(collapsedRail = false) {
-    const iconSize = collapsedRail ? 15 : 13;
-    const buttonClass = collapsedRail ? "icon-btn sidebar-workbench-action" : "sidebar-footer-item sidebar-workbench-action";
-    const actions = [
+  function toolsActions(iconSize = 13) {
+    return [
       { key: "mcp", label: "MCP Servers", icon: <Cube size={iconSize} />, action: onManageMcp, visible: true },
       { key: "skills", label: "Skills", icon: <Lightbulb size={iconSize} />, action: onManageSkills, visible: true },
       { key: "schedules", label: "Schedules", icon: <Calendar size={iconSize} />, action: onManageSchedules, visible: true },
       { key: "media", label: "Media", icon: <Image size={iconSize} />, action: onManageMedia, visible: true },
       { key: "pull-requests", label: "Pull requests", icon: <GitPullRequest size={iconSize} />, action: onManagePullRequests, visible: true },
-    ];
-    return actions.filter((item) => item.visible).map((item) => (
+    ].filter((item) => item.visible);
+  }
+
+  function renderToolsActions(collapsedRail = false) {
+    const iconSize = collapsedRail ? 15 : 13;
+    const buttonClass = collapsedRail ? "icon-btn sidebar-workbench-action" : "sidebar-footer-item sidebar-workbench-action";
+    return toolsActions(iconSize).map((item) => (
       <button
         key={item.key}
         className={buttonClass}
@@ -812,6 +826,71 @@ export function Sidebar({
       ),
     [projects, query, sessions, settledThreadsEnabled, sidebarState],
   );
+  const threadBarGroup = threadBarGroupId
+    ? groupedSessions.find((group) => group.id === threadBarGroupId) ?? null
+    : null;
+
+  function closeThreadBar() {
+    setThreadBarGroupId(null);
+    threadBarTriggerRef.current = null;
+  }
+
+  useEffect(() => {
+    if (placement === "sidebar") setThreadBarGroupId(null);
+  }, [placement]);
+
+  useEffect(() => {
+    if (!threadBarGroupId) return;
+    if (!groupedSessions.some((group) => group.id === threadBarGroupId)) {
+      setThreadBarGroupId(null);
+      threadBarTriggerRef.current = null;
+    }
+  }, [groupedSessions, threadBarGroupId]);
+
+  useEffect(() => {
+    if (placement === "sidebar") return;
+    const frame = window.requestAnimationFrame(() => {
+      threadBarProjectsRef.current
+        ?.querySelector<HTMLElement>('[data-thread-bar-active="true"]')
+        ?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeId, groupedSessions, placement]);
+
+  useEffect(() => {
+    if (!threadBarGroupId) return;
+    const frame = window.requestAnimationFrame(() => {
+      threadBarPopoverRef.current
+        ?.querySelector<HTMLElement>(".session-item.active")
+        ?.scrollIntoView?.({ block: "nearest" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [threadBarGroupId]);
+
+  useEffect(() => {
+    if (!threadBarGroupId) return;
+    const close = closeThreadBar;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!(event.target instanceof Node)) return;
+      if (threadBarRef.current?.contains(event.target) || threadBarPopoverRef.current?.contains(event.target)) return;
+      close();
+    };
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      const trigger = threadBarTriggerRef.current;
+      close();
+      trigger?.focus();
+    };
+    window.addEventListener("pointerdown", onPointerDown, true);
+    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("resize", close);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown, true);
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("resize", close);
+    };
+  }, [threadBarGroupId]);
   useEffect(() => {
     if (!settledThreadsEnabled) setSettledExpanded(false);
   }, [settledThreadsEnabled]);
@@ -961,6 +1040,7 @@ export function Sidebar({
     focusComposerSoon();
     setQuery("");
     setConfirmArchiveId(null);
+    closeThreadBar();
   }
 
   function openNewChatMenu(event: ReactMouseEvent<HTMLButtonElement>) {
@@ -968,7 +1048,7 @@ export function Sidebar({
     event.stopPropagation();
     const trigger = event.currentTarget;
     const rect = trigger.parentElement?.getBoundingClientRect() ?? trigger.getBoundingClientRect();
-    openMenuAt({ x: rect.left, y: rect.bottom + 4 }, [
+    openMenuAt({ x: rect.left, y: placement === "bottom" ? rect.top - 4 : rect.bottom + 4 }, [
       {
         id: "current-checkout",
         label: "Current checkout",
@@ -982,7 +1062,43 @@ export function Sidebar({
         icon: <GitBranch size={13} />,
         action: () => createChat("worktree"),
       },
-    ], "New chat workspace", trigger);
+    ], "New chat workspace", trigger, placement === "bottom" ? "above" : "below");
+  }
+
+  function openThreadBarProjectMenu(event: ReactMouseEvent<HTMLButtonElement>) {
+    const trigger = event.currentTarget;
+    const rect = trigger.getBoundingClientRect();
+    openMenuAt({ x: rect.left, y: placement === "bottom" ? rect.top - 4 : rect.bottom + 4 }, [
+      {
+        id: "scratch",
+        label: "Start from scratch",
+        icon: <Plus size={13} />,
+        action: startScratchProject,
+      },
+      {
+        id: "existing-folder",
+        label: "Use an existing folder",
+        icon: <Folder size={13} />,
+        action: () => useExistingFolder(),
+      },
+    ], "Project actions", trigger, placement === "bottom" ? "above" : "below");
+  }
+
+  function openThreadBarToolsMenu(event: ReactMouseEvent<HTMLButtonElement>) {
+    const trigger = event.currentTarget;
+    const rect = trigger.getBoundingClientRect();
+    openMenuAt(
+      { x: rect.left, y: placement === "bottom" ? rect.top - 4 : rect.bottom + 4 },
+      toolsActions().map((item) => ({
+        id: item.key,
+        label: item.label,
+        icon: item.icon,
+        action: item.action,
+      })),
+      "Tools",
+      trigger,
+      placement === "bottom" ? "above" : "below",
+    );
   }
 
   function createChatInSection(sectionId: string) {
@@ -991,6 +1107,7 @@ export function Sidebar({
     focusComposerSoon();
     setQuery("");
     setConfirmArchiveId(null);
+    closeThreadBar();
   }
 
   function startScratchProject() {
@@ -998,6 +1115,7 @@ export function Sidebar({
     focusComposerSoon();
     setProjectMenuOpen(false);
     setQuery("");
+    closeThreadBar();
   }
 
   async function useExistingFolder() {
@@ -1013,6 +1131,7 @@ export function Sidebar({
       void createInteractiveChat({ folder: selected });
       focusComposerSoon();
       setQuery("");
+      closeThreadBar();
     } catch {
       /* dialog unavailable */
     } finally {
@@ -1227,14 +1346,21 @@ export function Sidebar({
     setDragOver(target);
   }
 
-  function dropPositionFromElement(clientY: number, element: HTMLElement): Exclude<SidebarDropPosition, "inside"> {
+  function dropPositionFromElement(clientX: number, clientY: number, element: HTMLElement): Exclude<SidebarDropPosition, "inside"> {
     const rect = element.getBoundingClientRect();
+    if (element.closest(".thread-bar-projects")) {
+      return clientX > rect.left + rect.width / 2 ? "after" : "before";
+    }
     return clientY > rect.top + rect.height / 2 ? "after" : "before";
   }
 
   function sidebarDropTargetFromPoint(clientX: number, clientY: number, item: SidebarDragItem): SidebarDragTarget | null {
+    const source = pointerDragRef.current?.active ? pointerDragRef.current.source : null;
+    const sourceVisibility = source?.style.visibility;
+    if (source) source.style.visibility = "hidden";
     const element = document.elementFromPoint(clientX, clientY);
-    if (!(element instanceof HTMLElement)) return null;
+    if (source) source.style.visibility = sourceVisibility ?? "";
+    if (!(element instanceof Element)) return null;
 
     if (item.type === "session") {
       const sessionElement = element.closest<HTMLElement>("[data-sidebar-session-id]");
@@ -1248,7 +1374,7 @@ export function Sidebar({
           sectionId === SIDEBAR_SETTLED_SECTION_ID
         )
           return null;
-        return { type: "session", id, sectionId, position: dropPositionFromElement(clientY, sessionElement) };
+        return { type: "session", id, sectionId, position: dropPositionFromElement(clientX, clientY, sessionElement) };
       }
 
       const sectionElement = element.closest<HTMLElement>("[data-sidebar-section-id]");
@@ -1260,7 +1386,7 @@ export function Sidebar({
     const sectionElement = element.closest<HTMLElement>("[data-sidebar-section-id]");
     const sectionId = sectionElement?.dataset.sidebarSectionId;
     if (!sectionElement || !sectionId || sectionId === item.id || !isSidebarProjectSectionId(sectionId)) return null;
-    return { type: "section", id: sectionId, position: dropPositionFromElement(clientY, sectionElement) };
+    return { type: "section", id: sectionId, position: dropPositionFromElement(clientX, clientY, sectionElement) };
   }
 
   function applySidebarDrop(item: SidebarDragItem, target: SidebarDragTarget | null) {
@@ -1308,7 +1434,7 @@ export function Sidebar({
     document.body.classList.remove("sidebar-pointer-dragging");
   }
 
-  function startPointerDrag(event: ReactPointerEvent<HTMLElement>, item: SidebarDragItem) {
+  function startPointerDrag(event: ReactPointerEvent<HTMLElement>, item: SidebarDragItem, axis: "x" | "y" = "y") {
     if (event.button !== 0 || editing || isSidebarDragInteractiveTarget(event.target)) return;
     if (item.type === "section" && !isSidebarProjectSectionId(item.id)) return;
     const source = event.currentTarget.closest<HTMLElement>(
@@ -1317,6 +1443,7 @@ export function Sidebar({
     if (!source) return;
     pointerDragRef.current = {
       item,
+      axis,
       pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
@@ -1345,7 +1472,15 @@ export function Sidebar({
       setDragging(drag.item);
     }
     event.preventDefault();
-    drag.source.style.translate = `0 ${event.clientY - drag.startY}px`;
+    drag.source.style.translate = drag.axis === "x"
+      ? `${event.clientX - drag.startX}px 0`
+      : `0 ${event.clientY - drag.startY}px`;
+    if (threadBarProjectsRef.current) {
+      const rect = threadBarProjectsRef.current.getBoundingClientRect();
+      const nearStrip = event.clientY >= rect.top - 32 && event.clientY <= rect.bottom + 32;
+      if (nearStrip && event.clientX < rect.left + 32) threadBarProjectsRef.current.scrollLeft -= 12;
+      else if (nearStrip && event.clientX > rect.right - 32) threadBarProjectsRef.current.scrollLeft += 12;
+    }
     setSidebarDragOver(sidebarDropTargetFromPoint(event.clientX, event.clientY, drag.item));
   }
 
@@ -1505,6 +1640,468 @@ export function Sidebar({
       event.preventDefault();
       resizeSidebar(DEFAULT_SIDEBAR_WIDTH);
     }
+  }
+
+  function threadBarPopoverStyle(): CSSProperties {
+    const trigger = threadBarTriggerRef.current;
+    if (!trigger) return { visibility: "hidden" };
+    const rect = trigger.getBoundingClientRect();
+    const viewportPadding = 8;
+    const gap = 6;
+    const width = Math.min(340, window.innerWidth - viewportPadding * 2);
+    const left = Math.min(
+      Math.max(viewportPadding, rect.left),
+      Math.max(viewportPadding, window.innerWidth - width - viewportPadding),
+    );
+    if (placement === "bottom") {
+      return {
+        bottom: window.innerHeight - rect.top + gap,
+        left,
+        maxHeight: Math.max(120, rect.top - gap - viewportPadding),
+        width,
+      };
+    }
+    return {
+      left,
+      maxHeight: Math.max(120, window.innerHeight - rect.bottom - gap - viewportPadding),
+      top: rect.bottom + gap,
+      width,
+    };
+  }
+
+  function renderThreadBarSession(group: SessionGroup, session: SidebarSession) {
+    const folder = projectFolderForSession(session);
+    const project = projectByFolder.get(folder);
+    const projectColor = projectColorsByFolder.get(folder);
+    const projectStyle = projectColor
+      ? { "--project-color": projectColor } as CSSProperties
+      : undefined;
+    const projectLabel = project?.name ?? (folder ? folderLabel(folder) : "");
+    const pinned = !session.parentId && sidebarState.pinnedSessionIds.includes(session.id);
+    const parentWorkersRunning = runningWorkerParentThreads.has(session.id);
+    const workerRunning = parentWorkersRunning || session.worker?.status === "queued" || session.worker?.status === "running";
+    const generating = generatingSessions.has(session.id) || workerRunning;
+    const unread = unreadSessions.has(session.id);
+    const runtimeState = group.settled || group.projectId ? null : runtimePreviewSidebarState(session);
+    const statusLabel = parentWorkersRunning
+      ? "Workers running"
+      : session.worker
+        ? `Worker ${session.worker.status}`
+        : generating
+          ? "Working"
+          : unread
+            ? "Unread update"
+            : "Ready";
+    const pullRequestOwner = group.settled
+      ? undefined
+      : group.inbox
+        ? sidebarInboxPullRequestOwner(session, pullRequestsBySession)
+        : sidebarThreadPullRequestOwner(session, pullRequestsBySession);
+    const pullRequestSnapshot = pullRequestOwner?.snapshot;
+    const pullRequest = pullRequestOwner?.pullRequest ?? null;
+    const pullRequestState = pullRequest
+      ? pullRequestReadiness(pullRequest, pullRequestSnapshot?.stale)
+      : null;
+    const sessionDragOver = dragOver?.type === "session" && dragOver.id === session.id;
+    const sessionDropClass = sessionDragOver ? ` drag-over drop-${dragOver.position}` : "";
+    const sessionDragging = dragging?.type === "session" && dragging.id === session.id;
+    const tierChild = Boolean(session.parentId && group.sessions.some((item) => item.id === session.parentId));
+    const settleDisabled = generating || unread;
+
+    return (
+      <div
+        key={session.id}
+        data-sidebar-session-id={session.id}
+        data-sidebar-session-section-id={group.id}
+        className={
+          "session-item thread-bar-session" +
+          (group.inbox ? " inbox-session-item" : "") +
+          (group.settled ? " settled-session-item" : "") +
+          (tierChild ? " child-session" : "") +
+          (session.id === activeId ? " active" : "") +
+          (generating ? " generating" : "") +
+          (runtimeState ? " runtime-preview runtime-" + runtimeState : "") +
+          (pinned ? " pinned" : "") +
+          (projectColor ? " project-colored" : "") +
+          (confirmArchiveId === session.id ? " delete-pending" : "") +
+          (sessionDragging ? " dragging" : "") +
+          sessionDropClass
+        }
+        style={projectStyle}
+        onPointerDown={!settledThreadsEnabled && !session.parentId
+          ? (event) => startPointerDrag(event, { type: "session", id: session.id }, "y")
+          : undefined}
+        onContextMenu={(event) => openSessionContextMenu(event, session, pinned)}
+        onClick={(event) => {
+          if (isSidebarDragInteractiveTarget(event.target) || consumeSuppressedClick()) return;
+          setConfirmArchiveId(null);
+          void switchVisibleSession(session.id).then(closeThreadBar);
+        }}
+        onDoubleClick={(event) => {
+          if (isSidebarDragInteractiveTarget(event.target)) return;
+          beginRename(session.id);
+        }}
+        title={session.title}
+      >
+        {editing === session.id ? (
+          <input
+            className="session-rename"
+            defaultValue={session.title}
+            autoFocus
+            onClick={(event) => event.stopPropagation()}
+            onBlur={(event) => {
+              rename(session.id, event.target.value.trim());
+              setEditing(null);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") (event.target as HTMLInputElement).blur();
+              if (event.key === "Escape") setEditing(null);
+            }}
+          />
+        ) : (
+          <>
+            <span className={group.inbox ? "session-copy inbox-session-copy" : "session-copy"}>
+              <HoverScrollText
+                className="session-title"
+                innerClassName={generating ? "shiny-text" : undefined}
+                text={session.title}
+              />
+              {group.inbox && (projectLabel || session.parentId) && (
+                <span className="inbox-session-metadata">
+                  {projectLabel && (
+                    <span className="inbox-session-project" title={projectLabel} aria-label={`Project: ${projectLabel}`}>
+                      {projectLabel}
+                    </span>
+                  )}
+                  {session.parentId && (
+                    <span
+                      className="inbox-session-branch"
+                      title={session.threadWorkspace?.branch || "Branch"}
+                      aria-label={session.threadWorkspace?.branch || "Branch"}
+                    >
+                      <GitBranch size={9} />
+                      <span>{session.threadWorkspace?.branch || "Branch"}</span>
+                    </span>
+                  )}
+                </span>
+              )}
+            </span>
+            <div className="session-side session-side-wide">
+              {pullRequest && pullRequestState && (
+                <button
+                  type="button"
+                  className={`session-side-indicator session-pr-state ${pullRequestState.tone}`}
+                  title={pullRequestAccessibleLabel(pullRequest, pullRequestSnapshot?.stale)}
+                  aria-label={pullRequestAccessibleLabel(pullRequest, pullRequestSnapshot?.stale)}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void switchVisibleSession(session.id);
+                    onOpenGitPanel(session.id, "pull_request");
+                  }}
+                >
+                  <GitPullRequest size={13} />
+                  <span aria-hidden="true" />
+                </button>
+              )}
+              {generating ? (
+                <WorkingSessionLoader
+                  className="session-side-indicator"
+                  data-testid="session-loader"
+                  role="img"
+                  title={statusLabel}
+                  aria-label={statusLabel}
+                />
+              ) : unread ? (
+                <UnreadSessionLoader
+                  className="session-side-indicator"
+                  data-testid="session-loader"
+                  role="img"
+                  title={statusLabel}
+                  aria-label={statusLabel}
+                />
+              ) : (
+                <span
+                  className="session-side-indicator session-recency"
+                  data-testid="session-recency"
+                  title={`Updated ${new Date(session.updatedAt).toLocaleString()}`}
+                >
+                  {sessionRecencyLabel(session.updatedAt)}
+                </span>
+              )}
+              <div className="session-side-actions" aria-label="Thread actions">
+                {group.settled ? (
+                  <button
+                    className="session-side-btn"
+                    type="button"
+                    aria-label={`Unsettle ${session.title}`}
+                    title="Unsettle chat"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      unsettleSession(session.id);
+                      setConfirmArchiveId(null);
+                    }}
+                  >
+                    <ArrowUp size={12} />
+                  </button>
+                ) : (
+                  <>
+                    {!session.parentId && (
+                      <button
+                        className={"session-side-btn" + (pinned ? " active" : "")}
+                        type="button"
+                        aria-label={pinned ? `Unpin ${session.title}` : `Pin ${session.title}`}
+                        title={pinned ? "Unpin chat" : "Pin chat"}
+                        aria-pressed={pinned}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setConfirmArchiveId(null);
+                          toggleSessionPinned(session.id);
+                        }}
+                      >
+                        <Pin size={12} />
+                      </button>
+                    )}
+                    {group.inbox && (
+                      <button
+                        className="session-side-btn"
+                        type="button"
+                        aria-label={`Settle ${session.title}`}
+                        title={settleDisabled ? "Thread still active" : "Settle chat"}
+                        disabled={settleDisabled}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void settleChat(session.id);
+                        }}
+                      >
+                        <Check size={12} />
+                      </button>
+                    )}
+                  </>
+                )}
+                {(!group.inbox || group.settled) && (
+                  <button
+                    className={"session-side-btn danger" + (confirmArchiveId === session.id ? " confirm" : "")}
+                    type="button"
+                    aria-label={confirmArchiveId === session.id ? `Confirm archive ${session.title}` : `Archive ${session.title}`}
+                    title={confirmArchiveId === session.id ? "Click again to archive" : "Archive chat"}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void archiveChat(session.id);
+                    }}
+                  >
+                    <Archive size={12} />
+                  </button>
+                )}
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    );
+  }
+
+  if (placement !== "sidebar") {
+    const threadBarLabel = settledThreadsEnabled ? "Thread inbox" : "Chats";
+    const threadBarProjectPullRequestOwner = threadBarGroup && !threadBarGroup.inbox
+      ? sidebarProjectPullRequestOwner(threadBarGroup, pullRequestsBySession)
+      : undefined;
+    const threadBarProjectPullRequestState = threadBarProjectPullRequestOwner
+      ? pullRequestReadiness(
+          threadBarProjectPullRequestOwner.pullRequest,
+          threadBarProjectPullRequestOwner.snapshot.stale,
+        )
+      : null;
+    return (
+      <>
+        <nav
+          ref={threadBarRef}
+          className={`thread-bar thread-bar-${placement}`}
+          aria-label={threadBarLabel}
+          data-testid="thread-bar"
+        >
+          <div className="thread-bar-leading" aria-label="Chat controls">
+            <button className="thread-bar-action" type="button" onClick={() => { closeThreadBar(); onSearchChats(); }} aria-label="Search chats">
+              <Search size={15} />
+              <span>Search</span>
+            </button>
+            <div className="thread-bar-new-chat">{newChatButton}</div>
+            <button className="thread-bar-action" type="button" onClick={(event) => { closeThreadBar(); openThreadBarProjectMenu(event); }} aria-label="New project">
+              <Folder size={15} />
+              <span>New project</span>
+            </button>
+          </div>
+
+          <div
+            ref={threadBarProjectsRef}
+            className="thread-bar-projects"
+            aria-label={settledThreadsEnabled ? "Inbox groups" : "Projects"}
+            onWheel={(event: ReactWheelEvent<HTMLDivElement>) => {
+              if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+              event.preventDefault();
+              event.currentTarget.scrollLeft += event.deltaY;
+            }}
+          >
+            {groupedSessions.map((group) => {
+              const projectSection = isSidebarProjectSectionId(group.id);
+              const sectionPinned = sidebarState.pinnedSectionIds.includes(group.id);
+              const projectColor = group.project
+                ? effectiveProjectColor(group.project, {
+                    accent: theme.colors.accent,
+                    sidebarBackground: theme.colors.sidebarBg,
+                    auto: autoColorThreadNames,
+                  })
+                : undefined;
+              const style = projectColor ? { "--project-color": projectColor } as CSSProperties : undefined;
+              const active = group.sessions.some((session) => session.id === activeId);
+              const working = group.sessions.some((session) => generatingSessions.has(session.id));
+              const unread = !working && group.sessions.some((session) => unreadSessions.has(session.id));
+              const projectPullRequestOwner = !group.inbox
+                ? sidebarProjectPullRequestOwner(group, pullRequestsBySession)
+                : undefined;
+              const projectPullRequestState = projectPullRequestOwner
+                ? pullRequestReadiness(projectPullRequestOwner.pullRequest, projectPullRequestOwner.snapshot.stale)
+                : null;
+              const sectionDragOver = dragOver?.type === "section" && dragOver.id === group.id;
+              const sectionDropClass = sectionDragOver ? ` drag-over drop-${dragOver.position}` : "";
+              const sectionDragging = dragging?.type === "section" && dragging.id === group.id;
+              const open = threadBarGroupId === group.id;
+              return (
+                <div
+                  key={group.id}
+                  data-sidebar-section-id={group.id}
+                  data-thread-bar-active={active || undefined}
+                  className={
+                    "thread-bar-project-wrap" +
+                    (sectionDragging ? " dragging" : "") +
+                    sectionDropClass
+                  }
+                  style={style}
+                  onPointerDown={!settledThreadsEnabled && projectSection
+                    ? (event) => startPointerDrag(event, { type: "section", id: group.id }, "x")
+                    : undefined}
+                  onContextMenu={(event) => openSectionContextMenu(event, group, false, sectionPinned)}
+                >
+                  <button
+                    className={"thread-bar-project section-toggle" + (active ? " active" : "") + (projectColor ? " project-colored" : "")}
+                    type="button"
+                    aria-expanded={open}
+                    aria-haspopup="dialog"
+                    onClick={(event) => {
+                      if (consumeSuppressedClick()) return;
+                      threadBarTriggerRef.current = event.currentTarget;
+                      setThreadBarGroupId(open ? null : group.id);
+                    }}
+                    title={group.subtitle ?? group.label}
+                  >
+                    <span className="thread-bar-project-icon" aria-hidden="true">
+                      {group.id === SIDEBAR_PINNED_SECTION_ID
+                        ? <Pin size={13} />
+                        : group.id === SIDEBAR_INBOX_SECTION_ID
+                          ? <FileText size={13} />
+                          : group.id === SIDEBAR_SETTLED_SECTION_ID
+                            ? <Check size={13} />
+                            : group.id === SIDEBAR_CHATS_SECTION_ID
+                              ? <FileText size={13} />
+                              : <ProjectIcon icon={group.project?.icon} size={13} />}
+                    </span>
+                    <span className="thread-bar-project-label">{group.label}</span>
+                    {working ? (
+                      <WorkingSessionLoader className="thread-bar-project-status" title="Working" aria-label="Working" />
+                    ) : unread ? (
+                      <UnreadSessionLoader className="thread-bar-project-status" title="Unread update" aria-label="Unread update" />
+                    ) : null}
+                    {projectPullRequestOwner && projectPullRequestState && (
+                      <span
+                        className={`session-pr-state thread-bar-project-pr ${projectPullRequestState.tone}`}
+                        role="img"
+                        title={pullRequestAccessibleLabel(projectPullRequestOwner.pullRequest, projectPullRequestOwner.snapshot.stale)}
+                        aria-label={pullRequestAccessibleLabel(projectPullRequestOwner.pullRequest, projectPullRequestOwner.snapshot.stale)}
+                      >
+                        <GitPullRequest size={13} />
+                        <span aria-hidden="true" />
+                      </span>
+                    )}
+                    <ChevronDown className="thread-bar-project-caret" size={12} />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="thread-bar-trailing" aria-label="App controls">
+            <button className="thread-bar-action" data-testid="open-tools" type="button" onClick={(event) => { closeThreadBar(); openThreadBarToolsMenu(event); }}>
+              <Bolt size={15} />
+              <span>Tools</span>
+            </button>
+            <button className="thread-bar-action" data-testid="open-settings" type="button" onClick={() => { closeThreadBar(); onOpenSettings(); }}>
+              <Gear size={15} />
+              <span>Settings</span>
+            </button>
+          </div>
+        </nav>
+
+        {threadBarGroup && createPortal(
+          <div
+            ref={threadBarPopoverRef}
+            className={`thread-bar-popover thread-bar-popover-${placement}`}
+            style={threadBarPopoverStyle()}
+            role="dialog"
+            aria-label={`${threadBarGroup.label} threads`}
+            data-testid="thread-bar-dropdown"
+            data-sidebar-section-id={threadBarGroup.id}
+          >
+            <div className="thread-bar-popover-head">
+              <span title={threadBarGroup.subtitle ?? threadBarGroup.label}>{threadBarGroup.label}</span>
+              <div className="thread-bar-popover-actions">
+                {threadBarProjectPullRequestOwner && threadBarProjectPullRequestState && (
+                  <button
+                    type="button"
+                    className={`session-pr-state ${threadBarProjectPullRequestState.tone}`}
+                    title={pullRequestAccessibleLabel(threadBarProjectPullRequestOwner.pullRequest, threadBarProjectPullRequestOwner.snapshot.stale)}
+                    aria-label={pullRequestAccessibleLabel(threadBarProjectPullRequestOwner.pullRequest, threadBarProjectPullRequestOwner.snapshot.stale)}
+                    onClick={() => {
+                      void switchVisibleSession(threadBarProjectPullRequestOwner.session.id);
+                      onOpenGitPanel(threadBarProjectPullRequestOwner.session.id, "pull_request");
+                    }}
+                  >
+                    <GitPullRequest size={13} />
+                    <span aria-hidden="true" />
+                  </button>
+                )}
+                {threadBarGroup.id !== SIDEBAR_PINNED_SECTION_ID && (
+                  <button
+                    className="icon-btn"
+                    type="button"
+                    title={`New chat in ${threadBarGroup.label}`}
+                    aria-label={`New chat in ${threadBarGroup.label}`}
+                    onClick={() => createChatInSection(threadBarGroup.id)}
+                  >
+                    <Plus size={14} />
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="thread-bar-popover-list">
+              {threadBarGroup.sessions.map((session) => renderThreadBarSession(threadBarGroup, session))}
+              {threadBarGroup.sessions.length === 0 && threadBarGroup.id !== SIDEBAR_PINNED_SECTION_ID && (
+                <button className="session-empty project-empty" type="button" onClick={() => createChatInSection(threadBarGroup.id)}>
+                  {threadBarGroup.id === SIDEBAR_CHATS_SECTION_ID ? "Start a chat" : "New chat in this project"}
+                </button>
+              )}
+            </div>
+          </div>,
+          document.body,
+        )}
+
+        {customizingProject && (
+          <ProjectCustomizationDialog
+            project={customizingProject}
+            onClose={() => setCustomizingProjectId(null)}
+            onSave={(patch) => updateProject(customizingProject.id, patch)}
+          />
+        )}
+      </>
+    );
   }
 
   if (!open) {

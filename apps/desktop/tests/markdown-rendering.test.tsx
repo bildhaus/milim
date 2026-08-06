@@ -11,6 +11,8 @@ type MarkdownProps = {
   allowHtml?: boolean;
   previewArtifactsStreaming?: boolean;
   collapseArtifacts?: boolean;
+  renderMermaid?: boolean;
+  sourceLinks?: boolean;
 };
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -57,11 +59,19 @@ const server = await createServer({
 });
 
 try {
-  const { Markdown, MemoizedMarkdown, isHttpHref, parseMarkdownIntoBlocks } = await server.ssrLoadModule("/src/components/Markdown.tsx") as {
+  const { Markdown, MemoizedMarkdown, hasClosedMermaidFence, isHttpHref, parseMarkdownIntoBlocks, sourceLinkDetails } = await server.ssrLoadModule("/src/components/Markdown.tsx") as {
     Markdown: ComponentType<MarkdownProps>;
     MemoizedMarkdown: ComponentType<MarkdownProps>;
+    hasClosedMermaidFence: (content: string) => boolean;
     isHttpHref: (href: string | undefined) => boolean;
     parseMarkdownIntoBlocks: (content: string) => string[];
+    sourceLinkDetails: (href: string | undefined) => { host: string; path: string } | null;
+  };
+  const { MermaidDiagram, boundedRasterDimensions, mermaidSvgDimensions, standaloneMermaidSvg } = await server.ssrLoadModule("/src/components/MermaidDiagram.tsx") as {
+    MermaidDiagram: ComponentType<{ source: string }>;
+    boundedRasterDimensions: (width: number, height: number) => { width: number; height: number };
+    mermaidSvgDimensions: (svg: string) => { width: number; height: number };
+    standaloneMermaidSvg: (svg: string) => string;
   };
 
   function renderMarkdown(
@@ -70,6 +80,8 @@ try {
     previewArtifactsStreaming = false,
     collapseArtifacts = true,
     allowHtml = false,
+    renderMermaid = false,
+    sourceLinks = false,
   ): string {
     return renderToStaticMarkup(createElement(Markdown, {
       content,
@@ -79,12 +91,15 @@ try {
       allowHtml,
       previewArtifactsStreaming,
       collapseArtifacts,
+      renderMermaid,
+      sourceLinks,
     }));
   }
 
   function renderMemoizedMarkdown(
     content: string,
     previewArtifacts?: ChatArtifact[],
+    renderMermaid = false,
   ): string {
     return renderToStaticMarkup(createElement(MemoizedMarkdown, {
       content,
@@ -92,6 +107,7 @@ try {
       onOpenPreview: () => {},
       highlight: false,
       collapseArtifacts: false,
+      renderMermaid,
     }));
   }
 
@@ -99,6 +115,16 @@ try {
   assert(isHttpHref("http://localhost:5173"), "localhost http links should use the native browser opener");
   assert(!isHttpHref("#section"), "page anchors should keep default markdown behavior");
   assert(!isHttpHref("mailto:test@example.com"), "non-http links should keep default markdown behavior");
+  equal(sourceLinkDetails("https://www.prompt-kit.com/docs?ref=chat")?.host, "prompt-kit.com", "source links should show a compact host");
+  equal(sourceLinkDetails("https://www.prompt-kit.com/docs?ref=chat")?.path, "prompt-kit.com/docs", "source previews should omit query parameters");
+  equal(sourceLinkDetails("#section"), null, "page anchors should not become source links");
+
+  const ordinaryLink = renderMarkdown("[Prompt Kit](https://www.prompt-kit.com/docs)");
+  assert(!ordinaryLink.includes("md-source-link"), "ordinary Markdown surfaces should keep regular links");
+  const assistantSourceLink = renderMarkdown("[Prompt Kit](https://www.prompt-kit.com/docs?ref=chat)", undefined, false, true, false, false, true);
+  assert(assistantSourceLink.includes("md-source-link"), "assistant sources should render as source chips");
+  assert(assistantSourceLink.includes("prompt-kit.com/docs"), "source chips should expose hover path details");
+  assert(assistantSourceLink.includes("opens in browser"), "source chips should announce external navigation");
 
   const emptyFences = renderMarkdown([
     "```html",
@@ -183,6 +209,56 @@ try {
   assert(streamingMarkdown.includes("<table>"), "streaming markdown should render tables");
   assert(streamingMarkdown.includes("<pre>"), "streaming markdown should render code fences");
   assert(!streamingMarkdown.includes("hljs"), "streaming markdown should skip syntax highlighting");
+
+  const mermaidSource = ["```mermaid", "flowchart LR", "A --> B", "```"].join("\n");
+  assert(hasClosedMermaidFence(mermaidSource), "closed Mermaid fences should be detected");
+  assert(!hasClosedMermaidFence(["```mermaid", "flowchart LR", "A --> B"].join("\n")), "open Mermaid fences should remain code while streaming");
+  assert(hasClosedMermaidFence(["~~~MERMAID", "flowchart LR", "A --> B", "~~~"].join("\n")), "tilde Mermaid fences should be detected case-insensitively");
+
+  const transcriptMermaid = renderMarkdown(mermaidSource, undefined, false, true, false, true);
+  assert(transcriptMermaid.includes('data-testid="mermaid-diagram"'), "transcript Mermaid fences should render a diagram card");
+  assert(transcriptMermaid.includes("Rendering diagram..."), "diagram cards should expose a rendering status before the lazy renderer completes");
+  assert(transcriptMermaid.includes("Image clipboard is unavailable"), "unsupported image clipboard environments should disable that action clearly");
+
+  const nonTranscriptMermaid = renderMarkdown(mermaidSource);
+  assert(nonTranscriptMermaid.includes("<pre>"), "Markdown surfaces without transcript opt-in should keep Mermaid as code");
+  assert(!nonTranscriptMermaid.includes('data-testid="mermaid-diagram"'), "non-transcript Markdown should not render Mermaid diagrams");
+
+  const streamingOpenMermaid = renderMemoizedMarkdown(["```mermaid", "flowchart LR", "A --> B"].join("\n"), undefined, true);
+  assert(streamingOpenMermaid.includes("<pre>"), "incomplete streaming Mermaid fences should remain code");
+  assert(!streamingOpenMermaid.includes('data-testid="mermaid-diagram"'), "incomplete streaming Mermaid fences should not invoke the renderer");
+  const streamingClosedMermaid = renderMemoizedMarkdown(mermaidSource, undefined, true);
+  assert(streamingClosedMermaid.includes('data-testid="mermaid-diagram"'), "completed streaming Mermaid fences should promote to diagrams");
+
+  const regularFenceWithMermaidEnabled = renderMarkdown("```ts\nconst value = 1;\n```", undefined, false, true, false, true);
+  assert(regularFenceWithMermaidEnabled.includes("<pre>"), "ordinary code fences should remain code when Mermaid rendering is enabled");
+  assert(!regularFenceWithMermaidEnabled.includes('data-testid="mermaid-diagram"'), "ordinary code fences should not become diagrams");
+
+  const standaloneSvg = standaloneMermaidSvg('<svg viewBox="0 0 900 300"></svg>');
+  assert(standaloneSvg.startsWith('<?xml version="1.0"'), "SVG downloads should include an XML declaration");
+  assert(standaloneSvg.includes('xmlns="http://www.w3.org/2000/svg"'), "SVG downloads should include the SVG namespace");
+  equal(mermaidSvgDimensions(standaloneSvg).width, 900, "SVG export should read viewBox width");
+  equal(mermaidSvgDimensions(standaloneSvg).height, 300, "SVG export should read viewBox height");
+  equal(boundedRasterDimensions(900, 300).width, 1800, "PNG export should rasterize at 2x when within bounds");
+  equal(boundedRasterDimensions(3000, 1500).width, 4096, "PNG export should cap its longest dimension");
+  equal(boundedRasterDimensions(3000, 1500).height, 2048, "PNG export should preserve aspect ratio at the cap");
+
+  const directMermaidCard = renderToStaticMarkup(createElement(MermaidDiagram, { source: "flowchart LR\nA --> B" }));
+  assert(directMermaidCard.includes("Copy Mermaid code"), "diagram cards should keep source-copy access in diagram view");
+  assert(directMermaidCard.includes("Download SVG"), "diagram cards should expose SVG export");
+  assert(directMermaidCard.includes("Download PNG"), "diagram cards should expose PNG export");
+
+  const { default: mermaid } = await import("mermaid");
+  mermaid.initialize({ startOnLoad: false, securityLevel: "strict", suppressErrorRendering: true });
+  const parsedMermaid = await mermaid.parse("flowchart LR\nA --> B");
+  assert(Boolean(parsedMermaid), "valid Mermaid source should parse");
+  let invalidMermaidRejected = false;
+  try {
+    await mermaid.parse("flowchart ???");
+  } catch {
+    invalidMermaidRejected = true;
+  }
+  assert(invalidMermaidRejected, "invalid Mermaid source should reach the renderer error path");
 
   const escapedHtml = renderMarkdown("<sub>Posted by a GitHub App.</sub>");
   assert(escapedHtml.includes("&lt;sub&gt;"), "raw HTML should remain escaped outside opted-in surfaces");

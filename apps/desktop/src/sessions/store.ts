@@ -2932,7 +2932,11 @@ export const useSessions = create<SessionState>()(
               s.id === id
                 ? {
                     ...s,
-                    messages: messages.map(normalizeMessageArtifacts),
+                    messages: messages.map((message, index) =>
+                      s.messages[index] === message
+                        ? message
+                        : normalizeMessageArtifacts(message),
+                    ),
                     updatedAt: Date.now(),
                     title:
                       s.title === NEW_CHAT_TITLE && options?.autoTitle !== false

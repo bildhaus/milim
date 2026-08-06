@@ -3,6 +3,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -307,6 +308,7 @@ import type { ModelPickerSelection } from "./ModelPicker";
 import { GoalPanel, type GoalPanelDraft } from "./GoalPanel";
 import {
   ArrowRight,
+  ChevronDown,
   Code,
   Eye,
   FileText,
@@ -370,10 +372,6 @@ const EMPTY_QUEUE: QueuedMessage[] = [];
 const EMPTY_CONTEXT_SECTION_IDS: QuickSummarySectionId[] = [];
 const NON_EMPTY_USAGE_MESSAGES: ChatMessage[] = [{ role: "user", content: "" }];
 const PREVIEW_PANEL_MIN_WIDTH = 360;
-const MESSAGE_VIRTUALIZE_AFTER = 80;
-const MESSAGE_ESTIMATED_HEIGHT = 152;
-const MESSAGE_VIRTUAL_OVERSCAN_PX = 900;
-const MESSAGE_ROW_GAP = 12;
 const RECENT_THREAD_SWITCHER_CLOSE_MS = 1600;
 const EVENT_STREAM_RECONNECT_MAX_MS = 5_000;
 const previewArtifactCache = new WeakMap<ChatMessage, ChatArtifact[] | null>();
@@ -901,107 +899,6 @@ function browserPreviewSelection(
   return { artifact, artifacts: [artifact], previewDeferred: false };
 }
 
-type VirtualMessageItem = {
-  index: number;
-  message: ChatMessage;
-  top: number;
-};
-
-type VirtualMessageWindow = {
-  virtualized: boolean;
-  items: VirtualMessageItem[];
-  totalHeight: number;
-};
-
-function virtualIndexAt(offsets: number[], value: number): number {
-  let low = 0;
-  let high = offsets.length - 1;
-  while (low < high) {
-    const mid = Math.floor((low + high) / 2);
-    if (offsets[mid] < value) low = mid + 1;
-    else high = mid;
-  }
-  return Math.max(0, low - 1);
-}
-
-function virtualMessageWindow(
-  messages: ChatMessage[],
-  heights: readonly number[],
-  scrollTop: number,
-  viewportHeight: number,
-): VirtualMessageWindow {
-  const visible = messages.flatMap((message, index) =>
-    workerRunSynthesisId(message) ? [] : [{ index, message, top: 0 }],
-  );
-  if (visible.length <= MESSAGE_VIRTUALIZE_AFTER) {
-    return {
-      virtualized: false,
-      totalHeight: 0,
-      items: visible,
-    };
-  }
-  const offsets = new Array<number>(visible.length + 1);
-  offsets[0] = 0;
-  for (let i = 0; i < visible.length; i += 1) {
-    offsets[i + 1] =
-      offsets[i] + (heights[visible[i].index] || MESSAGE_ESTIMATED_HEIGHT);
-  }
-  const start = virtualIndexAt(
-    offsets,
-    Math.max(0, scrollTop - MESSAGE_VIRTUAL_OVERSCAN_PX),
-  );
-  const end = Math.min(
-    visible.length - 1,
-    virtualIndexAt(
-      offsets,
-      scrollTop + viewportHeight + MESSAGE_VIRTUAL_OVERSCAN_PX,
-    ) + 1,
-  );
-  const items: VirtualMessageItem[] = [];
-  for (let index = start; index <= end; index += 1) {
-    items.push({ ...visible[index], top: offsets[index] });
-  }
-  return {
-    virtualized: true,
-    items,
-    totalHeight: offsets[visible.length],
-  };
-}
-
-function MessageVirtualRow({
-  index,
-  top,
-  measure,
-  children,
-}: {
-  index: number;
-  top: number;
-  measure: (index: number, height: number) => void;
-  children: ReactNode;
-}) {
-  const rowRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    const row = rowRef.current;
-    if (!row) return;
-    const update = () =>
-      measure(index, row.getBoundingClientRect().height + MESSAGE_ROW_GAP);
-    update();
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(update);
-    observer.observe(row);
-    return () => observer.disconnect();
-  }, [index, measure, children]);
-  return (
-    <div
-      ref={rowRef}
-      className="message-virtual-row"
-      style={{ top: `${top}px` }}
-    >
-      {children}
-    </div>
-  );
-}
-
 function previewIdleStatus(
   threadId: string,
   folder: string,
@@ -1519,6 +1416,7 @@ export function ChatView({
   composerDraft,
   gitPanelRequest = null,
   mcpManagerRequest = 0,
+  chatSearchRequest = 0,
   onComposerDraftConsumed,
   skillsRevision = 0,
 }: {
@@ -1532,6 +1430,7 @@ export function ChatView({
     view: GitPanelView;
   } | null;
   mcpManagerRequest?: number;
+  chatSearchRequest?: number;
   onComposerDraftConsumed?: (id: number) => void;
   skillsRevision?: number;
 }) {
@@ -1779,9 +1678,11 @@ export function ChatView({
   const setPreviewPanelWidth = useUiPreferences((s) => s.setPreviewPanelWidth);
   const sidebarOpen = useUiPreferences((s) => s.sidebarOpen);
   const sidebarWidth = useUiPreferences((s) => s.sidebarWidth);
+  const threadNavigationPlacement = useUiPreferences((s) => s.threadNavigationPlacement);
   const setSidebarOpen = useUiPreferences((s) => s.setSidebarOpen);
   const appShortcuts = useUiPreferences((s) => s.appShortcuts);
   const toggleSidebar = useUiPreferences((s) => s.toggleSidebar);
+  const verticalSidebarOpen = threadNavigationPlacement === "sidebar" && sidebarOpen;
   const autoTitleChats = useUiPreferences((s) => s.autoTitleChats);
   const experimentalHashlinePatch = useUiPreferences(
     (s) => s.experimentalHashlinePatch,
@@ -2168,6 +2069,7 @@ export function ChatView({
   const previewResizeHandleRef = useRef<HTMLDivElement>(null);
   const contextLauncherRef = useRef<HTMLButtonElement>(null);
   const stickToBottomRef = useRef(true);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const {
     approvedWorkerRunsRef,
     childThreadEventControllersRef,
@@ -2211,17 +2113,11 @@ export function ChatView({
     new Map<string, PreviewAppFile[]>(),
   );
   const scheduleRunPollingRef = useRef(false);
-  const messageHeightsRef = useRef<number[]>([]);
   const gitStatusUpdatedAtRef = useRef<number | null>(null);
   const [previewResizing, setPreviewResizing] = useState(false);
   const [previewPanelOverlay, setPreviewPanelOverlay] = useState(false);
   const [recentThreadSwitcher, setRecentThreadSwitcher] =
     useState<RecentThreadSwitcherState | null>(null);
-  const [messageScrollSnapshot, setMessageScrollSnapshot] = useState({
-    top: 0,
-    height: 0,
-  });
-  const [messageHeightsVersion, setMessageHeightsVersion] = useState(0);
 
   useEffect(() => {
     const body = chatBodyRef.current;
@@ -2243,22 +2139,6 @@ export function ChatView({
         typeof nextInput === "function" ? nextInput(current) : nextInput;
       setSessionComposerDraft(activeId, next);
       return next;
-    });
-  }
-
-  const measureMessageRow = useCallback((index: number, height: number) => {
-    const next = Math.max(1, Math.ceil(height));
-    if (messageHeightsRef.current[index] === next) return;
-    messageHeightsRef.current[index] = next;
-    setMessageHeightsVersion((version) => version + 1);
-  }, []);
-
-  function updateMessageScrollSnapshot() {
-    const el = chatScrollRef.current;
-    if (!el) return;
-    setMessageScrollSnapshot({
-      top: el.scrollTop,
-      height: el.clientHeight,
     });
   }
 
@@ -2314,7 +2194,12 @@ export function ChatView({
     const el = chatScrollRef.current;
     if (!el) return;
     el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
-    updateMessageScrollSnapshot();
+  }
+
+  function jumpToLatest() {
+    stickToBottomRef.current = true;
+    setShowJumpToLatest(false);
+    scrollToChatBottom();
   }
 
   function isLiveChildThread(thread: ChildThreadInfo): boolean {
@@ -2625,8 +2510,9 @@ export function ChatView({
   function updateAutoScrollCoupling() {
     const el = chatScrollRef.current;
     if (!el) return;
-    stickToBottomRef.current = isNearScrollBottom(el);
-    updateMessageScrollSnapshot();
+    const following = isNearScrollBottom(el);
+    stickToBottomRef.current = following;
+    setShowJumpToLatest(!following);
   }
 
   useEffect(() => {
@@ -2635,15 +2521,13 @@ export function ChatView({
     }
   }, [activeId, model, models, modelsLoaded, updateThreadSettings]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (stickToBottomRef.current) scrollToChatBottom();
-    else updateMessageScrollSnapshot();
   }, [messages]);
 
   useEffect(() => {
     stickToBottomRef.current = true;
-    messageHeightsRef.current = [];
-    setMessageHeightsVersion((version) => version + 1);
+    setShowJumpToLatest(false);
     scrollToChatBottom();
     setPendingAttachments([]);
     setChatNotice(null);
@@ -2675,6 +2559,11 @@ export function ChatView({
     if (!mcpManagerRequest) return;
     setMcpOpen(true);
   }, [mcpManagerRequest]);
+
+  useEffect(() => {
+    if (!chatSearchRequest) return;
+    setChatSearchOpen(true);
+  }, [chatSearchRequest]);
 
   useEffect(() => {
     return () => {
@@ -3920,7 +3809,7 @@ export function ChatView({
     const target = event.currentTarget;
     const bodyWidth = chatBodyRef.current?.getBoundingClientRect().width ?? chatBodyWidth;
     const dockedLimit = maxPreviewPanelWidth(bodyWidth, reservedContextWidth);
-    const sidebarGain = sidebarOpen
+    const sidebarGain = verticalSidebarOpen
       ? Math.max(0, sidebarWidth - COLLAPSED_SIDEBAR_WIDTH)
       : 0;
     previewResizeStartRef.current = {
@@ -3931,7 +3820,7 @@ export function ChatView({
       pointerId: event.pointerId,
       target,
       snappedClosed: false,
-      sidebarWasOpen: sidebarOpen,
+      sidebarWasOpen: verticalSidebarOpen,
       sidebarAutoCollapsed: false,
       sidebarCollapseBoundary: dockedLimit,
       overlayBoundary: dockedLimit + sidebarGain,
@@ -4040,7 +3929,7 @@ export function ChatView({
         resizePreviewPanel(resolvedPreviewPanelWidth + PREVIEW_PANEL_KEYBOARD_STEP, true);
       } else if (resolvedPreviewPanelWidth < dockedPreviewPanelWidth) {
         resizePreviewPanel(resolvedPreviewPanelWidth + PREVIEW_PANEL_KEYBOARD_STEP, false);
-      } else if (sidebarOpen) {
+      } else if (verticalSidebarOpen) {
         setSidebarOpen(false);
       } else {
         setPreviewPanelOverlay(true);
@@ -6284,7 +6173,6 @@ export function ChatView({
         reviewComments,
       };
     }
-    setMessages(activeId, conversation, { autoTitle: autoTitleChats });
     void runTurnAndDrain(
       conversation,
       selectedModel,
@@ -6524,6 +6412,7 @@ export function ChatView({
       label: sidebarOpen ? "Hide sidebar" : "Show sidebar",
       keywords: ["toggle", "navigation"],
       shortcut: shortcutLabel(appShortcuts.toggleSidebar),
+      available: threadNavigationPlacement === "sidebar",
       run: toggleSidebar,
     },
     {
@@ -6591,7 +6480,10 @@ export function ChatView({
       } else if (shortcutMatchesEvent(appShortcuts.openComposerSuggestions, event)) {
         event.preventDefault();
         window.dispatchEvent(new Event("milim:open-composer-suggestions"));
-      } else if (shortcutMatchesEvent(appShortcuts.toggleSidebar, event)) {
+      } else if (
+        threadNavigationPlacement === "sidebar" &&
+        shortcutMatchesEvent(appShortcuts.toggleSidebar, event)
+      ) {
         event.preventDefault();
         toggleSidebar();
       } else if (shortcutMatchesEvent(appShortcuts.previousThread, event)) {
@@ -6613,6 +6505,7 @@ export function ChatView({
     sessionSummaries,
     switchToSession,
     threadSettings,
+    threadNavigationPlacement,
     toggleSidebar,
   ]);
 
@@ -6807,21 +6700,6 @@ export function ChatView({
   }, [busy, messages]);
   const activeRun = activeAssistantRuntime.run;
   const activeStreamParts = activeAssistantRuntime.streamParts;
-  const virtualMessages = useMemo(
-    () =>
-      virtualMessageWindow(
-        messages,
-        messageHeightsRef.current,
-        messageScrollSnapshot.top,
-        messageScrollSnapshot.height,
-      ),
-    [
-      messages,
-      messageHeightsVersion,
-      messageScrollSnapshot.height,
-      messageScrollSnapshot.top,
-    ],
-  );
   const debugPreviewControlActivity =
     typeof window === "undefined"
       ? null
@@ -7019,76 +6897,70 @@ export function ChatView({
               </button>
             )}
           </div>
-          <div
-            className="chat-scroll"
-            ref={chatScrollRef}
-            onScroll={updateAutoScrollCoupling}
-          >
-            {!emptyThread && (
-              <div
-                className={
-                  "messages" +
-                  (virtualMessages.virtualized ? " messages-virtualized" : "")
-                }
-                style={
-                  virtualMessages.virtualized
-                    ? ({ height: virtualMessages.totalHeight } as CSSProperties)
-                    : undefined
-                }
+          <div className="chat-scroll-shell">
+            <div
+              className="chat-scroll"
+              ref={chatScrollRef}
+              onScroll={updateAutoScrollCoupling}
+            >
+              {!emptyThread && (
+                <div className="messages">
+                  {messages.map((m, i) => {
+                    if (workerRunSynthesisId(m)) return null;
+                    const messageIsCompaction = isCompactionCheckpoint(m);
+                    const isApprovalMessage = Boolean(m.approval);
+                    const isLastAssistant =
+                      m.role === "assistant" &&
+                      !messageIsCompaction &&
+                      !isApprovalMessage &&
+                      i === messages.length - 1;
+                    const messageTurnChangesKey = m.workspaceCheckpoint
+                      ? `${activeId}:${m.id ?? i}:${m.workspaceCheckpoint.ref}`
+                      : "";
+                    return (
+                      <MessageRow
+                        key={m.id ?? i}
+                        activeId={activeId}
+                        appSessionId={APP_SESSION_ID}
+                        message={m}
+                        index={i}
+                        isEditing={editing === i}
+                        isLastAssistant={isLastAssistant}
+                        assistantStreaming={busy && isLastAssistant}
+                        busy={busy}
+                        activeMediaTargetPresent={Boolean(activeMediaTarget)}
+                        folderIsEmpty={!folder.trim()}
+                        workspaceFolder={folder}
+                        activeRun={activeRun}
+                        previewArtifacts={previewArtifactsForMessage(m)}
+                        previewAppBusy={previewAppBusy}
+                        previewAppStatus={activePreviewAppStatus}
+                        toolApproval={toolApproval}
+                        turnReview={
+                          isLastAssistant &&
+                          turnReview?.key === messageTurnChangesKey
+                            ? turnReview
+                            : null
+                        }
+                        actionsRef={messageRowActionsRef}
+                      />
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            {showJumpToLatest && !emptyThread && (
+              <button
+                type="button"
+                className="chat-jump-latest"
+                data-testid="chat-jump-latest"
+                title="Jump to latest"
+                aria-label="Jump to latest message"
+                onClick={jumpToLatest}
               >
-                {virtualMessages.items.map(({ message: m, index: i, top }) => {
-                  const messageIsCompaction = isCompactionCheckpoint(m);
-                  const isApprovalMessage = Boolean(m.approval);
-                  const isLastAssistant =
-                    m.role === "assistant" &&
-                    !messageIsCompaction &&
-                    !isApprovalMessage &&
-                    i === messages.length - 1;
-                  const messageTurnChangesKey = m.workspaceCheckpoint
-                    ? `${activeId}:${m.id ?? i}:${m.workspaceCheckpoint.ref}`
-                    : "";
-                  const row = (
-                    <MessageRow
-                      key={m.id ?? i}
-                      activeId={activeId}
-                      appSessionId={APP_SESSION_ID}
-                      message={m}
-                      index={i}
-                      isEditing={editing === i}
-                      isLastAssistant={isLastAssistant}
-                      assistantStreaming={busy && isLastAssistant}
-                      busy={busy}
-                      activeMediaTargetPresent={Boolean(activeMediaTarget)}
-                      folderIsEmpty={!folder.trim()}
-                      workspaceFolder={folder}
-                      activeRun={activeRun}
-                      previewArtifacts={previewArtifactsForMessage(m)}
-                      previewAppBusy={previewAppBusy}
-                      previewAppStatus={activePreviewAppStatus}
-                      toolApproval={toolApproval}
-                      turnReview={
-                        isLastAssistant &&
-                        turnReview?.key === messageTurnChangesKey
-                          ? turnReview
-                          : null
-                      }
-                      actionsRef={messageRowActionsRef}
-                    />
-                  );
-                  return virtualMessages.virtualized ? (
-                    <MessageVirtualRow
-                      key={m.id ?? i}
-                      index={i}
-                      top={top}
-                      measure={measureMessageRow}
-                    >
-                      {row}
-                    </MessageVirtualRow>
-                  ) : (
-                    row
-                  );
-                })}
-              </div>
+                <ChevronDown size={14} aria-hidden="true" />
+                <span>Latest</span>
+              </button>
             )}
           </div>
 

@@ -79,6 +79,17 @@ equal(partialStreamingTable.length, 0, "partial streamed table rows should stay 
 
 const shortSnippet = extractArtifactsFromContent("```ts\nconst x = 1;\n```");
 equal(shortSnippet.length, 0, "short anonymous code snippets should stay inline only");
+const anonymousMermaid = extractArtifactsFromContent([
+  "```mermaid",
+  "flowchart LR",
+  ...Array.from({ length: 30 }, (_, index) => `node${index} --> node${index + 1}`),
+  "```",
+].join("\n"));
+equal(anonymousMermaid.length, 0, "anonymous Mermaid fences should use the inline diagram instead of a duplicate artifact card");
+const namedMermaid = extractArtifactsFromContent("```mermaid file=docs/architecture.mmd\nflowchart LR\nA --> B\n```");
+equal(namedMermaid.length, 1, "named Mermaid fences should remain file artifacts");
+equal(namedMermaid[0].filename, "docs/architecture.mmd", "named Mermaid artifacts should keep their target path");
+assert(isFileArtifact(namedMermaid[0]), "named Mermaid artifacts should keep workspace file actions");
 const manyAnonymousBlocks = extractArtifactsFromContent(Array.from({ length: 15 }, (_, index) => [
   "```ts",
   `export const anonymous${index} = "${"anonymous preview ".repeat(30)}";`,

@@ -526,6 +526,7 @@ export function DocsPage({ pathname }: { pathname?: string } = {}) {
 
   return (
     <div ref={root} className="site-shell docs-shell">
+      <a className="skip-link" href="#docs-main-content">Skip to content</a>
       <header className="nav">
         <a className="brand" href="/" aria-label="milim home">
           <img src="/assets/milim-wordmark.svg" alt="" />
@@ -543,7 +544,7 @@ export function DocsPage({ pathname }: { pathname?: string } = {}) {
         </div>
       </header>
 
-      <main className={`docs-main${isOverviewPage ? "" : " docs-main-subpage"}`}>
+      <main id="docs-main-content" className={`docs-main${isOverviewPage ? "" : " docs-main-subpage"}`} tabIndex={-1}>
         {isOverviewPage ? (
           <section className="docs-hero" id="top">
             <ShaderField />

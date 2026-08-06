@@ -169,8 +169,10 @@ try {
     createElement(AssistantMessage, {
       content: "",
       streamParts: [
+        { kind: "text", content: "I’ll inspect the implementation." },
         tool("Ran command", "done", "pnpm test"),
         { kind: "thinking", content: "verified the result" },
+        { kind: "text", content: "The implementation is verified." },
       ],
       streaming: false,
       workDurationMs: 65_000,
@@ -185,7 +187,7 @@ try {
     "completed work should collapse",
   );
   assert.match(successfulMarkup, /Worked for 1m 5s/);
-  assert.match(successfulMarkup, /1 command, 1 reasoning note/);
+  assert.match(successfulMarkup, /1 update, 1 command, 1 reasoning note/);
 
   const failedMarkup = renderToStaticMarkup(
     createElement(AssistantMessage, {
@@ -221,7 +223,7 @@ try {
     }),
   );
   const completedToolsTag = completedToolsMarkup.match(
-    /<details[^>]+data-testid="assistant-stream-tool-group"[^>]*>/,
+    /<details[^>]+data-testid="assistant-stream-work-group"[^>]*>/,
   )?.[0] ?? "";
   assert.doesNotMatch(
     completedToolsTag,
@@ -240,7 +242,7 @@ try {
     }),
   );
   const failedToolsTag = failedToolsMarkup.match(
-    /<details[^>]+data-testid="assistant-stream-tool-group"[^>]*>/,
+    /<details[^>]+data-testid="assistant-stream-work-group"[^>]*>/,
   )?.[0] ?? "";
   assert.doesNotMatch(
     failedToolsTag,

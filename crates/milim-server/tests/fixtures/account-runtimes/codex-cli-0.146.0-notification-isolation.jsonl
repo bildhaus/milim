@@ -1,0 +1,8 @@
+{"method":"turn/completed","params":{"threadId":"thread-main","turn":{"id":"turn-previous","status":"completed"}}}
+{"method":"turn/started","params":{"threadId":"thread-main","turn":{"id":"turn-main"}}}
+{"method":"turn/started","params":{"threadId":"thread-subagent","turn":{"id":"turn-subagent"}}}
+{"method":"item/agentMessage/delta","params":{"threadId":"thread-subagent","turnId":"turn-subagent","itemId":"sub-message","delta":"subagent leakage"}}
+{"method":"turn/completed","params":{"threadId":"thread-subagent","turn":{"id":"turn-subagent","status":"completed"}}}
+{"method":"item/agentMessage/delta","params":{"threadId":"thread-main","turnId":"turn-main","itemId":"main-message","delta":"main answer"}}
+{"method":"turn/completed","params":{"threadId":"thread-main","turn":{"id":"turn-previous","status":"completed"}}}
+{"method":"turn/completed","params":{"threadId":"thread-main","turn":{"id":"turn-main","status":"completed"}}}

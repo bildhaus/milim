@@ -32,9 +32,7 @@ const MAX_LIST_ENTRIES: usize = 1000;
 /// The current workspace root, or an error if the user hasn't picked a folder.
 fn root_of(ws: &ToolWorkspace) -> Result<PathBuf> {
     match ws {
-        ToolWorkspace::Fixed(root) | ToolWorkspace::FullAccess(root) => {
-            Ok(root.as_ref().clone())
-        }
+        ToolWorkspace::Fixed(root) | ToolWorkspace::FullAccess(root) => Ok(root.as_ref().clone()),
         ToolWorkspace::Live(ws) => ws.read().ok().and_then(|g| g.clone()).ok_or_else(|| {
             Error::InvalidRequest(
                 "no working folder selected - pick one with the Folder chip first".into(),
@@ -917,10 +915,7 @@ mod tests {
             json!({"path": written, "content": "written in Open"}),
         ))
         .unwrap();
-        assert_eq!(
-            std::fs::read_to_string(written).unwrap(),
-            "written in Open"
-        );
+        assert_eq!(std::fs::read_to_string(written).unwrap(), "written in Open");
 
         let _ = std::fs::remove_dir_all(root);
     }

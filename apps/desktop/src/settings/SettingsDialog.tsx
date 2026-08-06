@@ -255,6 +255,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const developerMode = useUiPreferences((s) => s.developerMode);
   const experimentalHashlinePatch = useUiPreferences((s) => s.experimentalHashlinePatch);
   const chatLayoutStyle = useUiPreferences((s) => s.chatLayoutStyle);
+  const threadNavigationPlacement = useUiPreferences((s) => s.threadNavigationPlacement);
   const sidebarRailStyle = useUiPreferences((s) => s.sidebarRailStyle);
   const settledThreadsEnabled = useUiPreferences((s) => s.settledThreadsEnabled);
   const showEmptyChatRidgeline = useUiPreferences((s) => s.showEmptyChatRidgeline);
@@ -303,6 +304,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const setDeveloperMode = useUiPreferences((s) => s.setDeveloperMode);
   const setExperimentalHashlinePatch = useUiPreferences((s) => s.setExperimentalHashlinePatch);
   const setChatLayoutStyle = useUiPreferences((s) => s.setChatLayoutStyle);
+  const setThreadNavigationPlacement = useUiPreferences((s) => s.setThreadNavigationPlacement);
   const setSidebarRailStyle = useUiPreferences((s) => s.setSidebarRailStyle);
   const setSettledThreadsEnabled = useUiPreferences((s) => s.setSettledThreadsEnabled);
   const setShowEmptyChatRidgeline = useUiPreferences((s) => s.setShowEmptyChatRidgeline);
@@ -1013,17 +1015,36 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                 </div>
               </div>
             </SettingsBlock>
-            <SettingsBlock title="Sidebar organization" data-setting-id="app-sidebar-organization" className={settingHighlightClass("app-sidebar-organization").trim()}>
-              <SettingsChoiceGroup<"projects" | "inbox">
-                value={settledThreadsEnabled ? "inbox" : "projects"}
-                onChange={(mode) => setSettledThreadsEnabled(mode === "inbox")}
-                testIdPrefix="sidebar-organization"
-                ariaLabel="Sidebar organization"
-                options={[
-                  { value: "projects", label: "Projects", detail: "Group threads by project and preserve manual ordering." },
-                  { value: "inbox", label: "Inbox", detail: "Sort active threads by recent activity and fold settled threads into the footer." },
-                ]}
-              />
+            <SettingsBlock title="Thread navigation" data-setting-id="app-thread-navigation" className={settingHighlightClass("app-thread-navigation").trim()}>
+              <div className="setting-stack">
+                <div className="setting-field">
+                  <span className="setting-mini-title">Placement</span>
+                  <SettingsChoiceGroup
+                    value={threadNavigationPlacement}
+                    onChange={setThreadNavigationPlacement}
+                    testIdPrefix="thread-navigation-placement"
+                    ariaLabel="Thread navigation placement"
+                    options={[
+                      { value: "sidebar", label: "Sidebar", detail: "Keep projects and threads in the left rail." },
+                      { value: "top", label: "Top bar", detail: "Use one horizontal rail below the title bar." },
+                      { value: "bottom", label: "Bottom bar", detail: "Use one horizontal rail below the chat." },
+                    ]}
+                  />
+                </div>
+                <div className="setting-field">
+                  <span className="setting-mini-title">Organization</span>
+                  <SettingsChoiceGroup<"projects" | "inbox">
+                    value={settledThreadsEnabled ? "inbox" : "projects"}
+                    onChange={(mode) => setSettledThreadsEnabled(mode === "inbox")}
+                    testIdPrefix="sidebar-organization"
+                    ariaLabel="Thread organization"
+                    options={[
+                      { value: "projects", label: "Projects", detail: "Group threads by project and preserve manual ordering." },
+                      { value: "inbox", label: "Inbox", detail: "Sort active threads by recent activity and fold settled threads into the footer." },
+                    ]}
+                  />
+                </div>
+              </div>
             </SettingsBlock>
             <SettingsBlock title="Window & layout" data-setting-id="app-window-layout" className={settingHighlightClass("app-window-layout").trim()}>
               <div className="setting-stack">
@@ -1039,13 +1060,13 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                     testId="general-always-on-top-toggle"
                   />
                 </div>
-                <div className="setting-toggle-row">
+                {threadNavigationPlacement === "sidebar" && <div className="setting-toggle-row">
                   <div>
                     <strong>Open sidebar</strong>
                     <span>Keep the chat list visible by default.</span>
                   </div>
                   <Toggle checked={sidebarOpen} onChange={setSidebarOpen} ariaLabel="Open sidebar" testId="general-sidebar-open-toggle" />
-                </div>
+                </div>}
                 <div className="setting-field">
                   <div className="settings-action-row">
                     <div>
@@ -1066,13 +1087,13 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                   </div>
                   <Toggle checked={showAccountUsageInTitleBar} onChange={setShowAccountUsageInTitleBar} ariaLabel="Show account usage in title bar" testId="general-titlebar-account-usage-toggle" />
                 </div>
-                <div className="setting-toggle-row">
+                {threadNavigationPlacement === "sidebar" && <div className="setting-toggle-row">
                   <div>
                     <strong>New chat at bottom</strong>
                     <span>Anchor the new chat button above the sidebar footer.</span>
                   </div>
                   <Toggle checked={newChatButtonAtBottom} onChange={setNewChatButtonAtBottom} ariaLabel="New chat at bottom" testId="general-new-chat-bottom-toggle" />
-                </div>
+                </div>}
                 <div className="settings-action-row">
                   <div>
                     <strong>Panel widths</strong>
@@ -1741,7 +1762,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             <SettingsBlock title="Sidebar" data-setting-id="appearance-sidebar-colors" className={settingHighlightClass("appearance-sidebar-colors").trim()}>
               <div className="setting-stack">
                 <div className="setting-field sidebar-rail-style-field">
-                  <span className="setting-mini-title">Collapsed rail</span>
+                  <span className="setting-mini-title">Collapsed sidebar rail</span>
                   <SettingsChoiceGroup
                     value={sidebarRailStyle}
                     onChange={setSidebarRailStyle}

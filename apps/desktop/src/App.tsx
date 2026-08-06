@@ -1,4 +1,5 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { invoke } from "@tauri-apps/api/core";
 import {
   Component,
   lazy,
@@ -56,6 +57,10 @@ import {
 } from "./ui/sounds";
 import { shortcutLabel } from "./ui/shortcuts";
 import { createInteractiveChat } from "./lib/newChatCoordinator";
+import {
+  nativeBadgeThreadCount,
+  setMilimUnreadBadge,
+} from "./lib/nativeNotifications";
 import { useUiPreferences } from "./ui/store";
 
 const SettingsDialog = lazy(() =>
@@ -364,6 +369,7 @@ function AppContent() {
   const sessionIds = useSessions((s) =>
     s.sessions.map((session) => session.id).join("\0"),
   );
+  const nativeBadgeCount = useSessions(nativeBadgeThreadCount);
   const lastSessionIdsRef = useRef<Set<string> | null>(null);
   const [sessionsHydrated, setSessionsHydrated] = useState(() =>
     useSessions.persist.hasHydrated(),
@@ -407,6 +413,10 @@ function AppContent() {
     });
   }, [sessionIds, sessionsHydrated]);
   useEffect(() => {
+    if (!sessionsHydrated) return;
+    void setMilimUnreadBadge(nativeBadgeCount).catch(() => {});
+  }, [nativeBadgeCount, sessionsHydrated]);
+  useEffect(() => {
     refreshAgents();
   }, [refreshAgents]);
   useEffect(() => {
@@ -429,6 +439,7 @@ function AppContent() {
   const [mediaOpen, setMediaOpen] = useState(false);
   const [pullRequestsOpen, setPullRequestsOpen] = useState(false);
   const [mcpManagerRequest, setMcpManagerRequest] = useState(0);
+  const [chatSearchRequest, setChatSearchRequest] = useState(0);
   const [composerDraft, setComposerDraft] = useState<{
     id: number;
     text: string;
@@ -446,6 +457,7 @@ function AppContent() {
   const interfaceSounds = useUiPreferences((s) => s.interfaceSounds);
   const soundOnInteractions = useUiPreferences((s) => s.soundOnInteractions);
   const chatLayoutStyle = useUiPreferences((s) => s.chatLayoutStyle);
+  const threadNavigationPlacement = useUiPreferences((s) => s.threadNavigationPlacement);
   const sidebarRailStyle = useUiPreferences((s) => s.sidebarRailStyle);
   const messageWidth = useUiPreferences((s) => s.messageWidth);
   const avatarStyle = useUiPreferences((s) => s.avatarStyle);
@@ -455,6 +467,7 @@ function AppContent() {
   const appClassName = [
     "app",
     `chat-layout-${chatLayoutStyle}`,
+    `thread-navigation-${threadNavigationPlacement}`,
     `sidebar-rail-${sidebarRailStyle}`,
     `message-width-${messageWidth}`,
     `avatar-style-${avatarStyle}`,
@@ -515,14 +528,14 @@ function AppContent() {
         detail: shortcutLabel(appShortcuts.focusComposer),
         action: focusComposer,
       },
-      {
-        id: "toggle-sidebar",
-        label: sidebarOpen ? "Hide sidebar" : "Show sidebar",
-        icon: <SidebarIcon size={13} />,
-        detail: shortcutLabel(appShortcuts.toggleSidebar),
-        separatorBefore: true,
-        action: toggleSidebar,
-      },
+      ...(threadNavigationPlacement === "sidebar" ? [{
+          id: "toggle-sidebar",
+          label: sidebarOpen ? "Hide sidebar" : "Show sidebar",
+          icon: <SidebarIcon size={13} />,
+          detail: shortcutLabel(appShortcuts.toggleSidebar),
+          separatorBefore: true,
+          action: toggleSidebar,
+        }] : []),
       {
         id: "settings",
         label: "Settings",
@@ -578,6 +591,13 @@ function AppContent() {
 
   useEffect(() => {
     if (!inTauri) return;
+    void invoke("set_sidebar_toggle_enabled", {
+      enabled: threadNavigationPlacement === "sidebar",
+    }).catch(() => {});
+  }, [threadNavigationPlacement]);
+
+  useEffect(() => {
+    if (!inTauri) return;
     let dispose: (() => void) | undefined;
     void import("@tauri-apps/api/event")
       .then(({ listen }) => listen("milim://runtime-failed", () => setRuntimeFailed(true)))
@@ -601,7 +621,9 @@ function AppContent() {
             setSettingsOpen(true);
             break;
           case "toggle-sidebar":
-            useUiPreferences.getState().toggleSidebar();
+            if (useUiPreferences.getState().threadNavigationPlacement === "sidebar") {
+              useUiPreferences.getState().toggleSidebar();
+            }
             break;
           case "documentation":
             openDocumentation();
@@ -628,26 +650,35 @@ function AppContent() {
     );
   }
 
+  const threadNavigation = (
+    <Sidebar
+      open={sidebarOpen}
+      placement={threadNavigationPlacement}
+      onToggle={toggleSidebar}
+      onSearchChats={() => setChatSearchRequest((value) => value + 1)}
+      onOpenSettings={() => setSettingsOpen(true)}
+      onManageSkills={() => setSkillsOpen(true)}
+      onManageSchedules={() => setSchedulesOpen(true)}
+      onManageMedia={() => setMediaOpen(true)}
+      onManagePullRequests={() => setPullRequestsOpen(true)}
+      onManageMcp={() => setMcpManagerRequest((value) => value + 1)}
+      onGitAction={(text) => setComposerDraft({ id: Date.now(), text })}
+      onOpenGitPanel={(sessionId, view = "changes") =>
+        setGitPanelRequest({ id: Date.now(), sessionId, view })
+      }
+    />
+  );
+
   return (
     <div className={appClassName} onContextMenu={openAppContextMenu}>
       <BackgroundLayer />
       <div className="main">
-        <Sidebar
-          open={sidebarOpen}
-          onToggle={toggleSidebar}
-          onOpenSettings={() => setSettingsOpen(true)}
-          onManageSkills={() => setSkillsOpen(true)}
-          onManageSchedules={() => setSchedulesOpen(true)}
-          onManageMedia={() => setMediaOpen(true)}
-          onManagePullRequests={() => setPullRequestsOpen(true)}
-          onManageMcp={() => setMcpManagerRequest((value) => value + 1)}
-          onGitAction={(text) => setComposerDraft({ id: Date.now(), text })}
-          onOpenGitPanel={(sessionId, view = "changes") =>
-            setGitPanelRequest({ id: Date.now(), sessionId, view })
-          }
-        />
+        {threadNavigationPlacement === "sidebar" && threadNavigation}
         <div className="content">
-          <TopBar onOpenAppMenu={openAppMenu} />
+          <TopBar
+            onOpenAppMenu={openAppMenu}
+            threadNavigation={threadNavigationPlacement === "top" ? threadNavigation : undefined}
+          />
           <ChatView
             onManageAgents={() => setAgentsOpen(true)}
             onOpenSchedules={() => setSchedulesOpen(true)}
@@ -655,6 +686,7 @@ function AppContent() {
             composerDraft={composerDraft}
             gitPanelRequest={gitPanelRequest}
             mcpManagerRequest={mcpManagerRequest}
+            chatSearchRequest={chatSearchRequest}
             skillsRevision={skillsRevision}
             onComposerDraftConsumed={(id) =>
               setComposerDraft((current) =>
@@ -662,6 +694,7 @@ function AppContent() {
               )
             }
           />
+          {threadNavigationPlacement === "bottom" && threadNavigation}
         </div>
       </div>
       <Suspense fallback={null}>
