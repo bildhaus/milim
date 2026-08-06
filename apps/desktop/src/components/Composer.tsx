@@ -7,7 +7,7 @@ import { composerDisplayForText, composerLinkClickAction, composerTokensForText,
 import { shortcutLabel, shortcutMatchesEvent } from "../ui/shortcuts";
 import { useUiPreferences } from "../ui/store";
 import { AgentAvatar } from "./AgentAvatar";
-import { ArrowUp, ChevronDown, Folder, FolderOpen, GitHub, Paperclip, PlusSquare, Slash, Square, UserRound, X } from "./icons";
+import { ArrowUp, ChevronDown, Folder, FolderOpen, GitHub, Paperclip, PlusSquare, Square, UserRound, X } from "./icons";
 const COMPOSER_HISTORY_NOTICE_MS = 1800;
 
 function isTauriRuntime(): boolean {
@@ -1101,20 +1101,6 @@ export function Composer({
           )}
           <button className="tool-btn" data-testid="attach-files" title="Attach files" aria-label="Attach files" onClick={attachFromPicker}>
             <Paperclip size={16} />
-          </button>
-          <button
-            className="tool-btn"
-            data-testid="slash-command-trigger"
-            title="Commands and skills"
-            aria-label="Commands and skills"
-            aria-expanded={showSlashMenu}
-            aria-haspopup="menu"
-            onClick={() => {
-              if (autocompleteMode !== "off") setSlashOpen((v) => !v);
-              setPersonaOpen(false);
-            }}
-          >
-            <Slash size={16} />
           </button>
           <div className="persona-wrap" ref={personaRef}>
             <button

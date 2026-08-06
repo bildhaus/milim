@@ -7025,13 +7025,13 @@ span.provider-brand-icon {
 
 .composer-bar { display: flex; align-items: center; justify-content: space-between; margin-top: 5px; }
 .composer-tools { flex: 1 1 auto; display: flex; align-items: center; min-width: 0; gap: 2px; }
-.project-chip-wrap { position: relative; flex: 1 1 auto; min-width: 0; }
+.project-chip-wrap { position: relative; flex: 0 1 auto; min-width: 0; max-width: min(220px, 34vw); }
 .project-chip {
   display: flex;
   align-items: center;
   gap: 6px;
-  width: 100%;
-  max-width: min(220px, 34vw);
+  width: auto;
+  max-width: 100%;
   height: 28px;
   padding: 0 7px;
   border: none;
