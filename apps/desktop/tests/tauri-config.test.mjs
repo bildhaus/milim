@@ -98,6 +98,10 @@ if (config.app?.windows?.[0]?.title !== "milim") {
   );
 }
 
+if (config.app?.windows?.[0]?.dragDropEnabled !== false) {
+  throw new Error("Tauri native drag/drop must stay disabled so the composer receives HTML5 file drops");
+}
+
 if (String(config.identifier).endsWith(".app")) {
   throw new Error("Tauri bundle identifier must not end with .app");
 }

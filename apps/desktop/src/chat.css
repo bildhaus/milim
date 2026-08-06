@@ -7024,12 +7024,13 @@ span.provider-brand-icon {
 }
 
 .composer-bar { display: flex; align-items: center; justify-content: space-between; margin-top: 5px; }
-.composer-tools { display: flex; align-items: center; gap: 2px; }
-.project-chip-wrap { position: relative; min-width: 0; }
+.composer-tools { flex: 1 1 auto; display: flex; align-items: center; min-width: 0; gap: 2px; }
+.project-chip-wrap { position: relative; flex: 1 1 auto; min-width: 0; }
 .project-chip {
   display: flex;
   align-items: center;
   gap: 6px;
+  width: 100%;
   max-width: min(220px, 34vw);
   height: 28px;
   padding: 0 7px;
