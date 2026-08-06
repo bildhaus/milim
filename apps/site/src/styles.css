@@ -421,8 +421,6 @@ main {
   border: 1px solid var(--line-soft);
   border-radius: 999px;
   background: rgba(127, 127, 127, 0.08);
-  opacity: 0.68;
-  transition: opacity 160ms ease;
 }
 
 .theme-control::before {
@@ -445,11 +443,6 @@ main {
 
 .theme-control[data-theme-mode="light"]::before {
   transform: translateX(200%);
-}
-
-.theme-control:hover,
-.theme-control:focus-within {
-  opacity: 1;
 }
 
 .theme-control button {
