@@ -42,11 +42,11 @@ Agents, Workers, skills, schedules, MCP, media, Google Workspace, previews, and 
 
 | Source | Path |
 |---|---|
-| Server router | [crates/milim-server/src/lib.rs](https://github.com/oshtz/milim/blob/main/crates/milim-server/src/lib.rs) |
-| Desktop API client | [apps/desktop/src/api.ts](https://github.com/oshtz/milim/blob/main/apps/desktop/src/api.ts) |
-| Embedded Tauri server | [apps/desktop/src-tauri/src/lib.rs](https://github.com/oshtz/milim/blob/main/apps/desktop/src-tauri/src/lib.rs) |
-| Thread/session state | [apps/desktop/src/sessions/store.ts](https://github.com/oshtz/milim/blob/main/apps/desktop/src/sessions/store.ts) |
-| Account runtimes | [docs/account-runtimes.md](https://github.com/oshtz/milim/blob/main/docs/account-runtimes.md) |
+| Server router | [crates/milim-server/src/lib.rs](https://github.com/bildhaus/milim/blob/main/crates/milim-server/src/lib.rs) |
+| Desktop API client | [apps/desktop/src/api.ts](https://github.com/bildhaus/milim/blob/main/apps/desktop/src/api.ts) |
+| Embedded Tauri server | [apps/desktop/src-tauri/src/lib.rs](https://github.com/bildhaus/milim/blob/main/apps/desktop/src-tauri/src/lib.rs) |
+| Thread/session state | [apps/desktop/src/sessions/store.ts](https://github.com/bildhaus/milim/blob/main/apps/desktop/src/sessions/store.ts) |
+| Account runtimes | [docs/account-runtimes.md](https://github.com/bildhaus/milim/blob/main/docs/account-runtimes.md) |
 
 ## Local-first line
 

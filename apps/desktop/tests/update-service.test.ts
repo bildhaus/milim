@@ -27,8 +27,8 @@ const topBarSource = readFileSync("src/components/TopBar.tsx", "utf8");
 
 function asset(
   name: string,
-  browserUrl = `https://github.com/oshtz/milim/releases/download/v1/${name}`,
-  apiUrl = `https://api.github.com/repos/oshtz/milim/releases/assets/${encodeURIComponent(name)}`,
+  browserUrl = `https://github.com/bildhaus/milim/releases/download/v1/${name}`,
+  apiUrl = `https://api.github.com/repos/bildhaus/milim/releases/assets/${encodeURIComponent(name)}`,
 ): GitHubReleaseAsset {
   return { name, url: apiUrl, browser_download_url: browserUrl };
 }
@@ -149,10 +149,10 @@ const macSelected = selectUpdateAssets([asset("milim.app.zip"), asset("SHA256SUM
 equal(macSelected.asset.name, "milim.app.zip");
 equal(macSelected.checksumAsset.name, "SHA256SUMS.txt");
 
-equal(getAssetDownloadUrl(asset("milim.app.zip")), "https://github.com/oshtz/milim/releases/download/v1/milim.app.zip");
+equal(getAssetDownloadUrl(asset("milim.app.zip")), "https://github.com/bildhaus/milim/releases/download/v1/milim.app.zip");
 equal(
-  getAssetDownloadUrl({ name: "milim.app.zip", url: "https://api.github.com/repos/oshtz/milim/releases/assets/1" }),
-  "https://api.github.com/repos/oshtz/milim/releases/assets/1",
+  getAssetDownloadUrl({ name: "milim.app.zip", url: "https://api.github.com/repos/bildhaus/milim/releases/assets/1" }),
+  "https://api.github.com/repos/bildhaus/milim/releases/assets/1",
 );
 throws(() => getAssetDownloadUrl({ name: "milim.app.zip" }), /no download URL/);
 

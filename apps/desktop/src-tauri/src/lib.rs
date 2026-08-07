@@ -4789,17 +4789,17 @@ mod artifact_save_tests {
     #[test]
     fn updater_validates_download_urls() {
         assert!(validate_update_download_url(
-            "https://github.com/oshtz/milim/releases/download/v0.1.1/milim-windows-x64-portable.exe",
+            "https://github.com/bildhaus/milim/releases/download/v0.1.1/milim-windows-x64-portable.exe",
             "Update download URL"
         )
         .is_ok());
         assert!(validate_update_download_url(
-            "https://api.github.com/repos/oshtz/milim/releases/assets/1",
+            "https://api.github.com/repos/bildhaus/milim/releases/assets/1",
             "Update download URL"
         )
         .is_ok());
         assert!(validate_update_download_url(
-            "http://github.com/oshtz/milim/releases/download/v0.1.1/milim.exe",
+            "http://github.com/bildhaus/milim/releases/download/v0.1.1/milim.exe",
             "Update download URL"
         )
         .is_err());
