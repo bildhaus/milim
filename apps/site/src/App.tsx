@@ -11,14 +11,14 @@ import { ThemeControl } from "./ThemeControl";
 
 gsap.registerPlugin(useGSAP, ScrollTrigger);
 
-const WINDOWS_URL = "https://github.com/oshtz/milim/releases/latest/download/milim-windows-x64-portable.exe";
-const MACOS_URL = "https://github.com/oshtz/milim/releases/latest/download/milim-macos-universal.dmg";
-const GITHUB_URL = "https://github.com/oshtz/milim";
-const RELEASES_URL = "https://github.com/oshtz/milim/releases/latest";
+const WINDOWS_URL = "https://github.com/bildhaus/milim/releases/latest/download/milim-windows-x64-portable.exe";
+const MACOS_URL = "https://github.com/bildhaus/milim/releases/latest/download/milim-macos-universal.dmg";
+const GITHUB_URL = "https://github.com/bildhaus/milim";
+const RELEASES_URL = "https://github.com/bildhaus/milim/releases/latest";
 const DOCS_URL = "https://docs.milim.ai/";
 const DOCS_QUICKSTART_URL = `${DOCS_URL}quickstart`;
-const GITHUB_RELEASE_API_URL = "https://api.github.com/repos/oshtz/milim/releases/latest";
-const GITHUB_REPO_API_URL = "https://api.github.com/repos/oshtz/milim";
+const GITHUB_RELEASE_API_URL = "https://api.github.com/repos/bildhaus/milim/releases/latest";
+const GITHUB_REPO_API_URL = "https://api.github.com/repos/bildhaus/milim";
 const RELEASE_CACHE_KEY = "milim-release-latest";
 const DocsPage = lazy(() => import("./DocsPage").then(({ DocsPage: Page }) => ({ default: Page })));
 
@@ -775,7 +775,7 @@ function ReleaseObject() {
   return (
     <div className="download-media release-object" aria-label="milim source and release concept" role="img">
       <div className="release-grid" aria-hidden="true">
-        <span>git clone oshtz/milim</span>
+        <span>git clone bildhaus/milim</span>
         <span>pnpm build</span>
         <span>cargo tauri build</span>
         <span>license: MIT</span>

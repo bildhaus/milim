@@ -4,7 +4,7 @@
 
 Milim is a model-agnostic software development app built around a Tauri desktop client and an embedded Rust server. Connect hosted providers, local runtimes, or installed coding-agent CLIs; work in one persistent thread; and keep model choice, tools, approvals, memory, previews, and Git review under one roof.
 
-[Website](https://milim.ai/) · [Documentation](https://docs.milim.ai/) · [Latest release](https://github.com/oshtz/milim/releases/latest) · [Source](https://github.com/oshtz/milim)
+[Website](https://milim.ai/) · [Documentation](https://docs.milim.ai/) · [Latest release](https://github.com/bildhaus/milim/releases/latest) · [Source](https://github.com/bildhaus/milim)
 
 Release artifacts target Windows and macOS. Linux packaging is intentionally disabled, but the Rust server and Tauri app remain source-buildable on supported platforms.
 
@@ -41,7 +41,7 @@ Git and preview review comments are sent as structured context with the next use
 
 ### Install the desktop app
 
-Download the Windows portable EXE or macOS universal DMG from the [latest GitHub release](https://github.com/oshtz/milim/releases/latest). The desktop app embeds the server, so normal desktop use does not require a separate `milim serve` process.
+Download the Windows portable EXE or macOS universal DMG from the [latest GitHub release](https://github.com/bildhaus/milim/releases/latest). The desktop app embeds the server, so normal desktop use does not require a separate `milim serve` process.
 
 Milim runs as a single desktop instance. Launching it again restores and focuses the existing window, including when that window is hidden in the system tray.
 

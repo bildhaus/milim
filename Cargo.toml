@@ -22,7 +22,7 @@ version = "0.2.30"
 edition = "2021"
 license = "MIT"
 authors = ["Omer Shatzberg <omershatzberg@gmail.com>"]
-repository = "https://github.com/oshtz/milim"
+repository = "https://github.com/bildhaus/milim"
 rust-version = "1.82"
 
 [workspace.dependencies]

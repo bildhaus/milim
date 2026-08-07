@@ -11,5 +11,5 @@ Use your own hosted models, local runtimes, and account subscriptions while keep
 - Quickstart: https://docs.milim.ai/quickstart
 - Models and providers: https://docs.milim.ai/models
 - Privacy: https://docs.milim.ai/privacy
-- GitHub: https://github.com/oshtz/milim
-- Latest release: https://github.com/oshtz/milim/releases/latest
+- GitHub: https://github.com/bildhaus/milim
+- Latest release: https://github.com/bildhaus/milim/releases/latest

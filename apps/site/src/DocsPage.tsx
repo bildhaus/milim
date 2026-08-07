@@ -11,7 +11,7 @@ import { ThemeControl } from "./ThemeControl";
 
 gsap.registerPlugin(useGSAP, ScrollTrigger);
 
-const GITHUB_URL = "https://github.com/oshtz/milim";
+const GITHUB_URL = "https://github.com/bildhaus/milim";
 const RELEASES_URL = `${GITHUB_URL}/releases/latest`;
 const WINDOWS_URL = `${RELEASES_URL}/download/milim-windows-x64-portable.exe`;
 const MACOS_URL = `${RELEASES_URL}/download/milim-macos-universal.dmg`;
