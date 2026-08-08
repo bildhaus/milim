@@ -91,7 +91,8 @@ assertLineOccurrences(releaseWorkflow, "      - run: pnpm -C apps/desktop verify
 
 assertEveryMutationGuarded(releaseWorkflow, "gh release edit", "--json isDraft --jq", "release edits");
 assertEveryMutationGuarded(releaseWorkflow, "gh release upload", "--json isDraft --jq", "release uploads");
-assertOccurrences(siteWorkflow, '- "VERSION"', 2, "site workflow version trigger");
+assertIncludes(siteWorkflow, "on:\n  pull_request:\n  push:", "site workflow pull request trigger");
+assertOccurrences(siteWorkflow, '- "VERSION"', 1, "site workflow version trigger");
 
 assertBefore(releaseWorkflow, "Validate release tag", checkoutReleaseTagRef, "release workflow checkout");
 assertBefore(releaseWorkflow, "Generate release notes", "Create or update draft release", "release workflow notes");
