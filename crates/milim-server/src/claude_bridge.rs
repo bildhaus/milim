@@ -1241,6 +1241,9 @@ fn handle_line(
                     _ => {}
                 }
             }
+            Some(
+                "message_start" | "content_block_stop" | "message_delta" | "message_stop" | "ping",
+            ) => {}
             Some(kind) => out.push(ClaudeStreamEvent::ProtocolNotice {
                 kind: "unsupported_stream_event",
                 message: format!("Claude emitted unsupported stream event {kind}"),
