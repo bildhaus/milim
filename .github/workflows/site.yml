@@ -2,11 +2,6 @@ name: Site
 
 on:
   pull_request:
-    paths:
-      - "apps/site/**"
-      - "docs/wiki/**"
-      - "VERSION"
-      - ".github/workflows/site.yml"
   push:
     branches: [main]
     paths:
