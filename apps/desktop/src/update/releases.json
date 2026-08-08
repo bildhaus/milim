@@ -1,4 +1,9 @@
 {
+  "0.2.31": {
+    "version": "0.2.31",
+    "summary": "Milim 0.2.31 keeps Claude Code responses streaming cleanly without spurious internal-event warnings.",
+    "items": []
+  },
   "0.2.30": {
     "version": "0.2.30",
     "summary": "Milim 0.2.30 adds flexible thread navigation, inline Mermaid diagrams, and clearer, more reliable long-running conversations.",

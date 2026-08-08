@@ -1,6 +1,6 @@
 [package]
 name = "milim-desktop"
-version = "0.2.30"
+version = "0.2.31"
 edition = "2021"
 description = "milim desktop app"
 authors = ["Omer Shatzberg <omershatzberg@gmail.com>"]
