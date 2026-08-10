@@ -1,4 +1,24 @@
 {
+  "0.2.33": {
+    "version": "0.2.33",
+    "summary": "Milim 0.2.33 improves update card readability while carrying forward the reasoning-effort fix for a direct before-and-after comparison.",
+    "items": [
+      {
+        "id": "per-chat-reasoning-effort",
+        "eyebrow": "Chat controls",
+        "title": "Keep reasoning effort with each chat",
+        "description": "Changing reasoning effort in one chat no longer silently retunes another chat using the same model.",
+        "details": [
+          "Use each chat's saved effort for sends, context compaction, and goal decisions",
+          "Start new desktop and Mobile relay chats from the app-wide default",
+          "Keep explicit Auto as a per-chat choice when the app-wide default is higher"
+        ],
+        "credit": "Thanks to @lzitser23 for identifying the issue and contributing the initial fix",
+        "accent": "var(--accent)",
+        "icon": "plug"
+      }
+    ]
+  },
   "0.2.32": {
     "version": "0.2.32",
     "summary": "Milim 0.2.32 keeps reasoning effort scoped to the chat where you set it, while new chats retain the app-wide default.",

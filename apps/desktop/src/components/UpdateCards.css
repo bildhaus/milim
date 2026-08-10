@@ -58,7 +58,7 @@
   display: grid;
   height: 100%;
   grid-template-rows: auto minmax(0, 1fr) auto;
-  gap: 20px;
+  gap: 16px;
   padding: 20px 26px 22px;
   overflow-y: auto;
 }
@@ -88,16 +88,16 @@
 
 .update-card-body {
   display: grid;
-  grid-template-columns: minmax(176px, 0.8fr) minmax(0, 1.7fr);
+  grid-template-columns: minmax(132px, 0.55fr) minmax(0, 1.85fr);
   align-items: center;
-  gap: 34px;
+  gap: 28px;
 }
 
 .update-card-visual {
   position: relative;
   display: grid;
-  width: min(100%, 190px);
-  min-height: 152px;
+  width: min(100%, 160px);
+  min-height: 140px;
   place-items: center;
   justify-self: center;
   color: color-mix(in srgb, var(--primary-text) 88%, var(--update-card-accent));
@@ -243,7 +243,7 @@
 
 .update-card-copy h2 {
   margin: 0;
-  max-width: 18ch;
+  max-width: 21ch;
   font-size: clamp(25px, 3.2vw, 31px);
   font-weight: 680;
   letter-spacing: -0.035em;
@@ -262,7 +262,7 @@
 
 .update-card-details {
   display: grid;
-  gap: 7px;
+  gap: 9px;
   margin: 15px 0 0;
   padding: 0;
   list-style: none;
@@ -275,7 +275,7 @@
   gap: 7px;
   color: var(--primary-text);
   font-size: 12px;
-  line-height: 1.35;
+  line-height: 1.42;
 }
 
 .update-card-details svg {
@@ -283,12 +283,19 @@
   color: color-mix(in srgb, var(--update-card-accent) 76%, var(--primary-text));
 }
 
+.update-card-credit {
+  margin: 12px 0 0 23px;
+  color: var(--tertiary-text);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .update-card-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 20px;
-  padding-top: 16px;
+  padding-top: 14px;
   border-top: 1px solid var(--border-secondary);
 }
 

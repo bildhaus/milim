@@ -24,6 +24,7 @@ type Release = {
     title: string;
     description: string;
     details: string[];
+    credit?: string;
     accent: string;
     icon: keyof typeof ICONS | "google";
   }>;
@@ -161,6 +162,7 @@ export function UpdateCards() {
                           </li>
                         ))}
                       </ul>
+                      {item.credit && <p className="update-card-credit">{item.credit}</p>}
                     </div>
                   </div>
 
