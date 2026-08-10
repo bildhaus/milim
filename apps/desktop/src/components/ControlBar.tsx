@@ -9,7 +9,7 @@ import {
 } from "../api";
 import { goalChipVisible, type GoalSettings } from "../lib/goals";
 import { modelDevProfile, modelDisplayName } from "../lib/modelPicker";
-import { REASONING_EFFORT_LABEL, reasoningEffortForModel } from "../lib/reasoningEffort";
+import { REASONING_EFFORT_LABEL, reasoningEffortForThread } from "../lib/reasoningEffort";
 import { ChevronDown, Cube, Lightbulb, Pin, Sliders } from "./icons";
 import { ModelPicker, type ModelPickerSelection } from "./ModelPicker";
 import { ProviderIcon, providerBrandForModel } from "./ProviderIcon";
@@ -89,6 +89,8 @@ export function ControlBar({
   models,
   model,
   reasoningEffortByModel,
+  reasoningEffortOverrides,
+  onReasoningEffort,
   providers,
   toolIntent,
   onModel,
@@ -117,6 +119,8 @@ export function ControlBar({
   models: ModelInfo[];
   model: string;
   reasoningEffortByModel: Record<string, ReasoningEffort>;
+  reasoningEffortOverrides?: Record<string, ReasoningEffort>;
+  onReasoningEffort?: (modelId: string, effort: ReasoningEffort) => void;
   providers?: ProviderInfo[];
   toolIntent?: boolean;
   onModel: (selection: ModelPickerSelection) => void;
@@ -176,7 +180,7 @@ export function ControlBar({
     : goal.status[0].toUpperCase() + goal.status.slice(1);
   const activeModel = models.find((item) => item.id === model);
   const activeModelLabel = activeModel ? modelDisplayName(activeModel) : model;
-  const activeReasoningEffort = reasoningEffortForModel(reasoningEffortByModel, model, models);
+  const activeReasoningEffort = reasoningEffortForThread(reasoningEffortOverrides, reasoningEffortByModel, model, models);
   const activeReasoningEffortLabel = activeReasoningEffort === "auto" ? "" : REASONING_EFFORT_LABEL[activeReasoningEffort];
   const activeModelProfile = modelDevProfile(activeModel, model, {
     providers,
@@ -237,6 +241,8 @@ export function ControlBar({
               onManageProviders={onManageProviders}
               onManageMcp={onManageMcp}
               onManageMemory={onManageMemory}
+              reasoningEffortOverrides={reasoningEffortOverrides}
+              onReasoningEffort={onReasoningEffort}
               onClose={() => {
                 setMenu(null);
                 window.requestAnimationFrame(() => modelTriggerRef.current?.focus());

@@ -1,6 +1,6 @@
 import { useMemo, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
-import type { ModelInfo, ProviderInfo } from "../api";
+import type { ModelInfo, ProviderInfo, ReasoningEffort } from "../api";
 import {
   isModelPickerGroupCollapsed,
   modelDevProfile,
@@ -79,6 +79,8 @@ export function ModelPicker({
   emptyMessage,
   ariaLabel = "Choose a model",
   style,
+  reasoningEffortOverrides,
+  onReasoningEffort,
 }: {
   models: ModelInfo[];
   model: string;
@@ -99,6 +101,9 @@ export function ModelPicker({
   emptyMessage?: string;
   ariaLabel?: string;
   style?: CSSProperties;
+  /** Thread-scoped effort choices; when omitted the picker reads and writes the app-wide defaults. */
+  reasoningEffortOverrides?: Record<string, ReasoningEffort>;
+  onReasoningEffort?: (modelId: string, effort: ReasoningEffort) => void;
 }) {
   const storedFavorites = useSettings((s) => s.favorites);
   const storedFavoritesOnly = useSettings((s) => s.favoritesOnly);
@@ -174,7 +179,7 @@ export function ModelPicker({
                   )}
                   {!collapsed && ms.map((m) => {
                     const hasEffortChoices = hasReasoningEffortChoices(m);
-                    const effort = normalizeReasoningEffortForModel(reasoningEffortByModel[m.id] ?? "auto", m);
+                    const effort = normalizeReasoningEffortForModel(reasoningEffortOverrides?.[m.id] ?? reasoningEffortByModel[m.id] ?? "auto", m);
                     const reasoningChoices = reasoningEffortOptions(m);
                     const effortOpen = effortMenu?.modelId === m.id;
                     const profile = modelDevProfile(m, m.id, {
@@ -248,7 +253,7 @@ export function ModelPicker({
                                     role="menuitemradio"
                                     aria-checked={choice === effort}
                                     onClick={() => {
-                                      setModelReasoningEffort(m.id, choice);
+                                      (onReasoningEffort ?? setModelReasoningEffort)(m.id, choice);
                                       setEffortMenu(null);
                                     }}
                                   >

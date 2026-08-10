@@ -6,7 +6,7 @@ title: Models and providers
 summary: Model-agnostic dev chat routing across provider APIs, local runtimes, Codex, Claude, OpenCode, and Pi bridges.
 group: Core
 order: 40
-updated: 2026-08-03
+updated: 2026-08-10
 ---
 
 Model routing is provider-agnostic and centered on the active dev thread. The provider registry stores enabled remotes and their model metadata, then the desktop model picker merges local API runtime models, provider models, account runtime models, and media-capable models. Duplicate provider model ids stay provider-scoped in the picker and route back to the selected provider; provider sections with fewer visible models appear first.
@@ -19,7 +19,7 @@ Worker routing is a separate thread setting. A thread may choose an optional Wor
 
 ## Favorites and reasoning effort
 
-Favorites are the only model shortcut. Every picker row keeps its provider or runtime identity visible, including nested routes such as `OpenCode · OpenAI` and `Pi · GitHub Copilot`, so overlapping model names remain distinct in Favorites, search results, and provider groups. Primary model labels omit redundant account-runtime and nested-provider prefixes while keeping creator namespaces. Search matches model names, route ids, runtimes, and providers. Each model keeps its own persisted reasoning-effort choice. Agents do not pin models, so changing the thread model keeps the active Agent enabled and changes the model used by its next interactive run.
+Favorites are the only model shortcut. Every picker row keeps its provider or runtime identity visible, including nested routes such as `OpenCode · OpenAI` and `Pi · GitHub Copilot`, so overlapping model names remain distinct in Favorites, search results, and provider groups. Primary model labels omit redundant account-runtime and nested-provider prefixes while keeping creator namespaces. Search matches model names, route ids, runtimes, and providers. Each model keeps its own persisted reasoning-effort choice as an app-wide default. Choosing an effort inside a chat overrides that default for the chat it was chosen in, so other open chats on the same model keep the effort they were set to; the choice still updates the app-wide default that new chats and the Hot Swap, Worker, and media pickers start from. Agents do not pin models, so changing the thread model keeps the active Agent enabled and changes the model used by its next interactive run.
 
 Every provider and runtime group can be collapsed. The layout is shared by the chat, Hot Swap, and Worker model pickers and persists across restarts. Favorites stays expanded, while search and Favorites-only filtering temporarily reveal matches without changing the saved collapsed groups.
 

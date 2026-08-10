@@ -45,6 +45,7 @@ import {
   normalizeQuickSummarySectionIds,
   type QuickSummarySectionId,
 } from "../lib/quickSummary.js";
+import { normalizeReasoningEffortOverrides } from "../lib/reasoningEffort.js";
 import { deriveThreadTitle, NEW_CHAT_TITLE } from "../lib/threadTitles.js";
 import {
   readUserStateKey,
@@ -128,6 +129,8 @@ export interface ThreadSettings {
   workerModel: string;
   /** Read-only planning mode for implementation planning before execution. */
   planMode: boolean;
+  /** Per-model reasoning effort chosen inside this thread; absent models inherit the app-wide default. */
+  reasoningEffortOverrides?: Record<string, ReasoningEffort>;
   goal: GoalSettings;
 }
 
@@ -709,6 +712,12 @@ function normalizeSettings(
   }
   if (typeof next.planMode !== "boolean") {
     next.planMode = DEFAULT_THREAD_SETTINGS.planMode;
+  }
+  const reasoningEffortOverrides = normalizeReasoningEffortOverrides(next.reasoningEffortOverrides);
+  if (Object.keys(reasoningEffortOverrides).length) {
+    next.reasoningEffortOverrides = reasoningEffortOverrides;
+  } else {
+    delete next.reasoningEffortOverrides;
   }
   if (
     next.delegationPolicy !== "off" &&

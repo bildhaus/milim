@@ -9,7 +9,7 @@ import {
   type ReasoningEffort,
 } from "../api.js";
 import { userStateStorage } from "../persistence/userStateStorage.js";
-import { reasoningEffortByModelWithSelection } from "../lib/reasoningEffort.js";
+import { isReasoningEffort, reasoningEffortByModelWithSelection } from "../lib/reasoningEffort.js";
 import type { PreviewBrowserStorageMode } from "../lib/previewWebview.js";
 
 export interface MediaSettings {
@@ -126,10 +126,6 @@ function normalizeAccountRuntimeEnablement(
         ? record.pi
         : DEFAULT_ACCOUNT_RUNTIME_ENABLEMENT.pi,
   };
-}
-
-function isReasoningEffort(value: unknown): value is ReasoningEffort {
-  return value === "auto" || value === "none" || value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "on" || value === "xhigh" || value === "max";
 }
 
 function normalizeReasoningEffortByModel(value: unknown): Record<string, ReasoningEffort> {
