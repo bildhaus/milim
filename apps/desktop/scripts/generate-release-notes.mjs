@@ -36,6 +36,9 @@ for (const [index, item] of release.items.entries()) {
   if (!Array.isArray(item.details) || item.details.length === 0 || item.details.some((detail) => typeof detail !== "string" || !detail.trim())) {
     fail(`Release ${version} item ${item.id} needs details.`);
   }
+  if (item.credit !== undefined && (typeof item.credit !== "string" || !item.credit.trim())) {
+    fail(`Release ${version} item ${item.id} has an invalid credit.`);
+  }
   ids.add(item.id);
 }
 
@@ -50,6 +53,7 @@ const markdown = [
     item.description,
     "",
     ...item.details.map((detail) => `- ${detail}`),
+    ...(item.credit ? ["", item.credit] : []),
     "",
   ]),
 ].join("\n").trimEnd() + "\n";
