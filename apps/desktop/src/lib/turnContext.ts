@@ -57,6 +57,7 @@ type TurnSetupSettings = {
   delegationPolicy: DelegationPolicy;
   workerModel: string;
   planMode: boolean;
+  reasoningEffortOverrides?: Record<string, ReasoningEffort>;
 };
 
 type TurnSetupAgent = {

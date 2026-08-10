@@ -181,7 +181,7 @@ import {
   GIT_STATUS_REFRESH_INTERVAL_MS,
   shouldRefreshGitStatus,
 } from "../lib/gitRefresh";
-import { reasoningEffortForModel } from "../lib/reasoningEffort";
+import { reasoningEffortForThread, reasoningEffortOverridesWithSelection } from "../lib/reasoningEffort";
 import {
   buildQuickSummary,
   type QuickSummarySectionId,
@@ -1714,6 +1714,7 @@ export function ChatView({
     delegationPolicy,
     workerModel,
     planMode,
+    reasoningEffortOverrides,
     goal,
   } = threadSettings;
   const visibleApprovalPrompts = useMemo(
@@ -4383,7 +4384,8 @@ export function ChatView({
     compactionInFlightRef.current = true;
     setChatNotice({ tone: "info", message: "Compacting thread context..." });
     try {
-      const reasoningEffort = reasoningEffortForModel(
+      const reasoningEffort = reasoningEffortForThread(
+        targetSettings.reasoningEffortOverrides,
         useSettings.getState().reasoningEffortByModel,
         selectedModel,
         pickerModels,
@@ -4578,7 +4580,8 @@ export function ChatView({
         currentGoal,
         latestMessages,
       );
-      const decisionReasoningEffort = reasoningEffortForModel(
+      const decisionReasoningEffort = reasoningEffortForThread(
+        decisionSettings.reasoningEffortOverrides,
         useSettings.getState().reasoningEffortByModel,
         turnModel,
         pickerModels,
@@ -5539,7 +5542,8 @@ export function ChatView({
       pendingHotSwap?.toModel === turnSetup.model &&
       pendingHotSwap.action === "review";
     const turnPlanMode = turnSettings.planMode || hotSwapReview;
-    const turnReasoningEffort = reasoningEffortForModel(
+    const turnReasoningEffort = reasoningEffortForThread(
+      turnSettings.reasoningEffortOverrides,
       useSettings.getState().reasoningEffortByModel,
       turnModel,
       pickerModels,
@@ -7007,6 +7011,16 @@ export function ChatView({
                 models={pickerModels}
                 model={model}
                 reasoningEffortByModel={reasoningEffortByModel}
+                reasoningEffortOverrides={reasoningEffortOverrides}
+                onReasoningEffort={(modelId, effort) => {
+                  updateThreadSettings(activeId, {
+                    reasoningEffortOverrides: reasoningEffortOverridesWithSelection(
+                      reasoningEffortOverrides,
+                      modelId,
+                      effort,
+                    ),
+                  });
+                }}
                 providers={providers}
                 toolIntent={modelToolIntent}
                 onModel={(m) => requestHotSwap(m)}

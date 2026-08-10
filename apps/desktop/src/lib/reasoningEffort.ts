@@ -65,6 +65,34 @@ export function reasoningEffortForModel(reasoningEffortByModel: Record<string, R
   return normalizeReasoningEffortForModel(reasoningEffortByModel?.[model] ?? "auto", selected);
 }
 
+/** A thread override wins over the app-wide default; an absent override inherits it. */
+export function reasoningEffortForThread(
+  reasoningEffortOverrides: Record<string, ReasoningEffort> | undefined,
+  reasoningEffortByModel: Record<string, ReasoningEffort> | undefined,
+  model: string,
+  models: ModelInfo[],
+): ReasoningEffort {
+  const selected = models.find((item) => item.id === model);
+  return normalizeReasoningEffortForModel(
+    reasoningEffortOverrides?.[model] ?? reasoningEffortByModel?.[model] ?? "auto",
+    selected,
+  );
+}
+
+export function isReasoningEffort(value: unknown): value is ReasoningEffort {
+  return value === "auto" || value === "none" || value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "on" || value === "xhigh" || value === "max";
+}
+
+export function normalizeReasoningEffortOverrides(value: unknown): Record<string, ReasoningEffort> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const overrides: Record<string, ReasoningEffort> = {};
+  for (const [model, effort] of Object.entries(value as Record<string, unknown>)) {
+    if (!model.trim() || !isReasoningEffort(effort)) continue;
+    overrides[model] = effort;
+  }
+  return overrides;
+}
+
 export function reasoningEffortByModelWithSelection(
   current: Record<string, ReasoningEffort>,
   model: string,
@@ -76,5 +104,16 @@ export function reasoningEffortByModelWithSelection(
   } else {
     next[model] = effort;
   }
+  return next;
+}
+
+/** Thread overrides keep "auto" as a real choice, so a thread can opt out of a non-auto default. */
+export function reasoningEffortOverridesWithSelection(
+  current: Record<string, ReasoningEffort> | undefined,
+  model: string,
+  effort: ReasoningEffort,
+): Record<string, ReasoningEffort> {
+  const next = { ...(current ?? {}) };
+  if (model.trim()) next[model] = effort;
   return next;
 }

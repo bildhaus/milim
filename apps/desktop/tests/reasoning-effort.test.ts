@@ -2,7 +2,7 @@ import { deepEqual, equal } from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import type { ModelInfo } from "../src/api";
 
-const { hasReasoningEffortChoices, reasoningEffortByModelWithSelection, reasoningEffortDisplay, reasoningEffortForModel, reasoningEffortOptions } = await import("../src/lib/reasoningEffort.js");
+const { hasReasoningEffortChoices, normalizeReasoningEffortOverrides, reasoningEffortByModelWithSelection, reasoningEffortDisplay, reasoningEffortForModel, reasoningEffortForThread, reasoningEffortOptions, reasoningEffortOverridesWithSelection } = await import("../src/lib/reasoningEffort.js");
 
 const optional: ModelInfo = {
   id: "openrouter/deepseek-r1",
@@ -78,6 +78,47 @@ deepEqual(
   {},
   "choosing auto should remove the per-model override",
 );
+equal(
+  reasoningEffortForThread({ [optional.id]: "low" }, { [optional.id]: "high" }, optional.id, [optional]),
+  "low",
+  "a thread override should win over the app-wide default",
+);
+equal(
+  reasoningEffortForThread({ [mandatory.id]: "low" }, { [optional.id]: "high" }, optional.id, [optional, mandatory]),
+  "high",
+  "a model without a thread override should inherit the app-wide default",
+);
+equal(
+  reasoningEffortForThread({ [optional.id]: "auto" }, { [optional.id]: "high" }, optional.id, [optional]),
+  "auto",
+  "an explicit auto override should opt a thread out of a non-auto default",
+);
+equal(
+  reasoningEffortForThread({ [mandatory.id]: "none" }, undefined, mandatory.id, [mandatory]),
+  "auto",
+  "unsupported thread overrides should fall back to auto",
+);
+equal(
+  reasoningEffortForThread(undefined, undefined, optional.id, [optional]),
+  "auto",
+  "a thread with no override and no default should stay on auto",
+);
+deepEqual(
+  reasoningEffortOverridesWithSelection({ [mandatory.id]: "low" }, optional.id, "auto"),
+  { [mandatory.id]: "low", [optional.id]: "auto" },
+  "choosing auto should be stored as a thread override rather than clearing it",
+);
+deepEqual(
+  reasoningEffortOverridesWithSelection(undefined, "   ", "high"),
+  {},
+  "a blank model id should not create a thread override",
+);
+deepEqual(
+  normalizeReasoningEffortOverrides({ "": "high", [optional.id]: "nope", [mandatory.id]: "low" }),
+  { [mandatory.id]: "low" },
+  "persisted thread overrides should drop blank models and unknown efforts",
+);
+deepEqual(normalizeReasoningEffortOverrides(["low"]), {}, "non-record thread overrides should normalize to empty");
 equal(reasoningEffortDisplay("medium", { id: "gemini-2.5-pro", owned_by: "Gemini" }).detail, "budget 4k", "Gemini 2.5 labels should show budget mapping");
 equal(reasoningEffortDisplay("high", { id: "gemini-3-pro", owned_by: "Gemini" }).detail, "thinking HIGH", "Gemini 3 labels should show thinking level mapping");
 equal(reasoningEffortDisplay("xhigh", mandatory).detail, "effort xhigh", "Claude labels should use effort terminology");
@@ -88,6 +129,16 @@ equal(modelPicker.includes("mp-effort-btn"), true, "model picker should expose a
 equal(modelPicker.includes("mp-effort-menu"), true, "model picker should expose effort choices in a custom row menu");
 equal(modelPicker.includes("createPortal("), true, "model picker should render the effort menu outside the clipped model list");
 equal(modelPicker.includes("setModelReasoningEffort"), true, "model picker selector should persist the global per-model effort");
+equal(modelPicker.includes("(onReasoningEffort ?? setModelReasoningEffort)"), true, "model picker should let a thread-scoped host own the effort choice");
+equal(modelPicker.includes("reasoningEffortOverrides?.[m.id] ?? reasoningEffortByModel[m.id]"), true, "model picker rows should show a thread override before the app-wide default");
+const chatView = readFileSync("src/components/ChatView.tsx", "utf8");
+equal(chatView.includes("reasoningEffortForModel("), false, "chat turns should no longer resolve effort from the app-wide map alone");
+equal(chatView.includes("setModelReasoningEffort"), false, "the in-chat effort menu should not retune the app-wide default");
+equal(
+  (chatView.match(/reasoningEffortForThread\(/g) ?? []).length,
+  3,
+  "sends, compaction, and goal decisions should each resolve effort thread-first",
+);
 equal(modelPicker.includes("hasReasoningEffortChoices(m)"), true, "model picker should hide auto-only reasoning controls");
 equal(modelPicker.includes("cap !== \"reasoning\" || !hasEffortChoices"), true, "model picker should avoid duplicate reasoning icons");
 equal(modelPicker.includes('setFavoritesOnly(!favoritesOnly)'), true, "model picker should expose the persisted favorites filter");

@@ -2061,6 +2061,24 @@ assert(
   !("reasoningEffortByModel" in useSessions.getState().getSettings(third)),
   "thread settings should ignore legacy reasoning effort maps",
 );
+useSessions.getState().updateSettings(third, {
+  reasoningEffortOverrides: {
+    "model-b2": "low",
+    "auto-model": "auto",
+    "": "high" as never,
+    broken: "nope" as never,
+  },
+});
+deepEqual(
+  useSessions.getState().getSettings(third).reasoningEffortOverrides,
+  { "model-b2": "low", "auto-model": "auto" },
+  "thread effort overrides should keep an explicit auto and drop invalid entries",
+);
+useSessions.getState().updateSettings(third, { reasoningEffortOverrides: {} });
+assert(
+  !("reasoningEffortOverrides" in useSessions.getState().getSettings(third)),
+  "a thread with no effort overrides should fall back to the app-wide defaults",
+);
 useSessions.getState().switchTo(second);
 deepEqual(
   useSessions.getState().getSettings(second),
