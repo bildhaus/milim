@@ -189,7 +189,9 @@ export function useChatMobileRelayController({
     const text = event.text.trim();
     const attachments = mobileRelayAttachments(event.attachments);
     const store = useSessions.getState();
-    store.newChat(threadSettings);
+    const nextThreadSettings = threadSettings ? { ...threadSettings } : undefined;
+    if (nextThreadSettings) delete nextThreadSettings.reasoningEffortOverrides;
+    store.newChat(nextThreadSettings);
     const sessionId = useSessions.getState().activeId;
     setInput("");
     setPendingAttachments([]);

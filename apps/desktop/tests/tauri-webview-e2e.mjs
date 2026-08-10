@@ -27,6 +27,7 @@ const settingsOnly = process.argv.includes("--settings-only");
 const appMenuOnly = process.argv.includes("--app-menu-only");
 const turnChangesOnly = process.argv.includes("--turn-changes-only");
 const chatAffordancesOnly = process.argv.includes("--chat-affordances-only");
+const reasoningEffortOnly = process.argv.includes("--reasoning-effort-only");
 const mobileAuthOnly = process.argv.includes("--mobile-auth-only");
 const mediaOnly = process.argv.includes("--media-only");
 const mcpAppKinds = ["chart", "diagram", "form", "dashboard", "viewer"];
@@ -60,6 +61,7 @@ const screenshots = {
   inboxActive: join(tmpdir(), "milim-tauri-webview-inbox-active.png"),
   inboxSettled: join(tmpdir(), "milim-tauri-webview-inbox-settled.png"),
   workspaceCode: join(tmpdir(), "milim-tauri-webview-workspace-code.png"),
+  reasoningEffort: join(tmpdir(), "milim-tauri-webview-reasoning-effort.png"),
   failure: join(tmpdir(), "milim-tauri-webview-failure.png"),
 };
 
@@ -143,6 +145,10 @@ try {
   } else if (chatAffordancesOnly) {
     const errors = collectErrors(session.page);
     await runChatAffordancesCheck(session.page);
+    consoleErrors.push(...errors.filter((message) => !message.includes("/codex/models")));
+  } else if (reasoningEffortOnly) {
+    const errors = collectErrors(session.page);
+    await runReasoningEffortIsolationCheck(session.page);
     consoleErrors.push(...errors.filter((message) => !message.includes("/codex/models")));
   } else if (browserProfileOnly) {
     const errors = collectErrors(session.page);
@@ -2878,6 +2884,127 @@ async function runModelPickerSurfaceCheck(page) {
   await picker.waitFor({ state: "hidden" }).catch(() => {});
 }
 
+async function runReasoningEffortIsolationCheck(page) {
+  const model = "e2e-reasoning";
+  const originalId = "reasoning-medium";
+  const changedId = "reasoning-high";
+  const now = Date.now();
+  const settings = {
+    model,
+    instructions: "",
+    activeAgentId: null,
+    folder: "",
+    sandbox: false,
+    computerUse: false,
+    memory: true,
+    privacy: "off",
+    toolApproval: "review",
+    delegationPolicy: "off",
+    workerModel: "",
+    planMode: false,
+  };
+
+  await page.route("**/v1/models", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      data: [{
+        id: model,
+        owned_by: "OpenAI",
+        reasoning: {
+          supported_efforts: ["low", "medium", "high"],
+          default_effort: "medium",
+          default_enabled: true,
+          mandatory: true,
+        },
+      }],
+    }),
+  }));
+  await page.evaluate(async ({ modelId, firstId, secondId, timestamp, threadSettings }) => {
+    const invoke = window.__TAURI_INTERNALS__.invoke;
+    await invoke("user_state_set", {
+      key: "milim.settings",
+      value: JSON.stringify({
+        state: {
+          accountRuntimeEnabled: { codex: false, claude: false, opencode: false, pi: false },
+          reasoningEffortByModel: { [modelId]: "medium" },
+          newThreadBehavior: "inherit",
+        },
+        version: 0,
+      }),
+    });
+    await invoke("user_sessions_set", {
+      value: JSON.stringify({
+        state: {
+          sessions: [
+            {
+              id: secondId,
+              title: "High effort thread",
+              messages: [{ id: "high-message", role: "user", content: "Keep this chat separate" }],
+              settings: threadSettings,
+              createdAt: timestamp + 1,
+              updatedAt: timestamp + 1,
+            },
+            {
+              id: firstId,
+              title: "Medium effort thread",
+              messages: [{ id: "medium-message", role: "user", content: "Keep this chat on medium" }],
+              settings: threadSettings,
+              createdAt: timestamp,
+              updatedAt: timestamp,
+            },
+          ],
+          activeId: secondId,
+        },
+        version: 0,
+      }),
+    });
+  }, { modelId: model, firstId: originalId, secondId: changedId, timestamp: now, threadSettings: settings });
+
+  await page.reload();
+  await page.getByTestId("chat-shell").waitFor();
+  await dismissOnboardingIfPresent(page);
+  const trigger = page.getByTestId("model-picker-trigger");
+  await assertTextContains(trigger.locator(".chip-detail"), "Medium");
+
+  await trigger.click();
+  const picker = page.locator(".mp");
+  await picker.waitFor();
+  await picker.getByRole("button", { name: `Reasoning effort for ${model}: Medium` }).click();
+  const effortMenu = page.getByRole("menu", { name: `Reasoning effort for ${model}` });
+  await effortMenu.getByRole("menuitemradio").filter({ hasText: "High" }).click();
+  await assertTextContains(trigger.locator(".chip-detail"), "High");
+  await trigger.click();
+  await picker.waitFor({ state: "hidden" }).catch(() => {});
+
+  await page.waitForFunction(async ({ modelId, sessionId }) => {
+    const invoke = window.__TAURI_INTERNALS__.invoke;
+    const sessionsRaw = await invoke("user_state_get", { key: "milim.sessions" });
+    const settingsRaw = await invoke("user_state_get", { key: "milim.settings" });
+    const sessions = sessionsRaw ? JSON.parse(sessionsRaw).state?.sessions ?? [] : [];
+    const appSettings = settingsRaw ? JSON.parse(settingsRaw).state ?? {} : {};
+    return (
+      sessions.find((session) => session.id === sessionId)?.settings?.reasoningEffortOverrides?.[modelId] === "high" &&
+      appSettings.reasoningEffortByModel?.[modelId] === "medium"
+    );
+  }, { modelId: model, sessionId: changedId });
+
+  await page.locator(`[data-sidebar-session-id="${originalId}"]:visible`).first().click();
+  await assertTextContains(trigger.locator(".chip-detail"), "Medium");
+  await page.locator(`[data-sidebar-session-id="${changedId}"]:visible`).first().click();
+  await assertTextContains(trigger.locator(".chip-detail"), "High");
+
+  await page.locator("button.new-chat:not(.new-chat-menu):visible").first().click();
+  await assertTextContains(trigger.locator(".chip-detail"), "Medium");
+  await page.waitForFunction(async ({ modelId, previousId }) => {
+    const raw = await window.__TAURI_INTERNALS__.invoke("user_state_get", { key: "milim.sessions" });
+    const state = raw ? JSON.parse(raw).state ?? {} : {};
+    const active = (state.sessions ?? []).find((session) => session.id === state.activeId);
+    return state.activeId !== previousId && active?.settings?.reasoningEffortOverrides?.[modelId] === undefined;
+  }, { modelId: model, previousId: changedId });
+  await page.screenshot({ path: screenshots.reasoningEffort, fullPage: false });
+}
+
 async function runArtifactCheck(page) {
   const workspace = mkdtempSync(join(tmpdir(), "milim-artifact-workspace-"));
   const prompt = [
@@ -5321,6 +5448,7 @@ function printEvidencePaths(milimHome) {
   console.log(`threadBarBottomScreenshot=${screenshots.threadBarBottom}`);
   console.log(`chatSourcesScreenshot=${screenshots.chatSources}`);
   console.log(`chatLatestScreenshot=${screenshots.chatLatest}`);
+  console.log(`reasoningEffortScreenshot=${screenshots.reasoningEffort}`);
   for (const theme of ["light", "dark"]) {
     for (const kind of mcpAppKinds) console.log(`mcpApp${kind}Screenshot(${theme})=${mcpAppViewScreenshot(kind, theme)}`);
   }

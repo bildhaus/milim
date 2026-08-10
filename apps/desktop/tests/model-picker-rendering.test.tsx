@@ -243,6 +243,41 @@ try {
   assert(controlBarMarkup.includes('data-provider-brand="openai"'), "The active model chip should render its provider icon");
   assert(controlBarMarkup.includes('<span class="chip-detail">High</span>'), "The closed model chip should show a selected non-auto reasoning effort");
 
+  const overriddenControlBarMarkup = renderToStaticMarkup(
+    createElement(ControlBar, {
+      models,
+      model: "gpt-5-render",
+      reasoningEffortByModel: { "gpt-5-render": "high" },
+      reasoningEffortOverrides: { "gpt-5-render": "low" },
+      providers,
+      onModel: () => {},
+      onReasoningEffort: () => {},
+      sandbox: false,
+      onToggleSandbox: () => {},
+      computerUse: false,
+      onToggleComputer: () => {},
+      memory: true,
+      onToggleMemory: () => {},
+      planMode: false,
+      onTogglePlanMode: () => {},
+      privacy: "off",
+      onPrivacy: () => {},
+      toolApproval: "guarded",
+      onToolApproval: () => {},
+      onManageProviders: () => {},
+      onManageMcp: () => {},
+      onManageMemory: () => {},
+      goal: DEFAULT_GOAL_SETTINGS,
+      goalMode: true,
+      onToggleGoalMode: () => {},
+      onOpenGoal: () => {},
+    }),
+  );
+  assert(
+    overriddenControlBarMarkup.includes('<span class="chip-detail">Low</span>'),
+    "The model chip should show this thread's effort override instead of the app-wide default",
+  );
+
   const { providerBrandForModel, providerBrandForProvider } = (await server.ssrLoadModule(
     "/src/components/ProviderIcon.tsx",
   )) as {

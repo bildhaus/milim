@@ -1,3 +1,5 @@
+import type { ModelInfo } from "../src/api";
+
 class MemoryStorage implements Storage {
   private values = new Map<string, string>();
   get length() { return this.values.size; }
@@ -16,8 +18,21 @@ function equal<T>(actual: T, expected: T, message: string) {
 
 const { useSettings } = await import("../src/settings/store.js");
 const { useSessions } = await import("../src/sessions/store.js");
+const { reasoningEffortForThread } = await import("../src/lib/reasoningEffort.js");
+
+const models: ModelInfo[] = [{
+  id: "inherited-model",
+  owned_by: "OpenAI",
+  reasoning: {
+    supported_efforts: ["low", "medium", "high"],
+    default_effort: "medium",
+    default_enabled: true,
+    mandatory: true,
+  },
+}];
 
 let state = useSessions.getState();
+const originalId = state.activeId;
 state.updateSettings(state.activeId, {
   model: "inherited-model",
   folder: "C:\\project",
@@ -25,6 +40,7 @@ state.updateSettings(state.activeId, {
   planMode: true,
   instructions: "temporary",
   memory: false,
+  reasoningEffortOverrides: { "inherited-model": "low" },
 });
 state.setMessages(state.activeId, [{ role: "user", content: "existing" }], { autoTitle: false });
 useSettings.getState().setNewThreadBehavior("inherit");
@@ -36,6 +52,33 @@ equal(inherited.memory, false, "inherit mode should retain memory preference");
 equal(inherited.computerUse, false, "new chats should always reset Computer Use");
 equal(inherited.planMode, false, "new chats should always reset Plan Mode");
 equal(inherited.instructions, "", "new chats should always reset temporary instructions");
+equal(inherited.reasoningEffortOverrides, undefined, "new chats should inherit app-wide reasoning defaults instead of another chat's overrides");
+
+useSessions.getState().updateSettings(originalId, { reasoningEffortOverrides: {} });
+useSettings.getState().setModelReasoningEffort("inherited-model", "medium");
+useSessions.getState().updateSettings(inheritedId, {
+  reasoningEffortOverrides: { "inherited-model": "high" },
+});
+equal(
+  reasoningEffortForThread(
+    useSessions.getState().getSettings(originalId).reasoningEffortOverrides,
+    useSettings.getState().reasoningEffortByModel,
+    "inherited-model",
+    models,
+  ),
+  "medium",
+  "changing effort in one chat should not retune another chat without an override",
+);
+equal(
+  reasoningEffortForThread(
+    useSessions.getState().getSettings(inheritedId).reasoningEffortOverrides,
+    useSettings.getState().reasoningEffortByModel,
+    "inherited-model",
+    models,
+  ),
+  "high",
+  "the chat that changed effort should resolve its own override",
+);
 
 useSessions.getState().setMessages(inheritedId, [{ role: "user", content: "next" }], { autoTitle: false });
 useSettings.getState().setNewThreadBehavior("configured");
