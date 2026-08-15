@@ -15,30 +15,30 @@ fn harness_terminal_drain_timeout(harness_id: &str) -> Option<Duration> {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct HarnessRunRequest {
-    pub prompt: String,
+    pub(crate) prompt: String,
     #[serde(default)]
-    pub images: Vec<crate::codex_bridge::AccountImage>,
-    pub model: String,
+    pub(crate) images: Vec<crate::codex_bridge::AccountImage>,
+    pub(crate) model: String,
     #[serde(default)]
-    pub cwd: Option<String>,
+    pub(crate) cwd: Option<String>,
     #[serde(default)]
-    pub reasoning_effort: Option<String>,
+    pub(crate) reasoning_effort: Option<String>,
     #[serde(default)]
-    pub native_session_id: Option<String>,
+    pub(crate) native_session_id: Option<String>,
     #[serde(default)]
-    pub persist_session: Option<bool>,
+    pub(crate) persist_session: Option<bool>,
     #[serde(default)]
-    pub tool_approval_policy: Option<String>,
+    pub(crate) tool_approval_policy: Option<String>,
     #[serde(default)]
-    pub tool_approval_grant: bool,
+    pub(crate) tool_approval_grant: bool,
     #[serde(default)]
-    pub interactive_tool_approval: bool,
+    pub(crate) interactive_tool_approval: bool,
     #[serde(default)]
-    pub plan_mode: bool,
+    pub(crate) plan_mode: bool,
     #[serde(default)]
-    pub allow_session_recovery: bool,
+    pub(crate) allow_session_recovery: bool,
     #[serde(default)]
-    pub milim_context: Option<Value>,
+    pub(crate) milim_context: Option<Value>,
 }
 
 #[derive(Clone, Copy)]
@@ -85,6 +85,42 @@ impl HarnessKind {
     }
 }
 
+pub(crate) fn account_harness_stream(
+    st: &AppState,
+    headers: &HeaderMap,
+    id: &str,
+    req: HarnessRunRequest,
+) -> Result<AccountHarnessStream, ApiError> {
+    let kind = HarnessKind::parse(id.trim()).ok_or_else(|| {
+        ApiError(Error::InvalidRequest(format!(
+            "Unknown harness '{}'",
+            id.trim()
+        )))
+    })?;
+    match kind {
+        HarnessKind::Codex => codex_harness_stream(
+            st,
+            headers,
+            native_request::<crate::codex_bridge::CodexRunRequest>(&req, kind)?,
+        ),
+        HarnessKind::Claude => claude_harness_stream(
+            st,
+            headers,
+            native_request::<crate::claude_bridge::ClaudeRunRequest>(&req, kind)?,
+        ),
+        HarnessKind::OpenCode => opencode_harness_stream(
+            st,
+            headers,
+            native_request::<crate::opencode_bridge::OpenCodeRunRequest>(&req, kind)?,
+        ),
+        HarnessKind::Pi => pi_harness_stream(
+            st,
+            headers,
+            native_request::<crate::pi_bridge::PiRunRequest>(&req, kind)?,
+        ),
+    }
+}
+
 /// `POST /harnesses/{id}/run` - run any built-in account harness through one event contract.
 pub(crate) async fn harness_run(
     State(st): State<AppState>,
@@ -100,28 +136,7 @@ pub(crate) async fn harness_run(
             id.trim()
         )))
     })?;
-    let source = match kind {
-        HarnessKind::Codex => codex_harness_stream(
-            &st,
-            &headers,
-            native_request::<crate::codex_bridge::CodexRunRequest>(&req, kind)?,
-        )?,
-        HarnessKind::Claude => claude_harness_stream(
-            &st,
-            &headers,
-            native_request::<crate::claude_bridge::ClaudeRunRequest>(&req, kind)?,
-        )?,
-        HarnessKind::OpenCode => opencode_harness_stream(
-            &st,
-            &headers,
-            native_request::<crate::opencode_bridge::OpenCodeRunRequest>(&req, kind)?,
-        )?,
-        HarnessKind::Pi => pi_harness_stream(
-            &st,
-            &headers,
-            native_request::<crate::pi_bridge::PiRunRequest>(&req, kind)?,
-        )?,
-    };
+    let source = account_harness_stream(&st, &headers, kind.id(), req)?;
     Ok(Sse::new(harness_event_stream(
         kind.id(),
         uuid::Uuid::new_v4().to_string(),

@@ -11,7 +11,9 @@ mod private_file;
 
 pub use crypto::EncryptedStore;
 pub use db::{
-    Database, DatabaseOptions, JournalMode, Migration, SecretKv, SessionsDelta, UserDataStore,
-    SECRETS_MIGRATIONS,
+    ControlApprovalRecord, ControlBackupState, ControlCommandReceiptRecord, ControlHostRecord,
+    ControlQueuedTurnRecord, ControlRunRecord, ControlThreadRecord, ControlTimelinePage,
+    ControlTimelineRecord, Database, DatabaseOptions, JournalMode, Migration, SecretKv,
+    SessionsDelta, UserDataStore, SECRETS_MIGRATIONS,
 };
 pub use private_file::create_private_file;

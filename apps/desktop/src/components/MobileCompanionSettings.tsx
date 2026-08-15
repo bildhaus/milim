@@ -3,12 +3,16 @@ import QRCode from "qrcode";
 import {
   apiBaseUrl,
   configureMobileTailscaleRelay,
+  getControlBootstrap,
   getMobileCompanionStatus,
+  getMobileLanStatus,
   openExternalUrl,
   revokeMobileCompanionDevice,
   setMobileCompanionEnabled,
+  setMobileLanEnabled,
   startMobileCompanionPairing,
   type MobileCompanionStatus,
+  type MobileLanStatus,
 } from "../api";
 import { readUserStateKey, writeUserStateKey } from "../persistence/userStateStorage";
 import { Copy, Refresh } from "./icons";
@@ -41,6 +45,8 @@ function emulatorBaseFromApiBase(base: string): string {
 
 export function MobileCompanionSettings() {
   const [status, setStatus] = useState<MobileCompanionStatus | null>(null);
+  const [lan, setLan] = useState<MobileLanStatus | null>(null);
+  const [hostId, setHostId] = useState("");
   const [urlBase, setUrlBase] = useState("");
   const [qrDataUrl, setQrDataUrl] = useState("");
   const [busy, setBusy] = useState(false);
@@ -52,13 +58,17 @@ export function MobileCompanionSettings() {
     let alive = true;
     void (async () => {
       try {
-        const [nextStatus, base, savedBase] = await Promise.all([
+        const [nextStatus, nextLan, bootstrap, base, savedBase] = await Promise.all([
           getMobileCompanionStatus(),
+          getMobileLanStatus(),
+          getControlBootstrap(),
           apiBaseUrl(),
           Promise.resolve(readUserStateKey(MOBILE_URL_BASE_KEY)).catch(() => null),
         ]);
         if (!alive) return;
         setStatus(nextStatus);
+        setLan(nextLan);
+        setHostId(bootstrap.host_id);
         setUrlBase(savedBase || emulatorBaseFromApiBase(base));
       } catch (error) {
         if (alive) setNotice({ tone: "error", message: `Mobile companion unavailable: ${error instanceof Error ? error.message : String(error)}` });
@@ -74,13 +84,24 @@ export function MobileCompanionSettings() {
     return `${normalizeBase(urlBase)}${status.pairing.path}`;
   }, [status?.pairing, urlBase]);
 
+  const nativePairingUrl = useMemo(() => {
+    if (!status?.pairing || !pairingUrl) return "";
+    const query = new URLSearchParams({
+      endpoint: normalizeBase(urlBase),
+      pair_id: status.pairing.id,
+      secret: new URL(pairingUrl).searchParams.get("secret") ?? "",
+      host_id: hostId || lan?.host_id || "",
+    });
+    return `milim://pair?${query}`;
+  }, [hostId, lan?.host_id, pairingUrl, status?.pairing, urlBase]);
+
   useEffect(() => {
     let alive = true;
-    if (!pairingUrl) {
+    if (!nativePairingUrl) {
       setQrDataUrl("");
       return;
     }
-    void QRCode.toDataURL(pairingUrl, { margin: 1, width: 220 })
+    void QRCode.toDataURL(nativePairingUrl, { margin: 1, width: 220 })
       .then((dataUrl) => {
         if (alive) setQrDataUrl(dataUrl);
       })
@@ -90,12 +111,17 @@ export function MobileCompanionSettings() {
     return () => {
       alive = false;
     };
-  }, [pairingUrl]);
+  }, [nativePairingUrl]);
 
   async function refresh() {
     setBusy(true);
     try {
-      setStatus(await getMobileCompanionStatus());
+      const [nextStatus, nextLan] = await Promise.all([
+        getMobileCompanionStatus(),
+        getMobileLanStatus(),
+      ]);
+      setStatus(nextStatus);
+      setLan(nextLan);
       setNotice({ tone: "success", message: "Mobile companion status refreshed." });
     } catch (error) {
       setNotice({ tone: "error", message: `Refresh failed: ${error instanceof Error ? error.message : String(error)}` });
@@ -111,6 +137,26 @@ export function MobileCompanionSettings() {
       setNotice({ tone: "success", message: enabled ? "Mobile companion bridge enabled." : "Mobile companion bridge disabled." });
     } catch (error) {
       setNotice({ tone: "error", message: `Update failed: ${error instanceof Error ? error.message : String(error)}` });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function updateLan(enabled: boolean) {
+    setBusy(true);
+    try {
+      if (enabled && !status?.enabled) {
+        setStatus(await setMobileCompanionEnabled(true));
+      }
+      setLan(await setMobileLanEnabled(enabled));
+      setNotice({
+        tone: enabled ? "info" : "success",
+        message: enabled
+          ? "LAN discovery enabled. Use this only on a trusted network; traffic is plain HTTP."
+          : "LAN discovery disabled.",
+      });
+    } catch (error) {
+      setNotice({ tone: "error", message: `LAN update failed: ${error instanceof Error ? error.message : String(error)}` });
     } finally {
       setBusy(false);
     }
@@ -198,9 +244,9 @@ export function MobileCompanionSettings() {
   }
 
   async function copyPairingUrl() {
-    if (!pairingUrl) return;
-    await navigator.clipboard?.writeText(pairingUrl).catch(() => undefined);
-    setNotice({ tone: "success", message: "Pairing URL copied." });
+    if (!nativePairingUrl) return;
+    await navigator.clipboard?.writeText(nativePairingUrl).catch(() => undefined);
+    setNotice({ tone: "success", message: "Native pairing link copied." });
   }
 
   const enabled = Boolean(status?.enabled);
@@ -210,9 +256,20 @@ export function MobileCompanionSettings() {
       <div className="setting-toggle-row">
         <div>
           <strong>Enable companion bridge</strong>
-          <span>Allow paired phones to relay text to the active desktop composer.</span>
+          <span>Allow paired native and web clients to control threads, runs, Agents, Workers, and approvals.</span>
         </div>
         <Toggle checked={enabled} onChange={updateEnabled} ariaLabel="Enable companion bridge" testId="mobile-companion-enabled-toggle" />
+      </div>
+
+      <div className="setting-toggle-row">
+        <div>
+          <strong>Trusted-network LAN discovery</strong>
+          <span>
+            Advertise <code>_milim._tcp.local.</code>
+            {lan?.port ? ` on port ${lan.port}` : ""}. Disabled by default; traffic is not encrypted.
+          </span>
+        </div>
+        <Toggle checked={Boolean(lan?.active)} onChange={updateLan} ariaLabel="Enable trusted-network LAN discovery" testId="mobile-companion-lan-toggle" />
       </div>
 
       <label className="setting-field">
@@ -253,11 +310,12 @@ export function MobileCompanionSettings() {
         <div className="mobile-pairing-panel">
           {qrDataUrl && <img className="mobile-pairing-qr" src={qrDataUrl} alt="Mobile companion pairing QR code" />}
           <div className="mobile-pairing-copy">
-            <span className="setting-mini-title">Pairing link</span>
-            <code data-testid="mobile-companion-pairing-url">{pairingUrl}</code>
+            <span className="setting-mini-title">Native pairing link</span>
+            <code data-testid="mobile-companion-pairing-url">{nativePairingUrl}</code>
             <button className="btn-ghost" type="button" onClick={() => void copyPairingUrl()}>
-              <Copy size={13} /> Copy link
+              <Copy size={13} /> Copy native link
             </button>
+            <small>Legacy web companion: {pairingUrl}</small>
             <small>Expires {formatTime(status?.pairing?.expires_at)}.</small>
           </div>
         </div>

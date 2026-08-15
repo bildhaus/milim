@@ -23,6 +23,8 @@ import {
   requestComposerCompletion,
   codexRuntimeModel,
   inferAttachmentMime,
+  createControlCommandId,
+  getControlBootstrap,
   getClaudeStatus,
   getOpenCodeStatus,
   getPiStatus,
@@ -54,6 +56,7 @@ import {
   deleteWorkerRun,
   runWorkspaceGitAction,
   saveArtifactFile,
+  sendControlCommand,
   searchGraphMemory,
   selectSkills,
   setComputerUse,
@@ -289,6 +292,12 @@ import {
   startTurnStream,
 } from "../lib/turnStream";
 import { checkpointWorkspaceBeforeTurn } from "../lib/turnWorkspace";
+import {
+  controlAttachments,
+  mergeControlRunMessages,
+  pollControlRun,
+  projectControlRunMessages,
+} from "../lib/canonicalControl.js";
 import { createChatMessageId } from "../lib/messageIds.js";
 import { flushDeferredUserStateWrites } from "../persistence/userStateStorage";
 import { useSettings } from "../settings/store";
@@ -1139,6 +1148,8 @@ type RunTurnOptions = {
   toolApprovalGrant?: boolean;
   claudeSessionRecoveryGrant?: boolean;
   delegationPolicyOverride?: DelegationPolicy;
+  canonicalAction?: "send" | "regenerate";
+  legacyRuntime?: boolean;
 };
 
 type ToolApprovalScope = ChatApprovalRequest["scope"];
@@ -1845,6 +1856,7 @@ export function ChatView({
     runTurn,
   });
   const persistingTurnIdsRef = useRef<Set<string>>(new Set());
+  const canonicalRunIdsRef = useRef<Map<string, string>>(new Map());
   const {
     activeMediaTarget,
     mediaAdvanced,
@@ -2507,6 +2519,69 @@ export function ChatView({
       stopChildThreadEventsIfIdle(id);
     });
   }, [generatingSessionIds]);
+
+  useEffect(() => {
+    if (!sessionsHydrated) return;
+    let disposed = false;
+    let controller: AbortController | null = null;
+    let retryTimer: number | null = null;
+    const syncActiveRun = async () => {
+      if (
+        disposed ||
+        canonicalRunIdsRef.current.has(activeId) ||
+        generationControllersRef.current.has(activeId)
+      ) {
+        if (!disposed) retryTimer = window.setTimeout(syncActiveRun, 500);
+        return;
+      }
+      try {
+        const bootstrap = await getControlBootstrap();
+        const run = bootstrap.active_runs.find((item) => item.thread_id === activeId);
+        if (!run || disposed || generationControllersRef.current.has(activeId)) return;
+        const store = useSessions.getState();
+        controller = claimTurnGeneration({
+          sessionId: activeId,
+          store,
+          generationControllersRef,
+        });
+        if (!controller) return;
+        canonicalRunIdsRef.current.set(activeId, run.id);
+        await pollControlRun(activeId, run.id, controller.signal, (items) => {
+          if (disposed) return;
+          const projected = projectControlRunMessages(items, run.id);
+          if (!projected.length) return;
+          const current = sessionMessages(activeId);
+          setMessages(
+            activeId,
+            mergeControlRunMessages(current, run.id, projected),
+            { autoTitle: autoTitleChats },
+          );
+        });
+      } catch {
+        // Startup remains usable with an older embedded server; control
+        // compatibility is surfaced by the next explicit send.
+      } finally {
+        if (controller) {
+          releaseTurnGeneration({
+            sessionId: activeId,
+            store: useSessions.getState(),
+            generationControllersRef,
+          });
+        }
+        if (canonicalRunIdsRef.current.get(activeId)) {
+          canonicalRunIdsRef.current.delete(activeId);
+        }
+        controller = null;
+        if (!disposed) retryTimer = window.setTimeout(syncActiveRun, 500);
+      }
+    };
+    void syncActiveRun();
+    return () => {
+      disposed = true;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+      controller?.abort();
+    };
+  }, [activeId, autoTitleChats, sessionsHydrated, setMessages]);
 
   function updateAutoScrollCoupling() {
     const el = chatScrollRef.current;
@@ -5481,6 +5556,104 @@ export function ChatView({
     }
   }
 
+  async function runCanonicalControlTurn(
+    convo: ChatMessage[],
+    options: RunTurnOptions,
+    sessionId: string,
+  ): Promise<RunTurnResult> {
+    const store = useSessions.getState();
+    const last = convo[convo.length - 1];
+    if (!last || last.role !== "user") {
+      return {
+        status: "error",
+        messages: sessionMessages(sessionId, convo),
+        error: "A canonical turn must end with a user message.",
+      };
+    }
+    await flushDeferredUserStateWrites("milim.sessions");
+    const controller = claimTurnGeneration({
+      sessionId,
+      store,
+      generationControllersRef,
+    });
+    if (!controller) {
+      return {
+        status: "skipped",
+        messages: sessionMessages(sessionId, convo),
+        error: "A turn is already running.",
+      };
+    }
+    const baseMessages =
+      options.canonicalAction === "regenerate" ? convo : convo.slice(0, -1);
+    try {
+      const command = await sendControlCommand({
+        command_id: createControlCommandId(),
+        kind:
+          options.canonicalAction === "regenerate"
+            ? "turn.regenerate"
+            : "turn.send",
+        thread_id: sessionId,
+        payload:
+          options.canonicalAction === "regenerate"
+            ? {}
+            : {
+                text: wireMessageContent(last),
+                display_text: last.content,
+                attachments: controlAttachments(last.attachments),
+              },
+      });
+      if (command.status === "queued") {
+        setChatNotice({
+          tone: "info",
+          message: "Message queued by the Milim runtime and safe to close or reload.",
+        });
+        return { status: "skipped", messages: sessionMessages(sessionId) };
+      }
+      if (command.status !== "accepted" || !command.run_id) {
+        throw new Error(command.message || `Control command ${command.status}.`);
+      }
+      const runId = command.run_id;
+      canonicalRunIdsRef.current.set(sessionId, runId);
+      const terminal = await pollControlRun(
+        sessionId,
+        runId,
+        controller.signal,
+        (items) => {
+          const projected = projectControlRunMessages(items, runId);
+          if (!projected.length) return;
+          setMessages(
+            sessionId,
+            mergeControlRunMessages(baseMessages, runId, projected),
+            { autoTitle: autoTitleChats },
+          );
+        },
+      );
+      await flushDeferredUserStateWrites("milim.sessions");
+      if (terminal.status === "completed") {
+        return { status: "done", messages: sessionMessages(sessionId) };
+      }
+      if (terminal.status === "cancelled" || terminal.status === "aborted") {
+        return { status: "aborted", messages: sessionMessages(sessionId) };
+      }
+      return {
+        status: "error",
+        messages: sessionMessages(sessionId),
+        error: terminal.error || `Run ended with status ${terminal.status}.`,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setChatNotice({ tone: "error", message });
+      return { status: "error", messages: sessionMessages(sessionId), error: message };
+    } finally {
+      canonicalRunIdsRef.current.delete(sessionId);
+      releaseTurnGeneration({
+        sessionId,
+        store,
+        generationControllersRef,
+      });
+    }
+  }
+
   /** Stream the assistant's reply to a conversation that ends with a user turn. */
   async function runTurn(
     convo: ChatMessage[],
@@ -5553,6 +5726,15 @@ export function ChatView({
     const claudeModel = turnSetup.claudeModel;
     const opencodeModel = turnSetup.opencodeModel;
     const piModel = turnSetup.piModel;
+    const canonicalEligible =
+      !options.legacyRuntime &&
+      !options.goal &&
+      options.toolApprovalGrant == null &&
+      options.claudeSessionRecoveryGrant == null &&
+      options.delegationPolicyOverride == null;
+    if (canonicalEligible) {
+      return runCanonicalControlTurn(convo, options, id);
+    }
     const store = useSessions.getState();
     if (persistingTurnIdsRef.current.has(id)) {
       return {
@@ -6228,7 +6410,7 @@ export function ChatView({
       );
       return;
     }
-    void runTurnAndDrain(convo);
+    void runTurnAndDrain(convo, undefined, { canonicalAction: "regenerate" });
   }
 
   /** Replace the user message at `index`, drop everything after it, re-run. */
@@ -6247,10 +6429,24 @@ export function ChatView({
     }
     const convo = editResendConversation(messages, index, text);
     if (!convo) return;
-    void runTurnAndDrain(convo);
+    void runTurnAndDrain(convo, undefined, { legacyRuntime: true });
   }
 
   async function stopSessionRun(sessionId: string) {
+    const canonicalRunId = canonicalRunIdsRef.current.get(sessionId);
+    if (canonicalRunId) {
+      const result = await sendControlCommand({
+        command_id: createControlCommandId(),
+        kind: "turn.stop",
+        thread_id: sessionId,
+        payload: { run_id: canonicalRunId },
+      });
+      if (result.status !== "applied") {
+        throw new Error(result.message || "The canonical run could not be stopped.");
+      }
+      generationControllersRef.current.get(sessionId)?.abort();
+      return;
+    }
     const workerRun = useSessions
       .getState()
       .workerRuns.find(

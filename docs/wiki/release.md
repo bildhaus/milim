@@ -6,7 +6,7 @@ title: Release and verification
 summary: Release artifacts, updater behavior, verification commands, and site build checks.
 group: Reference
 order: 110
-updated: 2026-07-31
+updated: 2026-08-15
 ---
 
 Release work should verify the Rust workspace, desktop app, site docs, and platform artifacts without reintroducing Linux packaging as a release target.
@@ -18,6 +18,8 @@ Release work should verify the Rust workspace, desktop app, site docs, and platf
 | Windows | `milim-windows-x64-portable.exe` from the latest GitHub release. |
 | macOS | `milim-macos-universal.dmg` and `milim.app.zip` from the latest GitHub release. |
 | Linux | Not packaged as a release artifact. The Rust server and Tauri app remain source-buildable. |
+| iOS | Protected manual store-delivery job archives a signed IPA and uploads it to TestFlight. |
+| Android | Protected manual store-delivery job produces a signed AAB and uploads it to Play internal testing. |
 
 Pull requests run full desktop verification in CI. Release tags do not repeat that suite: the Release workflow runs Windows runtime evidence alongside production packaging, Tauri builds the frontend before compiling each platform artifact, and each packaged binary and manifest is verified. macOS release artifacts require the Apple signing secrets and intentionally enable Tauri's macOS private API for transparent preview activity overlay windows. The workflow publishes `manifest.json` plus an aggregate `SHA256SUMS.txt` from the current release run. Updater assets are verified with SHA-256 sidecars and the aggregate checksum file. A rerun may repair an unpublished draft, but every edit and asset upload rechecks draft status; published releases are immutable and require a new version.
 
@@ -35,8 +37,19 @@ cargo clippy --workspace --all-targets
 pnpm -C apps/desktop verify
 pnpm -C apps/desktop verify:runtime-conformance
 pnpm -C apps/desktop perf:canonical
+pnpm -C apps/mobile verify
 pnpm -C apps/site build
 ```
+
+Pull requests separately verify the mobile protocol fixtures/reducer and build an Android debug APK plus an unsigned iOS simulator app. Simulator success does not replace installation on a real phone.
+
+## Mobile store delivery
+
+`.github/workflows/mobile-store.yml` is manual-only and uses protected GitHub environments. It aligns the mobile marketing version with `VERSION`; callers supply monotonically increasing iOS and Android build numbers so a retried upload remains store-valid. Android signing, Apple distribution credentials, provisioning data, App Store Connect keys, and Play service-account credentials remain protected secrets and are removed with the ephemeral runner.
+
+The iOS job retains the IPA and dSYM evidence before uploading to TestFlight. The Android job retains the signed AAB, mapping files, and native symbols before uploading to the Play internal track. Production promotion remains manual and should happen only after the TestFlight and internal-track builds are installed on real devices and the desktop/mobile compatibility evidence is attached.
+
+Store declarations describe the actual v1 boundary: no Milim account, tracking, managed relay, hosted transcript synchronization, or push gateway. The phone communicates directly with user-paired computers.
 
 ## Runtime evidence
 

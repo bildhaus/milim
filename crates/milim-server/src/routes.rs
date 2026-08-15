@@ -12,8 +12,8 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::header::{
-    AUTHORIZATION, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_SECURITY_POLICY, CONTENT_TYPE, HOST,
-    USER_AGENT,
+    AUTHORIZATION, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_SECURITY_POLICY, CONTENT_TYPE, ETAG,
+    HOST, USER_AGENT,
 };
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -68,6 +68,7 @@ use milim_tools::{Tool, ToolEffect, ToolRegistry};
 
 mod account_runtimes;
 mod agents;
+mod control;
 mod harnesses;
 mod inference;
 mod mcp;
@@ -77,6 +78,7 @@ mod workspace;
 
 pub(crate) use account_runtimes::*;
 pub(crate) use agents::*;
+pub(crate) use control::*;
 pub(crate) use harnesses::*;
 pub(crate) use inference::*;
 pub(crate) use mcp::*;

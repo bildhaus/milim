@@ -187,7 +187,22 @@ try {
     "completed work should collapse",
   );
   assert.match(successfulMarkup, /Worked for 1m 5s/);
+  assert.match(successfulMarkup.replace(/<[^>]+>/g, ""), /Ran command · pnpm test/);
   assert.match(successfulMarkup, /1 update, 1 command, 1 reasoning note/);
+
+  const changedFileMarkup = renderToStaticMarkup(
+    createElement(AssistantMessage, {
+      content: "",
+      streamParts: [tool("Edited file", "done", "src/App.tsx +3 -1")],
+      streaming: false,
+      workDurationMs: 2_000,
+    }),
+  );
+  assert.match(changedFileMarkup, /Worked for 2\.0s/);
+  assert.match(changedFileMarkup, /Edited file/);
+  assert.match(changedFileMarkup, /stream-diff-stat added/);
+  assert.match(changedFileMarkup, /stream-diff-stat removed/);
+  assert.match(changedFileMarkup, /1 command/);
 
   const failedMarkup = renderToStaticMarkup(
     createElement(AssistantMessage, {

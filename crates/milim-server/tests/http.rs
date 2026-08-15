@@ -50,6 +50,15 @@ fn mobile_test_state() -> AppState {
     ))
 }
 
+fn control_mobile_test_state() -> AppState {
+    let store = Arc::new(
+        milim_storage::UserDataStore::new(milim_storage::Database::open_in_memory().unwrap())
+            .unwrap(),
+    );
+    let control = milim_server::control::RunManager::new(store, "Control fixture").unwrap();
+    mobile_test_state().with_control(control)
+}
+
 fn unique_temp_path(prefix: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -731,10 +740,13 @@ async fn mobile_companion_phone_router_exposes_only_phone_routes() {
     assert!(page_text.contains("syncComposerInset"));
     assert!(page_text.contains("scroll-padding-bottom"));
     assert!(page_text.contains("overscroll-behavior: contain"));
-    assert!(page_text.contains("fetch(\"/mobile/thread/events\""));
+    assert!(page_text.contains("/control/v1/bootstrap"));
+    assert!(page_text.contains("/control/v1/socket-ticket"));
+    assert!(page_text.contains("/control/v1/ws?ticket="));
     assert!(page_text.contains("\"Authorization\": `Bearer ${store.key}`"));
     assert!(!page_text.contains("new EventSource"));
     assert!(!page_text.contains("/mobile/thread/events?key="));
+    assert!(!page_text.contains("/control/v1/ws?key="));
     assert!(page_text.contains("renderMarkdown"));
     assert!(page_text.contains("safeHref"));
     assert!(page_text.contains("Scan desktop QR"));
@@ -834,6 +846,139 @@ async fn mobile_companion_phone_router_exposes_only_phone_routes() {
         .await
         .unwrap();
     assert_eq!(relay.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn mobile_control_router_is_device_authenticated_and_isolated() {
+    let state = control_mobile_test_state();
+    let main = spawn(state.clone()).await;
+    let mobile = spawn_mobile(state).await;
+    let client = reqwest::Client::new();
+
+    client
+        .post(format!("{main}/mobile/enabled"))
+        .json(&json!({ "enabled": true }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let pairing: Value = client
+        .post(format!("{main}/mobile/pairing"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let secret = pairing["path"]
+        .as_str()
+        .unwrap()
+        .split("secret=")
+        .nth(1)
+        .unwrap();
+    let paired: Value = client
+        .post(format!("{mobile}/mobile/pair"))
+        .json(&json!({
+            "pair_id": pairing["id"],
+            "secret": secret,
+            "device_name": "Native fixture"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let key = paired["device_key"].as_str().unwrap();
+    let device_id = paired["device_id"].as_str().unwrap();
+
+    let unauthenticated = client
+        .get(format!("{mobile}/control/v1/bootstrap"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let unauthenticated_background = client
+        .get(format!(
+            "{mobile}/control/v1/appearance/background?revision=builtin-mono-dark"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        unauthenticated_background.status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+
+    let bootstrap: Value = client
+        .get(format!("{mobile}/control/v1/bootstrap"))
+        .bearer_auth(key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(bootstrap["protocol"], json!({ "min": 1, "max": 1 }));
+    assert_eq!(bootstrap["host_name"], "Control fixture");
+    let no_background = client
+        .get(format!(
+            "{mobile}/control/v1/appearance/background?revision=builtin-mono-dark"
+        ))
+        .bearer_auth(key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_background.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let created: Value = client
+        .post(format!("{mobile}/control/v1/commands"))
+        .bearer_auth(key)
+        .json(&json!({
+            "command_id": "mobile-create-1",
+            "kind": "thread.create",
+            "payload": {
+                "id": "native-thread",
+                "settings": { "model": "mock-echo" }
+            }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(created["status"], "applied");
+
+    let hidden_api = client
+        .get(format!("{mobile}/v1/models"))
+        .bearer_auth(key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hidden_api.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let revoked_self: Value = client
+        .delete(format!("{mobile}/mobile/device"))
+        .bearer_auth(key)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(revoked_self["revoked"], true);
+    assert_eq!(revoked_self["device_id"], device_id);
+    let revoked = client
+        .get(format!("{mobile}/control/v1/bootstrap"))
+        .bearer_auth(key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(revoked.status(), reqwest::StatusCode::UNAUTHORIZED);
 }
 
 struct MemoryToolBackend;
@@ -6131,6 +6276,7 @@ async fn worker_run_retry_preserves_task_context_and_terminal_stream_state() {
                 prompt: "child task".to_string(),
                 role: Some("reviewer".to_string()),
                 agent_id: None,
+                agent_snapshot: None,
                 model: "child-thread-tool".to_string(),
                 access: milim_agents::WorkerAccess::ReadOnly,
             }],

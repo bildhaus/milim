@@ -1,0 +1,197 @@
+name: Mobile store delivery
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag, for example v0.2.33
+        required: true
+        type: string
+      ios_build_number:
+        description: Monotonically increasing App Store build number
+        required: true
+        type: number
+      android_version_code:
+        description: Monotonically increasing Play version code
+        required: true
+        type: number
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-store-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  ios-testflight:
+    name: iOS TestFlight
+    runs-on: macos-latest
+    timeout-minutes: 90
+    environment: mobile-store-ios
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.release_tag }}
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 9
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/mobile/pnpm-lock.yaml
+      - uses: ruby/setup-ruby@v1
+        with:
+          bundler-cache: false
+      - run: pnpm -C apps/mobile install --frozen-lockfile
+      - name: Verify release version
+        shell: bash
+        run: |
+          expected="${{ inputs.release_tag }}"
+          expected="${expected#v}"
+          test "$(tr -d '\r\n' < VERSION)" = "$expected"
+          test "$(node -p "require('./apps/mobile/package.json').version")" = "$expected"
+      - name: Install CocoaPods
+        working-directory: apps/mobile
+        run: bundle install --jobs 4 --retry 3 && bundle exec pod install --project-directory=ios
+      - name: Import Apple distribution certificate
+        env:
+          CERTIFICATE_P12_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_PASSWORD }}
+        shell: bash
+        run: |
+          keychain="$RUNNER_TEMP/milim-signing.keychain-db"
+          certificate="$RUNNER_TEMP/milim-distribution.p12"
+          printf '%s' "$CERTIFICATE_P12_BASE64" | base64 --decode > "$certificate"
+          security create-keychain -p "$RUNNER_TEMP" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$RUNNER_TEMP" "$keychain"
+          security import "$certificate" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$RUNNER_TEMP" "$keychain"
+      - name: Install App Store provisioning profile
+        env:
+          PROFILE_BASE64: ${{ secrets.IOS_APPSTORE_PROFILE_BASE64 }}
+        shell: bash
+        run: |
+          profile="$RUNNER_TEMP/milim.mobileprovision"
+          printf '%s' "$PROFILE_BASE64" | base64 --decode > "$profile"
+          uuid="$(security cms -D -i "$profile" | plutil -extract UUID raw -)"
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          cp "$profile" "$HOME/Library/MobileDevice/Provisioning Profiles/$uuid.mobileprovision"
+          echo "MILIM_PROFILE_UUID=$uuid" >> "$GITHUB_ENV"
+      - name: Archive signed iOS app
+        working-directory: apps/mobile
+        env:
+          MILIM_IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+        shell: bash
+        run: |
+          version="${{ inputs.release_tag }}"
+          version="${version#v}"
+          xcodebuild \
+            -workspace ios/MilimMobile.xcworkspace \
+            -scheme MilimMobile \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/MilimMobile.xcarchive" \
+            MARKETING_VERSION="$version" \
+            CURRENT_PROJECT_VERSION="${{ inputs.ios_build_number }}" \
+            DEVELOPMENT_TEAM="$MILIM_IOS_TEAM_ID" \
+            PROVISIONING_PROFILE_SPECIFIER="$MILIM_PROFILE_UUID" \
+            CODE_SIGN_STYLE=Manual \
+            archive
+          /usr/libexec/PlistBuddy -c "Add :method string app-store-connect" "$RUNNER_TEMP/ExportOptions.plist"
+          /usr/libexec/PlistBuddy -c "Add :teamID string $MILIM_IOS_TEAM_ID" "$RUNNER_TEMP/ExportOptions.plist"
+          /usr/libexec/PlistBuddy -c "Add :signingStyle string manual" "$RUNNER_TEMP/ExportOptions.plist"
+          /usr/libexec/PlistBuddy -c "Add :provisioningProfiles dict" "$RUNNER_TEMP/ExportOptions.plist"
+          /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:com.milim.mobile string $MILIM_PROFILE_UUID" "$RUNNER_TEMP/ExportOptions.plist"
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/MilimMobile.xcarchive" \
+            -exportPath "$RUNNER_TEMP/ios-export" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist"
+      - name: Upload iOS evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: milim-ios-${{ inputs.ios_build_number }}
+          path: |
+            ${{ runner.temp }}/ios-export/*.ipa
+            ${{ runner.temp }}/MilimMobile.xcarchive/dSYMs
+          if-no-files-found: error
+      - name: Upload to TestFlight
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          mkdir -p "$HOME/.appstoreconnect/private_keys"
+          key_path="$HOME/.appstoreconnect/private_keys/AuthKey_$ASC_KEY_ID.p8"
+          printf '%s' "$ASC_PRIVATE_KEY" > "$key_path"
+          ipa="$(find "$RUNNER_TEMP/ios-export" -name '*.ipa' -print -quit)"
+          xcrun altool --upload-app --type ios --file "$ipa" --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+
+  android-internal:
+    name: Android Play internal
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    environment: mobile-store-android
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.release_tag }}
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 9
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/mobile/pnpm-lock.yaml
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+      - run: pnpm -C apps/mobile install --frozen-lockfile
+      - name: Verify release version
+        shell: bash
+        run: |
+          expected="${{ inputs.release_tag }}"
+          expected="${expected#v}"
+          test "$(tr -d '\r\n' < VERSION)" = "$expected"
+          test "$(node -p "require('./apps/mobile/package.json').version")" = "$expected"
+          echo "MILIM_MOBILE_VERSION=$expected" >> "$GITHUB_ENV"
+      - name: Prepare protected Android signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_BASE64 }}
+        shell: bash
+        run: |
+          keystore="$RUNNER_TEMP/milim-upload.keystore"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          echo "ORG_GRADLE_PROJECT_MILIM_UPLOAD_STORE_FILE=$keystore" >> "$GITHUB_ENV"
+      - name: Build signed AAB
+        working-directory: apps/mobile/android
+        env:
+          MILIM_ANDROID_VERSION_CODE: ${{ inputs.android_version_code }}
+          ORG_GRADLE_PROJECT_MILIM_UPLOAD_STORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_STORE_PASSWORD }}
+          ORG_GRADLE_PROJECT_MILIM_UPLOAD_KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
+          ORG_GRADLE_PROJECT_MILIM_UPLOAD_KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEY_PASSWORD }}
+        run: ./gradlew bundleRelease --no-daemon
+      - name: Upload Android evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: milim-android-${{ inputs.android_version_code }}
+          path: |
+            apps/mobile/android/app/build/outputs/bundle/release/*.aab
+            apps/mobile/android/app/build/outputs/mapping/release
+            apps/mobile/android/app/build/outputs/native-debug-symbols/release
+          if-no-files-found: error
+      - name: Upload to Play internal testing
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: com.milim.mobile
+          releaseFiles: apps/mobile/android/app/build/outputs/bundle/release/*.aab
+          track: internal
+          status: completed

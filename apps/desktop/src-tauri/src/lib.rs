@@ -16,7 +16,7 @@ mod preview_tools;
 mod preview_webview;
 mod secret_storage;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 #[cfg(target_os = "windows")]
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
@@ -104,19 +104,35 @@ struct DesktopPreviewRuntime(Arc<milim_server::preview_runtime::PreviewRuntimeMa
 
 struct DesktopServerRuntime(Arc<DesktopServerRuntimeState>);
 
+struct DesktopLanActive {
+    shutdown: tokio::sync::watch::Sender<bool>,
+    port: u16,
+    mdns: mdns_sd::ServiceDaemon,
+    fullname: String,
+}
+
 struct DesktopServerRuntimeState {
     shutdown: tokio::sync::watch::Sender<bool>,
     tasks: Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>,
     finishing: AtomicBool,
+    control: Option<Arc<milim_server::control::RunManager>>,
+    mobile_state: Option<AppState>,
+    lan: Mutex<Option<DesktopLanActive>>,
 }
 
 impl DesktopServerRuntimeState {
-    fn new() -> Arc<Self> {
+    fn new(
+        control: Option<Arc<milim_server::control::RunManager>>,
+        mobile_state: Option<AppState>,
+    ) -> Arc<Self> {
         let (shutdown, _) = tokio::sync::watch::channel(false);
         Arc::new(Self {
             shutdown,
             tasks: Mutex::new(Vec::new()),
             finishing: AtomicBool::new(false),
+            control,
+            mobile_state,
+            lan: Mutex::new(None),
         })
     }
 
@@ -131,10 +147,120 @@ impl DesktopServerRuntimeState {
             .push(task);
     }
 
+    fn enable_lan(&self) -> std::result::Result<MobileLanStatus, String> {
+        if let Some(active) = self.lan.lock().map_err(|_| "LAN state poisoned")?.as_ref() {
+            return Ok(self.lan_status(Some(active)));
+        }
+        let state = self
+            .mobile_state
+            .clone()
+            .ok_or_else(|| "Mobile control runtime is unavailable.".to_string())?;
+        let control = self
+            .control
+            .as_ref()
+            .ok_or_else(|| "Canonical control runtime is unavailable.".to_string())?;
+        let listener = TcpListener::bind("0.0.0.0:0").map_err(|error| error.to_string())?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| error.to_string())?;
+        let port = listener.local_addr().map_err(|error| error.to_string())?.port();
+        let host_id = control.host().host_id;
+        let host_label = host_id
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric())
+            .take(12)
+            .collect::<String>()
+            .to_ascii_lowercase();
+        let hostname = format!("milim-{host_label}.local.");
+        let mut properties = HashMap::new();
+        properties.insert("host_id".to_string(), host_id);
+        properties.insert("protocol_min".to_string(), "1".to_string());
+        properties.insert("protocol_max".to_string(), "1".to_string());
+        properties.insert("scheme".to_string(), "http".to_string());
+        let service = mdns_sd::ServiceInfo::new(
+            "_milim._tcp.local.",
+            control.host().display_name.as_str(),
+            &hostname,
+            "",
+            port,
+            properties,
+        )
+        .map_err(|error| error.to_string())?
+        .enable_addr_auto();
+        let fullname = service.get_fullname().to_string();
+        let mdns = mdns_sd::ServiceDaemon::new().map_err(|error| error.to_string())?;
+        mdns.register(service).map_err(|error| error.to_string())?;
+        let (shutdown, local_shutdown) = tokio::sync::watch::channel(false);
+        let global_shutdown = self.subscribe();
+        let task = tauri::async_runtime::spawn(async move {
+            let listener = match tokio::net::TcpListener::from_std(listener) {
+                Ok(listener) => listener,
+                Err(error) => {
+                    tracing::warn!("LAN mobile listener unavailable: {error}");
+                    return;
+                }
+            };
+            let shutdown = async move {
+                tokio::select! {
+                    _ = wait_for_desktop_shutdown(local_shutdown) => {},
+                    _ = wait_for_desktop_shutdown(global_shutdown) => {},
+                }
+            };
+            if let Err(error) =
+                milim_server::serve_mobile_companion_listener_with_graceful_shutdown(
+                    state, listener, shutdown,
+                )
+                .await
+            {
+                tracing::warn!("LAN mobile server stopped: {error}");
+            }
+        });
+        self.register(task);
+        let active = DesktopLanActive {
+            shutdown,
+            port,
+            mdns,
+            fullname,
+        };
+        let status = self.lan_status(Some(&active));
+        *self.lan.lock().map_err(|_| "LAN state poisoned")? = Some(active);
+        Ok(status)
+    }
+
+    fn disable_lan(&self) -> MobileLanStatus {
+        let active = self.lan.lock().ok().and_then(|mut value| value.take());
+        if let Some(active) = active {
+            let _ = active.shutdown.send(true);
+            let _ = active.mdns.unregister(&active.fullname);
+            let _ = active.mdns.shutdown();
+        }
+        self.lan_status(None)
+    }
+
+    fn current_lan_status(&self) -> MobileLanStatus {
+        let active = self.lan.lock().ok();
+        self.lan_status(active.as_deref().and_then(Option::as_ref))
+    }
+
+    fn lan_status(&self, active: Option<&DesktopLanActive>) -> MobileLanStatus {
+        MobileLanStatus {
+            enabled: active.is_some(),
+            active: active.is_some(),
+            port: active.map(|value| value.port),
+            service_type: "_milim._tcp.local.".to_string(),
+            host_id: self.control.as_ref().map(|value| value.host().host_id),
+            warning: "LAN mode uses plain HTTP. Enable it only on a trusted network.".to_string(),
+        }
+    }
+
     async fn shutdown(
         &self,
         preview_runtime: Arc<milim_server::preview_runtime::PreviewRuntimeManager>,
     ) {
+        self.disable_lan();
+        if let Some(control) = &self.control {
+            control.shutdown(Duration::from_secs(2)).await;
+        }
         let _ = self.shutdown.send(true);
         let mut tasks =
             std::mem::take(&mut *self.tasks.lock().expect("desktop server tasks poisoned"));
@@ -226,14 +352,17 @@ const ARTIFACT_DIFF_CONTEXT_LINES: usize = 2;
 const ARTIFACT_DIFF_LCS_CELL_LIMIT: usize = 2_000_000;
 const BACKUP_SCHEMA_VERSION: u32 = 1;
 const MAX_BACKUP_BYTES: u64 = 64 * 1024 * 1024;
+const APPEARANCE_STATE_KEY: &str = "milim.appearanceSnapshot";
 const BACKUP_STATE_KEYS: &[&str] = &[
     "milim.settings",
     "milim.ui",
     "milim.onboarding",
     "milim.themeId",
     "milim.customThemes",
+    APPEARANCE_STATE_KEY,
     "milim.window.alwaysOnTop",
     "milim.sessionDrafts",
+    "milim.mobile.lan",
 ];
 
 #[derive(Serialize, Deserialize)]
@@ -252,6 +381,8 @@ struct MilimBackupSummary {
     chats: usize,
     projects: usize,
     state_keys: usize,
+    #[serde(default)]
+    control_records: usize,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -259,6 +390,8 @@ struct MilimBackupSummary {
 struct MilimBackupState {
     sessions: Value,
     entries: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    control: Option<milim_storage::ControlBackupState>,
 }
 
 #[derive(Serialize)]
@@ -335,6 +468,16 @@ fn build_backup(store: &milim_storage::UserDataStore) -> std::result::Result<Mil
             );
         }
     }
+    let control = store
+        .control_backup_state()
+        .map_err(|error| error.to_string())?;
+    let control_records = control.threads.len()
+        + control.runs.len()
+        + control.timeline.len()
+        + control.queued_turns.len()
+        + control.command_receipts.len()
+        + control.approvals.len()
+        + usize::from(control.host.is_some());
     Ok(MilimBackup {
         schema_version: BACKUP_SCHEMA_VERSION,
         app_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -343,8 +486,13 @@ fn build_backup(store: &milim_storage::UserDataStore) -> std::result::Result<Mil
             chats,
             projects,
             state_keys: entries.len(),
+            control_records,
         },
-        state: MilimBackupState { sessions, entries },
+        state: MilimBackupState {
+            sessions,
+            entries,
+            control: Some(control),
+        },
     })
 }
 
@@ -417,10 +565,12 @@ async fn inspect_milim_backup(path: String) -> std::result::Result<BackupInspect
 #[tauri::command]
 async fn restore_milim_backup(
     state: tauri::State<'_, UserDataState>,
+    runtime: tauri::State<'_, DesktopServerRuntime>,
     path: String,
 ) -> std::result::Result<String, String> {
     let store = state.0.clone();
-    tokio::task::spawn_blocking(move || {
+    let recovery_path = tokio::task::spawn_blocking(
+        move || -> std::result::Result<String, String> {
         let (backup, _) = read_backup(Path::new(&path))?;
         let recovery = build_backup(&store)?;
         let recovery_bytes =
@@ -431,9 +581,12 @@ async fn restore_milim_backup(
             now_timestamp_ms()
         ));
         atomic_write(&recovery_path, &recovery_bytes).map_err(|error| error.to_string())?;
-        let entries = backup
-            .state
-            .entries
+        let MilimBackupState {
+            sessions,
+            entries,
+            control,
+        } = backup.state;
+        let entries = entries
             .into_iter()
             .map(|(key, value)| {
                 serde_json::to_string(&value)
@@ -441,8 +594,7 @@ async fn restore_milim_backup(
                     .map_err(|error| error.to_string())
             })
             .collect::<std::result::Result<BTreeMap<_, _>, _>>()?;
-        let sessions =
-            serde_json::to_string(&backup.state.sessions).map_err(|error| error.to_string())?;
+        let sessions = serde_json::to_string(&sessions).map_err(|error| error.to_string())?;
         let replace_keys = BACKUP_STATE_KEYS
             .iter()
             .map(|key| (*key).to_string())
@@ -450,10 +602,24 @@ async fn restore_milim_backup(
         store
             .replace_backup_state(&replace_keys, entries, &sessions)
             .map_err(|error| error.to_string())?;
-        Ok(recovery_path.to_string_lossy().to_string())
-    })
+        if let Some(control) = control {
+            store
+                .replace_control_backup_state(&control)
+                .map_err(|error| error.to_string())?;
+        } else {
+            store
+                .reconcile_control_startup()
+                .map_err(|error| error.to_string())?;
+        }
+            Ok(recovery_path.to_string_lossy().to_string())
+        },
+    )
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())??;
+    if let Some(control) = &runtime.0.control {
+        control.refresh_host().map_err(|error| error.to_string())?;
+    }
+    Ok(recovery_path)
 }
 
 #[derive(serde::Serialize)]
@@ -629,6 +795,16 @@ struct MobileTailscaleStatus {
     message: Option<String>,
 }
 
+#[derive(Clone, serde::Serialize, Debug)]
+struct MobileLanStatus {
+    enabled: bool,
+    active: bool,
+    port: Option<u16>,
+    service_type: String,
+    host_id: Option<String>,
+    warning: String,
+}
+
 #[tauri::command]
 fn api_token(token: tauri::State<'_, DesktopApiToken>) -> String {
     token.0.clone()
@@ -680,6 +856,29 @@ async fn disable_mobile_tailscale_relay(
 }
 
 #[tauri::command]
+fn mobile_lan_status(runtime: tauri::State<'_, DesktopServerRuntime>) -> MobileLanStatus {
+    runtime.0.current_lan_status()
+}
+
+#[tauri::command]
+fn set_mobile_lan_enabled(
+    runtime: tauri::State<'_, DesktopServerRuntime>,
+    user_data: tauri::State<'_, UserDataState>,
+    enabled: bool,
+) -> std::result::Result<MobileLanStatus, String> {
+    let status = if enabled {
+        runtime.0.enable_lan()?
+    } else {
+        runtime.0.disable_lan()
+    };
+    user_data
+        .0
+        .set_json("milim.mobile.lan", if enabled { "true" } else { "false" })
+        .map_err(|error| error.to_string())?;
+    Ok(status)
+}
+
+#[tauri::command]
 async fn user_state_get(
     state: tauri::State<'_, UserDataState>,
     key: String,
@@ -694,32 +893,46 @@ async fn user_state_get(
 #[tauri::command]
 async fn user_state_set(
     state: tauri::State<'_, UserDataState>,
+    runtime: tauri::State<'_, DesktopServerRuntime>,
     key: String,
     value: String,
 ) -> std::result::Result<(), String> {
-    if key == "milim.sessions" {
+    let result = if key == "milim.sessions" {
         state
             .0
             .set_sessions_snapshot(&value)
             .map_err(|e| e.to_string())
     } else {
         state.0.set_json(&key, &value).map_err(|e| e.to_string())
+    };
+    if result.is_ok() && key == APPEARANCE_STATE_KEY {
+        if let Some(control) = runtime.0.control.as_ref() {
+            control.publish_appearance();
+        }
     }
+    result
 }
 
 #[tauri::command]
 async fn user_state_delete(
     state: tauri::State<'_, UserDataState>,
+    runtime: tauri::State<'_, DesktopServerRuntime>,
     key: String,
 ) -> std::result::Result<bool, String> {
-    if key == "milim.sessions" {
+    let result = if key == "milim.sessions" {
         state
             .0
             .delete_sessions_snapshot()
             .map_err(|e| e.to_string())
     } else {
         state.0.delete_json(&key).map_err(|e| e.to_string())
+    };
+    if matches!(result, Ok(true)) && key == APPEARANCE_STATE_KEY {
+        if let Some(control) = runtime.0.control.as_ref() {
+            control.publish_appearance();
+        }
     }
+    result
 }
 
 #[tauri::command]
@@ -3627,6 +3840,7 @@ fn build_state(
     api_key: String,
     preview_tools_state: preview_tools::SharedPreviewToolState,
     encryption: Option<EncryptedStore>,
+    user_data: Arc<milim_storage::UserDataStore>,
 ) -> (
     AppState,
     SocketAddr,
@@ -3743,6 +3957,8 @@ fn build_state(
             })
             .unwrap_or_default(),
     );
+    let control = milim_server::control::RunManager::new(user_data, "Milim desktop")
+        .expect("initialize canonical control runtime");
     let service: SharedService = registry
         .as_ref()
         .map(|registry| Arc::new(registry.router(privacy.clone())) as SharedService)
@@ -3754,6 +3970,7 @@ fn build_state(
         .with_mcp(mcp.clone())
         .with_privacy(privacy)
         .with_mobile_companion(mobile_companion)
+        .with_control(control)
         .with_api_keys([api_key])
         .with_loopback_trust(false);
     match milim_server::media_library::MediaLibrary::open(paths.root().join("media")) {
@@ -4212,13 +4429,21 @@ pub fn run() {
     let preview_tools_state = Arc::new(preview_tools::PreviewToolState::default());
     let secret_storage = secret_storage::initialize(Paths::resolve().root());
     let storage_status = secret_storage.status.clone();
-    let (state, preferred_addr, mcp, providers) = build_state(
+    let user_data = open_user_data_store().expect("initialize user data store");
+    let (mut state, preferred_addr, mcp, providers) = build_state(
         api_key.clone(),
         preview_tools_state.clone(),
         secret_storage.encryption,
+        user_data.clone(),
     );
     let (server_listener, addr) =
         bind_desktop_server_listener(preferred_addr).expect("bind embedded milim server");
+    // Account-runtime tool endpoints must point at the actual listener. The
+    // preferred port may already be occupied, in which case binding falls
+    // back to an ephemeral loopback port.
+    let mut bound_config = (*state.config).clone();
+    bound_config.port = addr.port();
+    state.config = Arc::new(bound_config);
     let (mobile_listener, mobile_addr) = bind_desktop_server_listener(
         "127.0.0.1:0"
             .parse()
@@ -4231,8 +4456,14 @@ pub fn run() {
     let mobile_state = state.clone();
     let mobile_startup_companion = state.mobile_companion.clone();
     let mobile_startup_target = mobile_local_target.clone();
-    let user_data = open_user_data_store().expect("initialize user data store");
-    let server_runtime = DesktopServerRuntimeState::new();
+    let mobile_lan_enabled = user_data
+        .get_json("milim.mobile.lan")
+        .ok()
+        .flatten()
+        .and_then(|value| serde_json::from_str::<bool>(&value).ok())
+        .unwrap_or(false);
+    let server_runtime =
+        DesktopServerRuntimeState::new(state.control.clone(), Some(mobile_state.clone()));
 
     let builder = tauri::Builder::default();
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
@@ -4317,6 +4548,11 @@ pub fn run() {
                 tokio::join!(main_server, mobile_server);
             });
             server_runtime.register(server_task);
+            if mobile_lan_enabled {
+                if let Err(error) = server_runtime.enable_lan() {
+                    tracing::warn!("saved LAN mobile mode could not start: {error}");
+                }
+            }
             if let Some(companion) = mobile_startup_companion {
                 tauri::async_runtime::spawn(async move {
                     if companion.status(milim_server::now_unix()).enabled {
@@ -4369,6 +4605,8 @@ pub fn run() {
             mobile_tailscale_status,
             configure_mobile_tailscale_relay,
             disable_mobile_tailscale_relay,
+            mobile_lan_status,
+            set_mobile_lan_enabled,
             user_state_get,
             user_state_set,
             user_state_delete,
@@ -4430,7 +4668,7 @@ mod desktop_shutdown_tests {
 
     #[tokio::test]
     async fn desktop_shutdown_signal_releases_server_waiters() {
-        let runtime = DesktopServerRuntimeState::new();
+        let runtime = DesktopServerRuntimeState::new(None, None);
         let waiter = tokio::spawn(wait_for_desktop_shutdown(runtime.subscribe()));
 
         runtime.shutdown.send(true).unwrap();

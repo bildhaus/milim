@@ -874,7 +874,7 @@
     const MAX_TEXT_ATTACHMENT_BYTES = 128 * 1024;
     const MAX_IMAGE_PREVIEW_BYTES = 2 * 1024 * 1024;
     const MAX_ATTACHMENTS = 6;
-    const state = { thread: null, device: null, attachments: [], query: "", streamController: null, streamLive: false, lastUpdate: 0 };
+    const state = { thread: null, bootstrap: null, timeline: [], selectedThreadId: "", device: null, attachments: [], query: "", streamController: null, streamSocket: null, streamLive: false, lastUpdate: 0 };
     const themeColorMeta = document.querySelector('meta[name="theme-color"]');
     const themeCssVarPattern = /^--[a-z0-9-]+$/;
     const backgroundFits = new Set(["cover", "contain", "tile", "center"]);
@@ -1067,11 +1067,67 @@
       }
       return await response.json();
     }
-    async function relayAction(action, text = "", attachments = []) {
-      return await api("/mobile/relay", {
+    function commandId() {
+      return crypto.randomUUID ? crypto.randomUUID() : `pwa-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
+    async function controlCommand(kind, payload = null, threadId = state.selectedThreadId, expectedRevision) {
+      const command = {
+        command_id: commandId(),
+        kind,
+        thread_id: threadId || undefined,
+        expected_revision: expectedRevision,
+        payload,
+      };
+      let result = await api("/control/v1/commands", {
         method: "POST",
-        body: JSON.stringify({ action, text, attachments }),
+        body: JSON.stringify(command),
       });
+      if (result.status === "needs_confirmation" && result.confirmation_token) {
+        if (!confirm(result.message || "Confirm this destructive action?")) return result;
+        result = await api("/control/v1/commands", {
+          method: "POST",
+          body: JSON.stringify({ ...command, confirmation_token: result.confirmation_token }),
+        });
+      }
+      if (["failed", "conflict"].includes(result.status)) throw new Error(result.message || result.status);
+      return result;
+    }
+    async function relayAction(action, text = "", attachments = []) {
+      const thread = state.thread;
+      const revision = thread?.revision;
+      const map = {
+        send: ["turn.send", { text, attachments: attachments.map(({ dataUrl, ...item }) => ({ ...item, data_url: dataUrl })) }],
+        stop: ["turn.stop", null],
+        regenerate: ["turn.regenerate", null],
+        rename_thread: ["thread.rename", { title: text }],
+        archive_thread: ["thread.archive", { archived: true }],
+        delete_thread: ["thread.delete", null],
+        set_model: ["thread.set_model", { model: text }],
+        worker_run_start: ["worker.start", { run_id: text }],
+        worker_run_continue_solo: ["worker.continue_solo", { run_id: text }],
+        worker_run_stop: ["worker.stop", { run_id: text }],
+      };
+      if (action === "new_thread") {
+        const created = await controlCommand("thread.create", {
+          title: text || "New chat",
+          settings: { model: thread?.model || state.bootstrap?.models?.[0]?.id || "", privacy: "off", toolApproval: "review" },
+        }, "");
+        state.selectedThreadId = created.thread_id || "";
+        return created;
+      }
+      if (action === "switch_thread") {
+        state.selectedThreadId = text;
+        await refreshThread();
+        return { status: "applied" };
+      }
+      if (action === "delete_message") {
+        const message = thread?.messages?.[Number(text)];
+        if (!message?.id) throw new Error("That message is no longer available.");
+        return await controlCommand("message.delete", { message_id: message.id }, thread.session_id, revision);
+      }
+      const [kind, payload] = map[action] || [];
+      if (!kind) throw new Error(`Unsupported control action: ${action}`);
+      return await controlCommand(kind, payload, thread?.session_id, revision);
     }
     function showRelayError(error) {
       relayNotice.textContent = String(error.message || error);
@@ -1412,12 +1468,70 @@
       });
       threadMessages.scrollTop = threadMessages.scrollHeight;
     }
+    function projectControlMessages(items) {
+      const messages = [];
+      const deleted = new Set();
+      const streaming = new Map();
+      for (const item of items || []) {
+        const data = item.data || {};
+        if (item.type === "message_deleted") {
+          deleted.add(data.message_id);
+        } else if (item.type === "assistant_delta" && item.run_id) {
+          const message = streaming.get(item.run_id) || { id: `stream-${item.run_id}`, role: "assistant", content: "", reasoning: "", seq: item.seq };
+          message.content += data.text || "";
+          message.reasoning += data.reasoning || "";
+          streaming.set(item.run_id, message);
+        } else if (item.type === "message" && data.id) {
+          if (item.run_id) streaming.delete(item.run_id);
+          messages.push({ ...data, seq: item.seq });
+        }
+      }
+      return [...messages.filter((message) => !deleted.has(message.id)), ...streaming.values()].sort((a, b) => a.seq - b.seq);
+    }
+    function controlThreadSnapshot(bootstrap, summary, page) {
+      const groups = new Map();
+      for (const item of bootstrap.threads || []) {
+        if (item.archived_at_ms) continue;
+        const key = item.workspace || "threads";
+        const group = groups.get(key) || { id: key, label: item.workspace ? item.workspace.split(/[\\/]/).filter(Boolean).pop() : "Threads", subtitle: item.workspace || "", threads: [] };
+        group.threads.push({ ...item, project_path: item.workspace, project_label: group.label });
+        groups.set(key, group);
+      }
+      const workerItem = [...(page.items || [])].reverse().find((item) => item.type.includes("worker") && item.data?.run);
+      return {
+        session_id: summary.id,
+        title: summary.title,
+        model: summary.model,
+        revision: summary.revision,
+        busy: summary.busy,
+        updated_at: Math.floor(summary.updated_at_ms / 1000),
+        messages: projectControlMessages(page.items),
+        threads: bootstrap.threads,
+        groups: [...groups.values()],
+        models: (bootstrap.models || []).map((model) => typeof model === "string" ? { id: model } : model),
+        agents: bootstrap.agents || [],
+        pending_approvals: bootstrap.pending_approvals || [],
+        worker_run: workerItem?.data?.run || null,
+      };
+    }
     async function refreshThread() {
       if (!store.key || relayPanel.classList.contains("hidden")) return;
       try {
-        const data = await api("/mobile/thread");
+        const bootstrap = await api("/control/v1/bootstrap");
+        state.bootstrap = bootstrap;
+        const available = (bootstrap.threads || []).filter((thread) => !thread.archived_at_ms);
+        if (!available.some((thread) => thread.id === state.selectedThreadId)) {
+          state.selectedThreadId = available[0]?.id || "";
+        }
+        const summary = available.find((thread) => thread.id === state.selectedThreadId);
+        if (!summary) {
+          renderThread(null);
+          return;
+        }
+        const page = await api(`/control/v1/threads/${encodeURIComponent(summary.id)}/timeline?tail=200`);
+        state.timeline = page.items || [];
         state.lastUpdate = Date.now();
-        renderThread(data.thread);
+        renderThread(controlThreadSnapshot(bootstrap, summary, page));
       } catch (error) {
         renderThread(null);
         showRelayError(error);
@@ -1492,11 +1606,31 @@
     }
     function connectThreadStream() {
       state.streamController?.abort();
+      state.streamSocket?.close();
       state.streamLive = false;
-      if (!store.key || !window.ReadableStream) return;
-      const controller = new AbortController();
-      state.streamController = controller;
-      void runThreadStream(controller);
+      if (!store.key || !window.WebSocket) return;
+      void api("/control/v1/socket-ticket", { method: "POST" }).then(({ ticket }) => {
+        const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+        const socket = new WebSocket(`${protocol}//${location.host}/control/v1/ws?ticket=${encodeURIComponent(ticket)}`);
+        state.streamSocket = socket;
+        socket.addEventListener("open", () => {
+          state.streamLive = true;
+          setStatus("Live", true);
+        });
+        socket.addEventListener("message", (event) => {
+          try {
+            const update = JSON.parse(event.data);
+            if (update.type === "timeline.appended" || update.type === "sync.required" || update.type.startsWith("thread.") || update.type.startsWith("run.") || update.type.startsWith("approval_")) {
+              window.clearTimeout(state.controlRefreshTimer);
+              state.controlRefreshTimer = window.setTimeout(refreshThread, 80);
+            }
+          } catch {}
+        });
+        socket.addEventListener("close", () => {
+          state.streamLive = false;
+          setStatus("Reconnecting", false, true);
+        });
+      }).catch(showRelayError);
     }
     function checkHealth() {
       if (relayPanel.classList.contains("hidden") || !state.lastUpdate) return;
@@ -1517,9 +1651,9 @@
       relayNotice.textContent = "Switching thread...";
       relayNotice.className = "notice";
       try {
-        await relayAction("switch_thread", sessionId);
+        state.selectedThreadId = sessionId;
+        await refreshThread();
         closeThreadDrawer();
-        window.setTimeout(refreshThread, 800);
       } catch (error) {
         showRelayError(error);
       }
@@ -1792,6 +1926,8 @@
     });
     document.getElementById("forgetButton").addEventListener("click", () => {
       state.streamController?.abort();
+      state.streamSocket?.close();
+      api("/mobile/device", { method: "DELETE" }).catch(() => {});
       store.key = "";
       store.id = "";
       store.name = "";

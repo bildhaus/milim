@@ -98,6 +98,7 @@ localStorage.setItem("milim.customThemes", JSON.stringify([customTheme]));
 localStorage.setItem("milim.themeId", customTheme.id);
 
 const { hydrateThemeFromUserState, useTheme } = await import("../src/theme/store.js");
+const { appearanceSnapshot } = await import("../src/theme/appearanceSnapshot.js");
 const { animatedBackgroundSource, themeCssVariables } = await import("../src/theme/applyTheme.js");
 
 equal(
@@ -129,5 +130,13 @@ const nextCustomTheme = { ...customTheme, id: "custom-next", name: "Custom Next"
 useTheme.getState().saveCustom(nextCustomTheme);
 equal(localStorage.getItem("milim.themeId"), '"custom-next"', "saved custom theme should persist active ID as JSON string");
 assert(localStorage.getItem("milim.customThemes")?.includes('"custom-next"'), "saved custom theme should persist in custom theme list");
+const persistedAppearance = JSON.parse(localStorage.getItem("milim.appearanceSnapshot") ?? "null");
+equal(persistedAppearance?.theme_id, "custom-next", "saved custom theme should publish a resolved appearance snapshot");
+equal(persistedAppearance?.colors.accent, nextCustomTheme.colors.accent, "appearance snapshot should include the resolved accent");
+equal(
+  appearanceSnapshot(nextCustomTheme).revision,
+  persistedAppearance?.revision,
+  "appearance revisions should be deterministic",
+);
 
 export {};

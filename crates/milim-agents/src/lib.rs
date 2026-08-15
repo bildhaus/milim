@@ -13,9 +13,9 @@ pub use store::{
 };
 pub use threads::{
     thread_status_terminal, AgentThread, DelegationPolicy, ThreadEvent, ThreadStore, Worker,
-    WorkerAccess, WorkerPlanTask, WorkerRun, WorkerRunStatus, WorkerRuntime, THREAD_MIGRATIONS,
-    THREAD_STATUS_DONE, THREAD_STATUS_ERROR, THREAD_STATUS_QUEUED, THREAD_STATUS_RUNNING,
-    THREAD_STATUS_STOPPED,
+    WorkerAccess, WorkerAgentSnapshot, WorkerPlanTask, WorkerRun, WorkerRunStatus, WorkerRuntime,
+    THREAD_MIGRATIONS, THREAD_STATUS_DONE, THREAD_STATUS_ERROR, THREAD_STATUS_QUEUED,
+    THREAD_STATUS_RUNNING, THREAD_STATUS_STOPPED,
 };
 
 use std::collections::HashMap;

@@ -17,6 +17,7 @@ use milim_tools::ToolRegistry;
 use serde::Serialize;
 
 use crate::companion::MobileCompanionBridge;
+use crate::control::RunManager;
 use crate::media_library::MediaLibrary;
 use crate::preview_runtime::PreviewRuntimeManager;
 use crate::threads::ThreadSupervisor;
@@ -174,6 +175,12 @@ pub struct AppState {
     /// Relay-only mobile companion bridge. Disabled by default and only grants
     /// paired phones permission to submit text to the active desktop composer.
     pub mobile_companion: Option<Arc<MobileCompanionBridge>>,
+    /// Canonical server-owned user thread/run/timeline state used by desktop
+    /// and native mobile control clients.
+    pub control: Option<Arc<RunManager>>,
+    /// Set only on the separately bound phone router. Prevents loopback trust
+    /// or desktop API keys from widening that router beyond paired devices.
+    pub(crate) mobile_control_only: bool,
     /// Managed preview app runtime; no-folder staged apps live under `~/.milim/runtime`.
     pub preview_runtime: Arc<PreviewRuntimeManager>,
 }
@@ -206,6 +213,8 @@ impl AppState {
             computer_use: Arc::new(AtomicBool::new(false)),
             privacy: Arc::new(crate::privacy::PrivacyGate::default()),
             mobile_companion: None,
+            control: None,
+            mobile_control_only: false,
             preview_runtime: Arc::new(PreviewRuntimeManager::new(
                 milim_core::paths::Paths::resolve()
                     .root()
@@ -231,6 +240,11 @@ impl AppState {
     /// Attach the relay-only mobile companion bridge.
     pub fn with_mobile_companion(mut self, bridge: Arc<MobileCompanionBridge>) -> Self {
         self.mobile_companion = Some(bridge);
+        self
+    }
+
+    pub fn with_control(mut self, manager: Arc<RunManager>) -> Self {
+        self.control = Some(manager);
         self
     }
 

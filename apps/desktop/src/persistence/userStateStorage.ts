@@ -13,6 +13,7 @@ const CANONICAL_USER_STATE_KEYS = [
   "milim.onboarding",
   "milim.themeId",
   "milim.customThemes",
+  "milim.appearanceSnapshot",
   "milim.window.alwaysOnTop",
   "milim.mobile.urlBase",
   "milim.sessionDrafts",

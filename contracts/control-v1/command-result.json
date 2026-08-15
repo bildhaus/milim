@@ -1,0 +1,8 @@
+{
+  "command_id": "command-fixture",
+  "status": "accepted",
+  "thread_id": "thread-fixture",
+  "revision": 5,
+  "run_id": "run-fixture",
+  "data": null
+}

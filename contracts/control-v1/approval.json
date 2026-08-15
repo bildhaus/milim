@@ -1,0 +1,13 @@
+{
+  "id": "approval-fixture",
+  "run_id": "run-fixture",
+  "thread_id": "thread-fixture",
+  "kind": "command",
+  "request": {
+    "approval_id": "approval-fixture",
+    "command": "cargo test",
+    "cwd": "C:/workspace"
+  },
+  "status": "pending",
+  "created_at_ms": 1700000000002
+}

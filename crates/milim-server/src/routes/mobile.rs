@@ -138,6 +138,29 @@ pub(crate) async fn mobile_companion_device_status(
     Ok(Json(json!({ "connected": true, "device": device })).into_response())
 }
 
+/// `DELETE /mobile/device` - revoke the currently authenticated phone. This
+/// is deliberately scoped to the caller and is safe to expose on the narrow
+/// mobile router; revoking another device remains desktop-only.
+pub(crate) async fn mobile_companion_device_revoke_self(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let bridge = mobile_bridge(&st)?;
+    let key = companion_device_key(&headers)?;
+    let device = bridge.authenticate_device(key, now_unix()).ok_or_else(|| {
+        ApiError(Error::Unauthorized(
+            "invalid mobile companion device key".to_string(),
+        ))
+    })?;
+    let status = bridge.revoke_device(&device.id, now_unix());
+    Ok(Json(json!({
+        "revoked": true,
+        "device_id": device.id,
+        "status": status,
+    }))
+    .into_response())
+}
+
 /// `POST /mobile/relay`
 pub(crate) async fn mobile_companion_relay(
     State(st): State<AppState>,

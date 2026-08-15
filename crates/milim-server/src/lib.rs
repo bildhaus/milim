@@ -15,6 +15,7 @@ mod claude_bridge;
 mod cli_path;
 mod codex_bridge;
 pub mod companion;
+pub mod control;
 mod error;
 pub mod google_workspace;
 pub mod mcp_bridge;
@@ -77,6 +78,10 @@ pub fn build_router(state: AppState) -> Router {
             "/mobile/device/status",
             get(routes::mobile_companion_device_status),
         )
+        .route(
+            "/mobile/device",
+            delete(routes::mobile_companion_device_revoke_self),
+        )
         .route("/mobile/relay", post(routes::mobile_companion_relay))
         .route(
             "/mobile/thread",
@@ -91,6 +96,23 @@ pub fn build_router(state: AppState) -> Router {
             "/mobile/devices/{id}",
             delete(routes::mobile_companion_device_revoke),
         )
+        // Canonical desktop/native-mobile control contract. This namespace is
+        // intentionally distinct from legacy Worker `/threads/*` routes.
+        .route("/control/v1/bootstrap", get(routes::control_bootstrap))
+        .route(
+            "/control/v1/appearance/background",
+            get(routes::control_appearance_background),
+        )
+        .route(
+            "/control/v1/threads/{id}/timeline",
+            get(routes::control_timeline),
+        )
+        .route("/control/v1/commands", post(routes::control_command))
+        .route(
+            "/control/v1/socket-ticket",
+            post(routes::control_socket_ticket),
+        )
+        .route("/control/v1/ws", get(routes::control_socket))
         // Model listing (OpenAI + Ollama)
         .route("/v1/models", get(routes::openai_models))
         .route("/models", get(routes::openai_models))
@@ -394,6 +416,8 @@ pub fn build_router(state: AppState) -> Router {
 /// narrower than the local API so it can be exposed through Tailscale Serve.
 pub fn build_mobile_companion_router(state: AppState) -> Router {
     let body_limit = state.config.max_request_body_bytes;
+    let mut state = state;
+    state.mobile_control_only = true;
 
     Router::new()
         .route("/mobile", get(routes::mobile_companion_page))
@@ -417,12 +441,31 @@ pub fn build_mobile_companion_router(state: AppState) -> Router {
             "/mobile/device/status",
             get(routes::mobile_companion_device_status),
         )
+        .route(
+            "/mobile/device",
+            delete(routes::mobile_companion_device_revoke_self),
+        )
         .route("/mobile/relay", post(routes::mobile_companion_relay))
         .route("/mobile/thread", get(routes::mobile_companion_thread))
         .route(
             "/mobile/thread/events",
             get(routes::mobile_companion_thread_events),
         )
+        .route("/control/v1/bootstrap", get(routes::control_bootstrap))
+        .route(
+            "/control/v1/appearance/background",
+            get(routes::control_appearance_background),
+        )
+        .route(
+            "/control/v1/threads/{id}/timeline",
+            get(routes::control_timeline),
+        )
+        .route("/control/v1/commands", post(routes::control_command))
+        .route(
+            "/control/v1/socket-ticket",
+            post(routes::control_socket_ticket),
+        )
+        .route("/control/v1/ws", get(routes::control_socket))
         .layer(TraceLayer::new_for_http())
         .layer(RequestBodyLimitLayer::new(body_limit))
         .with_state(state)
@@ -788,6 +831,7 @@ mod tests {
         let mut agent = milim_agents::AgentDef {
             id: "agent-1".to_string(),
             name: "Reviewer".to_string(),
+            description: String::new(),
             system_prompt: String::new(),
             model: "test-echo".to_string(),
             tool_mode: "all".to_string(),
@@ -814,6 +858,7 @@ mod tests {
         let agent = milim_agents::AgentDef {
             id: "agent-none".to_string(),
             name: "No tools".to_string(),
+            description: String::new(),
             system_prompt: String::new(),
             model: "test-echo".to_string(),
             tool_mode: "none".to_string(),
@@ -831,6 +876,7 @@ mod tests {
         let agent = agents
             .create(
                 "Legacy",
+                "",
                 "test-echo",
                 "",
                 "none",

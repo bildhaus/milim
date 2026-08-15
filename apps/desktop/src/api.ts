@@ -6,6 +6,7 @@ import { wireMessages } from "./lib/attachmentWire.js";
 import { assertValidImageAttachment } from "./lib/attachmentInput.js";
 import { assertDesktopRequestBodyFits } from "./lib/requestBody.js";
 import type { GoogleRevocationStatus } from "./lib/googleWorkspace.js";
+import type { AppearanceSnapshotV1 } from "./theme/appearanceSnapshot.js";
 export {
   attachmentsToPromptContext,
   wireMessageContent,
@@ -865,6 +866,180 @@ export interface MobileCompanionPairing {
   path: string;
 }
 
+// ----- Canonical desktop/mobile control protocol v1 -----
+
+export interface ControlThreadSummaryV1 {
+  id: string;
+  title: string;
+  revision: number;
+  epoch: string;
+  updated_at_ms: number;
+  archived_at_ms?: number | null;
+  model?: string | null;
+  agent_id?: string | null;
+  workspace?: string | null;
+  busy: boolean;
+  queued_turns: number;
+}
+
+export interface ControlRunSnapshotV1 {
+  id: string;
+  thread_id: string;
+  status: string;
+  adapter: string;
+  created_at_ms: number;
+  updated_at_ms: number;
+  completed_at_ms?: number | null;
+  error?: unknown;
+}
+
+export interface ControlBootstrapV1 {
+  protocol: { min: number; max: number };
+  host_id: string;
+  host_name: string;
+  capabilities: Record<string, boolean>;
+  appearance?: AppearanceSnapshotV1;
+  threads: ControlThreadSummaryV1[];
+  models: unknown[];
+  agents: Array<{
+    id: string;
+    name: string;
+    description: string;
+    avatar: string;
+    tool_mode: string;
+    enabled_tool_count: number;
+    skill_mode: string;
+    enabled_skill_count: number;
+  }>;
+  active_runs: ControlRunSnapshotV1[];
+  queued_turns: Array<{
+    id: string;
+    thread_id: string;
+    command_id: string;
+    accepted_at_ms: number;
+  }>;
+  pending_approvals: Array<{
+    id: string;
+    run_id: string;
+    thread_id: string;
+    kind: string;
+    request: unknown;
+    status: string;
+    created_at_ms: number;
+  }>;
+}
+
+export interface ControlTimelineItemV1 {
+  id: string;
+  thread_id: string;
+  epoch: string;
+  seq: number;
+  run_id?: string | null;
+  type: string;
+  data: Record<string, unknown>;
+  created_at_ms: number;
+}
+
+export interface ControlTimelinePageV1 {
+  thread_id: string;
+  epoch: string;
+  first_seq?: number | null;
+  last_seq?: number | null;
+  has_older: boolean;
+  has_newer: boolean;
+  before_seq?: number | null;
+  after_seq?: number | null;
+  items: ControlTimelineItemV1[];
+}
+
+export type ControlCommandKindV1 =
+  | "thread.create"
+  | "thread.rename"
+  | "thread.archive"
+  | "thread.delete"
+  | "thread.set_model"
+  | "thread.set_agent"
+  | "message.delete"
+  | "turn.send"
+  | "turn.stop"
+  | "turn.regenerate"
+  | "turn.queue_resume"
+  | "turn.queue_delete"
+  | "approval.resolve"
+  | "worker.start"
+  | "worker.continue_solo"
+  | "worker.stop";
+
+export interface ControlCommandV1 {
+  command_id: string;
+  kind: ControlCommandKindV1;
+  thread_id?: string;
+  expected_revision?: number;
+  payload?: unknown;
+  confirmation_token?: string;
+}
+
+export interface ControlCommandResultV1 {
+  command_id: string;
+  status:
+    | "applied"
+    | "accepted"
+    | "queued"
+    | "needs_confirmation"
+    | "conflict"
+    | "failed";
+  thread_id?: string;
+  revision?: number;
+  run_id?: string;
+  queue_id?: string;
+  confirmation_token?: string;
+  message?: string;
+  data?: unknown;
+}
+
+export async function getControlBootstrap(): Promise<ControlBootstrapV1> {
+  const response = await authFetch(`${BASE}/control/v1/bootstrap`);
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response, "Control bootstrap failed."));
+  }
+  return response.json() as Promise<ControlBootstrapV1>;
+}
+
+export async function getControlTimeline(
+  threadId: string,
+  query: { tail?: number; afterSeq?: number; beforeSeq?: number } = { tail: 500 },
+): Promise<ControlTimelinePageV1> {
+  const params = new URLSearchParams();
+  if (query.tail != null) params.set("tail", String(query.tail));
+  if (query.afterSeq != null) params.set("after_seq", String(query.afterSeq));
+  if (query.beforeSeq != null) params.set("before_seq", String(query.beforeSeq));
+  const response = await authFetch(
+    `${BASE}/control/v1/threads/${encodeURIComponent(threadId)}/timeline?${params}`,
+  );
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response, "Timeline fetch failed."));
+  }
+  return response.json() as Promise<ControlTimelinePageV1>;
+}
+
+export async function sendControlCommand(
+  command: ControlCommandV1,
+): Promise<ControlCommandResultV1> {
+  const response = await authFetch(`${BASE}/control/v1/commands`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(command),
+  });
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response, "Control command failed."));
+  }
+  return response.json() as Promise<ControlCommandResultV1>;
+}
+
+export function createControlCommandId(client = "desktop"): string {
+  return `${client}-${Date.now().toString(36)}-${crypto.randomUUID()}`;
+}
+
 export interface MobileCompanionDevice {
   id: string;
   name: string;
@@ -887,6 +1062,15 @@ export interface MobileTailscaleStatus {
   public_url?: string | null;
   local_target: string;
   message?: string | null;
+}
+
+export interface MobileLanStatus {
+  enabled: boolean;
+  active: boolean;
+  port?: number | null;
+  service_type: string;
+  host_id?: string | null;
+  warning: string;
 }
 
 export type MobileRelayAction =
@@ -1590,6 +1774,23 @@ export async function disableMobileTailscaleRelay(): Promise<MobileTailscaleStat
     };
   }
   return await invoke<MobileTailscaleStatus>("disable_mobile_tailscale_relay");
+}
+
+export async function getMobileLanStatus(): Promise<MobileLanStatus> {
+  if (!inTauri) {
+    return {
+      enabled: false,
+      active: false,
+      service_type: "_milim._tcp.local.",
+      warning: "LAN mode is available in the desktop app.",
+    };
+  }
+  return await invoke<MobileLanStatus>("mobile_lan_status");
+}
+
+export async function setMobileLanEnabled(enabled: boolean): Promise<MobileLanStatus> {
+  if (!inTauri) return await getMobileLanStatus();
+  return await invoke<MobileLanStatus>("set_mobile_lan_enabled", { enabled });
 }
 
 /// Stream a chat completion, invoking `onToken` for each content delta.
@@ -2921,6 +3122,7 @@ export type AgentSkillMode = "auto" | "custom" | "none";
 export interface Agent {
   id: string;
   name: string;
+  description: string;
   system_prompt: string;
   /** @deprecated Used only as a fallback for schedules created before schedule-owned models. */
   model: string;
@@ -2933,14 +3135,16 @@ export interface Agent {
 
 export interface AgentDraft {
   name: string;
+  description: string;
   system_prompt: string;
   avatar: string;
 }
 
 const AGENT_DRAFT_SYSTEM_PROMPT = [
   "You generate reusable Milim agent profiles.",
-  "Return only one JSON object with string fields: name, avatar, system_prompt.",
+  "Return only one JSON object with string fields: name, description, avatar, system_prompt.",
   "name: concise display name, usually 2-4 words.",
+  "description: one short sentence explaining when to choose this agent.",
   "avatar: a short deterministic seed word or phrase for a generated avatar, not an emoji.",
   "system_prompt: directly usable as an agent system prompt. Include role, priorities, behavior, boundaries, and output style.",
   "Do not include markdown, code fences, comments, explanations, or extra fields.",
@@ -3033,6 +3237,7 @@ export function parseAgentDraftResponse(text: string): AgentDraft {
     raw.system_prompt ?? raw.systemPrompt,
     6000,
   );
+  const description = cleanDraftText(raw.description, 240).replace(/\s+/g, " ");
   const rawAvatar = cleanDraftText(raw.avatar, 64);
   const avatar =
     rawAvatar && !isLegacyAgentAvatar(rawAvatar)
@@ -3043,7 +3248,7 @@ export function parseAgentDraftResponse(text: string): AgentDraft {
   if (!systemPrompt)
     throw new Error("The model returned a draft without a system prompt.");
 
-  return { name, system_prompt: systemPrompt, avatar };
+  return { name, description, system_prompt: systemPrompt, avatar };
 }
 
 export interface ToolInfo {
@@ -3071,6 +3276,7 @@ export async function saveAgent(
 ): Promise<Agent | null> {
   const body = JSON.stringify({
     name: a.name,
+    description: a.description,
     model: a.model,
     system_prompt: a.system_prompt,
     tool_mode: a.tool_mode,
@@ -3157,6 +3363,7 @@ function normalizeAgent(
   return {
     id: a.id ?? "",
     name: a.name ?? "",
+    description: a.description ?? "",
     system_prompt: a.system_prompt ?? "",
     model: isUsableChatModel(model) ? model : "",
     tool_mode: toolMode,
