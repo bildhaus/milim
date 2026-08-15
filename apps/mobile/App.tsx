@@ -254,19 +254,22 @@ function AppearanceBackground({uri}: {uri: string | null}) {
   return (
     <View style={[StyleSheet.absoluteFill, {backgroundColor: palette.bg}]} pointerEvents="none">
       {uri ? (
-        <Image
-          source={{uri}}
+        <View
           style={[
-            styles.backgroundImage,
-            resizeMode === 'cover' && styles.backgroundImageCover,
-            {
-              opacity,
-              filter: treatment === 'mono' ? [{grayscale: 1}] : undefined,
-            },
-          ]}
-          resizeMode={resizeMode}
-          blurRadius={blurRadius}
-        />
+            StyleSheet.absoluteFill,
+            treatment === 'mono' ? {filter: [{grayscale: 1}]} : null,
+          ]}>
+          <Image
+            source={{uri}}
+            style={[
+              styles.backgroundImage,
+              resizeMode === 'cover' && styles.backgroundImageCover,
+              {opacity},
+            ]}
+            resizeMode={resizeMode}
+            blurRadius={blurRadius}
+          />
+        </View>
       ) : null}
       {overlayOpacity > 0 ? (
         <View style={[StyleSheet.absoluteFill, {backgroundColor: background.overlay_color ?? '#000000', opacity: overlayOpacity}]} />

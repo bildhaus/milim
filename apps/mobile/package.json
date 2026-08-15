@@ -15,9 +15,9 @@
     "@op-engineering/op-sqlite": "18.0.0",
     "@react-native-documents/picker": "12.0.2",
     "@react-native-masked-view/masked-view": "0.3.2",
-    "@react-native/new-app-screen": "0.87.0",
+    "@react-native/new-app-screen": "0.86.0",
     "react": "19.2.3",
-    "react-native": "0.87.0",
+    "react-native": "0.86.0",
     "react-native-blob-util": "0.24.10",
     "react-native-camera-kit": "18.0.1",
     "react-native-image-picker": "8.2.1",
@@ -34,13 +34,13 @@
     "@react-native-community/cli": "20.2.0",
     "@react-native-community/cli-platform-android": "20.2.0",
     "@react-native-community/cli-platform-ios": "20.2.0",
-    "@react-native/babel-preset": "0.87.0",
-    "@react-native/codegen": "0.87.0",
-    "@react-native/eslint-config": "0.87.0",
-    "@react-native/gradle-plugin": "0.87.0",
-    "@react-native/jest-preset": "0.87.0",
-    "@react-native/metro-config": "0.87.0",
-    "@react-native/typescript-config": "0.87.0",
+    "@react-native/babel-preset": "0.86.0",
+    "@react-native/codegen": "0.86.0",
+    "@react-native/eslint-config": "0.86.0",
+    "@react-native/gradle-plugin": "0.86.0",
+    "@react-native/jest-preset": "0.86.0",
+    "@react-native/metro-config": "0.86.0",
+    "@react-native/typescript-config": "0.86.0",
     "@types/jest": "^29.5.13",
     "@types/node": "26.2.0",
     "@types/react": "^19.2.0",
@@ -52,7 +52,7 @@
     "typescript": "^6.0.3"
   },
   "engines": {
-    "node": ">= 22.11.0"
+    "node": ">= 22.13.0"
   },
   "op-sqlite": {
     "performanceMode": true
