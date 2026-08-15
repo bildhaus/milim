@@ -43,6 +43,7 @@ jobs:
           cache-dependency-path: apps/mobile/pnpm-lock.yaml
       - uses: ruby/setup-ruby@v1
         with:
+          ruby-version: '3.3'
           bundler-cache: false
       - run: pnpm -C apps/mobile install --frozen-lockfile
       - name: Verify release version
