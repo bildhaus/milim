@@ -280,6 +280,13 @@ export interface PairedCredential {
   device_name: string;
 }
 
+export interface MobileHostProbe {
+  service: 'milim-mobile-control';
+  host_id: string;
+  host_name: string;
+  protocol: ProtocolRangeV1;
+}
+
 export function isProtocolCompatible(range: ProtocolRangeV1): boolean {
   return range.min <= CONTROL_PROTOCOL_VERSION && range.max >= CONTROL_PROTOCOL_VERSION;
 }

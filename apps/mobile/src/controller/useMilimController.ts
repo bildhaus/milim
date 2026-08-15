@@ -8,6 +8,7 @@ import {
   claimPairing,
   connectControlSocket,
   fetchBootstrap,
+  fetchMobileHostProbe,
   fetchTimeline,
   newCommandId,
   normalizeEndpoint,
@@ -28,7 +29,7 @@ import type {
 } from '../control/types';
 import {isProtocolCompatible} from '../control/types';
 import {discoverMilimHosts} from '../discovery';
-import {parsePairingClaim} from '../pairing';
+import {assertHostIdentity, parsePairingClaim} from '../pairing';
 import {
   listHosts,
   readDraft,
@@ -116,6 +117,7 @@ export function useMilimController() {
     for (const endpoint of savedCandidates) {
       try {
         const result = await fetchBootstrap(endpoint, key);
+        assertHostIdentity(host.hostId, result.host_id);
         return {endpoint, result};
       } catch (error) {
         lastFailure = error;
@@ -128,6 +130,7 @@ export function useMilimController() {
     for (const endpoint of candidates) {
       try {
         const result = await fetchBootstrap(endpoint, key);
+        assertHostIdentity(host.hostId, result.host_id);
         return {endpoint, result};
       } catch (error) {
         lastFailure = error;
@@ -140,6 +143,7 @@ export function useMilimController() {
     const host = activeHostRef.current;
     if (!host || !credential.current || !host.lastSuccessfulUrl) return null;
     const next = await fetchBootstrap(host.lastSuccessfulUrl, credential.current);
+    assertHostIdentity(host.hostId, next.host_id);
     setBootstrap(current =>
       current?.appearance?.revision &&
       current.appearance.revision === next.appearance?.revision
@@ -222,9 +226,13 @@ export function useMilimController() {
           endpoint,
           credential.current!,
           event => {
+            if (event.host_id !== host.hostId) {
+              setLastError('Ignored an event from a different milim desktop.');
+              return;
+            }
             const currentTimeline = timelineRef.current;
             if (currentTimeline) {
-              const next = applyControlEvent(currentTimeline, event);
+              const next = applyControlEvent(currentTimeline, event, host.hostId);
               timelineRef.current = next;
               setTimeline(next);
             }
@@ -349,23 +357,29 @@ export function useMilimController() {
           .map(host => normalizeEndpoint(host.endpoint)),
       ].filter((value, index, values) => values.indexOf(value) === index);
       let endpoint: string | null = null;
+      let lastFailure: unknown = null;
       for (const candidate of candidates) {
-        const reachable = await Promise.race([
-          fetch(`${candidate}/mobile`).then(response => response.ok).catch(() => false),
-          new Promise<boolean>(resolve => setTimeout(() => resolve(false), 2_000)),
-        ]);
-        if (reachable) {
+        try {
+          const probe = await Promise.race([
+            fetchMobileHostProbe(candidate),
+            new Promise<null>(resolve => setTimeout(() => resolve(null), 2_000)),
+          ]);
+          if (!probe || probe.service !== 'milim-mobile-control') continue;
+          assertHostIdentity(claim.hostId, probe.host_id);
           endpoint = candidate;
           break;
+        } catch (error) {
+          lastFailure = error;
         }
       }
       if (!endpoint) {
-        throw new Error(
+        throw lastFailure ?? new Error(
           'The paired desktop was not reachable at its saved URL or matching LAN discovery record.',
         );
       }
       const paired = await claimPairing(endpoint, claim.pairId, claim.secret, deviceName);
       const result = await fetchBootstrap(endpoint, paired.device_key);
+      assertHostIdentity(claim.hostId, result.host_id);
       if (!isProtocolCompatible(result.protocol)) {
         throw new Error(
           `Desktop protocol ${result.protocol.min}-${result.protocol.max} is not compatible with mobile v1.`,

@@ -1,12 +1,9 @@
-import {parsePairingClaim} from '../src/pairing';
+import {assertHostIdentity, parsePairingClaim} from '../src/pairing';
 
-test('parses legacy https pairing links for native claim', () => {
-  expect(parsePairingClaim('https://desktop.example:10000/mobile?pair_id=p1&secret=s1')).toEqual({
-    endpoint: 'https://desktop.example:10000',
-    pairId: 'p1',
-    secret: 's1',
-    hostId: undefined,
-  });
+test('rejects host-less legacy pairing links', () => {
+  expect(() =>
+    parsePairingClaim('https://desktop.example:10000/mobile?pair_id=p1&secret=s1'),
+  ).toThrow(/valid milim pairing claim/);
 });
 
 test('parses the native deep-link payload', () => {
@@ -15,4 +12,9 @@ test('parses the native deep-link payload', () => {
 
 test('rejects incomplete claims', () => {
   expect(() => parsePairingClaim('milim://pair?pair_id=x')).toThrow(/valid milim pairing claim/);
+});
+
+test('rejects a probe or bootstrap from a different host', () => {
+  expect(() => assertHostIdentity('host-a', 'host-b')).toThrow(/different milim desktop/);
+  expect(() => assertHostIdentity('host-a', 'host-a')).not.toThrow();
 });

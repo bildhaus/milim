@@ -93,9 +93,6 @@ import {
   type HarnessEventEnvelope,
   type HarnessRunRequest,
   type MediaGenerationResult,
-  type MobileThreadGroup,
-  type MobileThreadSummary,
-  type MobileWorkerRunSnapshot,
   type MemoryNotice,
   type ModelInfo,
   type PreviewAppFile,
@@ -122,13 +119,11 @@ import {
   normalizeVirtualFilePath,
   sessionVirtualProjectFiles,
   useSessions,
-  type Project,
   type QueuedMessage,
   type Session,
   type SessionBrowserSession,
   type SessionBrowserTab,
   type SessionPreviewRuntime,
-  type SessionSidebarState,
   type SessionVirtualFile,
   type HotSwapAction,
   type NativeSessionMode,
@@ -301,8 +296,6 @@ import {
 import { createChatMessageId } from "../lib/messageIds.js";
 import { flushDeferredUserStateWrites } from "../persistence/userStateStorage";
 import { useSettings } from "../settings/store";
-import { themeCssVariables } from "../theme/applyTheme";
-import { useTheme } from "../theme/store";
 import { shortcutLabel, shortcutMatchesEvent } from "../ui/shortcuts";
 import { sendMilimNotification } from "../lib/nativeNotifications";
 import { createInteractiveChat } from "../lib/newChatCoordinator";
@@ -328,7 +321,6 @@ import {
   UserRound,
   X,
 } from "./icons";
-import { groupSessionsByProjects } from "./Sidebar";
 import { InlineMediaControls } from "./InlineMediaControls";
 import { WorkersInspector, WorkersSummary } from "./WorkersInspector";
 import { ToolApprovalPrompt } from "./ToolApprovalPrompt";
@@ -359,7 +351,6 @@ import {
   useChatInspectorController,
 } from "./chat/useChatInspectorController";
 import { useChatConversationController } from "./chat/useChatConversationController";
-import { useChatMobileRelayController } from "./chat/useChatMobileRelayController";
 import { useChatMediaController } from "./chat/useChatMediaController";
 import { useChatWorkerController } from "./chat/useChatWorkerController";
 
@@ -469,20 +460,6 @@ function mergeTokenUsage(
   };
 }
 
-function mobileThreadMessages(
-  messages: ChatMessage[],
-): { role: string; content: string }[] {
-  return messages
-    .filter(
-      (message) => message.role === "user" || message.role === "assistant",
-    )
-    .map((message) => ({
-      role: message.role,
-      content: mobileThreadMessageContent(message),
-    }))
-    .filter((message) => message.content.trim());
-}
-
 function workerRunSynthesisMessage(record: WorkerRunRecord): ChatMessage {
   const allFailed = !record.workers.some((worker) => worker.status === "done");
   const results = record.workers.map((worker, index) => {
@@ -576,129 +553,6 @@ function nativeWorkerRunRecord(
     },
     workers,
   };
-}
-
-function mobileThreadMessageContent(message: ChatMessage): string {
-  if (message.content.trim()) return message.content;
-  return (message.streamParts ?? [])
-    .filter(
-      (part): part is Extract<ChatStreamPart, { kind: "text" }> =>
-        part.kind === "text",
-    )
-    .map((part) => part.content)
-    .join("");
-}
-
-function mobileFolderLabel(folder: string): string {
-  return folder.split(/[\\/]/).filter(Boolean).pop() || folder || "Project";
-}
-
-function mobileProjectByFolder(projects: Project[]): Map<string, Project> {
-  return new Map(
-    projects
-      .filter((project) => !project.archivedAt)
-      .map((project) => [project.folder, project]),
-  );
-}
-
-function mobileThreadSummary(
-  session: ChatSessionSummary,
-  running: Set<string>,
-  projectByFolder: Map<string, Project>,
-): MobileThreadSummary {
-  const folder = session.settings?.folder?.trim() ?? "";
-  const project = folder ? projectByFolder.get(folder) : undefined;
-  return {
-    id: session.id,
-    title: session.title || "New chat",
-    model: session.model ?? null,
-    updated_at: Math.floor(session.updatedAt / 1000),
-    busy: running.has(session.id),
-    parent_id: session.parentId ?? null,
-    project_label: folder ? (project?.name ?? mobileFolderLabel(folder)) : null,
-    project_path: folder || null,
-  };
-}
-
-function mobileThreadSummaries(
-  sessions: ChatSessionSummary[],
-  projects: Project[],
-  generatingSessionIds: string[],
-): MobileThreadSummary[] {
-  const running = new Set(generatingSessionIds);
-  const projectByFolder = mobileProjectByFolder(projects);
-  const archivedProjectFolders = new Set(
-    projects
-      .filter((project) => project.archivedAt)
-      .map((project) => project.folder),
-  );
-  return sessions
-    .filter((session) => {
-      if (session.parentId) return false;
-      if (session.archivedAt) return false;
-      const folder = session.settings?.folder?.trim() ?? "";
-      return !folder || !archivedProjectFolders.has(folder);
-    })
-    .slice()
-    .sort((a, b) => b.updatedAt - a.updatedAt)
-    .map((session) => mobileThreadSummary(session, running, projectByFolder));
-}
-
-function mobileWorkerRun(record?: WorkerRunRecord): MobileWorkerRunSnapshot | null {
-  if (!record) return null;
-  return {
-    id: record.run.id,
-    status: record.run.status,
-    tasks: record.run.tasks.map((task) => {
-      const worker = record.workers.find(
-        (item) => item.prompt === task.prompt || item.title === task.title,
-      );
-      return {
-        title: task.title,
-        model: task.model,
-        access: worker?.access ?? task.access,
-        status: worker?.status ?? (record.run.status === "proposed" ? "proposed" : "queued"),
-        result: worker?.summary ?? worker?.error ?? null,
-      };
-    }),
-  };
-}
-
-function mobileThreadGroups(
-  sessions: ChatSessionSummary[],
-  projects: Project[],
-  sidebar: SessionSidebarState,
-  generatingSessionIds: string[],
-): MobileThreadGroup[] {
-  const running = new Set(generatingSessionIds);
-  const projectByFolder = mobileProjectByFolder(projects);
-  return groupSessionsByProjects(sessions, projects, sidebar, "")
-    .map((group) => ({
-      id: group.id,
-      label: group.label,
-      subtitle: group.subtitle ?? null,
-      project_id: group.projectId ?? null,
-      threads: group.sessions.map((session) =>
-        mobileThreadSummary(session, running, projectByFolder),
-      ),
-    }))
-    .filter((group) => group.threads.length > 0);
-}
-
-function mobileModelSummaries(models: ModelInfo[]) {
-  return models
-    .filter(isUsableMobileModel)
-    .slice(0, 120)
-    .map((model) => ({ id: model.id, provider: model.owned_by || null }));
-}
-
-function isUsableMobileModel(model: ModelInfo): boolean {
-  return (
-    Boolean(model.id.trim()) &&
-    !model.capabilities?.imageOutput &&
-    !model.capabilities?.videoOutput &&
-    !model.capabilities?.musicOutput
-  );
 }
 
 const CHAT_MAIN_MIN_WIDTH = 420;
@@ -1597,7 +1451,6 @@ export function ChatView({
     }
   }, [activeTitle, attentionKey]);
   const projects = useSessions((s) => s.projects);
-  const sidebarState = useSessions((s) => s.sidebar);
   const generatingSessionIds = useSessions((s) => s.generatingSessionIds);
   const liveWorkerSessionIdsKey = useSessions((s) =>
     s.sessions
@@ -1698,9 +1551,6 @@ export function ChatView({
   const experimentalHashlinePatch = useUiPreferences(
     (s) => s.experimentalHashlinePatch,
   );
-  const activeTheme = useTheme((s) => s.theme);
-  const backgroundFit = useUiPreferences((s) => s.backgroundFit);
-  const backgroundTreatment = useUiPreferences((s) => s.backgroundTreatment);
   const showEmptyChatRidgeline = useUiPreferences((s) => s.showEmptyChatRidgeline);
   const pushNotice = useUiPreferences((s) => s.pushNotice);
   const quickActionMode = useUiPreferences((s) => s.quickActionMode);
@@ -6817,70 +6667,6 @@ export function ChatView({
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, []);
-
-  const mobileSnapshot = useMemo(
-    () => ({
-      session_id: activeId,
-      title: activeTitle,
-      model: effectiveModel.trim() || null,
-      busy,
-      messages: mobileThreadMessages(messages),
-      threads: mobileThreadSummaries(
-        sessionSummaries,
-        projects,
-        generatingSessionIds,
-      ),
-      groups: mobileThreadGroups(
-        sessionSummaries,
-        projects,
-        sidebarState,
-        generatingSessionIds,
-      ),
-      models: mobileModelSummaries(pickerModels),
-      theme: {
-        is_dark: activeTheme.isDark,
-        css_vars: themeCssVariables(activeTheme),
-        background_fit: backgroundFit,
-        background_treatment: backgroundTreatment,
-      },
-      worker_run: mobileWorkerRun(activeWorkerRun),
-    }),
-    [
-      activeId,
-      activeTheme,
-      activeWorkerRun,
-      activeTitle,
-      backgroundFit,
-      backgroundTreatment,
-      busy,
-      effectiveModel,
-      generatingSessionIds,
-      messages,
-      pickerModels,
-      projects,
-      sessionSummaries,
-      sidebarState,
-    ],
-  );
-  useChatMobileRelayController({
-    pollKey: `${activeId}\u0000${busy}\u0000${effectiveModel}`,
-    snapshot: mobileSnapshot,
-    setInput,
-    setPendingAttachments,
-    setChatNotice,
-    setProvidersOpen,
-    pushNotice,
-    createAttachmentId: attachmentId,
-    runTurn,
-    runTurnAndDrain,
-    drainQueuedMessages,
-    approveWorkerRun,
-    continueWorkerRunSolo,
-    stopActiveWorkerRun,
-    stop,
-    regenerate,
-    deleteMessageAt,
-  });
 
   const emptyThread = messages.length === 0;
   const activeAssistantRuntime = useMemo(() => {

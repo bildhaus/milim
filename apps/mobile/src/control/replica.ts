@@ -77,7 +77,9 @@ export function applyTimelinePage(
 export function applyControlEvent(
   current: TimelineReplica,
   event: ControlEventV1,
+  expectedHostId: string,
 ): TimelineReplica {
+  if (event.host_id !== expectedHostId) return current;
   if (event.type === 'sync.required') {
     return {...current, needsTailRefresh: true};
   }

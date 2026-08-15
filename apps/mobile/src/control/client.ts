@@ -3,6 +3,7 @@ import type {
   ControlCommandResultV1,
   ControlCommandV1,
   ControlEventV1,
+  MobileHostProbe,
   PairedCredential,
   TimelinePageV1,
 } from './types';
@@ -73,6 +74,10 @@ export async function claimPairing(
     method: 'POST',
     body: JSON.stringify({pair_id: pairId, secret, device_name: deviceName}),
   });
+}
+
+export async function fetchMobileHostProbe(endpoint: string): Promise<MobileHostProbe> {
+  return requestJson(endpoint, '/mobile');
 }
 
 export async function fetchBootstrap(

@@ -9,7 +9,7 @@ order: 80
 updated: 2026-08-15
 ---
 
-These optional extensions share the same desktop-owned state. Media routes generate images, videos, and prompt-to-music results, while native and compatibility mobile clients control the Rust-owned canonical threads and runs. Voice input, dictation, transcription, TTS, audio remix/upload, and voice-chat routes are not part of Milim.
+These optional extensions share the same desktop-owned state. Media routes generate images, videos, and prompt-to-music results, while the native mobile client controls the Rust-owned canonical threads and runs. Voice input, dictation, transcription, TTS, audio remix/upload, and voice-chat routes are not part of Milim.
 
 ## Setup paths
 
@@ -59,7 +59,7 @@ Open Settings -> Mobile and enable the companion bridge. **Set up with Tailscale
 
 Opt-in LAN access is disabled by default. Enabling it binds only the pairing and `/control/v1` mobile router, selects an available port, and advertises `_milim._tcp.local` with the stable host ID. Plain HTTP should be used only on a trusted network. Manual URLs remain available, including `http://10.0.2.2:<port>` for an Android emulator. The phone tries the last successful endpoint, other saved candidates, matching mDNS discovery, and then a manually entered URL. The Hosts screen leads with friendly connection summaries and compatibility state; exact endpoints, timestamps, protocol bounds, and the destructive device-removal action remain available in host details instead of dominating the main screen.
 
-Scan or open the native `milim://pair` QR/deep link. The short-lived claim contains the one-time pairing secret, stable host identity, protocol version, and selected endpoint. Device credentials are stored in iOS Keychain or Android Keystore and can be revoked individually from desktop or removed by the phone. A revoked key can no longer bootstrap, mint a socket ticket, or keep a WebSocket session alive.
+Scan or open the native `milim://pair` QR/deep link. The short-lived claim contains the stable host identity, protocol version, selected endpoint, and a pairing secret that is consumed by the first successful claim. Before sending that secret, the app probes the endpoint and rejects a host identity mismatch. Device credentials are stored in iOS Keychain or Android Keystore and can be revoked individually from desktop or removed by the phone. A revoked key can no longer bootstrap, mint a socket ticket, or keep a WebSocket session alive.
 
 ### Foreground synchronization
 
@@ -68,7 +68,3 @@ The phone paints its cached tail immediately, then compares timeline epoch and s
 The WebSocket is maintained only while the operating system permits foreground execution. Backgrounding saves drafts and cursors; foregrounding performs authoritative catch-up and surfaces pending attention. There are no v1 push notifications and no promise that the app remains connected while closed.
 
 Offline prompts remain drafts. Approvals, Worker decisions, destructive commands, and stale prompts are never auto-sent after reconnect. An ambiguous command response may be retried only with the same `command_id`, which returns the original durable result instead of duplicating work.
-
-### PWA compatibility window
-
-The existing `/mobile` phone PWA consumes the same versioned control contract and remains functional during native parity testing. It is a compatibility client, not the execution owner. Native becomes the documented default only after the cross-client acceptance matrix passes; the PWA is then marked deprecated for one compatibility window and removed in a later release.

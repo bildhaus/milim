@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import QRCode from "qrcode";
 import {
   apiBaseUrl,
-  configureMobileTailscaleRelay,
+  configureMobileTailscale,
   getControlBootstrap,
   getMobileCompanionStatus,
   getMobileLanStatus,
@@ -85,12 +85,13 @@ export function MobileCompanionSettings() {
   }, [status?.pairing, urlBase]);
 
   const nativePairingUrl = useMemo(() => {
-    if (!status?.pairing || !pairingUrl) return "";
+    const pairingHostId = hostId || lan?.host_id || "";
+    if (!status?.pairing || !pairingUrl || !pairingHostId) return "";
     const query = new URLSearchParams({
       endpoint: normalizeBase(urlBase),
       pair_id: status.pairing.id,
       secret: new URL(pairingUrl).searchParams.get("secret") ?? "",
-      host_id: hostId || lan?.host_id || "",
+      host_id: pairingHostId,
     });
     return `milim://pair?${query}`;
   }, [hostId, lan?.host_id, pairingUrl, status?.pairing, urlBase]);
@@ -167,7 +168,7 @@ export function MobileCompanionSettings() {
     setStatus((current) =>
       current
         ? { ...current, enabled: true, pairing }
-        : { enabled: true, pairing, devices: [], queued_events: 0 },
+        : { enabled: true, pairing, devices: [] },
     );
     const base = normalizeBase(baseValue);
     if (base) {
@@ -200,20 +201,20 @@ export function MobileCompanionSettings() {
       if (!enabled) {
         setStatus(await setMobileCompanionEnabled(true));
       }
-      const relay = await configureMobileTailscaleRelay();
-      if (!relay.installed) {
+      const connection = await configureMobileTailscale();
+      if (!connection.installed) {
         setTailscaleInstallVisible(true);
         await openTailscaleDownload("Tailscale is not installed. I opened the official download page. Install it, sign in, then click Set up with Tailscale again.");
         return;
       }
       setTailscaleInstallVisible(false);
-      if (!relay.logged_in || !relay.public_url) {
-        throw new Error(relay.message || "Tailscale is not ready.");
+      if (!connection.logged_in || !connection.public_url) {
+        throw new Error(connection.message || "Tailscale is not ready.");
       }
-      if (!relay.serve_configured) {
-        throw new Error(relay.message || "Tailscale Serve did not report the mobile relay target.");
+      if (!connection.serve_configured) {
+        throw new Error(connection.message || "Tailscale Serve did not report the mobile control target.");
       }
-      await createPairing(relay.public_url, relay.message || "Tailscale Serve is ready. Open the pairing link on your phone.");
+      await createPairing(connection.public_url, connection.message || "Tailscale Serve is ready. Open the pairing link on your phone.");
     } catch (error) {
       setNotice({ tone: "error", message: `Tailscale setup failed: ${error instanceof Error ? error.message : String(error)}` });
     } finally {
@@ -306,7 +307,7 @@ export function MobileCompanionSettings() {
         </button>
       </div>
 
-      {pairingUrl && (
+      {nativePairingUrl && (
         <div className="mobile-pairing-panel">
           {qrDataUrl && <img className="mobile-pairing-qr" src={qrDataUrl} alt="Mobile companion pairing QR code" />}
           <div className="mobile-pairing-copy">
@@ -315,7 +316,6 @@ export function MobileCompanionSettings() {
             <button className="btn-ghost" type="button" onClick={() => void copyPairingUrl()}>
               <Copy size={13} /> Copy native link
             </button>
-            <small>Legacy web companion: {pairingUrl}</small>
             <small>Expires {formatTime(status?.pairing?.expires_at)}.</small>
           </div>
         </div>

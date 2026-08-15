@@ -417,21 +417,18 @@ impl ModelService for ChildThreadToolBackend {
 }
 
 #[tokio::test]
-async fn mobile_companion_pairs_relays_and_revokes_device() {
-    let base = spawn(mobile_test_state()).await;
+async fn mobile_companion_pairs_once_and_revokes_device() {
+    let base = spawn(control_mobile_test_state()).await;
     let client = reqwest::Client::new();
 
-    let status: Value = client
+    client
         .post(format!("{base}/mobile/enabled"))
         .json(&json!({ "enabled": true }))
         .send()
         .await
         .unwrap()
-        .json()
-        .await
+        .error_for_status()
         .unwrap();
-    assert_eq!(status["enabled"], true);
-
     let pairing: Value = client
         .post(format!("{base}/mobile/pairing"))
         .send()
@@ -440,7 +437,6 @@ async fn mobile_companion_pairs_relays_and_revokes_device() {
         .json()
         .await
         .unwrap();
-    let pair_id = pairing["id"].as_str().unwrap();
     let secret = pairing["path"]
         .as_str()
         .unwrap()
@@ -451,403 +447,99 @@ async fn mobile_companion_pairs_relays_and_revokes_device() {
     let paired: Value = client
         .post(format!("{base}/mobile/pair"))
         .json(&json!({
-            "pair_id": pair_id,
+            "pair_id": pairing["id"],
             "secret": secret,
             "device_name": "Pixel QA"
         }))
         .send()
         .await
         .unwrap()
+        .error_for_status()
+        .unwrap()
         .json()
         .await
         .unwrap();
     let device_id = paired["device_id"].as_str().unwrap();
     let device_key = paired["device_key"].as_str().unwrap();
-    assert_eq!(paired["device_name"], "Pixel QA");
 
-    let query_only_stream = client
-        .get(format!("{base}/mobile/thread/events?key={device_key}"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        query_only_stream.status(),
-        reqwest::StatusCode::UNAUTHORIZED
-    );
-
-    let paired_pwa: Value = client
+    let replay = client
         .post(format!("{base}/mobile/pair"))
         .json(&json!({
-            "pair_id": pair_id,
+            "pair_id": pairing["id"],
             "secret": secret,
-            "device_name": "Pixel QA PWA"
+            "device_name": "Unexpected second phone"
         }))
         .send()
         .await
-        .unwrap()
-        .json()
-        .await
         .unwrap();
-    let pwa_device_id = paired_pwa["device_id"].as_str().unwrap();
-    let pwa_device_key = paired_pwa["device_key"].as_str().unwrap();
-    assert_ne!(pwa_device_key, device_key);
+    assert_eq!(replay.status(), reqwest::StatusCode::UNAUTHORIZED);
 
-    let no_thread = client
-        .get(format!("{base}/mobile/thread"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(no_thread.status(), reqwest::StatusCode::UNAUTHORIZED);
-
-    let published: Value = client
-        .post(format!("{base}/mobile/thread"))
-        .json(&json!({
-            "session_id": "session-1",
-            "title": "Mobile QA",
-            "model": "test-model",
-            "busy": true,
-            "messages": [
-                { "role": "user", "content": "hello desktop" },
-                { "role": "assistant", "content": "hello phone" }
-            ],
-            "threads": [
-                { "id": "session-1", "title": "Mobile QA", "model": "test-model", "updated_at": 1, "busy": true, "project_label": "Milim", "project_path": "C:\\Dev\\milim" },
-                { "id": "session-2", "title": "Second thread", "model": "test-model", "updated_at": 2 }
-            ],
-            "groups": [
-                {
-                    "id": "project:C:\\Dev\\milim",
-                    "label": "Milim",
-                    "subtitle": "C:\\Dev\\milim",
-                    "project_id": "project:C:\\Dev\\milim",
-                    "threads": [
-                        { "id": "session-1", "title": "Mobile QA", "model": "test-model", "updated_at": 1, "busy": true, "project_label": "Milim", "project_path": "C:\\Dev\\milim" }
-                    ]
-                },
-                {
-                    "id": "chats",
-                    "label": "Chats",
-                    "threads": [
-                        { "id": "session-2", "title": "Second thread", "model": "test-model", "updated_at": 2 }
-                    ]
-                }
-            ],
-            "models": [
-                { "id": "test-model", "provider": "Test" },
-                { "id": "other-model", "provider": "Test" }
-            ],
-            "theme": {
-                "is_dark": false,
-                "css_vars": {
-                    "--bg-primary": "#fafafa",
-                    "--primary-text": "#111111",
-                    "--bg-image": "url(data:image/png;base64,abc)",
-                    "bad-key": "ignored"
-                },
-                "background_fit": "contain",
-                "background_treatment": "mono"
-            }
-        }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(published["thread"]["version"], 1);
-
-    let thread: Value = client
-        .get(format!("{base}/mobile/thread"))
-        .bearer_auth(device_key)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(thread["thread"]["title"], "Mobile QA");
-    assert_eq!(thread["thread"]["busy"], true);
-    assert_eq!(thread["thread"]["messages"][0]["content"], "hello desktop");
-    assert_eq!(thread["thread"]["threads"][1]["title"], "Second thread");
-    assert_eq!(thread["thread"]["threads"][0]["project_label"], "Milim");
-    assert_eq!(thread["thread"]["groups"][0]["label"], "Milim");
-    assert_eq!(
-        thread["thread"]["groups"][0]["threads"][0]["title"],
-        "Mobile QA"
-    );
-    assert_eq!(thread["thread"]["groups"][1]["id"], "chats");
-    assert_eq!(thread["thread"]["models"][1]["id"], "other-model");
-    assert_eq!(thread["thread"]["theme"]["is_dark"], false);
-    assert_eq!(
-        thread["thread"]["theme"]["css_vars"]["--bg-primary"],
-        "#fafafa"
-    );
-    assert_eq!(
-        thread["thread"]["theme"]["css_vars"]["--bg-image"],
-        "url(data:image/png;base64,abc)"
-    );
-    assert!(thread["thread"]["theme"]["css_vars"]["bad-key"].is_null());
-    assert_eq!(thread["thread"]["theme"]["background_fit"], "contain");
-    assert_eq!(thread["thread"]["theme"]["background_treatment"], "mono");
-
-    let bearer_stream = client
-        .get(format!("{base}/mobile/thread/events"))
+    let connected = client
+        .get(format!("{base}/mobile/device/status"))
         .bearer_auth(device_key)
         .send()
         .await
         .unwrap();
-    assert_eq!(bearer_stream.status(), reqwest::StatusCode::OK);
-    drop(bearer_stream);
+    assert_eq!(connected.status(), reqwest::StatusCode::OK);
 
-    let switch: Value = client
-        .post(format!("{base}/mobile/relay"))
-        .bearer_auth(device_key)
-        .json(&json!({ "text": "session-2", "action": "switch_thread" }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(switch["event"]["action"], "switch_thread");
-
-    let switch_events: Value = client
-        .get(format!("{base}/mobile/events"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(switch_events["events"][0]["action"], "switch_thread");
-
-    let stop: Value = client
-        .post(format!("{base}/mobile/relay"))
-        .bearer_auth(device_key)
-        .json(&json!({ "action": "stop" }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(stop["event"]["action"], "stop");
-
-    let stop_events: Value = client
-        .get(format!("{base}/mobile/events"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(stop_events["events"][0]["action"], "stop");
-
-    let unauth = client
-        .post(format!("{base}/mobile/relay"))
-        .json(&json!({ "text": "should not relay", "action": "append" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(unauth.status(), reqwest::StatusCode::UNAUTHORIZED);
-
-    let relay: Value = client
-        .post(format!("{base}/mobile/relay"))
-        .bearer_auth(device_key)
-        .json(&json!({
-            "text": "hello from phone",
-            "action": "send",
-            "attachments": [
-                {
-                    "id": "att-1",
-                    "name": "note.txt",
-                    "mime": "text/plain",
-                    "size": 5,
-                    "content": "hello"
-                }
-            ]
-        }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(relay["ok"], true);
-    assert_eq!(relay["event"]["device_name"], "Pixel QA");
-
-    let events: Value = client
-        .get(format!("{base}/mobile/events"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(events["events"].as_array().unwrap().len(), 1);
-    assert_eq!(events["events"][0]["text"], "hello from phone");
-    assert_eq!(events["events"][0]["action"], "send");
-    assert_eq!(events["events"][0]["attachments"][0]["name"], "note.txt");
-
-    let drained: Value = client
-        .get(format!("{base}/mobile/events"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(drained["events"].as_array().unwrap().len(), 0);
-
-    let revoked: Value = client
+    client
         .delete(format!("{base}/mobile/devices/{device_id}"))
         .send()
         .await
         .unwrap()
-        .json()
-        .await
+        .error_for_status()
         .unwrap();
-    assert_eq!(revoked["devices"].as_array().unwrap().len(), 1);
-    assert_eq!(revoked["devices"][0]["id"], pwa_device_id);
-
-    let rejected = client
-        .post(format!("{base}/mobile/relay"))
+    let revoked = client
+        .get(format!("{base}/mobile/device/status"))
         .bearer_auth(device_key)
-        .json(&json!({ "text": "after revoke", "action": "append" }))
         .send()
         .await
         .unwrap();
-    assert_eq!(rejected.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert_eq!(revoked.status(), reqwest::StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
-async fn mobile_companion_phone_router_exposes_only_phone_routes() {
-    let base = spawn_mobile(mobile_test_state()).await;
+async fn mobile_phone_router_exposes_native_control_only() {
+    let base = spawn_mobile(control_mobile_test_state()).await;
     let client = reqwest::Client::new();
 
-    let page = client.get(format!("{base}/mobile")).send().await.unwrap();
-    assert_eq!(page.status(), reqwest::StatusCode::OK);
-    let page_text = page.text().await.unwrap();
-    assert!(page_text.contains("Milim Relay"));
-    assert!(page_text.contains("maximum-scale=1"));
-    assert!(page_text.contains("/mobile/manifest.webmanifest"));
-    assert!(page_text.contains("/mobile/icon.png"));
-    assert!(page_text.contains("/mobile/wordmark.svg"));
-    assert!(page_text.contains("--app-height"));
-    assert!(page_text.contains("--composer-height"));
-    assert!(page_text.contains("--message-actions-inset"));
-    assert!(page_text.contains("visualViewport"));
-    assert!(page_text.contains("syncComposerInset"));
-    assert!(page_text.contains("scroll-padding-bottom"));
-    assert!(page_text.contains("overscroll-behavior: contain"));
-    assert!(page_text.contains("/control/v1/bootstrap"));
-    assert!(page_text.contains("/control/v1/socket-ticket"));
-    assert!(page_text.contains("/control/v1/ws?ticket="));
-    assert!(page_text.contains("\"Authorization\": `Bearer ${store.key}`"));
-    assert!(!page_text.contains("new EventSource"));
-    assert!(!page_text.contains("/mobile/thread/events?key="));
-    assert!(!page_text.contains("/control/v1/ws?key="));
-    assert!(page_text.contains("renderMarkdown"));
-    assert!(page_text.contains("safeHref"));
-    assert!(page_text.contains("Scan desktop QR"));
-    assert!(page_text.contains("pairScanner"));
-    assert!(page_text.contains("applyThemeSnapshot"));
-    assert!(page_text.contains("bg-fit-cover"));
-    assert!(page_text.contains("url.origin !== location.origin"));
-    assert!(page_text.contains("thread-drawer"));
-    assert!(page_text.contains("thread?.groups"));
-
-    let manifest: Value = client
-        .get(format!("{base}/mobile/manifest.webmanifest"))
+    let probe: Value = client
+        .get(format!("{base}/mobile"))
         .send()
         .await
+        .unwrap()
+        .error_for_status()
         .unwrap()
         .json()
         .await
         .unwrap();
-    assert_eq!(manifest["start_url"], "/mobile");
-    assert!(manifest["icons"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|icon| icon["src"] == "/mobile/icon.png"));
+    assert_eq!(probe["service"], "milim-mobile-control");
+    assert_eq!(probe["host_name"], "Control fixture");
+    assert_eq!(probe["protocol"], json!({ "min": 1, "max": 1 }));
+    assert!(probe["host_id"]
+        .as_str()
+        .is_some_and(|value| value.starts_with("host-")));
 
-    let service_worker = client
-        .get(format!("{base}/mobile/sw.js"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(service_worker.status(), reqwest::StatusCode::OK);
-
-    let icon = client
-        .get(format!("{base}/mobile/icon.svg"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(icon.status(), reqwest::StatusCode::OK);
-
-    let icon_png = client
-        .get(format!("{base}/mobile/icon.png"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(icon_png.status(), reqwest::StatusCode::OK);
-
-    let wordmark = client
-        .get(format!("{base}/mobile/wordmark.svg"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(wordmark.status(), reqwest::StatusCode::OK);
-
-    let models = client
-        .get(format!("{base}/v1/models"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(models.status(), reqwest::StatusCode::NOT_FOUND);
-
-    let status = client
-        .get(format!("{base}/mobile/status"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(status.status(), reqwest::StatusCode::NOT_FOUND);
-
-    let pairing = client
-        .post(format!("{base}/mobile/pairing"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(pairing.status(), reqwest::StatusCode::NOT_FOUND);
-
-    let thread_publish = client
-        .post(format!("{base}/mobile/thread"))
-        .json(&json!({ "session_id": "x", "title": "x", "messages": [] }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        thread_publish.status(),
-        reqwest::StatusCode::METHOD_NOT_ALLOWED
-    );
-
-    let thread_events = client
-        .get(format!("{base}/mobile/thread/events"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(thread_events.status(), reqwest::StatusCode::UNAUTHORIZED);
-
-    let relay = client
-        .post(format!("{base}/mobile/relay"))
-        .json(&json!({ "text": "phone only", "action": "append" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(relay.status(), reqwest::StatusCode::UNAUTHORIZED);
+    for path in [
+        "/mobile/manifest.webmanifest",
+        "/mobile/sw.js",
+        "/mobile/icon.svg",
+        "/mobile/relay",
+        "/mobile/thread",
+        "/mobile/thread/events",
+        "/mobile/events",
+        "/mobile/status",
+        "/mobile/pairing",
+        "/v1/models",
+    ] {
+        let response = client.get(format!("{base}{path}")).send().await.unwrap();
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::NOT_FOUND,
+            "legacy or non-mobile route remained exposed: {path}"
+        );
+    }
 }
-
 #[tokio::test]
 async fn mobile_control_router_is_device_authenticated_and_isolated() {
     let state = control_mobile_test_state();

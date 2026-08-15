@@ -1,10 +1,8 @@
-use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::watch;
 use uuid::Uuid;
 
 use milim_storage::EncryptedStore;
@@ -12,32 +10,12 @@ use milim_tools::atomic_write;
 
 const PAIRING_TTL_SECS: u64 = 10 * 60;
 const MAX_DEVICE_NAME_CHARS: usize = 60;
-const MAX_RELAY_TEXT_BYTES: usize = 20 * 1024;
-const MAX_RELAY_ATTACHMENTS: usize = 6;
-const MAX_RELAY_ATTACHMENT_NAME_CHARS: usize = 140;
-const MAX_RELAY_ATTACHMENT_MIME_CHARS: usize = 120;
-const MAX_RELAY_ATTACHMENT_CONTENT_CHARS: usize = 128 * 1024;
-const MAX_RELAY_ATTACHMENT_DATA_URL_CHARS: usize = 3 * 1024 * 1024;
-const MAX_EVENTS: usize = 200;
-const MAX_THREAD_MESSAGES: usize = 160;
-const MAX_THREAD_MESSAGE_CHARS: usize = 40_000;
-const MAX_THREAD_SUMMARIES: usize = 80;
-const MAX_THREAD_GROUPS: usize = 80;
-const MAX_THREAD_MODELS: usize = 120;
-const MAX_THREAD_TITLE_CHARS: usize = 120;
-const MAX_THREAD_MODEL_CHARS: usize = 120;
-const MAX_THREAD_PROJECT_CHARS: usize = 240;
-const MAX_THEME_CSS_VARS: usize = 80;
-const MAX_THEME_CSS_KEY_CHARS: usize = 80;
-const MAX_THEME_CSS_VALUE_CHARS: usize = 3 * 1024 * 1024;
-const MAX_THEME_BACKGROUND_MODE_CHARS: usize = 20;
 
 #[derive(Clone)]
 pub struct MobileCompanionBridge {
     inner: Arc<RwLock<MobileCompanionInner>>,
     persistence_path: Option<Arc<PathBuf>>,
     persistence_encryption: Option<EncryptedStore>,
-    thread_updates: watch::Sender<u64>,
 }
 
 impl Default for MobileCompanionBridge {
@@ -46,7 +24,6 @@ impl Default for MobileCompanionBridge {
             inner: Arc::new(RwLock::new(MobileCompanionInner::default())),
             persistence_path: None,
             persistence_encryption: None,
-            thread_updates: watch::channel(0).0,
         }
     }
 }
@@ -56,10 +33,6 @@ struct MobileCompanionInner {
     enabled: bool,
     pairing: Option<MobilePairing>,
     devices: Vec<MobileDevice>,
-    events: VecDeque<MobileRelayEvent>,
-    next_event_id: u64,
-    thread: Option<MobileThreadSnapshot>,
-    next_thread_version: u64,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -91,7 +64,6 @@ pub struct MobileCompanionStatus {
     pub enabled: bool,
     pub pairing: Option<MobilePairingInfo>,
     pub devices: Vec<MobileDeviceInfo>,
-    pub queued_events: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -124,187 +96,6 @@ pub struct MobilePairResponse {
     pub device_name: String,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum MobileRelayAction {
-    Append,
-    Replace,
-    Send,
-    SwitchThread,
-    NewThread,
-    Stop,
-    Regenerate,
-    DeleteMessage,
-    RenameThread,
-    ArchiveThread,
-    DeleteThread,
-    SetModel,
-    Attach,
-    WorkerRunStart,
-    WorkerRunContinueSolo,
-    WorkerRunStop,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct MobileRelayRequest {
-    #[serde(default)]
-    pub text: String,
-    #[serde(default = "default_relay_action")]
-    pub action: MobileRelayAction,
-    #[serde(default)]
-    pub attachments: Vec<MobileRelayAttachment>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct MobileRelayAttachment {
-    pub id: String,
-    pub name: String,
-    pub mime: String,
-    pub size: u64,
-    #[serde(default)]
-    pub content: Option<String>,
-    #[serde(default, rename = "dataUrl")]
-    pub data_url: Option<String>,
-    #[serde(default)]
-    pub truncated: bool,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct MobileRelayEvent {
-    pub id: u64,
-    pub device_id: String,
-    pub device_name: String,
-    pub text: String,
-    pub action: MobileRelayAction,
-    pub attachments: Vec<MobileRelayAttachment>,
-    pub received_at: u64,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct MobileThreadUpdateRequest {
-    pub session_id: String,
-    pub title: String,
-    pub model: Option<String>,
-    #[serde(default)]
-    pub busy: bool,
-    #[serde(default)]
-    pub messages: Vec<MobileThreadMessage>,
-    #[serde(default)]
-    pub threads: Vec<MobileThreadSummary>,
-    #[serde(default)]
-    pub groups: Vec<MobileThreadGroup>,
-    #[serde(default)]
-    pub models: Vec<MobileModelSummary>,
-    #[serde(default)]
-    pub theme: Option<MobileThemeSnapshot>,
-    #[serde(default)]
-    pub worker_run: Option<MobileWorkerRunSnapshot>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct MobileThreadMessage {
-    pub role: String,
-    pub content: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct MobileThreadSnapshot {
-    pub version: u64,
-    pub session_id: String,
-    pub title: String,
-    pub model: Option<String>,
-    pub busy: bool,
-    pub updated_at: u64,
-    pub messages: Vec<MobileThreadMessage>,
-    pub threads: Vec<MobileThreadSummary>,
-    pub groups: Vec<MobileThreadGroup>,
-    pub models: Vec<MobileModelSummary>,
-    pub theme: Option<MobileThemeSnapshot>,
-    pub worker_run: Option<MobileWorkerRunSnapshot>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct MobileWorkerRunSnapshot {
-    pub id: String,
-    pub status: String,
-    #[serde(default)]
-    pub tasks: Vec<MobileWorkerTaskSnapshot>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct MobileWorkerTaskSnapshot {
-    pub title: String,
-    pub model: String,
-    pub access: String,
-    pub status: String,
-    #[serde(default)]
-    pub result: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct MobileThemeSnapshot {
-    pub is_dark: bool,
-    #[serde(default)]
-    pub css_vars: BTreeMap<String, String>,
-    #[serde(default)]
-    pub background_fit: Option<String>,
-    #[serde(default)]
-    pub background_treatment: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct MobileThreadSummary {
-    pub id: String,
-    pub title: String,
-    pub model: Option<String>,
-    pub updated_at: u64,
-    #[serde(default)]
-    pub busy: bool,
-    #[serde(default)]
-    pub parent_id: Option<String>,
-    #[serde(default)]
-    pub project_label: Option<String>,
-    #[serde(default)]
-    pub project_path: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct MobileThreadGroup {
-    pub id: String,
-    pub label: String,
-    #[serde(default)]
-    pub subtitle: Option<String>,
-    #[serde(default)]
-    pub project_id: Option<String>,
-    #[serde(default)]
-    pub threads: Vec<MobileThreadSummary>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct MobileModelSummary {
-    pub id: String,
-    #[serde(default)]
-    pub provider: Option<String>,
-}
-
-fn default_relay_action() -> MobileRelayAction {
-    MobileRelayAction::Append
-}
-
-fn relay_requires_content(action: MobileRelayAction) -> bool {
-    matches!(
-        action,
-        MobileRelayAction::Append
-            | MobileRelayAction::Replace
-            | MobileRelayAction::Send
-            | MobileRelayAction::SwitchThread
-            | MobileRelayAction::DeleteMessage
-            | MobileRelayAction::RenameThread
-            | MobileRelayAction::SetModel
-            | MobileRelayAction::Attach
-    )
-}
-
 impl MobileCompanionBridge {
     pub fn persistent(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
@@ -322,7 +113,6 @@ impl MobileCompanionBridge {
             inner: Arc::new(RwLock::new(inner)),
             persistence_path: Some(Arc::new(path)),
             persistence_encryption: None,
-            thread_updates: watch::channel(0).0,
         }
     }
 
@@ -336,7 +126,6 @@ impl MobileCompanionBridge {
             inner: Arc::new(RwLock::new(inner)),
             persistence_path: Some(Arc::new(path)),
             persistence_encryption: Some(encryption),
-            thread_updates: watch::channel(0).0,
         })
     }
 
@@ -351,10 +140,6 @@ impl MobileCompanionBridge {
         inner.enabled = enabled;
         if !enabled {
             inner.pairing = None;
-            inner.events.clear();
-            inner.thread = None;
-            inner.next_thread_version = inner.next_thread_version.saturating_add(1).max(1);
-            let _ = self.thread_updates.send(inner.next_thread_version);
         }
         inner.expire_pairing(now);
         self.persist_inner(&inner);
@@ -389,9 +174,10 @@ impl MobileCompanionBridge {
         inner.expire_pairing(now);
         let pairing = inner
             .pairing
-            .as_ref()
+            .take()
             .ok_or_else(|| "pairing session expired or missing".to_string())?;
         if pairing.id != req.pair_id || pairing.secret != req.secret {
+            inner.pairing = Some(pairing);
             return Err("invalid pairing token".to_string());
         }
 
@@ -419,7 +205,6 @@ impl MobileCompanionBridge {
     pub fn revoke_device(&self, id: &str, now: u64) -> MobileCompanionStatus {
         let mut inner = self.inner.write().expect("mobile companion lock poisoned");
         inner.devices.retain(|device| device.id != id);
-        inner.events.retain(|event| event.device_id != id);
         inner.expire_pairing(now);
         self.persist_inner(&inner);
         inner.status()
@@ -433,142 +218,6 @@ impl MobileCompanionBridge {
         let device = inner.devices.iter_mut().find(|device| device.key == key)?;
         device.last_seen_at = Some(now);
         Some(device.info())
-    }
-
-    pub fn submit_relay(
-        &self,
-        device_key: &str,
-        request: MobileRelayRequest,
-        now: u64,
-    ) -> Result<MobileRelayEvent, String> {
-        let mut inner = self.inner.write().expect("mobile companion lock poisoned");
-        if !inner.enabled {
-            return Err("mobile companion is disabled".to_string());
-        }
-        let text = request.text.trim().to_string();
-        if text.len() > MAX_RELAY_TEXT_BYTES {
-            return Err(format!(
-                "relay text is too large; limit is {MAX_RELAY_TEXT_BYTES} bytes"
-            ));
-        }
-        let attachments = request
-            .attachments
-            .into_iter()
-            .take(MAX_RELAY_ATTACHMENTS)
-            .filter_map(clean_relay_attachment)
-            .collect::<Vec<_>>();
-        if relay_requires_content(request.action) && text.is_empty() && attachments.is_empty() {
-            return Err("relay text or attachment is required".to_string());
-        }
-        let device_index = inner
-            .devices
-            .iter()
-            .position(|device| device.key == device_key)
-            .ok_or_else(|| "invalid device key".to_string())?;
-        inner.devices[device_index].last_seen_at = Some(now);
-        let device_id = inner.devices[device_index].id.clone();
-        let device_name = inner.devices[device_index].name.clone();
-        inner.next_event_id = inner.next_event_id.saturating_add(1).max(1);
-        let event = MobileRelayEvent {
-            id: inner.next_event_id,
-            device_id,
-            device_name,
-            text,
-            action: request.action,
-            attachments,
-            received_at: now,
-        };
-        inner.events.push_back(event.clone());
-        while inner.events.len() > MAX_EVENTS {
-            inner.events.pop_front();
-        }
-        self.persist_inner(&inner);
-        Ok(event)
-    }
-
-    pub fn take_events(&self) -> Vec<MobileRelayEvent> {
-        let mut inner = self.inner.write().expect("mobile companion lock poisoned");
-        inner.events.drain(..).collect()
-    }
-
-    pub fn update_thread(
-        &self,
-        request: MobileThreadUpdateRequest,
-        now: u64,
-    ) -> Option<MobileThreadSnapshot> {
-        let mut inner = self.inner.write().expect("mobile companion lock poisoned");
-        if !inner.enabled {
-            inner.thread = None;
-            return None;
-        }
-        inner.next_thread_version = inner.next_thread_version.saturating_add(1).max(1);
-        let snapshot = MobileThreadSnapshot {
-            version: inner.next_thread_version,
-            session_id: clean_limited(&request.session_id, 160),
-            title: clean_limited(&request.title, MAX_THREAD_TITLE_CHARS),
-            model: request
-                .model
-                .as_deref()
-                .map(|value| clean_limited(value, MAX_THREAD_MODEL_CHARS))
-                .filter(|value| !value.is_empty()),
-            busy: request.busy,
-            updated_at: now,
-            messages: request
-                .messages
-                .into_iter()
-                .rev()
-                .take(MAX_THREAD_MESSAGES)
-                .filter_map(clean_thread_message)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect(),
-            threads: request
-                .threads
-                .into_iter()
-                .take(MAX_THREAD_SUMMARIES)
-                .filter_map(clean_thread_summary)
-                .collect(),
-            groups: request
-                .groups
-                .into_iter()
-                .take(MAX_THREAD_GROUPS)
-                .filter_map(clean_thread_group)
-                .collect(),
-            models: request
-                .models
-                .into_iter()
-                .take(MAX_THREAD_MODELS)
-                .filter_map(clean_model_summary)
-                .collect(),
-            theme: request.theme.map(clean_mobile_theme),
-            worker_run: request.worker_run.map(clean_mobile_worker_run),
-        };
-        inner.thread = Some(snapshot.clone());
-        let _ = self.thread_updates.send(snapshot.version);
-        Some(snapshot)
-    }
-
-    pub fn thread_for_device(
-        &self,
-        device_key: &str,
-        now: u64,
-    ) -> Result<Option<MobileThreadSnapshot>, String> {
-        let mut inner = self.inner.write().expect("mobile companion lock poisoned");
-        if !inner.enabled {
-            return Err("mobile companion is disabled".to_string());
-        }
-        let device = inner
-            .devices
-            .iter_mut()
-            .find(|device| device.key == device_key)
-            .ok_or_else(|| "invalid device key".to_string())?;
-        device.last_seen_at = Some(now);
-        Ok(inner.thread.clone())
-    }
-
-    pub fn subscribe_thread(&self) -> watch::Receiver<u64> {
-        self.thread_updates.subscribe()
     }
 
     fn persist_inner(&self, inner: &MobileCompanionInner) {
@@ -634,7 +283,6 @@ impl MobileCompanionInner {
             enabled: self.enabled,
             pairing: self.pairing.as_ref().map(MobilePairing::info),
             devices: self.devices.iter().map(MobileDevice::info).collect(),
-            queued_events: self.events.len(),
         }
     }
 
@@ -691,183 +339,6 @@ fn clean_device_name(input: &str) -> String {
     trimmed
 }
 
-fn clean_thread_message(message: MobileThreadMessage) -> Option<MobileThreadMessage> {
-    let role = match message.role.as_str() {
-        "user" | "assistant" | "system" => message.role,
-        _ => return None,
-    };
-    let content = trim_limited(&message.content, MAX_THREAD_MESSAGE_CHARS);
-    if content.is_empty() {
-        return None;
-    }
-    Some(MobileThreadMessage { role, content })
-}
-
-fn clean_relay_attachment(attachment: MobileRelayAttachment) -> Option<MobileRelayAttachment> {
-    let name = clean_limited(&attachment.name, MAX_RELAY_ATTACHMENT_NAME_CHARS);
-    if name.is_empty() {
-        return None;
-    }
-    let mime = clean_limited(&attachment.mime, MAX_RELAY_ATTACHMENT_MIME_CHARS);
-    let content = attachment
-        .content
-        .as_deref()
-        .map(|value| trim_limited(value, MAX_RELAY_ATTACHMENT_CONTENT_CHARS))
-        .filter(|value| !value.is_empty());
-    let data_url = attachment
-        .data_url
-        .as_deref()
-        .map(|value| trim_limited(value, MAX_RELAY_ATTACHMENT_DATA_URL_CHARS))
-        .filter(|value| value.starts_with("data:image/"));
-    Some(MobileRelayAttachment {
-        id: clean_limited(&attachment.id, 80),
-        name,
-        mime,
-        size: attachment.size,
-        content,
-        data_url,
-        truncated: attachment.truncated,
-    })
-}
-
-fn clean_thread_summary(summary: MobileThreadSummary) -> Option<MobileThreadSummary> {
-    let id = clean_limited(&summary.id, 160);
-    if id.is_empty() {
-        return None;
-    }
-    Some(MobileThreadSummary {
-        id,
-        title: clean_limited(&summary.title, MAX_THREAD_TITLE_CHARS),
-        model: summary
-            .model
-            .as_deref()
-            .map(|value| clean_limited(value, MAX_THREAD_MODEL_CHARS))
-            .filter(|value| !value.is_empty()),
-        updated_at: summary.updated_at,
-        busy: summary.busy,
-        parent_id: summary
-            .parent_id
-            .as_deref()
-            .map(|value| clean_limited(value, 160))
-            .filter(|value| !value.is_empty()),
-        project_label: summary
-            .project_label
-            .as_deref()
-            .map(|value| clean_limited(value, MAX_THREAD_TITLE_CHARS))
-            .filter(|value| !value.is_empty()),
-        project_path: summary
-            .project_path
-            .as_deref()
-            .map(|value| clean_limited(value, MAX_THREAD_PROJECT_CHARS))
-            .filter(|value| !value.is_empty()),
-    })
-}
-
-fn clean_thread_group(group: MobileThreadGroup) -> Option<MobileThreadGroup> {
-    let id = clean_limited(&group.id, 180);
-    let label = clean_limited(&group.label, MAX_THREAD_TITLE_CHARS);
-    if id.is_empty() || label.is_empty() {
-        return None;
-    }
-    let threads = group
-        .threads
-        .into_iter()
-        .take(MAX_THREAD_SUMMARIES)
-        .filter_map(clean_thread_summary)
-        .collect::<Vec<_>>();
-    if threads.is_empty() {
-        return None;
-    }
-    Some(MobileThreadGroup {
-        id,
-        label,
-        subtitle: group
-            .subtitle
-            .as_deref()
-            .map(|value| clean_limited(value, MAX_THREAD_PROJECT_CHARS))
-            .filter(|value| !value.is_empty()),
-        project_id: group
-            .project_id
-            .as_deref()
-            .map(|value| clean_limited(value, 180))
-            .filter(|value| !value.is_empty()),
-        threads,
-    })
-}
-
-fn clean_model_summary(model: MobileModelSummary) -> Option<MobileModelSummary> {
-    let id = clean_limited(&model.id, MAX_THREAD_MODEL_CHARS);
-    if id.is_empty() {
-        return None;
-    }
-    Some(MobileModelSummary {
-        id,
-        provider: model
-            .provider
-            .as_deref()
-            .map(|value| clean_limited(value, MAX_THREAD_MODEL_CHARS))
-            .filter(|value| !value.is_empty()),
-    })
-}
-
-fn clean_mobile_worker_run(mut run: MobileWorkerRunSnapshot) -> MobileWorkerRunSnapshot {
-    run.id = clean_limited(&run.id, MAX_THREAD_MODEL_CHARS);
-    run.status = clean_limited(&run.status, 40);
-    run.tasks = run
-        .tasks
-        .into_iter()
-        .take(4)
-        .map(|mut task| {
-            task.title = clean_limited(&task.title, MAX_THREAD_TITLE_CHARS);
-            task.model = clean_limited(&task.model, MAX_THREAD_MODEL_CHARS);
-            task.access = clean_limited(&task.access, 40);
-            task.status = clean_limited(&task.status, 40);
-            task.result = task
-                .result
-                .map(|value| trim_limited(&value, MAX_THREAD_MESSAGE_CHARS));
-            task
-        })
-        .collect();
-    run
-}
-
-fn clean_mobile_theme(theme: MobileThemeSnapshot) -> MobileThemeSnapshot {
-    let css_vars = theme
-        .css_vars
-        .into_iter()
-        .filter_map(|(key, value)| {
-            let key = clean_limited(&key, MAX_THEME_CSS_KEY_CHARS);
-            if !is_safe_theme_css_var_key(&key) {
-                return None;
-            }
-            Some((key, trim_limited(&value, MAX_THEME_CSS_VALUE_CHARS)))
-        })
-        .take(MAX_THEME_CSS_VARS)
-        .collect();
-    MobileThemeSnapshot {
-        is_dark: theme.is_dark,
-        css_vars,
-        background_fit: theme
-            .background_fit
-            .as_deref()
-            .map(|value| clean_limited(value, MAX_THEME_BACKGROUND_MODE_CHARS))
-            .filter(|value| matches!(value.as_str(), "cover" | "contain" | "tile" | "center")),
-        background_treatment: theme
-            .background_treatment
-            .as_deref()
-            .map(|value| clean_limited(value, MAX_THEME_BACKGROUND_MODE_CHARS))
-            .filter(|value| matches!(value.as_str(), "clear" | "dim" | "blur" | "mono")),
-    }
-}
-
-fn is_safe_theme_css_var_key(value: &str) -> bool {
-    value.starts_with("--")
-        && value.len() > 2
-        && value[2..]
-            .chars()
-            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
-}
-
 fn clean_limited(input: &str, max_chars: usize) -> String {
     input
         .split_whitespace()
@@ -876,10 +347,6 @@ fn clean_limited(input: &str, max_chars: usize) -> String {
         .chars()
         .take(max_chars)
         .collect()
-}
-
-fn trim_limited(input: &str, max_chars: usize) -> String {
-    input.trim().chars().take(max_chars).collect()
 }
 
 pub fn validate_mobile_companion_persistence(data: &[u8]) -> Result<(), String> {
@@ -1029,5 +496,84 @@ mod tests {
             .authenticate_device(&paired.device_key, 5)
             .is_some());
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn mobile_companion_pairing_claims_and_device_credentials_are_isolated_per_host() {
+        let host_a = MobileCompanionBridge::default();
+        let host_b = MobileCompanionBridge::default();
+        host_a.set_enabled(true, 1);
+        host_b.set_enabled(true, 1);
+
+        let pairing_a = host_a.start_pairing(2).unwrap();
+        let pairing_b = host_b.start_pairing(2).unwrap();
+        let secret_a = pairing_a.path.split("secret=").nth(1).unwrap().to_string();
+        let secret_b = pairing_b.path.split("secret=").nth(1).unwrap().to_string();
+
+        let cross_pair = host_b.pair_device(
+            MobilePairRequest {
+                pair_id: pairing_a.id.clone(),
+                secret: secret_a.clone(),
+                device_name: Some("Wrong host".to_string()),
+            },
+            3,
+            None,
+        );
+        assert_eq!(cross_pair.unwrap_err(), "invalid pairing token");
+
+        let paired_a = host_a
+            .pair_device(
+                MobilePairRequest {
+                    pair_id: pairing_a.id,
+                    secret: secret_a,
+                    device_name: Some("Phone A".to_string()),
+                },
+                4,
+                None,
+            )
+            .unwrap();
+        let paired_b = host_b
+            .pair_device(
+                MobilePairRequest {
+                    pair_id: pairing_b.id,
+                    secret: secret_b,
+                    device_name: Some("Phone B".to_string()),
+                },
+                4,
+                None,
+            )
+            .unwrap();
+
+        assert!(host_a
+            .authenticate_device(&paired_a.device_key, 5)
+            .is_some());
+        assert!(host_a
+            .authenticate_device(&paired_b.device_key, 5)
+            .is_none());
+        assert!(host_b
+            .authenticate_device(&paired_b.device_key, 5)
+            .is_some());
+        assert!(host_b
+            .authenticate_device(&paired_a.device_key, 5)
+            .is_none());
+
+        let replay = host_a.pair_device(
+            MobilePairRequest {
+                pair_id: "consumed".to_string(),
+                secret: "consumed".to_string(),
+                device_name: None,
+            },
+            6,
+            None,
+        );
+        assert_eq!(replay.unwrap_err(), "pairing session expired or missing");
+
+        host_a.revoke_device(&paired_a.device_id, 7);
+        assert!(host_a
+            .authenticate_device(&paired_a.device_key, 8)
+            .is_none());
+        assert!(host_b
+            .authenticate_device(&paired_b.device_key, 8)
+            .is_some());
     }
 }

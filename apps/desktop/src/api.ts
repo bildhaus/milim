@@ -1052,7 +1052,6 @@ export interface MobileCompanionStatus {
   enabled: boolean;
   pairing?: MobileCompanionPairing | null;
   devices: MobileCompanionDevice[];
-  queued_events: number;
 }
 
 export interface MobileTailscaleStatus {
@@ -1071,100 +1070,6 @@ export interface MobileLanStatus {
   service_type: string;
   host_id?: string | null;
   warning: string;
-}
-
-export type MobileRelayAction =
-  | "append"
-  | "replace"
-  | "send"
-  | "switch_thread"
-  | "new_thread"
-  | "stop"
-  | "regenerate"
-  | "delete_message"
-  | "rename_thread"
-  | "archive_thread"
-  | "delete_thread"
-  | "set_model"
-  | "attach"
-  | "worker_run_start"
-  | "worker_run_continue_solo"
-  | "worker_run_stop";
-
-export type MobileRelayAttachment = Pick<
-  ChatAttachment,
-  "id" | "name" | "mime" | "size" | "content" | "dataUrl" | "truncated"
->;
-
-export interface MobileRelayEvent {
-  id: number;
-  device_id: string;
-  device_name: string;
-  text: string;
-  action: MobileRelayAction;
-  attachments?: MobileRelayAttachment[];
-  received_at: number;
-}
-
-export interface MobileThreadMessage {
-  role: string;
-  content: string;
-}
-
-export interface MobileThemeSnapshot {
-  is_dark: boolean;
-  css_vars: Record<string, string>;
-  background_fit?: string;
-  background_treatment?: string;
-}
-
-export interface MobileThreadSnapshot {
-  session_id: string;
-  title: string;
-  model?: string | null;
-  busy: boolean;
-  messages: MobileThreadMessage[];
-  threads?: MobileThreadSummary[];
-  groups?: MobileThreadGroup[];
-  models?: MobileModelSummary[];
-  theme?: MobileThemeSnapshot;
-  worker_run?: MobileWorkerRunSnapshot | null;
-}
-
-export interface MobileWorkerRunSnapshot {
-  id: string;
-  status: WorkerRunStatus;
-  tasks: Array<{
-    title: string;
-    model: string;
-    access: WorkerAccess;
-    status: string;
-    result?: string | null;
-  }>;
-}
-
-export interface MobileThreadSummary {
-  id: string;
-  title: string;
-  model?: string | null;
-  updated_at: number;
-  busy?: boolean;
-  parent_id?: string | null;
-  project_label?: string | null;
-  project_path?: string | null;
-}
-
-export interface MobileThreadGroup {
-  id: string;
-  label: string;
-  subtitle?: string | null;
-  project_id?: string | null;
-  threads: MobileThreadSummary[];
-}
-
-export interface MobileModelSummary {
-  id: string;
-  provider?: string | null;
 }
 
 async function parseJsonResponse<T>(
@@ -1714,27 +1619,6 @@ export async function revokeMobileCompanionDevice(
   );
 }
 
-export async function pollMobileCompanionEvents(): Promise<MobileRelayEvent[]> {
-  const payload = await parseJsonResponse<{ events: MobileRelayEvent[] }>(
-    await authFetch(`${BASE}/mobile/events`),
-    "mobile companion event poll failed",
-  );
-  return payload.events;
-}
-
-export async function publishMobileThreadSnapshot(
-  snapshot: MobileThreadSnapshot,
-): Promise<void> {
-  await parseJsonResponse<{ thread: unknown }>(
-    await authFetch(`${BASE}/mobile/thread`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(snapshot),
-    }),
-    "mobile thread publish failed",
-  );
-}
-
 export async function mobileTailscaleStatus(): Promise<MobileTailscaleStatus> {
   if (!inTauri) {
     return {
@@ -1748,7 +1632,7 @@ export async function mobileTailscaleStatus(): Promise<MobileTailscaleStatus> {
   return await invoke<MobileTailscaleStatus>("mobile_tailscale_status");
 }
 
-export async function configureMobileTailscaleRelay(): Promise<MobileTailscaleStatus> {
+export async function configureMobileTailscale(): Promise<MobileTailscaleStatus> {
   if (!inTauri) {
     return {
       installed: false,
@@ -1759,11 +1643,11 @@ export async function configureMobileTailscaleRelay(): Promise<MobileTailscaleSt
     };
   }
   return await invoke<MobileTailscaleStatus>(
-    "configure_mobile_tailscale_relay",
+    "configure_mobile_tailscale",
   );
 }
 
-export async function disableMobileTailscaleRelay(): Promise<MobileTailscaleStatus> {
+export async function disableMobileTailscale(): Promise<MobileTailscaleStatus> {
   if (!inTauri) {
     return {
       installed: false,
@@ -1773,7 +1657,7 @@ export async function disableMobileTailscaleRelay(): Promise<MobileTailscaleStat
       message: "Tailscale setup is available in the desktop app.",
     };
   }
-  return await invoke<MobileTailscaleStatus>("disable_mobile_tailscale_relay");
+  return await invoke<MobileTailscaleStatus>("disable_mobile_tailscale");
 }
 
 export async function getMobileLanStatus(): Promise<MobileLanStatus> {

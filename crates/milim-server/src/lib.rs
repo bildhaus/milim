@@ -53,23 +53,9 @@ pub fn build_router(state: AppState) -> Router {
 
     Router::new()
         .route("/health", get(routes::health))
-        // Mobile companion: phone capture and active-thread mirror.
-        .route("/mobile", get(routes::mobile_companion_page))
-        .route("/mobile/", get(routes::mobile_companion_page))
-        .route(
-            "/mobile/manifest.webmanifest",
-            get(routes::mobile_companion_manifest),
-        )
-        .route(
-            "/mobile/sw.js",
-            get(routes::mobile_companion_service_worker),
-        )
-        .route("/mobile/icon.svg", get(routes::mobile_companion_icon))
-        .route("/mobile/icon.png", get(routes::mobile_companion_icon_png))
-        .route(
-            "/mobile/wordmark.svg",
-            get(routes::mobile_companion_wordmark),
-        )
+        // Native mobile pairing, credentials, and control-v1 administration.
+        .route("/mobile", get(routes::mobile_companion_probe))
+        .route("/mobile/", get(routes::mobile_companion_probe))
         .route("/mobile/status", get(routes::mobile_companion_status))
         .route("/mobile/enabled", post(routes::mobile_companion_enabled))
         .route("/mobile/pairing", post(routes::mobile_companion_pairing))
@@ -82,16 +68,6 @@ pub fn build_router(state: AppState) -> Router {
             "/mobile/device",
             delete(routes::mobile_companion_device_revoke_self),
         )
-        .route("/mobile/relay", post(routes::mobile_companion_relay))
-        .route(
-            "/mobile/thread",
-            get(routes::mobile_companion_thread).post(routes::mobile_companion_thread_update),
-        )
-        .route(
-            "/mobile/thread/events",
-            get(routes::mobile_companion_thread_events),
-        )
-        .route("/mobile/events", get(routes::mobile_companion_events))
         .route(
             "/mobile/devices/{id}",
             delete(routes::mobile_companion_device_revoke),
@@ -420,22 +396,8 @@ pub fn build_mobile_companion_router(state: AppState) -> Router {
     state.mobile_control_only = true;
 
     Router::new()
-        .route("/mobile", get(routes::mobile_companion_page))
-        .route("/mobile/", get(routes::mobile_companion_page))
-        .route(
-            "/mobile/manifest.webmanifest",
-            get(routes::mobile_companion_manifest),
-        )
-        .route(
-            "/mobile/sw.js",
-            get(routes::mobile_companion_service_worker),
-        )
-        .route("/mobile/icon.svg", get(routes::mobile_companion_icon))
-        .route("/mobile/icon.png", get(routes::mobile_companion_icon_png))
-        .route(
-            "/mobile/wordmark.svg",
-            get(routes::mobile_companion_wordmark),
-        )
+        .route("/mobile", get(routes::mobile_companion_probe))
+        .route("/mobile/", get(routes::mobile_companion_probe))
         .route("/mobile/pair", post(routes::mobile_companion_pair))
         .route(
             "/mobile/device/status",
@@ -444,12 +406,6 @@ pub fn build_mobile_companion_router(state: AppState) -> Router {
         .route(
             "/mobile/device",
             delete(routes::mobile_companion_device_revoke_self),
-        )
-        .route("/mobile/relay", post(routes::mobile_companion_relay))
-        .route("/mobile/thread", get(routes::mobile_companion_thread))
-        .route(
-            "/mobile/thread/events",
-            get(routes::mobile_companion_thread_events),
         )
         .route("/control/v1/bootstrap", get(routes::control_bootstrap))
         .route(

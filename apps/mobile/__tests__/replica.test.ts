@@ -5,7 +5,13 @@ import {
   projectMessages,
   projectTranscript,
 } from '../src/control/replica';
-import type {PendingApprovalV1, TimelineItemV1, TimelinePageV1} from '../src/control/types';
+import type {
+  ControlEventV1,
+  JsonValue,
+  PendingApprovalV1,
+  TimelineItemV1,
+  TimelinePageV1,
+} from '../src/control/types';
 
 function item(seq: number, type = 'message', data: any = {id: `m-${seq}`, role: 'user', content: String(seq)}): TimelineItemV1 {
   return {id: `i-${seq}`, thread_id: 't', epoch: 'e1', seq, run_id: null, type, data, created_at_ms: seq};
@@ -31,11 +37,33 @@ test('a true middle gap requests an authoritative tail', () => {
 test('live duplicates are idempotent and assistant deltas project in order', () => {
   let replica = applyTimelinePage(emptyReplica('t'), page('e1', [item(1)]), 'tail');
   const delta = {...item(2, 'assistant_delta', {text: 'hel'}), run_id: 'r1'};
-  const event = {event_id: 'ev', host_id: 'h', thread_id: 't', epoch: 'e1', seq: 2, type: 'timeline.appended', data: {item: delta}};
-  replica = applyControlEvent(replica, event);
-  replica = applyControlEvent(replica, event);
+  const event: ControlEventV1 = {
+    event_id: 'ev',
+    host_id: 'h',
+    thread_id: 't',
+    epoch: 'e1',
+    seq: 2,
+    type: 'timeline.appended',
+    data: {item: delta} as unknown as JsonValue,
+  };
+  replica = applyControlEvent(replica, event, 'h');
+  replica = applyControlEvent(replica, event, 'h');
   expect(replica.items).toHaveLength(2);
   expect(projectMessages(replica.items).at(-1)?.content).toBe('hel');
+});
+
+test('ignores live events emitted by a different desktop host', () => {
+  const replica = applyTimelinePage(emptyReplica('t'), page('e1', [item(1)]), 'tail');
+  const foreign: ControlEventV1 = {
+    event_id: 'foreign',
+    host_id: 'host-b',
+    thread_id: 't',
+    epoch: 'e1',
+    seq: 2,
+    type: 'timeline.appended',
+    data: {item: item(2)} as unknown as JsonValue,
+  };
+  expect(applyControlEvent(replica, foreign, 'host-a')).toBe(replica);
 });
 
 test('older pages prepend in order and preserve whether more history exists', () => {

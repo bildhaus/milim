@@ -96,7 +96,7 @@ struct DesktopProviders(Option<Arc<milim_server::providers::ProviderRegistry>>);
 
 struct DesktopSecretStorage(secret_storage::SecretStorageStatus);
 
-struct MobileRelayLocalTarget(String);
+struct MobileControlLocalTarget(String);
 
 struct UserDataState(Arc<milim_storage::UserDataStore>);
 
@@ -827,7 +827,7 @@ async fn refresh_provider_models(
 
 #[tauri::command]
 async fn mobile_tailscale_status(
-    target: tauri::State<'_, MobileRelayLocalTarget>,
+    target: tauri::State<'_, MobileControlLocalTarget>,
 ) -> std::result::Result<MobileTailscaleStatus, String> {
     let local_target = target.0.clone();
     tokio::task::spawn_blocking(move || mobile_tailscale_status_blocking(local_target))
@@ -836,21 +836,21 @@ async fn mobile_tailscale_status(
 }
 
 #[tauri::command]
-async fn configure_mobile_tailscale_relay(
-    target: tauri::State<'_, MobileRelayLocalTarget>,
+async fn configure_mobile_tailscale(
+    target: tauri::State<'_, MobileControlLocalTarget>,
 ) -> std::result::Result<MobileTailscaleStatus, String> {
     let local_target = target.0.clone();
-    tokio::task::spawn_blocking(move || configure_mobile_tailscale_relay_blocking(local_target))
+    tokio::task::spawn_blocking(move || configure_mobile_tailscale_blocking(local_target))
         .await
         .map_err(|e| format!("tailscale setup task failed: {e}"))
 }
 
 #[tauri::command]
-async fn disable_mobile_tailscale_relay(
-    target: tauri::State<'_, MobileRelayLocalTarget>,
+async fn disable_mobile_tailscale(
+    target: tauri::State<'_, MobileControlLocalTarget>,
 ) -> std::result::Result<MobileTailscaleStatus, String> {
     let local_target = target.0.clone();
-    tokio::task::spawn_blocking(move || disable_mobile_tailscale_relay_blocking(local_target))
+    tokio::task::spawn_blocking(move || disable_mobile_tailscale_blocking(local_target))
         .await
         .map_err(|e| format!("tailscale disable task failed: {e}"))
 }
@@ -2391,7 +2391,7 @@ fn mobile_tailscale_status_blocking(local_target: String) -> MobileTailscaleStat
     }
 }
 
-fn configure_mobile_tailscale_relay_blocking(local_target: String) -> MobileTailscaleStatus {
+fn configure_mobile_tailscale_blocking(local_target: String) -> MobileTailscaleStatus {
     let Some(command) = find_tailscale_command() else {
         return tailscale_not_found_status(local_target);
     };
@@ -2452,7 +2452,7 @@ fn configure_mobile_tailscale_relay_blocking(local_target: String) -> MobileTail
     }
 }
 
-fn disable_mobile_tailscale_relay_blocking(local_target: String) -> MobileTailscaleStatus {
+fn disable_mobile_tailscale_blocking(local_target: String) -> MobileTailscaleStatus {
     let Some(command) = find_tailscale_command() else {
         return tailscale_not_found_status(local_target);
     };
@@ -4447,9 +4447,9 @@ pub fn run() {
     let (mobile_listener, mobile_addr) = bind_desktop_server_listener(
         "127.0.0.1:0"
             .parse()
-            .expect("valid mobile relay loopback address"),
+            .expect("valid mobile control loopback address"),
     )
-    .expect("bind embedded mobile relay server");
+    .expect("bind embedded mobile control server");
     let api_base = format!("http://{addr}");
     let mobile_local_target = format!("http://{mobile_addr}");
     let preview_runtime = state.preview_runtime.clone();
@@ -4476,7 +4476,7 @@ pub fn run() {
         .manage(DesktopApiBaseUrl(api_base))
         .manage(DesktopProviders(providers))
         .manage(DesktopSecretStorage(storage_status))
-        .manage(MobileRelayLocalTarget(mobile_local_target))
+        .manage(MobileControlLocalTarget(mobile_local_target))
         .manage(UserDataState(user_data))
         .manage(DesktopPreviewRuntime(preview_runtime))
         .manage(DesktopServerRuntime(server_runtime.clone()))
@@ -4539,10 +4539,10 @@ pub fn run() {
                                 )
                                 .await
                             {
-                                tracing::warn!("embedded mobile relay server error: {e}");
+                                tracing::warn!("embedded mobile control server error: {e}");
                             }
                         }
-                        Err(e) => tracing::warn!("embedded mobile relay listener error: {e}"),
+                        Err(e) => tracing::warn!("embedded mobile control listener error: {e}"),
                     }
                 };
                 tokio::join!(main_server, mobile_server);
@@ -4557,7 +4557,7 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     if companion.status(milim_server::now_unix()).enabled {
                         let status = tokio::task::spawn_blocking(move || {
-                            configure_mobile_tailscale_relay_blocking(mobile_startup_target)
+                            configure_mobile_tailscale_blocking(mobile_startup_target)
                         })
                         .await;
                         match status {
@@ -4565,12 +4565,12 @@ pub fn run() {
                             Ok(status) => {
                                 if let Some(message) = status.message {
                                     tracing::warn!(
-                                        "mobile relay Tailscale startup unavailable: {message}"
+                                        "mobile control Tailscale startup unavailable: {message}"
                                     );
                                 }
                             }
                             Err(e) => {
-                                tracing::warn!("mobile relay Tailscale startup task failed: {e}")
+                                tracing::warn!("mobile control Tailscale startup task failed: {e}")
                             }
                         }
                     }
@@ -4603,8 +4603,8 @@ pub fn run() {
             api_token,
             refresh_provider_models,
             mobile_tailscale_status,
-            configure_mobile_tailscale_relay,
-            disable_mobile_tailscale_relay,
+            configure_mobile_tailscale,
+            disable_mobile_tailscale,
             mobile_lan_status,
             set_mobile_lan_enabled,
             user_state_get,

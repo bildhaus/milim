@@ -172,8 +172,8 @@ pub struct AppState {
     /// Outbound privacy gate. Off by default; set via `POST /privacy/mode`. The
     /// `ProviderRouter` consults it before sending to a remote provider.
     pub privacy: Arc<crate::privacy::PrivacyGate>,
-    /// Relay-only mobile companion bridge. Disabled by default and only grants
-    /// paired phones permission to submit text to the active desktop composer.
+    /// Native-mobile pairing and per-device credential store. Disabled by
+    /// default; canonical state and mutations flow through `/control/v1`.
     pub mobile_companion: Option<Arc<MobileCompanionBridge>>,
     /// Canonical server-owned user thread/run/timeline state used by desktop
     /// and native mobile control clients.
@@ -237,7 +237,7 @@ impl AppState {
         self
     }
 
-    /// Attach the relay-only mobile companion bridge.
+    /// Attach the native-mobile pairing and credential store.
     pub fn with_mobile_companion(mut self, bridge: Arc<MobileCompanionBridge>) -> Self {
         self.mobile_companion = Some(bridge);
         self

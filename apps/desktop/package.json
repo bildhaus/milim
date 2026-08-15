@@ -34,7 +34,6 @@
     "test:tauri-inbox-sidebar": "node tests/tauri-webview-e2e.mjs --inbox-sidebar-only",
     "test:tauri-settings": "node tests/tauri-webview-e2e.mjs --settings-only",
     "test:tauri-turn-changes": "node tests/tauri-webview-e2e.mjs --turn-changes-only",
-    "test:tauri-mobile-auth": "node tests/tauri-webview-e2e.mjs --mobile-auth-only",
     "test:tauri-mcp-apps": "node tests/tauri-webview-e2e.mjs --mcp-apps-only",
     "perf:tauri-dev": "node tests/tauri-dev-perf.mjs",
     "perf:canonical": "npm run verify:tauri && node tests/tauri-dev-perf.mjs --binary",
