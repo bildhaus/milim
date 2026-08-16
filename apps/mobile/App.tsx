@@ -14,11 +14,12 @@ import {
   ScrollView,
   StatusBar,
   StyleSheet,
-  Text,
+  Text as NativeText,
   TextInput,
   View,
   useWindowDimensions,
   type StyleProp,
+  type TextProps,
   type ViewStyle,
 } from 'react-native';
 import {SafeAreaProvider, SafeAreaView} from 'react-native-safe-area-context';
@@ -119,11 +120,11 @@ const mobileMarkdownRules: RenderRules = {
 const mobileMarkdownParser = new MarkdownIt(MOBILE_MARKDOWN_OPTIONS);
 
 function appTheme(snapshot?: AppearanceSnapshotV1) {
-  const theme = createMobileTheme(snapshot);
+  const theme = createMobileTheme(snapshot, Platform.OS === 'ios' ? 'ios' : 'android');
   return {
     ...theme,
     styles: createStyles(theme),
-    markdownStyles: createMarkdownStyles(theme.palette),
+    markdownStyles: createMarkdownStyles(theme),
   };
 }
 
@@ -132,6 +133,11 @@ const AppThemeContext = createContext<AppTheme>(appTheme());
 
 function useAppTheme(): AppTheme {
   return useContext(AppThemeContext);
+}
+
+function Text({style, ...props}: TextProps) {
+  const {styles} = useAppTheme();
+  return <NativeText {...props} style={[styles.appText, style]} />;
 }
 
 function useReducedMotion(): boolean {
@@ -1314,6 +1320,10 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
           onScrollBeginDrag={() => {
             returningToLatest.current = false;
           }}
+          onContentSizeChange={() => {
+            if (!followingLatest.current || !transcriptItems.length) return;
+            messageList.current?.scrollToEnd({animated: false});
+          }}
           onScroll={({nativeEvent}) => {
             const distance = transcriptDistanceFromLatest({
               contentHeight: nativeEvent.contentSize.height,
@@ -2300,18 +2310,21 @@ function showError(error: unknown) {
   Alert.alert('milim', error instanceof Error ? error.message : String(error));
 }
 
-function createMarkdownStyles(palette: MobilePalette) {
+function createMarkdownStyles(theme: MobileTheme) {
+  const {fontFamily, monoFamily, palette} = theme;
   return {
-    body: {color: palette.text, fontSize: 14.5, lineHeight: 22},
-    code_inline: {color: palette.accent, backgroundColor: palette.raised},
-    fence: {color: palette.text, backgroundColor: palette.bg, borderColor: palette.border},
+    body: {color: palette.text, fontFamily, fontSize: 14.5, lineHeight: 22},
+    code_inline: {color: palette.accent, backgroundColor: palette.raised, fontFamily: monoFamily},
+    code_block: {color: palette.text, backgroundColor: palette.bg, borderColor: palette.border, fontFamily: monoFamily},
+    fence: {color: palette.text, backgroundColor: palette.bg, borderColor: palette.border, fontFamily: monoFamily},
     link: {color: palette.accent},
   };
 }
 
 function createStyles(theme: MobileTheme) {
-  const {cardRadius, inputRadius, palette} = theme;
+  const {cardRadius, fontFamily, inputRadius, monoFamily, palette} = theme;
   return StyleSheet.create({
+  appText: fontFamily ? {fontFamily} : {},
   root: {flex: 1, backgroundColor: palette.bg},
   app: {flex: 1, backgroundColor: 'transparent'},
   backgroundImage: {position: 'absolute', top: 0, right: 0, bottom: 0, left: 0},
@@ -2345,7 +2358,7 @@ function createStyles(theme: MobileTheme) {
   screenSubtitle: {color: palette.muted, fontSize: 10.5},
   eyebrow: {color: palette.secondary, fontSize: 9.5, fontWeight: '700', letterSpacing: 1.5},
   screenTitle: {color: palette.text, fontSize: 20, lineHeight: 25, fontWeight: '700', letterSpacing: -0.55},
-  input: {minHeight: 40, paddingHorizontal: 11, paddingVertical: 8, borderRadius: inputRadius, borderWidth: 1, borderColor: palette.borderStrong, backgroundColor: palette.input, color: palette.text, fontSize: 13.5},
+  input: {minHeight: 40, paddingHorizontal: 11, paddingVertical: 8, borderRadius: inputRadius, borderWidth: 1, borderColor: palette.borderStrong, backgroundColor: palette.input, color: palette.text, fontFamily, fontSize: 13.5},
   flex: {flex: 1},
   list: {flexGrow: 1, paddingBottom: 24, gap: 2},
   threadCard: {minHeight: 58, flexDirection: 'row', alignItems: 'center', backgroundColor: 'transparent', borderWidth: 1, borderColor: 'transparent', borderRadius: 8, paddingLeft: 7, paddingRight: 4, gap: 9},
@@ -2411,7 +2424,7 @@ function createStyles(theme: MobileTheme) {
   pickerSubtitle: {color: palette.muted, fontSize: 10.5, marginTop: 1},
   pickerClose: {width: 34, height: 34, borderRadius: 8, alignItems: 'center', justifyContent: 'center'},
   pickerSearch: {minHeight: 40, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 10, borderRadius: 8, borderWidth: 1, borderColor: palette.borderStrong, backgroundColor: palette.input, marginBottom: 8},
-  pickerSearchInput: {flex: 1, color: palette.text, fontSize: 13, paddingVertical: 7},
+  pickerSearchInput: {flex: 1, color: palette.text, fontFamily, fontSize: 13, paddingVertical: 7},
   pickerSearchClear: {width: 28, height: 28, alignItems: 'center', justifyContent: 'center'},
   pickerListView: {flexGrow: 1},
   pickerList: {flexGrow: 1, paddingBottom: 22, gap: 2},
@@ -2462,9 +2475,9 @@ function createStyles(theme: MobileTheme) {
   activityRowLabel: {flex: 1, color: palette.text, fontSize: 12.5, lineHeight: 17, fontWeight: '600'},
   activityRowStatus: {fontSize: 10.5, lineHeight: 16, fontWeight: '600'},
   activityDetailScroll: {minWidth: '100%', paddingRight: 14},
-  activityRowDetail: {color: palette.muted, fontFamily: Platform.select({ios: 'Menlo', android: 'monospace'}), fontSize: 11, lineHeight: 16},
+  activityRowDetail: {color: palette.muted, fontFamily: monoFamily, fontSize: 11, lineHeight: 16},
   diffChips: {flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 2},
-  diffChip: {paddingHorizontal: 6, paddingVertical: 2, borderRadius: 5, overflow: 'hidden', fontFamily: Platform.select({ios: 'Menlo', android: 'monospace'}), fontSize: 10.5, fontWeight: '700'},
+  diffChip: {paddingHorizontal: 6, paddingVertical: 2, borderRadius: 5, overflow: 'hidden', fontFamily: monoFamily, fontSize: 10.5, fontWeight: '700'},
   diffChipAdded: {color: palette.success, backgroundColor: palette.raised},
   diffChipRemoved: {color: palette.danger, backgroundColor: palette.dangerSurface},
   activityNotice: {minHeight: 48, alignSelf: 'stretch', flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 4, paddingVertical: 8, borderTopWidth: StyleSheet.hairlineWidth, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: palette.border},
@@ -2480,7 +2493,7 @@ function createStyles(theme: MobileTheme) {
   compactComposerPrompt: {flex: 1, minHeight: 38, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 10, borderRadius: Math.max(6, inputRadius - 3)},
   compactComposerText: {flex: 1, color: palette.placeholder, fontSize: 13, fontWeight: '500'},
   composerContextRow: {minHeight: 33, flexDirection: 'row', alignItems: 'center', gap: 6, paddingBottom: 5, marginBottom: 3, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: palette.border},
-  composerInput: {color: palette.text, minHeight: 46, maxHeight: 126, paddingHorizontal: 2, paddingTop: 5, paddingBottom: 4, fontSize: 14, lineHeight: 20, textAlignVertical: 'top'},
+  composerInput: {color: palette.text, minHeight: 46, maxHeight: 126, paddingHorizontal: 2, paddingTop: 5, paddingBottom: 4, fontFamily, fontSize: 14, lineHeight: 20, textAlignVertical: 'top'},
   composerActions: {height: 44, flexDirection: 'row', alignItems: 'center', gap: 4},
   composerSpacer: {flex: 1},
   iconButton: {width: 44, height: 44, borderRadius: 8, alignItems: 'center', justifyContent: 'center', backgroundColor: 'transparent'},
@@ -2492,7 +2505,7 @@ function createStyles(theme: MobileTheme) {
   attentionCard: {backgroundColor: palette.panel, borderWidth: 1, borderColor: palette.border, borderRadius: cardRadius, padding: 14, gap: 10},
   inlineApprovalCard: {alignSelf: 'stretch', borderColor: palette.warning, backgroundColor: palette.input, borderRadius: Math.max(8, cardRadius - 2), padding: 12},
   attentionTitle: {color: palette.text, fontSize: 16, fontWeight: '600'},
-  codeBlock: {color: palette.text, backgroundColor: palette.bg, borderRadius: inputRadius, padding: 10, fontFamily: Platform.select({ios: 'Menlo', android: 'monospace'}), fontSize: 12, maxHeight: 180},
+  codeBlock: {color: palette.text, backgroundColor: palette.bg, borderRadius: inputRadius, padding: 10, fontFamily: monoFamily, fontSize: 12, maxHeight: 180},
   approvalDetailScroll: {minWidth: '100%'},
   actionRow: {flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', gap: 8, flexWrap: 'wrap'},
   dialogBackdrop: {flex: 1, justifyContent: 'center', padding: 24, backgroundColor: 'rgba(0, 0, 0, 0.72)'},

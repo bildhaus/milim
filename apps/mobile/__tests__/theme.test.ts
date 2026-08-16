@@ -1,6 +1,7 @@
 import {
   createMobileTheme,
   defaultAppearance,
+  mobileFontFamily,
   mobileBackgroundResizeMode,
 } from '../src/theme';
 
@@ -41,4 +42,32 @@ test('maps desktop background fits to aspect-preserving native modes', () => {
   expect(mobileBackgroundResizeMode('center')).toBe('center');
   expect(mobileBackgroundResizeMode('tile')).toBe('repeat');
   expect(mobileBackgroundResizeMode('unknown')).toBe('cover');
+});
+
+test('resolves desktop font stacks to platform-native families', () => {
+  expect(mobileFontFamily(defaultAppearance.typography.font_family, 'ios')).toBeUndefined();
+  expect(mobileFontFamily(defaultAppearance.typography.font_family, 'android')).toBe('sans-serif');
+  expect(mobileFontFamily('Georgia, "Times New Roman", serif', 'ios')).toBe('Georgia');
+  expect(mobileFontFamily('Georgia, "Times New Roman", serif', 'android')).toBe('serif');
+  expect(mobileFontFamily('"JetBrains Mono", monospace', 'ios', true)).toBe('Menlo');
+  expect(mobileFontFamily('"JetBrains Mono", monospace', 'android', true)).toBe('monospace');
+});
+
+test('includes resolved desktop typography in the mobile theme', () => {
+  const appearance = {
+    ...defaultAppearance,
+    typography: {
+      font_family: 'Helvetica, Arial, sans-serif',
+      mono_family: '"Cascadia Code", monospace',
+    },
+  };
+
+  expect(createMobileTheme(appearance, 'ios')).toMatchObject({
+    fontFamily: 'Helvetica',
+    monoFamily: 'Menlo',
+  });
+  expect(createMobileTheme(appearance, 'android')).toMatchObject({
+    fontFamily: 'sans-serif',
+    monoFamily: 'monospace',
+  });
 });

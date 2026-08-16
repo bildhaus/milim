@@ -32,8 +32,12 @@ export interface MobileTheme {
   palette: MobilePalette;
   cardRadius: number;
   inputRadius: number;
+  fontFamily?: string;
+  monoFamily: string;
   isDark: boolean;
 }
+
+export type MobilePlatform = 'ios' | 'android';
 
 export const defaultAppearance: AppearanceSnapshotV1 = {
   revision: 'builtin-mono-dark',
@@ -147,7 +151,38 @@ function contrastInk(accent: string, isDark: boolean): string {
   return luminance > 0.55 ? '#0d0d0f' : '#ffffff';
 }
 
-export function createMobileTheme(snapshot?: AppearanceSnapshotV1): MobileTheme {
+function fontNames(stack: string): string[] {
+  return stack
+    .split(',')
+    .map(value => value.trim().replace(/^["']|["']$/g, ''))
+    .filter(Boolean);
+}
+
+export function mobileFontFamily(
+  stack: string,
+  platform: MobilePlatform,
+  monospace = false,
+): string | undefined {
+  const names = fontNames(stack);
+  const normalized = names.map(name => name.toLowerCase());
+  if (monospace) {
+    return platform === 'ios' ? 'Menlo' : 'monospace';
+  }
+  if (normalized.some(name => name === 'georgia' || name === 'times new roman' || name === 'serif')) {
+    return platform === 'ios'
+      ? names.find(name => ['georgia', 'times new roman'].includes(name.toLowerCase())) ?? 'Times New Roman'
+      : 'serif';
+  }
+  if (platform === 'ios') {
+    return names.find(name => ['helvetica', 'arial', 'verdana'].includes(name.toLowerCase()));
+  }
+  return 'sans-serif';
+}
+
+export function createMobileTheme(
+  snapshot?: AppearanceSnapshotV1,
+  platform: MobilePlatform = 'android',
+): MobileTheme {
   const appearance = snapshot ?? defaultAppearance;
   const defaults = defaultAppearance.colors;
   const colors = appearance.colors ?? defaults;
@@ -171,6 +206,8 @@ export function createMobileTheme(snapshot?: AppearanceSnapshotV1): MobileTheme 
     isDark,
     cardRadius: radius(borders.card_radius, 12),
     inputRadius: radius(borders.input_radius, 10),
+    fontFamily: mobileFontFamily(appearance.typography.font_family, platform),
+    monoFamily: mobileFontFamily(appearance.typography.mono_family, platform, true) ?? 'monospace',
     palette: {
       bg: bgPrimary,
       sidebar: withAlpha(validColor(colors.sidebar_bg, defaults.sidebar_bg), panelOpacity),

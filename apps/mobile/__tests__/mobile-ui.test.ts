@@ -73,6 +73,12 @@ describe('mobile UI helpers', () => {
       offsetY: 300,
       bottomInset: 138,
     })).toBe(300);
+    expect(transcriptDistanceFromLatest({
+      contentHeight: 1_238,
+      viewportHeight: 500,
+      offsetY: 1_238 - 500,
+      bottomInset: 138,
+    })).toBe(0);
   });
 
   test('keeps the composer expanded at latest or for active input state', () => {
