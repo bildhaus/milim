@@ -4855,18 +4855,48 @@ async function runChatAffordancesCheck(page) {
   if (!(await source.getAttribute("aria-label"))?.includes("opens in browser")) {
     throw new Error("Assistant source chip did not expose its external destination.");
   }
+  const scroll = page.locator(".chat-scroll");
+  const scrollBeforeHover = await scroll.evaluate((element) => element.scrollTop);
   await source.hover();
   await page.waitForFunction(() => {
     const preview = document.querySelector(".md-source-preview");
-    return preview instanceof HTMLElement && getComputedStyle(preview).opacity === "1";
+    return preview instanceof HTMLElement && getComputedStyle(preview).position === "fixed";
   });
+  const scrollAfterHover = await scroll.evaluate((element) => element.scrollTop);
+  if (Math.abs(scrollAfterHover - scrollBeforeHover) > 1) {
+    throw new Error(`Source hover moved the transcript from ${scrollBeforeHover} to ${scrollAfterHover}.`);
+  }
   const sourceDetail = await page.locator(".md-source-preview").last().innerText();
   if (!sourceDetail.includes("prompt-kit.com/docs") || sourceDetail.includes("ref=e2e")) {
     throw new Error(`Source hover detail was not compact and query-free: ${sourceDetail}`);
   }
+  const sourcePreviewStyle = await page.locator(".md-source-preview").last().evaluate((element) => {
+    const style = getComputedStyle(element);
+    const reference = document.createElement("div");
+    reference.className = "run-body";
+    document.body.append(reference);
+    const referenceStyle = getComputedStyle(reference);
+    const result = {
+      parentIsBody: element.parentElement === document.body,
+      background: style.backgroundColor,
+      blur: style.backdropFilter,
+      expectedBackground: referenceStyle.backgroundColor,
+      expectedBlur: referenceStyle.backdropFilter,
+    };
+    reference.remove();
+    return result;
+  });
+  if (!sourcePreviewStyle.parentIsBody) {
+    throw new Error("Source tooltip should render outside the scrolling transcript.");
+  }
+  if (sourcePreviewStyle.background !== sourcePreviewStyle.expectedBackground) {
+    throw new Error(`Source tooltip did not use the shared popover background: ${JSON.stringify(sourcePreviewStyle)}.`);
+  }
+  if (!sourcePreviewStyle.blur.includes(sourcePreviewStyle.expectedBlur)) {
+    throw new Error(`Source tooltip did not use the shared popover blur: ${JSON.stringify(sourcePreviewStyle)}.`);
+  }
   await page.screenshot({ path: screenshots.chatSources, fullPage: false });
 
-  const scroll = page.locator(".chat-scroll");
   const canScroll = await scroll.evaluate((element) => {
     element.scrollTop = 0;
     element.dispatchEvent(new Event("scroll"));

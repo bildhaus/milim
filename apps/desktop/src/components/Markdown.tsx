@@ -1,4 +1,5 @@
-import { Children, isValidElement, memo, useMemo, type ComponentProps, type MouseEvent, type ReactNode } from "react";
+import { Children, isValidElement, memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type MouseEvent, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize from "rehype-sanitize";
@@ -26,6 +27,7 @@ type MarkdownProps = {
 
 type MarkdownRehypePlugin = MarkdownRehypePlugins[number];
 type HastNode = SyntaxNode;
+const useClientLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
 function codeBlockText(children: ReactNode): string {
   return Children.toArray(children)
@@ -168,6 +170,90 @@ function openMarkdownLink(event: MouseEvent<HTMLAnchorElement>, href: string | u
   void openExternalUrl(href).catch((error) => console.warn("failed to open link", error));
 }
 
+function SourceLink({
+  children,
+  href,
+  label,
+  source,
+}: {
+  children: ReactNode;
+  href: string;
+  label: string;
+  source: { host: string; path: string };
+}) {
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const linkRef = useRef<HTMLAnchorElement>(null);
+  const previewRef = useRef<HTMLSpanElement>(null);
+  const previewId = useId();
+
+  useClientLayoutEffect(() => {
+    if (!previewOpen) return;
+
+    function positionPreview() {
+      const link = linkRef.current;
+      const preview = previewRef.current;
+      if (!link || !preview) return;
+      const linkRect = link.getBoundingClientRect();
+      const previewRect = preview.getBoundingClientRect();
+      const margin = 12;
+      const gap = 6;
+      const left = Math.min(
+        Math.max(margin, linkRect.left),
+        Math.max(margin, window.innerWidth - previewRect.width - margin),
+      );
+      const below = linkRect.bottom + gap;
+      const top = below + previewRect.height <= window.innerHeight - margin
+        ? below
+        : Math.max(margin, linkRect.top - previewRect.height - gap);
+      preview.style.left = `${left}px`;
+      preview.style.top = `${top}px`;
+    }
+
+    positionPreview();
+    window.addEventListener("resize", positionPreview);
+    window.addEventListener("scroll", positionPreview, true);
+    return () => {
+      window.removeEventListener("resize", positionPreview);
+      window.removeEventListener("scroll", positionPreview, true);
+    };
+  }, [previewOpen]);
+
+  return (
+    <span className="md-source">
+      <a
+        ref={linkRef}
+        className="md-source-link"
+        href={href}
+        target="_blank"
+        rel="noreferrer"
+        aria-label={`${label}, ${source.host}, opens in browser`}
+        aria-describedby={previewOpen ? previewId : undefined}
+        onClick={(event) => openMarkdownLink(event, href)}
+        onFocus={() => setPreviewOpen(true)}
+        onBlur={() => setPreviewOpen(false)}
+        onMouseEnter={() => setPreviewOpen(true)}
+        onMouseLeave={() => {
+          if (document.activeElement !== linkRef.current) setPreviewOpen(false);
+        }}
+      >
+        <span>{children}</span>
+        <span className="md-source-host" aria-hidden="true">{source.host}</span>
+        <ExternalLink size={10} aria-hidden="true" />
+      </a>
+      {previewOpen && typeof document !== "undefined"
+        ? createPortal(
+            <span ref={previewRef} id={previewId} className="md-source-preview" role="tooltip">
+              <strong>{label}</strong>
+              <span>{source.host}</span>
+              <code dir="ltr">{source.path}</code>
+            </span>,
+            document.body,
+          )
+        : null}
+    </span>
+  );
+}
+
 function MarkdownBody({
   content,
   previewArtifacts,
@@ -217,7 +303,7 @@ function MarkdownBody({
         },
         a: ({ children, href }) => {
           const source = sourceLinks ? sourceLinkDetails(href) : null;
-          if (!source) {
+          if (!source || !href) {
             return (
               <a href={href} target="_blank" rel="noreferrer" onClick={(event) => openMarkdownLink(event, href)}>
                 {children}
@@ -226,26 +312,7 @@ function MarkdownBody({
           }
           const label = codeBlockText(children).trim() || source.host;
           return (
-            <span className="md-source">
-              <a
-                className="md-source-link"
-                href={href}
-                target="_blank"
-                rel="noreferrer"
-                title={href}
-                aria-label={`${label}, ${source.host}, opens in browser`}
-                onClick={(event) => openMarkdownLink(event, href)}
-              >
-                <span>{children}</span>
-                <span className="md-source-host" aria-hidden="true">{source.host}</span>
-                <ExternalLink size={10} aria-hidden="true" />
-              </a>
-              <span className="md-source-preview" aria-hidden="true">
-                <strong>{label}</strong>
-                <span>{source.host}</span>
-                <code dir="ltr">{source.path}</code>
-              </span>
-            </span>
+            <SourceLink href={href} label={label} source={source}>{children}</SourceLink>
           );
         },
       }}
