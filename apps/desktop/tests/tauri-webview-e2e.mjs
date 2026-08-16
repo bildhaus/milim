@@ -28,7 +28,6 @@ const appMenuOnly = process.argv.includes("--app-menu-only");
 const turnChangesOnly = process.argv.includes("--turn-changes-only");
 const chatAffordancesOnly = process.argv.includes("--chat-affordances-only");
 const reasoningEffortOnly = process.argv.includes("--reasoning-effort-only");
-const mobileAuthOnly = process.argv.includes("--mobile-auth-only");
 const mediaOnly = process.argv.includes("--media-only");
 const mcpAppKinds = ["chart", "diagram", "form", "dashboard", "viewer"];
 const screenshots = {
@@ -120,9 +119,7 @@ let turnChangesRepo;
 try {
   session = await launchTauri(milimHome);
   await resetFrontendStorage(session.page);
-  if (mobileAuthOnly) {
-    await runMobileAuthCheck(session.page);
-  } else if (mediaOnly) {
+  if (mediaOnly) {
     const errors = collectErrors(session.page);
     await session.page.getByTestId("chat-shell").waitFor();
     await dismissOnboardingIfPresent(session.page);
@@ -274,58 +271,6 @@ function createTurnChangesRepo() {
     writeFileSync(join(folder, `file-${index}.txt`), `before\nchange ${index}\n`, "utf8");
   }
   return { folder, checkpoint };
-}
-
-async function runMobileAuthCheck(page) {
-  await page.getByTestId("chat-shell").waitFor();
-  const setup = await page.evaluate(async () => {
-    const invoke = window.__TAURI_INTERNALS__.invoke;
-    const [base, token] = await Promise.all([invoke("api_base_url"), invoke("api_token")]);
-    const headers = { Authorization: `Bearer ${token}` };
-    const enabled = await fetch(`${base}/mobile/enabled`, {
-      method: "POST",
-      headers: { ...headers, "Content-Type": "application/json" },
-      body: JSON.stringify({ enabled: true }),
-    });
-    if (!enabled.ok) throw new Error(`Mobile enable failed with HTTP ${enabled.status}`);
-    const response = await fetch(`${base}/mobile/pairing`, { method: "POST", headers });
-    if (!response.ok) throw new Error(`Mobile pairing failed with HTTP ${response.status}`);
-    const pairing = await response.json();
-    return { base, path: pairing.path };
-  });
-
-  const firstStream = page.waitForResponse((response) => {
-    const url = new URL(response.url());
-    return url.pathname === "/mobile/thread/events" && !url.search && response.status() === 200;
-  });
-  await page.goto(new URL(setup.path, setup.base).toString(), { waitUntil: "domcontentloaded" });
-  const firstResponse = await firstStream;
-  if (!/^Bearer \S+$/.test((await firstResponse.request().allHeaders()).authorization ?? "")) {
-    throw new Error("Bundled mobile SSE did not send an Authorization bearer header.");
-  }
-  await page.locator("#relayPanel:not(.hidden)").waitFor();
-  await page.locator("#status").filter({ hasText: "Live" }).waitFor();
-
-  const queryOnlyStatus = await page.evaluate(async () => {
-    const key = localStorage.getItem("milim.mobile.deviceKey");
-    if (!key) throw new Error("Paired mobile credential was not stored.");
-    return (await fetch(`/mobile/thread/events?key=${encodeURIComponent(key)}`)).status;
-  });
-  if (queryOnlyStatus !== 401) {
-    throw new Error(`Query-only mobile SSE auth returned HTTP ${queryOnlyStatus}; expected 401.`);
-  }
-
-  const reloadedStream = page.waitForResponse((response) => {
-    const url = new URL(response.url());
-    return url.pathname === "/mobile/thread/events" && !url.search && response.status() === 200;
-  });
-  await page.reload({ waitUntil: "domcontentloaded" });
-  const reloadedResponse = await reloadedStream;
-  if (!/^Bearer \S+$/.test((await reloadedResponse.request().allHeaders()).authorization ?? "")) {
-    throw new Error("Reloaded mobile SSE did not send an Authorization bearer header.");
-  }
-  await page.locator("#relayPanel:not(.hidden)").waitFor();
-  await page.locator("#status").filter({ hasText: "Live" }).waitFor();
 }
 
 async function runMediaStudioCheck(page) {

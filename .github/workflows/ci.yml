@@ -75,3 +75,65 @@ jobs:
       - name: Tauri Rust tests
         run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
       - run: pnpm -C apps/desktop verify
+
+  mobile-android:
+    name: Mobile Android debug
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 9
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/mobile/pnpm-lock.yaml
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+      - run: pnpm -C apps/mobile install --frozen-lockfile
+      - run: pnpm -C apps/mobile verify
+      - name: Assemble debug APK
+        working-directory: apps/mobile/android
+        run: ./gradlew assembleDebug --no-daemon
+
+  mobile-ios:
+    name: Mobile iOS simulator
+    runs-on: macos-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 9
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/mobile/pnpm-lock.yaml
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: false
+      - run: pnpm -C apps/mobile install --frozen-lockfile
+      - name: Install CocoaPods
+        working-directory: apps/mobile
+        run: bundle install --jobs 4 --retry 3
+      - name: Install iOS pods
+        working-directory: apps/mobile
+        run: bundle exec pod install --project-directory=ios
+      - name: Build iOS simulator app
+        working-directory: apps/mobile
+        run: >-
+          xcodebuild
+          -workspace ios/MilimMobile.xcworkspace
+          -scheme MilimMobile
+          -configuration Debug
+          -sdk iphonesimulator
+          -derivedDataPath ios/build/DerivedData
+          CODE_SIGNING_ALLOWED=NO
+          build

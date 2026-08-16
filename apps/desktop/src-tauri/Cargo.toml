@@ -57,6 +57,7 @@ enigo = { version = "0.6", optional = true }
 xcap = { version = "0.9", features = ["image"], optional = true }
 image = { version = "0.25", optional = true }
 base64 = "0.22"
+mdns-sd = "0.20.3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = { version = "0.25", optional = true }

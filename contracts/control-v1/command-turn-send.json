@@ -1,0 +1,10 @@
+{
+  "command_id": "command-fixture",
+  "kind": "turn.send",
+  "thread_id": "thread-fixture",
+  "expected_revision": 3,
+  "payload": {
+    "text": "Explain the failing check.",
+    "attachments": []
+  }
+}

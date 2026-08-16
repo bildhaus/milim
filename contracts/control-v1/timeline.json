@@ -1,0 +1,32 @@
+{
+  "thread_id": "thread-fixture",
+  "epoch": "epoch-fixture",
+  "first_seq": 3,
+  "last_seq": 4,
+  "has_older": true,
+  "has_newer": false,
+  "before_seq": 3,
+  "after_seq": null,
+  "items": [
+    {
+      "id": "message-fixture",
+      "thread_id": "thread-fixture",
+      "epoch": "epoch-fixture",
+      "seq": 3,
+      "run_id": "run-fixture",
+      "type": "message",
+      "data": { "id": "message-fixture", "role": "user", "content": "Hello" },
+      "created_at_ms": 1700000000000
+    },
+    {
+      "id": "delta-fixture",
+      "thread_id": "thread-fixture",
+      "epoch": "epoch-fixture",
+      "seq": 4,
+      "run_id": "run-fixture",
+      "type": "assistant_delta",
+      "data": { "text": "Hi", "reasoning": "" },
+      "created_at_ms": 1700000000001
+    }
+  ]
+}

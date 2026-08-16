@@ -14,6 +14,8 @@ pub struct AgentDef {
     pub id: String,
     pub name: String,
     #[serde(default)]
+    pub description: String,
+    #[serde(default)]
     pub system_prompt: String,
     /// Deprecated compatibility field used only as a fallback by legacy schedules.
     #[serde(default)]
@@ -63,6 +65,11 @@ pub const AGENT_MIGRATIONS: &[Migration] = &[
         sql: "ALTER TABLE agents ADD COLUMN skill_mode TEXT NOT NULL DEFAULT '';
               ALTER TABLE agents ADD COLUMN enabled_skills TEXT NOT NULL DEFAULT '[]';",
     },
+    Migration {
+        version: 5,
+        name: "agent_description",
+        sql: "ALTER TABLE agents ADD COLUMN description TEXT NOT NULL DEFAULT '';",
+    },
 ];
 
 fn default_skill_mode() -> String {
@@ -103,6 +110,7 @@ impl AgentStore {
     pub fn create(
         &self,
         name: &str,
+        description: &str,
         model: &str,
         system_prompt: &str,
         tool_mode: &str,
@@ -116,6 +124,7 @@ impl AgentStore {
         let agent = AgentDef {
             id: uuid::Uuid::new_v4().to_string(),
             name: name.to_string(),
+            description: description.to_string(),
             system_prompt: system_prompt.to_string(),
             model: model.to_string(),
             tool_mode,
@@ -137,10 +146,11 @@ impl AgentStore {
         let db = self.db.lock().expect("agents db poisoned");
         db.conn()
             .execute(
-                "INSERT INTO agents (id, name, system_prompt, model, tool_mode, enabled_tools, skill_mode, enabled_skills, avatar)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                "INSERT INTO agents (id, name, description, system_prompt, model, tool_mode, enabled_tools, skill_mode, enabled_skills, avatar)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                  ON CONFLICT(id) DO UPDATE SET
-                   name=excluded.name, system_prompt=excluded.system_prompt,
+                   name=excluded.name, description=excluded.description,
+                   system_prompt=excluded.system_prompt,
                    model=excluded.model, tool_mode=excluded.tool_mode,
                    enabled_tools=excluded.enabled_tools,
                    skill_mode=excluded.skill_mode,
@@ -149,6 +159,7 @@ impl AgentStore {
                 params![
                     agent.id,
                     agent.name,
+                    agent.description,
                     agent.system_prompt,
                     agent.model,
                     tool_mode,
@@ -168,7 +179,7 @@ impl AgentStore {
         let agent = db
             .conn()
             .query_row(
-                "SELECT id, name, system_prompt, model, tool_mode, enabled_tools, skill_mode, enabled_skills, avatar FROM agents WHERE id = ?1",
+                "SELECT id, name, description, system_prompt, model, tool_mode, enabled_tools, skill_mode, enabled_skills, avatar FROM agents WHERE id = ?1",
                 params![id],
                 row_to_agent,
             )
@@ -189,7 +200,7 @@ impl AgentStore {
         let conn = db.conn();
         let mut stmt = conn
             .prepare(
-                "SELECT id, name, system_prompt, model, tool_mode, enabled_tools, skill_mode, enabled_skills, avatar
+                "SELECT id, name, description, system_prompt, model, tool_mode, enabled_tools, skill_mode, enabled_skills, avatar
                  FROM agents ORDER BY created_at DESC",
             )
             .map_err(sqlite)?;
@@ -213,24 +224,25 @@ impl AgentStore {
 }
 
 fn row_to_agent(r: &rusqlite::Row) -> rusqlite::Result<AgentDef> {
-    let tool_mode: String = r.get(4)?;
-    let tools_json: String = r.get(5)?;
+    let tool_mode: String = r.get(5)?;
+    let tools_json: String = r.get(6)?;
     let enabled_tools: Vec<String> = serde_json::from_str(&tools_json).unwrap_or_default();
     let tool_mode = normalize_tool_mode(&tool_mode, &enabled_tools);
-    let skill_mode: String = r.get(6)?;
-    let skills_json: String = r.get(7)?;
+    let skill_mode: String = r.get(7)?;
+    let skills_json: String = r.get(8)?;
     let enabled_skills: Vec<String> = serde_json::from_str(&skills_json).unwrap_or_default();
     let skill_mode = normalize_skill_mode(&skill_mode, &enabled_skills);
     Ok(AgentDef {
         id: r.get(0)?,
         name: r.get(1)?,
-        system_prompt: r.get(2)?,
-        model: r.get(3)?,
+        description: r.get(2)?,
+        system_prompt: r.get(3)?,
+        model: r.get(4)?,
         tool_mode,
         enabled_tools,
         skill_mode,
         enabled_skills,
-        avatar: r.get(8)?,
+        avatar: r.get(9)?,
     })
 }
 
@@ -252,6 +264,7 @@ mod tests {
         let a = s
             .create(
                 "Researcher",
+                "Finds and verifies primary sources.",
                 "test-echo",
                 "You research.",
                 "custom",
@@ -263,6 +276,7 @@ mod tests {
             .unwrap();
         let fetched = s.get(&a.id).unwrap().unwrap();
         assert_eq!(fetched.name, "Researcher");
+        assert_eq!(fetched.description, "Finds and verifies primary sources.");
         assert_eq!(fetched.model, "test-echo");
         assert_eq!(fetched.tool_mode, "custom");
         assert_eq!(fetched.enabled_tools, vec!["echo".to_string()]);
@@ -281,7 +295,7 @@ mod tests {
     fn upsert_updates_in_place() {
         let s = store();
         let mut a = s
-            .create("A", "m", "", "all", vec![], "auto", vec![], "")
+            .create("A", "", "m", "", "all", vec![], "auto", vec![], "")
             .unwrap();
         a.name = "B".to_string();
         a.skill_mode = "".to_string();

@@ -1,11 +1,15 @@
 import { create } from "zustand";
 import { readUserStateKey, writeUserStateKey } from "../persistence/userStateStorage.js";
+import { useUiPreferences } from "../ui/store.js";
+import { appearanceSnapshot } from "./appearanceSnapshot.js";
 import { applyTheme } from "./applyTheme.js";
 import { BUILTIN_THEMES, DEFAULT_THEME_ID, themeById } from "./themes.js";
 import type { Theme } from "./types";
 
 const ACTIVE_KEY = "milim.themeId";
 const CUSTOM_KEY = "milim.customThemes";
+const APPEARANCE_KEY = "milim.appearanceSnapshot";
+let pendingAppearanceWrite: Promise<void> | null = null;
 
 function loadCustom(): Theme[] {
   return parseCustomThemes(readUserStateKeySync(CUSTOM_KEY));
@@ -41,6 +45,27 @@ function persistCustom(list: Theme[]) {
 }
 function persistActiveThemeId(id: string) {
   void writeUserStateKey(ACTIVE_KEY, JSON.stringify(id));
+}
+function trackAppearanceWrite(task: Promise<void>) {
+  pendingAppearanceWrite = task;
+  void task
+    .catch((error) => console.warn("Failed to publish appearance:", error))
+    .finally(() => {
+      if (pendingAppearanceWrite === task) pendingAppearanceWrite = null;
+    });
+}
+function persistAppearance(theme: Theme) {
+  const { backgroundFit, backgroundTreatment } = useUiPreferences.getState();
+  const value = JSON.stringify(
+    appearanceSnapshot(theme, { backgroundFit, backgroundTreatment }),
+  );
+  const write = () => Promise.resolve(writeUserStateKey(APPEARANCE_KEY, value));
+  if (!pendingAppearanceWrite) {
+    const result = writeUserStateKey(APPEARANCE_KEY, value);
+    if (result) trackAppearanceWrite(result);
+    return;
+  }
+  trackAppearanceWrite(pendingAppearanceWrite.catch(() => {}).then(write));
 }
 function resolve(id: string, custom: Theme[]): Theme {
   return custom.find((t) => t.id === id) ?? themeById(id);
@@ -79,6 +104,7 @@ export const useTheme = create<ThemeState>((set, get) => {
       const t = resolve(id, get().custom);
       applyTheme(t);
       persistActiveThemeId(t.id);
+      persistAppearance(t);
       set({ themeId: t.id, theme: t });
     },
 
@@ -91,6 +117,7 @@ export const useTheme = create<ThemeState>((set, get) => {
       persistCustom(list);
       applyTheme(t);
       persistActiveThemeId(t.id);
+      persistAppearance(t);
       set({ custom: list, themes: [...BUILTIN_THEMES, ...list], themeId: t.id, theme: t });
     },
 
@@ -100,9 +127,19 @@ export const useTheme = create<ThemeState>((set, get) => {
       const next = get().themeId === id ? BUILTIN_THEMES[0] : resolve(get().themeId, list);
       applyTheme(next);
       persistActiveThemeId(next.id);
+      persistAppearance(next);
       set({ custom: list, themes: [...BUILTIN_THEMES, ...list], themeId: next.id, theme: next });
     },
   };
+});
+
+useUiPreferences.subscribe((state, previous) => {
+  if (
+    state.backgroundFit !== previous.backgroundFit ||
+    state.backgroundTreatment !== previous.backgroundTreatment
+  ) {
+    persistAppearance(useTheme.getState().theme);
+  }
 });
 
 export async function hydrateThemeFromUserState(): Promise<void> {
@@ -114,5 +151,6 @@ export async function hydrateThemeFromUserState(): Promise<void> {
   const activeId = parseActiveThemeId(activeRaw);
   const next = resolve(activeId ?? useTheme.getState().themeId, custom);
   applyTheme(next);
+  persistAppearance(next);
   useTheme.setState({ custom, themes: [...BUILTIN_THEMES, ...custom], themeId: next.id, theme: next });
 }

@@ -3803,6 +3803,26 @@ html[data-dark="true"] .preview-control-cursor {
   font-family: var(--mono);
   font-size: 11.5px;
 }
+.stream-work-summary-details {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  overflow: hidden;
+}
+.stream-work-summary-details > .stream-event-detail {
+  flex: 1 1 auto;
+}
+.stream-work-summary-meta {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px solid var(--border-primary);
+  border-radius: 999px;
+  color: var(--tertiary-text);
+  font-size: 10.5px;
+  line-height: 1.3;
+  white-space: nowrap;
+}
 .stream-command-copy {
   display: grid;
   place-items: center;
@@ -3817,7 +3837,7 @@ html[data-dark="true"] .preview-control-cursor {
   cursor: pointer;
   opacity: 0;
 }
-.stream-event:hover > .stream-command-copy,
+.stream-event:hover .stream-command-copy,
 .stream-command-copy:focus-visible { opacity: 0.72; }
 .stream-command-copy:hover { background: var(--chip-hover); opacity: 1; }
 .stream-approval-actions {

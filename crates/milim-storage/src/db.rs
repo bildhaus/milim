@@ -10,7 +10,7 @@ use std::sync::Mutex;
 
 use milim_core::{Error, Result};
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::crypto::EncryptedStore;
 
@@ -282,6 +282,92 @@ const USER_DATA_MIGRATIONS: &[Migration] = &[
             FOREIGN KEY (session_id) REFERENCES user_sessions(id) ON DELETE CASCADE
         );",
     },
+    Migration {
+        version: 4,
+        name: "user_control_runtime",
+        sql: "CREATE TABLE IF NOT EXISTS user_control_host (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            host_id TEXT NOT NULL UNIQUE,
+            display_name TEXT NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            updated_at_ms INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS user_thread_control (
+            thread_id TEXT PRIMARY KEY,
+            epoch TEXT NOT NULL,
+            revision INTEGER NOT NULL DEFAULT 0,
+            next_seq INTEGER NOT NULL DEFAULT 1,
+            updated_at_ms INTEGER NOT NULL,
+            FOREIGN KEY (thread_id) REFERENCES user_sessions(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS user_runs (
+            id TEXT PRIMARY KEY,
+            thread_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            adapter TEXT NOT NULL,
+            request_json TEXT NOT NULL,
+            agent_snapshot_json TEXT,
+            native_session_json TEXT,
+            created_at_ms INTEGER NOT NULL,
+            updated_at_ms INTEGER NOT NULL,
+            completed_at_ms INTEGER,
+            error_json TEXT,
+            FOREIGN KEY (thread_id) REFERENCES user_sessions(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_runs_thread_created
+            ON user_runs(thread_id, created_at_ms DESC);
+        CREATE INDEX IF NOT EXISTS idx_user_runs_status
+            ON user_runs(status, updated_at_ms);
+        CREATE TABLE IF NOT EXISTS user_timeline_events (
+            thread_id TEXT NOT NULL,
+            epoch TEXT NOT NULL,
+            seq INTEGER NOT NULL,
+            item_id TEXT NOT NULL UNIQUE,
+            run_id TEXT,
+            item_type TEXT NOT NULL,
+            data_json TEXT NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (thread_id, epoch, seq),
+            FOREIGN KEY (thread_id) REFERENCES user_sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY (run_id) REFERENCES user_runs(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_timeline_thread_seq
+            ON user_timeline_events(thread_id, epoch, seq);
+        CREATE TABLE IF NOT EXISTS user_queued_turns (
+            id TEXT PRIMARY KEY,
+            thread_id TEXT NOT NULL,
+            command_id TEXT NOT NULL UNIQUE,
+            request_json TEXT NOT NULL,
+            accepted_at_ms INTEGER NOT NULL,
+            FOREIGN KEY (thread_id) REFERENCES user_sessions(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_queued_turns_order
+            ON user_queued_turns(thread_id, accepted_at_ms, id);
+        CREATE TABLE IF NOT EXISTS user_command_receipts (
+            command_id TEXT PRIMARY KEY,
+            device_id TEXT,
+            thread_id TEXT,
+            command_kind TEXT NOT NULL,
+            request_json TEXT NOT NULL,
+            result_json TEXT NOT NULL,
+            created_at_ms INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS user_pending_approvals (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            request_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            decision_json TEXT,
+            created_at_ms INTEGER NOT NULL,
+            resolved_at_ms INTEGER,
+            FOREIGN KEY (run_id) REFERENCES user_runs(id) ON DELETE CASCADE,
+            FOREIGN KEY (thread_id) REFERENCES user_sessions(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_pending_approvals_status
+            ON user_pending_approvals(status, created_at_ms);",
+    },
 ];
 
 /// Encrypted key/value store (API keys, OAuth tokens, agent secrets).
@@ -334,6 +420,104 @@ impl SecretKv<'_> {
 
 pub struct UserDataStore {
     db: Mutex<Database>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlHostRecord {
+    pub host_id: String,
+    pub display_name: String,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlThreadRecord {
+    pub id: String,
+    pub session_json: String,
+    pub revision: u64,
+    pub epoch: String,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlRunRecord {
+    pub id: String,
+    pub thread_id: String,
+    pub status: String,
+    pub adapter: String,
+    pub request_json: String,
+    pub agent_snapshot_json: Option<String>,
+    pub native_session_json: Option<String>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub completed_at_ms: Option<i64>,
+    pub error_json: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlTimelineRecord {
+    pub thread_id: String,
+    pub epoch: String,
+    pub seq: u64,
+    pub item_id: String,
+    pub run_id: Option<String>,
+    pub item_type: String,
+    pub data_json: String,
+    pub created_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlTimelinePage {
+    pub epoch: String,
+    pub first_seq: Option<u64>,
+    pub last_seq: Option<u64>,
+    pub has_older: bool,
+    pub has_newer: bool,
+    pub items: Vec<ControlTimelineRecord>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlQueuedTurnRecord {
+    pub id: String,
+    pub thread_id: String,
+    pub command_id: String,
+    pub request_json: String,
+    pub accepted_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlCommandReceiptRecord {
+    pub command_id: String,
+    pub device_id: Option<String>,
+    pub thread_id: Option<String>,
+    pub command_kind: String,
+    pub request_json: String,
+    pub result_json: String,
+    pub created_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlApprovalRecord {
+    pub id: String,
+    pub run_id: String,
+    pub thread_id: String,
+    pub kind: String,
+    pub request_json: String,
+    pub status: String,
+    pub decision_json: Option<String>,
+    pub created_at_ms: i64,
+    pub resolved_at_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlBackupState {
+    pub host: Option<ControlHostRecord>,
+    pub threads: Vec<ControlThreadRecord>,
+    pub runs: Vec<ControlRunRecord>,
+    pub timeline: Vec<ControlTimelineRecord>,
+    pub queued_turns: Vec<ControlQueuedTurnRecord>,
+    pub command_receipts: Vec<ControlCommandReceiptRecord>,
+    pub approvals: Vec<ControlApprovalRecord>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -571,6 +755,1313 @@ impl UserDataStore {
         }
         Ok(())
     }
+
+    /// Return the stable identity of this desktop host, creating it once.
+    /// The first caller wins so reinstalling or renaming a client cannot
+    /// silently replace the identity used to partition mobile replicas.
+    pub fn ensure_control_host(
+        &self,
+        proposed_host_id: &str,
+        display_name: &str,
+    ) -> Result<ControlHostRecord> {
+        let proposed_host_id = required_control_text(proposed_host_id, "host id")?;
+        let display_name = required_control_text(display_name, "host display name")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let now = now_ms();
+        db.conn()
+            .execute(
+                "INSERT OR IGNORE INTO user_control_host
+                 (singleton, host_id, display_name, created_at_ms, updated_at_ms)
+                 VALUES (1, ?1, ?2, ?3, ?3)",
+                params![proposed_host_id, display_name, now],
+            )
+            .map_err(sqlite)?;
+        db.conn()
+            .query_row(
+                "SELECT host_id, display_name, created_at_ms, updated_at_ms
+                 FROM user_control_host WHERE singleton = 1",
+                [],
+                |row| {
+                    Ok(ControlHostRecord {
+                        host_id: row.get(0)?,
+                        display_name: row.get(1)?,
+                        created_at_ms: row.get(2)?,
+                        updated_at_ms: row.get(3)?,
+                    })
+                },
+            )
+            .map_err(sqlite)
+    }
+
+    pub fn update_control_host_name(&self, display_name: &str) -> Result<ControlHostRecord> {
+        let display_name = required_control_text(display_name, "host display name")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        db.conn()
+            .execute(
+                "UPDATE user_control_host SET display_name = ?1, updated_at_ms = ?2
+                 WHERE singleton = 1",
+                params![display_name, now_ms()],
+            )
+            .map_err(sqlite)?;
+        db.conn()
+            .query_row(
+                "SELECT host_id, display_name, created_at_ms, updated_at_ms
+                 FROM user_control_host WHERE singleton = 1",
+                [],
+                |row| {
+                    Ok(ControlHostRecord {
+                        host_id: row.get(0)?,
+                        display_name: row.get(1)?,
+                        created_at_ms: row.get(2)?,
+                        updated_at_ms: row.get(3)?,
+                    })
+                },
+            )
+            .map_err(sqlite)
+    }
+
+    /// Materialize control metadata for legacy sessions without rewriting the
+    /// existing session JSON or message rows.
+    pub fn control_threads(&self) -> Result<Vec<ControlThreadRecord>> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        conn.execute(
+            "INSERT OR IGNORE INTO user_thread_control
+             (thread_id, epoch, revision, next_seq, updated_at_ms)
+             SELECT id, lower(hex(randomblob(16))), 0, 1, updated_at_ms
+             FROM user_sessions",
+            [],
+        )
+        .map_err(sqlite)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT s.id, s.session_json, c.revision, c.epoch, s.updated_at_ms
+                 FROM user_sessions s
+                 JOIN user_thread_control c ON c.thread_id = s.id
+                 ORDER BY s.sort_order ASC, s.updated_at_ms DESC",
+            )
+            .map_err(sqlite)?;
+        let rows = stmt
+            .query_map([], control_thread_from_row)
+            .map_err(sqlite)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sqlite)
+    }
+
+    pub fn control_thread(&self, thread_id: &str) -> Result<Option<ControlThreadRecord>> {
+        let thread_id = required_control_text(thread_id, "thread id")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        conn.execute(
+            "INSERT OR IGNORE INTO user_thread_control
+             (thread_id, epoch, revision, next_seq, updated_at_ms)
+             SELECT id, lower(hex(randomblob(16))), 0, 1, updated_at_ms
+             FROM user_sessions WHERE id = ?1",
+            params![thread_id],
+        )
+        .map_err(sqlite)?;
+        conn.query_row(
+            "SELECT s.id, s.session_json, c.revision, c.epoch, s.updated_at_ms
+             FROM user_sessions s
+             JOIN user_thread_control c ON c.thread_id = s.id
+             WHERE s.id = ?1",
+            params![thread_id],
+            control_thread_from_row,
+        )
+        .optional()
+        .map_err(sqlite)
+    }
+
+    pub fn control_create_thread(
+        &self,
+        thread_id: &str,
+        session_json: &str,
+        epoch: &str,
+    ) -> Result<ControlThreadRecord> {
+        let thread_id = required_control_text(thread_id, "thread id")?;
+        let epoch = required_control_text(epoch, "thread epoch")?;
+        validate_control_json(session_json, "thread")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        let now = now_ms();
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
+        let result = (|| -> Result<ControlThreadRecord> {
+            let sort_order: i64 = conn
+                .query_row(
+                    "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM user_sessions",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(sqlite)?;
+            conn.execute(
+                "INSERT INTO user_sessions (id, session_json, sort_order, updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![thread_id, session_json, sort_order, now],
+            )
+            .map_err(sqlite)?;
+            conn.execute(
+                "INSERT INTO user_thread_control
+                 (thread_id, epoch, revision, next_seq, updated_at_ms)
+                 VALUES (?1, ?2, 1, 1, ?3)",
+                params![thread_id, epoch, now],
+            )
+            .map_err(sqlite)?;
+            Ok(ControlThreadRecord {
+                id: thread_id.to_string(),
+                session_json: session_json.to_string(),
+                revision: 1,
+                epoch: epoch.to_string(),
+                updated_at_ms: now,
+            })
+        })();
+        finish_control_transaction(conn, result)
+    }
+
+    pub fn control_update_thread(
+        &self,
+        thread_id: &str,
+        session_json: &str,
+        expected_revision: Option<u64>,
+    ) -> Result<Option<ControlThreadRecord>> {
+        let thread_id = required_control_text(thread_id, "thread id")?;
+        validate_control_json(session_json, "thread")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
+        let result = (|| -> Result<Option<ControlThreadRecord>> {
+            let Some(mut current) = conn
+                .query_row(
+                    "SELECT s.id, s.session_json, c.revision, c.epoch, s.updated_at_ms
+                     FROM user_sessions s
+                     JOIN user_thread_control c ON c.thread_id = s.id
+                     WHERE s.id = ?1",
+                    params![thread_id],
+                    control_thread_from_row,
+                )
+                .optional()
+                .map_err(sqlite)?
+            else {
+                return Ok(None);
+            };
+            if let Some(expected) = expected_revision {
+                if expected != current.revision {
+                    return Err(Error::InvalidRequest(format!(
+                        "thread revision conflict: expected {expected}, current {}",
+                        current.revision
+                    )));
+                }
+            }
+            let now = now_ms();
+            current.revision = current.revision.saturating_add(1);
+            current.session_json = session_json.to_string();
+            current.updated_at_ms = now;
+            conn.execute(
+                "UPDATE user_sessions SET session_json = ?2, updated_at_ms = ?3 WHERE id = ?1",
+                params![thread_id, session_json, now],
+            )
+            .map_err(sqlite)?;
+            conn.execute(
+                "UPDATE user_thread_control SET revision = ?2, updated_at_ms = ?3 WHERE thread_id = ?1",
+                params![thread_id, u64_to_i64(current.revision)?, now],
+            )
+            .map_err(sqlite)?;
+            Ok(Some(current))
+        })();
+        finish_control_transaction(conn, result)
+    }
+
+    pub fn control_delete_thread(&self, thread_id: &str) -> Result<bool> {
+        let thread_id = required_control_text(thread_id, "thread id")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        db.conn()
+            .execute(
+                "DELETE FROM user_sessions WHERE id = ?1",
+                params![thread_id],
+            )
+            .map(|changed| changed > 0)
+            .map_err(sqlite)
+    }
+
+    pub fn control_append_message(&self, thread_id: &str, message_json: &str) -> Result<usize> {
+        let thread_id = required_control_text(thread_id, "thread id")?;
+        validate_control_json(message_json, "message")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
+        let result = (|| -> Result<usize> {
+            let index: i64 = conn
+                .query_row(
+                    "SELECT COALESCE(MAX(message_index), -1) + 1
+                     FROM user_session_messages WHERE session_id = ?1",
+                    params![thread_id],
+                    |row| row.get(0),
+                )
+                .map_err(sqlite)?;
+            conn.execute(
+                "INSERT INTO user_session_messages
+                 (session_id, message_index, message_json) VALUES (?1, ?2, ?3)",
+                params![thread_id, index, message_json],
+            )
+            .map_err(sqlite)?;
+            bump_thread_revision_locked(conn, thread_id)?;
+            usize::try_from(index)
+                .map_err(|_| Error::Other("message index is outside usize range".into()))
+        })();
+        finish_control_transaction(conn, result)
+    }
+
+    pub fn control_messages(&self, thread_id: &str) -> Result<Vec<String>> {
+        let thread_id = required_control_text(thread_id, "thread id")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let mut stmt = db
+            .conn()
+            .prepare(
+                "SELECT message_json FROM user_session_messages
+                 WHERE session_id = ?1 ORDER BY message_index ASC",
+            )
+            .map_err(sqlite)?;
+        let rows = stmt
+            .query_map(params![thread_id], |row| row.get::<_, String>(0))
+            .map_err(sqlite)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sqlite)
+    }
+
+    /// Delete one canonical user-session message by its stable JSON `id` and
+    /// compact the positional indices used by the legacy desktop snapshot.
+    pub fn control_delete_message(&self, thread_id: &str, message_id: &str) -> Result<bool> {
+        let thread_id = required_control_text(thread_id, "thread id")?;
+        let message_id = required_control_text(message_id, "message id")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
+        let result = (|| -> Result<bool> {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT message_index, message_json FROM user_session_messages
+                     WHERE session_id = ?1 ORDER BY message_index ASC",
+                )
+                .map_err(sqlite)?;
+            let rows = stmt
+                .query_map(params![thread_id], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(sqlite)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sqlite)?;
+            drop(stmt);
+            let Some((index, _)) = rows.iter().find(|(_, raw)| {
+                serde_json::from_str::<serde_json::Value>(raw)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("id")
+                            .and_then(|id| id.as_str())
+                            .map(str::to_owned)
+                    })
+                    .as_deref()
+                    == Some(message_id)
+            }) else {
+                return Ok(false);
+            };
+            conn.execute(
+                "DELETE FROM user_session_messages
+                 WHERE session_id = ?1 AND message_index = ?2",
+                params![thread_id, index],
+            )
+            .map_err(sqlite)?;
+            conn.execute(
+                "UPDATE user_session_messages SET message_index = message_index - 1
+                 WHERE session_id = ?1 AND message_index > ?2",
+                params![thread_id, index],
+            )
+            .map_err(sqlite)?;
+            bump_thread_revision_locked(conn, thread_id)?;
+            Ok(true)
+        })();
+        finish_control_transaction(conn, result)
+    }
+
+    pub fn control_run(&self, run_id: &str) -> Result<Option<ControlRunRecord>> {
+        let run_id = required_control_text(run_id, "run id")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        db.conn()
+            .query_row(
+                "SELECT id, thread_id, status, adapter, request_json, agent_snapshot_json,
+                        native_session_json, created_at_ms, updated_at_ms, completed_at_ms, error_json
+                 FROM user_runs WHERE id = ?1",
+                params![run_id],
+                control_run_from_row,
+            )
+            .optional()
+            .map_err(sqlite)
+    }
+
+    pub fn control_put_run(&self, run: &ControlRunRecord) -> Result<()> {
+        validate_control_json(&run.request_json, "run request")?;
+        validate_optional_control_json(run.agent_snapshot_json.as_deref(), "agent snapshot")?;
+        validate_optional_control_json(run.native_session_json.as_deref(), "native session")?;
+        validate_optional_control_json(run.error_json.as_deref(), "run error")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        db.conn()
+            .execute(
+                "INSERT INTO user_runs
+                 (id, thread_id, status, adapter, request_json, agent_snapshot_json,
+                  native_session_json, created_at_ms, updated_at_ms, completed_at_ms, error_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT(id) DO UPDATE SET
+                    status = excluded.status,
+                    native_session_json = excluded.native_session_json,
+                    updated_at_ms = excluded.updated_at_ms,
+                    completed_at_ms = excluded.completed_at_ms,
+                    error_json = excluded.error_json",
+                params![
+                    run.id,
+                    run.thread_id,
+                    run.status,
+                    run.adapter,
+                    run.request_json,
+                    run.agent_snapshot_json,
+                    run.native_session_json,
+                    run.created_at_ms,
+                    run.updated_at_ms,
+                    run.completed_at_ms,
+                    run.error_json,
+                ],
+            )
+            .map_err(sqlite)?;
+        Ok(())
+    }
+
+    pub fn control_runs(&self, nonterminal_only: bool) -> Result<Vec<ControlRunRecord>> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let sql = if nonterminal_only {
+            "SELECT id, thread_id, status, adapter, request_json, agent_snapshot_json,
+                    native_session_json, created_at_ms, updated_at_ms, completed_at_ms, error_json
+             FROM user_runs WHERE status IN ('accepted', 'running', 'waiting_approval', 'stopping')
+             ORDER BY created_at_ms ASC"
+        } else {
+            "SELECT id, thread_id, status, adapter, request_json, agent_snapshot_json,
+                    native_session_json, created_at_ms, updated_at_ms, completed_at_ms, error_json
+             FROM user_runs ORDER BY created_at_ms ASC"
+        };
+        let mut stmt = db.conn().prepare(sql).map_err(sqlite)?;
+        let rows = stmt.query_map([], control_run_from_row).map_err(sqlite)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sqlite)
+    }
+
+    pub fn control_append_timeline(
+        &self,
+        thread_id: &str,
+        item_id: &str,
+        run_id: Option<&str>,
+        item_type: &str,
+        data_json: &str,
+    ) -> Result<ControlTimelineRecord> {
+        let thread_id = required_control_text(thread_id, "thread id")?;
+        let item_id = required_control_text(item_id, "timeline item id")?;
+        let item_type = required_control_text(item_type, "timeline item type")?;
+        validate_control_json(data_json, "timeline data")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
+        let result = (|| -> Result<ControlTimelineRecord> {
+            let (epoch, seq): (String, i64) = conn
+                .query_row(
+                    "SELECT epoch, next_seq FROM user_thread_control WHERE thread_id = ?1",
+                    params![thread_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(sqlite)?;
+            let now = now_ms();
+            conn.execute(
+                "INSERT INTO user_timeline_events
+                 (thread_id, epoch, seq, item_id, run_id, item_type, data_json, created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![thread_id, epoch, seq, item_id, run_id, item_type, data_json, now],
+            )
+            .map_err(sqlite)?;
+            conn.execute(
+                "UPDATE user_thread_control
+                 SET next_seq = ?2, revision = revision + 1, updated_at_ms = ?3
+                 WHERE thread_id = ?1",
+                params![thread_id, seq.saturating_add(1), now],
+            )
+            .map_err(sqlite)?;
+            Ok(ControlTimelineRecord {
+                thread_id: thread_id.to_string(),
+                epoch,
+                seq: i64_to_u64(seq, "timeline sequence")?,
+                item_id: item_id.to_string(),
+                run_id: run_id.map(str::to_string),
+                item_type: item_type.to_string(),
+                data_json: data_json.to_string(),
+                created_at_ms: now,
+            })
+        })();
+        finish_control_transaction(conn, result)
+    }
+
+    /// Seed an existing desktop transcript into the canonical timeline before
+    /// the first control event is appended. The operation is idempotent and
+    /// intentionally leaves the thread revision unchanged.
+    pub fn control_seed_message_timeline_if_empty(
+        &self,
+        thread_id: &str,
+        messages: &[(String, String, i64)],
+    ) -> Result<usize> {
+        let thread_id = required_control_text(thread_id, "thread id")?;
+        for (item_id, data_json, _) in messages {
+            required_control_text(item_id, "timeline item id")?;
+            validate_control_json(data_json, "timeline data")?;
+        }
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
+        let result = (|| -> Result<usize> {
+            let (epoch, next_seq): (String, i64) = conn
+                .query_row(
+                    "SELECT epoch, next_seq FROM user_thread_control WHERE thread_id = ?1",
+                    params![thread_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(sqlite)?;
+            let has_timeline: bool = conn
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM user_timeline_events
+                        WHERE thread_id = ?1 AND epoch = ?2
+                     )",
+                    params![thread_id, epoch],
+                    |row| row.get(0),
+                )
+                .map_err(sqlite)?;
+            if has_timeline || messages.is_empty() {
+                return Ok(0);
+            }
+
+            let mut seq = next_seq;
+            for (item_id, data_json, created_at_ms) in messages {
+                conn.execute(
+                    "INSERT INTO user_timeline_events
+                     (thread_id, epoch, seq, item_id, run_id, item_type, data_json, created_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, NULL, 'message', ?5, ?6)",
+                    params![thread_id, epoch, seq, item_id, data_json, created_at_ms],
+                )
+                .map_err(sqlite)?;
+                seq = seq.saturating_add(1);
+            }
+            conn.execute(
+                "UPDATE user_thread_control SET next_seq = ?2 WHERE thread_id = ?1",
+                params![thread_id, seq],
+            )
+            .map_err(sqlite)?;
+            Ok(messages.len())
+        })();
+        finish_control_transaction(conn, result)
+    }
+
+    pub fn control_timeline_page(
+        &self,
+        thread_id: &str,
+        after_seq: Option<u64>,
+        before_seq: Option<u64>,
+        tail: bool,
+        limit: usize,
+    ) -> Result<Option<ControlTimelinePage>> {
+        let thread_id = required_control_text(thread_id, "thread id")?;
+        if after_seq.is_some() && before_seq.is_some() {
+            return Err(Error::InvalidRequest(
+                "timeline reads cannot combine after_seq and before_seq".into(),
+            ));
+        }
+        let limit = limit.clamp(1, 500);
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        let Some(epoch) = conn
+            .query_row(
+                "SELECT epoch FROM user_thread_control WHERE thread_id = ?1",
+                params![thread_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(sqlite)?
+        else {
+            return Ok(None);
+        };
+        let limit = i64::try_from(limit)
+            .map_err(|_| Error::InvalidRequest("timeline limit is too large".into()))?;
+        let mut items = if let Some(after) = after_seq {
+            query_timeline_rows(
+                conn,
+                "SELECT thread_id, epoch, seq, item_id, run_id, item_type, data_json, created_at_ms
+                 FROM user_timeline_events
+                 WHERE thread_id = ?1 AND epoch = ?2 AND seq > ?3
+                 ORDER BY seq ASC LIMIT ?4",
+                params![thread_id, epoch, u64_to_i64(after)?, limit],
+            )?
+        } else if let Some(before) = before_seq {
+            let mut rows = query_timeline_rows(
+                conn,
+                "SELECT thread_id, epoch, seq, item_id, run_id, item_type, data_json, created_at_ms
+                 FROM user_timeline_events
+                 WHERE thread_id = ?1 AND epoch = ?2 AND seq < ?3
+                 ORDER BY seq DESC LIMIT ?4",
+                params![thread_id, epoch, u64_to_i64(before)?, limit],
+            )?;
+            rows.reverse();
+            rows
+        } else if tail {
+            let mut rows = query_timeline_rows(
+                conn,
+                "SELECT thread_id, epoch, seq, item_id, run_id, item_type, data_json, created_at_ms
+                 FROM user_timeline_events
+                 WHERE thread_id = ?1 AND epoch = ?2
+                 ORDER BY seq DESC LIMIT ?3",
+                params![thread_id, epoch, limit],
+            )?;
+            rows.reverse();
+            rows
+        } else {
+            query_timeline_rows(
+                conn,
+                "SELECT thread_id, epoch, seq, item_id, run_id, item_type, data_json, created_at_ms
+                 FROM user_timeline_events
+                 WHERE thread_id = ?1 AND epoch = ?2
+                 ORDER BY seq ASC LIMIT ?3",
+                params![thread_id, epoch, limit],
+            )?
+        };
+        let bounds: (Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT MIN(seq), MAX(seq) FROM user_timeline_events
+                 WHERE thread_id = ?1 AND epoch = ?2",
+                params![thread_id, epoch],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(sqlite)?;
+        let first_seq = items.first().map(|item| item.seq);
+        let last_seq = items.last().map(|item| item.seq);
+        let has_older = match (bounds.0, first_seq) {
+            (Some(min), Some(first)) => i64_to_u64(min, "timeline bound")? < first,
+            _ => false,
+        };
+        let has_newer = match (bounds.1, last_seq) {
+            (Some(max), Some(last)) => i64_to_u64(max, "timeline bound")? > last,
+            _ => false,
+        };
+        Ok(Some(ControlTimelinePage {
+            epoch,
+            first_seq,
+            last_seq,
+            has_older,
+            has_newer,
+            items: std::mem::take(&mut items),
+        }))
+    }
+
+    pub fn control_enqueue_turn(&self, turn: &ControlQueuedTurnRecord) -> Result<()> {
+        validate_control_json(&turn.request_json, "queued turn request")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        db.conn()
+            .execute(
+                "INSERT INTO user_queued_turns
+                 (id, thread_id, command_id, request_json, accepted_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    turn.id,
+                    turn.thread_id,
+                    turn.command_id,
+                    turn.request_json,
+                    turn.accepted_at_ms
+                ],
+            )
+            .map_err(sqlite)?;
+        Ok(())
+    }
+
+    pub fn control_queued_turns(
+        &self,
+        thread_id: Option<&str>,
+    ) -> Result<Vec<ControlQueuedTurnRecord>> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let (sql, value) = match thread_id {
+            Some(id) => (
+                "SELECT id, thread_id, command_id, request_json, accepted_at_ms
+                 FROM user_queued_turns WHERE thread_id = ?1
+                 ORDER BY accepted_at_ms ASC, id ASC",
+                Some(required_control_text(id, "thread id")?),
+            ),
+            None => (
+                "SELECT id, thread_id, command_id, request_json, accepted_at_ms
+                 FROM user_queued_turns ORDER BY accepted_at_ms ASC, id ASC",
+                None,
+            ),
+        };
+        let mut stmt = db.conn().prepare(sql).map_err(sqlite)?;
+        let rows = if let Some(value) = value {
+            stmt.query_map(params![value], control_queued_turn_from_row)
+                .map_err(sqlite)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sqlite)?
+        } else {
+            stmt.query_map([], control_queued_turn_from_row)
+                .map_err(sqlite)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sqlite)?
+        };
+        Ok(rows)
+    }
+
+    pub fn control_remove_queued_turn(&self, id: &str) -> Result<bool> {
+        let id = required_control_text(id, "queued turn id")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        db.conn()
+            .execute("DELETE FROM user_queued_turns WHERE id = ?1", params![id])
+            .map(|changed| changed > 0)
+            .map_err(sqlite)
+    }
+
+    pub fn control_command_receipt(
+        &self,
+        command_id: &str,
+    ) -> Result<Option<ControlCommandReceiptRecord>> {
+        let command_id = required_control_text(command_id, "command id")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        db.conn()
+            .query_row(
+                "SELECT command_id, device_id, thread_id, command_kind,
+                        request_json, result_json, created_at_ms
+                 FROM user_command_receipts WHERE command_id = ?1",
+                params![command_id],
+                control_command_receipt_from_row,
+            )
+            .optional()
+            .map_err(sqlite)
+    }
+
+    pub fn control_put_command_receipt(&self, receipt: &ControlCommandReceiptRecord) -> Result<()> {
+        validate_control_json(&receipt.request_json, "command request")?;
+        validate_control_json(&receipt.result_json, "command result")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        db.conn()
+            .execute(
+                "INSERT INTO user_command_receipts
+                 (command_id, device_id, thread_id, command_kind, request_json, result_json, created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    receipt.command_id,
+                    receipt.device_id,
+                    receipt.thread_id,
+                    receipt.command_kind,
+                    receipt.request_json,
+                    receipt.result_json,
+                    receipt.created_at_ms,
+                ],
+            )
+            .map_err(sqlite)?;
+        Ok(())
+    }
+
+    pub fn control_put_approval(&self, approval: &ControlApprovalRecord) -> Result<()> {
+        validate_control_json(&approval.request_json, "approval request")?;
+        validate_optional_control_json(approval.decision_json.as_deref(), "approval decision")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        db.conn()
+            .execute(
+                "INSERT INTO user_pending_approvals
+                 (id, run_id, thread_id, kind, request_json, status, decision_json,
+                  created_at_ms, resolved_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(id) DO UPDATE SET
+                    status = excluded.status,
+                    decision_json = excluded.decision_json,
+                    resolved_at_ms = excluded.resolved_at_ms",
+                params![
+                    approval.id,
+                    approval.run_id,
+                    approval.thread_id,
+                    approval.kind,
+                    approval.request_json,
+                    approval.status,
+                    approval.decision_json,
+                    approval.created_at_ms,
+                    approval.resolved_at_ms,
+                ],
+            )
+            .map_err(sqlite)?;
+        Ok(())
+    }
+
+    pub fn control_pending_approvals(&self) -> Result<Vec<ControlApprovalRecord>> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let mut stmt = db
+            .conn()
+            .prepare(
+                "SELECT id, run_id, thread_id, kind, request_json, status,
+                        decision_json, created_at_ms, resolved_at_ms
+                 FROM user_pending_approvals WHERE status = 'pending'
+                 ORDER BY created_at_ms ASC",
+            )
+            .map_err(sqlite)?;
+        let rows = stmt
+            .query_map([], control_approval_from_row)
+            .map_err(sqlite)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sqlite)
+    }
+
+    pub fn control_approval(&self, id: &str) -> Result<Option<ControlApprovalRecord>> {
+        let id = required_control_text(id, "approval id")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        db.conn()
+            .query_row(
+                "SELECT id, run_id, thread_id, kind, request_json, status,
+                        decision_json, created_at_ms, resolved_at_ms
+                 FROM user_pending_approvals WHERE id = ?1",
+                params![id],
+                control_approval_from_row,
+            )
+            .optional()
+            .map_err(sqlite)
+    }
+
+    pub fn control_backup_state(&self) -> Result<ControlBackupState> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        let host = conn
+            .query_row(
+                "SELECT host_id, display_name, created_at_ms, updated_at_ms
+                 FROM user_control_host WHERE singleton = 1",
+                [],
+                |row| {
+                    Ok(ControlHostRecord {
+                        host_id: row.get(0)?,
+                        display_name: row.get(1)?,
+                        created_at_ms: row.get(2)?,
+                        updated_at_ms: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(sqlite)?;
+        let threads = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT s.id, s.session_json, c.revision, c.epoch, s.updated_at_ms
+                     FROM user_sessions s JOIN user_thread_control c ON c.thread_id = s.id
+                     ORDER BY s.sort_order ASC, s.updated_at_ms DESC",
+                )
+                .map_err(sqlite)?;
+            let rows = stmt
+                .query_map([], control_thread_from_row)
+                .map_err(sqlite)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sqlite)?;
+            rows
+        };
+        let runs = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, thread_id, status, adapter, request_json, agent_snapshot_json,
+                            native_session_json, created_at_ms, updated_at_ms, completed_at_ms, error_json
+                     FROM user_runs ORDER BY created_at_ms ASC",
+                )
+                .map_err(sqlite)?;
+            let rows = stmt
+                .query_map([], control_run_from_row)
+                .map_err(sqlite)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sqlite)?;
+            rows
+        };
+        let timeline = query_timeline_rows(
+            conn,
+            "SELECT thread_id, epoch, seq, item_id, run_id, item_type, data_json, created_at_ms
+             FROM user_timeline_events ORDER BY thread_id, epoch, seq",
+            [],
+        )?;
+        let queued_turns = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, thread_id, command_id, request_json, accepted_at_ms
+                     FROM user_queued_turns ORDER BY accepted_at_ms, id",
+                )
+                .map_err(sqlite)?;
+            let rows = stmt
+                .query_map([], control_queued_turn_from_row)
+                .map_err(sqlite)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sqlite)?;
+            rows
+        };
+        let command_receipts = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT command_id, device_id, thread_id, command_kind,
+                            request_json, result_json, created_at_ms
+                     FROM user_command_receipts ORDER BY created_at_ms, command_id",
+                )
+                .map_err(sqlite)?;
+            let rows = stmt
+                .query_map([], control_command_receipt_from_row)
+                .map_err(sqlite)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sqlite)?;
+            rows
+        };
+        let approvals = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, run_id, thread_id, kind, request_json, status,
+                            decision_json, created_at_ms, resolved_at_ms
+                     FROM user_pending_approvals ORDER BY created_at_ms, id",
+                )
+                .map_err(sqlite)?;
+            let rows = stmt
+                .query_map([], control_approval_from_row)
+                .map_err(sqlite)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sqlite)?;
+            rows
+        };
+        Ok(ControlBackupState {
+            host,
+            threads,
+            runs,
+            timeline,
+            queued_turns,
+            command_receipts,
+            approvals,
+        })
+    }
+
+    pub fn replace_control_backup_state(&self, backup: &ControlBackupState) -> Result<()> {
+        for run in &backup.runs {
+            validate_control_json(&run.request_json, "run request")?;
+            validate_optional_control_json(run.agent_snapshot_json.as_deref(), "agent snapshot")?;
+            validate_optional_control_json(run.native_session_json.as_deref(), "native session")?;
+            validate_optional_control_json(run.error_json.as_deref(), "run error")?;
+        }
+        for item in &backup.timeline {
+            validate_control_json(&item.data_json, "timeline data")?;
+        }
+        for turn in &backup.queued_turns {
+            validate_control_json(&turn.request_json, "queued turn request")?;
+        }
+        for receipt in &backup.command_receipts {
+            validate_control_json(&receipt.request_json, "command request")?;
+            validate_control_json(&receipt.result_json, "command result")?;
+        }
+        for approval in &backup.approvals {
+            validate_control_json(&approval.request_json, "approval request")?;
+            validate_optional_control_json(approval.decision_json.as_deref(), "approval decision")?;
+        }
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
+        let result = (|| -> Result<()> {
+            conn.execute_batch(
+                "DELETE FROM user_pending_approvals;
+                 DELETE FROM user_timeline_events;
+                 DELETE FROM user_queued_turns;
+                 DELETE FROM user_command_receipts;
+                 DELETE FROM user_runs;
+                 DELETE FROM user_thread_control;
+                 DELETE FROM user_control_host;",
+            )
+            .map_err(sqlite)?;
+            if let Some(host) = &backup.host {
+                conn.execute(
+                    "INSERT INTO user_control_host
+                     (singleton, host_id, display_name, created_at_ms, updated_at_ms)
+                     VALUES (1, ?1, ?2, ?3, ?4)",
+                    params![
+                        host.host_id,
+                        host.display_name,
+                        host.created_at_ms,
+                        host.updated_at_ms
+                    ],
+                )
+                .map_err(sqlite)?;
+            }
+            for thread in &backup.threads {
+                let next_seq = backup
+                    .timeline
+                    .iter()
+                    .filter(|item| item.thread_id == thread.id && item.epoch == thread.epoch)
+                    .map(|item| item.seq)
+                    .max()
+                    .unwrap_or(0)
+                    .saturating_add(1);
+                conn.execute(
+                    "INSERT INTO user_thread_control
+                     (thread_id, epoch, revision, next_seq, updated_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        thread.id,
+                        thread.epoch,
+                        u64_to_i64(thread.revision)?,
+                        u64_to_i64(next_seq)?,
+                        thread.updated_at_ms,
+                    ],
+                )
+                .map_err(sqlite)?;
+            }
+            for run in &backup.runs {
+                conn.execute(
+                    "INSERT INTO user_runs
+                     (id, thread_id, status, adapter, request_json, agent_snapshot_json,
+                      native_session_json, created_at_ms, updated_at_ms, completed_at_ms, error_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    params![run.id, run.thread_id, run.status, run.adapter, run.request_json,
+                        run.agent_snapshot_json, run.native_session_json, run.created_at_ms,
+                        run.updated_at_ms, run.completed_at_ms, run.error_json],
+                )
+                .map_err(sqlite)?;
+            }
+            for item in &backup.timeline {
+                conn.execute(
+                    "INSERT INTO user_timeline_events
+                     (thread_id, epoch, seq, item_id, run_id, item_type, data_json, created_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        item.thread_id,
+                        item.epoch,
+                        u64_to_i64(item.seq)?,
+                        item.item_id,
+                        item.run_id,
+                        item.item_type,
+                        item.data_json,
+                        item.created_at_ms
+                    ],
+                )
+                .map_err(sqlite)?;
+            }
+            for turn in &backup.queued_turns {
+                conn.execute(
+                    "INSERT INTO user_queued_turns
+                     (id, thread_id, command_id, request_json, accepted_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        turn.id,
+                        turn.thread_id,
+                        turn.command_id,
+                        turn.request_json,
+                        turn.accepted_at_ms
+                    ],
+                )
+                .map_err(sqlite)?;
+            }
+            for receipt in &backup.command_receipts {
+                conn.execute(
+                    "INSERT INTO user_command_receipts
+                     (command_id, device_id, thread_id, command_kind, request_json, result_json, created_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![receipt.command_id, receipt.device_id, receipt.thread_id,
+                        receipt.command_kind, receipt.request_json, receipt.result_json,
+                        receipt.created_at_ms],
+                )
+                .map_err(sqlite)?;
+            }
+            for approval in &backup.approvals {
+                conn.execute(
+                    "INSERT INTO user_pending_approvals
+                     (id, run_id, thread_id, kind, request_json, status, decision_json,
+                      created_at_ms, resolved_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        approval.id,
+                        approval.run_id,
+                        approval.thread_id,
+                        approval.kind,
+                        approval.request_json,
+                        approval.status,
+                        approval.decision_json,
+                        approval.created_at_ms,
+                        approval.resolved_at_ms
+                    ],
+                )
+                .map_err(sqlite)?;
+            }
+            Ok(())
+        })();
+        finish_control_transaction(conn, result)?;
+        drop(db);
+        self.reconcile_control_startup()?;
+        Ok(())
+    }
+
+    /// Mark work that cannot survive a process restart as interrupted before
+    /// any client can observe bootstrap state.
+    pub fn reconcile_control_startup(&self) -> Result<(usize, usize)> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
+        let result = (|| -> Result<(usize, usize)> {
+            let now = now_ms();
+            let runs = conn
+                .execute(
+                    "UPDATE user_runs
+                     SET status = 'interrupted', updated_at_ms = ?1, completed_at_ms = ?1,
+                         error_json = COALESCE(error_json, '{\"code\":\"process_restarted\",\"message\":\"Milim stopped before this run completed.\"}')
+                     WHERE status IN ('accepted', 'running', 'waiting_approval', 'stopping')",
+                    params![now],
+                )
+                .map_err(sqlite)?;
+            let approvals = conn
+                .execute(
+                    "UPDATE user_pending_approvals
+                     SET status = 'interrupted', resolved_at_ms = ?1
+                     WHERE status = 'pending'",
+                    params![now],
+                )
+                .map_err(sqlite)?;
+            Ok((runs, approvals))
+        })();
+        finish_control_transaction(conn, result)
+    }
+}
+
+fn required_control_text<'a>(value: &'a str, label: &str) -> Result<&'a str> {
+    let value = value.trim();
+    if value.is_empty() {
+        Err(Error::InvalidRequest(format!("{label} cannot be empty")))
+    } else {
+        Ok(value)
+    }
+}
+
+fn validate_control_json(value: &str, label: &str) -> Result<()> {
+    serde_json::from_str::<serde_json::Value>(value)
+        .map(|_| ())
+        .map_err(|error| Error::InvalidRequest(format!("invalid {label} JSON: {error}")))
+}
+
+fn validate_optional_control_json(value: Option<&str>, label: &str) -> Result<()> {
+    value.map_or(Ok(()), |value| validate_control_json(value, label))
+}
+
+fn u64_to_i64(value: u64) -> Result<i64> {
+    i64::try_from(value).map_err(|_| Error::InvalidRequest("integer is too large".into()))
+}
+
+fn i64_to_u64(value: i64, label: &str) -> Result<u64> {
+    u64::try_from(value).map_err(|_| Error::Other(format!("invalid negative {label}")))
+}
+
+fn finish_control_transaction<T>(conn: &Connection, result: Result<T>) -> Result<T> {
+    match result {
+        Ok(value) => {
+            conn.execute_batch("COMMIT").map_err(sqlite)?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+fn bump_thread_revision_locked(conn: &Connection, thread_id: &str) -> Result<()> {
+    let now = now_ms();
+    let changed = conn
+        .execute(
+            "UPDATE user_thread_control
+             SET revision = revision + 1, updated_at_ms = ?2 WHERE thread_id = ?1",
+            params![thread_id, now],
+        )
+        .map_err(sqlite)?;
+    if changed == 0 {
+        return Err(Error::InvalidRequest(format!(
+            "thread {thread_id} has no control metadata"
+        )));
+    }
+    conn.execute(
+        "UPDATE user_sessions SET updated_at_ms = ?2 WHERE id = ?1",
+        params![thread_id, now],
+    )
+    .map_err(sqlite)?;
+    Ok(())
+}
+
+fn control_thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ControlThreadRecord> {
+    let revision: i64 = row.get(2)?;
+    Ok(ControlThreadRecord {
+        id: row.get(0)?,
+        session_json: row.get(1)?,
+        revision: revision.max(0) as u64,
+        epoch: row.get(3)?,
+        updated_at_ms: row.get(4)?,
+    })
+}
+
+fn control_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ControlRunRecord> {
+    Ok(ControlRunRecord {
+        id: row.get(0)?,
+        thread_id: row.get(1)?,
+        status: row.get(2)?,
+        adapter: row.get(3)?,
+        request_json: row.get(4)?,
+        agent_snapshot_json: row.get(5)?,
+        native_session_json: row.get(6)?,
+        created_at_ms: row.get(7)?,
+        updated_at_ms: row.get(8)?,
+        completed_at_ms: row.get(9)?,
+        error_json: row.get(10)?,
+    })
+}
+
+fn control_timeline_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ControlTimelineRecord> {
+    let seq: i64 = row.get(2)?;
+    Ok(ControlTimelineRecord {
+        thread_id: row.get(0)?,
+        epoch: row.get(1)?,
+        seq: seq.max(0) as u64,
+        item_id: row.get(3)?,
+        run_id: row.get(4)?,
+        item_type: row.get(5)?,
+        data_json: row.get(6)?,
+        created_at_ms: row.get(7)?,
+    })
+}
+
+fn query_timeline_rows<P>(
+    conn: &Connection,
+    sql: &str,
+    params: P,
+) -> Result<Vec<ControlTimelineRecord>>
+where
+    P: rusqlite::Params,
+{
+    let mut stmt = conn.prepare(sql).map_err(sqlite)?;
+    let rows = stmt
+        .query_map(params, control_timeline_from_row)
+        .map_err(sqlite)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(sqlite)
+}
+
+fn control_queued_turn_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ControlQueuedTurnRecord> {
+    Ok(ControlQueuedTurnRecord {
+        id: row.get(0)?,
+        thread_id: row.get(1)?,
+        command_id: row.get(2)?,
+        request_json: row.get(3)?,
+        accepted_at_ms: row.get(4)?,
+    })
+}
+
+fn control_command_receipt_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ControlCommandReceiptRecord> {
+    Ok(ControlCommandReceiptRecord {
+        command_id: row.get(0)?,
+        device_id: row.get(1)?,
+        thread_id: row.get(2)?,
+        command_kind: row.get(3)?,
+        request_json: row.get(4)?,
+        result_json: row.get(5)?,
+        created_at_ms: row.get(6)?,
+    })
+}
+
+fn control_approval_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ControlApprovalRecord> {
+    Ok(ControlApprovalRecord {
+        id: row.get(0)?,
+        run_id: row.get(1)?,
+        thread_id: row.get(2)?,
+        kind: row.get(3)?,
+        request_json: row.get(4)?,
+        status: row.get(5)?,
+        decision_json: row.get(6)?,
+        created_at_ms: row.get(7)?,
+        resolved_at_ms: row.get(8)?,
+    })
 }
 
 fn get_json_locked(conn: &Connection, key: &str) -> Result<Option<String>> {
@@ -909,6 +2400,24 @@ fn apply_sessions_delta_locked(conn: &Connection, delta: SessionsDelta) -> Resul
                         session.id
                     )));
                 }
+            }
+
+            // While Rust owns a turn, renderer snapshots are replicas. They may
+            // contain an intentionally incomplete streaming assistant message,
+            // so accepting their positional message delta could overwrite the
+            // authoritative user turn or race the final assistant commit.
+            let server_owned_run = conn
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM user_runs
+                        WHERE thread_id = ?1 AND status IN ('accepted', 'running')
+                    )",
+                    params![session.id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(sqlite)?;
+            if server_owned_run {
+                continue;
             }
 
             conn.execute(
@@ -1716,6 +3225,338 @@ mod tests {
             )
             .unwrap(),
             serde_json::from_str::<serde_json::Value>(original).unwrap(),
+        );
+    }
+
+    #[test]
+    fn control_runtime_migrates_legacy_threads_without_rewriting_them() {
+        let store = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        let snapshot = r#"{"state":{"sessions":[{"id":"legacy","title":"Kept","unknown":{"future":true},"messages":[{"id":"m1","role":"user","content":"hello"}]}],"activeId":"legacy"},"version":0}"#;
+        store.set_sessions_snapshot(snapshot).unwrap();
+
+        let threads = store.control_threads().unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].id, "legacy");
+        assert_eq!(threads[0].revision, 0);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&threads[0].session_json).unwrap()["unknown"]
+                ["future"],
+            true
+        );
+        assert_eq!(store.control_messages("legacy").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn control_timeline_pages_have_stable_epoch_and_gap_cursors() {
+        let store = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        store
+            .control_create_thread(
+                "thread-1",
+                r#"{"id":"thread-1","title":"New chat","createdAt":1,"updatedAt":1}"#,
+                "epoch-1",
+            )
+            .unwrap();
+        for index in 1..=5 {
+            store
+                .control_append_timeline(
+                    "thread-1",
+                    &format!("item-{index}"),
+                    None,
+                    "message",
+                    &format!(r#"{{"index":{index}}}"#),
+                )
+                .unwrap();
+        }
+
+        let tail = store
+            .control_timeline_page("thread-1", None, None, true, 2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(tail.epoch, "epoch-1");
+        assert_eq!(
+            tail.items.iter().map(|item| item.seq).collect::<Vec<_>>(),
+            vec![4, 5]
+        );
+        assert!(tail.has_older);
+        assert!(!tail.has_newer);
+
+        let middle = store
+            .control_timeline_page("thread-1", Some(2), None, false, 2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            middle.items.iter().map(|item| item.seq).collect::<Vec<_>>(),
+            vec![3, 4]
+        );
+        assert!(middle.has_older);
+        assert!(middle.has_newer);
+    }
+
+    #[test]
+    fn control_seeds_existing_messages_into_an_empty_timeline_once() {
+        let store = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        store
+            .control_create_thread(
+                "thread-1",
+                r#"{"id":"thread-1","title":"Existing chat","createdAt":1,"updatedAt":2}"#,
+                "epoch-1",
+            )
+            .unwrap();
+        let messages = vec![
+            (
+                "history:user-1".into(),
+                r#"{"id":"user-1","role":"user","content":"hello"}"#.into(),
+                10,
+            ),
+            (
+                "history:assistant-1".into(),
+                r#"{"id":"assistant-1","role":"assistant","content":"hi"}"#.into(),
+                11,
+            ),
+        ];
+
+        assert_eq!(
+            store
+                .control_seed_message_timeline_if_empty("thread-1", &messages)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            store
+                .control_seed_message_timeline_if_empty("thread-1", &messages)
+                .unwrap(),
+            0
+        );
+        let page = store
+            .control_timeline_page("thread-1", None, None, true, 10)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|item| (item.item_id.as_str(), item.seq))
+                .collect::<Vec<_>>(),
+            vec![("history:user-1", 1), ("history:assistant-1", 2)]
+        );
+        assert_eq!(
+            store
+                .control_append_timeline(
+                    "thread-1",
+                    "live-1",
+                    None,
+                    "message",
+                    r#"{"id":"live-1","role":"user","content":"next"}"#,
+                )
+                .unwrap()
+                .seq,
+            3
+        );
+    }
+
+    #[test]
+    fn control_receipts_queue_and_startup_reconciliation_are_durable() {
+        let store = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        let host = store
+            .ensure_control_host("host-1", "Milim desktop")
+            .unwrap();
+        assert_eq!(host.host_id, "host-1");
+        assert_eq!(
+            store
+                .ensure_control_host("host-2", "Replacement")
+                .unwrap()
+                .host_id,
+            "host-1"
+        );
+        store
+            .control_create_thread(
+                "thread-1",
+                r#"{"id":"thread-1","title":"New chat","createdAt":1,"updatedAt":1}"#,
+                "epoch-1",
+            )
+            .unwrap();
+        store
+            .control_enqueue_turn(&ControlQueuedTurnRecord {
+                id: "queued-1".into(),
+                thread_id: "thread-1".into(),
+                command_id: "command-1".into(),
+                request_json: r#"{"text":"next"}"#.into(),
+                accepted_at_ms: 3,
+            })
+            .unwrap();
+        store
+            .control_put_command_receipt(&ControlCommandReceiptRecord {
+                command_id: "command-1".into(),
+                device_id: Some("phone-1".into()),
+                thread_id: Some("thread-1".into()),
+                command_kind: "turn.send".into(),
+                request_json: r#"{"text":"next"}"#.into(),
+                result_json: r#"{"status":"queued"}"#.into(),
+                created_at_ms: 3,
+            })
+            .unwrap();
+        store
+            .control_put_run(&ControlRunRecord {
+                id: "run-1".into(),
+                thread_id: "thread-1".into(),
+                status: "running".into(),
+                adapter: "mock".into(),
+                request_json: r#"{"text":"hello"}"#.into(),
+                agent_snapshot_json: None,
+                native_session_json: None,
+                created_at_ms: 1,
+                updated_at_ms: 2,
+                completed_at_ms: None,
+                error_json: None,
+            })
+            .unwrap();
+        store
+            .control_put_approval(&ControlApprovalRecord {
+                id: "approval-1".into(),
+                run_id: "run-1".into(),
+                thread_id: "thread-1".into(),
+                kind: "command".into(),
+                request_json: r#"{"command":"echo ok"}"#.into(),
+                status: "pending".into(),
+                decision_json: None,
+                created_at_ms: 2,
+                resolved_at_ms: None,
+            })
+            .unwrap();
+
+        assert_eq!(store.control_queued_turns(None).unwrap().len(), 1);
+        assert!(store
+            .control_command_receipt("command-1")
+            .unwrap()
+            .is_some());
+        assert_eq!(store.reconcile_control_startup().unwrap(), (1, 1));
+        assert!(store.control_runs(true).unwrap().is_empty());
+        assert!(store.control_pending_approvals().unwrap().is_empty());
+        let run = store.control_runs(false).unwrap().pop().unwrap();
+        assert_eq!(run.status, "interrupted");
+    }
+
+    #[test]
+    fn renderer_message_delta_cannot_overwrite_an_active_control_run() {
+        let store = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        store
+            .control_create_thread(
+                "thread-1",
+                r#"{"id":"thread-1","title":"Fixture"}"#,
+                "epoch-1",
+            )
+            .unwrap();
+        store
+            .control_append_message(
+                "thread-1",
+                r#"{"id":"server-user","role":"user","content":"authoritative"}"#,
+            )
+            .unwrap();
+        store
+            .control_put_run(&ControlRunRecord {
+                id: "run-1".into(),
+                thread_id: "thread-1".into(),
+                status: "running".into(),
+                adapter: "mock".into(),
+                request_json: r#"{"text":"authoritative"}"#.into(),
+                agent_snapshot_json: None,
+                native_session_json: None,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                completed_at_ms: None,
+                error_json: None,
+            })
+            .unwrap();
+        store
+            .apply_sessions_delta(SessionsDelta {
+                meta_json: r#"{"state":{"activeId":"thread-1"},"version":0}"#.into(),
+                session_order: vec!["thread-1".into()],
+                upserts: vec![SessionDelta {
+                    id: "thread-1".into(),
+                    session_json: None,
+                    message_count: 1,
+                    messages: vec![SessionMessageDelta {
+                        index: 0,
+                        message_json: r#"{"id":"renderer-copy","role":"user","content":"stale"}"#
+                            .into(),
+                    }],
+                }],
+                deleted_session_ids: Vec::new(),
+            })
+            .unwrap();
+        let messages = store.control_messages("thread-1").unwrap();
+        assert!(messages[0].contains("authoritative"));
+        assert!(!messages[0].contains("stale"));
+    }
+
+    #[test]
+    fn control_backup_round_trips_and_interrupts_restored_work() {
+        let source = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        source
+            .ensure_control_host("stable-host", "Fixture")
+            .unwrap();
+        source
+            .control_create_thread(
+                "thread-1",
+                r#"{"id":"thread-1","title":"Fixture"}"#,
+                "epoch-1",
+            )
+            .unwrap();
+        source
+            .control_put_run(&ControlRunRecord {
+                id: "run-1".into(),
+                thread_id: "thread-1".into(),
+                status: "running".into(),
+                adapter: "mock".into(),
+                request_json: r#"{"text":"hello"}"#.into(),
+                agent_snapshot_json: None,
+                native_session_json: None,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                completed_at_ms: None,
+                error_json: None,
+            })
+            .unwrap();
+        source
+            .control_append_timeline(
+                "thread-1",
+                "event-1",
+                Some("run-1"),
+                "assistant_delta",
+                r#"{"text":"hi"}"#,
+            )
+            .unwrap();
+        source
+            .control_enqueue_turn(&ControlQueuedTurnRecord {
+                id: "queue-1".into(),
+                thread_id: "thread-1".into(),
+                command_id: "command-1".into(),
+                request_json: r#"{"text":"next"}"#.into(),
+                accepted_at_ms: 2,
+            })
+            .unwrap();
+        let backup = source.control_backup_state().unwrap();
+
+        let target = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        target
+            .set_sessions_snapshot(
+                r#"{"state":{"sessions":[{"id":"thread-1","title":"Fixture","messages":[]}]},"version":0}"#,
+            )
+            .unwrap();
+        target.replace_control_backup_state(&backup).unwrap();
+        assert_eq!(
+            target.control_backup_state().unwrap().host.unwrap().host_id,
+            "stable-host"
+        );
+        assert_eq!(target.control_queued_turns(None).unwrap().len(), 1);
+        assert_eq!(target.control_runs(false).unwrap()[0].status, "interrupted");
+        assert_eq!(
+            target
+                .control_timeline_page("thread-1", None, None, true, 10)
+                .unwrap()
+                .unwrap()
+                .items
+                .len(),
+            1
         );
     }
 }

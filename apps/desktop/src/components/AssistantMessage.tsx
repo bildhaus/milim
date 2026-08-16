@@ -153,7 +153,7 @@ function StreamEvent({
   workspaceFolder?: string;
 }) {
   const status = part.status ?? "done";
-  const detail = part.approvalStatus && ["approved", "denied", "canceled"].includes(part.approvalStatus)
+  const detail = hidesApprovalDetail(part)
     ? undefined
     : part.detail;
   return (
@@ -191,6 +191,12 @@ function StreamEvent({
         </Suspense>
       ) : null}
     </>
+  );
+}
+
+function hidesApprovalDetail(part: ChatStreamEventPart): boolean {
+  return Boolean(
+    part.approvalStatus && ["approved", "denied", "canceled"].includes(part.approvalStatus),
   );
 }
 
@@ -246,6 +252,17 @@ function workGroupDetail(group: ChatStreamWorkGroup): string {
       .filter(Boolean)
       .join(", ") || plural(group.parts.length, "step")
   );
+}
+
+function completedWorkDetail(
+  part: ChatStreamEventPart,
+  workspaceFolder?: string,
+): string {
+  if (!part.detail || hidesApprovalDetail(part)) return part.label;
+  const detail = isCommandEvent(part)
+    ? formatCommandDisplay(part.detail, workspaceFolder)
+    : part.detail;
+  return `${part.label} · ${detail}`;
 }
 
 function StreamWorkGroup({
@@ -334,6 +351,15 @@ function StreamWorkGroup({
             role="alert"
             copyText={failure.detail && isCommandEvent(failure) ? failure.detail : undefined}
           />
+        ) : latestEvent ? (
+          <span className="stream-work-summary-details">
+            <StreamEventDetail
+              detail={completedWorkDetail(latestEvent, workspaceFolder)}
+              running={false}
+              copyText={isCommandEvent(latestEvent) && !hidesApprovalDetail(latestEvent) ? latestEvent.detail : undefined}
+            />
+            <span className="stream-work-summary-meta">{workGroupDetail(group)}</span>
+          </span>
         ) : (
           <code className="stream-event-detail">{workGroupDetail(group)}</code>
         )}

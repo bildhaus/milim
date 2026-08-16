@@ -385,7 +385,7 @@ const CHILD_THREAD_READ_ONLY_TOOL_NAMES: &[&str] = &[
     "current_time",
     "echo",
 ];
-const PLAN_MODE_READ_ONLY_TOOL_NAMES: &[&str] = &["read_file", "list_dir"];
+const PLAN_MODE_READ_ONLY_TOOL_NAMES: &[&str] = &["read_file", "list_dir", "list_agents"];
 const MAX_CHILD_THREAD_WAIT_MS: u64 = 300_000;
 const WORKSPACE_UNAVAILABLE_SYSTEM_PROMPT: &str = concat!(
     "No working folder is selected in Milim. Host filesystem and host shell tools are unavailable. ",
@@ -533,6 +533,16 @@ impl RunContext {
             .or(cwd.as_ref());
         let privacy_mode = context.and_then(|context| context.tool_context.privacy_mode.as_value());
         Self::from_values(st, workspace, privacy_mode)
+    }
+
+    pub(crate) fn from_control(
+        st: &AppState,
+        workspace: Option<&str>,
+        privacy_mode: &str,
+    ) -> milim_core::Result<Self> {
+        let workspace = workspace.map(|value| Value::String(value.to_string()));
+        let privacy_mode = Value::String(privacy_mode.to_string());
+        Self::from_values(st, workspace.as_ref(), Some(&privacy_mode))
     }
 
     fn from_worker_run(run: &milim_agents::WorkerRun) -> milim_core::Result<Self> {
@@ -1467,6 +1477,11 @@ fn agent_base_registry_with_memory(
         run_context,
         policy.approval == ToolApprovalPolicy::Open && !policy.plan_mode,
     );
+    if let Some(store) = st.agents.as_ref() {
+        reg.register(Arc::new(ListAgentsTool {
+            store: store.clone(),
+        }));
+    }
     let workspace_unavailable =
         desktop_workspace_unavailable_for(st, run_context.workspace.as_deref());
     if policy.plan_mode {
@@ -1569,6 +1584,46 @@ pub(crate) async fn tool_approval_resolve(
             )))
         }
     };
+    if let Some(control) = st
+        .control
+        .as_ref()
+        .filter(|control| control.owns_approval(&id))
+    {
+        let result = control
+            .command(
+                st.clone(),
+                None,
+                crate::control::ControlCommandV1 {
+                    command_id: format!("desktop-approval-{}", uuid::Uuid::new_v4()),
+                    kind: crate::control::ControlCommandKindV1::ApprovalResolve,
+                    thread_id: None,
+                    expected_revision: None,
+                    payload: json!({
+                        "approval_id": id,
+                        "decision": req.decision,
+                        "response": req.response,
+                    }),
+                    confirmation_token: None,
+                },
+            )
+            .await
+            .map_err(ApiError)?;
+        return match result.status {
+            crate::control::ControlCommandStatusV1::Applied => {
+                Ok(Json(result.data).into_response())
+            }
+            crate::control::ControlCommandStatusV1::Conflict => Ok((
+                StatusCode::CONFLICT,
+                Json(json!({ "error": result.message.unwrap_or_else(|| "approval conflict".into()) })),
+            )
+                .into_response()),
+            _ => Ok((
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": result.message.unwrap_or_else(|| "tool approval failed".into()) })),
+            )
+                .into_response()),
+        };
+    }
     match st
         .tool_approvals
         .resolve_with_response(&id, approved, req.response)
@@ -1714,6 +1769,60 @@ pub(crate) fn scheduled_agent_registry(
 pub(crate) struct MemoryRegisterTool {
     pub(crate) store: Arc<milim_memory::MemoryStore>,
     pub(crate) context: AgentMemoryContext,
+}
+
+struct ListAgentsTool {
+    store: Arc<milim_agents::AgentStore>,
+}
+
+#[async_trait]
+impl Tool for ListAgentsTool {
+    fn name(&self) -> &str {
+        "list_agents"
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
+    }
+
+    fn description(&self) -> &str {
+        "List reusable Milim Agents and compact tool/skill capability summaries. System prompts are never returned."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        })
+    }
+
+    async fn invoke(&self, _args: Value) -> milim_core::Result<Value> {
+        let agents = self
+            .store
+            .list()?
+            .into_iter()
+            .map(|agent| {
+                json!({
+                    "id": agent.id,
+                    "name": agent.name,
+                    "description": agent.description,
+                    "avatar": agent.avatar,
+                    "tools": {
+                        "mode": agent.tool_mode,
+                        "count": agent.enabled_tools.len(),
+                        "names": agent.enabled_tools,
+                    },
+                    "skills": {
+                        "mode": agent.skill_mode,
+                        "count": agent.enabled_skills.len(),
+                        "names": agent.enabled_skills,
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({ "agents": agents }))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1917,7 +2026,7 @@ fn child_read_only_registry(st: &AppState, run_context: &RunContext) -> ToolRegi
     reg
 }
 
-fn worker_review_registry(st: &AppState, run_context: &RunContext) -> ToolRegistry {
+pub(crate) fn worker_review_registry(st: &AppState, run_context: &RunContext) -> ToolRegistry {
     let mut reg = static_registry_for_context(st, run_context)
         .without(CHILD_THREAD_TOOL_NAMES)
         .without(SANDBOX_TOOL_NAMES)
@@ -2103,7 +2212,7 @@ async fn resolve_worker_plan(
             .unwrap_or(preferred_model);
         let model = resolve_worker_model(&available, requested_model, preferred_model)?;
         let agent_id = trim_optional_agent_id(task.agent_id);
-        let system_prompt = if let Some(agent_id) = agent_id.as_deref() {
+        let agent_snapshot = if let Some(agent_id) = agent_id.as_deref() {
             let store = state
                 .agents
                 .as_ref()
@@ -2111,10 +2220,23 @@ async fn resolve_worker_plan(
             let agent = store
                 .get(agent_id)?
                 .ok_or_else(|| Error::ModelNotFound(format!("agent {agent_id}")))?;
-            (!agent.system_prompt.trim().is_empty()).then_some(agent.system_prompt)
+            Some(milim_agents::WorkerAgentSnapshot {
+                id: agent.id,
+                name: agent.name,
+                description: agent.description,
+                system_prompt: agent.system_prompt,
+                tool_mode: agent.tool_mode,
+                enabled_tools: agent.enabled_tools,
+                skill_mode: agent.skill_mode,
+                enabled_skills: agent.enabled_skills,
+                avatar: agent.avatar,
+            })
         } else {
             None
         };
+        let system_prompt = agent_snapshot.as_ref().and_then(|agent| {
+            (!agent.system_prompt.trim().is_empty()).then(|| agent.system_prompt.clone())
+        });
         let title = child_thread_title(task.title, &prompt);
         plan.push(milim_agents::WorkerPlanTask {
             id: uuid::Uuid::new_v4().to_string(),
@@ -2122,6 +2244,7 @@ async fn resolve_worker_plan(
             prompt,
             role: task.role,
             agent_id,
+            agent_snapshot,
             model,
             access: task.access.unwrap_or_default(),
         });
@@ -2252,7 +2375,7 @@ fn managed_worker_context(workspace: Option<&FsPath>, base: Option<&str>) -> Opt
     (!sections.is_empty()).then(|| sections.join("\n\n"))
 }
 
-async fn start_managed_worker_run(
+pub(crate) async fn start_managed_worker_run(
     state: &AppState,
     supervisor: &ThreadSupervisor,
     run: &milim_agents::WorkerRun,
@@ -2265,28 +2388,25 @@ async fn start_managed_worker_run(
     }
     let run_context = RunContext::from_worker_run(run)?;
     let service = service_for_run(state, &run_context);
-    let task_args = run
+    if run
         .tasks
         .iter()
-        .map(|task| DelegateWorkerTaskArgs {
-            prompt: task.prompt.clone(),
-            title: Some(task.title.clone()),
-            role: task.role.clone(),
-            agent_id: task.agent_id.clone(),
-            model: Some(task.model.clone()),
-            access: Some(task.access),
-        })
-        .collect();
-    let (resolved, prompts) = resolve_worker_plan(state, "default", None, task_args).await?;
-    if resolved
-        .iter()
-        .map(|t| (&t.prompt, &t.model, &t.agent_id))
-        .ne(run.tasks.iter().map(|t| (&t.prompt, &t.model, &t.agent_id)))
+        .any(|task| task.agent_id.is_some() && task.agent_snapshot.is_none())
     {
         return Err(Error::InvalidRequest(
-            "frozen worker plan no longer resolves exactly".to_string(),
+            "this proposed Worker plan predates frozen Agent snapshots; create a new proposal"
+                .to_string(),
         ));
     }
+    let prompts = run
+        .tasks
+        .iter()
+        .map(|task| {
+            task.agent_snapshot.as_ref().and_then(|agent| {
+                (!agent.system_prompt.trim().is_empty()).then(|| agent.system_prompt.clone())
+            })
+        })
+        .collect();
     let running = supervisor
         .store()
         .update_worker_run_status(&run.id, milim_agents::WorkerRunStatus::Running, None)?
@@ -2340,7 +2460,7 @@ async fn create_worker_worktree(folder: Option<PathBuf>) -> Option<PathBuf> {
     .flatten()
 }
 
-fn schedule_worker_run_deadline(supervisor: Arc<ThreadSupervisor>, run_id: String) {
+pub(crate) fn schedule_worker_run_deadline(supervisor: Arc<ThreadSupervisor>, run_id: String) {
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(MAX_CHILD_THREAD_WAIT_MS)).await;
         let still_running = supervisor
@@ -2889,6 +3009,106 @@ pub(crate) async fn agents_run(
     .into_response())
 }
 
+pub(crate) type ControlAgentStream =
+    std::pin::Pin<Box<dyn futures::Stream<Item = milim_agents::AgentEvent> + Send>>;
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn control_agent_stream(
+    st: &AppState,
+    agent: &milim_agents::AgentDef,
+    model: &str,
+    mut messages: Vec<ChatMessage>,
+    workspace: Option<&str>,
+    privacy: &str,
+    approval_mode: &str,
+    plan_mode: bool,
+    sandbox: bool,
+    computer_use: bool,
+    memory_enabled: bool,
+    delegation_policy: &str,
+    worker_model: &str,
+    thread_id: &str,
+    message_id: &str,
+    reasoning_effort: Option<ReasoningEffort>,
+) -> milim_core::Result<ControlAgentStream> {
+    let run_context = RunContext::from_control(st, workspace, privacy)?;
+    let service = service_for_run(st, &run_context);
+    let approval = match approval_mode {
+        "review" => ToolApprovalPolicy::Review,
+        "open" => ToolApprovalPolicy::Open,
+        _ => ToolApprovalPolicy::Guarded,
+    };
+    let tool_policy = ToolRunPolicy {
+        approval,
+        approval_granted: false,
+        interactive_approval: approval == ToolApprovalPolicy::Review,
+        sandbox_enabled: sandbox,
+        computer_use_enabled: computer_use,
+        preview_tools_enabled: false,
+        experimental_hashline_patch: false,
+        plan_mode,
+    };
+    let mut agent_config = milim_agents::AgentRunConfig::default();
+    if tool_policy.interactive_approval {
+        agent_config.approval_broker = Some(st.tool_approvals.clone());
+    }
+    let query = messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "user")
+        .map(ChatMessage::text_content)
+        .unwrap_or_default();
+    let mut prefixed = Vec::new();
+    if !agent.system_prompt.trim().is_empty() {
+        prefixed.push(ChatMessage::text("system", agent.system_prompt.clone()));
+    }
+    prefixed.extend(crate::agent_skill_messages(st, agent, &query));
+    prefixed.append(&mut messages);
+    add_workspace_instructions_for(&mut prefixed, run_context.workspace());
+    add_workspace_notice_if_needed(
+        &mut prefixed,
+        desktop_workspace_unavailable_for(st, run_context.workspace()),
+    );
+    let memory = AgentMemoryContext {
+        enabled: memory_enabled,
+        model: model.to_string(),
+        thread_id: Some(thread_id.to_string()),
+        project_locator: workspace.map(str::to_string),
+        project_label: workspace.and_then(|value| {
+            FsPath::new(value)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+        }),
+        message_id: Some(message_id.to_string()),
+        delegation_policy: match delegation_policy {
+            "off" => milim_agents::DelegationPolicy::Off,
+            "auto" => milim_agents::DelegationPolicy::Auto,
+            _ => milim_agents::DelegationPolicy::Ask,
+        },
+        worker_model: (!worker_model.trim().is_empty()).then(|| worker_model.to_string()),
+        worker_context: Some(query),
+    };
+    let mut registry = agent_registry_for_mode_with_context(
+        st,
+        &agent.tool_mode,
+        &agent.enabled_tools,
+        Some(memory),
+        &tool_policy,
+        &run_context,
+    );
+    if !plan_mode {
+        register_skill_tools(&mut registry, st, &agent.skill_mode, &agent.enabled_skills);
+    }
+    Ok(Box::pin(milim_agents::run_agent_stream_with_config(
+        service,
+        Arc::new(registry),
+        model.to_string(),
+        prefixed,
+        reasoning_effort,
+        agent_config,
+    )))
+}
+
 /// `GET /agents` — list named agents.
 pub(crate) async fn agents_list(
     State(st): State<AppState>,
@@ -2906,6 +3126,8 @@ pub(crate) async fn agents_list(
 #[derive(Deserialize)]
 pub(crate) struct CreateAgentRequest {
     name: String,
+    #[serde(default)]
+    description: String,
     model: String,
     #[serde(default)]
     system_prompt: String,
@@ -2933,6 +3155,7 @@ pub(crate) async fn agent_create(
     let agent = store
         .create(
             &req.name,
+            &req.description,
             &req.model,
             &req.system_prompt,
             &req.tool_mode,
@@ -3109,6 +3332,7 @@ pub(crate) async fn agent_update(
     let agent = milim_agents::AgentDef {
         id,
         name: req.name,
+        description: req.description,
         system_prompt: req.system_prompt,
         model: req.model,
         tool_mode: milim_agents::normalize_tool_mode(&req.tool_mode, &req.enabled_tools),
@@ -3556,6 +3780,40 @@ pub(crate) async fn worker_run_start(
     .map_err(ApiError)?;
     schedule_worker_run_deadline(supervisor, run.id.clone());
     Ok(Json(json!({ "run": run, "workers": workers })).into_response())
+}
+
+pub(crate) async fn control_worker_run_start(st: &AppState, id: &str) -> milim_core::Result<Value> {
+    let supervisor = st
+        .threads
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| Error::InvalidRequest("child threads are not enabled".to_string()))?;
+    let run = supervisor
+        .worker_run(id)?
+        .ok_or_else(|| Error::ModelNotFound(format!("worker run {id}")))?;
+    let run_context = RunContext::from_worker_run(&run)?;
+    let (run, workers) = start_managed_worker_run(
+        st,
+        &supervisor,
+        &run,
+        worker_review_registry(st, &run_context),
+    )
+    .await?;
+    schedule_worker_run_deadline(supervisor, run.id.clone());
+    Ok(json!({ "run": run, "workers": workers }))
+}
+
+pub(crate) fn control_worker_run_stop(st: &AppState, id: &str) -> milim_core::Result<Value> {
+    let supervisor = st
+        .threads
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| Error::InvalidRequest("child threads are not enabled".to_string()))?;
+    let run = supervisor
+        .stop_run(id, "stopped by control client")?
+        .ok_or_else(|| Error::ModelNotFound(format!("worker run {id}")))?;
+    let workers = supervisor.workers_for_run(id)?;
+    Ok(json!({ "run": run, "workers": workers }))
 }
 
 #[derive(Default, Deserialize)]

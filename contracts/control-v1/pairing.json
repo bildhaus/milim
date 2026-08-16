@@ -1,0 +1,12 @@
+{
+  "host_id": "host-fixture",
+  "host_name": "Milim desktop",
+  "protocol": { "min": 1, "max": 1 },
+  "pair_id": "pair-fixture",
+  "secret": "one-time-secret-fixture",
+  "candidates": [
+    { "kind": "tailscale", "url": "https://milim.example.ts.net" },
+    { "kind": "manual", "url": "http://192.0.2.10:10000" }
+  ],
+  "deep_link": "milim://pair?payload=fixture"
+}
