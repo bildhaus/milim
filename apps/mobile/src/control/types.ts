@@ -280,6 +280,18 @@ export interface PairedCredential {
   device_name: string;
 }
 
+export interface PairingRequestCreated {
+  request_id: string;
+  request_key: string;
+  expires_at: number;
+}
+
+export interface PairingRequestStatus {
+  request_id: string;
+  status: 'pending' | 'approved' | 'denied' | 'paired';
+  expires_at: number;
+}
+
 export interface MobileHostProbe {
   service: 'milim-mobile-control';
   host_id: string;

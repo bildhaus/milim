@@ -1,6 +1,7 @@
 import {
   canUseCompactComposer,
   friendlyEndpoint,
+  friendlyPairingError,
   groupMobileThreads,
   lowercaseMilimBrand,
   nextAwayFromLatest,
@@ -70,6 +71,15 @@ describe('mobile UI helpers', () => {
     expect(friendlyEndpoint('http://127.0.0.1:7377')).toBe('Local emulator · Port 7377');
     expect(friendlyEndpoint('https://desktop.example.ts.net:10000')).toBe('Tailscale · desktop.example.ts.net · Port 10000');
     expect(relativeConnectionTime(990_000, 1_000_000)).toBe('Connected just now');
+  });
+
+  test('turns private pairing failures into actionable copy', () => {
+    expect(friendlyPairingError(new Error('unauthorized: pairing request expired or missing')))
+      .toBe('That request expired. Tap the desktop to try again.');
+    expect(friendlyPairingError(new Error('pairing request was denied')))
+      .toBe('Connection declined on your desktop.');
+    expect(friendlyPairingError(new TypeError('Network request failed')))
+      .toBe('The desktop became unreachable. Check the connection and try again.');
   });
 
   test('renders the milim brand in lowercase without changing surrounding labels', () => {

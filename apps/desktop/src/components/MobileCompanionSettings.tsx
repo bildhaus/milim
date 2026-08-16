@@ -15,7 +15,7 @@ import {
   type MobileLanStatus,
 } from "../api";
 import { readUserStateKey, writeUserStateKey } from "../persistence/userStateStorage";
-import { Copy, Refresh } from "./icons";
+import { Copy, Refresh, Smartphone } from "./icons";
 import { Toggle } from "./ui";
 
 const MOBILE_URL_BASE_KEY = "milim.mobile.urlBase";
@@ -76,6 +76,21 @@ export function MobileCompanionSettings() {
     })();
     return () => {
       alive = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    const timer = window.setInterval(() => {
+      void getMobileCompanionStatus()
+        .then((nextStatus) => {
+          if (alive) setStatus(nextStatus);
+        })
+        .catch(() => {});
+    }, 2_000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
     };
   }, []);
 
@@ -163,12 +178,12 @@ export function MobileCompanionSettings() {
     }
   }
 
-  async function createPairing(baseValue: string, message = "Pairing link created. Open it on the phone.") {
+  async function createPairing(baseValue: string, message = "QR code and pairing link ready.") {
     const pairing = await startMobileCompanionPairing();
     setStatus((current) =>
       current
         ? { ...current, enabled: true, pairing }
-        : { enabled: true, pairing, devices: [] },
+        : { enabled: true, pairing, pairing_requests: [], devices: [] },
     );
     const base = normalizeBase(baseValue);
     if (base) {
@@ -254,6 +269,16 @@ export function MobileCompanionSettings() {
 
   return (
     <div className="mobile-companion-settings">
+      {enabled && lan?.active ? (
+        <div className="mobile-connection-ready" role="status">
+          <div className="mobile-connection-ready-icon"><Smartphone size={18} /></div>
+          <div>
+            <strong>Ready for nearby devices</strong>
+            <span>Open milim mobile, tap this desktop, then approve the request here.</span>
+          </div>
+        </div>
+      ) : null}
+
       <div className="setting-toggle-row">
         <div>
           <strong>Enable companion bridge</strong>
@@ -274,7 +299,7 @@ export function MobileCompanionSettings() {
       </div>
 
       <label className="setting-field">
-        <span>Phone URL base</span>
+        <span>Remote phone URL</span>
         <input
           data-testid="mobile-companion-url-base"
           value={urlBase}
@@ -287,7 +312,7 @@ export function MobileCompanionSettings() {
         />
       </label>
       <p className="sheet-hint">
-        Use a Tailscale Serve URL on a real phone, or <code>http://10.0.2.2:&lt;port&gt;</code> in the Android emulator.
+        Used when nearby discovery is unavailable. Prefer a Tailscale Serve URL for a real phone.
       </p>
 
       <div className="mobile-companion-actions">
@@ -300,7 +325,7 @@ export function MobileCompanionSettings() {
           </button>
         )}
         <button className="btn-ghost" type="button" disabled={!enabled || busy} onClick={() => void startPairing()} data-testid="mobile-companion-start-pairing">
-          Pair device
+          Show QR or link
         </button>
         <button className="btn-ghost" type="button" disabled={busy} onClick={() => void refresh()} title="Refresh mobile companion">
           <Refresh size={13} /> Refresh
@@ -311,10 +336,10 @@ export function MobileCompanionSettings() {
         <div className="mobile-pairing-panel">
           {qrDataUrl && <img className="mobile-pairing-qr" src={qrDataUrl} alt="Mobile companion pairing QR code" />}
           <div className="mobile-pairing-copy">
-            <span className="setting-mini-title">Native pairing link</span>
+            <span className="setting-mini-title">Pair another way</span>
             <code data-testid="mobile-companion-pairing-url">{nativePairingUrl}</code>
             <button className="btn-ghost" type="button" onClick={() => void copyPairingUrl()}>
-              <Copy size={13} /> Copy native link
+              <Copy size={13} /> Copy pairing link
             </button>
             <small>Expires {formatTime(status?.pairing?.expires_at)}.</small>
           </div>

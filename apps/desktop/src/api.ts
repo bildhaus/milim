@@ -1048,9 +1048,19 @@ export interface MobileCompanionDevice {
   last_seen_at?: number | null;
 }
 
+export interface MobileCompanionPairingRequest {
+  id: string;
+  device_name: string;
+  platform: "android" | "ios" | "mobile";
+  created_at: number;
+  expires_at: number;
+  status: "pending" | "approved" | "denied" | "paired";
+}
+
 export interface MobileCompanionStatus {
   enabled: boolean;
   pairing?: MobileCompanionPairing | null;
+  pairing_requests: MobileCompanionPairingRequest[];
   devices: MobileCompanionDevice[];
 }
 
@@ -1605,6 +1615,23 @@ export async function startMobileCompanionPairing(): Promise<MobileCompanionPair
   return await parseJsonResponse<MobileCompanionPairing>(
     await authFetch(`${BASE}/mobile/pairing`, { method: "POST" }),
     "mobile companion pairing failed",
+  );
+}
+
+export async function decideMobileCompanionPairingRequest(
+  id: string,
+  approved: boolean,
+): Promise<MobileCompanionStatus> {
+  return await parseJsonResponse<MobileCompanionStatus>(
+    await authFetch(
+      `${BASE}/mobile/pair-requests/${encodeURIComponent(id)}/decision`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approved }),
+      },
+    ),
+    "mobile pairing decision failed",
   );
 }
 

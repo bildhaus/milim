@@ -27,7 +27,10 @@ use serde_json::{json, Value};
 use tokio::io::AsyncReadExt;
 
 use crate::auth::authorize;
-use crate::companion::{MobileCompanionBridge, MobilePairRequest};
+use crate::companion::{
+    MobileCompanionBridge, MobilePairRequest, MobilePairingRequestCreate,
+    MobilePairingRequestDecision,
+};
 use crate::error::ApiError;
 use crate::media_library::{
     MediaDownloadSource, MediaLibraryItem, MediaLibraryMediaItem, MediaLibraryUpdate,

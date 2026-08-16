@@ -1,6 +1,7 @@
-import React, {createContext, useContext, useEffect, useMemo, useRef, useState} from 'react';
+import React, {createContext, useCallback, useContext, useEffect, useMemo, useRef, useState} from 'react';
 import {
   AccessibilityInfo,
+  ActivityIndicator,
   Alert,
   Animated,
   FlatList,
@@ -53,7 +54,11 @@ import type {
   QueuedTurnV1,
   ThreadSummaryV1,
 } from './src/control/types';
-import {useMilimController} from './src/controller/useMilimController';
+import {
+  useMilimController,
+  type NearbyPairingStage,
+} from './src/controller/useMilimController';
+import {discoverMilimHosts, type DiscoveredHost} from './src/discovery';
 import {
   modelPickerGroups,
   parseMobileModel,
@@ -69,6 +74,7 @@ import {
 import {
   canUseCompactComposer,
   friendlyEndpoint,
+  friendlyPairingError,
   groupMobileThreads,
   lowercaseMilimBrand,
   nextAwayFromLatest,
@@ -320,6 +326,7 @@ function App(): React.JSX.Element {
             claim={pairingClaim}
             setClaim={setPairingClaim}
             onPair={controller.pair}
+            onPairNearby={controller.pairNearby}
           />
         </SafeAreaProvider>
       </AppThemeContext.Provider>
@@ -468,16 +475,97 @@ function Onboarding({
   claim,
   setClaim,
   onPair,
+  onPairNearby,
 }: {
   claim: string;
   setClaim: (value: string) => void;
   onPair: (claim: string, name: string) => Promise<unknown>;
+  onPairNearby: (
+    host: DiscoveredHost,
+    deviceName: string,
+    signal: AbortSignal,
+    onStage: (stage: NearbyPairingStage) => void,
+  ) => Promise<unknown>;
 }) {
   const {palette, styles} = useAppTheme();
   const [deviceName, setDeviceName] = useState(`${Platform.OS === 'ios' ? 'iPhone' : 'Android'} controller`);
   const [scanner, setScanner] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [nearbyHosts, setNearbyHosts] = useState<DiscoveredHost[]>([]);
+  const [discovering, setDiscovering] = useState(true);
+  const [discoveryError, setDiscoveryError] = useState<string | null>(null);
+  const [showManualPairing, setShowManualPairing] = useState(Boolean(claim));
+  const [nearbyPairing, setNearbyPairing] = useState<{
+    host: DiscoveredHost;
+    stage: NearbyPairingStage;
+  } | null>(null);
+  const discoveryVersion = useRef(0);
+  const discoveryActive = useRef(false);
+  const nearbyPairingAbort = useRef<AbortController | null>(null);
+  const refreshNearbyHosts = useCallback(async () => {
+    if (discoveryActive.current) return;
+    discoveryActive.current = true;
+    const version = ++discoveryVersion.current;
+    setDiscovering(true);
+    setDiscoveryError(null);
+    try {
+      const hosts = await discoverMilimHosts();
+      if (version === discoveryVersion.current) setNearbyHosts(hosts);
+    } catch (reason) {
+      if (version === discoveryVersion.current) {
+        setDiscoveryError(reason instanceof Error ? reason.message : String(reason));
+      }
+    } finally {
+      if (version === discoveryVersion.current) {
+        discoveryActive.current = false;
+        setDiscovering(false);
+      }
+    }
+  }, []);
+  useEffect(() => {
+    void refreshNearbyHosts();
+    const timer = setInterval(() => void refreshNearbyHosts(), 15_000);
+    return () => {
+      clearInterval(timer);
+      discoveryVersion.current += 1;
+      discoveryActive.current = false;
+    };
+  }, [refreshNearbyHosts]);
+  useEffect(() => {
+    if (claim.trim()) setShowManualPairing(true);
+  }, [claim]);
+  useEffect(() => () => nearbyPairingAbort.current?.abort(), []);
+
+  const connectNearby = async (host: DiscoveredHost) => {
+    nearbyPairingAbort.current?.abort();
+    const controller = new AbortController();
+    nearbyPairingAbort.current = controller;
+    setError(null);
+    setNearbyPairing({host, stage: 'requesting'});
+    try {
+      await onPairNearby(host, deviceName, controller.signal, stage => {
+        setNearbyPairing(current => current?.host.endpoint === host.endpoint
+          ? {...current, stage}
+          : current);
+      });
+    } catch (reason) {
+      if (!controller.signal.aborted) {
+        setError(friendlyPairingError(reason));
+      }
+    } finally {
+      if (nearbyPairingAbort.current === controller) {
+        nearbyPairingAbort.current = null;
+        setNearbyPairing(null);
+      }
+    }
+  };
+
+  const cancelNearbyPairing = () => {
+    nearbyPairingAbort.current?.abort();
+    nearbyPairingAbort.current = null;
+    setNearbyPairing(null);
+  };
   const pair = async () => {
     setBusy(true);
     setError(null);
@@ -508,14 +596,107 @@ function Onboarding({
             Control the same threads, runs, queues, and approvals. Your desktop stays authoritative.
           </Text>
         </View>
-        <View style={styles.pairingPanel}>
+        <View style={styles.nearbyPanel}>
+          <View style={styles.nearbyHeading}>
+            <View style={styles.flex}>
+              <Text style={styles.nearbyTitle}>Nearby desktops</Text>
+              <Text style={styles.nearbySubtitle}>
+                {discovering
+                  ? 'Searching your trusted network…'
+                  : nearbyHosts.length
+                    ? `${nearbyHosts.length} ready to pair`
+                    : 'No desktops detected'}
+              </Text>
+            </View>
+            <MotionPressable
+              style={[styles.nearbyRefresh, discovering && styles.disabled]}
+              onPress={() => void refreshNearbyHosts()}
+              disabled={discovering}
+              accessibilityLabel="Refresh nearby desktops">
+              <MilimIcon name="refresh" size={14} color={palette.secondary} />
+            </MotionPressable>
+          </View>
+          {nearbyPairing ? (
+            <View style={[styles.nearbyHost, styles.nearbyHostPending]}>
+              <View style={styles.nearbyPairingSpinner}>
+                <ActivityIndicator size="small" color={palette.text} />
+              </View>
+              <View style={styles.nearbyHostBody}>
+                <Text style={styles.nearbyHostName} numberOfLines={1}>
+                  {nearbyPairing.stage === 'requesting'
+                    ? 'Requesting access…'
+                    : nearbyPairing.stage === 'connecting'
+                      ? 'Connecting securely…'
+                      : 'Approve on your desktop'}
+                </Text>
+                <Text style={styles.nearbyHostEndpoint} numberOfLines={2}>
+                  {nearbyPairing.stage === 'waiting'
+                    ? `${lowercaseMilimBrand(nearbyPairing.host.name)} is waiting for your confirmation.`
+                    : friendlyEndpoint(nearbyPairing.host.endpoint)}
+                </Text>
+              </View>
+              <Button label="Cancel" tone="quiet" onPress={cancelNearbyPairing} />
+            </View>
+          ) : nearbyHosts.map(host => (
+            <MotionPressable
+              key={host.hostId ?? host.endpoint}
+              style={styles.nearbyHost}
+              onPress={() => void connectNearby(host)}
+              accessibilityLabel={`Connect to ${lowercaseMilimBrand(host.name)}`}>
+              <Image source={milimLogo} style={styles.nearbyHostMark} />
+              <View style={styles.nearbyHostBody}>
+                <Text style={styles.nearbyHostName} numberOfLines={1}>
+                  {lowercaseMilimBrand(host.name)}
+                </Text>
+                <Text style={styles.nearbyHostEndpoint} numberOfLines={1}>
+                  {friendlyEndpoint(host.endpoint)}
+                </Text>
+              </View>
+              <View style={styles.nearbyConnectAction}>
+                <Text style={styles.nearbyConnectText}>Connect</Text>
+                <MilimIcon name="chevron-right" size={13} color={palette.text} />
+              </View>
+            </MotionPressable>
+          ))}
+          {!discovering && !nearbyHosts.length ? (
+            <Text style={styles.nearbyEmpty}>
+              {discoveryError
+                ? 'Local discovery is unavailable. You can still pair with the QR code or link below.'
+                : 'Enable the companion bridge and trusted-network discovery on your desktop. Some emulators and VPNs block local discovery.'}
+            </Text>
+          ) : null}
+          {nearbyHosts.length ? (
+            <Text style={styles.nearbyHelp}>
+              Tap a desktop, then approve the request there. No code or link needed.
+            </Text>
+          ) : null}
+          {error ? <Text style={styles.formError}>{error}</Text> : null}
+        </View>
+        <MotionPressable
+          style={styles.manualPairToggle}
+          onPress={() => setShowManualPairing(current => !current)}
+          accessibilityLabel="Pair with QR code or link">
+          <View style={styles.manualPairIcon}>
+            <MilimIcon name="link" size={16} color={palette.secondary} />
+          </View>
+          <View style={styles.flex}>
+            <Text style={styles.manualPairTitle}>Pair another way</Text>
+            <Text style={styles.manualPairCopy}>Use a QR code or link when nearby discovery is unavailable.</Text>
+          </View>
+          <MilimIcon
+            name={showManualPairing ? 'chevron-up' : 'chevron-down'}
+            size={15}
+            color={palette.muted}
+          />
+        </MotionPressable>
+        {showManualPairing ? <View style={styles.pairingPanel}>
           <View style={styles.panelHeading}>
             <View style={styles.panelIcon}>
               <MilimIcon name="smartphone" size={17} color={palette.text} />
             </View>
             <View style={styles.flex}>
-              <Text style={styles.panelTitle}>Connect this device</Text>
-              <Text style={styles.help}>Settings → Mobile on your desktop</Text>
+              <Text style={styles.panelTitle}>QR code or pairing link</Text>
+              <Text style={styles.help}>For Tailscale, VPNs, or networks that block discovery</Text>
             </View>
           </View>
           <Text style={styles.fieldLabel}>DEVICE NAME</Text>
@@ -537,12 +718,11 @@ function Onboarding({
         autoCorrect={false}
         multiline
       />
-      {error ? <Text style={styles.formError}>{error}</Text> : null}
       <View style={styles.pairActions}>
         <Button label="Scan QR" icon="scan" tone="quiet" onPress={() => setScanner(true)} />
         <Button label={busy ? 'Pairing…' : 'Pair desktop'} icon="arrow-up" onPress={() => void pair()} disabled={busy || !claim.trim()} />
       </View>
-        </View>
+        </View> : null}
         <View style={styles.directNote}>
           <View style={[styles.dot, styles.dotOnline]} />
           <Text style={styles.directNoteText}>
@@ -2352,6 +2532,28 @@ function createStyles(theme: MobileTheme) {
   onboardingIntro: {gap: 9},
   heroTitle: {color: palette.text, fontSize: 34, lineHeight: 38, fontWeight: '700', letterSpacing: -1.5},
   heroCopy: {color: palette.secondary, fontSize: 14, lineHeight: 20},
+  nearbyPanel: {gap: 9, padding: 13, borderRadius: cardRadius, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.panel},
+  nearbyHeading: {minHeight: 36, flexDirection: 'row', alignItems: 'center', gap: 10},
+  nearbyTitle: {color: palette.text, fontSize: 14.5, fontWeight: '600'},
+  nearbySubtitle: {color: palette.muted, fontSize: 10.5, lineHeight: 15},
+  nearbyRefresh: {width: 36, height: 36, alignItems: 'center', justifyContent: 'center', borderRadius: 8, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.raised},
+  nearbyHost: {minHeight: 58, flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 10, paddingVertical: 8, borderRadius: 9, borderWidth: 1, borderColor: palette.borderStrong, backgroundColor: palette.input},
+  nearbyHostPending: {borderColor: palette.accent, backgroundColor: palette.raised},
+  nearbyHostMark: {width: 30, height: 30, resizeMode: 'contain'},
+  nearbyPairingSpinner: {width: 30, height: 30, alignItems: 'center', justifyContent: 'center'},
+  nearbyHostBody: {flex: 1, minWidth: 0, gap: 2},
+  nearbyHostName: {color: palette.text, fontSize: 12.5, fontWeight: '700'},
+  nearbyHostEndpoint: {color: palette.muted, fontSize: 9.5},
+  nearbyStatus: {flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 7, height: 24, borderRadius: 7, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.raised},
+  nearbyStatusText: {color: palette.secondary, fontSize: 8, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.45},
+  nearbyConnectAction: {flexDirection: 'row', alignItems: 'center', gap: 4, paddingLeft: 8},
+  nearbyConnectText: {color: palette.text, fontSize: 10.5, fontWeight: '700'},
+  nearbyEmpty: {color: palette.muted, fontSize: 11.5, lineHeight: 17},
+  nearbyHelp: {color: palette.secondary, fontSize: 10.5, lineHeight: 15},
+  manualPairToggle: {minHeight: 58, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 13, paddingVertical: 10, borderRadius: cardRadius, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.panel},
+  manualPairIcon: {width: 34, height: 34, borderRadius: 8, alignItems: 'center', justifyContent: 'center', backgroundColor: palette.raised},
+  manualPairTitle: {color: palette.text, fontSize: 13, fontWeight: '600'},
+  manualPairCopy: {color: palette.muted, fontSize: 10.5, lineHeight: 14},
   pairingPanel: {gap: 10, padding: 15, borderRadius: cardRadius, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.panel},
   panelHeading: {flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 3},
   panelIcon: {width: 34, height: 34, borderRadius: 8, borderWidth: 1, borderColor: palette.borderStrong, backgroundColor: palette.raised, alignItems: 'center', justifyContent: 'center'},

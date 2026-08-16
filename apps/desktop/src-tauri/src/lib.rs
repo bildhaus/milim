@@ -159,7 +159,15 @@ impl DesktopServerRuntimeState {
             .control
             .as_ref()
             .ok_or_else(|| "Canonical control runtime is unavailable.".to_string())?;
-        let listener = TcpListener::bind("0.0.0.0:0").map_err(|error| error.to_string())?;
+        let listener = TcpListener::bind(("0.0.0.0", MOBILE_LAN_PREFERRED_PORT)).or_else(
+            |error| {
+                tracing::warn!(
+                    "LAN mobile listener could not bind preferred port {MOBILE_LAN_PREFERRED_PORT}: {error}; falling back to an available port"
+                );
+                TcpListener::bind("0.0.0.0:0")
+            },
+        )
+        .map_err(|error| error.to_string())?;
         listener
             .set_nonblocking(true)
             .map_err(|error| error.to_string())?;
@@ -326,6 +334,7 @@ fn complete_workspace_editor_leave(
 }
 
 const TAILSCALE_SERVE_PORT: u16 = 10000;
+const MOBILE_LAN_PREFERRED_PORT: u16 = 7378;
 const TAILSCALE_COMMAND_TIMEOUT_SECS: u64 = 12;
 const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_OPEN_ID: &str = "open";

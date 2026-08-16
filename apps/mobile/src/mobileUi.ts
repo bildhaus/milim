@@ -100,6 +100,24 @@ export function friendlyEndpoint(endpoint: string | null): string {
   }
 }
 
+export function friendlyPairingError(reason: unknown): string {
+  const message = reason instanceof Error ? reason.message : String(reason);
+  const normalized = message.toLowerCase();
+  if (normalized.includes('expired or missing')) {
+    return 'That request expired. Tap the desktop to try again.';
+  }
+  if (normalized.includes('denied') || normalized.includes('declined')) {
+    return 'Connection declined on your desktop.';
+  }
+  if (normalized.includes('too many pairing requests')) {
+    return 'That desktop already has several requests waiting. Try again shortly.';
+  }
+  if (normalized.includes('network request failed') || normalized.includes('failed to fetch')) {
+    return 'The desktop became unreachable. Check the connection and try again.';
+  }
+  return message.replace(/^unauthorized:\s*/i, '');
+}
+
 export function lowercaseMilimBrand(value: string): string {
   return value.replace(/\bmilim\b/gi, 'milim');
 }

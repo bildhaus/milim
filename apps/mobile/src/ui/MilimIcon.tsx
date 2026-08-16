@@ -9,6 +9,7 @@ export type MilimIconName =
   | 'camera'
   | 'check'
   | 'chevron-down'
+  | 'chevron-right'
   | 'chevron-up'
   | 'file'
   | 'folder'
@@ -65,6 +66,7 @@ export function MilimIcon({
       ) : null}
       {name === 'check' ? <Path d="m5 12 5 5 9-10" {...common} /> : null}
       {name === 'chevron-down' ? <Path d="m6 9 6 6 6-6" {...common} /> : null}
+      {name === 'chevron-right' ? <Path d="m9 6 6 6-6 6" {...common} /> : null}
       {name === 'chevron-up' ? <Path d="m6 15 6-6 6 6" {...common} /> : null}
       {name === 'file' ? (
         <>

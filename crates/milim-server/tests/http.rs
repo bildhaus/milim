@@ -499,6 +499,108 @@ async fn mobile_companion_pairs_once_and_revokes_device() {
 }
 
 #[tokio::test]
+async fn mobile_companion_pair_request_is_approved_on_desktop_and_claimed_on_phone() {
+    let state = control_mobile_test_state();
+    let desktop = spawn(state.clone()).await;
+    let mobile = spawn_mobile(state).await;
+    let client = reqwest::Client::new();
+
+    client
+        .post(format!("{desktop}/mobile/enabled"))
+        .json(&json!({ "enabled": true }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let request: Value = client
+        .post(format!("{mobile}/mobile/pair-requests"))
+        .json(&json!({
+            "device_name": "Android controller",
+            "platform": "android"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let request_id = request["request_id"].as_str().unwrap();
+    let request_key = request["request_key"].as_str().unwrap();
+
+    let pending: Value = client
+        .get(format!("{mobile}/mobile/pair-requests/{request_id}"))
+        .header("x-milim-pairing-key", request_key)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(pending["status"], "pending");
+    let mobile_decision = client
+        .post(format!(
+            "{mobile}/mobile/pair-requests/{request_id}/decision"
+        ))
+        .json(&json!({ "approved": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mobile_decision.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let desktop_status: Value = client
+        .get(format!("{desktop}/mobile/status"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(desktop_status["pairing_requests"][0]["id"], request_id);
+    assert_eq!(
+        desktop_status["pairing_requests"][0]["device_name"],
+        "Android controller"
+    );
+    client
+        .post(format!(
+            "{desktop}/mobile/pair-requests/{request_id}/decision"
+        ))
+        .json(&json!({ "approved": true }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    let paired: Value = client
+        .post(format!("{mobile}/mobile/pair-requests/{request_id}/claim"))
+        .header("x-milim-pairing-key", request_key)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let device_key = paired["device_key"].as_str().unwrap();
+    client
+        .get(format!("{mobile}/control/v1/bootstrap"))
+        .bearer_auth(device_key)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+}
+
+#[tokio::test]
 async fn mobile_phone_router_exposes_native_control_only() {
     let base = spawn_mobile(control_mobile_test_state()).await;
     let client = reqwest::Client::new();

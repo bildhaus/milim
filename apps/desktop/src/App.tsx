@@ -29,6 +29,7 @@ import { ContextMenuProvider, useContextMenu, type ContextMenuItem } from "./com
 import type { GitPanelView } from "./components/GitPanel";
 import { FolderOpen, Gear, Globe, Pencil, Plus, Refresh, Sidebar as SidebarIcon, X } from "./components/icons";
 import { Logo } from "./components/Logo";
+import { MobilePairingApprovalPrompt } from "./components/MobilePairingApprovalPrompt";
 import { ResizeHandles } from "./components/ResizeHandles";
 import { Sidebar } from "./components/Sidebar";
 import { TopBar } from "./components/TopBar";
@@ -720,6 +721,7 @@ function AppContent() {
         )}
       </Suspense>
       <AppNoticeHost />
+      <MobilePairingApprovalPrompt />
       <AutoUpdater />
       <ResizeHandles />
     </div>
