@@ -97,7 +97,7 @@ describe('milim desktop discovery', () => {
     await expect(first).resolves.toEqual([]);
   });
 
-  test('uses the Android host bridge in development without waiting for mDNS', async () => {
+  test('merges the Android host bridge with LAN discovery in development', async () => {
     Object.assign(globalThis, {__DEV__: true});
     mockFetchMobileHostProbe.mockResolvedValue({
       service: 'milim-mobile-control',
@@ -106,17 +106,79 @@ describe('milim desktop discovery', () => {
       protocol: {min: 1, max: 1},
     });
     const {discoverMilimHosts} = discoveryModule();
+    const result = discoverMilimHosts(100);
+    const zeroconf = mockZeroconfInstances[0];
 
-    await expect(discoverMilimHosts(100)).resolves.toEqual([{
-      name: 'Development desktop',
-      hostId: 'host-local',
-      endpoint: 'http://10.0.2.2:7378',
-    }]);
+    zeroconf.emit('resolved', {
+      name: 'Remote desktop',
+      port: 7378,
+      addresses: ['192.168.1.20'],
+      txt: {host_id: 'host-remote'},
+    });
+    jest.advanceTimersByTime(100);
+
+    await expect(result).resolves.toEqual([
+      {
+        name: 'Development desktop',
+        hostId: 'host-local',
+        endpoint: 'http://10.0.2.2:7378',
+      },
+      {
+        name: 'Remote desktop',
+        hostId: 'host-remote',
+        endpoint: 'http://192.168.1.20:7378',
+      },
+    ]);
     expect(mockFetchMobileHostProbe).toHaveBeenCalledWith(
       'http://10.0.2.2:7378',
       expect.any(AbortSignal),
     );
-    expect(mockZeroconfInstances).toHaveLength(0);
+  });
+
+  test('prefers the simulator bridge when mDNS resolves the same desktop', async () => {
+    Object.assign(globalThis, {__DEV__: true});
+    mockFetchMobileHostProbe.mockResolvedValue({
+      service: 'milim-mobile-control',
+      host_id: 'host-local',
+      host_name: 'Development desktop',
+      protocol: {min: 1, max: 1},
+    });
+    const {discoverMilimHosts} = discoveryModule();
+    const result = discoverMilimHosts(100);
+
+    mockZeroconfInstances[0].emit('resolved', {
+      name: 'Development desktop',
+      port: 7378,
+      addresses: ['192.168.1.10'],
+      txt: {host_id: 'host-local'},
+    });
+    jest.advanceTimersByTime(100);
+
+    await expect(result).resolves.toEqual([{
+      name: 'Development desktop',
+      hostId: 'host-local',
+      endpoint: 'http://10.0.2.2:7378',
+    }]);
+  });
+
+  test('keeps the simulator bridge when native discovery fails', async () => {
+    Object.assign(globalThis, {__DEV__: true});
+    mockFetchMobileHostProbe.mockResolvedValue({
+      service: 'milim-mobile-control',
+      host_id: 'host-local',
+      host_name: 'Development desktop',
+      protocol: {min: 1, max: 1},
+    });
+    const {discoverMilimHosts} = discoveryModule();
+    const result = discoverMilimHosts(100);
+
+    mockZeroconfInstances[0].emit('error', new Error('multicast unavailable'));
+
+    await expect(result).resolves.toEqual([{
+      name: 'Development desktop',
+      hostId: 'host-local',
+      endpoint: 'http://10.0.2.2:7378',
+    }]);
   });
 
   test('maps iOS simulator and Android emulator to their host loopbacks', () => {

@@ -96,11 +96,28 @@ function startNativeMilimHostDiscovery(timeoutMs: number): Promise<DiscoveredHos
   });
 }
 
-function startMilimHostDiscovery(timeoutMs: number): Promise<DiscoveredHost[]> {
+function mergeDiscoveredHosts(...groups: DiscoveredHost[][]): DiscoveredHost[] {
+  const hosts = new Map<string, DiscoveredHost>();
+  for (const group of groups) {
+    for (const host of group) {
+      hosts.set(host.hostId ?? host.endpoint, host);
+    }
+  }
+  return [...hosts.values()].sort((left, right) => left.name.localeCompare(right.name));
+}
+
+async function startMilimHostDiscovery(timeoutMs: number): Promise<DiscoveredHost[]> {
   if (!__DEV__) return startNativeMilimHostDiscovery(timeoutMs);
-  return discoverSimulatorHost().then(hosts =>
-    hosts.length > 0 ? hosts : startNativeMilimHostDiscovery(timeoutMs),
+  const nativeDiscovery = startNativeMilimHostDiscovery(timeoutMs).then(
+    hosts => ({hosts, error: null}),
+    error => ({hosts: [] as DiscoveredHost[], error}),
   );
+  const [native, simulatorHosts] = await Promise.all([
+    nativeDiscovery,
+    discoverSimulatorHost(),
+  ]);
+  if (native.error && simulatorHosts.length === 0) throw native.error;
+  return mergeDiscoveredHosts(native.hosts, simulatorHosts);
 }
 
 export function discoverMilimHosts(timeoutMs = 5_000): Promise<DiscoveredHost[]> {

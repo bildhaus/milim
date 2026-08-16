@@ -10,6 +10,10 @@ const config = JSON.parse(
   readFileSync(join(root, "src-tauri", "tauri.conf.json"), "utf8"),
 );
 const cargoToml = readFileSync(join(root, "src-tauri", "Cargo.toml"), "utf8");
+const macosInfoPlist = readFileSync(
+  join(root, "src-tauri", "Info.plist"),
+  "utf8",
+);
 const tauriLib = readFileSync(join(root, "src-tauri", "src", "lib.rs"), "utf8");
 const repoVersion = readFileSync(
   join(root, "..", "..", "VERSION"),
@@ -140,6 +144,16 @@ if (!tauriFeatures.includes('"macos-private-api"')) {
   throw new Error(
     "macOS transparent preview overlays require Tauri's macos-private-api Cargo feature",
   );
+}
+
+for (const key of ["NSLocalNetworkUsageDescription", "NSBonjourServices"]) {
+  if (!macosInfoPlist.includes(`<key>${key}</key>`)) {
+    throw new Error(`macOS Info.plist must declare ${key} for trusted-network discovery`);
+  }
+}
+
+if (!macosInfoPlist.includes("<string>_milim._tcp.</string>")) {
+  throw new Error("macOS Info.plist must declare the _milim._tcp. Bonjour service");
 }
 
 if (repoVersion !== packageJson.version) {
