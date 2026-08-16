@@ -34,6 +34,7 @@ import type {
 import {isProtocolCompatible} from '../control/types';
 import {discoverMilimHosts} from '../discovery';
 import type {DiscoveredHost} from '../discovery';
+import {friendlyConnectionError} from '../mobileUi';
 import {assertHostIdentity, parsePairingClaim} from '../pairing';
 import {
   listHosts,
@@ -101,6 +102,7 @@ export function useMilimController() {
   const [draft, setDraftState] = useState('');
   const [status, setStatus] = useState<ConnectionStatus>('offline');
   const [lastError, setLastError] = useState<string | null>(null);
+  const [connectionRevision, setConnectionRevision] = useState(0);
   const [pendingRetry, setPendingRetry] = useState<ControlCommandV1 | null>(null);
   const [appearanceBackgroundUri, setAppearanceBackgroundUri] = useState<string | null>(null);
   const [appState, setAppState] = useState<AppStateStatus>(
@@ -281,14 +283,23 @@ export function useMilimController() {
             }
           },
           () => {
-            if (!cancelled && AppState.currentState === 'active') setStatus('offline');
+            if (!cancelled && AppState.currentState === 'active') {
+              setStatus('offline');
+              setLastError(friendlyConnectionError(
+                [endpoint],
+                new Error('The connection closed unexpectedly.'),
+              ));
+            }
           },
         );
       })
       .catch(error => {
         if (!cancelled) {
           setStatus('offline');
-          setLastError(error instanceof Error ? error.message : String(error));
+          setLastError(friendlyConnectionError(
+            [host.lastSuccessfulUrl, ...host.candidates],
+            error,
+          ));
         }
       });
     return () => {
@@ -296,7 +307,12 @@ export function useMilimController() {
       socket.current?.close();
       socket.current = null;
     };
-  }, [activeHost?.hostId, appState, rememberHost, refreshBootstrap, tryBootstrap]);
+  }, [activeHost?.hostId, appState, connectionRevision, rememberHost, refreshBootstrap, tryBootstrap]);
+
+  const reconnect = useCallback(() => {
+    setLastError(null);
+    setConnectionRevision(current => current + 1);
+  }, []);
 
   useEffect(() => {
     const host = activeHostRef.current;
@@ -606,6 +622,7 @@ export function useMilimController() {
     setActiveHost,
     setSelectedThreadId,
     setDraft,
+    reconnect,
     pair,
     pairNearby,
     addManualHostCandidate,

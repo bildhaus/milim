@@ -6,7 +6,6 @@ import {
   Animated,
   FlatList,
   Image,
-  Keyboard,
   Linking,
   Modal,
   PermissionsAndroid,
@@ -79,6 +78,8 @@ import {
   lowercaseMilimBrand,
   nextAwayFromLatest,
   relativeConnectionTime,
+  shouldHoldCompactComposerForLatestReturn,
+  transcriptDistanceFromLatest,
   type MobileThreadGroup,
 } from './src/mobileUi';
 import {MilimIcon, type MilimIconName} from './src/ui/MilimIcon';
@@ -86,6 +87,7 @@ import {MilimIcon, type MilimIconName} from './src/ui/MilimIcon';
 type Tab = 'chat' | 'attention' | 'hosts';
 
 const milimLogo = require('./src/assets/milim-icon.png');
+const TRANSCRIPT_FADE_HEIGHT = 40;
 
 function markdownCodeContent(content: string): string {
   return content.endsWith('\n') ? content.slice(0, -1) : content;
@@ -171,20 +173,28 @@ function DrawerBackdropFade() {
   );
 }
 
-function TranscriptFadeMask() {
+function TranscriptFadeMask({bottomInset}: {bottomInset: Animated.AnimatedInterpolation<number>}) {
   return (
-    <Svg pointerEvents="none" width="100%" height="100%">
-      <Defs>
-        <SvgLinearGradient id="transcript-fade-mask" x1="0" y1="0" x2="0" y2="1">
-          <Stop offset="0" stopColor="#fff" stopOpacity="1" />
-          <Stop offset="0.88" stopColor="#fff" stopOpacity="1" />
-          <Stop offset="1" stopColor="#fff" stopOpacity="0" />
-        </SvgLinearGradient>
-      </Defs>
-      <Rect width="100%" height="100%" fill="url(#transcript-fade-mask)" />
-    </Svg>
+    <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+      <Animated.View style={[StyleSheet.absoluteFill, {bottom: bottomInset}]}>
+        <View style={stylesStatic.transcriptMaskOpaque} />
+        <Svg width="100%" height={TRANSCRIPT_FADE_HEIGHT}>
+          <Defs>
+            <SvgLinearGradient id="transcript-fade-mask" x1="0" y1="0" x2="0" y2="1">
+              <Stop offset="0" stopColor="#fff" stopOpacity="1" />
+              <Stop offset="1" stopColor="#fff" stopOpacity="0" />
+            </SvgLinearGradient>
+          </Defs>
+          <Rect width="100%" height={TRANSCRIPT_FADE_HEIGHT} fill="url(#transcript-fade-mask)" />
+        </Svg>
+      </Animated.View>
+    </View>
   );
 }
+
+const stylesStatic = StyleSheet.create({
+  transcriptMaskOpaque: {flex: 1, backgroundColor: '#fff'},
+});
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
@@ -365,11 +375,21 @@ function App(): React.JSX.Element {
           </View>
         </View>
         {controller.lastError ? (
-          <Pressable style={styles.errorBanner} onPress={() => void controller.retryPendingCommand()}>
+          <Pressable
+            style={styles.errorBanner}
+            onPress={controller.pendingRetry
+              ? () => void controller.retryPendingCommand()
+              : controller.activeHost && controller.status === 'offline'
+                ? controller.reconnect
+                : undefined}>
             <Text style={styles.errorText} numberOfLines={2}>
               {controller.lastError}
             </Text>
-            {controller.pendingRetry ? <Text style={styles.retry}>Retry same command</Text> : null}
+            {controller.pendingRetry ? (
+              <Text style={styles.retry}>Retry same command</Text>
+            ) : controller.activeHost && controller.status === 'offline' ? (
+              <Text style={styles.retry}>Retry connection</Text>
+            ) : null}
           </Pressable>
         ) : null}
         <View style={styles.content}>
@@ -1121,9 +1141,9 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
   const messageList = useRef<FlatList<ProjectedTranscriptItem>>(null);
   const composerInput = useRef<React.ElementRef<typeof TextInput>>(null);
   const composerProgress = useRef(new Animated.Value(0)).current;
-  const returnToLatestOnExpand = useRef(false);
   const shouldScrollToLatest = useRef(true);
   const followingLatest = useRef(true);
+  const returningToLatest = useRef(false);
   const modelsForPicker = useMemo(() => {
     const models = [...(controller.bootstrap?.models ?? [])];
     const ids = new Set(models.map(modelId).filter(Boolean));
@@ -1150,6 +1170,11 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
     pendingApproval: hasPendingApproval,
     forcedOpen: forcedComposerOpen,
   });
+  const composerHeight = composerProgress.interpolate({
+    inputRange: [0, 1],
+    outputRange: [expandedComposerHeight, compactComposerHeight],
+  });
+  const transcriptBottomInset = Animated.add(composerHeight, TRANSCRIPT_FADE_HEIGHT);
 
   useEffect(() => {
     setComposerCompact(shouldCompactComposer);
@@ -1168,49 +1193,28 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
 
   useEffect(() => {
     if (!forcedComposerOpen || composerCompact) return;
-    let settleTimer: ReturnType<typeof setTimeout> | undefined;
     const focusTimer = setTimeout(() => {
-      if (returnToLatestOnExpand.current) {
-        messageList.current?.scrollToEnd({animated: false});
-      }
       composerInput.current?.focus();
-      settleTimer = setTimeout(() => {
-        if (!returnToLatestOnExpand.current) return;
-        messageList.current?.scrollToEnd({animated: false});
-        followingLatest.current = true;
-        setShowLatest(false);
-        setAwayFromLatest(false);
-        returnToLatestOnExpand.current = false;
-      }, reduced ? 0 : 360);
     }, reduced ? 0 : 160);
-    return () => {
-      clearTimeout(focusTimer);
-      if (settleTimer) clearTimeout(settleTimer);
-    };
+    return () => clearTimeout(focusTimer);
   }, [composerCompact, forcedComposerOpen, reduced]);
 
   useEffect(() => {
-    const subscription = Keyboard.addListener('keyboardDidShow', () => {
-      if (!returnToLatestOnExpand.current) return;
-      requestAnimationFrame(() => {
-        messageList.current?.scrollToEnd({animated: false});
-        followingLatest.current = true;
-        setShowLatest(false);
-        setAwayFromLatest(false);
-        returnToLatestOnExpand.current = false;
-      });
-    });
-    return () => subscription.remove();
-  }, []);
+    if ((!shouldScrollToLatest.current && !followingLatest.current) || !transcriptItems.length) return;
+    const animated = !shouldScrollToLatest.current;
+    shouldScrollToLatest.current = false;
+    const frame = requestAnimationFrame(() => messageList.current?.scrollToEnd({animated}));
+    return () => cancelAnimationFrame(frame);
+  }, [transcriptItems]);
 
   useEffect(() => {
     shouldScrollToLatest.current = true;
     followingLatest.current = true;
+    returningToLatest.current = false;
     setShowLatest(false);
     setAwayFromLatest(false);
     setForcedComposerOpen(false);
     setInputFocused(false);
-    returnToLatestOnExpand.current = false;
   }, [thread?.id]);
   if (!thread) {
     return <Empty title="Choose a thread" copy="Open the thread drawer to select or create a conversation." action="Open threads" onAction={openThreads} />;
@@ -1238,6 +1242,12 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
       controller.setDraft('');
       await cleanupAttachments(attachments);
       setAttachments([]);
+      shouldScrollToLatest.current = true;
+      followingLatest.current = true;
+      returningToLatest.current = false;
+      setShowLatest(false);
+      setAwayFromLatest(false);
+      requestAnimationFrame(() => messageList.current?.scrollToEnd({animated: !reduced}));
     } catch (error) {
       showError(error);
     } finally {
@@ -1274,8 +1284,11 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
           </View>
         ) : null}
       </View>
-      <View style={styles.transcriptStage}>
-        <MaskedView style={styles.transcriptMask} maskElement={<TranscriptFadeMask />}>
+      <View style={styles.chatBody}>
+        <MaskedView
+          style={styles.transcriptMask}
+          maskElement={<TranscriptFadeMask bottomInset={composerHeight} />}
+          androidRenderingMode="software">
         <FlatList
           ref={messageList}
           style={styles.messageList}
@@ -1292,21 +1305,31 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
             </MotionPressable>
           ) : undefined}
           ListEmptyComponent={<Empty title="Ready when you are" copy="Runs continue on the desktop process even if this screen disconnects." />}
+          ListFooterComponent={<Animated.View style={{height: transcriptBottomInset}} />}
           maintainVisibleContentPosition={{minIndexForVisible: 0}}
           scrollEventThrottle={32}
+          onScrollBeginDrag={() => {
+            returningToLatest.current = false;
+          }}
           onScroll={({nativeEvent}) => {
-            const distance = Math.max(0, nativeEvent.contentSize.height - nativeEvent.layoutMeasurement.height - nativeEvent.contentOffset.y);
-            const nearLatest = distance <= 96;
+            const distance = transcriptDistanceFromLatest({
+              contentHeight: nativeEvent.contentSize.height,
+              viewportHeight: nativeEvent.layoutMeasurement.height,
+              offsetY: nativeEvent.contentOffset.y,
+              bottomInset: (composerCompact ? compactComposerHeight : expandedComposerHeight) + TRANSCRIPT_FADE_HEIGHT,
+            });
+            const nearLatest = !shouldHoldCompactComposerForLatestReturn(distance);
+            if (returningToLatest.current) {
+              if (!nearLatest) return;
+              returningToLatest.current = false;
+              followingLatest.current = true;
+              setShowLatest(false);
+              setAwayFromLatest(false);
+              return;
+            }
             followingLatest.current = nearLatest;
             setShowLatest(!nearLatest);
             setAwayFromLatest(current => nextAwayFromLatest(current, distance));
-          }}
-          onContentSizeChange={() => {
-            if ((shouldScrollToLatest.current || followingLatest.current) && transcriptItems.length) {
-              const animated = !shouldScrollToLatest.current;
-              shouldScrollToLatest.current = false;
-              messageList.current?.scrollToEnd({animated});
-            }
           }}
           renderItem={({item}) => (
             <TranscriptItemView
@@ -1318,29 +1341,25 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
         />
         </MaskedView>
         {showLatest ? (
-          <MotionPressable
-            style={styles.latestButton}
-            onPress={() => {
-              followingLatest.current = true;
-              setShowLatest(false);
-              setAwayFromLatest(false);
-              messageList.current?.scrollToEnd({animated: true});
-            }}>
-            <MilimIcon name="chevron-down" size={13} color={palette.secondary} />
-            <Text style={styles.latestText}>Latest</Text>
-          </MotionPressable>
+          <Animated.View pointerEvents="box-none" style={[styles.latestDock, {bottom: composerHeight}]}>
+            <MotionPressable
+              style={styles.latestButton}
+              onPress={() => {
+                returningToLatest.current = !reduced;
+                followingLatest.current = true;
+                setShowLatest(false);
+                messageList.current?.scrollToEnd({animated: !reduced});
+                if (reduced) setAwayFromLatest(false);
+              }}>
+              <MilimIcon name="chevron-down" size={13} color={palette.secondary} />
+              <Text style={styles.latestText}>Latest</Text>
+            </MotionPressable>
+          </Animated.View>
         ) : null}
-      </View>
-      {missingAgent ? <Text style={styles.missing}>This Agent was deleted. Clear or replace it before sending.</Text> : null}
       <Animated.View
         style={[
           styles.composerDock,
-          {
-            height: composerProgress.interpolate({
-              inputRange: [0, 1],
-              outputRange: [expandedComposerHeight, compactComposerHeight],
-            }),
-          },
+          {height: composerHeight},
         ]}>
         <Animated.View
           style={[
@@ -1357,17 +1376,13 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
           accessibilityElementsHidden={!composerCompact}
           importantForAccessibility={composerCompact ? 'auto' : 'no-hide-descendants'}
           onLayout={({nativeEvent}) => setCompactComposerHeight(nativeEvent.layout.height)}>
+        {missingAgent ? <Text style={styles.missing}>This Agent was deleted. Clear or replace it before sending.</Text> : null}
         <View style={styles.compactComposer}>
           <MotionPressable
             style={styles.compactComposerPrompt}
             hitSlop={3}
             onPress={() => {
-              returnToLatestOnExpand.current = true;
-              followingLatest.current = true;
-              setShowLatest(false);
-              setAwayFromLatest(false);
               setForcedComposerOpen(true);
-              messageList.current?.scrollToEnd({animated: !reduced});
             }}
             accessibilityLabel="Expand message composer">
             {thread.busy ? <View style={[styles.dot, styles.dotOnline]} /> : <MilimIcon name="sparkles" size={13} color={palette.muted} />}
@@ -1395,6 +1410,7 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
           accessibilityElementsHidden={composerCompact}
           importantForAccessibility={composerCompact ? 'no-hide-descendants' : 'auto'}
           onLayout={({nativeEvent}) => setExpandedComposerHeight(nativeEvent.layout.height)}>
+        {missingAgent ? <Text style={styles.missing}>This Agent was deleted. Clear or replace it before sending.</Text> : null}
         <View style={styles.composer}>
         <View style={styles.composerContextRow}>
           <PickerChip
@@ -1465,6 +1481,7 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
       </View>
         </Animated.View>
       </Animated.View>
+      </View>
       <PickerSheetFrame
         visible={attachmentMenuVisible}
         title="Add attachment"
@@ -2407,13 +2424,14 @@ function createStyles(theme: MobileTheme) {
   pickerRowDescription: {color: palette.secondary, fontSize: 10.5, lineHeight: 15},
   capabilityRow: {flexDirection: 'row', alignItems: 'center', gap: 5, flexWrap: 'wrap', marginTop: 3},
   capabilityTag: {color: palette.secondary, fontSize: 8, fontWeight: '800', letterSpacing: 0.6, paddingHorizontal: 5, paddingVertical: 2, borderRadius: 4, overflow: 'hidden', backgroundColor: palette.input, borderWidth: StyleSheet.hairlineWidth, borderColor: palette.border},
-  transcriptStage: {flex: 1, marginHorizontal: -12, position: 'relative'},
+  chatBody: {flex: 1, marginHorizontal: -12, position: 'relative'},
   transcriptMask: {flex: 1},
   messageList: {flex: 1},
   messageContent: {flexGrow: 1, paddingHorizontal: 14, paddingTop: 12, paddingBottom: 18, gap: 12},
   historyControl: {minHeight: 44, alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.panel},
   historyText: {color: palette.secondary, fontSize: 11, fontWeight: '600'},
-  latestButton: {position: 'absolute', alignSelf: 'center', bottom: 8, minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 13, borderRadius: 9, borderWidth: 1, borderColor: palette.borderStrong, backgroundColor: palette.popover, shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 12, shadowOffset: {width: 0, height: 5}, elevation: 6},
+  latestDock: {position: 'absolute', right: 0, left: 0, alignItems: 'center'},
+  latestButton: {marginBottom: 8, minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 13, borderRadius: 9, borderWidth: 1, borderColor: palette.borderStrong, backgroundColor: palette.popover, shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 12, shadowOffset: {width: 0, height: 5}, elevation: 6},
   latestText: {color: palette.secondary, fontSize: 10.5, fontWeight: '700'},
   message: {borderRadius: 8, paddingHorizontal: 12, paddingVertical: 9, maxWidth: '82%'},
   userMessage: {backgroundColor: palette.accentSoft, borderWidth: 1, borderColor: palette.accentBorder, alignSelf: 'flex-end'},
@@ -2449,11 +2467,11 @@ function createStyles(theme: MobileTheme) {
   attachments: {gap: 5, paddingTop: 6, paddingBottom: 2},
   attachment: {height: 27, maxWidth: 210, flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: palette.raised, borderWidth: 1, borderColor: palette.border, borderRadius: 7, paddingHorizontal: 7},
   attachmentText: {maxWidth: 155, color: palette.secondary, fontSize: 10},
-  composerDock: {position: 'relative', overflow: 'hidden'},
+  composerDock: {position: 'absolute', right: 12, bottom: 0, left: 12, overflow: 'hidden'},
   composerLayer: {position: 'absolute', top: 0, right: 0, left: 0, zIndex: 1, paddingTop: 5, paddingBottom: 3},
   composerLayerFront: {zIndex: 2},
-  composer: {backgroundColor: 'transparent', borderWidth: 1, borderColor: palette.borderStrong, borderRadius: inputRadius, padding: 8, shadowColor: '#000', shadowOpacity: 0.13, shadowRadius: 18, shadowOffset: {width: 0, height: 7}, elevation: 6},
-  compactComposer: {minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 4, padding: 4, borderWidth: 1, borderColor: palette.borderStrong, borderRadius: inputRadius, backgroundColor: palette.popover, shadowColor: '#000', shadowOpacity: 0.14, shadowRadius: 16, shadowOffset: {width: 0, height: 6}, elevation: 6},
+  composer: {backgroundColor: 'transparent', borderWidth: 1, borderColor: palette.borderStrong, borderRadius: inputRadius, padding: 8},
+  compactComposer: {minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 4, padding: 4, borderWidth: 1, borderColor: palette.borderStrong, borderRadius: inputRadius, backgroundColor: 'transparent'},
   compactComposerPrompt: {flex: 1, minHeight: 38, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 10, borderRadius: Math.max(6, inputRadius - 3)},
   compactComposerText: {flex: 1, color: palette.placeholder, fontSize: 13, fontWeight: '500'},
   composerContextRow: {minHeight: 33, flexDirection: 'row', alignItems: 'center', gap: 6, paddingBottom: 5, marginBottom: 3, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: palette.border},

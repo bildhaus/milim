@@ -59,7 +59,7 @@ describe('milim desktop discovery', () => {
 
     expect(zeroconf.scan).toHaveBeenCalledWith('milim', 'tcp', 'local.', 'DNSSD');
     zeroconf.emit('resolved', {
-      name: 'milim desktop',
+      name: 'STUDIO-PC',
       port: 60959,
       addresses: ['fe80::1', '192.168.1.20'],
       txt: {host_id: 'host-1'},
@@ -67,7 +67,7 @@ describe('milim desktop discovery', () => {
     jest.advanceTimersByTime(100);
 
     await expect(result).resolves.toEqual([{
-      name: 'milim desktop',
+      name: 'STUDIO-PC',
       hostId: 'host-1',
       endpoint: 'http://192.168.1.20:60959',
     }]);
@@ -102,7 +102,7 @@ describe('milim desktop discovery', () => {
     mockFetchMobileHostProbe.mockResolvedValue({
       service: 'milim-mobile-control',
       host_id: 'host-local',
-      host_name: 'Development desktop',
+      host_name: 'STUDIO-PC',
       protocol: {min: 1, max: 1},
     });
     const {discoverMilimHosts} = discoveryModule();
@@ -119,7 +119,7 @@ describe('milim desktop discovery', () => {
 
     await expect(result).resolves.toEqual([
       {
-        name: 'Development desktop',
+        name: 'STUDIO-PC',
         hostId: 'host-local',
         endpoint: 'http://10.0.2.2:7378',
       },
@@ -140,14 +140,14 @@ describe('milim desktop discovery', () => {
     mockFetchMobileHostProbe.mockResolvedValue({
       service: 'milim-mobile-control',
       host_id: 'host-local',
-      host_name: 'Development desktop',
+      host_name: 'Omer-MacBook-Pro',
       protocol: {min: 1, max: 1},
     });
     const {discoverMilimHosts} = discoveryModule();
     const result = discoverMilimHosts(100);
 
     mockZeroconfInstances[0].emit('resolved', {
-      name: 'Development desktop',
+      name: 'Omer-MacBook-Pro',
       port: 7378,
       addresses: ['192.168.1.10'],
       txt: {host_id: 'host-local'},
@@ -155,7 +155,7 @@ describe('milim desktop discovery', () => {
     jest.advanceTimersByTime(100);
 
     await expect(result).resolves.toEqual([{
-      name: 'Development desktop',
+      name: 'Omer-MacBook-Pro',
       hostId: 'host-local',
       endpoint: 'http://10.0.2.2:7378',
     }]);
@@ -166,7 +166,7 @@ describe('milim desktop discovery', () => {
     mockFetchMobileHostProbe.mockResolvedValue({
       service: 'milim-mobile-control',
       host_id: 'host-local',
-      host_name: 'Development desktop',
+      host_name: 'STUDIO-PC',
       protocol: {min: 1, max: 1},
     });
     const {discoverMilimHosts} = discoveryModule();
@@ -175,7 +175,7 @@ describe('milim desktop discovery', () => {
     mockZeroconfInstances[0].emit('error', new Error('multicast unavailable'));
 
     await expect(result).resolves.toEqual([{
-      name: 'Development desktop',
+      name: 'STUDIO-PC',
       hostId: 'host-local',
       endpoint: 'http://10.0.2.2:7378',
     }]);

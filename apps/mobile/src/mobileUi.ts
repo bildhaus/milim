@@ -61,7 +61,26 @@ export function nextAwayFromLatest(current: boolean, distance: number): boolean 
   return current ? distance > EXPAND_DISTANCE : distance > COLLAPSE_DISTANCE;
 }
 
+export function shouldHoldCompactComposerForLatestReturn(distance: number): boolean {
+  return distance > EXPAND_DISTANCE;
+}
+
+export function transcriptDistanceFromLatest({
+  contentHeight,
+  viewportHeight,
+  offsetY,
+  bottomInset,
+}: {
+  contentHeight: number;
+  viewportHeight: number;
+  offsetY: number;
+  bottomInset: number;
+}): number {
+  return Math.max(0, contentHeight - bottomInset - viewportHeight - offsetY);
+}
+
 export function canUseCompactComposer({
+  awayFromLatest,
   draft,
   attachmentCount,
   inputFocused,
@@ -75,7 +94,8 @@ export function canUseCompactComposer({
   pendingApproval: boolean;
   forcedOpen: boolean;
 }): boolean {
-  return !draft.trim() &&
+  return awayFromLatest &&
+    !draft.trim() &&
     attachmentCount === 0 &&
     !inputFocused &&
     !pendingApproval &&
@@ -98,6 +118,35 @@ export function friendlyEndpoint(endpoint: string | null): string {
   } catch {
     return endpoint;
   }
+}
+
+export function isTailscaleEndpoint(endpoint: string | null | undefined): boolean {
+  if (!endpoint) return false;
+  try {
+    return /(?:^|\.)ts\.net$/i.test(new URL(endpoint).hostname);
+  } catch {
+    return false;
+  }
+}
+
+export function friendlyConnectionError(
+  endpoints: Array<string | null | undefined>,
+  reason: unknown,
+): string {
+  const message = reason instanceof Error ? reason.message : String(reason);
+  const normalized = message.toLowerCase();
+  const networkFailure = reason instanceof TypeError ||
+    normalized.includes('network request failed') ||
+    normalized.includes('failed to fetch') ||
+    normalized.includes('did not respond') ||
+    normalized.includes('connection closed');
+  if (networkFailure && endpoints.some(isTailscaleEndpoint)) {
+    return 'This desktop\'s Tailscale address is unreachable. Check that Tailscale is active on both devices, then try again.';
+  }
+  if (networkFailure) {
+    return 'The desktop is unreachable. Make sure milim is running and try again.';
+  }
+  return message;
 }
 
 export function friendlyPairingError(reason: unknown): string {
