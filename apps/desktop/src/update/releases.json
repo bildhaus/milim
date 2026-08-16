@@ -1,4 +1,9 @@
 {
+  "0.2.34": {
+    "version": "0.2.34",
+    "summary": "Milim 0.2.34 adds direct desktop support for the source-built mobile companion, fixes app-bundled Codex startup, and strengthens dependency and code security.",
+    "items": []
+  },
   "0.2.33": {
     "version": "0.2.33",
     "summary": "Milim 0.2.33 improves update card readability while carrying forward the reasoning-effort fix for a direct before-and-after comparison.",

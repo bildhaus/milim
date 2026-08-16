@@ -153,6 +153,8 @@ Codex, Claude, OpenCode, and Pi integrations invoke separately installed tools a
 
 On Windows, Milim refreshes the current system and user executable search path at startup, so account runtimes and host tools installed after sign-in are available without launching Milim from a terminal.
 
+On macOS and Linux, Milim resolves symlinked CLI launchers to their installed executable before startup so app-bundled runtimes can find companion executables beside the real binary.
+
 ## License
 
 [MIT](LICENSE)
