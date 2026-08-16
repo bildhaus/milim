@@ -584,24 +584,10 @@ type HotSwapPreflightRequest = {
   assessment: HotSwapAssessment;
   selection: ModelPickerSelection;
 };
-const APP_SESSION_ID = (() => {
-  try {
-    return crypto.randomUUID();
-  } catch {
-    return (
-      "app-" + Math.random().toString(36).slice(2) + Date.now().toString(36)
-    );
-  }
-})();
+const APP_SESSION_ID = crypto.randomUUID();
 
 function attachmentId(): string {
-  try {
-    return crypto.randomUUID();
-  } catch {
-    return (
-      "att-" + Math.random().toString(36).slice(2) + Date.now().toString(36)
-    );
-  }
+  return crypto.randomUUID();
 }
 
 async function browserFileAttachment(file: File): Promise<ChatAttachment> {

@@ -22,7 +22,7 @@
     "test:user-state-storage": "node tests/run-ts-test.mjs tests/user-state-storage.test.ts tests/theme-store.test.ts",
     "test:update": "node tests/run-ts-test.mjs tests/update-service.test.ts tests/update-store.test.ts",
     "test:api-models": "node tests/api-models.test.mjs && node tests/api-model-discovery.test.mjs && node tests/api-model-startup.test.mjs && node tests/inspector-controller.test.mjs && node tests/chat-run-context-contract.test.mjs",
-    "test:git-refresh": "node tests/run-ts-test.mjs tests/git-refresh.test.ts tests/pull-requests.test.ts tests/empty-starter-suggestions.test.ts tests/git-diff-renderer.test.ts tests/git-commit-message-models.test.ts tests/turn-workspace.test.ts tests/turn-changes-card.test.tsx",
+    "test:git-refresh": "node tests/run-ts-test.mjs tests/git-refresh.test.ts tests/git-remote.test.ts tests/pull-requests.test.ts tests/empty-starter-suggestions.test.ts tests/git-diff-renderer.test.ts tests/git-commit-message-models.test.ts tests/turn-workspace.test.ts tests/turn-changes-card.test.tsx",
     "test:media": "node tests/run-ts-test.mjs tests/generated-media-rendering.test.tsx && cargo test --manifest-path ../../Cargo.toml -p milim-server media_",
     "test:mobile-companion": "cargo test --manifest-path ../../Cargo.toml -p milim-server mobile_companion",
     "test:artifacts": "node tests/run-ts-test.mjs tests/artifacts.test.ts tests/artifact-visibility.test.ts tests/browser-recent-visits.test.ts tests/google-workspace.test.ts tests/markdown-rendering.test.tsx tests/preview-panel-rendering.test.tsx && node tests/run-tauri-rust-test.mjs artifact_",
@@ -58,7 +58,7 @@
     "@codemirror/state": "^6.7.1",
     "@codemirror/view": "^6.43.7",
     "@lezer/highlight": "^1.2.3",
-    "@modelcontextprotocol/ext-apps": "1.7.4",
+    "@modelcontextprotocol/ext-apps": "1.7.5",
     "@oshtz/shatz-avatars": "file:vendor/oshtz-shatz-avatars-0.1.0.tgz",
     "@tauri-apps/api": "^2.1.1",
     "@tauri-apps/plugin-dialog": "^2.7.1",
@@ -86,6 +86,16 @@
     "@vitejs/plugin-react": "^4.3.4",
     "playwright-core": "^1.60.0",
     "typescript": "^5.6.3",
-    "vite": "^5.4.11"
+    "vite": "^6.4.3"
+  },
+  "pnpm": {
+    "overrides": {
+      "@hono/node-server": "1.19.17",
+      "fast-uri": "3.1.5",
+      "hono": "4.13.2",
+      "ip-address": "10.5.0",
+      "nanoid": "3.3.18",
+      "postcss": "8.5.26"
+    }
   }
 }

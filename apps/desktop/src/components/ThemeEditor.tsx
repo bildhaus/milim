@@ -50,11 +50,7 @@ const MONO_PRESETS: Array<[string, string]> = [
 ];
 
 function newId() {
-  try {
-    return "custom-" + crypto.randomUUID();
-  } catch {
-    return "custom-" + Math.random().toString(36).slice(2);
-  }
+  return "custom-" + crypto.randomUUID();
 }
 
 function alphaColor(color: string, alpha: number): string {

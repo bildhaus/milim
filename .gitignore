@@ -16,10 +16,11 @@ apps/desktop/src-tauri/gen
 apps/desktop/release-artifacts
 apps/desktop/tester-artifacts
 apps/desktop/downloaded-release-artifacts
+/apps/desktop/.tmp-tests-*
 # Generated HyperFrames promo projects
 /promo/
 # Generated local screenshots
-milim-*.png
+/milim-*.png
 /design-qa.md
 # local model cache / runtime state
 /.milim-dev
