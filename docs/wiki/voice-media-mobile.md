@@ -6,7 +6,7 @@ title: Media and mobile
 summary: Media generation and the mobile companion.
 group: Local data
 order: 80
-updated: 2026-08-15
+updated: 2026-08-17
 ---
 
 These optional extensions share the same desktop-owned state. Media routes generate images, videos, and prompt-to-music results, while the native mobile client controls the Rust-owned canonical threads and runs. Voice input, dictation, transcription, TTS, audio remix/upload, and voice-chat routes are not part of Milim.
@@ -44,6 +44,8 @@ The original prompt and normalized request settings stay local in the library so
 ## Mobile companion
 
 The native companion in `apps/mobile` is a bare React Native application for iOS and Android. It uses TypeScript, Metro, Xcode, and Gradle directly; Milim does not use Expo or EAS. A paired phone can switch among multiple Milim desktop hosts, manage threads, read and send Markdown chat, queue or stop turns, regenerate, choose models and Agents, attach small photos or files, resolve individual Review requests, and control Worker proposals. Git diffs, terminals, desktop settings, and complete Worker logs remain desktop-only.
+
+The iOS target currently supports iPhone only; iPad is not declared as a supported device family. Android remains available through the native Gradle project.
 
 The active desktop host publishes a resolved appearance snapshot through control v1. Mobile applies its palette, light/dark status-bar mode, glass opacity, border opacity, card/input radii, background fit, clear/dim/blur/mono treatment, and typography immediately and refreshes them after an `appearance.updated` event; switching hosts switches appearance with the rest of that host's replica. Desktop interface and code stacks resolve to an available native family when possible and otherwise keep their serif, sans-serif, or monospace category. Desktop **Cover** (and legacy **Fill**) maps to native edge-to-edge aspect fill, so the image spans the full phone window without distortion; Contain, Center, and Tile retain their desktop meanings. When the active custom theme contains an uploaded JPEG, PNG, GIF, or WebP data image, mobile downloads it from the paired-device-authenticated, size-bounded appearance endpoint and keeps only the current host/revision in its private cache. Arbitrary remote CSS URLs, gradients, and desktop font files are not transferred; those use native color and font-category fallbacks. Native motion honors the OS Reduce Motion setting.
 
