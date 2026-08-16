@@ -2,7 +2,7 @@
 
 **Your local control plane for coding agents.** Use your own models and subscriptions, keep one canonical thread, review the diff, and ship.
 
-Milim is a model-agnostic software development app built around a Tauri desktop client and an embedded Rust server. Connect hosted providers, local runtimes, or installed coding-agent CLIs; work in one persistent thread; and keep model choice, tools, approvals, memory, previews, and Git review under one roof.
+Milim is a model-agnostic software development app built around a Rust-owned agent runtime with interchangeable desktop and mobile clients. Connect hosted providers, local runtimes, or installed coding-agent CLIs; work in one persistent thread; and keep model choice, tools, approvals, memory, previews, and Git review under one roof.
 
 [Website](https://milim.ai/) · [Documentation](https://docs.milim.ai/) · [Latest release](https://github.com/bildhaus/milim/releases/latest) · [Source](https://github.com/bildhaus/milim)
 
@@ -15,6 +15,7 @@ Release artifacts target Windows and macOS. Linux packaging is intentionally dis
 - **Work from a thread inbox.** A General preference can show active threads without section pagination in a flat recent-activity view, keep quiet project context beneath each thread, and fold completed threads into a Settled footer before they can be archived. The native taskbar or Dock badge counts distinct chats with unread updates or unresolved approvals.
 - **Hot-swap models.** Switch the next turn between hosted providers, local Ollama or LM Studio models, and separately installed Codex, Claude, OpenCode, or Pi runtimes. Reasoning effort chosen inside a chat stays with that chat; new chats inherit app-wide model defaults instead of copying another chat's overrides.
 - **Keep local control.** Project selection, model routing, tool approvals, local persistence, and outbound privacy boundaries stay explicit.
+- **Control work from mobile.** The bare React Native iOS/Android companion pairs directly with one or more running desktops over Tailscale, opt-in LAN discovery, or a manual URL. The paged canonical timeline projects messages, grouped work, live and completed tool rows, file-change summaries, failures, and approval context into one ordered transcript; actionable approvals also remain aggregated under Attention. Each host publishes its active milim appearance, authenticated custom background, fit/treatment effects, glass surfaces, borders, and radii; mobile preserves that visual system in a thumb-friendly single column. Mobile-owned product copy and desktop-supplied host labels consistently render the `milim` brand in lowercase. A header-opened project drawer mirrors desktop thread grouping without consuming a navigation tab, while an empty, unfocused composer rests as a compact message pill and expands for focus, drafts, attachments, or approvals. Native searchable model and Agent sheets preserve the desktop picker hierarchy and capability context. milim operates no relay, account service, cloud transcript store, or v1 push service.
 - **Approve execution, then review the result.** Review is the new-chat default for consequential tool calls; configured defaults may opt into Open, while changing workspace folders resets approval to Review. Built-in Git views keep resulting diffs, checkpoints, and recovery beside the thread.
 - **Inspect and edit the workspace.** Code provides a searchable file rail and one focused editor with explicit, conflict-safe saves; generated artifacts remain available as read-only sources. Threads using the same effective directory share whether the Inspector is open and its selected tab, while the Inspector's contents remain thread-specific.
 - **Render structured output inline.** The built-in `render_chart` tool places responsive, interactive native bar, line, pie, and scatter charts, including horizontal bars, directly in the transcript, while completed fenced `mermaid` blocks become theme-aware diagrams with source, image-copy, SVG, and PNG actions. Neither path requires an MCP App server.
@@ -25,7 +26,9 @@ Agents, Workers, skills, schedules, MCP servers and Apps, media generation, Goog
 
 Milim keeps provider-backed chat and installed account runtimes distinct. Provider models use Milim's tool-agent loop, while account runtimes retain their native sessions and tools behind the same visible approval policy. Open gives host tools and supported account runtimes unrestricted filesystem and command access, keeps the selected folder only as the working directory, starts eligible worker plans immediately, and clears ordinary pending tool approvals; connector input and authorization remain interactive. Managed read-only Workers inherit unrestricted host reads in Open, while write-review Workers still use isolated Git worktrees. Changing the selected model affects the next turn without turning each model into a separate project history.
 
-The desktop consumes one versioned `HarnessEvent` stream for Codex, Claude, OpenCode, and Pi. A terminal event finishes the visible turn immediately while native cleanup drains in the background; Claude cleanup drains through process exit so its session lock is released. Explicit Quit and restart close Milim-owned MCP, agent-runtime, host-shell, sandbox, and preview process trees; deliberately opened browsers/editors and updater handoff remain detached. Open mode also authorizes exact-session Claude recovery without an extra approval card. Runtime-specific account, model, quota, import, update, worker, and recovery behavior remains intact behind that boundary.
+Rust's `RunManager` owns accepted turns, per-thread queues, approvals, cancellation, frozen run configuration, and the durable normalized timeline. The desktop and mobile apps are replicas of that state, so hiding the Tauri window or reloading its renderer does not pause work. Different threads may run concurrently; a single thread runs one turn at a time. Explicit Quit and restart cancel active runs and close Milim-owned MCP, agent-runtime, host-shell, sandbox, and preview process trees. A restart marks unfinished runs and approvals interrupted instead of replaying them.
+
+Codex, Claude, OpenCode, and Pi continue through one versioned `HarnessEvent` vocabulary behind reusable runtime adapters. Existing harness and runtime-specific routes remain compatibility facades while `/control/v1` is the authoritative desktop/native-mobile control contract.
 
 Connected Codex and Claude histories can be imported by project, as selected individual chats, or as the complete no-project group; existing imports are opened instead of duplicated.
 
@@ -35,7 +38,7 @@ Failed or canceled native-runtime turns discard that runtime's native session be
 
 Completed assistant responses retain their provider or account runtime and model in the transcript footer. Command rows visually replace the current workspace with `.` and unwrap recognized shell launchers, while their tooltip and copy action preserve the exact original input.
 
-Git and preview review comments are sent as structured context with the next user turn for provider models and account runtimes. Completed turns fold intermediate assistant updates, reasoning, and ordinary tool activity into one duration-labeled work drawer while keeping the final response and structured outputs visible. Live work drawers open automatically only while their newest activity is a failure, collapse after recovery or turn completion, and remain manually expandable with failure details intact. Approval lifecycle rows settle when the turn ends instead of remaining animated.
+Git and preview review comments are sent as structured context with the next user turn for provider models and account runtimes. Completed turns fold intermediate assistant updates, reasoning, and ordinary tool activity into one duration-labeled work drawer whose summary retains the last meaningful action, primary detail, step counts, and compact diff stats while keeping the final response and structured outputs visible. Live work drawers open automatically only while their newest activity is a failure, collapse after recovery or turn completion, and remain manually expandable with failure details intact. Approval lifecycle rows settle when the turn ends instead of remaining animated.
 
 ## Get started
 
@@ -58,6 +61,18 @@ pnpm -C apps/desktop tauri:dev
 ```
 
 Desktop Tauri commands load an ignored repository-root `.env.local` when it exists. Provider credentials can also be added through the app and are stored in encrypted local state.
+
+### Run the native mobile app from source
+
+The companion is a bare React Native project; it does not include Expo or EAS.
+
+```powershell
+pnpm -C apps/mobile install --frozen-lockfile
+pnpm -C apps/mobile verify
+pnpm -C apps/mobile android
+```
+
+Run iOS from macOS with CocoaPods and the `apps/mobile/ios/MilimMobile.xcworkspace` workspace. Pairing and the control API require the Milim desktop process to remain alive.
 
 ### Run the CLI server
 
@@ -82,9 +97,10 @@ OpenAI-compatible clients can use `http://127.0.0.1:7377/v1`. Milim does not shi
 
 | Part | Responsibility |
 |---|---|
-| Desktop app | Tauri 2 with Vite, React, and TypeScript; provides chat, model and provider management, approvals, previews, Git review, settings, and local persistence. |
-| Embedded server | The Axum server runs in-process with the desktop app and is also exposed by the Rust CLI for standalone API use. |
-| Local data | Threads, settings, memories, schedules, provider records, and runtime state live under the Milim data directory; updates flush pending user state before replacing the app, and secrets use OS-backed or encrypted local storage. |
+| Desktop app | Tauri 2 with Vite, React, and TypeScript; presents a local replica of canonical thread/run state plus desktop-only previews, Git review, and settings. |
+| Native mobile app | Bare React Native with TypeScript and Metro for iOS and Android; a bounded, multi-host controller/cache that connects directly to paired desktops. |
+| Embedded server | The in-process Axum server and Rust `RunManager` own active turns, queues, approvals, normalized events, and compatibility adapters. No independent OS daemon is installed. |
+| Local data | Desktop SQLite is authoritative for threads, frozen runs, timelines, queues, command receipts, and approvals. Mobile SQLite is a host-partitioned bounded cache; secrets use OS-backed or encrypted storage. |
 | Model sources | Hosted providers, local OpenAI-compatible runtimes, and separately installed account-runtime CLIs connect through explicit routing and privacy boundaries. |
 
 The [docs overview](https://docs.milim.ai/) includes the source map for the server router, desktop API client, Tauri host, session state, and account-runtime reference.
@@ -101,6 +117,9 @@ cargo clippy --workspace --all-targets
 # Desktop
 pnpm -C apps/desktop verify
 pnpm -C apps/desktop verify:tester-ready
+
+# Native mobile protocol, reducer, lint, and types
+pnpm -C apps/mobile verify
 
 # Focused runtime contract and Windows canonical-thread benchmark
 pnpm -C apps/desktop verify:runtime-conformance

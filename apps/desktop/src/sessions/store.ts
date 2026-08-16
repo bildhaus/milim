@@ -359,24 +359,11 @@ const DEFAULT_SIDEBAR_STATE: SessionSidebarState = {
 };
 
 function uid(): string {
-  try {
-    return crypto.randomUUID();
-  } catch {
-    return "s-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
-  }
+  return crypto.randomUUID();
 }
 
 function runtimeUuid(): string {
-  try {
-    return crypto.randomUUID();
-  } catch {
-    return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (char) =>
-      (
-        Number(char) ^
-        (Math.floor(Math.random() * 16) >> (Number(char) / 4))
-      ).toString(16),
-    );
-  }
+  return crypto.randomUUID();
 }
 
 function normalizeAccountRuntime(

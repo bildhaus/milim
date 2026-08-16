@@ -6,7 +6,7 @@ title: Privacy and security
 summary: Local and remote data boundaries, Google Workspace access, privacy modes, redaction, blocking, bearer auth, and CORS boundaries.
 group: Local data
 order: 70
-updated: 2026-07-29
+updated: 2026-08-15
 ---
 
 Privacy settings are easiest to reason about as a routing question: what stays local, what goes to a provider, and which gate runs before a remote send.
@@ -47,7 +47,7 @@ Each desktop run snapshots its selected privacy mode and canonical workspace whe
 | Hosted model provider | Messages, selected context, embedding inputs, and tool-visible text go to the provider after the privacy mode is applied. |
 | Account runtime | Prompt text and, only in Privacy Off, attached image pixels go to the selected Codex, Claude, OpenCode, or Pi runtime and its configured model provider. |
 | Media provider | Prompt text and model parameters go to Replicate, fal, OpenRouter media, or the selected media backend after the privacy mode is applied. OpenRouter video bytes return through an authenticated Milim proxy; the provider key remains server-side. Generated media URLs or data URLs are stored with the chat result when persistence is enabled. |
-| Mobile companion | Paired phone text, files, and photos enter the active desktop thread; the desktop still controls the final model send and privacy gate. |
+| Mobile companion | Paired phone text, files, and photos travel directly to the user's running desktop over Tailscale, opt-in LAN, or a manual endpoint. Rust accepts the turn with the thread's current privacy configuration and applies the same provider/runtime gate. Milim operates no managed relay or hosted transcript store. |
 | MCP tools | External MCP servers run as configured local child processes or remotes; treat each configured server as its own trust boundary. |
 | MCP Apps | App HTML comes from its configured MCP server, is re-fetched rather than persisted, and runs in an opaque-origin iframe. Validated HTML is held briefly in memory behind a random expiring capability URL; it receives no bearer token. Network access is denied by default and limited to valid `_meta.ui.csp` origins; host calls remain authenticated, same-server, visibility-checked, and approval-gated. |
 
@@ -66,6 +66,10 @@ Milim's use and transfer of information received from Google APIs adheres to the
 ## Auth and CORS
 
 The desktop app disables loopback trust and uses a per-launch bearer token for its embedded server. Standalone server auth supports static bearer tokens or `msk-v1` access keys when configured. Empty CORS allow-list means no browser origins are allowed; configured origins are explicit.
+
+The mobile listener exposes only a host identity probe, pairing and device authentication, and `/control/v1`; it cannot reach the full desktop/provider API and serves no legacy browser relay. Pairing creates a revocable per-device credential stored by the phone in Keychain or Keystore. A pairing secret is consumed by its first successful claim, and the native client verifies that the endpoint's stable host identity matches the scanned claim before submitting it. WebSockets use short-lived, single-use tickets, and revocation invalidates HTTP access, unused tickets, and live sockets. Optional LAN exposure is off by default and advertises only the isolated listener; plain HTTP carries an explicit trusted-network warning.
+
+Every accepted control turn freezes its model, workspace, privacy and approval modes, plan state, Agent snapshot, enabled tools and skills, attachments, and native session identity. Later settings or Agent edits affect later turns only. Backup/restore includes canonical runs, queues, timelines, command receipts, and approvals, but paired-device secrets remain in their existing encrypted desktop store.
 
 ```bash Scan text before sending
 curl http://127.0.0.1:7377/privacy/scan \

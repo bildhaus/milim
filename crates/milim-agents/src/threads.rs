@@ -98,12 +98,34 @@ impl WorkerRunStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerAgentSnapshot {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub system_prompt: String,
+    #[serde(default)]
+    pub tool_mode: String,
+    #[serde(default)]
+    pub enabled_tools: Vec<String>,
+    #[serde(default)]
+    pub skill_mode: String,
+    #[serde(default)]
+    pub enabled_skills: Vec<String>,
+    #[serde(default)]
+    pub avatar: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerPlanTask {
     pub id: String,
     pub title: String,
     pub prompt: String,
     pub role: Option<String>,
     pub agent_id: Option<String>,
+    #[serde(default)]
+    pub agent_snapshot: Option<WorkerAgentSnapshot>,
     pub model: String,
     pub access: WorkerAccess,
 }
@@ -1112,6 +1134,7 @@ mod tests {
                     prompt: "check".into(),
                     role: None,
                     agent_id: None,
+                    agent_snapshot: None,
                     model: "test-echo".into(),
                     access: WorkerAccess::ReadOnly,
                 }],

@@ -51,6 +51,7 @@ import {
   type GitFileTreeNode,
 } from "../lib/gitDiffRows";
 import { shouldRefreshGitStatus } from "../lib/gitRefresh";
+import { gitRemoteWebUrl } from "../lib/gitRemote";
 import {
   pullRequestReadiness,
 } from "../lib/pullRequests";
@@ -212,20 +213,6 @@ function branchMetaLabel(branch: WorkspaceGitBranch): string {
       ? ` · ${branch.ahead} ahead / ${branch.behind} behind`
       : "";
   return `${branch.current ? "current" : branch.upstream ? branch.upstream : "local"}${sync}`;
-}
-
-function remoteWebUrl(remote: string | null): string | null {
-  if (!remote) return null;
-  const trimmed = remote.trim().replace(/\.git$/, "");
-  if (/^https?:\/\//i.test(trimmed)) return trimmed;
-
-  const ssh = trimmed.match(/^ssh:\/\/(?:[^@]+@)?([^/]+)\/(.+)$/i);
-  if (ssh) return `https://${ssh[1]}/${ssh[2]}`;
-
-  const scp = trimmed.match(
-    /^(?:[^@\\/\s]+@)?([^:\\/\s]+(?:\.[^:\\/\s]+)+):([^\\\s]+\/[^\\\s]+)$/,
-  );
-  return scp ? `https://${scp[1]}/${scp[2]}` : null;
 }
 
 function gitStateLabel(status: WorkspaceGitStatus | null): string {
@@ -1013,7 +1000,7 @@ export function GitPanel({
   const readyStatus = currentStatus;
   const changeSummary = changeLabel(readyStatus);
   const updated = updatedLabel(updatedAt, now);
-  const remoteUrl = remoteWebUrl(readyStatus.remote);
+  const remoteUrl = gitRemoteWebUrl(readyStatus.remote);
   const sync = syncCommand(readyStatus);
   const SyncIcon =
     sync?.action === "pull"

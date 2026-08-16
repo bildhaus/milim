@@ -1,0 +1,20 @@
+{
+  "event_id": "event-fixture",
+  "host_id": "host-fixture",
+  "thread_id": "thread-fixture",
+  "epoch": "epoch-fixture",
+  "seq": 4,
+  "type": "timeline.appended",
+  "data": {
+    "item": {
+      "id": "item-fixture",
+      "thread_id": "thread-fixture",
+      "epoch": "epoch-fixture",
+      "seq": 4,
+      "run_id": "run-fixture",
+      "type": "assistant_delta",
+      "data": { "text": "Hello", "reasoning": "" },
+      "created_at_ms": 1700000000001
+    }
+  }
+}

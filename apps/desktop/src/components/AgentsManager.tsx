@@ -274,6 +274,7 @@ export function AgentsManager({ onClose }: { onClose: () => void }) {
   const [draftGenerating, setDraftGenerating] = useState(false);
   const [draftError, setDraftError] = useState("");
   const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
   const [instructions, setInstructions] = useState("");
   const [enabled, setEnabled] = useState<string[]>([]);
   const [avatar, setAvatar] = useState("");
@@ -353,6 +354,7 @@ export function AgentsManager({ onClose }: { onClose: () => void }) {
     resetTest();
     if (a === "new") {
       setName("");
+      setDescription("");
       setInstructions("");
       setEnabled([]);
       setAvatar("");
@@ -361,6 +363,7 @@ export function AgentsManager({ onClose }: { onClose: () => void }) {
       setEnabledSkills([]);
     } else {
       setName(a.name);
+      setDescription(a.description ?? "");
       setInstructions(a.system_prompt);
       setEnabled(a.enabled_tools ?? []);
       const storedAvatar = a.avatar ?? "";
@@ -385,6 +388,7 @@ export function AgentsManager({ onClose }: { onClose: () => void }) {
     setConfirmDeleteId(null);
     resetTest();
     setName(starter.name);
+    setDescription(starter.description);
     setInstructions(starter.systemPrompt);
     setAvatar(starter.avatar);
     setToolMode(starter.toolMode === "custom" && starterTools.length === 0 ? "none" : starter.toolMode);
@@ -401,6 +405,7 @@ export function AgentsManager({ onClose }: { onClose: () => void }) {
     setConfirmDeleteId(null);
     resetTest();
     setName(`${agent.name} copy`);
+    setDescription(agent.description ?? "");
     setInstructions(agent.system_prompt);
     setEnabled(agent.enabled_tools ?? []);
     const storedAvatar = agent.avatar ?? "";
@@ -418,6 +423,7 @@ export function AgentsManager({ onClose }: { onClose: () => void }) {
     try {
       const draft = await generateAgentDraft(prompt, generationModel);
       setName(draft.name);
+      setDescription(draft.description);
       setAvatar(draft.avatar);
       setInstructions(draft.system_prompt);
     } catch (error) {
@@ -483,6 +489,7 @@ export function AgentsManager({ onClose }: { onClose: () => void }) {
     const saved = await saveAgent({
       id,
       name: name.trim(),
+      description: description.trim(),
       model: "",
       system_prompt: instructions,
       tool_mode: toolMode,
@@ -505,6 +512,11 @@ export function AgentsManager({ onClose }: { onClose: () => void }) {
     await refresh();
     setConfirmDeleteId(null);
     setSel(null);
+  }
+
+  function startChat(agent: Agent) {
+    useSessions.getState().newUserChat({ activeAgentId: agent.id });
+    onClose();
   }
 
   const toggleTool = (t: string) =>
@@ -540,6 +552,7 @@ export function AgentsManager({ onClose }: { onClose: () => void }) {
   const canDraftAgent = draftPrompt.trim().length > 0 && Boolean(generationModel) && !draftGenerating;
   const hasDraftContent = Boolean(
     name.trim() ||
+      description.trim() ||
       instructions.trim() ||
       avatar.trim() ||
       enabled.length ||
@@ -596,6 +609,7 @@ export function AgentsManager({ onClose }: { onClose: () => void }) {
                       <AgentAvatar id={a.id} name={a.name} avatar={a.avatar} className="agent-card-badge" />
                       <span className="agent-card-copy">
                         <span className="agent-card-name">{a.name}</span>
+                        {a.description && <span className="agent-card-description">{a.description}</span>}
                         <span className="agent-card-meta">
                           <span>{agentToolSummary(a)}</span>
                           <span>{agentSkillSummary(a)}</span>
@@ -724,6 +738,17 @@ export function AgentsManager({ onClose }: { onClose: () => void }) {
                       />
                     </label>
                   </div>
+                  <label className="field agent-field agent-description-field">
+                    <span>Description</span>
+                    <input
+                      className="css-input"
+                      data-testid="agent-description-input"
+                      value={description}
+                      onChange={(e) => setDescription(e.target.value)}
+                      placeholder="When should someone choose this agent?"
+                      maxLength={240}
+                    />
+                  </label>
                 </section>
 
                 <section className="agent-editor-section">
@@ -916,6 +941,12 @@ export function AgentsManager({ onClose }: { onClose: () => void }) {
                 </section>
 
                 <div className="agent-action-footer">
+                  {selectedAgent && (
+                    <button className="btn-accent" data-testid="start-agent-chat" type="button" onClick={() => startChat(selectedAgent)}>
+                      <Plus size={14} />
+                      <span>Start chat</span>
+                    </button>
+                  )}
                   {selectedAgent && (
                     <button className="btn-ghost agent-duplicate-action" data-testid="duplicate-agent" type="button" onClick={() => duplicateAgent(selectedAgent)}>
                       <Copy size={14} />

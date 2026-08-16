@@ -159,7 +159,7 @@ const SETTINGS_SECTIONS: SettingsSection[] = [
   {
     id: "mobile",
     label: "Mobile",
-    detail: "Phone companion relay and pairing",
+    detail: "Native phone pairing and direct control",
     icon: Smartphone,
   },
   {

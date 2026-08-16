@@ -1,0 +1,92 @@
+{
+  "protocol": { "min": 1, "max": 1 },
+  "host_id": "host-fixture",
+  "host_name": "Milim desktop",
+  "capabilities": {
+    "timeline_sync": true,
+    "queued_turns": true,
+    "approvals": true,
+    "agents": true,
+    "workers": true,
+    "attachments": true,
+    "websocket_tickets": true,
+    "lan_discovery": false,
+    "push_notifications": false,
+    "inline_branches": false,
+    "appearance_assets": true
+  },
+  "appearance": {
+    "revision": "fixture-revision",
+    "theme_id": "fixture-custom",
+    "name": "Fixture Custom",
+    "is_dark": true,
+    "colors": {
+      "primary_text": "#f8fafc",
+      "secondary_text": "#cbd5e1",
+      "tertiary_text": "#64748b",
+      "placeholder_text": "#64748b",
+      "bg_primary": "#020617",
+      "bg_secondary": "#0f172a",
+      "bg_tertiary": "#1e293b",
+      "sidebar_bg": "#020617",
+      "accent": "#38bdf8",
+      "accent_light": "#7dd3fc",
+      "border_primary": "#334155",
+      "border_secondary": "#475569",
+      "focus_border": "#0ea5e9",
+      "success": "#22c55e",
+      "warning": "#f59e0b",
+      "error": "#ef4444",
+      "info": "#38bdf8",
+      "card_bg": "#0f172a",
+      "card_border": "#334155",
+      "input_bg": "#020617",
+      "input_border": "#334155"
+    },
+    "glass": {
+      "enabled": false,
+      "blur_radius": 24,
+      "opacity_primary": 1,
+      "opacity_secondary": 1,
+      "edge_light": "rgba(255,255,255,0.08)"
+    },
+    "background": {
+      "has_image": false,
+      "image_opacity": 1,
+      "image_blur": 0,
+      "overlay_color": null,
+      "overlay_opacity": 0,
+      "fit": "cover",
+      "treatment": "clear"
+    },
+    "borders": {
+      "card_radius": 8,
+      "input_radius": 8,
+      "border_opacity": 1
+    },
+    "typography": {
+      "font_family": "system-ui, sans-serif",
+      "mono_family": "ui-monospace, monospace"
+    }
+  },
+  "threads": [
+    {
+      "id": "thread-fixture",
+      "title": "Fixture chat",
+      "revision": 3,
+      "epoch": "epoch-fixture",
+      "updated_at_ms": 1700000000000,
+      "archived_at_ms": null,
+      "model": "mock-echo",
+      "agent_id": null,
+      "workspace": null,
+      "busy": true,
+      "queued_turns": 1
+    }
+  ],
+  "models": [{ "id": "mock-echo", "object": "model", "created": 0, "owned_by": "milim" }],
+  "agents": [],
+  "active_runs": [],
+  "queued_turns": [],
+  "pending_approvals": []
+}

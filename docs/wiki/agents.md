@@ -6,7 +6,7 @@ title: Agents, tools, skills, and schedules
 summary: Reusable Agent profiles, Worker Runs, tool modes, skills, schedules, and approval policies.
 group: Core
 order: 50
-updated: 2026-07-29
+updated: 2026-08-15
 ---
 
 Agents are for repeatable behavior, tool access, and longer work. Keep one-off questions in plain chat; save an agent when the same instructions or tool policy should survive across threads.
@@ -15,7 +15,7 @@ Agents are for repeatable behavior, tool access, and longer work. Keep one-off q
 
 | Block | Behavior |
 |---|---|
-| Named Agents | Model-agnostic profiles with name, deterministic avatar seed, system prompt, tool mode, and skill mode. The generated avatar follows the Agent through persona, schedule, and assigned Worker surfaces; unassigned Workers receive deterministic run-local identities. An Agent is a saved role; a Worker is one live instance of that role. |
+| Named Agents | Model-agnostic profiles with name, description, deterministic avatar seed, system prompt, tool mode, and skill mode. **Start chat** creates a normal thread bound to the Agent while model choice remains thread-owned. The generated avatar follows the Agent through persona, schedule, and assigned Worker surfaces; unassigned Workers receive deterministic run-local identities. An Agent is a saved role; a Worker is one live instance of that role. |
 | Tool modes | `all`, `custom`, or `none`. |
 | Skill modes | `auto`, `custom`, or `none`; auto selects enabled skills by keyword, while explicit `@Skill Name` and `/Skill Name` prompt tags inject matching enabled skills for that turn. |
 | Run timeline | Start, token, reasoning, tool call, bounded tool result, memory, Worker Run, per-request usage deltas, final usage, and error events render as structured stream parts. Tool results are capped before timeline persistence and again for model replay. Worker events carry monotonic cursors and reload on demand. Runs stop at 100 model turns by default (`stopped_at_limit: true`), and stream-open failures are retried once before surfacing an error. |
@@ -44,6 +44,10 @@ The same policy is rechecked for calls made by an inline MCP App. Review approva
 ## Agents, Workers, and Runs
 
 The parent chat is canonical. Delegated work is stored as a Worker Run attached to one parent turn and never becomes a sidebar chat. A Run contains one to four independent tasks; each task creates a Worker. The model sees one `delegate_workers` operation rather than lifecycle tools for spawning, listing, reading, waiting, and stopping children.
+
+At run acceptance Milim resolves a bound Agent exactly once and stores its complete immutable snapshot with the run. Worker proposals also freeze their assigned Agent snapshots before approval, so editing or deleting a profile cannot rewrite running work or an approved plan. Legacy nonterminal proposals without snapshots are stale and must be proposed again. If a thread's Agent is later deleted, history remains readable but new sends are blocked until the binding is cleared or replaced.
+
+The read-only `list_agents` model tool returns Agent IDs, names, descriptions, avatars, and compact tool/skill capability summaries. It deliberately omits system prompts.
 
 Each thread has a delegation policy:
 
