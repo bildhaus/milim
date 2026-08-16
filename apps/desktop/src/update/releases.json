@@ -1,4 +1,9 @@
 {
+  "0.2.35": {
+    "version": "0.2.35",
+    "summary": "Milim 0.2.35 restores responsive partial streaming and reliable reload continuity for server-owned desktop turns, while carrying forward the mobile companion, app-bundled Codex startup fix, and security hardening.",
+    "items": []
+  },
   "0.2.34": {
     "version": "0.2.34",
     "summary": "Milim 0.2.34 adds direct desktop support for the source-built mobile companion, fixes app-bundled Codex startup, and strengthens dependency and code security.",

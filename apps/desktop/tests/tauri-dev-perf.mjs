@@ -353,7 +353,7 @@ async function runCanonicalBinaryBenchmark() {
       session.child.pid,
     );
 
-    console.log("[canonical] reload interrupted perf-a turn");
+    console.log("[canonical] reload reattaches to perf-a turn");
     const reloadStartedAt = Date.now();
     await reloadPage(session.page);
     await session.page
@@ -387,20 +387,32 @@ async function runCanonicalBinaryBenchmark() {
         queuedPrompt,
       "Reloaded queued message text changed.",
     );
-    ensure(
-      !(await session.page
-        .getByRole("button", { name: "Stop generating" })
-        .isVisible()
-        .catch(() => false)),
-      "Reloaded canonical thread remained marked as generating.",
-    );
+    await session.page
+      .getByTestId("assistant-message")
+      .last()
+      .getByText(partialMarker)
+      .waitFor({ timeout: 20_000 });
+    const stopButton = session.page.getByRole("button", {
+      name: "Stop generating",
+    });
+    await stopButton.waitFor({ state: "visible", timeout: 20_000 });
+    await waitForSelectedModel(session.page, modelA);
+    await assertLayout(session.page, "canonical-queue-reload-running");
+    report.continuity.sameThreadAfterReload = true;
+    report.continuity.runningAfterReload = true;
+
+    console.log("[canonical] stop reattached perf-a turn");
+    const stopStartedAt = Date.now();
+    await stopButton.click();
+    await stopButton.waitFor({ state: "hidden", timeout: 20_000 });
+    await reloadedQueuedRow.waitFor({ timeout: 20_000 });
+    report.timingsMs.stopAfterReload = Date.now() - stopStartedAt;
     ensure(
       (await session.page
         .getByTestId("composer-send")
         .getAttribute("aria-label")) === "Send message",
-      "Reloaded composer did not return to a nonrunning state.",
+      "Stopped canonical turn did not return the composer to a nonrunning state.",
     );
-    await waitForSelectedModel(session.page, modelA);
     await assertLayout(session.page, "canonical-queue-reload");
     report.timingsMs.inputToNextFrame =
       await measureComposerInputToNextFrame(session.page);
@@ -408,8 +420,7 @@ async function runCanonicalBinaryBenchmark() {
       id: item.id,
       content: item.content,
     }));
-    report.continuity.sameThreadAfterReload = true;
-    report.continuity.nonrunningAfterReload = true;
+    report.continuity.stoppedAfterReload = true;
 
     await installRuntimeSamplers(session.page);
     await session.page.evaluate(() => window.__MILIM_PERF__?.reset());
