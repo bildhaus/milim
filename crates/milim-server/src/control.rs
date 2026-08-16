@@ -1654,7 +1654,21 @@ impl RunManager {
                     }
                     None
                 }
-                event = stream.next() => event,
+                event = tokio::time::timeout(Duration::from_millis(250), stream.next()) => {
+                    match event {
+                        Ok(event) => event,
+                        Err(_) => {
+                            flush_deltas(
+                                self,
+                                thread_id,
+                                run_id,
+                                &mut pending_text,
+                                &mut pending_reasoning,
+                            )?;
+                            continue;
+                        }
+                    }
+                },
             };
             let Some(event) = event else {
                 break;
