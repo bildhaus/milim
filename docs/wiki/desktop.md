@@ -6,7 +6,7 @@ title: Desktop app
 summary: Unified threads, projects, composer controls, artifacts, plan mode, goals, search, rendering, settings, and slash commands.
 group: Core
 order: 30
-updated: 2026-08-15
+updated: 2026-08-17
 ---
 
 Milim is your local control plane for coding agents: use your own models and subscriptions, keep one canonical thread, review the diff, and ship.
@@ -18,6 +18,8 @@ The Providers sheet uses branded icons for saved providers, setup shortcuts, det
 Git-backed New Chat flows use the configured workspace preference. The split-button menu can explicitly start in the current checkout or an isolated worktree. Isolated threads execute from `~/.milim/runtime/threads/<thread-id>` on a retained `milim/thread-<short-id>` branch while continuing to group under the original project. Uncommitted changes in the original checkout are excluded. Archive preserves the worktree; deletion removes a clean worktree or asks before force-discarding dirty state, and never deletes its branch.
 
 The Code inspector is a workspace-first mini editor with one persistent, collapsible, pointer- and keyboard-resizable file rail. Folders expand inline and quick search scans recursively while `.git`, dependency, build, and generated directories stay hidden. One workspace file can be edited at a time; generated artifacts remain in a secondary group labelled read-only. The Git inspector opens the current branch PR in its in-app cockpit or creates a GitHub draft after commit and publish prerequisites are met. Ready DOM previews expose an annotation crosshair that captures bounded element metadata without screenshots or complete DOM persistence.
+
+Resizable pane boundaries use one 12px pointer target centered on the visible seam, with the same quiet grip, focus state, and active state in the Sidebar, Inspector, Code and Git rails, Pull requests, Media Studio, and Preview logs. A layout with an intentional gap centers that same target in the gap rather than offsetting it into either pane.
 
 Milim has one model-agnostic workbench. Project, Agent, MCP, media, memory, sandbox, schedule, and computer-use features are always discoverable, with advanced tools collapsed until needed. The sidebar Tools launcher opens MCP servers, Skills, Schedules, Pull requests, and the media manager from one persistent place. The Tauri process starts the embedded backend, connects persisted MCP servers, and runs schedules in the background. The model picker emits cached provider rows immediately, then merges the provider refresh and each Codex, Claude, OpenCode, or Pi discovery lane independently. A slow CLI cannot block usable provider models, and a failed lane does not clear existing rows. Background schedule completions and mobile control events use shared app notices so they remain visible outside their settings panels. Closing the desktop window hides it to the system tray so server-owned runs, queues, approvals, and schedules keep running; use the tray menu to reopen or quit. Launching Milim again restores and focuses that existing window instead of starting another app instance. Explicit Quit and restart cancel canonical runs and close Milim-owned MCP, agent-runtime, host-shell, sandbox, and preview process trees. Programs deliberately opened in a browser or editor, plus the updater handoff, remain detached so they can outlive the app.
 

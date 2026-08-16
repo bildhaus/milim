@@ -16,6 +16,7 @@ import { useContextMenu } from "./ContextMenu";
 import { ArrowLeft, ArrowRight, Bolt, Code, Copy, Download, ExternalLink, Eye, Globe, MoreHorizontal, Plus, Refresh, Sidebar, Square, Terminal, X } from "./icons";
 import { GoogleWorkspacePreview } from "./GoogleWorkspacePreview";
 import { Logo } from "./Logo";
+import { PaneResizeHandle } from "./PaneResizeHandle";
 import { WorkspaceCodePanel } from "./WorkspaceCodePanel";
 
 const Markdown = lazy(() => import("./Markdown").then((mod) => ({ default: mod.Markdown })));
@@ -1447,6 +1448,22 @@ export function PreviewPanel({
               </div>
             )}
             <div className={`preview-log-drawer${logsOpen ? " open" : ""}`} data-testid="preview-log-drawer">
+              {logsOpen && (
+                <PaneResizeHandle
+                  className={`preview-log-resize-handle${logResizing ? " dragging" : ""}`}
+                  orientation="horizontal"
+                  data-testid="preview-log-resize-handle"
+                  aria-label="Resize logs"
+                  aria-valuemin={LOG_DRAWER_MIN_HEIGHT}
+                  aria-valuemax={maxLogDrawerHeight()}
+                  aria-valuenow={logDrawerHeight}
+                  onKeyDown={resizeLogDrawerWithKeyboard}
+                  onPointerDown={startLogResize}
+                  onPointerMove={moveLogResize}
+                  onPointerUp={endLogResize}
+                  onPointerCancel={endLogResize}
+                />
+              )}
               <div className="preview-log-head">
                 <button
                   className="preview-log-toggle"
@@ -1473,35 +1490,17 @@ export function PreviewPanel({
                 </div>
               </div>
               {logsOpen && (
-                <>
-                  <div
-                    className={`preview-log-resize-handle${logResizing ? " dragging" : ""}`}
-                    data-testid="preview-log-resize-handle"
-                    role="separator"
-                    aria-label="Resize logs"
-                    aria-orientation="horizontal"
-                    aria-valuemin={LOG_DRAWER_MIN_HEIGHT}
-                    aria-valuemax={maxLogDrawerHeight()}
-                    aria-valuenow={logDrawerHeight}
-                    tabIndex={0}
-                    onKeyDown={resizeLogDrawerWithKeyboard}
-                    onPointerDown={startLogResize}
-                    onPointerMove={moveLogResize}
-                    onPointerUp={endLogResize}
-                    onPointerCancel={endLogResize}
-                  />
-                  <div
-                    id="preview-log-list"
-                    className="preview-log-list"
-                    data-testid="preview-log-list"
-                    role="log"
-                    aria-live="polite"
-                    aria-relevant="additions"
-                    style={{ height: logDrawerHeight }}
-                  >
-                    {visibleLogs.length ? visibleLogs.map((log) => <PreviewLogRow key={log.id} log={log} />) : <div className="preview-log-empty">No logs</div>}
-                  </div>
-                </>
+                <div
+                  id="preview-log-list"
+                  className="preview-log-list"
+                  data-testid="preview-log-list"
+                  role="log"
+                  aria-live="polite"
+                  aria-relevant="additions"
+                  style={{ height: logDrawerHeight }}
+                >
+                  {visibleLogs.length ? visibleLogs.map((log) => <PreviewLogRow key={log.id} log={log} />) : <div className="preview-log-empty">No logs</div>}
+                </div>
               )}
             </div>
           </div>

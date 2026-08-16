@@ -35,6 +35,7 @@ import { useTheme } from "../theme/store";
 import { GitPanel, type GitPanelView } from "./GitPanel";
 import { useContextMenu } from "./ContextMenu";
 import { HoverScrollText } from "./HoverScrollText";
+import { PaneResizeHandle } from "./PaneResizeHandle";
 import { SheetDialog } from "./SheetDialog";
 import { ColorField } from "./ui";
 import { Archive, ArrowUp, Bolt, Calendar, Check, ChevronDown, Code, Cube, Download, FileText, Folder, FolderOpen, Gear, GitBranch, GitPullRequest, Globe, Image, Lightbulb, MoreHorizontal, Pin, Plus, Search, Sidebar as PanelIcon, Star, Terminal } from "./icons";
@@ -3035,14 +3036,13 @@ export function Sidebar({
           </button>
         </div>
       </div>
-      <div
+      <PaneResizeHandle
         ref={sidebarResizeHandleRef}
         className={`sidebar-resize-handle${sidebarResizing ? " dragging" : ""}`}
+        orientation="vertical"
         data-testid="sidebar-resize-handle"
-        role="separator"
         aria-label="Resize thread sidebar; double-click or press Enter to reset"
         title="Drag to resize; double-click to reset"
-        aria-orientation="vertical"
         aria-valuemin={MIN_SIDEBAR_WIDTH}
         aria-valuemax={MAX_SIDEBAR_WIDTH}
         aria-valuenow={resolvedSidebarWidth}

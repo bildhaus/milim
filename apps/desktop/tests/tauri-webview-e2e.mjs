@@ -17,6 +17,7 @@ const staticPreviewOnly = process.argv.includes("--static-preview-only");
 const browserProfileOnly = process.argv.includes("--browser-profile-only");
 const zoomOnly = process.argv.includes("--zoom-only");
 const microUiOnly = process.argv.includes("--micro-ui-only");
+const resizeHandlesOnly = process.argv.includes("--resize-handles-only");
 const workersOnly = process.argv.includes("--workers-only");
 const mcpAppsOnly = process.argv.includes("--mcp-apps-only");
 const sidebarMotionOnly = process.argv.includes("--sidebar-motion-only");
@@ -40,6 +41,7 @@ const screenshots = {
   zoom: join(tmpdir(), "milim-tauri-webview-zoom-chip.png"),
   accountUsage: join(tmpdir(), "milim-tauri-webview-account-usage.png"),
   microUi: join(tmpdir(), "milim-tauri-webview-micro-ui.png"),
+  resizeHandles: join(tmpdir(), "milim-tauri-webview-resize-handles.png"),
   inspectorOverlay: join(tmpdir(), "milim-tauri-webview-inspector-overlay.png"),
   workersPlan: join(tmpdir(), "milim-tauri-webview-workers-plan.png"),
   workersNarrow: join(tmpdir(), "milim-tauri-webview-workers-narrow.png"),
@@ -198,6 +200,10 @@ try {
   } else if (settingsOnly) {
     const errors = collectErrors(session.page);
     await runSettingsLayoutCheck(session.page);
+    consoleErrors.push(...errors.filter((message) => !message.includes("/codex/models")));
+  } else if (resizeHandlesOnly) {
+    const errors = collectErrors(session.page);
+    await runResizeHandleCheck(session.page);
     consoleErrors.push(...errors.filter((message) => !message.includes("/codex/models")));
   } else if (zoomOnly || microUiOnly) {
     const errors = collectErrors(session.page);
@@ -4183,6 +4189,73 @@ async function runAccountUsageTitleBarCheck(page) {
   await pill.waitFor({ state: "hidden" });
 }
 
+async function assertSidebarResizeHandleAlignment(page) {
+  const alignment = await page.evaluate(() => {
+    const sidebar = document.querySelector(".sidebar");
+    const handle = document.querySelector('[data-testid="sidebar-resize-handle"]');
+    if (!(sidebar instanceof HTMLElement) || !(handle instanceof HTMLElement)) return null;
+    const sidebarRect = sidebar.getBoundingClientRect();
+    const handleRect = handle.getBoundingClientRect();
+    const visibleInset = Number.parseFloat(getComputedStyle(sidebar, "::before").right);
+    return {
+      handleCenter: handleRect.left + handleRect.width / 2,
+      handleWidth: handleRect.width,
+      seam: sidebarRect.right - visibleInset,
+    };
+  });
+  if (!alignment || Math.abs(alignment.handleCenter - alignment.seam) > 1 || Math.abs(alignment.handleWidth - 12) > 1) {
+    throw new Error(`Sidebar resize handle should center its 12px target on the visible seam: ${JSON.stringify(alignment)}.`);
+  }
+}
+
+async function assertInspectorResizeHandleAlignment(page) {
+  const alignment = await page.evaluate(() => {
+    const shell = document.querySelector(".inspector-shell");
+    const handle = document.querySelector('[data-testid="preview-resize-handle"]');
+    if (!(shell instanceof HTMLElement) || !(handle instanceof HTMLElement)) return null;
+    const shellRect = shell.getBoundingClientRect();
+    const handleRect = handle.getBoundingClientRect();
+    return {
+      handleCenter: handleRect.left + handleRect.width / 2,
+      handleWidth: handleRect.width,
+      seam: shellRect.left,
+    };
+  });
+  if (!alignment || Math.abs(alignment.handleCenter - alignment.seam) > 1 || Math.abs(alignment.handleWidth - 12) > 1) {
+    throw new Error(`Inspector resize handle should center its 12px target on the panel seam: ${JSON.stringify(alignment)}.`);
+  }
+}
+
+async function runResizeHandleCheck(page) {
+  await page.getByTestId("chat-shell").waitFor();
+  await dismissOnboardingIfPresent(page);
+
+  const sidebarHandle = page.getByTestId("sidebar-resize-handle");
+  await assertSidebarResizeHandleAlignment(page);
+  const sidebarWidth = await sidebarHandle.getAttribute("aria-valuenow");
+  await sidebarHandle.focus();
+  await page.keyboard.press("ArrowRight");
+  if ((await sidebarHandle.getAttribute("aria-valuenow")) === sidebarWidth) {
+    throw new Error("Sidebar resize handle should remain keyboard operable.");
+  }
+  await page.keyboard.press("Enter");
+
+  await page.getByTestId("open-artifact-browser").click();
+  const previewHandle = page.getByTestId("preview-resize-handle");
+  await previewHandle.waitFor();
+  await delay(220);
+  await assertInspectorResizeHandleAlignment(page);
+  const previewWidth = await previewHandle.getAttribute("aria-valuenow");
+  await previewHandle.focus();
+  await page.keyboard.press("ArrowLeft");
+  if ((await previewHandle.getAttribute("aria-valuenow")) === previewWidth) {
+    throw new Error("Inspector resize handle should remain keyboard operable.");
+  }
+  await page.keyboard.press("Enter");
+  await delay(220);
+  await page.screenshot({ path: screenshots.resizeHandles, fullPage: false });
+}
+
 async function runMicroUiCheck(page) {
   await page.addInitScript(() => {
     Object.defineProperty(navigator, "clipboard", {
@@ -4264,7 +4337,8 @@ async function runMicroUiCheck(page) {
   await resetUiPersistenceWrites(page);
   const sidebarDragBox = await sidebarHandle.boundingBox();
   if (!sidebarDragBox) throw new Error("Sidebar resize handle should have measurable bounds.");
-  const sidebarDragX = sidebarDragBox.x + 4;
+  await assertSidebarResizeHandleAlignment(page);
+  const sidebarDragX = sidebarDragBox.x + sidebarDragBox.width / 2;
   const sidebarDragY = sidebarDragBox.y + sidebarDragBox.height / 2;
   await page.mouse.move(sidebarDragX, sidebarDragY);
   await page.mouse.down();
@@ -4284,7 +4358,7 @@ async function runMicroUiCheck(page) {
 
   const sidebarHandleBox = await sidebarHandle.boundingBox();
   if (!sidebarHandleBox) throw new Error("Sidebar resize handle should have measurable bounds.");
-  await page.mouse.move(sidebarHandleBox.x + 4, sidebarHandleBox.y + sidebarHandleBox.height / 2);
+  await page.mouse.move(sidebarHandleBox.x + sidebarHandleBox.width / 2, sidebarHandleBox.y + sidebarHandleBox.height / 2);
   await page.mouse.down();
   await delay(50);
   await page.mouse.move(sidebarHandleBox.x - 112, sidebarHandleBox.y + sidebarHandleBox.height / 2, { steps: 4 });
@@ -4310,6 +4384,8 @@ async function runMicroUiCheck(page) {
   await page.getByTestId("open-artifact-browser").click();
   const previewHandle = page.getByTestId("preview-resize-handle");
   await previewHandle.waitFor();
+  await delay(220);
+  await assertInspectorResizeHandleAlignment(page);
   await previewHandle.focus();
   await page.keyboard.press("ArrowLeft");
   if ((await previewHandle.getAttribute("aria-valuenow")) === "420") {
@@ -4324,7 +4400,7 @@ async function runMicroUiCheck(page) {
   await resetUiPersistenceWrites(page);
   const previewDragBox = await previewHandle.boundingBox();
   if (!previewDragBox) throw new Error("Inspector resize handle should have measurable bounds.");
-  const previewDragX = previewDragBox.x + 4;
+  const previewDragX = previewDragBox.x + previewDragBox.width / 2;
   const previewDragY = previewDragBox.y + previewDragBox.height / 2;
   await page.mouse.move(previewDragX, previewDragY);
   await page.mouse.down();
@@ -4345,7 +4421,7 @@ async function runMicroUiCheck(page) {
 
   const previewHandleBox = await previewHandle.boundingBox();
   if (!previewHandleBox) throw new Error("Inspector resize handle should have measurable bounds.");
-  await page.mouse.move(previewHandleBox.x + 4, previewHandleBox.y + previewHandleBox.height / 2);
+  await page.mouse.move(previewHandleBox.x + previewHandleBox.width / 2, previewHandleBox.y + previewHandleBox.height / 2);
   await page.mouse.down();
   await delay(50);
   await page.mouse.move(previewHandleBox.x + 152, previewHandleBox.y + previewHandleBox.height / 2, { steps: 4 });
@@ -5379,6 +5455,7 @@ function printEvidencePaths(milimHome) {
   console.log(`zoomScreenshot=${screenshots.zoom}`);
   console.log(`accountUsageScreenshot=${screenshots.accountUsage}`);
   console.log(`microUiScreenshot=${screenshots.microUi}`);
+  console.log(`resizeHandlesScreenshot=${screenshots.resizeHandles}`);
   console.log(`inspectorOverlayScreenshot=${screenshots.inspectorOverlay}`);
   console.log(`workersPlanScreenshot=${screenshots.workersPlan}`);
   console.log(`workersNarrowScreenshot=${screenshots.workersNarrow}`);

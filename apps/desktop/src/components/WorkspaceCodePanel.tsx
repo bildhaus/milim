@@ -13,6 +13,7 @@ import {
 } from "../api";
 import { registerWorkspaceEditorGuard, requestWorkspaceEditorLeave, type WorkspaceEditorLeaveReason } from "../lib/workspaceEditorGuard";
 import { ChevronDown, Eye, FileText, Folder, FolderOpen, Search, Sidebar } from "./icons";
+import { PaneResizeHandle } from "./PaneResizeHandle";
 import { SourceCodeView } from "./SourceCodeView";
 
 const WorkspaceCodeEditor = lazy(() => import("./WorkspaceCodeEditor"));
@@ -348,12 +349,11 @@ export function WorkspaceCodePanel({
         <ul>{generatedFiles.map((file) => <li key={file.artifact.id}><button type="button" className={activeSource === "generated" && selectedArtifact?.artifact.id === file.artifact.id ? "active" : ""} title={file.path} onClick={() => void selectGenerated(file.artifact.id)}><FileText size={13} /><span>{file.path}</span>{file.entry ? <small>entry</small> : null}</button></li>)}</ul>
       </section> : null}
     </aside>
-    {railCollapsed ? <button type="button" className="workspace-code-rail-open icon-btn" aria-label="Show file rail" title="Show file rail" onClick={() => setRailCollapsed(false)}><Sidebar size={14} /></button> : <div
+    {railCollapsed ? <button type="button" className="workspace-code-rail-open icon-btn" aria-label="Show file rail" title="Show file rail" onClick={() => setRailCollapsed(false)}><Sidebar size={14} /></button> : <PaneResizeHandle
       className="workspace-code-rail-resizer"
+      orientation="vertical"
       data-testid="workspace-code-rail-resizer"
-      role="separator"
       aria-label="Resize file rail"
-      aria-orientation="vertical"
       aria-valuemin={RAIL_MIN_WIDTH}
       aria-valuemax={RAIL_MAX_WIDTH}
       aria-valuenow={railWidth}

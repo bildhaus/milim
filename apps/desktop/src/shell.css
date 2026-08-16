@@ -1023,35 +1023,6 @@
   top: 0;
   right: 0;
   bottom: 0;
-  width: 8px;
-  cursor: col-resize;
-  touch-action: none;
-  outline: none;
-}
-.sidebar-resize-handle::before {
-  content: "";
-  position: absolute;
-  inset: 0 -2px;
-}
-.sidebar-resize-handle::after {
-  content: "";
-  position: absolute;
-  top: 50%;
-  right: 3px;
-  width: 2px;
-  height: 42px;
-  border-radius: 999px;
-  background: var(--border-secondary);
-  opacity: 0.55;
-  transform: translateY(-50%);
-  transition: opacity 0.15s, background 0.15s, height 0.15s;
-}
-.sidebar-resize-handle:hover::after,
-.sidebar-resize-handle:focus-visible::after,
-.sidebar-resize-handle.dragging::after {
-  height: 64px;
-  background: var(--accent);
-  opacity: 1;
 }
 
 .sidebar-head { display: flex; align-items: center; gap: 7px; min-height: 32px; padding: 0 1px; }
@@ -3523,8 +3494,9 @@ button.git-row:hover svg {
   border-top-color: color-mix(in srgb, var(--error) 42%, var(--border-primary));
 }
 .git-diff-layout {
+  position: relative;
   display: grid;
-  grid-template-columns: var(--git-diff-navigator-width, 210px) 7px minmax(0, 1fr);
+  grid-template-columns: var(--git-diff-navigator-width, 210px) minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
   height: 100%;
@@ -3544,29 +3516,11 @@ button.git-row:hover svg {
   background: color-mix(in srgb, var(--panel-muted-bg) 52%, transparent);
 }
 .git-diff-resize-handle {
-  position: relative;
-  width: 7px;
-  cursor: col-resize;
-  background: color-mix(in srgb, var(--panel-muted-bg) 52%, transparent);
-}
-.git-diff-resize-handle::after {
-  content: "";
   position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 2px;
-  height: 34px;
-  border-radius: 999px;
-  background: var(--border-secondary);
-  opacity: 0.55;
-  transform: translate(-50%, -50%);
-}
-.git-diff-resize-handle:hover::after,
-.git-diff-resize-handle:focus-visible::after,
-.git-diff-resize-handle.dragging::after {
-  height: 50px;
-  background: var(--accent);
-  opacity: 1;
+  top: 0;
+  bottom: 0;
+  left: var(--git-diff-navigator-width, 210px);
+  transform: translateX(-50%);
 }
 .git-diff-navigator-head {
   display: flex;

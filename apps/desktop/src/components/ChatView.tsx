@@ -332,6 +332,7 @@ import {
   type GitPanelView,
 } from "./GitPanel";
 import { PreviewPanel } from "./PreviewPanel";
+import { PaneResizeHandle } from "./PaneResizeHandle";
 import { QuickSummaryPanel } from "./QuickSummaryPanel";
 import {
   turnReviewFromDiff,
@@ -7174,14 +7175,13 @@ export function ChatView({
               <div className="preview-overlay-spacer" aria-hidden="true" />
             )}
             {!panelsStacked && (
-              <div
+              <PaneResizeHandle
                 ref={previewResizeHandleRef}
                 className={`preview-resize-handle${previewResizing ? " dragging" : ""}${previewPanelClosing ? " closing" : ""}${sidePanelAlreadyOpen ? " no-enter" : ""}`}
+                orientation="vertical"
                 data-testid="preview-resize-handle"
-                role="separator"
                 aria-label="Resize side panel; keep expanding at the limit to collapse the sidebar, then overlay the transcript"
                 title="Drag to resize; keep dragging at the limit for more space; double-click to reset"
-                aria-orientation="vertical"
                 aria-valuemin={PREVIEW_PANEL_MIN_WIDTH}
                 aria-valuemax={maxPreviewPanelWidth(
                   chatBodyWidth,
