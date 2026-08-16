@@ -4,6 +4,8 @@ Milim can use signed-in Codex, bring-your-own Claude CLI, OpenCode, and Pi as ch
 
 On Windows, Milim refreshes its process search path from the current machine and user environment at startup. Account runtimes and their child tools—including Git, GitHub CLI, Cargo, and ripgrep—therefore see tools installed after sign-in even when Explorer launched Milim with an older environment snapshot.
 
+On macOS and Linux, Milim resolves symlinked CLI launchers to their real executable target before spawning them. This preserves app-bundle-relative companion lookup when a shell command in a directory such as `~/.local/bin` points into an application bundle.
+
 The Providers panel shows each detected CLI version and compares it with the latest stable version published for that CLI. An available update enables and highlights the Update action; a current runtime shows a disabled Up to date action. If the release check is unavailable, the action remains neutral and usable. Updating requires a second confirmation, then invokes that runtime's own updater (`codex update`, `claude update`, `opencode upgrade --pure`, or `pi update self --no-approve`) and rechecks the installed version. Finish active turns first. Milim does not replace these tools' installers, credentials, or standalone configuration.
 
 After a Milim chat has a native Codex thread id, Claude session id, OpenCode session id, or Pi session id, Milim lets that runtime own prior context. Later turns send the current per-turn context plus the latest user message instead of replaying the visible Milim transcript or auto-compacting it first. Manual `/compact` still creates a visible Milim checkpoint, but its summary call is ephemeral and the stored native runtime id is cleared afterward.

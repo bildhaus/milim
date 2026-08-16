@@ -14,6 +14,9 @@
 //!   the binary has to be resolved to an absolute path here.
 //! * The child still needs the enriched `PATH` for its own helpers (node, git,
 //!   ripgrep), so it is exported as well.
+//! * App-bundled CLIs can locate companion executables relative to their own
+//!   binary. Symlinks are resolved before launch so that lookup starts from the
+//!   real installation directory rather than the directory containing a shim.
 //!
 //! Windows is excluded: GUI processes there do inherit the user environment,
 //! and each bridge already resolves its `.cmd`/`.exe` shims itself.
@@ -36,12 +39,16 @@ pub(crate) fn command(program: &str) -> Command {
     command
 }
 
-/// Resolve `program` to an executable file on [`search_path`].
+/// Resolve `program` to the real executable target on [`search_path`].
 pub(crate) fn resolve(program: &str) -> Option<PathBuf> {
-    env::split_paths(&search_path()).find_map(|dir| {
-        let candidate = dir.join(program);
-        is_executable(&candidate).then_some(candidate)
-    })
+    env::split_paths(&search_path()).find_map(|dir| executable_target(dir.join(program)))
+}
+
+fn executable_target(candidate: PathBuf) -> Option<PathBuf> {
+    if !is_executable(&candidate) {
+        return None;
+    }
+    Some(candidate.canonicalize().unwrap_or(candidate))
 }
 
 /// The inherited `PATH` followed by the install directories a GUI launch does
@@ -111,12 +118,38 @@ mod tests {
     fn resolves_an_existing_binary_to_an_absolute_path() {
         let path = resolve("sh").expect("`sh` is installed on every unix");
         assert!(path.is_absolute(), "{path:?} should be absolute");
-        assert!(path.ends_with("sh"), "{path:?} should end with `sh`");
+        assert_eq!(path, path.canonicalize().unwrap());
+        assert!(is_executable(&path), "{path:?} should be executable");
     }
 
     #[test]
     fn missing_binary_resolves_to_none() {
         assert!(resolve("milim-cli-that-does-not-exist").is_none());
+    }
+
+    #[test]
+    fn resolves_an_executable_symlink_to_its_real_target() {
+        let root = env::temp_dir().join(format!("milim-cli-path-test-{}", uuid::Uuid::new_v4()));
+        let resources = root.join("ChatGPT.app/Contents/Resources");
+        let bin = root.join(".local/bin");
+        std::fs::create_dir_all(&resources).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+
+        let target = resources.join("codex");
+        std::fs::write(&target, "#!/bin/sh\n").unwrap();
+        let mut permissions = std::fs::metadata(&target).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&target, permissions).unwrap();
+
+        let link = bin.join("codex");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert_eq!(
+            executable_target(link),
+            Some(target.canonicalize().unwrap())
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
