@@ -74,6 +74,8 @@ pnpm -C apps/mobile android
 
 Run iOS from macOS with CocoaPods and the `apps/mobile/ios/MilimMobile.xcworkspace` workspace. Pairing and the control API require the Milim desktop process to remain alive.
 
+Mobile transcripts render Markdown links and pasted web URLs as tappable links in both user and assistant messages.
+
 ### Run the CLI server
 
 The standalone `milim` server exposes OpenAI-, Ollama-, and Anthropic-compatible routes over a local HTTP API. Point `MILIM_REMOTE_BASE_URL` at an OpenAI-compatible backend such as Ollama, LM Studio, vLLM, OpenAI, or OpenRouter:

@@ -22,7 +22,7 @@ import {
   type ViewStyle,
 } from 'react-native';
 import {SafeAreaProvider, SafeAreaView} from 'react-native-safe-area-context';
-import Markdown, {type RenderRules} from 'react-native-markdown-display';
+import Markdown, {MarkdownIt, type RenderRules} from 'react-native-markdown-display';
 import MaskedView from '@react-native-masked-view/masked-view';
 import Svg, {Defs, LinearGradient as SvgLinearGradient, Rect, Stop} from 'react-native-svg';
 import {Camera} from 'react-native-camera-kit';
@@ -35,6 +35,7 @@ import {
   promptWithAttachments,
   wireAttachments,
 } from './src/attachments';
+import {MOBILE_MARKDOWN_OPTIONS} from './src/markdown';
 import {newCommandId} from './src/control/client';
 import {
   projectTranscript,
@@ -114,6 +115,8 @@ const mobileMarkdownRules: RenderRules = {
     </ScrollView>
   ),
 };
+
+const mobileMarkdownParser = new MarkdownIt(MOBILE_MARKDOWN_OPTIONS);
 
 function appTheme(snapshot?: AppearanceSnapshotV1) {
   const theme = createMobileTheme(snapshot);
@@ -1650,7 +1653,9 @@ function TranscriptItemView({
     <View style={[styles.message, item.role === 'user' ? styles.userMessage : styles.assistantMessage]}>
       {item.role === 'system' ? <Text style={styles.messageRole}>SYSTEM</Text> : null}
       {item.reasoning ? <ReasoningBlock text={item.reasoning} /> : null}
-      <Markdown style={markdownStyles} rules={mobileMarkdownRules}>{item.content || '…'}</Markdown>
+      <Markdown markdownit={mobileMarkdownParser} style={markdownStyles} rules={mobileMarkdownRules}>
+        {item.content || '…'}
+      </Markdown>
     </View>
   );
 }
