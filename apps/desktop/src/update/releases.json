@@ -1,4 +1,9 @@
 {
+  "0.2.41": {
+    "version": "0.2.41",
+    "summary": "Milim 0.2.41 keeps favorite models synchronized between the desktop app and paired mobile companions.",
+    "items": []
+  },
   "0.2.40": {
     "version": "0.2.40",
     "summary": "Milim 0.2.40 adds local vLLM discovery, shared mobile agent avatars and edge-swipe thread navigation, fixes fragmented Codex response streaming, and refreshes the project README.",
