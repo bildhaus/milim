@@ -8,6 +8,7 @@ import {
   Image,
   Linking,
   Modal,
+  PanResponder,
   PermissionsAndroid,
   Platform,
   Pressable,
@@ -98,6 +99,10 @@ type AppScreen = 'chat' | 'attention' | 'hosts';
 
 const milimLogo = require('./src/assets/milim-icon.png');
 const TRANSCRIPT_FADE_HEIGHT = 40;
+const DRAWER_EDGE_GESTURE_WIDTH = 28;
+const DRAWER_SWIPE_ACTIVATION_DISTANCE = 8;
+const DRAWER_SWIPE_COMMIT_DISTANCE = 52;
+const DRAWER_SWIPE_COMMIT_VELOCITY = 0.5;
 
 function markdownCodeContent(content: string): string {
   return content.endsWith('\n') ? content.slice(0, -1) : content;
@@ -179,10 +184,10 @@ function DrawerBackdropFade() {
     <Svg pointerEvents="none" style={StyleSheet.absoluteFill} width="100%" height="100%">
       <Defs>
         <SvgLinearGradient id="drawer-backdrop-fade" x1="0" y1="0" x2="1" y2="0">
-          <Stop offset="0" stopColor="#000" stopOpacity="0" />
-          <Stop offset="0.35" stopColor="#000" stopOpacity="0.18" />
-          <Stop offset="0.7" stopColor="#000" stopOpacity="0.42" />
-          <Stop offset="1" stopColor="#000" stopOpacity="0.54" />
+          <Stop offset="0" stopColor="#000" stopOpacity="0.54" />
+          <Stop offset="0.3" stopColor="#000" stopOpacity="0.42" />
+          <Stop offset="0.65" stopColor="#000" stopOpacity="0.18" />
+          <Stop offset="1" stopColor="#000" stopOpacity="0" />
         </SvgLinearGradient>
       </Defs>
       <Rect width="100%" height="100%" fill="url(#drawer-backdrop-fade)" />
@@ -333,6 +338,23 @@ function App(): React.JSX.Element {
   const [threadDrawerVisible, setThreadDrawerVisible] = useState(false);
   const [pairingVisible, setPairingVisible] = useState(false);
   const [pairingClaim, setPairingClaim] = useState('');
+  const openThreads = useCallback(() => setThreadDrawerVisible(true), []);
+  const threadDrawerEdgeGesture = useMemo(() => PanResponder.create({
+    onMoveShouldSetPanResponderCapture: (_event, gestureState) => (
+      !threadDrawerVisible &&
+      gestureState.x0 <= DRAWER_EDGE_GESTURE_WIDTH &&
+      gestureState.dx > DRAWER_SWIPE_ACTIVATION_DISTANCE &&
+      Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.25
+    ),
+    onPanResponderRelease: (_event, gestureState) => {
+      if (
+        gestureState.dx >= DRAWER_SWIPE_COMMIT_DISTANCE ||
+        gestureState.vx >= DRAWER_SWIPE_COMMIT_VELOCITY
+      ) {
+        openThreads();
+      }
+    },
+  }), [openThreads, threadDrawerVisible]);
 
   useEffect(() => {
     void cleanupStaleAttachments();
@@ -372,24 +394,33 @@ function App(): React.JSX.Element {
     <AppThemeContext.Provider value={theme}>
       <SafeAreaProvider>
         <StatusBar barStyle={theme.isDark ? 'light-content' : 'dark-content'} />
-        <View style={styles.root}>
+        <View style={styles.root} {...threadDrawerEdgeGesture.panHandlers}>
         <AppearanceBackground uri={controller.appearanceBackgroundUri} />
         <SafeAreaView style={styles.app} edges={['top', 'right', 'bottom', 'left']}>
         <View style={styles.topbar}>
-          <MotionPressable
-            style={[styles.brandGroup, screen === 'hosts' && styles.topbarDestinationActive]}
-            onPress={() => setScreen('hosts')}
-            hitSlop={4}
-            accessibilityLabel="Open desktop hosts"
-            accessibilityState={{selected: screen === 'hosts'}}>
-            <Image source={milimLogo} style={styles.brandMark} />
-            <View>
-              <Text style={styles.brand}>milim</Text>
-              <Text style={styles.hostLabel} numberOfLines={1}>
-                {lowercaseMilimBrand(controller.activeHost.displayName)}
-              </Text>
-            </View>
-          </MotionPressable>
+          <View style={styles.topbarLeading}>
+            <MotionPressable
+              style={styles.topbarButton}
+              hitSlop={5}
+              onPress={openThreads}
+              accessibilityLabel="Open threads">
+              <MilimIcon name="sidebar" size={17} color={theme.palette.secondary} />
+            </MotionPressable>
+            <MotionPressable
+              style={[styles.brandGroup, screen === 'hosts' && styles.topbarDestinationActive]}
+              onPress={() => setScreen('hosts')}
+              hitSlop={4}
+              accessibilityLabel="Open desktop hosts"
+              accessibilityState={{selected: screen === 'hosts'}}>
+              <Image source={milimLogo} style={styles.brandMark} />
+              <View>
+                <Text style={styles.brand}>milim</Text>
+                <Text style={styles.hostLabel} numberOfLines={1}>
+                  {lowercaseMilimBrand(controller.activeHost.displayName)}
+                </Text>
+              </View>
+            </MotionPressable>
+          </View>
           <View style={styles.topbarActions}>
             <ConnectionPill
               status={controller.status}
@@ -397,13 +428,6 @@ function App(): React.JSX.Element {
               active={screen === 'attention'}
               onPress={() => setScreen('attention')}
             />
-            <MotionPressable
-              style={styles.topbarButton}
-              hitSlop={5}
-              onPress={() => setThreadDrawerVisible(true)}
-              accessibilityLabel="Open threads">
-              <MilimIcon name="sidebar" size={17} color={theme.palette.secondary} />
-            </MotionPressable>
           </View>
         </View>
         {controller.lastError ? (
@@ -427,7 +451,7 @@ function App(): React.JSX.Element {
         <View style={styles.content}>
           <ScreenStage key={screen}>
           {screen === 'chat' ? (
-            <ChatScreen controller={controller} openThreads={() => setThreadDrawerVisible(true)} />
+            <ChatScreen controller={controller} openThreads={openThreads} />
           ) : null}
           {screen === 'attention' ? (
             <AttentionScreen
@@ -887,7 +911,7 @@ function ThreadDrawer({
   const reduced = useReducedMotion();
   const {width} = useWindowDimensions();
   const drawerWidth = Math.min(width * 0.9, 380);
-  const translateX = useRef(new Animated.Value(drawerWidth)).current;
+  const translateX = useRef(new Animated.Value(-drawerWidth)).current;
   const [title, setTitle] = useState('');
   const [renaming, setRenaming] = useState<ThreadSummaryV1 | null>(null);
   const [actionsFor, setActionsFor] = useState<ThreadSummaryV1 | null>(null);
@@ -913,7 +937,7 @@ function ThreadDrawer({
 
   useEffect(() => {
     if (!visible) return;
-    translateX.setValue(reduced ? 0 : drawerWidth);
+    translateX.setValue(reduced ? 0 : -drawerWidth);
     Animated.timing(translateX, {
       toValue: 0,
       duration: reduced ? 0 : 180,
@@ -921,20 +945,50 @@ function ThreadDrawer({
     }).start();
   }, [drawerWidth, reduced, translateX, visible]);
 
-  const close = () => {
+  const close = useCallback(() => {
     setDetailsFor(null);
     if (reduced) {
       onClose();
       return;
     }
     Animated.timing(translateX, {
-      toValue: drawerWidth,
+      toValue: -drawerWidth,
       duration: 150,
       useNativeDriver: true,
     }).start(({finished}) => {
       if (finished) onClose();
     });
-  };
+  }, [drawerWidth, onClose, reduced, translateX]);
+
+  const restoreDrawer = useCallback(() => {
+    if (reduced) return;
+    Animated.timing(translateX, {
+      toValue: 0,
+      duration: 120,
+      useNativeDriver: true,
+    }).start();
+  }, [reduced, translateX]);
+
+  const dismissGesture = useMemo(() => PanResponder.create({
+    onMoveShouldSetPanResponderCapture: (_event, gestureState) => (
+      gestureState.dx < -DRAWER_SWIPE_ACTIVATION_DISTANCE &&
+      Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.25
+    ),
+    onPanResponderMove: (_event, gestureState) => {
+      if (!reduced) translateX.setValue(Math.max(-drawerWidth, Math.min(0, gestureState.dx)));
+    },
+    onPanResponderRelease: (_event, gestureState) => {
+      if (
+        gestureState.dx <= -DRAWER_SWIPE_COMMIT_DISTANCE ||
+        gestureState.vx <= -DRAWER_SWIPE_COMMIT_VELOCITY
+      ) {
+        close();
+      } else {
+        restoreDrawer();
+      }
+    },
+    onPanResponderTerminate: restoreDrawer,
+  }), [close, drawerWidth, reduced, restoreDrawer, translateX]);
 
   const create = async () => {
     const result = await command('thread.create', {
@@ -951,8 +1005,10 @@ function ThreadDrawer({
         <Pressable style={styles.drawerDismiss} onPress={close} accessibilityRole="button" accessibilityLabel="Close threads">
           <DrawerBackdropFade />
         </Pressable>
-        <Animated.View style={[styles.drawer, {width: drawerWidth, transform: [{translateX}]}]}>
-          <SafeAreaView style={styles.drawerSafe} edges={['top', 'right', 'bottom']}>
+        <Animated.View
+          style={[styles.drawer, {width: drawerWidth, transform: [{translateX}]}]}
+          {...dismissGesture.panHandlers}>
+          <SafeAreaView style={styles.drawerSafe} edges={['top', 'left', 'bottom']}>
             <View style={styles.drawerHeader}>
               <View style={styles.drawerHeading}>
                 <Text style={styles.eyebrow}>THREADS</Text>
@@ -2763,6 +2819,7 @@ function createStyles(theme: MobileTheme) {
   backgroundImageCover: {transform: [{scale: 1.06}]},
   backgroundDim: {backgroundColor: 'rgba(0,0,0,0.18)'},
   topbar: {height: 46, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: palette.sidebar, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: palette.border},
+  topbarLeading: {flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 5},
   brandGroup: {minHeight: 38, flexShrink: 1, flexDirection: 'row', alignItems: 'center', gap: 8, marginLeft: -5, paddingHorizontal: 5, borderRadius: 8},
   brandMark: {width: 23, height: 23, resizeMode: 'contain'},
   brand: {color: palette.text, fontSize: 13.5, lineHeight: 15, fontWeight: '700', letterSpacing: -0.35},
@@ -2800,9 +2857,9 @@ function createStyles(theme: MobileTheme) {
   busy: {color: palette.success, fontSize: 9, fontWeight: '800', letterSpacing: 0.8},
   queued: {color: palette.warning, fontSize: 9.5, fontWeight: '800'},
   threadMenu: {width: 38, height: 38, borderRadius: 7, alignItems: 'center', justifyContent: 'center'},
-  drawerBackdrop: {flex: 1, flexDirection: 'row', justifyContent: 'flex-end'},
+  drawerBackdrop: {flex: 1, flexDirection: 'row-reverse'},
   drawerDismiss: {flex: 1},
-  drawer: {height: '100%', borderLeftWidth: 1, borderLeftColor: palette.glassEdge, backgroundColor: palette.popover, shadowColor: '#000', shadowOpacity: 0.34, shadowRadius: 26, shadowOffset: {width: -10, height: 0}, elevation: 18},
+  drawer: {height: '100%', borderRightWidth: 1, borderRightColor: palette.glassEdge, backgroundColor: palette.popover, shadowColor: '#000', shadowOpacity: 0.34, shadowRadius: 26, shadowOffset: {width: 10, height: 0}, elevation: 18},
   drawerSafe: {flex: 1},
   drawerHeader: {minHeight: 72, flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 14, paddingTop: 5, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: palette.border},
   drawerHeading: {flex: 1, gap: 2},
