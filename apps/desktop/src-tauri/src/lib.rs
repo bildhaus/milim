@@ -347,6 +347,7 @@ const WORKSPACE_EDITOR_LEAVE_EVENT: &str = "milim://workspace-editor-leave-reque
 const USER_STATE_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 const DESKTOP_SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const RUNTIME_FAILED_EVENT: &str = "milim://runtime-failed";
+const MODEL_FAVORITES_UPDATED_EVENT: &str = "milim://model-favorites-updated";
 const APP_MENU_EVENT: &str = "milim://menu-action";
 const APP_MENU_NEW_CHAT_ID: &str = "app.new-chat";
 const APP_MENU_SETTINGS_ID: &str = "app.settings";
@@ -928,6 +929,11 @@ async fn user_state_set(
             control.publish_appearance();
         }
     }
+    if result.is_ok() && key == milim_server::control::MODEL_FAVORITES_SETTINGS_KEY {
+        if let Some(control) = runtime.0.control.as_ref() {
+            control.publish_model_favorites();
+        }
+    }
     result
 }
 
@@ -948,6 +954,13 @@ async fn user_state_delete(
     if matches!(result, Ok(true)) && key == APPEARANCE_STATE_KEY {
         if let Some(control) = runtime.0.control.as_ref() {
             control.publish_appearance();
+        }
+    }
+    if matches!(result, Ok(true))
+        && key == milim_server::control::MODEL_FAVORITES_SETTINGS_KEY
+    {
+        if let Some(control) = runtime.0.control.as_ref() {
+            control.publish_model_favorites();
         }
     }
     result
@@ -4540,6 +4553,7 @@ pub fn run() {
         .unwrap_or(false);
     let server_runtime =
         DesktopServerRuntimeState::new(state.control.clone(), Some(mobile_state.clone()));
+    let model_favorites_control = state.control.clone();
 
     let builder = tauri::Builder::default();
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
@@ -4578,6 +4592,37 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     milim_server::scheduler_loop(scheduler_state).await;
                 });
+            }
+            if let Some(control) = model_favorites_control {
+                let mut events = control.subscribe();
+                let favorites_app = app.handle().clone();
+                let favorites_control = control.clone();
+                let favorites_task = tauri::async_runtime::spawn(async move {
+                    loop {
+                        match events.recv().await {
+                            Ok(event)
+                                if event.event_type
+                                    == milim_server::control::MODEL_FAVORITES_EVENT_TYPE =>
+                            {
+                                let favorites = event
+                                    .data
+                                    .get("favorite_model_ids")
+                                    .cloned()
+                                    .unwrap_or_else(|| json!([]));
+                                let _ = favorites_app.emit(MODEL_FAVORITES_UPDATED_EVENT, favorites);
+                            }
+                            Ok(_) => {}
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                let _ = favorites_app.emit(
+                                    MODEL_FAVORITES_UPDATED_EVENT,
+                                    favorites_control.model_favorites(),
+                                );
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                });
+                server_runtime.register(favorites_task);
             }
             // Run both embedded servers until desktop shutdown signals them.
             let server_app = app.handle().clone();

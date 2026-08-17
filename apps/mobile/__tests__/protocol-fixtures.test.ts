@@ -36,8 +36,10 @@ test('generated v1 fixture keeps additive harness capabilities and commands curr
     run_inspection: true,
     steering: true,
     context_injection: true,
+    model_favorites: true,
   });
   expect(generated.command_kinds).toEqual(expect.arrayContaining([
+    'model_favorites.set',
     'turn.steer',
     'context.inject',
     'turn.inbox_delete',

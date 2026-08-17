@@ -41,6 +41,10 @@ const MAX_CONTROL_ATTACHMENT_BYTES: u64 = 2 * 1024 * 1024;
 const APPEARANCE_STATE_KEY: &str = "milim.appearanceSnapshot";
 const CUSTOM_THEMES_STATE_KEY: &str = "milim.customThemes";
 const MAX_APPEARANCE_BACKGROUND_BYTES: usize = 8 * 1024 * 1024;
+const MAX_MODEL_FAVORITES: usize = 256;
+const MAX_MODEL_FAVORITE_ID_CHARS: usize = 512;
+pub const MODEL_FAVORITES_SETTINGS_KEY: &str = "milim.settings";
+pub const MODEL_FAVORITES_EVENT_TYPE: &str = "model_favorites.updated";
 
 // Wire declarations live in `milim-control-contract`. Keeping the former
 // declarations compiled out for this cutover makes the ownership move easy to
@@ -1273,6 +1277,28 @@ impl RunManager {
         self.emit("models.updated", None, None, None, json!({}));
     }
 
+    pub fn model_favorites(&self) -> Vec<String> {
+        self.store
+            .get_json(MODEL_FAVORITES_SETTINGS_KEY)
+            .ok()
+            .flatten()
+            .and_then(|value| serde_json::from_str::<Value>(&value).ok())
+            .and_then(|value| value.get("state")?.get("favorites").cloned())
+            .and_then(|value| value.as_array().cloned())
+            .map(|values| normalized_model_favorite_ids(&values, false).unwrap_or_default())
+            .unwrap_or_default()
+    }
+
+    pub fn publish_model_favorites(&self) {
+        self.emit(
+            MODEL_FAVORITES_EVENT_TYPE,
+            None,
+            None,
+            None,
+            json!({ "favorite_model_ids": self.model_favorites() }),
+        );
+    }
+
     pub(crate) fn appearance_background_asset(&self) -> Option<AppearanceBackgroundAsset> {
         let appearance = self.appearance_snapshot();
         if !appearance.background.has_image {
@@ -1420,6 +1446,7 @@ impl RunManager {
             appearance: self.appearance_snapshot(),
             threads: thread_summaries,
             models,
+            favorite_model_ids: self.model_favorites(),
             agents,
             active_runs,
             queued_turns,
@@ -1610,6 +1637,7 @@ impl RunManager {
             ControlCommandKindV1::ThreadSetModel => self.patch_thread(&command, ThreadPatch::Model),
             ControlCommandKindV1::ThreadSetAgent => self.patch_thread(&command, ThreadPatch::Agent),
             ControlCommandKindV1::MessageDelete => self.delete_message(&command),
+            ControlCommandKindV1::ModelFavoritesSet => self.set_model_favorites(&command),
             ControlCommandKindV1::TurnSend => self.accept_turn(state, &command).await,
             ControlCommandKindV1::TurnSteer => self.steer_turn(&state, &command),
             ControlCommandKindV1::ContextInject => self.inject_context(&command),
@@ -1689,6 +1717,48 @@ impl RunManager {
             confirmation_token: None,
             message: None,
             data: Value::Null,
+        })
+    }
+
+    fn set_model_favorites(&self, command: &ControlCommandV1) -> Result<ControlCommandResultV1> {
+        let values = command
+            .payload
+            .get("favorite_model_ids")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                Error::InvalidRequest("payload.favorite_model_ids must be an array".into())
+            })?;
+        let favorite_model_ids = normalized_model_favorite_ids(values, true)?;
+        let mut root = self
+            .store
+            .get_json(MODEL_FAVORITES_SETTINGS_KEY)?
+            .map(|value| {
+                serde_json::from_str::<Value>(&value)
+                    .map_err(|error| Error::Other(format!("invalid stored settings JSON: {error}")))
+            })
+            .transpose()?
+            .unwrap_or_else(|| json!({ "state": {}, "version": 0 }));
+        let state = root
+            .as_object_mut()
+            .ok_or_else(|| Error::Other("stored settings are not an object".into()))?
+            .entry("state")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| Error::Other("stored settings state is not an object".into()))?;
+        state.insert("favorites".into(), json!(favorite_model_ids));
+        self.store
+            .set_json(MODEL_FAVORITES_SETTINGS_KEY, &root.to_string())?;
+        self.publish_model_favorites();
+        Ok(ControlCommandResultV1 {
+            command_id: command.command_id.clone(),
+            status: ControlCommandStatusV1::Applied,
+            thread_id: None,
+            revision: None,
+            run_id: None,
+            queue_id: None,
+            confirmation_token: None,
+            message: None,
+            data: json!({ "favorite_model_ids": favorite_model_ids }),
         })
     }
 
@@ -4119,6 +4189,41 @@ fn required_payload_string(payload: &Value, key: &str) -> Result<String> {
         .ok_or_else(|| Error::InvalidRequest(format!("payload.{key} must be a non-empty string")))
 }
 
+fn normalized_model_favorite_ids(values: &[Value], strict: bool) -> Result<Vec<String>> {
+    if values.len() > MAX_MODEL_FAVORITES {
+        return Err(Error::InvalidRequest(format!(
+            "favorite_model_ids supports at most {MAX_MODEL_FAVORITES} models"
+        )));
+    }
+    let mut normalized = Vec::new();
+    for value in values {
+        let Some(id) = value.as_str() else {
+            if strict {
+                return Err(Error::InvalidRequest(
+                    "favorite_model_ids must contain only strings".into(),
+                ));
+            }
+            continue;
+        };
+        let id = id.trim();
+        if id.is_empty() {
+            continue;
+        }
+        if id.chars().count() > MAX_MODEL_FAVORITE_ID_CHARS {
+            if strict {
+                return Err(Error::InvalidRequest(format!(
+                    "favorite model ids must contain at most {MAX_MODEL_FAVORITE_ID_CHARS} characters"
+                )));
+            }
+            continue;
+        }
+        if !normalized.iter().any(|existing| existing == id) {
+            normalized.push(id.to_string());
+        }
+    }
+    Ok(normalized)
+}
+
 fn settings_object(object: &mut Map<String, Value>) -> Result<&mut Map<String, Value>> {
     if !object.contains_key("settings") {
         object.insert("settings".into(), json!({}));
@@ -4699,6 +4804,94 @@ mod tests {
         let event = receiver.try_recv().unwrap();
         assert_eq!(event.event_type, "models.updated");
         assert_eq!(event.thread_id, None);
+    }
+
+    #[tokio::test]
+    async fn model_favorites_round_trip_through_bootstrap_command_and_live_event() {
+        let (manager, state) = manager_and_state();
+        manager
+            .store
+            .set_json(
+                MODEL_FAVORITES_SETTINGS_KEY,
+                r#"{"state":{"favorites":["codex:gpt-5"],"browserStorageMode":"private"},"version":0}"#,
+            )
+            .unwrap();
+        assert_eq!(
+            manager.bootstrap(&state).await.unwrap().favorite_model_ids,
+            vec!["codex:gpt-5"]
+        );
+
+        let mut receiver = manager.subscribe();
+        let result = manager
+            .command(
+                state.clone(),
+                Some("device-1".into()),
+                ControlCommandV1 {
+                    command_id: "set-model-favorites".into(),
+                    kind: ControlCommandKindV1::ModelFavoritesSet,
+                    thread_id: None,
+                    expected_revision: None,
+                    payload: json!({
+                        "favorite_model_ids": [" claude:opus ", "claude:opus", "provider:model"]
+                    }),
+                    confirmation_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.status, ControlCommandStatusV1::Applied);
+        assert_eq!(
+            result.data["favorite_model_ids"],
+            json!(["claude:opus", "provider:model"])
+        );
+        let event = receiver.try_recv().unwrap();
+        assert_eq!(event.event_type, MODEL_FAVORITES_EVENT_TYPE);
+        assert_eq!(
+            event.data["favorite_model_ids"],
+            json!(["claude:opus", "provider:model"])
+        );
+        assert_eq!(
+            manager.bootstrap(&state).await.unwrap().favorite_model_ids,
+            vec!["claude:opus", "provider:model"]
+        );
+        let persisted: Value = serde_json::from_str(
+            &manager
+                .store
+                .get_json(MODEL_FAVORITES_SETTINGS_KEY)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted["state"]["browserStorageMode"], "private");
+    }
+
+    #[tokio::test]
+    async fn model_favorites_reject_non_string_entries_without_mutating_settings() {
+        let (manager, state) = manager_and_state();
+        manager
+            .store
+            .set_json(
+                MODEL_FAVORITES_SETTINGS_KEY,
+                r#"{"state":{"favorites":["codex:gpt-5"]},"version":0}"#,
+            )
+            .unwrap();
+        let result = manager
+            .command(
+                state,
+                Some("device-1".into()),
+                ControlCommandV1 {
+                    command_id: "invalid-model-favorites".into(),
+                    kind: ControlCommandKindV1::ModelFavoritesSet,
+                    thread_id: None,
+                    expected_revision: None,
+                    payload: json!({"favorite_model_ids": ["claude:opus", 42]}),
+                    confirmation_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.status, ControlCommandStatusV1::Failed);
+        assert_eq!(manager.model_favorites(), vec!["codex:gpt-5"]);
     }
 
     #[test]

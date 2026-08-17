@@ -73,6 +73,7 @@ interface SettingsState {
   browserStorageMode: BrowserStorageMode;
   browserSetupSeen: boolean;
   toggleFavorite: (id: string) => void;
+  setFavorites: (ids: string[]) => void;
   setFavoritesOnly: (v: boolean) => void;
   setModelGroupCollapsed: (group: string, collapsed: boolean) => void;
   setAccountRuntimeEnabled: (kind: AccountRuntimeKind, enabled: boolean) => void;
@@ -208,6 +209,7 @@ export const useSettings = create<SettingsState>()(
             ? s.favorites.filter((x) => x !== id)
             : [...s.favorites, id],
         })),
+      setFavorites: (ids) => set({ favorites: normalizeStringArray(ids) }),
       setFavoritesOnly: (favoritesOnly) => set({ favoritesOnly }),
       setModelGroupCollapsed: (group, collapsed) =>
         set((s) => {
@@ -254,6 +256,7 @@ export const useSettings = create<SettingsState>()(
         return {
           ...current,
           ...saved,
+          favorites: normalizeStringArray(saved?.favorites),
           favoritesOnly: Boolean(saved?.favoritesOnly),
           collapsedModelGroups: normalizeStringArray(saved?.collapsedModelGroups),
           accountRuntimeEnabled: normalizeAccountRuntimeEnablement(saved?.accountRuntimeEnabled),

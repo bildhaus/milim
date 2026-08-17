@@ -1,4 +1,10 @@
-import {modelPickerGroups, normalizeModelPickerPreferences, parseMobileModel} from '../src/modelPicker';
+import {
+  modelPickerFavoriteIds,
+  modelPickerGroups,
+  normalizeModelPickerPreferences,
+  parseMobileModel,
+  toggledModelFavoriteIds,
+} from '../src/modelPicker';
 
 test('projects runtime model labels, provider routes, and capabilities', () => {
   const model = parseMobileModel({
@@ -57,6 +63,14 @@ test('normalizes persisted mobile picker preferences', () => {
     favoritesOnly: 'yes',
     collapsedGroups: ['OpenAI', null],
   })).toEqual({favorites: ['a'], favoritesOnly: false, collapsedGroups: ['OpenAI']});
+});
+
+test('uses host favorites when supported and keeps local favorites as a legacy fallback', () => {
+  expect(modelPickerFavoriteIds([' desktop:model ', 'desktop:model'], ['mobile:model']))
+    .toEqual(['desktop:model']);
+  expect(modelPickerFavoriteIds(undefined, ['mobile:model'])).toEqual(['mobile:model']);
+  expect(toggledModelFavoriteIds(['desktop:model'], 'provider:model'))
+    .toEqual(['desktop:model', 'provider:model']);
 });
 
 test('searches across labels, ids, providers, and routes', () => {

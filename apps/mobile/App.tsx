@@ -64,8 +64,10 @@ import {
 import {discoverMilimHosts, type DiscoveredHost} from './src/discovery';
 import {
   DEFAULT_MODEL_PICKER_PREFERENCES,
+  modelPickerFavoriteIds,
   modelPickerGroups,
   parseMobileModel,
+  toggledModelFavoriteIds,
   type MobileModelCapability,
   type MobileModelOption,
 } from './src/modelPicker';
@@ -1632,9 +1634,21 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
         visible={modelPickerVisible}
         hostId={controller.activeHost?.hostId ?? controller.bootstrap?.host_id ?? ''}
         models={modelsForPicker}
+        favoriteIds={controller.bootstrap?.capabilities.model_favorites === true
+          ? controller.bootstrap.favorite_model_ids ?? []
+          : undefined}
         selectedId={thread.model}
         reasoningEffortOverrides={thread.reasoning_effort_overrides}
         onClose={() => setModelPickerVisible(false)}
+        onFavoriteIdsChange={controller.bootstrap?.capabilities.model_favorites === true
+          ? async favoriteModelIds => {
+              await controller.command(
+                'model_favorites.set',
+                {favorite_model_ids: favoriteModelIds},
+                null,
+              );
+            }
+          : undefined}
         onSelect={(id, reasoningEffort) => {
           setModelPickerVisible(false);
           void controller.command(
@@ -2049,26 +2063,35 @@ function ModelPickerSheet({
   visible,
   hostId,
   models,
+  favoriteIds,
   selectedId,
   reasoningEffortOverrides,
   onClose,
+  onFavoriteIdsChange,
   onSelect,
 }: {
   visible: boolean;
   hostId: string;
   models: JsonValue[];
+  favoriteIds?: string[];
   selectedId: string | null;
   reasoningEffortOverrides?: Record<string, string>;
   onClose: () => void;
+  onFavoriteIdsChange?: (favoriteModelIds: string[]) => Promise<void>;
   onSelect: (id: string, reasoningEffort?: string) => void;
 }) {
   const {palette, styles} = useAppTheme();
   const [query, setQuery] = useState('');
   const [effortModelId, setEffortModelId] = useState<string | null>(null);
   const [preferences, setPreferences] = useState(DEFAULT_MODEL_PICKER_PREFERENCES);
+  const [optimisticFavoriteIds, setOptimisticFavoriteIds] = useState<string[] | null>(null);
+  const effectiveFavoriteIds = modelPickerFavoriteIds(
+    optimisticFavoriteIds ?? favoriteIds,
+    preferences.favorites,
+  );
   const groups = useMemo(
-    () => modelPickerGroups(models, query, preferences.favorites, preferences.favoritesOnly),
-    [models, preferences.favorites, preferences.favoritesOnly, query],
+    () => modelPickerGroups(models, query, effectiveFavoriteIds, preferences.favoritesOnly),
+    [effectiveFavoriteIds, models, preferences.favoritesOnly, query],
   );
   const collapsedGroups = useMemo(
     () => new Set(preferences.collapsedGroups),
@@ -2106,6 +2129,7 @@ function ModelPickerSheet({
       return;
     }
     setPreferences(DEFAULT_MODEL_PICKER_PREFERENCES);
+    setOptimisticFavoriteIds(null);
     if (!hostId) return;
     let cancelled = false;
     void readModelPickerPreferences(hostId)
@@ -2117,16 +2141,25 @@ function ModelPickerSheet({
       cancelled = true;
     };
   }, [hostId, visible]);
+  useEffect(() => {
+    setOptimisticFavoriteIds(null);
+  }, [favoriteIds]);
   const updatePreferences = useCallback((next: typeof preferences) => {
     setPreferences(next);
     if (hostId) void saveModelPickerPreferences(hostId, next).catch(showError);
   }, [hostId]);
   const toggleFavorite = useCallback((favoriteModelId: string) => {
-    const favorites = preferences.favorites.includes(favoriteModelId)
-      ? preferences.favorites.filter(id => id !== favoriteModelId)
-      : [...preferences.favorites, favoriteModelId];
-    updatePreferences({...preferences, favorites});
-  }, [preferences, updatePreferences]);
+    const next = toggledModelFavoriteIds(effectiveFavoriteIds, favoriteModelId);
+    if (favoriteIds !== undefined && onFavoriteIdsChange) {
+      setOptimisticFavoriteIds(next);
+      void onFavoriteIdsChange(next).catch(error => {
+        setOptimisticFavoriteIds(null);
+        showError(error);
+      });
+      return;
+    }
+    updatePreferences({...preferences, favorites: next});
+  }, [effectiveFavoriteIds, favoriteIds, onFavoriteIdsChange, preferences, updatePreferences]);
   const toggleGroup = useCallback((title: string) => {
     const next = new Set(preferences.collapsedGroups);
     if (next.has(title)) next.delete(title);
@@ -2191,7 +2224,7 @@ function ModelPickerSheet({
           <ModelPickerRow
             model={item.model}
             selected={item.model.id === selectedId}
-            favorite={preferences.favorites.includes(item.model.id)}
+            favorite={effectiveFavoriteIds.includes(item.model.id)}
             reasoningEffort={reasoningEffortOverrides?.[item.model.id] ?? 'auto'}
             onPress={() => onSelect(item.model.id)}
             onFavorite={() => toggleFavorite(item.model.id)}
