@@ -6,7 +6,7 @@ title: Models and providers
 summary: Model-agnostic dev chat routing across provider APIs, local runtimes, Codex, Claude, OpenCode, and Pi bridges.
 group: Core
 order: 40
-updated: 2026-08-10
+updated: 2026-08-17
 ---
 
 Model routing is provider-agnostic and centered on the active dev thread. The provider registry stores enabled remotes and their model metadata, then the desktop model picker merges local API runtime models, provider models, account runtime models, and media-capable models. Duplicate provider model ids stay provider-scoped in the picker and route back to the selected provider; provider sections with fewer visible models appear first.
@@ -36,10 +36,12 @@ OpenCode model rows use the CLI's verbose catalog for context, output, image, to
 | Gemini | Google Generative Language API | Chat, model discovery, model routing, inline image bytes, and genuine Gemini Files API URIs. Arbitrary web image URLs are rejected instead of downloaded server-side. |
 | Replicate | Remote image/video/music provider | Media model catalog, schemas, generation status polling, and normalized URL-returning music results. |
 | fal | Remote image/video/music provider | Queued generation, status polling, and normalized media results. |
-| Local API runtimes | Ollama and LM Studio on this machine | Chat, prompt generation, Ollama `keep_alive` lifecycle calls, Responses or completions where the runtime exposes them, model list, embeddings, structured output, native vision/tool-use labels where available, and reasoning effort for supported local reasoning models. |
+| Local API runtimes | Ollama, LM Studio, and vLLM on this machine | Chat, prompt generation, Ollama `keep_alive` lifecycle calls, Responses or completions where the runtime exposes them, model list, embeddings, structured output, native vision/tool-use labels where available, and reasoning effort for supported local reasoning models. |
 | Account runtimes | Installed Codex, Claude, OpenCode, and Pi CLIs, not saved provider API keys | Resumable agent-style turns with real image input, visible tool events, active Milim browser context, Milim-owned tools, and Milim approval modes. |
 
 Requests to OpenRouter include its app-attribution headers with `https://milim.ai/` as the identifier and `milim` as the display title.
+
+Local detection probes Ollama on `localhost:11434`, LM Studio on `localhost:1234`, and vLLM on `localhost:8000`. It also reads published TCP ports from running Docker containers whose image or name contains `vllm`; it never inspects container arguments or environment. A vLLM candidate is marked reachable only when its unauthenticated `/v1/models` response identifies at least one model with `owned_by: "vllm"`. Containers without a published host port, authenticated vLLM servers, and setups where Milim itself runs inside Docker must be added manually with a URL reachable from Milim's network.
 
 ## Runtime lanes
 
@@ -57,7 +59,7 @@ Requests to OpenRouter include its app-attribution headers with `https://milim.a
 
 | Goal | Route | Why |
 |---|---|---|
-| Best local privacy | Ollama or LM Studio | Prompts stay on your machine unless that runtime is configured otherwise. |
+| Best local privacy | Ollama, LM Studio, or vLLM | Prompts stay on your machine unless that runtime is configured otherwise. |
 | General reasoning | OpenAI, Anthropic, Gemini, or OpenRouter | Use hosted providers when quality, context length, or latency matters more than staying fully local. |
 | Local reasoning control | Ollama thinking models or LM Studio models with reasoning metadata | Ollama uses `/v1/chat/completions`; LM Studio uses `/api/v1/chat` for advertised native reasoning options without custom tools and `/v1/responses` when Milim function tools are attached. `gpt-oss` still uses `/v1/responses` for `low`, `medium`, and `high` effort. |
 | Media workflow | Replicate, fal, or OpenRouter media models | Use image, video, or prompt-to-music generation from the same Milim surface. |

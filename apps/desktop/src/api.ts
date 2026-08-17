@@ -3891,7 +3891,7 @@ export async function listProviders(): Promise<ProviderInfo[]> {
 export async function discoverLocalProviders(): Promise<ProviderDiscovery[]> {
   try {
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 3500);
+    const t = setTimeout(() => ctrl.abort(), 5000);
     const r = await authFetch(`${BASE}/providers/discover`, {
       signal: ctrl.signal,
     });

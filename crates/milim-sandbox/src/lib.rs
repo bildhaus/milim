@@ -48,6 +48,15 @@ pub struct SandboxOutput {
     pub exit_code: Option<i32>,
 }
 
+/// A TCP port published by a running Docker container.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DockerPublishedPort {
+    pub image: String,
+    pub name: String,
+    pub host_ip: String,
+    pub host_port: u16,
+}
+
 /// Runs commands via the `docker` CLI.
 #[derive(Debug, Clone)]
 pub struct DockerBackend {
@@ -100,6 +109,146 @@ impl DockerBackend {
         probe_cmd.creation_flags(milim_core::proc::CREATE_NO_WINDOW);
         command_succeeds_within(&mut probe_cmd, Duration::from_secs(5)).await
     }
+
+    /// List published TCP ports without inspecting container arguments or environment.
+    pub async fn published_ports(&self) -> Result<Vec<DockerPublishedPort>> {
+        const MAX_OUTPUT: usize = 256 * 1024;
+        const TIMEOUT: Duration = Duration::from_secs(2);
+
+        let mut command = Command::new(&self.docker_bin);
+        command
+            .args([
+                "ps",
+                "--no-trunc",
+                "--format",
+                "{{.Image}}|{{.Names}}|{{.Ports}}",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        command.creation_flags(milim_core::proc::CREATE_NO_WINDOW);
+
+        let output = command_output_bounded(&mut command, TIMEOUT, MAX_OUTPUT).await?;
+        if output.exit_code != Some(0) {
+            return Err(Error::Other("docker ps failed".into()));
+        }
+        if output.stdout_truncated {
+            return Err(Error::Other("docker ps output exceeded the limit".into()));
+        }
+        Ok(parse_published_ports(&output.stdout))
+    }
+}
+
+async fn command_output_bounded(
+    command: &mut Command,
+    timeout: Duration,
+    limit: usize,
+) -> Result<SandboxOutput> {
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command
+        .spawn()
+        .map_err(|error| Error::Other(format!("docker command failed to start: {error}")))?;
+    let mut tree = ProcessTreeGuard::attach(
+        child
+            .id()
+            .ok_or_else(|| Error::Other("docker process id unavailable".into()))?,
+    )
+    .map_err(|error| Error::Other(format!("failed to contain docker process: {error}")))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| Error::Other("docker stdout unavailable".into()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| Error::Other("docker stderr unavailable".into()))?;
+    let stdout_task = tokio::spawn(read_bounded(stdout, limit));
+    let stderr_task = tokio::spawn(read_bounded(stderr, limit));
+
+    let (status, wait_error) = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => (Some(status), None),
+        Ok(Err(error)) => (
+            None,
+            Some(Error::Other(format!("docker command failed: {error}"))),
+        ),
+        Err(_) => {
+            tree.terminate();
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            (
+                None,
+                Some(Error::Other(format!(
+                    "docker command timed out after {timeout:?}"
+                ))),
+            )
+        }
+    };
+    let (stdout, stdout_truncated) = stdout_task
+        .await
+        .map_err(|error| Error::Other(format!("docker stdout task failed: {error}")))??;
+    let (stderr, stderr_truncated) = stderr_task
+        .await
+        .map_err(|error| Error::Other(format!("docker stderr task failed: {error}")))??;
+    if let Some(error) = wait_error {
+        return Err(error);
+    }
+
+    Ok(SandboxOutput {
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        stdout_truncated,
+        stderr_truncated,
+        exit_code: status.and_then(|status| status.code()),
+    })
+}
+
+fn parse_published_ports(output: &str) -> Vec<DockerPublishedPort> {
+    let mut ports = Vec::new();
+    for line in output.lines() {
+        let mut fields = line.splitn(3, '|');
+        let (Some(image), Some(name), Some(mappings)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        if image.is_empty() || name.is_empty() {
+            continue;
+        }
+
+        for mapping in mappings.split(',').map(str::trim) {
+            let Some((published, container)) = mapping.split_once("->") else {
+                continue;
+            };
+            let Some((container_port, protocol)) = container.split_once('/') else {
+                continue;
+            };
+            if protocol != "tcp" || container_port.contains('-') {
+                continue;
+            }
+            let Some((host_ip, host_port)) = published.rsplit_once(':') else {
+                continue;
+            };
+            let host_ip = host_ip
+                .strip_prefix('[')
+                .and_then(|value| value.strip_suffix(']'))
+                .unwrap_or(host_ip);
+            let (Ok(host_port), Ok(_)) = (host_port.parse::<u16>(), container_port.parse::<u16>())
+            else {
+                continue;
+            };
+
+            ports.push(DockerPublishedPort {
+                image: image.to_string(),
+                name: name.to_string(),
+                host_ip: host_ip.to_string(),
+                host_port,
+            });
+        }
+    }
+    ports
 }
 
 async fn command_succeeds_within(command: &mut Command, timeout: Duration) -> bool {
@@ -347,6 +496,48 @@ mod tests {
         };
 
         assert!(!docker.available().await);
+    }
+
+    #[test]
+    fn parses_docker_published_tcp_ports() {
+        let output = concat!(
+            "vllm/vllm-openai:latest|vllm-main|127.0.0.1:8000->8000/tcp, [::1]:8001->8000/tcp\n",
+            "vllm/vllm-openai:latest|vllm-wildcard|0.0.0.0:8100->8000/tcp, [::]:8100->8000/tcp\n",
+            "other/image|many-ports|9000/tcp, 10.0.0.5:9200->9200/tcp, 0.0.0.0:5300->53/udp\n",
+        );
+
+        let ports = parse_published_ports(output);
+
+        assert_eq!(ports.len(), 5);
+        assert_eq!(ports[0].host_ip, "127.0.0.1");
+        assert_eq!(ports[0].host_port, 8000);
+        assert_eq!(ports[1].host_ip, "::1");
+        assert_eq!(ports[2].host_ip, "0.0.0.0");
+        assert_eq!(ports[3].host_ip, "::");
+        assert_eq!(ports[4].host_ip, "10.0.0.5");
+        assert_eq!(ports[4].host_port, 9200);
+    }
+
+    #[test]
+    fn skips_unpublished_and_malformed_docker_ports() {
+        let output = concat!(
+            "vllm/image|unpublished|8000/tcp\n",
+            "vllm/image|bad|not-a-port->8000/tcp, 127.0.0.1:8000->bad/tcp\n",
+            "vllm/image|ranges|127.0.0.1:8000-8001->8000-8001/tcp\n",
+            "missing-fields\n",
+        );
+
+        assert!(parse_published_ports(output).is_empty());
+    }
+
+    #[tokio::test]
+    async fn published_ports_reports_unavailable_docker() {
+        let fake_docker = fake_docker_that_cannot_run_containers();
+        let docker = DockerBackend {
+            docker_bin: fake_docker.to_string_lossy().into_owned(),
+        };
+
+        assert!(docker.published_ports().await.is_err());
     }
 
     // Gated on a reachable Docker daemon.

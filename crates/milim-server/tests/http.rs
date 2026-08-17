@@ -1904,15 +1904,19 @@ async fn providers_discover_lists_local_candidates() {
         .await
         .unwrap();
     let providers = body["providers"].as_array().expect("providers array");
-    assert_eq!(providers.len(), 2);
-    assert_eq!(providers[0]["name"], "Ollama (local)");
-    assert_eq!(providers[0]["kind"], "openai_compatible");
-    assert_eq!(providers[0]["base_url"], "http://localhost:11434/v1");
-    assert_eq!(providers[0]["configured"], false);
-    assert_eq!(providers[1]["name"], "LM Studio (local)");
-    assert_eq!(providers[1]["kind"], "openai_compatible");
-    assert_eq!(providers[1]["base_url"], "http://localhost:1234/v1");
-    assert_eq!(providers[1]["configured"], false);
+    for (name, base_url) in [
+        ("Ollama (local)", "http://localhost:11434/v1"),
+        ("LM Studio (local)", "http://localhost:1234/v1"),
+        ("vLLM (local)", "http://localhost:8000/v1"),
+    ] {
+        let provider = providers
+            .iter()
+            .find(|provider| provider["base_url"] == base_url)
+            .unwrap_or_else(|| panic!("missing discovery candidate {base_url}"));
+        assert_eq!(provider["name"], name);
+        assert_eq!(provider["kind"], "openai_compatible");
+        assert_eq!(provider["configured"], false);
+    }
 }
 
 #[tokio::test]
