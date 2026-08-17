@@ -1,4 +1,9 @@
 {
+  "0.2.36": {
+    "version": "0.2.36",
+    "summary": "Milim 0.2.36 hardens agent execution, brings desktop theming and model controls to the mobile companion, and polishes discovery, links, layout, pane resizing, and source tooltips.",
+    "items": []
+  },
   "0.2.35": {
     "version": "0.2.35",
     "summary": "Milim 0.2.35 restores responsive partial streaming and reliable reload continuity for server-owned desktop turns, while carrying forward the mobile companion, app-bundled Codex startup fix, and security hardening.",
