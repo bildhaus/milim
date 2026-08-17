@@ -320,31 +320,26 @@ async function runCanonicalBinaryBenchmark() {
     const queueStartedAt = Date.now();
     await session.page.getByTestId("composer-input").fill(queuedPrompt);
     await session.page.getByTestId("composer-send").click();
-    const queuedRow = session.page
-      .getByTestId("queued-message")
-      .filter({ hasText: queuedPrompt })
-      .first();
-    await queuedRow.waitFor({ timeout: 10_000 });
-    const queuedId = await queuedRow.getAttribute("data-queued-message-id");
-    ensure(queuedId, "Queued message did not expose a durable id.");
-    const durableQueue = await waitForPersistedState(
+    const durableQueue = await waitForControlBootstrap(
       session.page,
-      (state) => {
-        const queue = state.queuedMessagesBySession?.[activeId];
-        return Array.isArray(queue) &&
-          queue.length === 1 &&
-          queue[0]?.id === queuedId &&
-          queue[0]?.content === queuedPrompt
+      (bootstrap) => {
+        const queue = bootstrap.queued_turns?.filter(
+          (turn) => turn.thread_id === activeId,
+        );
+        return queue?.length === 1
           ? queue
           : null;
       },
-      "queued message durability",
+      "canonical queued turn durability",
     );
+    const queuedId = durableQueue[0]?.id;
+    ensure(queuedId, "Canonical queued turn did not expose a durable id.");
     report.timingsMs.queueDurable = Date.now() - queueStartedAt;
     report.continuity.queuedId = queuedId;
     report.continuity.queueBeforeReload = durableQueue.map((item) => ({
       id: item.id,
-      content: item.content,
+      threadId: item.thread_id,
+      commandId: item.command_id,
     }));
     await session.page.screenshot({ path: paths.queued, fullPage: false });
     report.renderer.beforeReload = await collectRuntimeMetrics(session.page);
@@ -359,33 +354,36 @@ async function runCanonicalBinaryBenchmark() {
     await session.page
       .getByTestId("chat-shell")
       .waitFor({ timeout: 20_000 });
-    const reloadedQueuedRow = session.page.locator(
-      `[data-queued-message-id="${cssAttributeValue(queuedId)}"]`,
+    const reloadedControl = await waitForControlBootstrap(
+      session.page,
+      (bootstrap) => {
+        const queued = bootstrap.queued_turns?.find(
+          (turn) => turn.id === queuedId && turn.thread_id === activeId,
+        );
+        const activeRun = bootstrap.active_runs?.find(
+          (run) => run.thread_id === activeId,
+        );
+        return queued && activeRun ? { queued, activeRun } : null;
+      },
+      "canonical queue and active run after reload",
     );
-    await reloadedQueuedRow.waitFor({ timeout: 20_000 });
-    report.timingsMs.reloadToQueueVisible = Date.now() - reloadStartedAt;
+    report.timingsMs.reloadToQueueDurable = Date.now() - reloadStartedAt;
 
-    const reloadedState = await waitForPersistedState(
+    await waitForPersistedState(
       session.page,
       (state) => {
         const active = activePersistedSession(state);
-        const queue = state.queuedMessagesBySession?.[activeId];
         return state.activeId === activeId &&
           active &&
-          persistedModelMatches(active.settings?.model, modelA) &&
-          Array.isArray(queue) &&
-          queue.length === 1 &&
-          queue[0]?.id === queuedId &&
-          queue[0]?.content === queuedPrompt
-          ? { active, queue }
+          persistedModelMatches(active.settings?.model, modelA)
+          ? active
           : null;
       },
       "canonical state after reload",
     );
     ensure(
-      (await reloadedQueuedRow.locator(".queued-copy").innerText()) ===
-        queuedPrompt,
-      "Reloaded queued message text changed.",
+      reloadedControl.queued.id === queuedId,
+      "Reloaded canonical queue id changed.",
     );
     await session.page
       .getByTestId("assistant-message")
@@ -405,7 +403,19 @@ async function runCanonicalBinaryBenchmark() {
     const stopStartedAt = Date.now();
     await stopButton.click();
     await stopButton.waitFor({ state: "hidden", timeout: 20_000 });
-    await reloadedQueuedRow.waitFor({ timeout: 20_000 });
+    const stoppedControl = await waitForControlBootstrap(
+      session.page,
+      (bootstrap) => {
+        const queued = bootstrap.queued_turns?.find(
+          (turn) => turn.id === queuedId && turn.thread_id === activeId,
+        );
+        const running = bootstrap.active_runs?.some(
+          (run) => run.thread_id === activeId,
+        );
+        return queued && !running ? queued : null;
+      },
+      "canonical queue preservation after cancellation",
+    );
     report.timingsMs.stopAfterReload = Date.now() - stopStartedAt;
     ensure(
       (await session.page
@@ -416,10 +426,11 @@ async function runCanonicalBinaryBenchmark() {
     await assertLayout(session.page, "canonical-queue-reload");
     report.timingsMs.inputToNextFrame =
       await measureComposerInputToNextFrame(session.page);
-    report.continuity.queueAfterReload = reloadedState.queue.map((item) => ({
-      id: item.id,
-      content: item.content,
-    }));
+    report.continuity.queueAfterReload = [{
+      id: stoppedControl.id,
+      threadId: stoppedControl.thread_id,
+      commandId: stoppedControl.command_id,
+    }];
     report.continuity.stoppedAfterReload = true;
 
     await installRuntimeSamplers(session.page);
@@ -438,11 +449,18 @@ async function runCanonicalBinaryBenchmark() {
     );
     report.timingsMs.modelSwitch = Date.now() - switchStartedAt;
 
-    console.log("[canonical] run queued prompt with perf-b");
+    console.log("[canonical] resume frozen queued prompt after switching to perf-b");
     const resumeStartedAt = Date.now();
-    await reloadedQueuedRow
-      .getByRole("button", { name: "Run", exact: true })
-      .click();
+    const resumed = await sendControlTestCommand(session.page, {
+      command_id: `canonical-perf-resume-${Date.now()}`,
+      kind: "turn.queue_resume",
+      thread_id: activeId,
+      payload: { queue_id: queuedId },
+    });
+    ensure(
+      resumed.status === "accepted" && resumed.run_id,
+      `Canonical queue resume failed: ${JSON.stringify(resumed)}.`,
+    );
     await session.page
       .getByTestId("assistant-message")
       .last()
@@ -462,7 +480,7 @@ async function runCanonicalBinaryBenchmark() {
       (request) => request.body?.model,
     );
     ensure(
-      JSON.stringify(upstreamModels) === JSON.stringify([modelA, modelB]),
+      JSON.stringify(upstreamModels) === JSON.stringify([modelA, modelA]),
       `Canonical upstream models changed: ${JSON.stringify(upstreamModels)}.`,
     );
     const terminalState = await waitForPersistedState(
@@ -505,6 +523,8 @@ async function runCanonicalBinaryBenchmark() {
       "Queued message tray did not drain.",
     );
     report.continuity.upstreamModels = upstreamModels;
+    report.continuity.queuedModelFrozenBeforeSwitch = true;
+    report.continuity.selectedModelAfterQueue = modelB;
     report.continuity.queuedPromptCount = terminalState.messages.filter(
       (message) =>
         message.role === "user" && message.content === queuedPrompt,
@@ -675,7 +695,7 @@ async function runCanonicalBinaryBenchmark() {
     );
     ensure(
       JSON.stringify(finalUpstreamModels) ===
-        JSON.stringify([modelA, modelB, modelB]),
+        JSON.stringify([modelA, modelA, modelB]),
       `Canonical upstream models changed after reload: ${JSON.stringify(finalUpstreamModels)}.`,
     );
     report.continuity.upstreamModels = finalUpstreamModels;
@@ -880,18 +900,21 @@ function finishCanonicalResponse(res, model, marker) {
       ],
     })}\n\n`,
   );
-  res.write(
-    `data: ${JSON.stringify({
-      id: "canonical-complete",
-      object: "chat.completion.chunk",
-      created: 0,
-      model,
-      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
-      usage: { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 },
-    })}\n\n`,
-  );
-  res.write("data: [DONE]\n\n");
-  res.end();
+  setTimeout(() => {
+    if (res.destroyed) return;
+    res.write(
+      `data: ${JSON.stringify({
+        id: "canonical-complete",
+        object: "chat.completion.chunk",
+        created: 0,
+        model,
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        usage: { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 },
+      })}\n\n`,
+    );
+    res.write("data: [DONE]\n\n");
+    res.end();
+  }, 750);
 }
 
 function streamCompletion(res) {
@@ -970,14 +993,7 @@ function chunkText(text, size) {
 }
 
 async function configureProvider(page, baseUrl, expectedModels = [modelId]) {
-  const api = await page.evaluate(async () => {
-    const invoke = window.__TAURI_INTERNALS__?.invoke;
-    if (!invoke) throw new Error("Tauri invoke API unavailable.");
-    return {
-      base: await invoke("api_base_url"),
-      token: await invoke("api_token"),
-    };
-  });
+  const api = await localApiCredentials(page);
   const headers = { "Content-Type": "application/json" };
   if (api.token) headers.Authorization = `Bearer ${api.token}`;
   const response = await fetch(`${api.base}/providers`, {
@@ -1000,6 +1016,70 @@ async function configureProvider(page, baseUrl, expectedModels = [modelId]) {
       );
   }
   await waitForBackendModels(api.base, api.token, expectedModels);
+}
+
+async function localApiCredentials(page) {
+  return await page.evaluate(async () => {
+    const invoke = window.__TAURI_INTERNALS__?.invoke;
+    if (!invoke) throw new Error("Tauri invoke API unavailable.");
+    return {
+      base: await invoke("api_base_url"),
+      token: await invoke("api_token"),
+    };
+  });
+}
+
+async function controlTestRequest(page, path, init = {}) {
+  const api = await localApiCredentials(page);
+  const headers = new Headers(init.headers);
+  headers.set("Content-Type", "application/json");
+  if (api.token) headers.set("Authorization", `Bearer ${api.token}`);
+  const response = await fetch(`${api.base}${path}`, {
+    ...init,
+    headers,
+    signal: AbortSignal.timeout(10_000),
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(
+      `Control request ${path} failed: ${response.status} ${text}`,
+    );
+  }
+  return text ? JSON.parse(text) : null;
+}
+
+async function readControlBootstrap(page) {
+  return await controlTestRequest(page, "/control/v1/bootstrap");
+}
+
+async function sendControlTestCommand(page, command) {
+  return await controlTestRequest(page, "/control/v1/commands", {
+    method: "POST",
+    body: JSON.stringify(command),
+  });
+}
+
+async function waitForControlBootstrap(
+  page,
+  predicate,
+  label,
+  timeoutMs = 10_000,
+) {
+  const startedAt = Date.now();
+  let lastBootstrap;
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      lastBootstrap = await readControlBootstrap(page);
+      const result = predicate(lastBootstrap);
+      if (result) return result;
+    } catch {
+      // The local API or canonical runtime is still settling.
+    }
+    await delay(100);
+  }
+  throw new Error(
+    `Timed out waiting for ${label}. Last bootstrap: ${JSON.stringify(lastBootstrap)}`,
+  );
 }
 
 async function mockAccountRuntimeDiscovery(page) {
@@ -1678,10 +1758,6 @@ function currentCommitSha() {
     encoding: "utf8",
   });
   return result.status === 0 ? result.stdout.trim() : null;
-}
-
-function cssAttributeValue(value) {
-  return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
 }
 
 function ensure(condition, message) {
