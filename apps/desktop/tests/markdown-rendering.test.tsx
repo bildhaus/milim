@@ -210,6 +210,16 @@ try {
   assert(streamingMarkdown.includes("<pre>"), "streaming markdown should render code fences");
   assert(!streamingMarkdown.includes("hljs"), "streaming markdown should skip syntax highlighting");
 
+  const longCodexStream = [
+    "**Codex stream**",
+    ...Array.from({ length: 1_000 }, (_, index) => `soft-wrapped-token-${index}`),
+  ].join("\n");
+  assert(longCodexStream.length > 12_000, "Codex streaming fixture should cover the former plain-text cutoff");
+  const longStreamingMarkdown = renderMemoizedMarkdown(longCodexStream);
+  assert(longStreamingMarkdown.includes("<strong>Codex stream</strong>"), "long streaming answers should retain Markdown formatting");
+  equal(count(longStreamingMarkdown, "<p>"), 1, "soft newlines in long streaming answers should remain one Markdown paragraph");
+  assert(!longStreamingMarkdown.includes("<br"), "soft newlines in long streaming answers should not become forced line breaks");
+
   const mermaidSource = ["```mermaid", "flowchart LR", "A --> B", "```"].join("\n");
   assert(hasClosedMermaidFence(mermaidSource), "closed Mermaid fences should be detected");
   assert(!hasClosedMermaidFence(["```mermaid", "flowchart LR", "A --> B"].join("\n")), "open Mermaid fences should remain code while streaming");

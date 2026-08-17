@@ -42,6 +42,10 @@ const chatView = readFileSync(
   join(root, "src", "components", "ChatView.tsx"),
   "utf8",
 );
+const assistantMessage = readFileSync(
+  join(root, "src", "components", "AssistantMessage.tsx"),
+  "utf8",
+);
 const sidebar = readFileSync(
   join(root, "src", "components", "Sidebar.tsx"),
   "utf8",
@@ -62,6 +66,11 @@ if (styleEntry !== expectedStyleEntry) {
 const styles = styleFiles
   .map((file) => readFileSync(join(root, "src", file), "utf8"))
   .join("\n");
+if (assistantMessage.includes("STREAMING_MARKDOWN_CHAR_LIMIT")) {
+  throw new Error(
+    "Long live answers must keep the Markdown renderer instead of switching to preserved text",
+  );
+}
 const nativePreviewBlockerFiles = [
   ["App.tsx", 2],
   [join("components", "SheetDialog.tsx"), 1],
