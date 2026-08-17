@@ -46,6 +46,19 @@ if (streaming[1].kind === "workGroup") {
 }
 equal(streaming[2].kind, "text", "text after live tools should keep its order");
 
+const fragmentedCodexAnswer = groupCompletedStreamActivity([
+  { kind: "text", content: "Morning" },
+  { kind: "text", content: " tea" },
+  { kind: "text", content: " warms" },
+  { kind: "text", content: " my" },
+  { kind: "text", content: " hands." },
+], true);
+equal(fragmentedCodexAnswer.length, 1, "streaming Codex answer fragments should render as one block");
+assert(
+  fragmentedCodexAnswer[0].kind === "text" && fragmentedCodexAnswer[0].content === "Morning tea warms my hands.",
+  "streaming Codex answer fragments should preserve their exact combined text",
+);
+
 const grouped = groupCompletedStreamActivity(parts, false);
 equal(grouped.length, 3, "completed mode should expose one work drawer and the final answer");
 equal(grouped[0].kind, "workGroup", "intermediate text, tools, and reasoning should become one work group");

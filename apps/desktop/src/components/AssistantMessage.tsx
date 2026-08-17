@@ -730,7 +730,7 @@ function AnswerText({
 
 function StreamingMarkdownText({ content }: { content: string }) {
   const fallback = (
-    <div className="md md-streaming-text" dir="auto">
+    <div className="md md-streaming-answer-fallback" dir="auto">
       {content}
     </div>
   );
