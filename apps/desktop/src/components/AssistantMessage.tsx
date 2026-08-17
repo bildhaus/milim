@@ -33,7 +33,6 @@ const McpAppView = lazy(() =>
 const NativeChartView = lazy(() =>
   import("./NativeChartView").then((mod) => ({ default: mod.NativeChartView })),
 );
-const STREAMING_MARKDOWN_CHAR_LIMIT = 12000;
 type ChatStreamEventPart = Extract<ChatStreamPart, { kind: "event" }>;
 
 function isNativeChart(descriptor: ToolUiDescriptor): descriptor is NativeChartDescriptor {
@@ -735,7 +734,6 @@ function StreamingMarkdownText({ content }: { content: string }) {
       {content}
     </div>
   );
-  if (content.length > STREAMING_MARKDOWN_CHAR_LIMIT) return fallback;
   return (
     <Suspense fallback={fallback}>
       <MemoizedMarkdown
