@@ -1623,23 +1623,25 @@ impl CodexProcess {
 
 #[cfg(windows)]
 fn codex_command() -> Command {
-    if let Some(path) = crate::child_process::find_on_path("codex.cmd") {
+    let command = if let Some(path) = crate::child_process::find_on_path("codex.cmd") {
         if let Some(command) = codex_npm_command(&path) {
-            return command;
+            command
+        } else {
+            let mut fallback = Command::new("cmd");
+            fallback.arg("/C").arg(path);
+            fallback
         }
-        let mut fallback = Command::new("cmd");
-        fallback.arg("/C").arg(path);
-        return fallback;
-    }
-    if let Some(path) = crate::child_process::find_on_path("codex.exe") {
-        return Command::new(path);
-    }
-    Command::new("codex.exe")
+    } else if let Some(path) = crate::child_process::find_on_path("codex.exe") {
+        Command::new(path)
+    } else {
+        Command::new("codex.exe")
+    };
+    crate::child_process::account_runtime_inherited(command)
 }
 
 #[cfg(not(windows))]
 fn codex_command() -> Command {
-    crate::cli_path::command("codex")
+    crate::child_process::account_runtime_inherited(crate::cli_path::command("codex"))
 }
 
 #[cfg(windows)]

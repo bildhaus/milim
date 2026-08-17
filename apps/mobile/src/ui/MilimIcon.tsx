@@ -9,9 +9,11 @@ export type MilimIconName =
   | 'camera'
   | 'check'
   | 'chevron-down'
+  | 'chevron-right'
   | 'chevron-up'
   | 'file'
   | 'folder'
+  | 'eye'
   | 'image'
   | 'info'
   | 'link'
@@ -19,24 +21,30 @@ export type MilimIconName =
   | 'paperclip'
   | 'pencil'
   | 'plus'
+  | 'plug'
   | 'refresh'
   | 'scan'
   | 'search'
   | 'sidebar'
   | 'smartphone'
   | 'sparkles'
+  | 'star'
   | 'square'
   | 'trash'
+  | 'video'
+  | 'volume'
   | 'x';
 
 export function MilimIcon({
   name,
   size = 18,
   color = 'currentColor',
+  filled = false,
 }: {
   name: MilimIconName;
   size?: number;
   color?: string;
+  filled?: boolean;
 }) {
   const common = {
     fill: 'none',
@@ -65,6 +73,7 @@ export function MilimIcon({
       ) : null}
       {name === 'check' ? <Path d="m5 12 5 5 9-10" {...common} /> : null}
       {name === 'chevron-down' ? <Path d="m6 9 6 6 6-6" {...common} /> : null}
+      {name === 'chevron-right' ? <Path d="m9 6 6 6-6 6" {...common} /> : null}
       {name === 'chevron-up' ? <Path d="m6 15 6-6 6 6" {...common} /> : null}
       {name === 'file' ? (
         <>
@@ -73,6 +82,12 @@ export function MilimIcon({
         </>
       ) : null}
       {name === 'folder' ? <Path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" {...common} /> : null}
+      {name === 'eye' ? (
+        <>
+          <Path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" {...common} />
+          <Circle cx="12" cy="12" r="2.5" {...common} />
+        </>
+      ) : null}
       {name === 'image' ? (
         <>
           <Rect x="3" y="5" width="18" height="14" rx="2" {...common} />
@@ -98,6 +113,7 @@ export function MilimIcon({
       {name === 'paperclip' ? <Path d="M21 11.5 12.5 20a4.5 4.5 0 0 1-6.4-6.4l8.5-8.5a3 3 0 0 1 4.3 4.3l-8.6 8.5a1.5 1.5 0 0 1-2.1-2.1l7.8-7.8" {...common} /> : null}
       {name === 'pencil' ? <Path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" {...common} /> : null}
       {name === 'plus' ? <Path d="M12 5v14M5 12h14" {...common} /> : null}
+      {name === 'plug' ? <Path d="M8 3v5M16 3v5M7 8h10v3a5 5 0 0 1-5 5v5M9 21h6" {...common} /> : null}
       {name === 'refresh' ? <Path d="M21 12a9 9 0 1 1-2.6-6.4M21 4v5h-5" {...common} /> : null}
       {name === 'scan' ? <Path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M8 12h8" {...common} /> : null}
       {name === 'search' ? (
@@ -119,8 +135,11 @@ export function MilimIcon({
         </>
       ) : null}
       {name === 'sparkles' ? <Path d="M12 4l1.4 3.6L17 9l-3.6 1.4L12 14l-1.4-3.6L7 9l3.6-1.4ZM19 14l.7 1.8L21.5 16l-1.8.7L19 18.5l-.7-1.8L16.5 16l1.8-.5Z" {...common} /> : null}
+      {name === 'star' ? <Path d="m12 3 2.7 5.5 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1-4.4-4.3 6.1-.9Z" {...common} fill={filled ? color : 'none'} /> : null}
       {name === 'square' ? <Rect x="6" y="6" width="12" height="12" rx="2.5" fill={color} /> : null}
       {name === 'trash' ? <Path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13" {...common} /> : null}
+      {name === 'video' ? <><Rect x="3" y="6" width="13" height="12" rx="2" {...common} /><Path d="m16 10 5-3v10l-5-3Z" {...common} /></> : null}
+      {name === 'volume' ? <><Path d="M5 9H2v6h3l5 4V5L5 9Z" {...common} /><Path d="M14 9a4 4 0 0 1 0 6M17 6a8 8 0 0 1 0 12" {...common} /></> : null}
       {name === 'x' ? <Path d="M6 6l12 12M18 6 6 18" {...common} /> : null}
     </Svg>
   );

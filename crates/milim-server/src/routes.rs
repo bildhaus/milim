@@ -27,7 +27,10 @@ use serde_json::{json, Value};
 use tokio::io::AsyncReadExt;
 
 use crate::auth::authorize;
-use crate::companion::{MobileCompanionBridge, MobilePairRequest};
+use crate::companion::{
+    MobileCompanionBridge, MobilePairRequest, MobilePairingRequestCreate,
+    MobilePairingRequestDecision,
+};
 use crate::error::ApiError;
 use crate::media_library::{
     MediaDownloadSource, MediaLibraryItem, MediaLibraryMediaItem, MediaLibraryUpdate,
@@ -283,6 +286,9 @@ pub(crate) async fn provider_upsert(
         last_error: None,
     };
     let saved = reg.upsert(cfg).await.map_err(ApiError)?;
+    if let Some(control) = &st.control {
+        control.publish_model_catalog();
+    }
     Ok(Json(json!({
         "id": saved.id, "name": saved.name, "kind": saved.kind, "base_url": saved.base_url,
         "enabled": saved.enabled, "has_key": saved.api_key.is_some(), "models": saved.models,
@@ -305,7 +311,13 @@ pub(crate) async fn provider_delete(
             "providers are not enabled".to_string(),
         ))
     })?;
-    Ok(Json(json!({ "deleted": reg.delete(&id).await.map_err(ApiError)? })).into_response())
+    let deleted = reg.delete(&id).await.map_err(ApiError)?;
+    if deleted {
+        if let Some(control) = &st.control {
+            control.publish_model_catalog();
+        }
+    }
+    Ok(Json(json!({ "deleted": deleted })).into_response())
 }
 
 // ----- Skills -----

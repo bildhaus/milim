@@ -17,6 +17,7 @@ const staticPreviewOnly = process.argv.includes("--static-preview-only");
 const browserProfileOnly = process.argv.includes("--browser-profile-only");
 const zoomOnly = process.argv.includes("--zoom-only");
 const microUiOnly = process.argv.includes("--micro-ui-only");
+const resizeHandlesOnly = process.argv.includes("--resize-handles-only");
 const workersOnly = process.argv.includes("--workers-only");
 const mcpAppsOnly = process.argv.includes("--mcp-apps-only");
 const sidebarMotionOnly = process.argv.includes("--sidebar-motion-only");
@@ -40,6 +41,7 @@ const screenshots = {
   zoom: join(tmpdir(), "milim-tauri-webview-zoom-chip.png"),
   accountUsage: join(tmpdir(), "milim-tauri-webview-account-usage.png"),
   microUi: join(tmpdir(), "milim-tauri-webview-micro-ui.png"),
+  resizeHandles: join(tmpdir(), "milim-tauri-webview-resize-handles.png"),
   inspectorOverlay: join(tmpdir(), "milim-tauri-webview-inspector-overlay.png"),
   workersPlan: join(tmpdir(), "milim-tauri-webview-workers-plan.png"),
   workersNarrow: join(tmpdir(), "milim-tauri-webview-workers-narrow.png"),
@@ -199,6 +201,10 @@ try {
     const errors = collectErrors(session.page);
     await runSettingsLayoutCheck(session.page);
     consoleErrors.push(...errors.filter((message) => !message.includes("/codex/models")));
+  } else if (resizeHandlesOnly) {
+    const errors = collectErrors(session.page);
+    await runResizeHandleCheck(session.page);
+    consoleErrors.push(...errors.filter((message) => !message.includes("/codex/models")));
   } else if (zoomOnly || microUiOnly) {
     const errors = collectErrors(session.page);
     await session.page.getByTestId("chat-shell").waitFor();
@@ -220,6 +226,7 @@ try {
     consoleErrors.push(...(await runPersistenceAndChat(session.page, session.child.pid)));
     await session.page.screenshot({ path: screenshots.chat, fullPage: false });
     await runChatAffordancesCheck(session.page);
+    await runHarnessHardeningUiCheck(session.page);
   }
 
   if (consoleErrors.length) {
@@ -4183,6 +4190,73 @@ async function runAccountUsageTitleBarCheck(page) {
   await pill.waitFor({ state: "hidden" });
 }
 
+async function assertSidebarResizeHandleAlignment(page) {
+  const alignment = await page.evaluate(() => {
+    const sidebar = document.querySelector(".sidebar");
+    const handle = document.querySelector('[data-testid="sidebar-resize-handle"]');
+    if (!(sidebar instanceof HTMLElement) || !(handle instanceof HTMLElement)) return null;
+    const sidebarRect = sidebar.getBoundingClientRect();
+    const handleRect = handle.getBoundingClientRect();
+    const visibleInset = Number.parseFloat(getComputedStyle(sidebar, "::before").right);
+    return {
+      handleCenter: handleRect.left + handleRect.width / 2,
+      handleWidth: handleRect.width,
+      seam: sidebarRect.right - visibleInset,
+    };
+  });
+  if (!alignment || Math.abs(alignment.handleCenter - alignment.seam) > 1 || Math.abs(alignment.handleWidth - 12) > 1) {
+    throw new Error(`Sidebar resize handle should center its 12px target on the visible seam: ${JSON.stringify(alignment)}.`);
+  }
+}
+
+async function assertInspectorResizeHandleAlignment(page) {
+  const alignment = await page.evaluate(() => {
+    const shell = document.querySelector(".inspector-shell");
+    const handle = document.querySelector('[data-testid="preview-resize-handle"]');
+    if (!(shell instanceof HTMLElement) || !(handle instanceof HTMLElement)) return null;
+    const shellRect = shell.getBoundingClientRect();
+    const handleRect = handle.getBoundingClientRect();
+    return {
+      handleCenter: handleRect.left + handleRect.width / 2,
+      handleWidth: handleRect.width,
+      seam: shellRect.left,
+    };
+  });
+  if (!alignment || Math.abs(alignment.handleCenter - alignment.seam) > 1 || Math.abs(alignment.handleWidth - 12) > 1) {
+    throw new Error(`Inspector resize handle should center its 12px target on the panel seam: ${JSON.stringify(alignment)}.`);
+  }
+}
+
+async function runResizeHandleCheck(page) {
+  await page.getByTestId("chat-shell").waitFor();
+  await dismissOnboardingIfPresent(page);
+
+  const sidebarHandle = page.getByTestId("sidebar-resize-handle");
+  await assertSidebarResizeHandleAlignment(page);
+  const sidebarWidth = await sidebarHandle.getAttribute("aria-valuenow");
+  await sidebarHandle.focus();
+  await page.keyboard.press("ArrowRight");
+  if ((await sidebarHandle.getAttribute("aria-valuenow")) === sidebarWidth) {
+    throw new Error("Sidebar resize handle should remain keyboard operable.");
+  }
+  await page.keyboard.press("Enter");
+
+  await page.getByTestId("open-artifact-browser").click();
+  const previewHandle = page.getByTestId("preview-resize-handle");
+  await previewHandle.waitFor();
+  await delay(220);
+  await assertInspectorResizeHandleAlignment(page);
+  const previewWidth = await previewHandle.getAttribute("aria-valuenow");
+  await previewHandle.focus();
+  await page.keyboard.press("ArrowLeft");
+  if ((await previewHandle.getAttribute("aria-valuenow")) === previewWidth) {
+    throw new Error("Inspector resize handle should remain keyboard operable.");
+  }
+  await page.keyboard.press("Enter");
+  await delay(220);
+  await page.screenshot({ path: screenshots.resizeHandles, fullPage: false });
+}
+
 async function runMicroUiCheck(page) {
   await page.addInitScript(() => {
     Object.defineProperty(navigator, "clipboard", {
@@ -4264,7 +4338,8 @@ async function runMicroUiCheck(page) {
   await resetUiPersistenceWrites(page);
   const sidebarDragBox = await sidebarHandle.boundingBox();
   if (!sidebarDragBox) throw new Error("Sidebar resize handle should have measurable bounds.");
-  const sidebarDragX = sidebarDragBox.x + 4;
+  await assertSidebarResizeHandleAlignment(page);
+  const sidebarDragX = sidebarDragBox.x + sidebarDragBox.width / 2;
   const sidebarDragY = sidebarDragBox.y + sidebarDragBox.height / 2;
   await page.mouse.move(sidebarDragX, sidebarDragY);
   await page.mouse.down();
@@ -4284,7 +4359,7 @@ async function runMicroUiCheck(page) {
 
   const sidebarHandleBox = await sidebarHandle.boundingBox();
   if (!sidebarHandleBox) throw new Error("Sidebar resize handle should have measurable bounds.");
-  await page.mouse.move(sidebarHandleBox.x + 4, sidebarHandleBox.y + sidebarHandleBox.height / 2);
+  await page.mouse.move(sidebarHandleBox.x + sidebarHandleBox.width / 2, sidebarHandleBox.y + sidebarHandleBox.height / 2);
   await page.mouse.down();
   await delay(50);
   await page.mouse.move(sidebarHandleBox.x - 112, sidebarHandleBox.y + sidebarHandleBox.height / 2, { steps: 4 });
@@ -4310,6 +4385,8 @@ async function runMicroUiCheck(page) {
   await page.getByTestId("open-artifact-browser").click();
   const previewHandle = page.getByTestId("preview-resize-handle");
   await previewHandle.waitFor();
+  await delay(220);
+  await assertInspectorResizeHandleAlignment(page);
   await previewHandle.focus();
   await page.keyboard.press("ArrowLeft");
   if ((await previewHandle.getAttribute("aria-valuenow")) === "420") {
@@ -4324,7 +4401,7 @@ async function runMicroUiCheck(page) {
   await resetUiPersistenceWrites(page);
   const previewDragBox = await previewHandle.boundingBox();
   if (!previewDragBox) throw new Error("Inspector resize handle should have measurable bounds.");
-  const previewDragX = previewDragBox.x + 4;
+  const previewDragX = previewDragBox.x + previewDragBox.width / 2;
   const previewDragY = previewDragBox.y + previewDragBox.height / 2;
   await page.mouse.move(previewDragX, previewDragY);
   await page.mouse.down();
@@ -4345,7 +4422,7 @@ async function runMicroUiCheck(page) {
 
   const previewHandleBox = await previewHandle.boundingBox();
   if (!previewHandleBox) throw new Error("Inspector resize handle should have measurable bounds.");
-  await page.mouse.move(previewHandleBox.x + 4, previewHandleBox.y + previewHandleBox.height / 2);
+  await page.mouse.move(previewHandleBox.x + previewHandleBox.width / 2, previewHandleBox.y + previewHandleBox.height / 2);
   await page.mouse.down();
   await delay(50);
   await page.mouse.move(previewHandleBox.x + 152, previewHandleBox.y + previewHandleBox.height / 2, { steps: 4 });
@@ -4779,18 +4856,48 @@ async function runChatAffordancesCheck(page) {
   if (!(await source.getAttribute("aria-label"))?.includes("opens in browser")) {
     throw new Error("Assistant source chip did not expose its external destination.");
   }
+  const scroll = page.locator(".chat-scroll");
+  const scrollBeforeHover = await scroll.evaluate((element) => element.scrollTop);
   await source.hover();
   await page.waitForFunction(() => {
     const preview = document.querySelector(".md-source-preview");
-    return preview instanceof HTMLElement && getComputedStyle(preview).opacity === "1";
+    return preview instanceof HTMLElement && getComputedStyle(preview).position === "fixed";
   });
+  const scrollAfterHover = await scroll.evaluate((element) => element.scrollTop);
+  if (Math.abs(scrollAfterHover - scrollBeforeHover) > 1) {
+    throw new Error(`Source hover moved the transcript from ${scrollBeforeHover} to ${scrollAfterHover}.`);
+  }
   const sourceDetail = await page.locator(".md-source-preview").last().innerText();
   if (!sourceDetail.includes("prompt-kit.com/docs") || sourceDetail.includes("ref=e2e")) {
     throw new Error(`Source hover detail was not compact and query-free: ${sourceDetail}`);
   }
+  const sourcePreviewStyle = await page.locator(".md-source-preview").last().evaluate((element) => {
+    const style = getComputedStyle(element);
+    const reference = document.createElement("div");
+    reference.className = "run-body";
+    document.body.append(reference);
+    const referenceStyle = getComputedStyle(reference);
+    const result = {
+      parentIsBody: element.parentElement === document.body,
+      background: style.backgroundColor,
+      blur: style.backdropFilter,
+      expectedBackground: referenceStyle.backgroundColor,
+      expectedBlur: referenceStyle.backdropFilter,
+    };
+    reference.remove();
+    return result;
+  });
+  if (!sourcePreviewStyle.parentIsBody) {
+    throw new Error("Source tooltip should render outside the scrolling transcript.");
+  }
+  if (sourcePreviewStyle.background !== sourcePreviewStyle.expectedBackground) {
+    throw new Error(`Source tooltip did not use the shared popover background: ${JSON.stringify(sourcePreviewStyle)}.`);
+  }
+  if (!sourcePreviewStyle.blur.includes(sourcePreviewStyle.expectedBlur)) {
+    throw new Error(`Source tooltip did not use the shared popover blur: ${JSON.stringify(sourcePreviewStyle)}.`);
+  }
   await page.screenshot({ path: screenshots.chatSources, fullPage: false });
 
-  const scroll = page.locator(".chat-scroll");
   const canScroll = await scroll.evaluate((element) => {
     element.scrollTop = 0;
     element.dispatchEvent(new Event("scroll"));
@@ -4807,6 +4914,326 @@ async function runChatAffordancesCheck(page) {
       element.scrollHeight - element.scrollTop - element.clientHeight <= 32;
   });
   await latest.waitFor({ state: "hidden" });
+}
+
+async function runHarnessHardeningUiCheck(page) {
+  const requests = [];
+  // The preceding chat-affordance interaction can leave a debounced session
+  // write pending. Let it commit before replacing the native session fixture so
+  // pagehide cannot restore the previous transcript over this one.
+  await page.waitForTimeout(3_100);
+  await page.route("**/control/v1/runs/e2e-ledger-run**", async (route) => {
+    const url = new URL(route.request().url());
+    requests.push(url.pathname + url.search);
+    if (url.pathname.endsWith("/events")) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          run_id: "e2e-ledger-run",
+          after_seq: null,
+          next_seq: null,
+          has_more: false,
+          events: [{
+            id: "e2e-ledger-event",
+            run_id: "e2e-ledger-run",
+            seq: 1,
+            step_id: "step-1",
+            type: "model_request_resolved",
+            data: { artifact_digest: "sha256:e2e" },
+            created_at_ms: 2,
+          }],
+        }),
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        run: {
+          id: "e2e-ledger-run",
+          thread_id: "e2e-ledger-thread",
+          status: "completed",
+          adapter: "provider",
+          config: { model: "e2e-ledger-model" },
+          capabilities: {
+            ledger: true,
+            inspectable: true,
+            steering: true,
+            visibility: "model_visible",
+          },
+          created_at_ms: 1,
+          updated_at_ms: 2,
+          completed_at_ms: 2,
+          error: null,
+        },
+        composition: {
+          visibility: "model_visible",
+          adapter: "provider",
+          model: "e2e-ledger-model",
+          reasoning_effort: null,
+          native_session_boundary: null,
+          prompt_sections: [],
+          tools: [],
+          policies: {},
+          environment_policy: "HostShellInherited",
+          explicit_environment_grants: [],
+        },
+      }),
+    });
+  });
+
+  await page.evaluate(async () => {
+    const invoke = window.__TAURI_INTERNALS__?.invoke;
+    if (!invoke) throw new Error("Tauri invoke unavailable for run-ledger fixture.");
+    const now = Date.now();
+    await invoke("user_sessions_set", {
+      value: JSON.stringify({
+        state: {
+          sessions: [{
+            id: "e2e-ledger-thread",
+            title: "Quiet run details fixture",
+            messages: [
+              { id: "e2e-user", role: "user", content: "Inspect quietly." },
+              {
+                id: "e2e-legacy-work",
+                role: "assistant",
+                content: "Legacy complete.",
+                metrics: { model: "legacy-fixture-model", durationMs: 900 },
+                streamParts: [{
+                  kind: "event",
+                  eventType: "tool",
+                  label: "Read legacy file",
+                  status: "done",
+                }, { kind: "text", content: "Legacy complete." }],
+              },
+              { id: "e2e-ledger-user", role: "user", content: "Inspect the ledger quietly." },
+              {
+                id: "e2e-ledger-work",
+                role: "assistant",
+                content: "Ledger complete.",
+                runId: "e2e-ledger-run",
+                ledgerVersion: 1,
+                metrics: { model: "e2e-ledger-model", durationMs: 1200 },
+                streamParts: [{
+                  kind: "event",
+                  eventType: "tool",
+                  label: "Read ledger file",
+                  status: "done",
+                }, { kind: "text", content: "Ledger complete." }],
+              },
+            ],
+            settings: {
+              model: "mock-echo",
+              instructions: "",
+              activeAgentId: null,
+              folder: "",
+              sandbox: false,
+              computerUse: false,
+              memory: false,
+              privacy: "off",
+              toolApproval: "review",
+              delegationPolicy: "off",
+              workerModel: "",
+              planMode: false,
+            },
+            createdAt: now,
+            updatedAt: now,
+          }],
+          activeId: "e2e-ledger-thread",
+        },
+        version: 0,
+      }),
+    });
+  });
+  await page.reload();
+  await page.getByTestId("chat-shell").waitFor();
+  await dismissOnboardingIfPresent(page);
+  await page.waitForFunction(() =>
+    document.body.textContent?.includes("Ledger complete.") ||
+    document.body.textContent?.includes("Milim needs a quick restart."),
+  );
+  if (await page.getByText("Milim needs a quick restart.", { exact: true }).isVisible().catch(() => false)) {
+    await page.getByText("Technical details", { exact: true }).click();
+    const detail = await page.locator(".app-error-details code").innerText();
+    throw new Error(`Run-ledger fixture crashed the UI: ${detail}`);
+  }
+
+  if (requests.length !== 0) {
+    throw new Error(`Closed transcript requested run details: ${JSON.stringify(requests)}.`);
+  }
+  const workGroups = page.getByTestId("assistant-stream-work-group");
+  const workGroupCount = await workGroups.count();
+  if (workGroupCount !== 2) {
+    const assistantText = await page.getByTestId("assistant-message").allInnerTexts();
+    const persisted = await page.evaluate(async () => {
+      const raw = await window.__TAURI_INTERNALS__?.invoke("user_sessions_get");
+      if (typeof raw !== "string") return null;
+      const parsed = JSON.parse(raw);
+      return {
+        activeId: parsed.state?.activeId,
+        sessions: parsed.state?.sessions?.map((session) => ({
+          id: session.id,
+          roles: session.messages?.map((message) => message.role),
+        })),
+      };
+    });
+    throw new Error(`Run-ledger fixture should render two existing work drawers; found ${workGroupCount}: ${JSON.stringify({ assistantText, persisted })}.`);
+  }
+  const ledgerGroup = workGroups.filter({ hasText: "Read ledger file" });
+  const summary = await ledgerGroup.locator("summary").innerText();
+  if (!summary.includes("Worked for") || summary.includes("e2e-ledger-model")) {
+    throw new Error(`Closed run summary gained diagnostic chrome: ${summary}.`);
+  }
+  if (await page.getByRole("button", { name: "Run details", exact: true }).isVisible().catch(() => false)) {
+    throw new Error("Run details should stay hidden until the existing work drawer is opened.");
+  }
+
+  await ledgerGroup.locator("summary").click();
+  const action = ledgerGroup.getByRole("button", { name: "Run details", exact: true });
+  await action.waitFor();
+  if ((await page.locator(".stream-run-details-action").count()) !== 1) {
+    throw new Error("Legacy work should omit the Run details action.");
+  }
+  if (requests.length !== 0) {
+    throw new Error("Opening the work drawer should not fetch the ledger.");
+  }
+  await action.click();
+  const details = page.getByTestId("assistant-run-details");
+  await details.waitFor();
+  await details.getByText("Composition", { exact: true }).waitFor();
+  await details.getByText("Model steps", { exact: true }).waitFor();
+  const inspectionRequests = requests.filter((request) => !request.includes("/events"));
+  const eventRequests = requests.filter((request) => request.includes("/events?limit=100"));
+  if (inspectionRequests.length !== 1 || eventRequests.length !== 1 || requests.length !== 2) {
+    throw new Error(`Run details should make one inspection and one bounded event request: ${JSON.stringify(requests)}.`);
+  }
+
+  const commandBodies = [];
+  const bootstrap = JSON.parse(readFileSync(join(root, "..", "..", "contracts", "control-v1", "bootstrap.json"), "utf8"));
+  bootstrap.capabilities = {
+    ...bootstrap.capabilities,
+    run_ledger: true,
+    run_inspection: true,
+    steering: true,
+    context_injection: true,
+  };
+  bootstrap.threads = [{
+    id: "e2e-ledger-thread",
+    title: "Quiet run details fixture",
+    revision: 7,
+    epoch: "e2e-ledger-epoch",
+    updated_at_ms: Date.now(),
+    archived_at_ms: null,
+    model: "mock-echo",
+    reasoning_effort_overrides: {},
+    agent_id: null,
+    workspace: null,
+    busy: true,
+    queued_turns: 0,
+  }];
+  bootstrap.models = [{ id: "mock-echo", object: "model", created: 0, owned_by: "milim" }];
+  bootstrap.active_runs = [{
+    id: "e2e-active-provider-run",
+    thread_id: "e2e-ledger-thread",
+    status: "running",
+    adapter: "provider",
+    config: {
+      model: "mock-echo",
+      instructions: "",
+      workspace: null,
+      privacy: "off",
+      approval_mode: "review",
+      plan_mode: false,
+      sandbox: false,
+      computer_use: false,
+      memory: false,
+      delegation_policy: "off",
+      worker_model: "",
+      agent: null,
+      tool_mode: "all",
+      enabled_tools: [],
+      skill_mode: "auto",
+      enabled_skills: [],
+      attachments: [],
+      native_session_id: null,
+      reasoning_effort: null,
+      adapter: "provider",
+    },
+    capabilities: {
+      ledger: true,
+      inspectable: true,
+      steering: true,
+      visibility: "model_visible",
+    },
+    created_at_ms: Date.now() - 1000,
+    updated_at_ms: Date.now(),
+    completed_at_ms: null,
+    error: null,
+  }];
+  bootstrap.queued_turns = [];
+  bootstrap.pending_inputs = [];
+  bootstrap.pending_approvals = [];
+  await page.route("**/control/v1/bootstrap", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify(bootstrap),
+  }));
+  await page.route("**/control/v1/threads/e2e-ledger-thread/timeline**", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      thread_id: "e2e-ledger-thread",
+      epoch: "e2e-ledger-epoch",
+      first_seq: null,
+      last_seq: null,
+      has_more_before: false,
+      has_more_after: false,
+      items: [],
+    }),
+  }));
+  await page.route("**/control/v1/commands", async (route) => {
+    const body = JSON.parse(route.request().postData() ?? "{}");
+    commandBodies.push(body);
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        command_id: body.command_id,
+        status: body.kind === "turn.send" ? "queued" : "accepted",
+        thread_id: body.thread_id,
+        revision: 7,
+        run_id: body.kind === "turn.steer" ? "e2e-active-provider-run" : null,
+        queue_id: body.kind === "turn.send" ? "e2e-followup" : null,
+        confirmation_token: null,
+        message: null,
+        data: body.kind === "turn.steer" ? { inbox_id: "e2e-steer" } : null,
+      }),
+    });
+  });
+  await page.reload();
+  await page.getByTestId("chat-shell").waitFor();
+  await page.getByLabel("Queue message").waitFor();
+  const composer = page.getByTestId("composer-input");
+  await composer.fill("Queue this follow-up");
+  await page.getByLabel("Queue message").click();
+  await page.waitForFunction(() => document.body.textContent?.includes("Message queued"));
+  await composer.fill("Steer with this input");
+  await page.getByLabel("More actions for active run").click();
+  await page.getByRole("menuitem", { name: "Steer next step" }).click();
+  await page.waitForFunction(() => document.body.textContent?.includes("Steering will be applied"));
+  if (commandBodies.length !== 2 || commandBodies[0].kind !== "turn.send" || commandBodies[1].kind !== "turn.steer") {
+    throw new Error(`Busy composer should queue first and steer only explicitly: ${JSON.stringify(commandBodies)}.`);
+  }
+  if (commandBodies[1].payload?.run_id !== "e2e-active-provider-run") {
+    throw new Error("Steering should target the exact active run id.");
+  }
+
+  await page.reload();
+  await page.getByTestId("chat-shell").waitFor();
+  await page.getByLabel("Queue message").waitFor();
+  await page.getByLabel("More actions for active run").waitFor();
 }
 
 async function seedChatSearchFixture(page, withQueuedMessages = false) {
@@ -5145,7 +5572,7 @@ function collectErrors(page) {
     const url = response.url();
     if (
       ([400, 502].includes(response.status()) && /\/media\/(?:models|model-schema)\b/.test(url)) ||
-      (response.status() === 502 && /\/codex\/models\b/.test(url)) ||
+      (response.status() === 502 && /\/codex\/(?:models|account)\b/.test(url)) ||
       (response.status() === 400 && /\/(?:codex|claude|opencode|pi)\/run\b/.test(url))
     ) {
       expectedFailedResources.push(url);
@@ -5161,7 +5588,7 @@ function collectErrors(page) {
     if (text.includes("favicon.ico") && text.includes("Content Security Policy directive")) return;
     if (/^Failed to load resource: the server responded with a status of (?:400 \(Bad Request\)|502 \(Bad Gateway\))$/.test(text)) {
       const responseIndex = expectedFailedResources.findIndex((resourceUrl) => !url || resourceUrl === url);
-      if (/\/(?:media\/(?:models|model-schema)|codex\/models)\b/.test(url) || responseIndex >= 0) {
+      if (/\/(?:media\/(?:models|model-schema)|codex\/(?:models|account))\b/.test(url) || responseIndex >= 0) {
         if (responseIndex >= 0) expectedFailedResources.splice(responseIndex, 1);
         return;
       }
@@ -5379,6 +5806,7 @@ function printEvidencePaths(milimHome) {
   console.log(`zoomScreenshot=${screenshots.zoom}`);
   console.log(`accountUsageScreenshot=${screenshots.accountUsage}`);
   console.log(`microUiScreenshot=${screenshots.microUi}`);
+  console.log(`resizeHandlesScreenshot=${screenshots.resizeHandles}`);
   console.log(`inspectorOverlayScreenshot=${screenshots.inspectorOverlay}`);
   console.log(`workersPlanScreenshot=${screenshots.workersPlan}`);
   console.log(`workersNarrowScreenshot=${screenshots.workersNarrow}`);

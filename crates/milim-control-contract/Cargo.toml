@@ -1,0 +1,17 @@
+[package]
+name = "milim-control-contract"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Canonical Rust and generated TypeScript contract for Milim control v1."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+ts-rs = { version = "10", default-features = false, features = ["serde-json-impl"] }
+
+[[bin]]
+name = "generate-control-contract"
+path = "src/bin/generate.rs"

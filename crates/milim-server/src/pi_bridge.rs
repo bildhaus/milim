@@ -992,17 +992,19 @@ fn remove_extension(path: Option<PathBuf>) {
 
 #[cfg(windows)]
 fn pi_command() -> Command {
-    if let Some(path) = crate::child_process::find_on_path("pi.cmd") {
+    let command = if let Some(path) = crate::child_process::find_on_path("pi.cmd") {
         let mut command = Command::new("cmd");
         command.arg("/C").arg(path);
-        return command;
-    }
-    Command::new("pi")
+        command
+    } else {
+        Command::new("pi")
+    };
+    crate::child_process::account_runtime_inherited(command)
 }
 
 #[cfg(not(windows))]
 fn pi_command() -> Command {
-    crate::cli_path::command("pi")
+    crate::child_process::account_runtime_inherited(crate::cli_path::command("pi"))
 }
 
 #[cfg(test)]

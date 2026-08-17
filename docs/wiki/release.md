@@ -6,7 +6,7 @@ title: Release and verification
 summary: Release artifacts, updater behavior, verification commands, and site build checks.
 group: Reference
 order: 110
-updated: 2026-08-15
+updated: 2026-08-17
 ---
 
 Release work should verify the Rust workspace, desktop app, site docs, and platform artifacts without reintroducing Linux packaging as a release target.
@@ -36,6 +36,7 @@ cargo test
 cargo clippy --workspace --all-targets
 pnpm -C apps/desktop verify
 pnpm -C apps/desktop verify:runtime-conformance
+pnpm -C apps/desktop verify:tauri-webview
 pnpm -C apps/desktop perf:canonical
 pnpm -C apps/mobile verify
 pnpm -C apps/site build
@@ -53,7 +54,9 @@ Store declarations describe the actual v1 boundary: no Milim account, tracking, 
 
 ## Runtime evidence
 
-`v*` tags and manual Release runs produce a Windows-only `runtime-evidence-windows` artifact. Successful runs contain `runtime-conformance.json`, `canonical-thread.json`, and benchmark screenshots from deterministic, mock-backed scenarios; a benchmark failure adds `failure.json` and `failure.png`. These checks prove Milim's normalized event, session, approval, queue, and desktop interaction contracts; they require no credentials, make no paid or live completion calls, do not change authentication state, and do not establish live third-party compatibility.
+`v*` tags and manual Release runs produce a Windows-only `runtime-evidence-windows` artifact. Successful runs contain `runtime-conformance.json`, `canonical-thread.json`, and benchmark screenshots from deterministic, mock-backed scenarios; a benchmark failure adds `failure.json` and `failure.png`. Runtime conformance checks the generated `/control/v1` contract, v5 migration, ledger atomicity and privacy, durable inbox lifecycle, tool execution bounds, runtime adapters, and the quiet desktop run-details rendering. These checks require no credentials, make no paid or live completion calls, do not change authentication state, and do not establish live third-party compatibility.
+
+Two integration tests provide explicit, self-skipping live proof. Set `MILIM_REAL_HARNESS_SMOKE=1` with `MILIM_REAL_HARNESS_BASE_URL`, `MILIM_REAL_HARNESS_API_KEY`, and `MILIM_REAL_HARNESS_MODEL`; optionally set `MILIM_REAL_HARNESS_KIND` to `anthropic` or `gemini` instead of the default `openai_compatible`. The test submits a real turn through `/control/v1`, waits through the authenticated inspection route, and verifies request/response ledger events without exposing the key. Set `MILIM_REAL_ACCOUNT_RUNTIME_SMOKE=1` plus one or more of `MILIM_REAL_CODEX_SMOKE_MODEL`, `MILIM_REAL_CLAUDE_SMOKE_MODEL`, `MILIM_REAL_OPENCODE_SMOKE_MODEL`, and `MILIM_REAL_PI_SMOKE_MODEL` to exercise installed, already-authenticated account CLIs and verify their `harness_boundary` journals. These tests return immediately unless their opt-in flag is set; enabled runs may incur provider usage.
 
 The canonical benchmark builds and launches a Windows Tauri/WebView2 binary. Its timing measurements are advisory and have no pass/fail budgets; functional assertions, invalid layout, console errors, and missing evidence still fail the job.
 

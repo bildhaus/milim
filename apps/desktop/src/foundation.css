@@ -460,6 +460,57 @@ textarea,
   .workers-history { border-right: 0; border-bottom: 1px solid var(--border-primary); }
 }
 
+.pane-resize-handle {
+  position: relative;
+  z-index: 5;
+  flex: none;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  touch-action: none;
+}
+.pane-resize-handle-vertical {
+  width: var(--pane-resize-target);
+  min-width: var(--pane-resize-target);
+  cursor: col-resize;
+}
+.pane-resize-handle-horizontal {
+  height: var(--pane-resize-target);
+  min-height: var(--pane-resize-target);
+  cursor: ns-resize;
+}
+.pane-resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: var(--pane-resize-indicator-thickness);
+  height: var(--pane-resize-indicator-length);
+  border-radius: 999px;
+  background: var(--border-secondary);
+  opacity: 0.55;
+  transform: translate(-50%, -50%);
+  transition: opacity 0.15s, background 0.15s, width 0.15s, height 0.15s;
+}
+.pane-resize-handle-horizontal::after {
+  width: var(--pane-resize-indicator-length);
+  height: var(--pane-resize-indicator-thickness);
+}
+.pane-resize-handle:hover::after,
+.pane-resize-handle:focus-visible::after,
+.pane-resize-handle.dragging::after {
+  height: var(--pane-resize-indicator-active-length);
+  background: var(--accent);
+  opacity: 1;
+}
+.pane-resize-handle-horizontal:hover::after,
+.pane-resize-handle-horizontal:focus-visible::after,
+.pane-resize-handle-horizontal.dragging::after {
+  width: var(--pane-resize-indicator-active-length);
+  height: var(--pane-resize-indicator-thickness);
+}
+
 button { font-family: inherit; }
 .hover-scroll-text {
   display: block;
@@ -507,6 +558,11 @@ body.sidebar-pointer-dragging .session-section-title {
 :root {
   --titlebar-height: 44px;
   --chat-content-width: 760px;
+  --pane-resize-target: 12px;
+  --pane-resize-half-target: 6px;
+  --pane-resize-indicator-thickness: 2px;
+  --pane-resize-indicator-length: 42px;
+  --pane-resize-indicator-active-length: 64px;
   --motion-fast: 120ms;
   --motion-standard: 180ms;
   --motion-ease-out: cubic-bezier(0.16, 1, 0.3, 1);

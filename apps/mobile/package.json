@@ -1,6 +1,6 @@
 {
   "name": "milim-mobile",
-  "version": "0.2.33",
+  "version": "0.2.36",
   "private": true,
   "scripts": {
     "android": "react-native run-android",
@@ -9,7 +9,8 @@
     "start": "react-native start",
     "test": "jest --runInBand",
     "typecheck": "tsc --noEmit",
-    "verify": "pnpm typecheck && pnpm test && pnpm lint"
+    "verify:control-contract": "cargo run --quiet --manifest-path ../../crates/milim-control-contract/Cargo.toml --bin generate-control-contract -- --check",
+    "verify": "pnpm verify:control-contract && pnpm typecheck && pnpm test && pnpm lint"
   },
   "dependencies": {
     "@op-engineering/op-sqlite": "18.0.0",

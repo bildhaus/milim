@@ -1,14 +1,20 @@
 import {useCallback, useEffect, useRef, useState} from 'react';
-import {AppState, type AppStateStatus} from 'react-native';
+import {AppState, Platform, type AppStateStatus} from 'react-native';
 import {
   cleanupAppearanceBackgrounds,
   fetchAppearanceBackground,
 } from '../appearance';
 import {
+  cancelPairingRequest,
   claimPairing,
+  claimPairingRequest,
   connectControlSocket,
+  createPairingRequest,
   fetchBootstrap,
   fetchMobileHostProbe,
+  fetchPairingRequestStatus,
+  fetchRunEvents,
+  fetchRunInspection,
   fetchTimeline,
   newCommandId,
   normalizeEndpoint,
@@ -17,6 +23,7 @@ import {
 import {
   applyControlEvent,
   applyTimelinePage,
+  controlEventInvalidatesBootstrap,
   emptyReplica,
   type TimelineReplica,
 } from '../control/replica';
@@ -28,7 +35,10 @@ import type {
   SavedHost,
 } from '../control/types';
 import {isProtocolCompatible} from '../control/types';
+import type {RunEventPageV1, RunInspectionV1} from '../control/generated-v1';
 import {discoverMilimHosts} from '../discovery';
+import type {DiscoveredHost} from '../discovery';
+import {friendlyConnectionError} from '../mobileUi';
 import {assertHostIdentity, parsePairingClaim} from '../pairing';
 import {
   listHosts,
@@ -46,6 +56,31 @@ import {
 } from '../storage/secure';
 
 export type ConnectionStatus = 'offline' | 'connecting' | 'online' | 'incompatible';
+export type NearbyPairingStage = 'requesting' | 'waiting' | 'connecting';
+
+function pairingCancelledError(): Error {
+  const error = new Error('Pairing cancelled.');
+  error.name = 'AbortError';
+  return error;
+}
+
+function waitForPairingPoll(signal: AbortSignal, timeoutMs = 900): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(pairingCancelledError());
+      return;
+    }
+    const timeout = setTimeout(done, timeoutMs);
+    const onAbort = () => done(pairingCancelledError());
+    function done(error?: Error) {
+      clearTimeout(timeout);
+      signal.removeEventListener('abort', onAbort);
+      if (error) reject(error);
+      else resolve();
+    }
+    signal.addEventListener('abort', onAbort, {once: true});
+  });
+}
 
 function pageFromReplica(replica: TimelineReplica) {
   const items = replica.items.slice(-150);
@@ -71,6 +106,7 @@ export function useMilimController() {
   const [draft, setDraftState] = useState('');
   const [status, setStatus] = useState<ConnectionStatus>('offline');
   const [lastError, setLastError] = useState<string | null>(null);
+  const [connectionRevision, setConnectionRevision] = useState(0);
   const [pendingRetry, setPendingRetry] = useState<ControlCommandV1 | null>(null);
   const [appearanceBackgroundUri, setAppearanceBackgroundUri] = useState<string | null>(null);
   const [appState, setAppState] = useState<AppStateStatus>(
@@ -236,29 +272,29 @@ export function useMilimController() {
               timelineRef.current = next;
               setTimeline(next);
             }
-            if (
-              event.type.startsWith('thread.') ||
-              event.type.startsWith('run.') ||
-              event.type.startsWith('turn.') ||
-              event.type.startsWith('approval_') ||
-              event.type.startsWith('worker.') ||
-              event.type === 'appearance.updated' ||
-              event.type === 'timeline.appended' ||
-              event.type === 'sync.required'
-            ) {
+            if (controlEventInvalidatesBootstrap(event.type)) {
               if (bootstrapRefreshTimer.current) clearTimeout(bootstrapRefreshTimer.current);
               bootstrapRefreshTimer.current = setTimeout(() => void refreshBootstrap(), 120);
             }
           },
           () => {
-            if (!cancelled && AppState.currentState === 'active') setStatus('offline');
+            if (!cancelled && AppState.currentState === 'active') {
+              setStatus('offline');
+              setLastError(friendlyConnectionError(
+                [endpoint],
+                new Error('The connection closed unexpectedly.'),
+              ));
+            }
           },
         );
       })
       .catch(error => {
         if (!cancelled) {
           setStatus('offline');
-          setLastError(error instanceof Error ? error.message : String(error));
+          setLastError(friendlyConnectionError(
+            [host.lastSuccessfulUrl, ...host.candidates],
+            error,
+          ));
         }
       });
     return () => {
@@ -266,7 +302,12 @@ export function useMilimController() {
       socket.current?.close();
       socket.current = null;
     };
-  }, [activeHost?.hostId, appState, rememberHost, refreshBootstrap, tryBootstrap]);
+  }, [activeHost?.hostId, appState, connectionRevision, rememberHost, refreshBootstrap, tryBootstrap]);
+
+  const reconnect = useCallback(() => {
+    setLastError(null);
+    setConnectionRevision(current => current + 1);
+  }, []);
 
   useEffect(() => {
     const host = activeHostRef.current;
@@ -343,6 +384,32 @@ export function useMilimController() {
     [hosts],
   );
 
+  const finishPairing = useCallback(
+    async (endpoint: string, hostId: string, paired: {device_key: string}) => {
+      const result = await fetchBootstrap(endpoint, paired.device_key);
+      assertHostIdentity(hostId, result.host_id);
+      if (!isProtocolCompatible(result.protocol)) {
+        throw new Error(
+          `Desktop protocol ${result.protocol.min}-${result.protocol.max} is not compatible with mobile v1.`,
+        );
+      }
+      await saveDeviceCredential(result.host_id, paired.device_key);
+      credential.current = paired.device_key;
+      const host: SavedHost = {
+        hostId: result.host_id,
+        displayName: result.host_name,
+        protocol: result.protocol,
+        candidates: [endpoint],
+        lastSuccessfulUrl: endpoint,
+        lastConnectedAt: Date.now(),
+      };
+      await rememberHost(host);
+      setBootstrap(result);
+      return host;
+    },
+    [rememberHost],
+  );
+
   const pair = useCallback(
     async (rawClaim: string, deviceName: string) => {
       const claim = parsePairingClaim(rawClaim);
@@ -378,28 +445,72 @@ export function useMilimController() {
         );
       }
       const paired = await claimPairing(endpoint, claim.pairId, claim.secret, deviceName);
-      const result = await fetchBootstrap(endpoint, paired.device_key);
-      assertHostIdentity(claim.hostId, result.host_id);
-      if (!isProtocolCompatible(result.protocol)) {
-        throw new Error(
-          `Desktop protocol ${result.protocol.min}-${result.protocol.max} is not compatible with mobile v1.`,
-        );
-      }
-      await saveDeviceCredential(result.host_id, paired.device_key);
-      credential.current = paired.device_key;
-      const host: SavedHost = {
-        hostId: result.host_id,
-        displayName: result.host_name,
-        protocol: result.protocol,
-        candidates: [endpoint],
-        lastSuccessfulUrl: endpoint,
-        lastConnectedAt: Date.now(),
-      };
-      await rememberHost(host);
-      setBootstrap(result);
-      return host;
+      return finishPairing(endpoint, claim.hostId, paired);
     },
-    [rememberHost],
+    [finishPairing],
+  );
+
+  const pairNearby = useCallback(
+    async (
+      discoveredHost: DiscoveredHost,
+      deviceName: string,
+      signal: AbortSignal,
+      onStage: (stage: NearbyPairingStage) => void,
+    ) => {
+      const endpoint = normalizeEndpoint(discoveredHost.endpoint);
+      onStage('requesting');
+      const probe = await fetchMobileHostProbe(endpoint, signal);
+      if (probe.service !== 'milim-mobile-control') {
+        throw new Error('This address is not a milim desktop.');
+      }
+      if (discoveredHost.hostId) assertHostIdentity(discoveredHost.hostId, probe.host_id);
+      const request = await createPairingRequest(
+        endpoint,
+        deviceName,
+        Platform.OS === 'ios' ? 'ios' : 'android',
+        signal,
+      );
+      let claimed = false;
+      try {
+        onStage('waiting');
+        while (!signal.aborted) {
+          const requestStatus = await fetchPairingRequestStatus(
+            endpoint,
+            request.request_id,
+            request.request_key,
+            signal,
+          );
+          if (requestStatus.status === 'denied') {
+            throw new Error('Connection declined on the desktop.');
+          }
+          if (requestStatus.status === 'approved' || requestStatus.status === 'paired') {
+            onStage('connecting');
+            const paired = await claimPairingRequest(
+              endpoint,
+              request.request_id,
+              request.request_key,
+              signal,
+            );
+            claimed = true;
+            return await finishPairing(endpoint, probe.host_id, paired);
+          }
+          if (Date.now() >= requestStatus.expires_at * 1000) {
+            throw new Error('The desktop did not approve this request in time. Try again.');
+          }
+          await waitForPairingPoll(signal);
+        }
+        throw pairingCancelledError();
+      } finally {
+        if (!claimed) {
+          void cancelPairingRequest(
+            endpoint,
+            request.request_id,
+            request.request_key,
+          ).catch(() => {});
+        }
+      }
+    },
+    [finishPairing],
   );
 
   const addManualHostCandidate = useCallback(
@@ -492,6 +603,30 @@ export function useMilimController() {
     return execute(pendingRetry);
   }, [execute, pendingRetry]);
 
+  const loadRunDetails = useCallback(
+    async (runId: string): Promise<{inspection: RunInspectionV1; events: RunEventPageV1}> => {
+      if (!activeHost?.lastSuccessfulUrl || !credential.current || status !== 'online') {
+        throw new Error('Reconnect to the desktop to inspect this run.');
+      }
+      const [inspection, events] = await Promise.all([
+        fetchRunInspection(activeHost.lastSuccessfulUrl, credential.current, runId),
+        fetchRunEvents(activeHost.lastSuccessfulUrl, credential.current, runId),
+      ]);
+      return {inspection, events};
+    },
+    [activeHost, status],
+  );
+
+  const loadMoreRunEvents = useCallback(
+    async (runId: string, afterSeq: number): Promise<RunEventPageV1> => {
+      if (!activeHost?.lastSuccessfulUrl || !credential.current || status !== 'online') {
+        throw new Error('Reconnect to the desktop to inspect this run.');
+      }
+      return fetchRunEvents(activeHost.lastSuccessfulUrl, credential.current, runId, afterSeq);
+    },
+    [activeHost, status],
+  );
+
   return {
     hosts,
     activeHost,
@@ -506,13 +641,17 @@ export function useMilimController() {
     setActiveHost,
     setSelectedThreadId,
     setDraft,
+    reconnect,
     pair,
+    pairNearby,
     addManualHostCandidate,
     removeHost,
     refreshBootstrap,
     refreshTimeline,
     execute,
     command,
+    loadRunDetails,
+    loadMoreRunEvents,
     retryPendingCommand,
   };
 }

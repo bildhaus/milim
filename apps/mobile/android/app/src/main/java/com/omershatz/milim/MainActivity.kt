@@ -1,4 +1,4 @@
-package com.milim.mobile
+package com.omershatz.milim
 
 import com.facebook.react.ReactActivity
 import com.facebook.react.ReactActivityDelegate

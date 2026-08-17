@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/milim-core",
+    "crates/milim-control-contract",
     "crates/milim-inference",
     "crates/milim-server",
     "crates/milim-storage",
@@ -18,7 +19,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.35"
+version = "0.2.36"
 edition = "2021"
 license = "MIT"
 authors = ["Omer Shatzberg <omershatzberg@gmail.com>"]
@@ -54,6 +55,7 @@ sha2 = "0.10"
 
 # internal crates
 milim-core = { path = "crates/milim-core" }
+milim-control-contract = { path = "crates/milim-control-contract" }
 milim-inference = { path = "crates/milim-inference" }
 milim-server = { path = "crates/milim-server" }
 milim-storage = { path = "crates/milim-storage" }

@@ -24,7 +24,7 @@ use tokio::sync::{oneshot, Mutex};
 use milim_core::proc::ProcessTreeGuard;
 use milim_core::{Error, Result};
 use milim_storage::{create_private_file, EncryptedStore};
-use milim_tools::{atomic_write, Tool, ToolEffect, ToolUiDescriptor};
+use milim_tools::{atomic_write, ProcessEnvironmentPolicy, Tool, ToolEffect, ToolUiDescriptor};
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 
@@ -674,6 +674,41 @@ pub struct McpTool {
     ui: Option<ToolUiDescriptor>,
 }
 
+struct McpAppCallTool {
+    client: Arc<McpClient>,
+    name: String,
+    description: String,
+    schema: Value,
+    effect: ToolEffect,
+}
+
+#[async_trait]
+impl Tool for McpAppCallTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    fn input_schema(&self) -> Value {
+        self.schema.clone()
+    }
+
+    fn effect(&self) -> ToolEffect {
+        self.effect
+    }
+
+    fn environment_policy(&self) -> ProcessEnvironmentPolicy {
+        ProcessEnvironmentPolicy::ConfiguredIntegrationSanitized
+    }
+
+    async fn invoke(&self, args: Value) -> Result<Value> {
+        self.client.call_tool(&self.name, args).await
+    }
+}
+
 #[async_trait]
 impl Tool for McpTool {
     fn name(&self) -> &str {
@@ -687,6 +722,9 @@ impl Tool for McpTool {
     }
     fn effect(&self) -> ToolEffect {
         self.effect
+    }
+    fn environment_policy(&self) -> ProcessEnvironmentPolicy {
+        ProcessEnvironmentPolicy::ConfiguredIntegrationSanitized
     }
     fn ui(&self) -> Option<ToolUiDescriptor> {
         self.ui.clone()
@@ -735,6 +773,10 @@ impl Tool for McpListResourcesTool {
         ToolEffect::ReadOnly
     }
 
+    fn environment_policy(&self) -> ProcessEnvironmentPolicy {
+        ProcessEnvironmentPolicy::ConfiguredIntegrationSanitized
+    }
+
     async fn invoke(&self, _args: Value) -> Result<Value> {
         let resources = self.client.list_resources().await?;
         let resource_templates = self.client.list_resource_templates().await?;
@@ -770,6 +812,10 @@ impl Tool for McpReadResourceTool {
         ToolEffect::ReadOnly
     }
 
+    fn environment_policy(&self) -> ProcessEnvironmentPolicy {
+        ProcessEnvironmentPolicy::ConfiguredIntegrationSanitized
+    }
+
     async fn invoke(&self, args: Value) -> Result<Value> {
         let uri = args
             .get("uri")
@@ -800,6 +846,10 @@ impl Tool for McpListPromptsTool {
 
     fn effect(&self) -> ToolEffect {
         ToolEffect::ReadOnly
+    }
+
+    fn environment_policy(&self) -> ProcessEnvironmentPolicy {
+        ProcessEnvironmentPolicy::ConfiguredIntegrationSanitized
     }
 
     async fn invoke(&self, _args: Value) -> Result<Value> {
@@ -836,6 +886,10 @@ impl Tool for McpGetPromptTool {
 
     fn effect(&self) -> ToolEffect {
         ToolEffect::ReadOnly
+    }
+
+    fn environment_policy(&self) -> ProcessEnvironmentPolicy {
+        ProcessEnvironmentPolicy::ConfiguredIntegrationSanitized
     }
 
     async fn invoke(&self, args: Value) -> Result<Value> {
@@ -1353,6 +1407,20 @@ impl McpHub {
             .cloned()
     }
 
+    /// One fixed-server MCP App tool for the central execution pipeline.
+    pub fn app_tool_proxy(&self, server_id: &str, name: &str) -> Result<Arc<dyn Tool>> {
+        let definition = self.app_tool(server_id, name).ok_or_else(|| {
+            Error::InvalidRequest(format!("tool is not app-visible on MCP server: {name}"))
+        })?;
+        Ok(Arc::new(McpAppCallTool {
+            client: self.app_client(server_id)?,
+            name: definition.name,
+            description: definition.description,
+            schema: definition.input_schema,
+            effect: definition.effect,
+        }))
+    }
+
     /// Call an app-visible tool on its originating server connection.
     pub async fn call_app_tool(
         &self,
@@ -1624,6 +1692,14 @@ mod tests {
             .unwrap()
             .name()
             .to_string();
+        assert_eq!(
+            tools
+                .iter()
+                .find(|tool| tool.name() == chart_name)
+                .unwrap()
+                .environment_policy(),
+            ProcessEnvironmentPolicy::ConfiguredIntegrationSanitized
+        );
         let generic = registry.call(&chart_name, json!({})).await.unwrap();
         assert!(generic.get("structuredContent").is_some());
         assert!(generic.get("image").is_some());
@@ -1740,6 +1816,44 @@ mod tests {
             client.call_tool("echo", json!({})).await.unwrap()["content"][0]["text"],
             "ok"
         );
+    }
+
+    #[tokio::test]
+    async fn configured_mcp_environment_excludes_host_credentials_and_keeps_explicit_grants() {
+        if std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let host_key = format!("MILIM_MCP_HOST_SECRET_{}", std::process::id());
+        let host_value = "must-not-cross-mcp-boundary";
+        std::env::set_var(&host_key, host_value);
+        let script = r#"const readline=require('readline');const rl=readline.createInterface({input:process.stdin});function send(id,result){process.stdout.write(JSON.stringify({jsonrpc:'2.0',id,result})+'\n')}rl.on('line',line=>{const m=JSON.parse(line);if(m.method==='initialize')return send(m.id,{protocolVersion:'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'env-proof',version:'1'}});if(m.method==='tools/list')return send(m.id,{tools:[{name:'environment',description:'environment proof',inputSchema:{type:'object'}}]});if(m.method==='tools/call')return send(m.id,{content:[{type:'text',text:JSON.stringify({host:process.env[process.env.MILIM_PROBE_KEY]??null,grant:process.env.MCP_EXPLICIT_GRANT??null,path:Boolean(process.env.PATH||process.env.Path)})}]})});"#;
+        let env = HashMap::from([
+            ("MILIM_PROBE_KEY".to_string(), host_key.clone()),
+            (
+                "MCP_EXPLICIT_GRANT".to_string(),
+                "configured-value".to_string(),
+            ),
+        ]);
+        let client = McpClient::connect_with_env(
+            "node",
+            &["-e".to_string(), script.to_string()],
+            None,
+            &env,
+        )
+        .await
+        .unwrap();
+        let result = client.call_tool("environment", json!({})).await.unwrap();
+        std::env::remove_var(&host_key);
+        let proof: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(proof["host"], Value::Null);
+        assert_eq!(proof["grant"], "configured-value");
+        assert_eq!(proof["path"], true);
+        assert!(!serde_json::to_string(&result).unwrap().contains(host_value));
     }
 
     #[tokio::test]

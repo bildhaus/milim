@@ -530,6 +530,7 @@ function MessageRowView({
                 workDurationMs={m.metrics?.durationMs}
                 toolApproval={toolApproval}
                 workspaceFolder={workspaceFolder}
+                runDetailsRunId={m.ledgerVersion === 1 ? m.runId : undefined}
               />
             )}
             {renderMessageMedia(m.mediaResults)}

@@ -53,6 +53,7 @@ import {
   X,
 } from "./icons";
 import { SheetDialog } from "./SheetDialog";
+import { PaneResizeHandle } from "./PaneResizeHandle";
 
 const Markdown = lazy(() =>
   import("./Markdown").then((module) => ({ default: module.Markdown })),
@@ -144,6 +145,7 @@ export function PullRequestsManager({ onClose }: { onClose: () => void }) {
   const [reviewBody, setReviewBody] = useState("");
   const [mergeMethod, setMergeMethod] = useState<MergeMethod | null>(null);
   const [actionBusy, setActionBusy] = useState<WorkspaceGitAction | null>(null);
+  const [dividerResizing, setDividerResizing] = useState(false);
   const resizeCleanupRef = useRef<(() => void) | null>(null);
   const dividerCleanupRef = useRef<(() => void) | null>(null);
   const detailsRequestsRef = useRef(new Set<string>());
@@ -451,6 +453,7 @@ export function PullRequestsManager({ onClose }: { onClose: () => void }) {
       window.removeEventListener("pointerup", onPointerUp);
       window.removeEventListener("pointercancel", cleanup);
       document.body.classList.remove("pull-requests-divider-resizing");
+      setDividerResizing(false);
       dividerCleanupRef.current = null;
     };
     const onPointerMove = (moveEvent: PointerEvent) => {
@@ -462,6 +465,7 @@ export function PullRequestsManager({ onClose }: { onClose: () => void }) {
       setSavedListWidth(latest);
     };
     dividerCleanupRef.current = cleanup;
+    setDividerResizing(true);
     document.body.classList.add("pull-requests-divider-resizing");
     window.addEventListener("pointermove", onPointerMove);
     window.addEventListener("pointerup", onPointerUp);
@@ -485,7 +489,7 @@ export function PullRequestsManager({ onClose }: { onClose: () => void }) {
 
   const resolvedListWidth = Math.min(
     listWidth,
-    Math.max(MIN_PULL_REQUESTS_LIST_WIDTH, size.width - 327),
+    Math.max(MIN_PULL_REQUESTS_LIST_WIDTH, size.width - 320),
   );
   const sheetStyle = {
     width: size.width,
@@ -611,13 +615,11 @@ export function PullRequestsManager({ onClose }: { onClose: () => void }) {
           </div>
         </aside>
 
-        <div
-          className="pull-requests-divider"
+        <PaneResizeHandle
+          className={`pull-requests-divider${dividerResizing ? " dragging" : ""}`}
+          orientation="vertical"
           data-testid="pull-requests-divider"
-          role="separator"
-          tabIndex={0}
           aria-label="Resize pull request list"
-          aria-orientation="vertical"
           aria-valuemin={MIN_PULL_REQUESTS_LIST_WIDTH}
           aria-valuenow={resolvedListWidth}
           title="Drag to resize the pull request list"

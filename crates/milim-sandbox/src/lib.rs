@@ -145,37 +145,7 @@ impl DockerBackend {
             std::process::id(),
             NEXT_CONTAINER.fetch_add(1, Ordering::Relaxed)
         );
-        let mut args: Vec<String> = vec![
-            "run".into(),
-            "--rm".into(),
-            "--name".into(),
-            container_name.clone(),
-            "--pids-limit".into(),
-            "128".into(),
-            "--cpus".into(),
-            "1".into(),
-            "--read-only".into(),
-            "--cap-drop".into(),
-            "ALL".into(),
-            "--security-opt".into(),
-            "no-new-privileges".into(),
-            "--tmpfs".into(),
-            "/tmp:rw,noexec,nosuid,size=64m".into(),
-        ];
-        if !opts.network {
-            args.push("--network".into());
-            args.push("none".into());
-        }
-        if let Some(mem) = &opts.memory {
-            args.push("--memory".into());
-            args.push(mem.clone());
-        }
-        if let Some(dir) = &opts.workdir {
-            args.push("--workdir".into());
-            args.push(dir.clone());
-        }
-        args.push(image.to_string());
-        args.extend(command.iter().cloned());
+        let args = docker_run_args(&container_name, image, command, opts);
 
         let mut cmd = Command::new(&self.docker_bin);
         cmd.args(&args)
@@ -238,6 +208,46 @@ impl DockerBackend {
             exit_code: status.code(),
         })
     }
+}
+
+fn docker_run_args(
+    container_name: &str,
+    image: &str,
+    command: &[String],
+    opts: &RunOpts,
+) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "run".into(),
+        "--rm".into(),
+        "--name".into(),
+        container_name.into(),
+        "--pids-limit".into(),
+        "128".into(),
+        "--cpus".into(),
+        "1".into(),
+        "--read-only".into(),
+        "--cap-drop".into(),
+        "ALL".into(),
+        "--security-opt".into(),
+        "no-new-privileges".into(),
+        "--tmpfs".into(),
+        "/tmp:rw,noexec,nosuid,size=64m".into(),
+    ];
+    if !opts.network {
+        args.push("--network".into());
+        args.push("none".into());
+    }
+    if let Some(mem) = &opts.memory {
+        args.push("--memory".into());
+        args.push(mem.clone());
+    }
+    if let Some(dir) = &opts.workdir {
+        args.push("--workdir".into());
+        args.push(dir.clone());
+    }
+    args.push(image.to_string());
+    args.extend(command.iter().cloned());
+    args
 }
 
 async fn read_bounded<R>(mut reader: R, limit: usize) -> Result<(Vec<u8>, bool)>
@@ -306,6 +316,27 @@ mod tests {
         let o = RunOpts::default();
         assert!(!o.network);
         assert_eq!(o.memory.as_deref(), Some("512m"));
+    }
+
+    #[test]
+    fn sandbox_payload_does_not_forward_host_environment() {
+        let key = format!("MILIM_SANDBOX_HOST_SECRET_{}", std::process::id());
+        let value = "must-not-cross-container-boundary";
+        std::env::set_var(&key, value);
+        let args = docker_run_args(
+            "milim-sandbox-proof",
+            "alpine",
+            &["env".into()],
+            &RunOpts::default(),
+        );
+        std::env::remove_var(&key);
+        assert!(!args
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "-e" | "--env" | "--env-file")));
+        assert!(!args
+            .iter()
+            .any(|arg| arg.contains(&key) || arg.contains(value)));
+        assert!(args.windows(2).any(|pair| pair == ["--network", "none"]));
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-package com.milim.mobile
+package com.omershatz.milim
 
 import android.app.Application
 import com.facebook.react.PackageList

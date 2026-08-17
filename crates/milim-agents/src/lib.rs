@@ -28,14 +28,17 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use milim_core::api::openai::{
-    ChatMessage, Content, ContentPart, ImageUrl, ReasoningEffort, Tool, ToolFunction, Usage,
+    ChatMessage, Content, ContentPart, ImageUrl, ReasoningEffort, Tool, ToolCall, ToolFunction,
+    Usage,
 };
 use milim_core::{Error, Result};
 use milim_inference::{
     CompletionRequest, EventStream, ModelService, SamplingParams, SharedService, StreamEvent,
     ToolCallAccumulator,
 };
-use milim_tools::{ToolEffect, ToolRegistry, ToolUiDescriptor};
+use milim_tools::{
+    ProcessEnvironmentPolicy, ToolEffect, ToolExecutionSpec, ToolRegistry, ToolUiDescriptor,
+};
 
 const DEFAULT_AGENT_MAX_ITERATIONS: usize = 100;
 const DEFAULT_INITIAL_STREAM_RETRY_BACKOFF_MS: u64 = 250;
@@ -52,6 +55,9 @@ pub struct AgentRunConfig {
     pub initial_stream_retry_backoff: Duration,
     /// Interactive approval broker for consequential streamed tool calls.
     pub approval_broker: Option<Arc<ToolApprovalBroker>>,
+    /// Durable boundary hook. A failed commit aborts the loop before another
+    /// provider request can leave Milim.
+    pub step_hook: Option<Arc<dyn AgentStepHook>>,
 }
 
 impl Default for AgentRunConfig {
@@ -62,8 +68,39 @@ impl Default for AgentRunConfig {
                 DEFAULT_INITIAL_STREAM_RETRY_BACKOFF_MS,
             ),
             approval_broker: None,
+            step_hook: None,
         }
     }
+}
+
+#[async_trait::async_trait]
+pub trait AgentStepHook: std::fmt::Debug + Send + Sync {
+    async fn commit_tool_catalog(&self, _tools: &[ToolExecutionSpec]) -> Result<()> {
+        Ok(())
+    }
+
+    async fn prepare_model_step(&self, step: usize, messages: &mut Vec<ChatMessage>) -> Result<()>;
+
+    async fn commit_model_request(&self, step: usize, request: &CompletionRequest) -> Result<()>;
+
+    async fn commit_model_response(
+        &self,
+        step: usize,
+        content: &str,
+        reasoning: &str,
+        tool_calls: &[ToolCall],
+        finish_reason: &str,
+        usage: Usage,
+    ) -> Result<()>;
+
+    async fn commit_tool_result(
+        &self,
+        step: usize,
+        call_id: Option<&str>,
+        name: &str,
+        result: &Value,
+        model_content: &str,
+    ) -> Result<()>;
 }
 
 #[derive(Debug)]
@@ -694,6 +731,7 @@ pub enum AgentEvent {
         name: String,
         arguments: String,
         effect: ToolEffect,
+        environment_policy: ProcessEnvironmentPolicy,
     },
     ToolApprovalResolved {
         approval_id: String,
@@ -793,10 +831,24 @@ pub fn run_agent_stream_with_config(
         let mut messages = messages;
         let mut total_usage = Usage::default();
 
+        if let Some(hook) = config.step_hook.as_ref() {
+            if let Err(e) = hook.commit_tool_catalog(&tools.execution_specs()).await {
+                yield AgentEvent::Error { message: e.to_string() };
+                return;
+            }
+        }
+
         yield AgentEvent::Start { model: model.clone() };
 
         let mut iteration = 0;
         loop {
+            let step = iteration + 1;
+            if let Some(hook) = config.step_hook.as_ref() {
+                if let Err(e) = hook.prepare_model_step(step, &mut messages).await {
+                    yield AgentEvent::Error { message: e.to_string() };
+                    return;
+                }
+            }
             let req = CompletionRequest {
                 model: model.clone(),
                 messages: messages.clone(),
@@ -808,6 +860,12 @@ pub fn run_agent_stream_with_config(
                 sampling: SamplingParams::default(),
                 reasoning_effort,
             };
+            if let Some(hook) = config.step_hook.as_ref() {
+                if let Err(e) = hook.commit_model_request(step, &req).await {
+                    yield AgentEvent::Error { message: e.to_string() };
+                    return;
+                }
+            }
             let mut stream = match stream_with_initial_retry(&service, req, retry_backoff).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -818,6 +876,8 @@ pub fn run_agent_stream_with_config(
 
             let mut content = String::new();
             let mut reasoning = String::new();
+            let mut step_usage = Usage::default();
+            let mut finish_reason = "stream_ended".to_string();
             let mut tool_acc = ToolCallAccumulator::default();
             while let Some(ev) = stream.next().await {
                 match ev {
@@ -834,7 +894,9 @@ pub fn run_agent_stream_with_config(
                             tool_acc.push(tc);
                         }
                     }
-                    Ok(StreamEvent::Done { usage, .. }) => {
+                    Ok(StreamEvent::Done { usage, finish_reason: reason }) => {
+                        step_usage = usage;
+                        finish_reason = reason;
                         add_usage(&mut total_usage, usage);
                         yield AgentEvent::UsageDelta { usage };
                     }
@@ -847,6 +909,22 @@ pub fn run_agent_stream_with_config(
             iteration += 1;
 
             let calls = tool_acc.finish();
+            if let Some(hook) = config.step_hook.as_ref() {
+                if let Err(e) = hook
+                    .commit_model_response(
+                        step,
+                        &content,
+                        &reasoning,
+                        &calls,
+                        &finish_reason,
+                        step_usage,
+                    )
+                    .await
+                {
+                    yield AgentEvent::Error { message: e.to_string() };
+                    return;
+                }
+            }
             if calls.is_empty() {
                 yield AgentEvent::Final { content };
                 yield AgentEvent::Done { iterations: iteration, stopped_at_limit: false, usage: total_usage };
@@ -870,6 +948,7 @@ pub fn run_agent_stream_with_config(
             });
 
             let mut pending_images: Vec<ChatMessage> = Vec::new();
+            let mut prepared_calls = Vec::new();
             for call in calls {
                 yield AgentEvent::ToolCall {
                     call_id: call.id.clone(),
@@ -878,6 +957,9 @@ pub fn run_agent_stream_with_config(
                     mcp_app: tools.ui(&call.function.name),
                 };
                 let effect = tools.effect(&call.function.name).unwrap_or(ToolEffect::Unknown);
+                let environment_policy = tools
+                    .environment_policy(&call.function.name)
+                    .unwrap_or(ProcessEnvironmentPolicy::HostShellInherited);
                 let approved = if effect != ToolEffect::ReadOnly {
                     if let Some(broker) = config.approval_broker.as_ref() {
                         let mut pending = broker.request();
@@ -887,6 +969,7 @@ pub fn run_agent_stream_with_config(
                             name: call.function.name.clone(),
                             arguments: call.function.arguments.clone(),
                             effect,
+                            environment_policy,
                         };
                         let approved = pending.wait().await.approved;
                         let _ = pending.deliver();
@@ -903,17 +986,50 @@ pub fn run_agent_stream_with_config(
                 } else {
                     true
                 };
-                let executed = if approved {
-                    execute_tool_call(
-                        tools.as_ref(),
-                        &call.function.name,
-                        &call.function.arguments,
-                    )
-                    .await
-                } else {
-                    denied_tool_call(tools.as_ref(), &call.function.name)
-                };
+                prepared_calls.push((call, approved));
+            }
+            // Calls enter the fixed registry pipeline in model order. The
+            // pipeline's fair exclusive barriers prevent mutating/command/MCP
+            // calls from overlapping, while explicitly parallel-safe reads
+            // can use at most four slots. `buffered` preserves result order
+            // and one failure remains an independent model-visible result.
+            let executions = futures::stream::iter(prepared_calls.into_iter().map(|(call, approved)| {
+                let tools = tools.clone();
+                async move {
+                    let executed = if approved {
+                        execute_tool_call(
+                            tools.as_ref(),
+                            &call.function.name,
+                            &call.function.arguments,
+                        )
+                        .await
+                    } else {
+                        denied_tool_call(tools.as_ref(), &call.function.name)
+                    };
+                    (call, executed)
+                }
+            }))
+            .buffered(4)
+            .collect::<Vec<_>>()
+            .await;
+            for (call, executed) in executions {
                 let visible = executed.visible;
+                let model_content = tool_replay_content(&visible);
+                if let Some(hook) = config.step_hook.as_ref() {
+                    if let Err(e) = hook
+                        .commit_tool_result(
+                            step,
+                            call.id.as_deref(),
+                            &call.function.name,
+                            &visible,
+                            &model_content,
+                        )
+                        .await
+                    {
+                        yield AgentEvent::Error { message: e.to_string() };
+                        return;
+                    }
+                }
                 yield AgentEvent::ToolResult {
                     call_id: call.id.clone(),
                     name: call.function.name.clone(),
@@ -937,7 +1053,7 @@ pub fn run_agent_stream_with_config(
                 }
                 messages.push(ChatMessage {
                     role: "tool".to_string(),
-                    content: Some(Content::Text(tool_replay_content(&visible))),
+                    content: Some(Content::Text(model_content)),
                     name: None,
                     tool_calls: None,
                     tool_call_id: call.id.clone(),
@@ -1306,6 +1422,189 @@ mod tests {
         attempts: Arc<AtomicUsize>,
     }
 
+    struct CountingBackend {
+        calls: Arc<AtomicUsize>,
+    }
+
+    struct OrderedToolsBackend {
+        calls: Arc<AtomicUsize>,
+        observed_tool_ids: Arc<Mutex<Vec<String>>>,
+    }
+
+    struct DelayTool {
+        name: &'static str,
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl milim_tools::Tool for DelayTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "ordered result fixture"
+        }
+
+        fn input_schema(&self) -> Value {
+            json!({"type":"object"})
+        }
+
+        fn effect(&self) -> ToolEffect {
+            ToolEffect::ReadOnly
+        }
+
+        fn concurrency(&self) -> milim_tools::ToolConcurrency {
+            milim_tools::ToolConcurrency::Parallel
+        }
+
+        async fn invoke(&self, _args: Value) -> Result<Value> {
+            tokio::time::sleep(self.delay).await;
+            Ok(json!({"tool": self.name}))
+        }
+    }
+
+    #[async_trait]
+    impl ModelService for OrderedToolsBackend {
+        fn name(&self) -> &str {
+            "ordered-tools"
+        }
+
+        async fn list_models(&self) -> Result<Vec<Model>> {
+            Ok(vec![Model::local("ordered-tools", 0)])
+        }
+
+        async fn stream(&self, req: CompletionRequest) -> Result<EventStream> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                let stream = async_stream::stream! {
+                    yield Ok(StreamEvent::Delta(DeltaEvent {
+                        tool_calls: vec![
+                            DeltaToolCall {
+                                index: 0,
+                                id: Some("call-slow".into()),
+                                kind: Some("function".into()),
+                                function: DeltaFunction {
+                                    name: Some("slow".into()),
+                                    arguments: Some("{}".into()),
+                                },
+                            },
+                            DeltaToolCall {
+                                index: 1,
+                                id: Some("call-fast".into()),
+                                kind: Some("function".into()),
+                                function: DeltaFunction {
+                                    name: Some("fast".into()),
+                                    arguments: Some("{}".into()),
+                                },
+                            },
+                        ],
+                        ..Default::default()
+                    }));
+                    yield Ok(StreamEvent::Done {
+                        finish_reason: "tool_calls".into(),
+                        usage: Usage::new(1, 1),
+                    });
+                };
+                return Ok(Box::pin(stream));
+            }
+            *self.observed_tool_ids.lock().unwrap() = req
+                .messages
+                .iter()
+                .filter(|message| message.role == "tool")
+                .filter_map(|message| message.tool_call_id.clone())
+                .collect();
+            let stream = async_stream::stream! {
+                yield Ok(StreamEvent::Delta(DeltaEvent::text("done")));
+                yield Ok(StreamEvent::Done {
+                    finish_reason: "stop".into(),
+                    usage: Usage::new(1, 1),
+                });
+            };
+            Ok(Box::pin(stream))
+        }
+
+        async fn embed(&self, _model: &str, inputs: Vec<String>) -> Result<Vec<Vec<f32>>> {
+            Ok(inputs.into_iter().map(|_| vec![0.0]).collect())
+        }
+    }
+
+    #[async_trait]
+    impl ModelService for CountingBackend {
+        fn name(&self) -> &str {
+            "counting"
+        }
+
+        async fn list_models(&self) -> Result<Vec<Model>> {
+            TestBackend::new().list_models().await
+        }
+
+        async fn stream(&self, req: CompletionRequest) -> Result<EventStream> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            TestBackend::new().stream(req).await
+        }
+
+        async fn embed(&self, model: &str, inputs: Vec<String>) -> Result<Vec<Vec<f32>>> {
+            TestBackend::new().embed(model, inputs).await
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailingStepHook {
+        fail_request: bool,
+        fail_response: bool,
+    }
+
+    #[async_trait]
+    impl AgentStepHook for FailingStepHook {
+        async fn prepare_model_step(
+            &self,
+            _step: usize,
+            _messages: &mut Vec<ChatMessage>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn commit_model_request(
+            &self,
+            _step: usize,
+            _request: &CompletionRequest,
+        ) -> Result<()> {
+            if self.fail_request {
+                Err(Error::Other("pre-request ledger commit failed".into()))
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn commit_model_response(
+            &self,
+            _step: usize,
+            _content: &str,
+            _reasoning: &str,
+            _tool_calls: &[ToolCall],
+            _finish_reason: &str,
+            _usage: Usage,
+        ) -> Result<()> {
+            if self.fail_response {
+                Err(Error::Other("post-response ledger commit failed".into()))
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn commit_tool_result(
+            &self,
+            _step: usize,
+            _call_id: Option<&str>,
+            _name: &str,
+            _result: &Value,
+            _model_content: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
     #[async_trait]
     impl ModelService for FlakyStreamBackend {
         fn name(&self) -> &str {
@@ -1364,6 +1663,7 @@ mod tests {
                 max_iterations: 2,
                 initial_stream_retry_backoff: Duration::ZERO,
                 approval_broker: None,
+                step_hook: None,
             },
         )
         .await
@@ -1474,6 +1774,7 @@ mod tests {
                 max_iterations: 100,
                 initial_stream_retry_backoff: Duration::ZERO,
                 approval_broker: None,
+                step_hook: None,
             },
         ));
 
@@ -1496,6 +1797,108 @@ mod tests {
         assert!(saw_final);
         assert!(saw_done);
         assert!(!saw_error);
+    }
+
+    #[tokio::test]
+    async fn failed_pre_request_commit_prevents_provider_execution() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let service: SharedService = Arc::new(CountingBackend {
+            calls: calls.clone(),
+        });
+        let mut stream = Box::pin(run_agent_stream_with_config(
+            service,
+            Arc::new(ToolRegistry::new()),
+            "test-echo".into(),
+            vec![ChatMessage::text("user", "hello")],
+            None,
+            AgentRunConfig {
+                step_hook: Some(Arc::new(FailingStepHook {
+                    fail_request: true,
+                    fail_response: false,
+                })),
+                ..AgentRunConfig::default()
+            },
+        ));
+        let mut error = None;
+        while let Some(event) = stream.next().await {
+            if let AgentEvent::Error { message } = event {
+                error = Some(message);
+            }
+        }
+        assert!(error.unwrap().contains("pre-request ledger commit failed"));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_post_response_commit_prevents_tools_and_another_model_step() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let service: SharedService = Arc::new(CountingBackend {
+            calls: calls.clone(),
+        });
+        let mut stream = Box::pin(run_agent_stream_with_config(
+            service,
+            Arc::new(ToolRegistry::with_builtins()),
+            "test-echo".into(),
+            vec![ChatMessage::text("user", "/tool please")],
+            None,
+            AgentRunConfig {
+                step_hook: Some(Arc::new(FailingStepHook {
+                    fail_request: false,
+                    fail_response: true,
+                })),
+                ..AgentRunConfig::default()
+            },
+        ));
+        let mut saw_tool_result = false;
+        let mut error = None;
+        while let Some(event) = stream.next().await {
+            match event {
+                AgentEvent::ToolResult { .. } => saw_tool_result = true,
+                AgentEvent::Error { message } => error = Some(message),
+                _ => {}
+            }
+        }
+        assert!(error
+            .unwrap()
+            .contains("post-response ledger commit failed"));
+        assert!(!saw_tool_result);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn parallel_tool_results_preserve_model_call_order() {
+        let observed_tool_ids = Arc::new(Mutex::new(Vec::new()));
+        let service: SharedService = Arc::new(OrderedToolsBackend {
+            calls: Arc::new(AtomicUsize::new(0)),
+            observed_tool_ids: observed_tool_ids.clone(),
+        });
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(DelayTool {
+            name: "slow",
+            delay: Duration::from_millis(30),
+        }));
+        registry.register(Arc::new(DelayTool {
+            name: "fast",
+            delay: Duration::from_millis(1),
+        }));
+        let mut stream = Box::pin(run_agent_stream(
+            service,
+            Arc::new(registry),
+            "ordered-tools".into(),
+            vec![ChatMessage::text("user", "run both")],
+            None,
+        ));
+        let mut result_order = Vec::new();
+        while let Some(event) = stream.next().await {
+            if let AgentEvent::ToolResult { name, .. } = event {
+                result_order.push(name);
+            }
+        }
+        assert_eq!(result_order, vec!["slow", "fast"]);
+        assert_eq!(
+            *observed_tool_ids.lock().unwrap(),
+            vec!["call-slow", "call-fast"]
+        );
     }
 
     #[tokio::test]

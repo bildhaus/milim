@@ -24,3 +24,22 @@ test('approval fixture never contains an entered response value', () => {
   const approval = fixture('approval.json');
   expect(JSON.stringify(approval)).not.toContain('response_value');
 });
+
+test('generated v1 fixture keeps additive harness capabilities and commands current', () => {
+  const generated = JSON.parse(fs.readFileSync(
+    path.resolve(__dirname, '../../../crates/milim-control-contract/fixtures/control-v1.json'),
+    'utf8',
+  ));
+  expect(generated.protocol).toEqual({min: 1, max: 1});
+  expect(generated.capabilities).toMatchObject({
+    run_ledger: true,
+    run_inspection: true,
+    steering: true,
+    context_injection: true,
+  });
+  expect(generated.command_kinds).toEqual(expect.arrayContaining([
+    'turn.steer',
+    'context.inject',
+    'turn.inbox_delete',
+  ]));
+});

@@ -11,23 +11,25 @@ use std::time::{Duration, Instant};
 use axum::http::{HeaderMap, HeaderValue};
 use base64::Engine as _;
 use futures::StreamExt;
-use milim_core::api::openai::{ChatMessage, ReasoningEffort};
+use milim_agents::AgentStepHook as _;
+pub use milim_control_contract::*;
+use milim_core::api::openai::{ChatMessage, ReasoningEffort, ToolCall, Usage};
 use milim_core::{Error, Result};
 use milim_inference::{CompletionRequest, SamplingParams, StreamEvent};
 use milim_storage::{
-    ControlApprovalRecord, ControlCommandReceiptRecord, ControlHostRecord, ControlQueuedTurnRecord,
-    ControlRunRecord, ControlThreadRecord, ControlTimelineRecord, UserDataStore,
+    ControlApprovalRecord, ControlCommandReceiptRecord, ControlHostRecord, ControlInboxRecord,
+    ControlQueuedTurnRecord, ControlRunArtifactRecord, ControlRunRecord, ControlThreadRecord,
+    ControlTimelineRecord, UserDataStore,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, watch, Mutex as AsyncMutex};
 use uuid::Uuid;
 
 use crate::routes::{service_for_run, RunContext};
 use crate::AppState;
 
-pub const CONTROL_PROTOCOL_MIN: u16 = 1;
-pub const CONTROL_PROTOCOL_MAX: u16 = 1;
 const CONTROL_EVENT_CAPACITY: usize = 1_024;
 const CONFIRMATION_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_CONTROL_ATTACHMENTS: usize = 6;
@@ -40,472 +42,488 @@ const APPEARANCE_STATE_KEY: &str = "milim.appearanceSnapshot";
 const CUSTOM_THEMES_STATE_KEY: &str = "milim.customThemes";
 const MAX_APPEARANCE_BACKGROUND_BYTES: usize = 8 * 1024 * 1024;
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ControlProtocolRangeV1 {
-    pub min: u16,
-    pub max: u16,
-}
+// Wire declarations live in `milim-control-contract`. Keeping the former
+// declarations compiled out for this cutover makes the ownership move easy to
+// audit while all server call sites use the canonical crate above.
+#[cfg(any())]
+mod legacy_control_contract {
+    use super::*;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ControlCapabilitiesV1 {
-    pub timeline_sync: bool,
-    pub queued_turns: bool,
-    pub approvals: bool,
-    pub agents: bool,
-    pub workers: bool,
-    pub attachments: bool,
-    pub websocket_tickets: bool,
-    pub lan_discovery: bool,
-    pub push_notifications: bool,
-    pub inline_branches: bool,
-    pub appearance_assets: bool,
-}
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct ControlProtocolRangeV1 {
+        pub min: u16,
+        pub max: u16,
+    }
 
-impl Default for ControlCapabilitiesV1 {
-    fn default() -> Self {
-        Self {
-            timeline_sync: true,
-            queued_turns: true,
-            approvals: true,
-            agents: true,
-            workers: true,
-            attachments: true,
-            websocket_tickets: true,
-            lan_discovery: true,
-            push_notifications: false,
-            inline_branches: false,
-            appearance_assets: true,
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct ControlCapabilitiesV1 {
+        pub timeline_sync: bool,
+        pub queued_turns: bool,
+        pub approvals: bool,
+        pub agents: bool,
+        pub workers: bool,
+        pub attachments: bool,
+        pub websocket_tickets: bool,
+        pub lan_discovery: bool,
+        pub push_notifications: bool,
+        pub inline_branches: bool,
+        pub appearance_assets: bool,
+    }
+
+    impl Default for ControlCapabilitiesV1 {
+        fn default() -> Self {
+            Self {
+                timeline_sync: true,
+                queued_turns: true,
+                approvals: true,
+                agents: true,
+                workers: true,
+                attachments: true,
+                websocket_tickets: true,
+                lan_discovery: true,
+                push_notifications: false,
+                inline_branches: false,
+                appearance_assets: true,
+            }
         }
     }
-}
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ThreadSummaryV1 {
-    pub id: String,
-    pub title: String,
-    pub revision: u64,
-    pub epoch: String,
-    pub updated_at_ms: i64,
-    pub archived_at_ms: Option<i64>,
-    pub model: Option<String>,
-    pub agent_id: Option<String>,
-    pub workspace: Option<String>,
-    pub busy: bool,
-    pub queued_turns: usize,
-}
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct ThreadSummaryV1 {
+        pub id: String,
+        pub title: String,
+        pub revision: u64,
+        pub epoch: String,
+        pub updated_at_ms: i64,
+        pub archived_at_ms: Option<i64>,
+        pub model: Option<String>,
+        #[serde(default)]
+        pub reasoning_effort_overrides: HashMap<String, String>,
+        pub agent_id: Option<String>,
+        pub workspace: Option<String>,
+        pub busy: bool,
+        pub queued_turns: usize,
+    }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AgentSummaryV1 {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub avatar: String,
-    pub tool_mode: String,
-    pub enabled_tool_count: usize,
-    pub skill_mode: String,
-    pub enabled_skill_count: usize,
-}
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct AgentSummaryV1 {
+        pub id: String,
+        pub name: String,
+        pub description: String,
+        pub avatar: String,
+        pub tool_mode: String,
+        pub enabled_tool_count: usize,
+        pub skill_mode: String,
+        pub enabled_skill_count: usize,
+    }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AgentSnapshotV1 {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub avatar: String,
-    pub system_prompt: String,
-    pub tool_mode: String,
-    pub enabled_tools: Vec<String>,
-    pub skill_mode: String,
-    pub enabled_skills: Vec<String>,
-}
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct AgentSnapshotV1 {
+        pub id: String,
+        pub name: String,
+        pub description: String,
+        pub avatar: String,
+        pub system_prompt: String,
+        pub tool_mode: String,
+        pub enabled_tools: Vec<String>,
+        pub skill_mode: String,
+        pub enabled_skills: Vec<String>,
+    }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct FrozenRunConfigV1 {
-    pub model: String,
-    #[serde(default)]
-    pub instructions: String,
-    pub workspace: Option<String>,
-    pub privacy: String,
-    pub approval_mode: String,
-    pub plan_mode: bool,
-    pub sandbox: bool,
-    pub computer_use: bool,
-    pub memory: bool,
-    pub delegation_policy: String,
-    pub worker_model: String,
-    pub agent: Option<AgentSnapshotV1>,
-    #[serde(default = "default_control_tool_mode")]
-    pub tool_mode: String,
-    pub enabled_tools: Vec<String>,
-    #[serde(default = "default_control_skill_mode")]
-    pub skill_mode: String,
-    pub enabled_skills: Vec<String>,
-    pub attachments: Vec<ControlAttachmentV1>,
-    pub native_session_id: Option<String>,
-    pub reasoning_effort: Option<String>,
-    pub adapter: String,
-}
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct FrozenRunConfigV1 {
+        pub model: String,
+        #[serde(default)]
+        pub instructions: String,
+        pub workspace: Option<String>,
+        pub privacy: String,
+        pub approval_mode: String,
+        pub plan_mode: bool,
+        pub sandbox: bool,
+        pub computer_use: bool,
+        pub memory: bool,
+        pub delegation_policy: String,
+        pub worker_model: String,
+        pub agent: Option<AgentSnapshotV1>,
+        #[serde(default = "default_control_tool_mode")]
+        pub tool_mode: String,
+        pub enabled_tools: Vec<String>,
+        #[serde(default = "default_control_skill_mode")]
+        pub skill_mode: String,
+        pub enabled_skills: Vec<String>,
+        pub attachments: Vec<ControlAttachmentV1>,
+        pub native_session_id: Option<String>,
+        pub reasoning_effort: Option<String>,
+        pub adapter: String,
+    }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ControlAttachmentV1 {
-    pub id: String,
-    pub name: String,
-    pub mime: String,
-    pub size: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub data_url: Option<String>,
-    #[serde(default)]
-    pub truncated: bool,
-}
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct ControlAttachmentV1 {
+        pub id: String,
+        pub name: String,
+        pub mime: String,
+        pub size: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub content: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub data_url: Option<String>,
+        #[serde(default)]
+        pub truncated: bool,
+    }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RunSnapshotV1 {
-    pub id: String,
-    pub thread_id: String,
-    pub status: String,
-    pub adapter: String,
-    pub config: FrozenRunConfigV1,
-    pub created_at_ms: i64,
-    pub updated_at_ms: i64,
-    pub completed_at_ms: Option<i64>,
-    pub error: Option<Value>,
-}
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct RunSnapshotV1 {
+        pub id: String,
+        pub thread_id: String,
+        pub status: String,
+        pub adapter: String,
+        pub config: FrozenRunConfigV1,
+        pub created_at_ms: i64,
+        pub updated_at_ms: i64,
+        pub completed_at_ms: Option<i64>,
+        pub error: Option<Value>,
+    }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PendingApprovalV1 {
-    pub id: String,
-    pub run_id: String,
-    pub thread_id: String,
-    pub kind: String,
-    pub request: Value,
-    pub status: String,
-    pub created_at_ms: i64,
-}
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct PendingApprovalV1 {
+        pub id: String,
+        pub run_id: String,
+        pub thread_id: String,
+        pub kind: String,
+        pub request: Value,
+        pub status: String,
+        pub created_at_ms: i64,
+    }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct QueuedTurnV1 {
-    pub id: String,
-    pub thread_id: String,
-    pub command_id: String,
-    pub accepted_at_ms: i64,
-}
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct QueuedTurnV1 {
+        pub id: String,
+        pub thread_id: String,
+        pub command_id: String,
+        pub accepted_at_ms: i64,
+    }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct AppearanceColorsV1 {
-    pub primary_text: String,
-    pub secondary_text: String,
-    pub tertiary_text: String,
-    pub placeholder_text: String,
-    pub bg_primary: String,
-    pub bg_secondary: String,
-    pub bg_tertiary: String,
-    pub sidebar_bg: String,
-    pub accent: String,
-    pub accent_light: String,
-    pub border_primary: String,
-    pub border_secondary: String,
-    pub focus_border: String,
-    pub success: String,
-    pub warning: String,
-    pub error: String,
-    pub info: String,
-    pub card_bg: String,
-    pub card_border: String,
-    pub input_bg: String,
-    pub input_border: String,
-}
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+    pub struct AppearanceColorsV1 {
+        pub primary_text: String,
+        pub secondary_text: String,
+        pub tertiary_text: String,
+        pub placeholder_text: String,
+        pub bg_primary: String,
+        pub bg_secondary: String,
+        pub bg_tertiary: String,
+        pub sidebar_bg: String,
+        pub accent: String,
+        pub accent_light: String,
+        pub border_primary: String,
+        pub border_secondary: String,
+        pub focus_border: String,
+        pub success: String,
+        pub warning: String,
+        pub error: String,
+        pub info: String,
+        pub card_bg: String,
+        pub card_border: String,
+        pub input_bg: String,
+        pub input_border: String,
+    }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct AppearanceGlassV1 {
-    pub enabled: bool,
-    pub blur_radius: f64,
-    pub opacity_primary: f64,
-    pub opacity_secondary: f64,
-    pub edge_light: String,
-}
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+    pub struct AppearanceGlassV1 {
+        pub enabled: bool,
+        pub blur_radius: f64,
+        pub opacity_primary: f64,
+        pub opacity_secondary: f64,
+        pub edge_light: String,
+    }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct AppearanceBackgroundV1 {
-    pub has_image: bool,
-    pub image_opacity: f64,
-    pub image_blur: f64,
-    pub overlay_color: Option<String>,
-    pub overlay_opacity: f64,
-    #[serde(default = "default_appearance_background_fit")]
-    pub fit: String,
-    #[serde(default = "default_appearance_background_treatment")]
-    pub treatment: String,
-}
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+    pub struct AppearanceBackgroundV1 {
+        pub has_image: bool,
+        pub image_opacity: f64,
+        pub image_blur: f64,
+        pub overlay_color: Option<String>,
+        pub overlay_opacity: f64,
+        #[serde(default = "default_appearance_background_fit")]
+        pub fit: String,
+        #[serde(default = "default_appearance_background_treatment")]
+        pub treatment: String,
+    }
 
-fn default_appearance_background_fit() -> String {
-    "cover".into()
-}
+    fn default_appearance_background_fit() -> String {
+        "cover".into()
+    }
 
-fn default_appearance_background_treatment() -> String {
-    "clear".into()
-}
+    fn default_appearance_background_treatment() -> String {
+        "clear".into()
+    }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct AppearanceBordersV1 {
-    pub card_radius: f64,
-    pub input_radius: f64,
-    pub border_opacity: f64,
-}
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+    pub struct AppearanceBordersV1 {
+        pub card_radius: f64,
+        pub input_radius: f64,
+        pub border_opacity: f64,
+    }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct AppearanceTypographyV1 {
-    pub font_family: String,
-    pub mono_family: String,
-}
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+    pub struct AppearanceTypographyV1 {
+        pub font_family: String,
+        pub mono_family: String,
+    }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct AppearanceSnapshotV1 {
-    pub revision: String,
-    pub theme_id: String,
-    pub name: String,
-    pub is_dark: bool,
-    pub colors: AppearanceColorsV1,
-    pub glass: AppearanceGlassV1,
-    pub background: AppearanceBackgroundV1,
-    pub borders: AppearanceBordersV1,
-    pub typography: AppearanceTypographyV1,
-}
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+    pub struct AppearanceSnapshotV1 {
+        pub revision: String,
+        pub theme_id: String,
+        pub name: String,
+        pub is_dark: bool,
+        pub colors: AppearanceColorsV1,
+        pub glass: AppearanceGlassV1,
+        pub background: AppearanceBackgroundV1,
+        pub borders: AppearanceBordersV1,
+        pub typography: AppearanceTypographyV1,
+    }
 
-impl Default for AppearanceSnapshotV1 {
-    fn default() -> Self {
-        Self {
-            revision: "builtin-mono-dark".into(),
-            theme_id: "mono-dark".into(),
-            name: "Mono Dark".into(),
-            is_dark: true,
-            colors: AppearanceColorsV1 {
-                primary_text: "#ededf0".into(),
-                secondary_text: "#a0a0a8".into(),
-                tertiary_text: "#71717a".into(),
-                placeholder_text: "#71717a".into(),
-                bg_primary: "#0d0d0f".into(),
-                bg_secondary: "#161618".into(),
-                bg_tertiary: "#1f1f23".into(),
-                sidebar_bg: "#0a0a0c".into(),
-                accent: "#ededf0".into(),
-                accent_light: "#c8c8d0".into(),
-                border_primary: "#262629".into(),
-                border_secondary: "#323237".into(),
-                focus_border: "#55555e".into(),
-                success: "#34d399".into(),
-                warning: "#fbbf24".into(),
-                error: "#f87171".into(),
-                info: "#a0a0a8".into(),
-                card_bg: "#161618".into(),
-                card_border: "#262629".into(),
-                input_bg: "#161618".into(),
-                input_border: "#323237".into(),
-            },
-            glass: AppearanceGlassV1 {
-                enabled: false,
-                blur_radius: 24.0,
-                opacity_primary: 1.0,
-                opacity_secondary: 1.0,
-                edge_light: "rgba(255,255,255,0.08)".into(),
-            },
-            background: AppearanceBackgroundV1 {
-                has_image: false,
-                image_opacity: 1.0,
-                image_blur: 0.0,
-                overlay_color: None,
-                overlay_opacity: 0.0,
-                fit: default_appearance_background_fit(),
-                treatment: default_appearance_background_treatment(),
-            },
-            borders: AppearanceBordersV1 {
-                card_radius: 12.0,
-                input_radius: 10.0,
-                border_opacity: 1.0,
-            },
-            typography: AppearanceTypographyV1 {
-                font_family: "system-ui, sans-serif".into(),
-                mono_family: "ui-monospace, monospace".into(),
-            },
+    impl Default for AppearanceSnapshotV1 {
+        fn default() -> Self {
+            Self {
+                revision: "builtin-mono-dark".into(),
+                theme_id: "mono-dark".into(),
+                name: "Mono Dark".into(),
+                is_dark: true,
+                colors: AppearanceColorsV1 {
+                    primary_text: "#ededf0".into(),
+                    secondary_text: "#a0a0a8".into(),
+                    tertiary_text: "#71717a".into(),
+                    placeholder_text: "#71717a".into(),
+                    bg_primary: "#0d0d0f".into(),
+                    bg_secondary: "#161618".into(),
+                    bg_tertiary: "#1f1f23".into(),
+                    sidebar_bg: "#0a0a0c".into(),
+                    accent: "#ededf0".into(),
+                    accent_light: "#c8c8d0".into(),
+                    border_primary: "#262629".into(),
+                    border_secondary: "#323237".into(),
+                    focus_border: "#55555e".into(),
+                    success: "#34d399".into(),
+                    warning: "#fbbf24".into(),
+                    error: "#f87171".into(),
+                    info: "#a0a0a8".into(),
+                    card_bg: "#161618".into(),
+                    card_border: "#262629".into(),
+                    input_bg: "#161618".into(),
+                    input_border: "#323237".into(),
+                },
+                glass: AppearanceGlassV1 {
+                    enabled: false,
+                    blur_radius: 24.0,
+                    opacity_primary: 1.0,
+                    opacity_secondary: 1.0,
+                    edge_light: "rgba(255,255,255,0.08)".into(),
+                },
+                background: AppearanceBackgroundV1 {
+                    has_image: false,
+                    image_opacity: 1.0,
+                    image_blur: 0.0,
+                    overlay_color: None,
+                    overlay_opacity: 0.0,
+                    fit: default_appearance_background_fit(),
+                    treatment: default_appearance_background_treatment(),
+                },
+                borders: AppearanceBordersV1 {
+                    card_radius: 12.0,
+                    input_radius: 10.0,
+                    border_opacity: 1.0,
+                },
+                typography: AppearanceTypographyV1 {
+                    font_family: "system-ui, sans-serif".into(),
+                    mono_family: "ui-monospace, monospace".into(),
+                },
+            }
         }
     }
-}
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ControlBootstrapV1 {
-    pub protocol: ControlProtocolRangeV1,
-    pub host_id: String,
-    pub host_name: String,
-    pub capabilities: ControlCapabilitiesV1,
-    #[serde(default)]
-    pub appearance: AppearanceSnapshotV1,
-    pub threads: Vec<ThreadSummaryV1>,
-    pub models: Vec<Value>,
-    pub agents: Vec<AgentSummaryV1>,
-    pub active_runs: Vec<RunSnapshotV1>,
-    pub queued_turns: Vec<QueuedTurnV1>,
-    pub pending_approvals: Vec<PendingApprovalV1>,
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct ControlBootstrapV1 {
+        pub protocol: ControlProtocolRangeV1,
+        pub host_id: String,
+        pub host_name: String,
+        pub capabilities: ControlCapabilitiesV1,
+        #[serde(default)]
+        pub appearance: AppearanceSnapshotV1,
+        pub threads: Vec<ThreadSummaryV1>,
+        pub models: Vec<Value>,
+        pub agents: Vec<AgentSummaryV1>,
+        pub active_runs: Vec<RunSnapshotV1>,
+        pub queued_turns: Vec<QueuedTurnV1>,
+        pub pending_approvals: Vec<PendingApprovalV1>,
+    }
+
+    pub(crate) struct AppearanceBackgroundAsset {
+        pub revision: String,
+        pub mime: &'static str,
+        pub bytes: Vec<u8>,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct TimelineItemV1 {
+        pub id: String,
+        pub thread_id: String,
+        pub epoch: String,
+        pub seq: u64,
+        pub run_id: Option<String>,
+        #[serde(rename = "type")]
+        pub item_type: String,
+        pub data: Value,
+        pub created_at_ms: i64,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct TimelinePageV1 {
+        pub thread_id: String,
+        pub epoch: String,
+        pub first_seq: Option<u64>,
+        pub last_seq: Option<u64>,
+        pub has_older: bool,
+        pub has_newer: bool,
+        pub before_seq: Option<u64>,
+        pub after_seq: Option<u64>,
+        pub items: Vec<TimelineItemV1>,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct ControlEventV1 {
+        pub event_id: String,
+        pub host_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub thread_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub epoch: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub seq: Option<u64>,
+        #[serde(rename = "type")]
+        pub event_type: String,
+        pub data: Value,
+    }
+
+    #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+    pub enum ControlCommandStatusV1 {
+        #[serde(rename = "applied")]
+        Applied,
+        #[serde(rename = "accepted")]
+        Accepted,
+        #[serde(rename = "queued")]
+        Queued,
+        #[serde(rename = "needs_confirmation")]
+        NeedsConfirmation,
+        #[serde(rename = "conflict")]
+        Conflict,
+        #[serde(rename = "failed")]
+        Failed,
+    }
+
+    #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+    pub enum ControlCommandKindV1 {
+        #[serde(rename = "thread.create")]
+        ThreadCreate,
+        #[serde(rename = "thread.rename")]
+        ThreadRename,
+        #[serde(rename = "thread.archive")]
+        ThreadArchive,
+        #[serde(rename = "thread.delete")]
+        ThreadDelete,
+        #[serde(rename = "thread.set_model")]
+        ThreadSetModel,
+        #[serde(rename = "thread.set_agent")]
+        ThreadSetAgent,
+        #[serde(rename = "message.delete")]
+        MessageDelete,
+        #[serde(rename = "turn.send")]
+        TurnSend,
+        #[serde(rename = "turn.stop")]
+        TurnStop,
+        #[serde(rename = "turn.regenerate")]
+        TurnRegenerate,
+        #[serde(rename = "turn.queue_resume")]
+        TurnQueueResume,
+        #[serde(rename = "turn.queue_delete")]
+        TurnQueueDelete,
+        #[serde(rename = "approval.resolve")]
+        ApprovalResolve,
+        #[serde(rename = "worker.start")]
+        WorkerStart,
+        #[serde(rename = "worker.continue_solo")]
+        WorkerContinueSolo,
+        #[serde(rename = "worker.stop")]
+        WorkerStop,
+    }
+
+    impl ControlCommandKindV1 {
+        fn as_str(self) -> &'static str {
+            match self {
+                Self::ThreadCreate => "thread.create",
+                Self::ThreadRename => "thread.rename",
+                Self::ThreadArchive => "thread.archive",
+                Self::ThreadDelete => "thread.delete",
+                Self::ThreadSetModel => "thread.set_model",
+                Self::ThreadSetAgent => "thread.set_agent",
+                Self::MessageDelete => "message.delete",
+                Self::TurnSend => "turn.send",
+                Self::TurnStop => "turn.stop",
+                Self::TurnRegenerate => "turn.regenerate",
+                Self::TurnQueueResume => "turn.queue_resume",
+                Self::TurnQueueDelete => "turn.queue_delete",
+                Self::ApprovalResolve => "approval.resolve",
+                Self::WorkerStart => "worker.start",
+                Self::WorkerContinueSolo => "worker.continue_solo",
+                Self::WorkerStop => "worker.stop",
+            }
+        }
+
+        fn destructive(self) -> bool {
+            matches!(self, Self::ThreadDelete | Self::MessageDelete)
+        }
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct ControlCommandV1 {
+        pub command_id: String,
+        pub kind: ControlCommandKindV1,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub thread_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub expected_revision: Option<u64>,
+        #[serde(default)]
+        pub payload: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub confirmation_token: Option<String>,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct ControlCommandResultV1 {
+        pub command_id: String,
+        pub status: ControlCommandStatusV1,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub thread_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub revision: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub run_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub queue_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub confirmation_token: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub message: Option<String>,
+        #[serde(default)]
+        pub data: Value,
+    }
 }
 
 pub(crate) struct AppearanceBackgroundAsset {
     pub revision: String,
     pub mime: &'static str,
     pub bytes: Vec<u8>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TimelineItemV1 {
-    pub id: String,
-    pub thread_id: String,
-    pub epoch: String,
-    pub seq: u64,
-    pub run_id: Option<String>,
-    #[serde(rename = "type")]
-    pub item_type: String,
-    pub data: Value,
-    pub created_at_ms: i64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TimelinePageV1 {
-    pub thread_id: String,
-    pub epoch: String,
-    pub first_seq: Option<u64>,
-    pub last_seq: Option<u64>,
-    pub has_older: bool,
-    pub has_newer: bool,
-    pub before_seq: Option<u64>,
-    pub after_seq: Option<u64>,
-    pub items: Vec<TimelineItemV1>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ControlEventV1 {
-    pub event_id: String,
-    pub host_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thread_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub epoch: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seq: Option<u64>,
-    #[serde(rename = "type")]
-    pub event_type: String,
-    pub data: Value,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum ControlCommandStatusV1 {
-    #[serde(rename = "applied")]
-    Applied,
-    #[serde(rename = "accepted")]
-    Accepted,
-    #[serde(rename = "queued")]
-    Queued,
-    #[serde(rename = "needs_confirmation")]
-    NeedsConfirmation,
-    #[serde(rename = "conflict")]
-    Conflict,
-    #[serde(rename = "failed")]
-    Failed,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum ControlCommandKindV1 {
-    #[serde(rename = "thread.create")]
-    ThreadCreate,
-    #[serde(rename = "thread.rename")]
-    ThreadRename,
-    #[serde(rename = "thread.archive")]
-    ThreadArchive,
-    #[serde(rename = "thread.delete")]
-    ThreadDelete,
-    #[serde(rename = "thread.set_model")]
-    ThreadSetModel,
-    #[serde(rename = "thread.set_agent")]
-    ThreadSetAgent,
-    #[serde(rename = "message.delete")]
-    MessageDelete,
-    #[serde(rename = "turn.send")]
-    TurnSend,
-    #[serde(rename = "turn.stop")]
-    TurnStop,
-    #[serde(rename = "turn.regenerate")]
-    TurnRegenerate,
-    #[serde(rename = "turn.queue_resume")]
-    TurnQueueResume,
-    #[serde(rename = "turn.queue_delete")]
-    TurnQueueDelete,
-    #[serde(rename = "approval.resolve")]
-    ApprovalResolve,
-    #[serde(rename = "worker.start")]
-    WorkerStart,
-    #[serde(rename = "worker.continue_solo")]
-    WorkerContinueSolo,
-    #[serde(rename = "worker.stop")]
-    WorkerStop,
-}
-
-impl ControlCommandKindV1 {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::ThreadCreate => "thread.create",
-            Self::ThreadRename => "thread.rename",
-            Self::ThreadArchive => "thread.archive",
-            Self::ThreadDelete => "thread.delete",
-            Self::ThreadSetModel => "thread.set_model",
-            Self::ThreadSetAgent => "thread.set_agent",
-            Self::MessageDelete => "message.delete",
-            Self::TurnSend => "turn.send",
-            Self::TurnStop => "turn.stop",
-            Self::TurnRegenerate => "turn.regenerate",
-            Self::TurnQueueResume => "turn.queue_resume",
-            Self::TurnQueueDelete => "turn.queue_delete",
-            Self::ApprovalResolve => "approval.resolve",
-            Self::WorkerStart => "worker.start",
-            Self::WorkerContinueSolo => "worker.continue_solo",
-            Self::WorkerStop => "worker.stop",
-        }
-    }
-
-    fn destructive(self) -> bool {
-        matches!(self, Self::ThreadDelete | Self::MessageDelete)
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ControlCommandV1 {
-    pub command_id: String,
-    pub kind: ControlCommandKindV1,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thread_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_revision: Option<u64>,
-    #[serde(default)]
-    pub payload: Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub confirmation_token: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ControlCommandResultV1 {
-    pub command_id: String,
-    pub status: ControlCommandStatusV1,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thread_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub revision: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub queue_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub confirmation_token: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    #[serde(default)]
-    pub data: Value,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -529,7 +547,620 @@ struct AcceptedTurnV1 {
 
 struct ActiveRun {
     run_id: String,
+    steering: bool,
     stop: watch::Sender<bool>,
+}
+
+struct RunJournal {
+    store: Arc<UserDataStore>,
+    privacy: Arc<crate::privacy::PrivacyGate>,
+    privacy_mode: crate::privacy::PrivacyMode,
+    thread_id: String,
+    run_id: String,
+}
+
+impl std::fmt::Debug for RunJournal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RunJournal")
+            .field("thread_id", &self.thread_id)
+            .field("run_id", &self.run_id)
+            .field("privacy_mode", &self.privacy_mode)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RunJournal {
+    fn append_event(&self, step: usize, event_type: &str, data: Value) -> Result<()> {
+        self.store.control_append_run_event(
+            &self.run_id,
+            &Uuid::new_v4().to_string(),
+            Some(&format!("step-{step}")),
+            event_type,
+            &data.to_string(),
+        )?;
+        Ok(())
+    }
+
+    fn put_artifact(&self, kind: &str, data: &Value) -> Result<String> {
+        let encoded = serde_json::to_vec(data)
+            .map_err(|error| Error::Other(format!("serialize run artifact: {error}")))?;
+        let byte_len = u64::try_from(encoded.len()).unwrap_or(u64::MAX);
+        let digest = format!("sha256:{:x}", Sha256::digest(&encoded));
+        self.store
+            .control_put_run_artifact(&ControlRunArtifactRecord {
+                run_id: self.run_id.clone(),
+                digest: digest.clone(),
+                kind: kind.into(),
+                data_json: String::from_utf8(encoded)
+                    .map_err(|error| Error::Other(format!("encode run artifact: {error}")))?,
+                byte_len,
+                created_at_ms: now_ms(),
+            })?;
+        Ok(digest)
+    }
+
+    fn privacy_processed_request(&self, request: &CompletionRequest) -> Result<Value> {
+        ModelInputResolver {
+            privacy: &self.privacy,
+            privacy_mode: self.privacy_mode,
+        }
+        .resolve_request(request)
+    }
+
+    fn privacy_processed_text(&self, text: &str) -> Result<String> {
+        ModelInputResolver {
+            privacy: &self.privacy,
+            privacy_mode: self.privacy_mode,
+        }
+        .resolve_text(text)
+    }
+
+    fn privacy_processed_value(&self, value: &Value) -> Result<Value> {
+        ModelInputResolver {
+            privacy: &self.privacy,
+            privacy_mode: self.privacy_mode,
+        }
+        .resolve_value(value)
+    }
+
+    fn artifact_value(&self, digest: &str) -> Result<Value> {
+        let artifact = self
+            .store
+            .control_run_artifacts(&self.run_id)?
+            .into_iter()
+            .find(|artifact| artifact.digest == digest)
+            .ok_or_else(|| Error::Other(format!("run artifact {digest} is missing")))?;
+        parse_value(&artifact.data_json)
+    }
+
+    fn event_artifact_value(&self, data_json: &str) -> Result<Value> {
+        let data = parse_value(data_json)?;
+        let digest = data
+            .get("artifact_digest")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::Other("run event is missing artifact_digest".into()))?;
+        self.artifact_value(digest)
+    }
+
+    fn rebuild_messages_for_step(
+        &self,
+        step: usize,
+        memory_cache: &[ChatMessage],
+    ) -> Result<Option<Vec<ChatMessage>>> {
+        if step <= 1 {
+            return Ok(None);
+        }
+        let previous_step_id = format!("step-{}", step - 1);
+        let mut events = Vec::new();
+        let mut after_seq = None;
+        loop {
+            let page = self
+                .store
+                .control_run_events(&self.run_id, after_seq, 500)?;
+            let page_len = page.len();
+            after_seq = page.last().map(|event| event.seq);
+            events.extend(page);
+            if page_len < 500 {
+                break;
+            }
+        }
+        let previous = events
+            .iter()
+            .filter(|event| event.step_id.as_deref() == Some(previous_step_id.as_str()))
+            .collect::<Vec<_>>();
+        let request_event = previous
+            .iter()
+            .rev()
+            .find(|event| event.event_type == "model_request_resolved")
+            .ok_or_else(|| {
+                Error::Other(format!(
+                    "cannot rebuild step {step}: previous model request is missing"
+                ))
+            })?;
+        let request = self.event_artifact_value(&request_event.data_json)?;
+        let mut messages: Vec<ChatMessage> = serde_json::from_value(
+            request
+                .get("messages")
+                .cloned()
+                .ok_or_else(|| Error::Other("stored provider request has no messages".into()))?,
+        )
+        .map_err(|error| Error::Other(format!("decode stored provider messages: {error}")))?;
+
+        let response_event = previous
+            .iter()
+            .rev()
+            .find(|event| event.event_type == "model_response_committed")
+            .ok_or_else(|| {
+                Error::Other(format!(
+                    "cannot rebuild step {step}: previous model response is missing"
+                ))
+            })?;
+        let response = self.event_artifact_value(&response_event.data_json)?;
+        let tool_calls: Vec<ToolCall> = serde_json::from_value(
+            response
+                .get("tool_calls")
+                .cloned()
+                .unwrap_or_else(|| json!([])),
+        )
+        .map_err(|error| Error::Other(format!("decode stored provider tool calls: {error}")))?;
+        messages.push(ChatMessage {
+            role: "assistant".into(),
+            content: response
+                .get("content")
+                .and_then(Value::as_str)
+                .filter(|content| !content.is_empty())
+                .map(|content| milim_core::api::openai::Content::Text(content.to_string())),
+            name: None,
+            tool_calls: Some(tool_calls),
+            tool_call_id: None,
+            reasoning_content: response
+                .get("reasoning")
+                .and_then(Value::as_str)
+                .filter(|reasoning| !reasoning.is_empty())
+                .map(str::to_string),
+        });
+        for event in previous
+            .iter()
+            .filter(|event| event.event_type == "tool_result_committed")
+        {
+            let result = self.event_artifact_value(&event.data_json)?;
+            let model_content = result
+                .get("model_content")
+                .and_then(Value::as_str)
+                .ok_or_else(|| Error::Other("stored tool result has no model_content".into()))?;
+            messages.push(ChatMessage {
+                role: "tool".into(),
+                content: Some(milim_core::api::openai::Content::Text(
+                    model_content.to_string(),
+                )),
+                name: None,
+                tool_calls: None,
+                tool_call_id: result
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                reasoning_content: None,
+            });
+        }
+
+        // Binary tool images are referenced rather than duplicated in the
+        // ledger. Keep only those image follow-ups from the in-process cache;
+        // all text and JSON above is rebuilt from SQLite.
+        if let Some(last_tool_call) = memory_cache
+            .iter()
+            .rposition(|message| message.role == "assistant" && message.tool_calls.is_some())
+        {
+            messages.extend(
+                memory_cache[last_tool_call + 1..]
+                    .iter()
+                    .filter(|message| {
+                        message.role == "user"
+                            && matches!(
+                                message.content.as_ref(),
+                                Some(milim_core::api::openai::Content::Parts(parts))
+                                    if parts.iter().any(|part| matches!(part, milim_core::api::openai::ContentPart::ImageUrl { .. }))
+                            )
+                    })
+                    .cloned(),
+            );
+        }
+        Ok(Some(messages))
+    }
+
+    fn commit_failure(&self, step: usize, error: &Error) -> Result<()> {
+        let (message, privacy_rejected) = match self.privacy_processed_text(&error.to_string()) {
+            Ok(message) => (message, false),
+            Err(_) => ("[REJECTED_BY_PRIVACY_BLOCK]".to_string(), true),
+        };
+        self.append_event(
+            step,
+            "run_error_committed",
+            json!({
+                "code": error.code(),
+                "message": message,
+                "privacy_rejected": privacy_rejected,
+            }),
+        )
+    }
+}
+
+struct ModelInputResolver<'a> {
+    privacy: &'a crate::privacy::PrivacyGate,
+    privacy_mode: crate::privacy::PrivacyMode,
+}
+
+impl ModelInputResolver<'_> {
+    fn resolve_request(&self, request: &CompletionRequest) -> Result<Value> {
+        let mut processed = request.clone();
+        match self.privacy_mode {
+            crate::privacy::PrivacyMode::Off => {}
+            crate::privacy::PrivacyMode::Block => {
+                if crate::privacy::request_has_image_parts(&processed)
+                    || !self.privacy.scan_request(&processed).is_empty()
+                {
+                    return Err(Error::InvalidRequest(
+                        "blocked by the privacy gate before run-ledger persistence".into(),
+                    ));
+                }
+            }
+            crate::privacy::PrivacyMode::Redact => {
+                if crate::privacy::request_has_image_parts(&processed) {
+                    return Err(Error::InvalidRequest(
+                        "blocked by the privacy gate before run-ledger persistence: image data cannot be redacted".into(),
+                    ));
+                }
+                self.privacy.redact_request(&mut processed);
+            }
+        }
+        completion_request_value(&processed).map(|value| scrub_credential_value(&value))
+    }
+
+    fn resolve_text(&self, text: &str) -> Result<String> {
+        let processed = match self.privacy_mode {
+            crate::privacy::PrivacyMode::Off => text.to_string(),
+            crate::privacy::PrivacyMode::Redact => self.privacy.redact_text(text).text,
+            crate::privacy::PrivacyMode::Block => {
+                if self.privacy.is_clean_text(text) {
+                    text.to_string()
+                } else {
+                    return Err(Error::InvalidRequest(
+                        "blocked by the privacy gate before run-ledger persistence".into(),
+                    ));
+                }
+            }
+        };
+        Ok(scrub_credential_text(&processed))
+    }
+
+    fn resolve_value(&self, value: &Value) -> Result<Value> {
+        match value {
+            Value::String(text) => self.resolve_text(text).map(Value::String),
+            Value::Array(values) => values
+                .iter()
+                .map(|value| self.resolve_value(value))
+                .collect::<Result<Vec<_>>>()
+                .map(Value::Array),
+            Value::Object(values) => values
+                .iter()
+                .map(|(key, value)| {
+                    if credential_field_name(key) {
+                        Ok((key.clone(), Value::String("[REDACTED_CREDENTIAL]".into())))
+                    } else {
+                        self.resolve_value(value).map(|value| (key.clone(), value))
+                    }
+                })
+                .collect::<Result<Map<String, Value>>>()
+                .map(Value::Object),
+            _ => Ok(value.clone()),
+        }
+    }
+}
+
+impl RunJournal {
+    fn commit_composition(&self, accepted: &AcceptedTurnV1) -> Result<()> {
+        let visibility = if matches!(
+            accepted.config.adapter.as_str(),
+            "codex" | "claude" | "opencode" | "pi"
+        ) {
+            "harness_boundary"
+        } else {
+            "model_visible"
+        };
+        let environment_policy = if visibility == "harness_boundary" {
+            "AccountRuntimeInherited"
+        } else {
+            "MilimProviderBoundary"
+        };
+        let attachments = accepted
+            .config
+            .attachments
+            .iter()
+            .map(|attachment| {
+                let identity = attachment
+                    .data_url
+                    .as_deref()
+                    .or(attachment.content.as_deref())
+                    .unwrap_or_default();
+                json!({
+                    "id": attachment.id,
+                    "name": attachment.name,
+                    "mime": attachment.mime,
+                    "size": attachment.size,
+                    "digest": format!("sha256:{:x}", Sha256::digest(identity.as_bytes())),
+                    "reference": format!("control-attachment:{}", attachment.id),
+                    "truncated": attachment.truncated,
+                })
+            })
+            .collect::<Vec<_>>();
+        let composition = json!({
+            "visibility": visibility,
+            "adapter": accepted.config.adapter,
+            "model": accepted.config.model,
+            "reasoning_effort": accepted.config.reasoning_effort,
+            "native_session_boundary": accepted.config.native_session_id,
+            "workspace": accepted.config.workspace,
+            "environment_policy": environment_policy,
+            "explicit_environment_grants": [],
+            "prompt_sections": [
+                {
+                    "kind": "instructions",
+                    "provenance": "frozen_run_config",
+                    "content": self.privacy_processed_text(&accepted.config.instructions)?,
+                },
+                {
+                    "kind": "user",
+                    "provenance": "accepted_turn",
+                    "content": self.privacy_processed_text(&accepted.text)?,
+                }
+            ],
+            "tools": accepted.config.enabled_tools.iter().map(|name| json!({
+                "name": name,
+                "provenance": "frozen_run_config",
+            })).collect::<Vec<_>>(),
+            "policies": {
+                "privacy": accepted.config.privacy,
+                "approval": accepted.config.approval_mode,
+                "tool_mode": accepted.config.tool_mode,
+                "plan_mode": accepted.config.plan_mode,
+                "sandbox": accepted.config.sandbox,
+                "computer_use": accepted.config.computer_use,
+                "delegation": accepted.config.delegation_policy,
+            },
+            "attachments": attachments,
+        });
+        let digest = self.put_artifact("run_composition", &composition)?;
+        self.store.control_append_run_event(
+            &self.run_id,
+            &Uuid::new_v4().to_string(),
+            None,
+            "run_composition_resolved",
+            &json!({ "artifact_digest": digest, "visibility": visibility }).to_string(),
+        )?;
+        Ok(())
+    }
+}
+
+fn credential_field_name(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    matches!(
+        normalized.as_str(),
+        "authorization"
+            | "apikey"
+            | "accesstoken"
+            | "refreshtoken"
+            | "bearertoken"
+            | "devicekey"
+            | "clientsecret"
+            | "password"
+            | "secret"
+    )
+}
+
+fn scrub_credential_text(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let markers = [
+        "bearer ",
+        "authorization:",
+        "api_key=",
+        "api-key=",
+        "apikey=",
+        "openai_api_key=",
+        "anthropic_api_key=",
+        "device_key=",
+        "client_secret=",
+        "sk-",
+    ];
+    if markers.iter().any(|marker| lower.contains(marker)) {
+        "[REDACTED_CREDENTIAL]".into()
+    } else {
+        text.to_string()
+    }
+}
+
+fn scrub_credential_value(value: &Value) -> Value {
+    match value {
+        Value::String(text) => Value::String(scrub_credential_text(text)),
+        Value::Array(values) => Value::Array(values.iter().map(scrub_credential_value).collect()),
+        Value::Object(values) => Value::Object(
+            values
+                .iter()
+                .map(|(key, value)| {
+                    if credential_field_name(key) {
+                        (key.clone(), Value::String("[REDACTED_CREDENTIAL]".into()))
+                    } else {
+                        (key.clone(), scrub_credential_value(value))
+                    }
+                })
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
+}
+
+#[async_trait::async_trait]
+impl milim_agents::AgentStepHook for RunJournal {
+    async fn commit_tool_catalog(&self, tools: &[milim_tools::ToolExecutionSpec]) -> Result<()> {
+        let tools = self.privacy_processed_value(
+            &serde_json::to_value(tools)
+                .map_err(|error| Error::Other(format!("serialize effective tools: {error}")))?,
+        )?;
+        let digest = self.put_artifact("effective_tools", &tools)?;
+        self.store.control_append_run_event(
+            &self.run_id,
+            &Uuid::new_v4().to_string(),
+            None,
+            "effective_tools_resolved",
+            &json!({"artifact_digest": digest}).to_string(),
+        )?;
+        Ok(())
+    }
+
+    async fn prepare_model_step(&self, step: usize, messages: &mut Vec<ChatMessage>) -> Result<()> {
+        if let Some(rebuilt) = self.rebuild_messages_for_step(step, messages)? {
+            *messages = rebuilt;
+        }
+        let claimed = self
+            .store
+            .control_claim_step_inputs(&self.thread_id, &self.run_id)?;
+        for item in &claimed {
+            match item.kind.as_str() {
+                "steer" => {
+                    let accepted: AcceptedTurnV1 = serde_json::from_str(&item.payload_json)
+                        .map_err(|error| {
+                            Error::Other(format!("stored steering input is invalid: {error}"))
+                        })?;
+                    messages.push(ChatMessage::text("user", accepted.text.clone()));
+                    let message = json!({
+                        "id": Uuid::new_v4().to_string(),
+                        "role": "user",
+                        "content": accepted.display_text.as_deref().unwrap_or(&accepted.text),
+                        "promptContent": accepted.text,
+                        "attachments": accepted.config.attachments,
+                        "runId": self.run_id,
+                        "steering": true,
+                    });
+                    let message_id = message
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or(&item.id);
+                    let step_id = format!("step-{step}");
+                    self.store.control_commit_message_projection_and_event(
+                        &self.thread_id,
+                        &self.run_id,
+                        message_id,
+                        &message.to_string(),
+                        &Uuid::new_v4().to_string(),
+                        Some(&step_id),
+                        "inbox_input_projected",
+                        &json!({"inbox_id": item.id, "item_id": message_id}).to_string(),
+                    )?;
+                }
+                "inject" => {
+                    let payload = parse_value(&item.payload_json)?;
+                    if let Some(text) = payload.get("text").and_then(Value::as_str) {
+                        messages.push(ChatMessage::text(
+                            "system",
+                            format!("Injected context:\n{text}"),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !claimed.is_empty() {
+            self.append_event(
+                step,
+                "inbox_claimed",
+                json!({
+                    "items": claimed.iter().map(|item| json!({
+                        "id": item.id,
+                        "kind": item.kind,
+                        "target_run_id": item.target_run_id,
+                    })).collect::<Vec<_>>()
+                }),
+            )?;
+        }
+        Ok(())
+    }
+
+    async fn commit_model_request(&self, step: usize, request: &CompletionRequest) -> Result<()> {
+        let data = self.privacy_processed_request(request)?;
+        let digest = self.put_artifact("provider_request", &data)?;
+        self.append_event(
+            step,
+            "model_request_resolved",
+            json!({ "artifact_digest": digest, "privacy": self.privacy_mode.as_str() }),
+        )
+    }
+
+    async fn commit_model_response(
+        &self,
+        step: usize,
+        content: &str,
+        reasoning: &str,
+        tool_calls: &[ToolCall],
+        finish_reason: &str,
+        usage: Usage,
+    ) -> Result<()> {
+        let content = self.privacy_processed_text(content)?;
+        let reasoning = self.privacy_processed_text(reasoning)?;
+        let tool_calls = self.privacy_processed_value(
+            &serde_json::to_value(tool_calls)
+                .map_err(|error| Error::Other(format!("serialize tool calls: {error}")))?,
+        )?;
+        let response = json!({
+            "content": content,
+            "reasoning": reasoning,
+            "tool_calls": tool_calls,
+            "finish_reason": finish_reason,
+            "usage": usage,
+        });
+        let digest = self.put_artifact("provider_response", &response)?;
+        self.append_event(
+            step,
+            "model_response_committed",
+            json!({
+                "artifact_digest": digest,
+                "finish_reason": finish_reason,
+                "usage": usage,
+            }),
+        )
+    }
+
+    async fn commit_tool_result(
+        &self,
+        step: usize,
+        call_id: Option<&str>,
+        name: &str,
+        result: &Value,
+        model_content: &str,
+    ) -> Result<()> {
+        let result = self.privacy_processed_value(result)?;
+        let model_content = self.privacy_processed_text(model_content)?;
+        let model_content_bytes = model_content.len();
+        let artifact = json!({
+            "call_id": call_id,
+            "name": name,
+            "result": result,
+            "model_content": model_content,
+        });
+        let digest = self.put_artifact("tool_result", &artifact)?;
+        self.append_event(
+            step,
+            "tool_result_committed",
+            json!({
+                "artifact_digest": digest,
+                "call_id": call_id,
+                "name": name,
+                "model_content_bytes": model_content_bytes,
+            }),
+        )
+    }
 }
 
 struct ConfirmationGrant {
@@ -636,6 +1267,10 @@ impl RunManager {
             None,
             json!({ "appearance": self.appearance_snapshot() }),
         );
+    }
+
+    pub fn publish_model_catalog(&self) {
+        self.emit("models.updated", None, None, None, json!({}));
     }
 
     pub(crate) fn appearance_background_asset(&self) -> Option<AppearanceBackgroundAsset> {
@@ -761,6 +1396,13 @@ impl RunManager {
             .map(run_snapshot)
             .collect::<Result<Vec<_>>>()?;
         let queued_turns = queued.into_iter().map(queued_turn).collect();
+        let pending_inputs = self
+            .store
+            .control_pending_inbox(None)?
+            .into_iter()
+            .filter(|item| item.kind != "followup")
+            .map(pending_input)
+            .collect();
         let pending_approvals = self
             .store
             .control_pending_approvals()?
@@ -781,6 +1423,7 @@ impl RunManager {
             agents,
             active_runs,
             queued_turns,
+            pending_inputs,
             pending_approvals,
         })
     }
@@ -816,6 +1459,84 @@ impl RunManager {
             .transpose()
     }
 
+    pub fn run_inspection(&self, run_id: &str) -> Result<Option<RunInspectionV1>> {
+        let Some(run) = self.store.control_run(run_id)? else {
+            return Ok(None);
+        };
+        let composition = self
+            .store
+            .control_run_artifacts(run_id)?
+            .into_iter()
+            .find(|artifact| artifact.kind == "run_composition")
+            .map(|artifact| {
+                serde_json::from_str::<ResolvedRunCompositionV1>(&artifact.data_json).map_err(
+                    |error| Error::Other(format!("stored run composition is invalid: {error}")),
+                )
+            })
+            .transpose()?;
+        Ok(Some(RunInspectionV1 {
+            run: run_snapshot(run)?,
+            composition,
+        }))
+    }
+
+    pub fn run_event_page(
+        &self,
+        run_id: &str,
+        after_seq: Option<u64>,
+        limit: usize,
+    ) -> Result<Option<RunEventPageV1>> {
+        if self.store.control_run(run_id)?.is_none() {
+            return Ok(None);
+        }
+        let limit = limit.clamp(1, 200);
+        let mut records =
+            self.store
+                .control_run_events(run_id, after_seq, limit.saturating_add(1))?;
+        let has_more = records.len() > limit;
+        records.truncate(limit);
+        let artifacts = self
+            .store
+            .control_run_artifacts(run_id)?
+            .into_iter()
+            .map(|artifact| (artifact.digest, artifact.data_json))
+            .collect::<HashMap<_, _>>();
+        let events = records
+            .into_iter()
+            .map(|record| {
+                let mut data = parse_value(&record.data_json)?;
+                if let Some(object) = data.as_object_mut() {
+                    if let Some(artifact) = object
+                        .get("artifact_digest")
+                        .and_then(Value::as_str)
+                        .and_then(|digest| artifacts.get(digest))
+                    {
+                        object.insert("artifact".into(), parse_value(artifact)?);
+                    }
+                }
+                Ok(RunEventV1 {
+                    id: record.event_id,
+                    run_id: record.run_id,
+                    seq: record.seq,
+                    step_id: record.step_id,
+                    event_type: record.event_type,
+                    data,
+                    created_at_ms: record.created_at_ms,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let next_seq = has_more
+            .then(|| events.last().map(|event| event.seq))
+            .flatten();
+        Ok(Some(RunEventPageV1 {
+            run_id: run_id.to_string(),
+            after_seq,
+            next_seq,
+            has_more,
+            events,
+        }))
+    }
+
     pub async fn command(
         self: &Arc<Self>,
         state: AppState,
@@ -836,6 +1557,9 @@ impl RunManager {
         let thread_lock = if matches!(
             command.kind,
             ControlCommandKindV1::TurnSend
+                | ControlCommandKindV1::TurnSteer
+                | ControlCommandKindV1::ContextInject
+                | ControlCommandKindV1::TurnInboxDelete
                 | ControlCommandKindV1::TurnRegenerate
                 | ControlCommandKindV1::TurnQueueResume
                 | ControlCommandKindV1::TurnQueueDelete
@@ -887,6 +1611,9 @@ impl RunManager {
             ControlCommandKindV1::ThreadSetAgent => self.patch_thread(&command, ThreadPatch::Agent),
             ControlCommandKindV1::MessageDelete => self.delete_message(&command),
             ControlCommandKindV1::TurnSend => self.accept_turn(state, &command).await,
+            ControlCommandKindV1::TurnSteer => self.steer_turn(&state, &command),
+            ControlCommandKindV1::ContextInject => self.inject_context(&command),
+            ControlCommandKindV1::TurnInboxDelete => self.delete_inbox_input(&command),
             ControlCommandKindV1::TurnStop => self.stop_turn(&command),
             ControlCommandKindV1::TurnRegenerate => {
                 self.regenerate_turn(state, &command, None).await
@@ -1007,7 +1734,35 @@ impl RunManager {
             }
             ThreadPatch::Model => {
                 let model = required_payload_string(&command.payload, "model")?;
-                settings_object(object)?.insert("model".into(), Value::String(model));
+                let reasoning_effort = match command.payload.get("reasoning_effort") {
+                    Some(value) => {
+                        let raw = value.as_str().ok_or_else(|| {
+                            Error::InvalidRequest(
+                                "payload.reasoning_effort must be a supported string".into(),
+                            )
+                        })?;
+                        Some(parse_reasoning_effort(raw).ok_or_else(|| {
+                            Error::InvalidRequest(format!(
+                                "unsupported payload.reasoning_effort: {raw}"
+                            ))
+                        })?)
+                    }
+                    None => None,
+                };
+                let settings = settings_object(object)?;
+                settings.insert("model".into(), Value::String(model.clone()));
+                if let Some(reasoning_effort) = reasoning_effort {
+                    let overrides = settings
+                        .entry("reasoningEffortOverrides")
+                        .or_insert_with(|| json!({}))
+                        .as_object_mut()
+                        .ok_or_else(|| {
+                            Error::Other(
+                                "stored reasoning effort overrides are not an object".into(),
+                            )
+                        })?;
+                    overrides.insert(model, Value::String(reasoning_effort.as_str().to_string()));
+                }
             }
             ThreadPatch::Agent => {
                 let agent = command
@@ -1193,6 +1948,12 @@ impl RunManager {
             });
         }
         let run_id = self.start_turn(state, thread_id.clone(), accepted)?;
+        let run_capabilities = self
+            .store
+            .control_run(&run_id)?
+            .map(run_snapshot)
+            .transpose()?
+            .map(|run| run.capabilities);
         let revision = self
             .store
             .control_thread(&thread_id)?
@@ -1206,7 +1967,160 @@ impl RunManager {
             queue_id: None,
             confirmation_token: None,
             message: None,
-            data: Value::Null,
+            data: json!({ "capabilities": run_capabilities }),
+        })
+    }
+
+    fn steer_turn(
+        &self,
+        state: &AppState,
+        command: &ControlCommandV1,
+    ) -> Result<ControlCommandResultV1> {
+        let thread_id = required_thread_id(command)?.to_string();
+        let requested_run_id = required_payload_string(&command.payload, "run_id")?;
+        let payload: TurnSendPayloadV1 =
+            serde_json::from_value(command.payload.clone()).map_err(|error| {
+                Error::InvalidRequest(format!("invalid turn.steer payload: {error}"))
+            })?;
+        if payload.text.trim().is_empty() && payload.attachments.is_empty() {
+            return Err(Error::InvalidRequest(
+                "turn.steer requires text or at least one attachment".into(),
+            ));
+        }
+        validate_control_attachments(&payload.attachments)?;
+        {
+            let active = self
+                .active
+                .lock()
+                .expect("control active run store poisoned");
+            let Some(run) = active.get(&thread_id) else {
+                return Err(Error::InvalidRequest("thread has no active turn".into()));
+            };
+            if run.run_id != requested_run_id {
+                return Err(Error::InvalidRequest(
+                    "turn.steer run_id does not match the active run".into(),
+                ));
+            }
+            if !run.steering {
+                return Err(Error::InvalidRequest(
+                    "active runtime does not support steering".into(),
+                ));
+            }
+        }
+        let thread = self
+            .store
+            .control_thread(&thread_id)?
+            .ok_or_else(|| Error::ModelNotFound(format!("thread {thread_id}")))?;
+        let accepted = AcceptedTurnV1 {
+            text: payload.text,
+            display_text: payload.display_text,
+            config: resolve_frozen_config(state, &thread, payload.attachments)?,
+            append_user: true,
+        };
+        let inbox_id = Uuid::new_v4().to_string();
+        self.store.control_put_inbox(&ControlInboxRecord {
+            id: inbox_id.clone(),
+            thread_id: thread_id.clone(),
+            target_run_id: Some(requested_run_id.clone()),
+            command_id: Some(command.command_id.clone()),
+            kind: "steer".into(),
+            state: "pending".into(),
+            payload_json: serde_json::to_string(&accepted)
+                .map_err(|error| Error::Other(format!("serialize steering input: {error}")))?,
+            created_at_ms: now_ms(),
+            claimed_at_ms: None,
+            resolved_at_ms: None,
+        })?;
+        self.emit(
+            "turn.inbox_updated",
+            Some(&thread_id),
+            Some(&thread.epoch),
+            None,
+            json!({ "inbox_id": inbox_id, "kind": "steer", "state": "pending" }),
+        );
+        Ok(ControlCommandResultV1 {
+            command_id: command.command_id.clone(),
+            status: ControlCommandStatusV1::Accepted,
+            thread_id: Some(thread_id),
+            revision: Some(thread.revision),
+            run_id: Some(requested_run_id),
+            queue_id: None,
+            confirmation_token: None,
+            message: None,
+            data: json!({ "inbox_id": inbox_id }),
+        })
+    }
+
+    fn inject_context(&self, command: &ControlCommandV1) -> Result<ControlCommandResultV1> {
+        let thread_id = required_thread_id(command)?.to_string();
+        let text = required_payload_string(&command.payload, "text")?;
+        let thread = self
+            .store
+            .control_thread(&thread_id)?
+            .ok_or_else(|| Error::ModelNotFound(format!("thread {thread_id}")))?;
+        let inbox_id = Uuid::new_v4().to_string();
+        self.store.control_put_inbox(&ControlInboxRecord {
+            id: inbox_id.clone(),
+            thread_id: thread_id.clone(),
+            target_run_id: None,
+            command_id: Some(command.command_id.clone()),
+            kind: "inject".into(),
+            state: "pending".into(),
+            payload_json: json!({ "text": text }).to_string(),
+            created_at_ms: now_ms(),
+            claimed_at_ms: None,
+            resolved_at_ms: None,
+        })?;
+        self.emit(
+            "turn.inbox_updated",
+            Some(&thread_id),
+            Some(&thread.epoch),
+            None,
+            json!({ "inbox_id": inbox_id, "kind": "inject", "state": "pending" }),
+        );
+        Ok(ControlCommandResultV1 {
+            command_id: command.command_id.clone(),
+            status: ControlCommandStatusV1::Accepted,
+            thread_id: Some(thread_id),
+            revision: Some(thread.revision),
+            run_id: None,
+            queue_id: None,
+            confirmation_token: None,
+            message: None,
+            data: json!({ "inbox_id": inbox_id }),
+        })
+    }
+
+    fn delete_inbox_input(&self, command: &ControlCommandV1) -> Result<ControlCommandResultV1> {
+        let thread_id = required_thread_id(command)?.to_string();
+        let inbox_id = required_payload_string(&command.payload, "inbox_id")?;
+        let belongs_to_thread = self
+            .store
+            .control_pending_inbox(Some(&thread_id))?
+            .iter()
+            .any(|item| item.id == inbox_id);
+        if !belongs_to_thread || !self.store.control_cancel_inbox(&inbox_id)? {
+            return Err(Error::InvalidRequest(
+                "inbox input was already claimed, removed, or belongs to another thread".into(),
+            ));
+        }
+        self.emit(
+            "turn.inbox_updated",
+            Some(&thread_id),
+            None,
+            None,
+            json!({ "inbox_id": inbox_id, "state": "cancelled" }),
+        );
+        Ok(ControlCommandResultV1 {
+            command_id: command.command_id.clone(),
+            status: ControlCommandStatusV1::Applied,
+            thread_id: Some(thread_id),
+            revision: None,
+            run_id: None,
+            queue_id: None,
+            confirmation_token: None,
+            message: None,
+            data: json!({ "inbox_id": inbox_id }),
         })
     }
 
@@ -1342,12 +2256,14 @@ impl RunManager {
                 thread_id.clone(),
                 ActiveRun {
                     run_id: run_id.clone(),
+                    steering: accepted.config.agent.is_some()
+                        || accepted.config.adapter == "provider",
                     stop,
                 },
             );
         }
         let now = now_ms();
-        self.store.control_put_run(&ControlRunRecord {
+        let mut run_record = ControlRunRecord {
             id: run_id.clone(),
             thread_id: thread_id.clone(),
             status: "accepted".into(),
@@ -1370,7 +2286,28 @@ impl RunManager {
             updated_at_ms: now,
             completed_at_ms: None,
             error_json: None,
-        })?;
+        };
+        self.store.control_put_run(&run_record)?;
+        let journal = RunJournal {
+            store: self.store.clone(),
+            privacy: state.privacy.clone(),
+            privacy_mode: crate::privacy::PrivacyMode::parse(&accepted.config.privacy),
+            thread_id: thread_id.clone(),
+            run_id: run_id.clone(),
+        };
+        if let Err(error) = journal.commit_composition(&accepted) {
+            self.active
+                .lock()
+                .expect("control active run store poisoned")
+                .remove(&thread_id);
+            run_record.status = "failed".into();
+            run_record.updated_at_ms = now_ms();
+            run_record.completed_at_ms = Some(run_record.updated_at_ms);
+            run_record.error_json =
+                Some(json!({ "code": error.code(), "message": error.to_string() }).to_string());
+            let _ = self.store.control_put_run(&run_record);
+            return Err(error);
+        }
         if accepted.append_user {
             let user_message_id = Uuid::new_v4().to_string();
             let user_message = json!({
@@ -1381,9 +2318,14 @@ impl RunManager {
                 "attachments": accepted.config.attachments,
                 "runId": run_id,
             });
-            self.store
-                .control_append_message(&thread_id, &user_message.to_string())?;
-            self.persist_and_emit(&thread_id, Some(&run_id), "message", user_message)?;
+            self.persist_message_and_event(
+                &thread_id,
+                &run_id,
+                user_message,
+                None,
+                "accepted_input_projected",
+                json!({"source": "turn.send"}),
+            )?;
         }
         let manager = self.clone();
         let spawned_run_id = run_id.clone();
@@ -1440,6 +2382,17 @@ impl RunManager {
                 .await
         };
 
+        if let Err(error) = &outcome {
+            let journal = RunJournal {
+                store: self.store.clone(),
+                privacy: state.privacy.clone(),
+                privacy_mode: crate::privacy::PrivacyMode::parse(&accepted.config.privacy),
+                thread_id: thread_id.clone(),
+                run_id: run_id.clone(),
+            };
+            let _ = journal.commit_failure(0, error);
+        }
+
         let (status, error) = match outcome {
             Ok(RunOutcome::Completed) => ("completed", None),
             Ok(RunOutcome::Cancelled) => ("cancelled", None),
@@ -1459,6 +2412,7 @@ impl RunManager {
             "run_status",
             json!({ "run_id": run_id, "status": status, "error": error }),
         );
+        let _ = self.store.control_retarget_pending_steers(&run_id);
         self.active
             .lock()
             .expect("control active run store poisoned")
@@ -1515,19 +2469,26 @@ impl RunManager {
             .reasoning_effort
             .as_deref()
             .and_then(parse_reasoning_effort);
-        let mut stream = service
-            .stream(CompletionRequest {
-                model: accepted.config.model.clone(),
-                messages,
-                tools: Vec::new(),
-                tool_choice: None,
-                response_format: None,
-                prompt: None,
-                suffix: None,
-                sampling: SamplingParams::default(),
-                reasoning_effort,
-            })
-            .await?;
+        let request = CompletionRequest {
+            model: accepted.config.model.clone(),
+            messages,
+            tools: Vec::new(),
+            tool_choice: None,
+            response_format: None,
+            prompt: None,
+            suffix: None,
+            sampling: SamplingParams::default(),
+            reasoning_effort,
+        };
+        let journal = RunJournal {
+            store: self.store.clone(),
+            privacy: state.privacy.clone(),
+            privacy_mode: crate::privacy::PrivacyMode::parse(&accepted.config.privacy),
+            thread_id: thread_id.to_string(),
+            run_id: run_id.to_string(),
+        };
+        journal.commit_model_request(1, &request).await?;
+        let mut stream = service.stream(request).await?;
         let mut content = String::new();
         let mut reasoning = String::new();
         let mut pending_text = String::new();
@@ -1561,6 +2522,16 @@ impl RunManager {
                         }
                         Some(Ok(StreamEvent::Done { finish_reason, usage })) => {
                             flush_deltas(self, thread_id, run_id, &mut pending_text, &mut pending_reasoning)?;
+                            journal
+                                .commit_model_response(
+                                    1,
+                                    &content,
+                                    &reasoning,
+                                    &[],
+                                    &finish_reason,
+                                    usage,
+                                )
+                                .await?;
                             self.complete_assistant_message(
                                 thread_id,
                                 run_id,
@@ -1623,6 +2594,13 @@ impl RunManager {
             .reasoning_effort
             .as_deref()
             .and_then(parse_reasoning_effort);
+        let journal = Arc::new(RunJournal {
+            store: self.store.clone(),
+            privacy: state.privacy.clone(),
+            privacy_mode: crate::privacy::PrivacyMode::parse(&accepted.config.privacy),
+            thread_id: thread_id.to_string(),
+            run_id: run_id.to_string(),
+        });
         let mut stream = crate::routes::control_agent_stream(
             state,
             &agent,
@@ -1640,6 +2618,7 @@ impl RunManager {
             thread_id,
             run_id,
             reasoning_effort,
+            journal.clone(),
         )?;
         let mut content = String::new();
         let mut reasoning = String::new();
@@ -1680,6 +2659,13 @@ impl RunManager {
                 .and_then(Value::as_str)
                 .unwrap_or("agent_event")
                 .to_string();
+            if matches!(
+                &event,
+                milim_agents::AgentEvent::ToolApprovalRequired { .. }
+                    | milim_agents::AgentEvent::ToolApprovalResolved { .. }
+            ) {
+                journal.append_event(0, &event_type, journal.privacy_processed_value(&value)?)?;
+            }
             match &event {
                 milim_agents::AgentEvent::Token { text } => {
                     content.push_str(text);
@@ -1714,6 +2700,7 @@ impl RunManager {
                     name,
                     arguments,
                     effect,
+                    environment_policy,
                     ..
                 } => {
                     flush_deltas(
@@ -1733,6 +2720,13 @@ impl RunManager {
                             "name": name,
                             "arguments": arguments,
                             "effect": effect,
+                            "environment_policy": environment_policy,
+                            "environment_notice": matches!(
+                                environment_policy,
+                                milim_tools::ProcessEnvironmentPolicy::HostShellInherited
+                            ).then_some(
+                                "This host tool inherits your user environment; developer credentials may be accessible."
+                            ),
                         })
                         .to_string(),
                         status: "pending".into(),
@@ -1864,6 +2858,37 @@ impl RunManager {
                 "enabled_skills": accepted.config.enabled_skills,
             })),
         };
+        let journal = RunJournal {
+            store: self.store.clone(),
+            privacy: state.privacy.clone(),
+            privacy_mode: crate::privacy::PrivacyMode::parse(&accepted.config.privacy),
+            thread_id: thread_id.to_string(),
+            run_id: run_id.to_string(),
+        };
+        let boundary_request = json!({
+            "adapter": accepted.config.adapter,
+            "model": request.model,
+            "prompt": journal.privacy_processed_text(&request.prompt)?,
+            "cwd": request.cwd,
+            "reasoning_effort": request.reasoning_effort,
+            "native_session_id": request.native_session_id,
+            "persist_session": request.persist_session,
+            "environment_policy": "AccountRuntimeInherited",
+            "images": request.images.iter().map(|image| json!({
+                "media_type": image.media_type,
+                "digest": format!("sha256:{:x}", Sha256::digest(image.data.as_bytes())),
+                "reference": "control-attachment",
+            })).collect::<Vec<_>>(),
+        });
+        let request_digest = journal.put_artifact("harness_boundary_request", &boundary_request)?;
+        journal.append_event(
+            1,
+            "harness_request_committed",
+            json!({
+                "artifact_digest": request_digest,
+                "visibility": "harness_boundary",
+            }),
+        )?;
         let mut stream = crate::routes::account_harness_stream(
             state,
             &headers,
@@ -1937,9 +2962,22 @@ impl RunManager {
                 }
                 _ => {}
             }
+            if matches!(event_type, "approval_requested" | "approval_resolved") {
+                journal.append_event(1, event_type, journal.privacy_processed_value(&value)?)?;
+            }
             self.persist_and_emit(thread_id, Some(run_id), timeline_type, timeline_value)?;
             if event.is_terminal() {
                 if event_type == "turn_completed" {
+                    journal
+                        .commit_model_response(
+                            1,
+                            &content,
+                            &reasoning,
+                            &[],
+                            "stop",
+                            Usage::default(),
+                        )
+                        .await?;
                     self.complete_assistant_message(thread_id, run_id, content, reasoning, None)?;
                     return Ok(RunOutcome::Completed);
                 }
@@ -1974,11 +3012,17 @@ impl RunManager {
             "content": content,
             "reasoning": reasoning,
             "runId": run_id,
+            "ledgerVersion": 1,
             "metrics": metrics,
         });
-        self.store
-            .control_append_message(thread_id, &message.to_string())?;
-        self.persist_and_emit(thread_id, Some(run_id), "message", message)?;
+        self.persist_message_and_event(
+            thread_id,
+            run_id,
+            message,
+            None,
+            "assistant_message_projected",
+            json!({"ledger_version": 1}),
+        )?;
         Ok(())
     }
 
@@ -2074,7 +3118,7 @@ impl RunManager {
             .control_queued_turns(Some(&thread_id))?
             .iter()
             .any(|turn| turn.id == queue_id);
-        if !belongs_to_thread || !self.store.control_remove_queued_turn(&queue_id)? {
+        if !belongs_to_thread || !self.store.control_cancel_inbox(&queue_id)? {
             return Err(Error::ModelNotFound(format!("queued turn {queue_id}")));
         }
         self.emit(
@@ -2305,15 +3349,16 @@ impl RunManager {
             return;
         };
         let Ok(accepted) = serde_json::from_str::<AcceptedTurnV1>(&next.request_json) else {
-            let _ = self.store.control_remove_queued_turn(&next.id);
+            let _ = self.store.control_discard_inbox(&next.id);
             return;
         };
         if self
             .store
             .control_remove_queued_turn(&next.id)
             .unwrap_or(false)
+            && self.start_turn(state, thread_id, accepted).is_err()
         {
-            let _ = self.start_turn(state, thread_id, accepted);
+            let _ = self.store.control_enqueue_turn(&next);
         }
     }
 
@@ -2376,6 +3421,39 @@ impl RunManager {
             run_id,
             item_type,
             &data.to_string(),
+        )?;
+        self.emit(
+            "timeline.appended",
+            Some(thread_id),
+            Some(&record.epoch),
+            Some(record.seq),
+            json!({ "item": timeline_item(record.clone())? }),
+        );
+        Ok(record)
+    }
+
+    fn persist_message_and_event(
+        &self,
+        thread_id: &str,
+        run_id: &str,
+        message: Value,
+        step_id: Option<&str>,
+        event_type: &str,
+        event_data: Value,
+    ) -> Result<ControlTimelineRecord> {
+        let item_id = message
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::InvalidRequest("message projection is missing id".into()))?;
+        let (record, _) = self.store.control_commit_message_projection_and_event(
+            thread_id,
+            run_id,
+            item_id,
+            &message.to_string(),
+            &Uuid::new_v4().to_string(),
+            step_id,
+            event_type,
+            &event_data.to_string(),
         )?;
         self.emit(
             "timeline.appended",
@@ -2557,7 +3635,7 @@ fn resolve_frozen_config(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    let model = settings
+    let selected_model = settings
         .and_then(|settings| settings.get("model"))
         .and_then(Value::as_str)
         .map(str::trim)
@@ -2612,8 +3690,8 @@ fn resolve_frozen_config(
             skill_mode: agent.skill_mode,
             enabled_skills: agent.enabled_skills,
         });
-    let adapter = runtime_adapter(&model).to_string();
-    let model = runtime_model(&model).to_string();
+    let adapter = runtime_adapter(&selected_model).to_string();
+    let model = runtime_model(&selected_model).to_string();
     let native_session_id = value
         .get("accountRuntime")
         .and_then(Value::as_object)
@@ -2629,7 +3707,7 @@ fn resolve_frozen_config(
     let reasoning_effort = settings
         .and_then(|settings| settings.get("reasoningEffortOverrides"))
         .and_then(Value::as_object)
-        .and_then(|overrides| overrides.get(&model))
+        .and_then(|overrides| overrides.get(&selected_model))
         .and_then(Value::as_str)
         .map(str::to_string);
     let enabled_tools = agent
@@ -2734,6 +3812,20 @@ fn thread_summary(
             .and_then(|settings| settings.get("model"))
             .and_then(Value::as_str)
             .map(str::to_string),
+        reasoning_effort_overrides: settings
+            .and_then(|settings| settings.get("reasoningEffortOverrides"))
+            .and_then(Value::as_object)
+            .map(|overrides| {
+                overrides
+                    .iter()
+                    .filter_map(|(model, effort)| {
+                        let effort = effort.as_str()?;
+                        parse_reasoning_effort(effort)?;
+                        Some((model.clone(), effort.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         agent_id: settings
             .and_then(|settings| settings.get("activeAgentId"))
             .and_then(Value::as_str)
@@ -2750,17 +3842,40 @@ fn thread_summary(
 fn run_snapshot(run: ControlRunRecord) -> Result<RunSnapshotV1> {
     let accepted: AcceptedTurnV1 = serde_json::from_str(&run.request_json)
         .map_err(|error| Error::Other(format!("invalid stored run snapshot: {error}")))?;
+    let visibility = if matches!(run.adapter.as_str(), "codex" | "claude" | "opencode" | "pi") {
+        "harness_boundary"
+    } else {
+        "model_visible"
+    };
+    let steering = accepted.config.agent.is_some() || accepted.config.adapter == "provider";
     Ok(RunSnapshotV1 {
         id: run.id,
         thread_id: run.thread_id,
         status: run.status,
         adapter: run.adapter,
         config: accepted.config,
+        capabilities: RunCapabilitiesV1 {
+            ledger: true,
+            inspectable: true,
+            steering,
+            visibility: visibility.into(),
+        },
         created_at_ms: run.created_at_ms,
         updated_at_ms: run.updated_at_ms,
         completed_at_ms: run.completed_at_ms,
         error: run.error_json.as_deref().map(parse_value).transpose()?,
     })
+}
+
+fn pending_input(item: ControlInboxRecord) -> PendingInputV1 {
+    PendingInputV1 {
+        id: item.id,
+        thread_id: item.thread_id,
+        target_run_id: item.target_run_id,
+        kind: item.kind,
+        state: item.state,
+        created_at_ms: item.created_at_ms,
+    }
 }
 
 fn queued_turn(turn: ControlQueuedTurnRecord) -> QueuedTurnV1 {
@@ -2877,9 +3992,31 @@ fn parse_value(value: &str) -> Result<Value> {
         .map_err(|error| Error::Other(format!("invalid stored control JSON: {error}")))
 }
 
+fn completion_request_value(request: &CompletionRequest) -> Result<Value> {
+    Ok(json!({
+        "model": request.model,
+        "messages": request.messages,
+        "tools": request.tools,
+        "tool_choice": request.tool_choice,
+        "response_format": request.response_format,
+        "prompt": request.prompt,
+        "suffix": request.suffix,
+        "sampling": {
+            "temperature": request.sampling.temperature,
+            "top_p": request.sampling.top_p,
+            "max_tokens": request.sampling.max_tokens,
+            "stop": request.sampling.stop,
+            "seed": request.sampling.seed,
+            "frequency_penalty": request.sampling.frequency_penalty,
+            "presence_penalty": request.sampling.presence_penalty,
+        },
+        "reasoning_effort": request.reasoning_effort,
+    }))
+}
+
 fn control_chat_messages(store: &UserDataStore, thread_id: &str) -> Result<Vec<ChatMessage>> {
     store
-        .control_messages(thread_id)?
+        .control_projected_messages(thread_id)?
         .into_iter()
         .map(|raw| {
             let mut value: Value = serde_json::from_str(&raw)
@@ -3121,6 +4258,40 @@ mod tests {
         }
     }
 
+    fn journal_fixture(mode: crate::privacy::PrivacyMode) -> (Arc<UserDataStore>, RunJournal) {
+        let store = Arc::new(UserDataStore::new(Database::open_in_memory().unwrap()).unwrap());
+        store
+            .control_create_thread(
+                "thread-1",
+                r#"{"id":"thread-1","title":"Fixture"}"#,
+                "epoch-1",
+            )
+            .unwrap();
+        store
+            .control_put_run(&ControlRunRecord {
+                id: "run-1".into(),
+                thread_id: "thread-1".into(),
+                status: "running".into(),
+                adapter: "provider".into(),
+                request_json: r#"{"text":"fixture"}"#.into(),
+                agent_snapshot_json: None,
+                native_session_json: None,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                completed_at_ms: None,
+                error_json: None,
+            })
+            .unwrap();
+        let journal = RunJournal {
+            store: store.clone(),
+            privacy: Arc::new(crate::privacy::PrivacyGate::default()),
+            privacy_mode: mode,
+            thread_id: "thread-1".into(),
+            run_id: "run-1".into(),
+        };
+        (store, journal)
+    }
+
     #[test]
     fn checked_in_protocol_fixtures_decode() {
         let bootstrap = serde_json::from_str::<ControlBootstrapV1>(include_str!(
@@ -3152,6 +4323,301 @@ mod tests {
             serde_json::from_str(include_str!("../../../contracts/control-v1/pairing.json"))
                 .unwrap();
         assert_eq!(pairing["host_id"], "host-fixture");
+    }
+
+    #[tokio::test]
+    async fn run_ledger_scrubs_credentials_before_any_artifact_is_persisted() {
+        let store = Arc::new(UserDataStore::new(Database::open_in_memory().unwrap()).unwrap());
+        store
+            .control_create_thread(
+                "thread-1",
+                r#"{"id":"thread-1","title":"Fixture"}"#,
+                "epoch-1",
+            )
+            .unwrap();
+        store
+            .control_put_run(&ControlRunRecord {
+                id: "run-1".into(),
+                thread_id: "thread-1".into(),
+                status: "running".into(),
+                adapter: "provider".into(),
+                request_json: r#"{"text":"fixture"}"#.into(),
+                agent_snapshot_json: None,
+                native_session_json: None,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                completed_at_ms: None,
+                error_json: None,
+            })
+            .unwrap();
+        let journal = RunJournal {
+            store: store.clone(),
+            privacy: Arc::new(crate::privacy::PrivacyGate::default()),
+            privacy_mode: crate::privacy::PrivacyMode::Off,
+            thread_id: "thread-1".into(),
+            run_id: "run-1".into(),
+        };
+        let sentinel = "sentinel-device-credential-9381";
+        let request = CompletionRequest {
+            model: "fixture".into(),
+            messages: vec![ChatMessage::text(
+                "user",
+                format!("Authorization: Bearer {sentinel}"),
+            )],
+            tools: vec![],
+            tool_choice: None,
+            response_format: None,
+            prompt: None,
+            suffix: None,
+            sampling: SamplingParams::default(),
+            reasoning_effort: None,
+        };
+        journal.commit_model_request(1, &request).await.unwrap();
+        journal
+            .commit_tool_result(
+                1,
+                Some("call-1"),
+                "fixture",
+                &json!({"device_key": sentinel, "result": format!("sk-{sentinel}")}),
+                &format!("sk-{sentinel}"),
+            )
+            .await
+            .unwrap();
+
+        let artifacts = store.control_run_artifacts("run-1").unwrap();
+        assert!(!artifacts.is_empty());
+        let stored = serde_json::to_string(&artifacts).unwrap();
+        assert!(!stored.contains(sentinel));
+        assert!(stored.contains("REDACTED_CREDENTIAL"));
+        let events =
+            serde_json::to_string(&store.control_run_events("run-1", None, 50).unwrap()).unwrap();
+        assert!(!events.contains(sentinel));
+    }
+
+    #[tokio::test]
+    async fn clean_run_ledger_reconstructs_provider_request_byte_for_byte() {
+        let (store, journal) = journal_fixture(crate::privacy::PrivacyMode::Off);
+        let request = CompletionRequest {
+            model: "fixture-model".into(),
+            messages: vec![
+                ChatMessage::text("system", "follow the fixture"),
+                ChatMessage::text("user", "hello"),
+            ],
+            tools: vec![],
+            tool_choice: None,
+            response_format: None,
+            prompt: None,
+            suffix: None,
+            sampling: SamplingParams::default(),
+            reasoning_effort: Some(ReasoningEffort::High),
+        };
+        let expected = serde_json::to_vec(&completion_request_value(&request).unwrap()).unwrap();
+        journal.commit_model_request(1, &request).await.unwrap();
+        let artifact = store
+            .control_run_artifacts("run-1")
+            .unwrap()
+            .into_iter()
+            .find(|artifact| artifact.kind == "provider_request")
+            .unwrap();
+        assert_eq!(artifact.data_json.as_bytes(), expected);
+    }
+
+    #[tokio::test]
+    async fn subsequent_model_step_rebuilds_text_and_tool_context_from_sqlite() {
+        let (_store, journal) = journal_fixture(crate::privacy::PrivacyMode::Off);
+        let request = CompletionRequest {
+            model: "fixture-model".into(),
+            messages: vec![
+                ChatMessage::text("system", "ledger authority"),
+                ChatMessage::text("user", "read the fixture"),
+            ],
+            tools: vec![],
+            tool_choice: None,
+            response_format: None,
+            prompt: None,
+            suffix: None,
+            sampling: SamplingParams::default(),
+            reasoning_effort: None,
+        };
+        let tool_calls: Vec<ToolCall> = serde_json::from_value(json!([{
+            "id": "call-1",
+            "type": "function",
+            "function": {"name": "read_file", "arguments": "{\"path\":\"a.txt\"}"}
+        }]))
+        .unwrap();
+        journal.commit_model_request(1, &request).await.unwrap();
+        journal
+            .commit_model_response(
+                1,
+                "I will read it.",
+                "",
+                &tool_calls,
+                "tool_calls",
+                Usage::default(),
+            )
+            .await
+            .unwrap();
+        journal
+            .commit_tool_result(
+                1,
+                Some("call-1"),
+                "read_file",
+                &json!({"content": "durable result"}),
+                "{\"content\":\"durable result\"}",
+            )
+            .await
+            .unwrap();
+
+        let mut memory_cache = vec![ChatMessage::text("user", "poisoned memory cache")];
+        journal
+            .prepare_model_step(2, &mut memory_cache)
+            .await
+            .unwrap();
+        assert_eq!(memory_cache.len(), 4);
+        assert_eq!(memory_cache[0].text_content(), "ledger authority");
+        assert_eq!(memory_cache[1].text_content(), "read the fixture");
+        assert_eq!(memory_cache[2].text_content(), "I will read it.");
+        assert_eq!(
+            memory_cache[2].tool_calls.as_ref().unwrap()[0]
+                .function
+                .name,
+            "read_file"
+        );
+        assert_eq!(
+            memory_cache[3].text_content(),
+            "{\"content\":\"durable result\"}"
+        );
+        assert_eq!(memory_cache[3].tool_call_id.as_deref(), Some("call-1"));
+        assert!(memory_cache
+            .iter()
+            .all(|message| message.text_content() != "poisoned memory cache"));
+    }
+
+    #[tokio::test]
+    async fn privacy_block_rejection_leaves_no_request_ledger_rows() {
+        let store = Arc::new(UserDataStore::new(Database::open_in_memory().unwrap()).unwrap());
+        store
+            .control_create_thread(
+                "thread-1",
+                r#"{"id":"thread-1","title":"Fixture"}"#,
+                "epoch-1",
+            )
+            .unwrap();
+        store
+            .control_put_run(&ControlRunRecord {
+                id: "run-1".into(),
+                thread_id: "thread-1".into(),
+                status: "running".into(),
+                adapter: "provider".into(),
+                request_json: r#"{"text":"fixture"}"#.into(),
+                agent_snapshot_json: None,
+                native_session_json: None,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                completed_at_ms: None,
+                error_json: None,
+            })
+            .unwrap();
+        let journal = RunJournal {
+            store: store.clone(),
+            privacy: Arc::new(crate::privacy::PrivacyGate::default()),
+            privacy_mode: crate::privacy::PrivacyMode::Block,
+            thread_id: "thread-1".into(),
+            run_id: "run-1".into(),
+        };
+        let request = CompletionRequest {
+            model: "fixture".into(),
+            messages: vec![ChatMessage::text("user", "private@example.com")],
+            tools: vec![],
+            tool_choice: None,
+            response_format: None,
+            prompt: None,
+            suffix: None,
+            sampling: SamplingParams::default(),
+            reasoning_effort: None,
+        };
+        assert!(journal.commit_model_request(1, &request).await.is_err());
+        assert!(store.control_run_artifacts("run-1").unwrap().is_empty());
+        assert!(store
+            .control_run_events("run-1", None, 50)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn model_patch_atomically_persists_thread_reasoning_effort() {
+        let (manager, state) = manager_and_state();
+        let created = manager
+            .command(
+                state.clone(),
+                None,
+                create_command("create-reasoning", "codex:gpt-5"),
+            )
+            .await
+            .unwrap();
+        let changed = manager
+            .command(
+                state.clone(),
+                None,
+                ControlCommandV1 {
+                    command_id: "set-reasoning".into(),
+                    kind: ControlCommandKindV1::ThreadSetModel,
+                    thread_id: Some("thread-fixture".into()),
+                    expected_revision: created.revision,
+                    payload: json!({"model": "codex:gpt-5", "reasoning_effort": "high"}),
+                    confirmation_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(changed.status, ControlCommandStatusV1::Applied);
+
+        let bootstrap = manager.bootstrap(&state).await.unwrap();
+        assert_eq!(
+            bootstrap.threads[0]
+                .reasoning_effort_overrides
+                .get("codex:gpt-5")
+                .map(String::as_str),
+            Some("high")
+        );
+        let thread = manager
+            .store
+            .control_thread("thread-fixture")
+            .unwrap()
+            .unwrap();
+        let frozen = resolve_frozen_config(&state, &thread, vec![]).unwrap();
+        assert_eq!(frozen.model, "gpt-5");
+        assert_eq!(frozen.reasoning_effort.as_deref(), Some("high"));
+
+        let explicit_auto = manager
+            .command(
+                state,
+                None,
+                ControlCommandV1 {
+                    command_id: "set-reasoning-auto".into(),
+                    kind: ControlCommandKindV1::ThreadSetModel,
+                    thread_id: Some("thread-fixture".into()),
+                    expected_revision: changed.revision,
+                    payload: json!({"model": "codex:gpt-5", "reasoning_effort": "auto"}),
+                    confirmation_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(explicit_auto.status, ControlCommandStatusV1::Applied);
+        let session: Value = serde_json::from_str(
+            &manager
+                .store
+                .control_thread("thread-fixture")
+                .unwrap()
+                .unwrap()
+                .session_json,
+        )
+        .unwrap();
+        assert_eq!(
+            session["settings"]["reasoningEffortOverrides"]["codex:gpt-5"],
+            "auto"
+        );
     }
 
     #[test]
@@ -3221,6 +4687,18 @@ mod tests {
         let event = receiver.try_recv().unwrap();
         assert_eq!(event.event_type, "appearance.updated");
         assert_eq!(event.data["appearance"]["colors"]["accent"], "#ff00aa");
+    }
+
+    #[test]
+    fn model_catalog_updates_are_published_live() {
+        let (manager, _) = manager_and_state();
+        let mut receiver = manager.subscribe();
+
+        manager.publish_model_catalog();
+
+        let event = receiver.try_recv().unwrap();
+        assert_eq!(event.event_type, "models.updated");
+        assert_eq!(event.thread_id, None);
     }
 
     #[test]
@@ -3461,5 +4939,176 @@ mod tests {
             .control_queued_turns(Some("thread-fixture"))
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn inbox_injection_is_durable_deletable_and_does_not_wake_an_idle_thread() {
+        let (manager, state) = manager_and_state();
+        manager
+            .command(
+                state.clone(),
+                None,
+                create_command("create-inject", "mock-echo"),
+            )
+            .await
+            .unwrap();
+        let injected = manager
+            .command(
+                state.clone(),
+                None,
+                ControlCommandV1 {
+                    command_id: "inject-1".into(),
+                    kind: ControlCommandKindV1::ContextInject,
+                    thread_id: Some("thread-fixture".into()),
+                    expected_revision: None,
+                    payload: json!({"text": "quiet context"}),
+                    confirmation_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(injected.status, ControlCommandStatusV1::Accepted);
+        assert!(manager.store.control_runs(true).unwrap().is_empty());
+        let bootstrap = manager.bootstrap(&state).await.unwrap();
+        assert!(bootstrap.active_runs.is_empty());
+        assert_eq!(bootstrap.pending_inputs.len(), 1);
+        assert_eq!(bootstrap.pending_inputs[0].kind, "inject");
+
+        let inbox_id = injected.data["inbox_id"].as_str().unwrap();
+        let deleted = manager
+            .command(
+                state.clone(),
+                None,
+                ControlCommandV1 {
+                    command_id: "delete-inject-1".into(),
+                    kind: ControlCommandKindV1::TurnInboxDelete,
+                    thread_id: Some("thread-fixture".into()),
+                    expected_revision: None,
+                    payload: json!({"inbox_id": inbox_id}),
+                    confirmation_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(deleted.status, ControlCommandStatusV1::Applied);
+        assert!(manager
+            .bootstrap(&state)
+            .await
+            .unwrap()
+            .pending_inputs
+            .is_empty());
+
+        let conflict = manager
+            .command(
+                state,
+                None,
+                ControlCommandV1 {
+                    command_id: "delete-inject-conflict".into(),
+                    kind: ControlCommandKindV1::TurnInboxDelete,
+                    thread_id: Some("thread-fixture".into()),
+                    expected_revision: None,
+                    payload: json!({"inbox_id": inbox_id}),
+                    confirmation_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(conflict.status, ControlCommandStatusV1::Failed);
+    }
+
+    #[tokio::test]
+    async fn inbox_steering_requires_the_exact_active_steer_capable_run() {
+        let (manager, state) = manager_and_state();
+        manager
+            .command(
+                state.clone(),
+                None,
+                create_command("create-steer", "mock-echo"),
+            )
+            .await
+            .unwrap();
+        manager
+            .store
+            .control_put_run(&ControlRunRecord {
+                id: "run-active".into(),
+                thread_id: "thread-fixture".into(),
+                status: "running".into(),
+                adapter: "provider".into(),
+                request_json: serde_json::to_string(&AcceptedTurnV1 {
+                    text: "active".into(),
+                    display_text: None,
+                    config: resolve_frozen_config(
+                        &state,
+                        &manager
+                            .store
+                            .control_thread("thread-fixture")
+                            .unwrap()
+                            .unwrap(),
+                        vec![],
+                    )
+                    .unwrap(),
+                    append_user: true,
+                })
+                .unwrap(),
+                agent_snapshot_json: None,
+                native_session_json: None,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                completed_at_ms: None,
+                error_json: None,
+            })
+            .unwrap();
+        let (stop, _stop_rx) = watch::channel(false);
+        manager.active.lock().unwrap().insert(
+            "thread-fixture".into(),
+            ActiveRun {
+                run_id: "run-active".into(),
+                steering: false,
+                stop: stop.clone(),
+            },
+        );
+
+        let steer = |command_id: &str, run_id: &str| ControlCommandV1 {
+            command_id: command_id.into(),
+            kind: ControlCommandKindV1::TurnSteer,
+            thread_id: Some("thread-fixture".into()),
+            expected_revision: None,
+            payload: json!({"run_id": run_id, "text": "adjust", "attachments": []}),
+            confirmation_token: None,
+        };
+        let unsupported = manager
+            .command(
+                state.clone(),
+                None,
+                steer("steer-unsupported", "run-active"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unsupported.status, ControlCommandStatusV1::Failed);
+
+        manager
+            .active
+            .lock()
+            .unwrap()
+            .get_mut("thread-fixture")
+            .unwrap()
+            .steering = true;
+        let mismatched = manager
+            .command(state.clone(), None, steer("steer-mismatch", "run-other"))
+            .await
+            .unwrap();
+        assert_eq!(mismatched.status, ControlCommandStatusV1::Failed);
+        let accepted = manager
+            .command(state, None, steer("steer-accepted", "run-active"))
+            .await
+            .unwrap();
+        assert_eq!(accepted.status, ControlCommandStatusV1::Accepted);
+        let pending = manager
+            .store
+            .control_pending_inbox(Some("thread-fixture"))
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].kind, "steer");
+        assert_eq!(pending[0].target_run_id.as_deref(), Some("run-active"));
     }
 }

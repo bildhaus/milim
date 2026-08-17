@@ -1,0 +1,121 @@
+import fs from 'node:fs';
+import path from 'node:path';
+
+const mobileRoot = path.resolve(__dirname, '..');
+const repoRoot = path.resolve(mobileRoot, '../..');
+
+function read(...parts: string[]): string {
+  return fs.readFileSync(path.join(mobileRoot, ...parts), 'utf8');
+}
+
+function occurrences(value: string, needle: string): number {
+  return value.split(needle).length - 1;
+}
+
+function pngDimensions(filePath: string): {width: number; height: number; colorType: number} {
+  const image = fs.readFileSync(filePath);
+  expect(image.subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  return {
+    width: image.readUInt32BE(16),
+    height: image.readUInt32BE(20),
+    colorType: image[25],
+  };
+}
+
+test('mobile app identifiers and versions match the release-ready configuration', () => {
+  const version = fs.readFileSync(path.join(repoRoot, 'VERSION'), 'utf8').trim();
+  const packageJson = JSON.parse(read('package.json')) as {version: string};
+  const android = read('android', 'app', 'build.gradle');
+  const settings = read('android', 'settings.gradle');
+  const activity = read(
+    'android',
+    'app',
+    'src',
+    'main',
+    'java',
+    'com',
+    'omershatz',
+    'milim',
+    'MainActivity.kt',
+  );
+  const application = read(
+    'android',
+    'app',
+    'src',
+    'main',
+    'java',
+    'com',
+    'omershatz',
+    'milim',
+    'MainApplication.kt',
+  );
+  const project = read('ios', 'MilimMobile.xcodeproj', 'project.pbxproj');
+
+  expect(packageJson.version).toBe(version);
+  expect(android).toContain('namespace "com.omershatz.milim"');
+  expect(android).toContain('applicationId "com.omershatz.milim"');
+  expect(android).toContain(`?: "${version}"`);
+  expect(settings).toContain("rootProject.name = 'com.omershatz.milim'");
+  expect(activity).toContain('package com.omershatz.milim');
+  expect(application).toContain('package com.omershatz.milim');
+  expect(occurrences(project, `MARKETING_VERSION = ${version};`)).toBe(2);
+  expect(occurrences(project, 'CURRENT_PROJECT_VERSION = 1;')).toBe(2);
+  expect(occurrences(project, 'PRODUCT_BUNDLE_IDENTIFIER = "com.omershatz.milim";')).toBe(2);
+  expect(occurrences(project, 'TARGETED_DEVICE_FAMILY = 1;')).toBe(2);
+  expect(project).not.toContain('TARGETED_DEVICE_FAMILY = "1,2";');
+});
+
+test('iOS metadata preserves pairing and bundles the privacy manifest', () => {
+  const info = read('ios', 'MilimMobile', 'Info.plist');
+  const privacy = read('ios', 'MilimMobile', 'PrivacyInfo.xcprivacy');
+  const project = read('ios', 'MilimMobile.xcodeproj', 'project.pbxproj');
+  const launchScreen = read('ios', 'MilimMobile', 'LaunchScreen.storyboard');
+
+  expect(info).toContain('<string>com.omershatz.milim.pairing</string>');
+  expect(info).toMatch(/<key>CFBundleURLSchemes<\/key>[\s\S]*<string>milim<\/string>/);
+  expect(info).toMatch(/<key>ITSAppUsesNonExemptEncryption<\/key>\s*<false\/>/);
+  expect(privacy).toContain('<string>C617.1</string>');
+  expect(privacy).toContain('<string>CA92.1</string>');
+  expect(privacy).toContain('<string>35F9.1</string>');
+  expect(privacy).toMatch(/<key>NSPrivacyCollectedDataTypes<\/key>\s*<array\/>/);
+  expect(privacy).toMatch(/<key>NSPrivacyTracking<\/key>\s*<false\/>/);
+  expect(project).toContain('PrivacyInfo.xcprivacy in Resources');
+  expect(project).toMatch(/PBXResourcesBuildPhase[\s\S]*13B07FC01A68108700A75B9A \/\* PrivacyInfo\.xcprivacy in Resources \*\//);
+  expect(launchScreen).toContain('text="milim"');
+  expect(launchScreen).toContain('systemColor="systemBackgroundColor"');
+  expect(launchScreen).toContain('systemColor="labelColor"');
+  expect(launchScreen).not.toContain('Powered by React Native');
+});
+
+test('iOS app icon catalog contains complete opaque assets', () => {
+  const iconRoot = path.join(
+    mobileRoot,
+    'ios',
+    'MilimMobile',
+    'Images.xcassets',
+    'AppIcon.appiconset',
+  );
+  const catalog = JSON.parse(
+    fs.readFileSync(path.join(iconRoot, 'Contents.json'), 'utf8'),
+  ) as {images: Array<{filename?: string}>};
+  const expected = new Map<string, number>([
+    ['AppIcon-20@2x.png', 40],
+    ['AppIcon-20@3x.png', 60],
+    ['AppIcon-29@2x.png', 58],
+    ['AppIcon-29@3x.png', 87],
+    ['AppIcon-40@2x.png', 80],
+    ['AppIcon-40@3x.png', 120],
+    ['AppIcon-60@2x.png', 120],
+    ['AppIcon-60@3x.png', 180],
+    ['AppIcon-1024.png', 1024],
+  ]);
+
+  expect(catalog.images.map(image => image.filename)).toEqual([...expected.keys()]);
+  for (const [filename, size] of expected) {
+    expect(pngDimensions(path.join(iconRoot, filename))).toEqual({
+      width: size,
+      height: size,
+      colorType: 2,
+    });
+  }
+});

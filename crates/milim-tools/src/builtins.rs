@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 
 use milim_core::{Error, Result};
 
-use crate::{Tool, ToolEffect, ToolUiDescriptor};
+use crate::{Tool, ToolConcurrency, ToolEffect, ToolUiDescriptor};
 
 /// Max characters returned by `http_fetch`.
 const MAX_FETCH_CHARS: usize = 100_000;
@@ -40,6 +40,10 @@ impl Tool for EchoTool {
         ToolEffect::ReadOnly
     }
 
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Parallel
+    }
+
     async fn invoke(&self, args: Value) -> Result<Value> {
         Ok(json!({ "echoed": args }))
     }
@@ -64,6 +68,10 @@ impl Tool for CurrentTimeTool {
 
     fn effect(&self) -> ToolEffect {
         ToolEffect::ReadOnly
+    }
+
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Parallel
     }
 
     async fn invoke(&self, _args: Value) -> Result<Value> {
@@ -417,6 +425,10 @@ impl Tool for HttpFetchTool {
 
     fn effect(&self) -> ToolEffect {
         ToolEffect::ReadOnly
+    }
+
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Parallel
     }
 
     async fn invoke(&self, args: Value) -> Result<Value> {

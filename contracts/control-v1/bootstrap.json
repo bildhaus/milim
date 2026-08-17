@@ -78,6 +78,7 @@
       "updated_at_ms": 1700000000000,
       "archived_at_ms": null,
       "model": "mock-echo",
+      "reasoning_effort_overrides": { "mock-echo": "high" },
       "agent_id": null,
       "workspace": null,
       "busy": true,

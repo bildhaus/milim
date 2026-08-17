@@ -2081,12 +2081,12 @@ fn opt_u32(value: &Value, key: &str) -> Option<u32> {
 
 #[cfg(windows)]
 fn claude_command() -> Command {
-    Command::new("claude")
+    crate::child_process::account_runtime_inherited(Command::new("claude"))
 }
 
 #[cfg(not(windows))]
 fn claude_command() -> Command {
-    crate::cli_path::command("claude")
+    crate::child_process::account_runtime_inherited(crate::cli_path::command("claude"))
 }
 
 #[cfg(test)]

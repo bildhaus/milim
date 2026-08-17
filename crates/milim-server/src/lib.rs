@@ -61,6 +61,23 @@ pub fn build_router(state: AppState) -> Router {
         .route("/mobile/pairing", post(routes::mobile_companion_pairing))
         .route("/mobile/pair", post(routes::mobile_companion_pair))
         .route(
+            "/mobile/pair-requests",
+            post(routes::mobile_companion_pairing_request_create),
+        )
+        .route(
+            "/mobile/pair-requests/{id}",
+            get(routes::mobile_companion_pairing_request_status)
+                .delete(routes::mobile_companion_pairing_request_cancel),
+        )
+        .route(
+            "/mobile/pair-requests/{id}/claim",
+            post(routes::mobile_companion_pairing_request_claim),
+        )
+        .route(
+            "/mobile/pair-requests/{id}/decision",
+            post(routes::mobile_companion_pairing_request_decision),
+        )
+        .route(
             "/mobile/device/status",
             get(routes::mobile_companion_device_status),
         )
@@ -82,6 +99,14 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/control/v1/threads/{id}/timeline",
             get(routes::control_timeline),
+        )
+        .route(
+            "/control/v1/runs/{run_id}",
+            get(routes::control_run_inspection),
+        )
+        .route(
+            "/control/v1/runs/{run_id}/events",
+            get(routes::control_run_events),
         )
         .route("/control/v1/commands", post(routes::control_command))
         .route(
@@ -400,6 +425,19 @@ pub fn build_mobile_companion_router(state: AppState) -> Router {
         .route("/mobile/", get(routes::mobile_companion_probe))
         .route("/mobile/pair", post(routes::mobile_companion_pair))
         .route(
+            "/mobile/pair-requests",
+            post(routes::mobile_companion_pairing_request_create),
+        )
+        .route(
+            "/mobile/pair-requests/{id}",
+            get(routes::mobile_companion_pairing_request_status)
+                .delete(routes::mobile_companion_pairing_request_cancel),
+        )
+        .route(
+            "/mobile/pair-requests/{id}/claim",
+            post(routes::mobile_companion_pairing_request_claim),
+        )
+        .route(
             "/mobile/device/status",
             get(routes::mobile_companion_device_status),
         )
@@ -415,6 +453,14 @@ pub fn build_mobile_companion_router(state: AppState) -> Router {
         .route(
             "/control/v1/threads/{id}/timeline",
             get(routes::control_timeline),
+        )
+        .route(
+            "/control/v1/runs/{run_id}",
+            get(routes::control_run_inspection),
+        )
+        .route(
+            "/control/v1/runs/{run_id}/events",
+            get(routes::control_run_events),
         )
         .route("/control/v1/commands", post(routes::control_command))
         .route(

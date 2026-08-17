@@ -62,6 +62,7 @@ import { ComposerSurface } from "./ComposerSurface";
 import { GeneratedMedia } from "./GeneratedMedia";
 import { InlineMediaControls } from "./InlineMediaControls";
 import { ModelPicker } from "./ModelPicker";
+import { PaneResizeHandle } from "./PaneResizeHandle";
 import { ProvidersManager } from "./ProvidersManager";
 import { SheetDialog } from "./SheetDialog";
 import { Select } from "./ui";
@@ -1496,12 +1497,11 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
                 </div>
                 {mediaComposer}
                 {composerPlacement === "side" && (
-                  <div
+                  <PaneResizeHandle
                     className={`media-panel-resize-handle media-composer-resize-handle${resizingPanel === "composer" ? " dragging" : ""}`}
+                    orientation="vertical"
                     data-testid="media-composer-resize-handle"
-                    role="separator"
                     aria-label="Resize media composer; drag past minimum to move it below Output"
-                    aria-orientation="vertical"
                     aria-valuemin={MIN_SIDEBAR_WIDTH}
                     aria-valuemax={MAX_SIDEBAR_WIDTH}
                     aria-valuenow={composerWidth}
@@ -1594,12 +1594,11 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
           </section>
 
           {libraryOpen && <aside className="media-library" id="media-library-sidebar" aria-label="Local library">
-              <div
+              <PaneResizeHandle
                 className={`media-panel-resize-handle media-library-resize-handle${resizingPanel === "library" ? " dragging" : ""}`}
+                orientation="vertical"
                 data-testid="media-library-resize-handle"
-                role="separator"
                 aria-label="Resize local library; drag past minimum to close it"
-                aria-orientation="vertical"
                 aria-valuemin={MIN_SIDEBAR_WIDTH}
                 aria-valuemax={MAX_SIDEBAR_WIDTH}
                 aria-valuenow={libraryWidth}

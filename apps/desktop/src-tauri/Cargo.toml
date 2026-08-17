@@ -1,6 +1,6 @@
 [package]
 name = "milim-desktop"
-version = "0.2.35"
+version = "0.2.36"
 edition = "2021"
 description = "milim desktop app"
 authors = ["Omer Shatzberg <omershatzberg@gmail.com>"]
@@ -58,6 +58,7 @@ xcap = { version = "0.9", features = ["image"], optional = true }
 image = { version = "0.25", optional = true }
 base64 = "0.22"
 mdns-sd = "0.20.3"
+gethostname = "1.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = { version = "0.25", optional = true }

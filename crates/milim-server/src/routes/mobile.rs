@@ -25,6 +25,19 @@ fn companion_device_key(headers: &HeaderMap) -> Result<&str, ApiError> {
     })
 }
 
+fn pairing_request_key(headers: &HeaderMap) -> Result<&str, ApiError> {
+    headers
+        .get("x-milim-pairing-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ApiError(Error::Unauthorized(
+                "missing mobile pairing request key".to_string(),
+            ))
+        })
+}
+
 #[derive(Deserialize)]
 pub(crate) struct MobileCompanionEnabledRequest {
     enabled: bool,
@@ -107,6 +120,79 @@ pub(crate) async fn mobile_companion_pair(
         .pair_device(req, now_unix(), user_agent)
         .map_err(|message| ApiError(Error::Unauthorized(message)))?;
     Ok(Json(pair).into_response())
+}
+
+/// `POST /mobile/pair-requests` - ask the desktop user to approve this device.
+pub(crate) async fn mobile_companion_pairing_request_create(
+    State(st): State<AppState>,
+    Json(req): Json<MobilePairingRequestCreate>,
+) -> Result<Response, ApiError> {
+    let bridge = mobile_bridge(&st)?;
+    let request = bridge
+        .start_pairing_request(req, now_unix())
+        .map_err(|message| ApiError(Error::InvalidRequest(message)))?;
+    Ok(Json(request).into_response())
+}
+
+/// `GET /mobile/pair-requests/{id}` - private status for the requesting phone.
+pub(crate) async fn mobile_companion_pairing_request_status(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let bridge = mobile_bridge(&st)?;
+    let key = pairing_request_key(&headers)?;
+    let request = bridge
+        .pairing_request_status(&id, key, now_unix())
+        .map_err(|message| ApiError(Error::Unauthorized(message)))?;
+    Ok(Json(request).into_response())
+}
+
+/// `POST /mobile/pair-requests/{id}/claim` - redeem an approved request.
+pub(crate) async fn mobile_companion_pairing_request_claim(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let bridge = mobile_bridge(&st)?;
+    let key = pairing_request_key(&headers)?;
+    let user_agent = headers
+        .get(USER_AGENT)
+        .and_then(|value| value.to_str().ok());
+    let paired = bridge
+        .claim_pairing_request(&id, key, now_unix(), user_agent)
+        .map_err(|message| ApiError(Error::Unauthorized(message)))?;
+    Ok(Json(paired).into_response())
+}
+
+/// `DELETE /mobile/pair-requests/{id}` - cancel the phone's pending request.
+pub(crate) async fn mobile_companion_pairing_request_cancel(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let bridge = mobile_bridge(&st)?;
+    let key = pairing_request_key(&headers)?;
+    bridge
+        .cancel_pairing_request(&id, key, now_unix())
+        .map_err(|message| ApiError(Error::Unauthorized(message)))?;
+    Ok(Json(json!({ "cancelled": true, "request_id": id })).into_response())
+}
+
+/// `POST /mobile/pair-requests/{id}/decision` - desktop-only approval.
+pub(crate) async fn mobile_companion_pairing_request_decision(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: Peer,
+    Path(id): Path<String>,
+    Json(decision): Json<MobilePairingRequestDecision>,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    let bridge = mobile_bridge(&st)?;
+    let status = bridge
+        .decide_pairing_request(&id, decision, now_unix())
+        .map_err(|message| ApiError(Error::InvalidRequest(message)))?;
+    Ok(Json(status).into_response())
 }
 
 /// `GET /mobile/device/status`

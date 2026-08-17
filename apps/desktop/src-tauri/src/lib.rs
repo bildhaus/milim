@@ -53,7 +53,9 @@ use milim_inference::{remote::RemoteBackend, unavailable::UnavailableBackend, Sh
 use milim_sandbox::{DockerBackend, RunOpts};
 use milim_server::AppState;
 use milim_storage::{Database, DatabaseOptions, EncryptedStore, JournalMode, SessionsDelta};
-use milim_tools::{atomic_write, resolve_workspace_path, Tool, ToolEffect, ToolRegistry};
+use milim_tools::{
+    atomic_write, resolve_workspace_path, ProcessEnvironmentPolicy, Tool, ToolEffect, ToolRegistry,
+};
 
 /// Simple Rust/JS bridge example.
 #[tauri::command]
@@ -159,7 +161,15 @@ impl DesktopServerRuntimeState {
             .control
             .as_ref()
             .ok_or_else(|| "Canonical control runtime is unavailable.".to_string())?;
-        let listener = TcpListener::bind("0.0.0.0:0").map_err(|error| error.to_string())?;
+        let listener = TcpListener::bind(("0.0.0.0", MOBILE_LAN_PREFERRED_PORT)).or_else(
+            |error| {
+                tracing::warn!(
+                    "LAN mobile listener could not bind preferred port {MOBILE_LAN_PREFERRED_PORT}: {error}; falling back to an available port"
+                );
+                TcpListener::bind("0.0.0.0:0")
+            },
+        )
+        .map_err(|error| error.to_string())?;
         listener
             .set_nonblocking(true)
             .map_err(|error| error.to_string())?;
@@ -326,6 +336,7 @@ fn complete_workspace_editor_leave(
 }
 
 const TAILSCALE_SERVE_PORT: u16 = 10000;
+const MOBILE_LAN_PREFERRED_PORT: u16 = 7378;
 const TAILSCALE_COMMAND_TIMEOUT_SECS: u64 = 12;
 const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_OPEN_ID: &str = "open";
@@ -818,11 +829,18 @@ fn api_base_url(base: tauri::State<'_, DesktopApiBaseUrl>) -> String {
 #[tauri::command]
 async fn refresh_provider_models(
     providers: tauri::State<'_, DesktopProviders>,
+    runtime: tauri::State<'_, DesktopServerRuntime>,
 ) -> std::result::Result<bool, String> {
     let Some(providers) = providers.0.clone() else {
         return Ok(false);
     };
-    providers.refresh_all().await.map_err(|e| e.to_string())
+    let refreshed = providers.refresh_all().await.map_err(|e| e.to_string())?;
+    if refreshed {
+        if let Some(control) = &runtime.0.control {
+            control.publish_model_catalog();
+        }
+    }
+    Ok(refreshed)
 }
 
 #[tauri::command]
@@ -2374,7 +2392,7 @@ fn mobile_tailscale_status_blocking(local_target: String) -> MobileTailscaleStat
         if public_url.is_none() {
             Some("Tailscale is running, but no DNS name was reported.".to_string())
         } else if serve_configured && peer_count == 0 {
-            Some("Tailscale Serve is ready, but no other tailnet devices are visible. Open Tailscale on your iPhone and make sure it is connected to this same tailnet.".to_string())
+            Some("Tailscale Serve is ready, but no other tailnet devices are visible. Open Tailscale on your mobile device and make sure it is connected to this same tailnet.".to_string())
         } else {
             None
         }
@@ -3810,6 +3828,55 @@ fn desktop_config() -> ServerConfiguration {
     }
 }
 
+const LEGACY_DESKTOP_CONTROL_NAME: &str = "milim desktop";
+
+fn normalize_desktop_control_name(raw_name: &str) -> String {
+    let trimmed = raw_name.trim();
+    let without_local_suffix = trimmed
+        .get(..trimmed.len().saturating_sub(".local".len()))
+        .filter(|_| trimmed.to_ascii_lowercase().ends_with(".local"))
+        .unwrap_or(trimmed)
+        .trim();
+
+    if without_local_suffix.is_empty() {
+        LEGACY_DESKTOP_CONTROL_NAME.to_string()
+    } else {
+        without_local_suffix.to_string()
+    }
+}
+
+fn desktop_control_display_name() -> String {
+    normalize_desktop_control_name(&gethostname::gethostname().to_string_lossy())
+}
+
+fn has_legacy_desktop_control_name(display_name: &str) -> bool {
+    matches!(
+        display_name.trim().to_ascii_lowercase().as_str(),
+        LEGACY_DESKTOP_CONTROL_NAME | "milim-desktop"
+    )
+}
+
+fn migrate_desktop_control_name(
+    user_data: &milim_storage::UserDataStore,
+    control: &milim_server::control::RunManager,
+    desktop_name: &str,
+) {
+    let current = control.host();
+    if !has_legacy_desktop_control_name(&current.display_name)
+        || current.display_name == desktop_name
+    {
+        return;
+    }
+
+    if let Err(error) = user_data.update_control_host_name(desktop_name) {
+        tracing::warn!("failed to update the mobile desktop name: {error}");
+        return;
+    }
+    if let Err(error) = control.refresh_host() {
+        tracing::warn!("failed to refresh the mobile desktop name: {error}");
+    }
+}
+
 fn open_user_data_store_at(path: &Path) -> Result<Arc<milim_storage::UserDataStore>> {
     let db = Database::open_with_options(
         path,
@@ -3817,6 +3884,10 @@ fn open_user_data_store_at(path: &Path) -> Result<Arc<milim_storage::UserDataSto
             journal_mode: JournalMode::Wal,
         },
     )?;
+    if db.schema_version_scoped("user_data")? == 4 {
+        let snapshot = path.with_extension("pre-v5.sqlite3");
+        db.vacuum_snapshot_into(&snapshot)?;
+    }
     milim_storage::UserDataStore::new(db).map(Arc::new)
 }
 
@@ -3957,8 +4028,10 @@ fn build_state(
             })
             .unwrap_or_default(),
     );
-    let control = milim_server::control::RunManager::new(user_data, "Milim desktop")
+    let desktop_name = desktop_control_display_name();
+    let control = milim_server::control::RunManager::new(user_data.clone(), &desktop_name)
         .expect("initialize canonical control runtime");
+    migrate_desktop_control_name(&user_data, &control, &desktop_name);
     let service: SharedService = registry
         .as_ref()
         .map(|registry| Arc::new(registry.router(privacy.clone())) as SharedService)
@@ -4109,6 +4182,9 @@ impl Tool for RunCommandTool {
     }
     fn effect(&self) -> ToolEffect {
         ToolEffect::Command
+    }
+    fn environment_policy(&self) -> ProcessEnvironmentPolicy {
+        ProcessEnvironmentPolicy::SandboxSanitized
     }
     async fn invoke(&self, args: Value) -> Result<Value> {
         let command = args
@@ -4653,6 +4729,31 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running milim desktop");
+}
+
+#[cfg(test)]
+mod desktop_control_name_tests {
+    use super::*;
+
+    #[test]
+    fn computer_name_is_prepared_for_mobile_display() {
+        assert_eq!(
+            normalize_desktop_control_name("  Omer-MacBook-Pro.local  "),
+            "Omer-MacBook-Pro"
+        );
+        assert_eq!(
+            normalize_desktop_control_name("STUDIO-PC"),
+            "STUDIO-PC"
+        );
+        assert_eq!(normalize_desktop_control_name(".local"), "milim desktop");
+    }
+
+    #[test]
+    fn only_old_generic_names_are_migrated() {
+        assert!(has_legacy_desktop_control_name("Milim desktop"));
+        assert!(has_legacy_desktop_control_name("milim-desktop"));
+        assert!(!has_legacy_desktop_control_name("Omer-MacBook-Pro"));
+    }
 }
 
 #[cfg(test)]

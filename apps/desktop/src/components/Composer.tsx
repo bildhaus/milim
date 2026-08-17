@@ -99,6 +99,7 @@ export function Composer({
   value,
   onChange,
   onSend,
+  onSteer,
   onStop,
   attachments,
   onAttachFiles,
@@ -127,11 +128,13 @@ export function Composer({
   tokens,
   contextBudgetTokens,
   busy,
+  canSteer = false,
   hasReviewComments = false,
 }: {
   value: string;
   onChange: (v: string) => void;
   onSend: () => void;
+  onSteer?: () => void;
   onStop: () => void;
   attachments: ChatAttachment[];
   onAttachFiles: (files?: File[]) => void;
@@ -160,6 +163,7 @@ export function Composer({
   tokens: number;
   contextBudgetTokens?: number;
   busy: boolean;
+  canSteer?: boolean;
   hasReviewComments?: boolean;
 }) {
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -186,6 +190,7 @@ export function Composer({
     direction: "forward" | "backward" | "none";
   } | null>(null);
   const [personaOpen, setPersonaOpen] = useState(false);
+  const [busyActionsOpen, setBusyActionsOpen] = useState(false);
   const [projectOpen, setProjectOpen] = useState(false);
   const [slashOpen, setSlashOpen] = useState(false);
   const [slashFocusIndex, setSlashFocusIndex] = useState(0);
@@ -1191,6 +1196,35 @@ export function Composer({
               <button className="send-btn" data-testid="composer-send" onClick={submitComposer} disabled={!canSend} title={`Queue (${sendShortcutLabel})`} aria-label="Queue message">
                 <ArrowUp size={18} />
               </button>
+              {canSteer && onSteer ? (
+                <div className="composer-busy-actions">
+                  <button
+                    type="button"
+                    className="tool-btn"
+                    aria-label="More actions for active run"
+                    aria-expanded={busyActionsOpen}
+                    onClick={() => setBusyActionsOpen((open) => !open)}
+                  >
+                    <ChevronDown size={13} />
+                  </button>
+                  {busyActionsOpen ? (
+                    <div className="menu composer-busy-menu" role="menu">
+                      <button
+                        type="button"
+                        className="menu-item"
+                        role="menuitem"
+                        disabled={!canSend}
+                        onClick={() => {
+                          setBusyActionsOpen(false);
+                          onSteer();
+                        }}
+                      >
+                        Steer next step
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
               <button className="send-btn stop" onClick={onStop} title="Stop generating" aria-label="Stop generating">
                 <Square size={13} />
               </button>

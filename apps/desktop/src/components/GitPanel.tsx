@@ -59,6 +59,7 @@ import { useSessions } from "../sessions/store";
 import { useUiPreferences } from "../ui/store";
 import { useSettings } from "../settings/store";
 import { useContextMenu } from "./ContextMenu";
+import { PaneResizeHandle } from "./PaneResizeHandle";
 import {
   ArrowUp,
   ArrowRight,
@@ -1822,12 +1823,11 @@ export function GitPanel({
       >
         {diffNavigatorVisible && renderFileNavigator(true)}
         {diffNavigatorVisible && navigableFiles.length > 0 && (
-          <div
+          <PaneResizeHandle
             className={`git-diff-resize-handle${diffNavigatorResizing ? " dragging" : ""}`}
+            orientation="vertical"
             data-testid="git-diff-resize-handle"
-            role="separator"
             aria-label="Resize changed files"
-            aria-orientation="vertical"
             aria-valuemin={DIFF_NAVIGATOR_MIN_WIDTH}
             aria-valuemax={Math.max(
               DIFF_NAVIGATOR_MIN_WIDTH,

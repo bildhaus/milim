@@ -1023,35 +1023,6 @@
   top: 0;
   right: 0;
   bottom: 0;
-  width: 8px;
-  cursor: col-resize;
-  touch-action: none;
-  outline: none;
-}
-.sidebar-resize-handle::before {
-  content: "";
-  position: absolute;
-  inset: 0 -2px;
-}
-.sidebar-resize-handle::after {
-  content: "";
-  position: absolute;
-  top: 50%;
-  right: 3px;
-  width: 2px;
-  height: 42px;
-  border-radius: 999px;
-  background: var(--border-secondary);
-  opacity: 0.55;
-  transform: translateY(-50%);
-  transition: opacity 0.15s, background 0.15s, height 0.15s;
-}
-.sidebar-resize-handle:hover::after,
-.sidebar-resize-handle:focus-visible::after,
-.sidebar-resize-handle.dragging::after {
-  height: 64px;
-  background: var(--accent);
-  opacity: 1;
 }
 
 .sidebar-head { display: flex; align-items: center; gap: 7px; min-height: 32px; padding: 0 1px; }
@@ -3137,6 +3108,102 @@ button.git-row:hover svg {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.mobile-pair-request-backdrop {
+  z-index: 1500;
+}
+
+.mobile-pair-request-modal {
+  width: min(420px, calc(100vw - 32px));
+  gap: 12px;
+  padding: 18px;
+  border-radius: 12px;
+}
+
+.mobile-pair-request-icon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border-primary));
+  border-radius: 11px;
+  color: var(--primary-text);
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg-secondary));
+}
+
+.mobile-pair-request-copy {
+  display: grid;
+  gap: 5px;
+}
+
+.mobile-pair-request-eyebrow {
+  color: var(--success);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.mobile-pair-request-copy h2,
+.mobile-pair-request-copy p {
+  margin: 0;
+}
+
+.mobile-pair-request-copy h2 {
+  color: var(--primary-text);
+  font-size: 19px;
+  line-height: 1.2;
+}
+
+.mobile-pair-request-copy p {
+  color: var(--secondary-text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.mobile-pair-request-security {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  color: var(--tertiary-text);
+  background: var(--bg-secondary);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.mobile-pair-request-security svg {
+  flex: none;
+  margin-top: 1px;
+  color: var(--success);
+}
+
+.mobile-pair-request-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mobile-pair-request-meta span {
+  padding: 4px 7px;
+  border: 1px solid var(--border-primary);
+  border-radius: 999px;
+  color: var(--tertiary-text);
+  font-size: 10.5px;
+}
+
+.mobile-pair-request-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.mobile-pair-request-actions button {
+  min-height: 34px;
+  padding: 0 13px;
+}
 .git-command-modal-meta {
   display: flex;
   align-items: center;
@@ -3427,8 +3494,9 @@ button.git-row:hover svg {
   border-top-color: color-mix(in srgb, var(--error) 42%, var(--border-primary));
 }
 .git-diff-layout {
+  position: relative;
   display: grid;
-  grid-template-columns: var(--git-diff-navigator-width, 210px) 7px minmax(0, 1fr);
+  grid-template-columns: var(--git-diff-navigator-width, 210px) minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
   height: 100%;
@@ -3448,29 +3516,11 @@ button.git-row:hover svg {
   background: color-mix(in srgb, var(--panel-muted-bg) 52%, transparent);
 }
 .git-diff-resize-handle {
-  position: relative;
-  width: 7px;
-  cursor: col-resize;
-  background: color-mix(in srgb, var(--panel-muted-bg) 52%, transparent);
-}
-.git-diff-resize-handle::after {
-  content: "";
   position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 2px;
-  height: 34px;
-  border-radius: 999px;
-  background: var(--border-secondary);
-  opacity: 0.55;
-  transform: translate(-50%, -50%);
-}
-.git-diff-resize-handle:hover::after,
-.git-diff-resize-handle:focus-visible::after,
-.git-diff-resize-handle.dragging::after {
-  height: 50px;
-  background: var(--accent);
-  opacity: 1;
+  top: 0;
+  bottom: 0;
+  left: var(--git-diff-navigator-width, 210px);
+  transform: translateX(-50%);
 }
 .git-diff-navigator-head {
   display: flex;

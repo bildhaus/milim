@@ -6,7 +6,7 @@ import {
   type ControlTimelineItemV1,
 } from "../api.js";
 
-type CanonicalMessage = ChatMessage & { runId?: string };
+type CanonicalMessage = ChatMessage;
 
 export function controlAttachments(attachments?: ChatAttachment[]) {
   return (attachments ?? []).map(({ dataUrl, sourcePath: _sourcePath, ...attachment }) => ({
@@ -101,6 +101,7 @@ export function projectControlRunMessages(
         role: typeof data.role === "string" ? data.role : "assistant",
         content: typeof data.content === "string" ? data.content : "",
         runId,
+        ledgerVersion: typeof data.ledgerVersion === "number" ? data.ledgerVersion : undefined,
       };
       if (Array.isArray(data.attachments)) {
         message.attachments = data.attachments.map((raw) => {

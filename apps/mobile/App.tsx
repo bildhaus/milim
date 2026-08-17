@@ -1,11 +1,11 @@
-import React, {createContext, useContext, useEffect, useMemo, useRef, useState} from 'react';
+import React, {createContext, useCallback, useContext, useEffect, useMemo, useRef, useState} from 'react';
 import {
   AccessibilityInfo,
+  ActivityIndicator,
   Alert,
   Animated,
   FlatList,
   Image,
-  Keyboard,
   Linking,
   Modal,
   PermissionsAndroid,
@@ -14,15 +14,16 @@ import {
   ScrollView,
   StatusBar,
   StyleSheet,
-  Text,
+  Text as NativeText,
   TextInput,
   View,
   useWindowDimensions,
   type StyleProp,
+  type TextProps,
   type ViewStyle,
 } from 'react-native';
 import {SafeAreaProvider, SafeAreaView} from 'react-native-safe-area-context';
-import Markdown, {type RenderRules} from 'react-native-markdown-display';
+import Markdown, {MarkdownIt, type RenderRules} from 'react-native-markdown-display';
 import MaskedView from '@react-native-masked-view/masked-view';
 import Svg, {Defs, LinearGradient as SvgLinearGradient, Rect, Stop} from 'react-native-svg';
 import {Camera} from 'react-native-camera-kit';
@@ -35,7 +36,9 @@ import {
   promptWithAttachments,
   wireAttachments,
 } from './src/attachments';
+import {MOBILE_MARKDOWN_OPTIONS} from './src/markdown';
 import {newCommandId} from './src/control/client';
+import type {RunEventPageV1, RunEventV1, RunInspectionV1} from './src/control/generated-v1';
 import {
   projectTranscript,
   type ActivityStatus,
@@ -53,13 +56,22 @@ import type {
   QueuedTurnV1,
   ThreadSummaryV1,
 } from './src/control/types';
-import {useMilimController} from './src/controller/useMilimController';
 import {
+  useMilimController,
+  type NearbyPairingStage,
+} from './src/controller/useMilimController';
+import {discoverMilimHosts, type DiscoveredHost} from './src/discovery';
+import {
+  DEFAULT_MODEL_PICKER_PREFERENCES,
   modelPickerGroups,
   parseMobileModel,
   type MobileModelCapability,
   type MobileModelOption,
 } from './src/modelPicker';
+import {
+  readModelPickerPreferences,
+  saveModelPickerPreferences,
+} from './src/storage/cache';
 import {
   createMobileTheme,
   mobileBackgroundResizeMode,
@@ -69,17 +81,22 @@ import {
 import {
   canUseCompactComposer,
   friendlyEndpoint,
+  friendlyPairingError,
   groupMobileThreads,
   lowercaseMilimBrand,
   nextAwayFromLatest,
   relativeConnectionTime,
+  shouldHoldCompactComposerForLatestReturn,
+  transcriptDistanceFromLatest,
   type MobileThreadGroup,
 } from './src/mobileUi';
 import {MilimIcon, type MilimIconName} from './src/ui/MilimIcon';
+import {ProviderIcon} from './src/ui/ProviderIcon';
 
 type Tab = 'chat' | 'attention' | 'hosts';
 
 const milimLogo = require('./src/assets/milim-icon.png');
+const TRANSCRIPT_FADE_HEIGHT = 40;
 
 function markdownCodeContent(content: string): string {
   return content.endsWith('\n') ? content.slice(0, -1) : content;
@@ -107,12 +124,14 @@ const mobileMarkdownRules: RenderRules = {
   ),
 };
 
+const mobileMarkdownParser = new MarkdownIt(MOBILE_MARKDOWN_OPTIONS);
+
 function appTheme(snapshot?: AppearanceSnapshotV1) {
-  const theme = createMobileTheme(snapshot);
+  const theme = createMobileTheme(snapshot, Platform.OS === 'ios' ? 'ios' : 'android');
   return {
     ...theme,
     styles: createStyles(theme),
-    markdownStyles: createMarkdownStyles(theme.palette),
+    markdownStyles: createMarkdownStyles(theme),
   };
 }
 
@@ -121,6 +140,11 @@ const AppThemeContext = createContext<AppTheme>(appTheme());
 
 function useAppTheme(): AppTheme {
   return useContext(AppThemeContext);
+}
+
+function Text({style, ...props}: TextProps) {
+  const {styles} = useAppTheme();
+  return <NativeText {...props} style={[styles.appText, style]} />;
 }
 
 function useReducedMotion(): boolean {
@@ -165,20 +189,28 @@ function DrawerBackdropFade() {
   );
 }
 
-function TranscriptFadeMask() {
+function TranscriptFadeMask({bottomInset}: {bottomInset: Animated.AnimatedInterpolation<number>}) {
   return (
-    <Svg pointerEvents="none" width="100%" height="100%">
-      <Defs>
-        <SvgLinearGradient id="transcript-fade-mask" x1="0" y1="0" x2="0" y2="1">
-          <Stop offset="0" stopColor="#fff" stopOpacity="1" />
-          <Stop offset="0.88" stopColor="#fff" stopOpacity="1" />
-          <Stop offset="1" stopColor="#fff" stopOpacity="0" />
-        </SvgLinearGradient>
-      </Defs>
-      <Rect width="100%" height="100%" fill="url(#transcript-fade-mask)" />
-    </Svg>
+    <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+      <Animated.View style={[StyleSheet.absoluteFill, {bottom: bottomInset}]}>
+        <View style={stylesStatic.transcriptMaskOpaque} />
+        <Svg width="100%" height={TRANSCRIPT_FADE_HEIGHT}>
+          <Defs>
+            <SvgLinearGradient id="transcript-fade-mask" x1="0" y1="0" x2="0" y2="1">
+              <Stop offset="0" stopColor="#fff" stopOpacity="1" />
+              <Stop offset="1" stopColor="#fff" stopOpacity="0" />
+            </SvgLinearGradient>
+          </Defs>
+          <Rect width="100%" height={TRANSCRIPT_FADE_HEIGHT} fill="url(#transcript-fade-mask)" />
+        </Svg>
+      </Animated.View>
+    </View>
   );
 }
+
+const stylesStatic = StyleSheet.create({
+  transcriptMaskOpaque: {flex: 1, backgroundColor: '#fff'},
+});
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
@@ -189,6 +221,8 @@ function MotionPressable({
   disabled,
   hitSlop,
   accessibilityLabel,
+  accessibilityRole = 'button',
+  accessibilityState,
 }: {
   children: React.ReactNode;
   style?: StyleProp<ViewStyle>;
@@ -196,6 +230,8 @@ function MotionPressable({
   disabled?: boolean;
   hitSlop?: number;
   accessibilityLabel?: string;
+  accessibilityRole?: React.ComponentProps<typeof Pressable>['accessibilityRole'];
+  accessibilityState?: React.ComponentProps<typeof Pressable>['accessibilityState'];
 }) {
   const reduced = useReducedMotion();
   const scale = useRef(new Animated.Value(1)).current;
@@ -216,8 +252,9 @@ function MotionPressable({
       onPress={onPress}
       disabled={disabled}
       hitSlop={hitSlop}
-      accessibilityRole="button"
+      accessibilityRole={accessibilityRole}
       accessibilityLabel={accessibilityLabel}
+      accessibilityState={accessibilityState}
       onPressIn={() => animate(0.97, 100)}
       onPressOut={() => animate(1, 140)}>
       {children}
@@ -320,6 +357,7 @@ function App(): React.JSX.Element {
             claim={pairingClaim}
             setClaim={setPairingClaim}
             onPair={controller.pair}
+            onPairNearby={controller.pairNearby}
           />
         </SafeAreaProvider>
       </AppThemeContext.Provider>
@@ -358,11 +396,21 @@ function App(): React.JSX.Element {
           </View>
         </View>
         {controller.lastError ? (
-          <Pressable style={styles.errorBanner} onPress={() => void controller.retryPendingCommand()}>
+          <Pressable
+            style={styles.errorBanner}
+            onPress={controller.pendingRetry
+              ? () => void controller.retryPendingCommand()
+              : controller.activeHost && controller.status === 'offline'
+                ? controller.reconnect
+                : undefined}>
             <Text style={styles.errorText} numberOfLines={2}>
               {controller.lastError}
             </Text>
-            {controller.pendingRetry ? <Text style={styles.retry}>Retry same command</Text> : null}
+            {controller.pendingRetry ? (
+              <Text style={styles.retry}>Retry same command</Text>
+            ) : controller.activeHost && controller.status === 'offline' ? (
+              <Text style={styles.retry}>Retry connection</Text>
+            ) : null}
           </Pressable>
         ) : null}
         <View style={styles.content}>
@@ -468,16 +516,97 @@ function Onboarding({
   claim,
   setClaim,
   onPair,
+  onPairNearby,
 }: {
   claim: string;
   setClaim: (value: string) => void;
   onPair: (claim: string, name: string) => Promise<unknown>;
+  onPairNearby: (
+    host: DiscoveredHost,
+    deviceName: string,
+    signal: AbortSignal,
+    onStage: (stage: NearbyPairingStage) => void,
+  ) => Promise<unknown>;
 }) {
   const {palette, styles} = useAppTheme();
   const [deviceName, setDeviceName] = useState(`${Platform.OS === 'ios' ? 'iPhone' : 'Android'} controller`);
   const [scanner, setScanner] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [nearbyHosts, setNearbyHosts] = useState<DiscoveredHost[]>([]);
+  const [discovering, setDiscovering] = useState(true);
+  const [discoveryError, setDiscoveryError] = useState<string | null>(null);
+  const [showManualPairing, setShowManualPairing] = useState(Boolean(claim));
+  const [nearbyPairing, setNearbyPairing] = useState<{
+    host: DiscoveredHost;
+    stage: NearbyPairingStage;
+  } | null>(null);
+  const discoveryVersion = useRef(0);
+  const discoveryActive = useRef(false);
+  const nearbyPairingAbort = useRef<AbortController | null>(null);
+  const refreshNearbyHosts = useCallback(async () => {
+    if (discoveryActive.current) return;
+    discoveryActive.current = true;
+    const version = ++discoveryVersion.current;
+    setDiscovering(true);
+    setDiscoveryError(null);
+    try {
+      const hosts = await discoverMilimHosts();
+      if (version === discoveryVersion.current) setNearbyHosts(hosts);
+    } catch (reason) {
+      if (version === discoveryVersion.current) {
+        setDiscoveryError(reason instanceof Error ? reason.message : String(reason));
+      }
+    } finally {
+      if (version === discoveryVersion.current) {
+        discoveryActive.current = false;
+        setDiscovering(false);
+      }
+    }
+  }, []);
+  useEffect(() => {
+    void refreshNearbyHosts();
+    const timer = setInterval(() => void refreshNearbyHosts(), 15_000);
+    return () => {
+      clearInterval(timer);
+      discoveryVersion.current += 1;
+      discoveryActive.current = false;
+    };
+  }, [refreshNearbyHosts]);
+  useEffect(() => {
+    if (claim.trim()) setShowManualPairing(true);
+  }, [claim]);
+  useEffect(() => () => nearbyPairingAbort.current?.abort(), []);
+
+  const connectNearby = async (host: DiscoveredHost) => {
+    nearbyPairingAbort.current?.abort();
+    const controller = new AbortController();
+    nearbyPairingAbort.current = controller;
+    setError(null);
+    setNearbyPairing({host, stage: 'requesting'});
+    try {
+      await onPairNearby(host, deviceName, controller.signal, stage => {
+        setNearbyPairing(current => current?.host.endpoint === host.endpoint
+          ? {...current, stage}
+          : current);
+      });
+    } catch (reason) {
+      if (!controller.signal.aborted) {
+        setError(friendlyPairingError(reason));
+      }
+    } finally {
+      if (nearbyPairingAbort.current === controller) {
+        nearbyPairingAbort.current = null;
+        setNearbyPairing(null);
+      }
+    }
+  };
+
+  const cancelNearbyPairing = () => {
+    nearbyPairingAbort.current?.abort();
+    nearbyPairingAbort.current = null;
+    setNearbyPairing(null);
+  };
   const pair = async () => {
     setBusy(true);
     setError(null);
@@ -508,14 +637,107 @@ function Onboarding({
             Control the same threads, runs, queues, and approvals. Your desktop stays authoritative.
           </Text>
         </View>
-        <View style={styles.pairingPanel}>
+        <View style={styles.nearbyPanel}>
+          <View style={styles.nearbyHeading}>
+            <View style={styles.flex}>
+              <Text style={styles.nearbyTitle}>Nearby desktops</Text>
+              <Text style={styles.nearbySubtitle}>
+                {discovering
+                  ? 'Searching your trusted network…'
+                  : nearbyHosts.length
+                    ? `${nearbyHosts.length} ready to pair`
+                    : 'No desktops detected'}
+              </Text>
+            </View>
+            <MotionPressable
+              style={[styles.nearbyRefresh, discovering && styles.disabled]}
+              onPress={() => void refreshNearbyHosts()}
+              disabled={discovering}
+              accessibilityLabel="Refresh nearby desktops">
+              <MilimIcon name="refresh" size={14} color={palette.secondary} />
+            </MotionPressable>
+          </View>
+          {nearbyPairing ? (
+            <View style={[styles.nearbyHost, styles.nearbyHostPending]}>
+              <View style={styles.nearbyPairingSpinner}>
+                <ActivityIndicator size="small" color={palette.text} />
+              </View>
+              <View style={styles.nearbyHostBody}>
+                <Text style={styles.nearbyHostName} numberOfLines={1}>
+                  {nearbyPairing.stage === 'requesting'
+                    ? 'Requesting access…'
+                    : nearbyPairing.stage === 'connecting'
+                      ? 'Connecting securely…'
+                      : 'Approve on your desktop'}
+                </Text>
+                <Text style={styles.nearbyHostEndpoint} numberOfLines={2}>
+                  {nearbyPairing.stage === 'waiting'
+                    ? `${lowercaseMilimBrand(nearbyPairing.host.name)} is waiting for your confirmation.`
+                    : friendlyEndpoint(nearbyPairing.host.endpoint)}
+                </Text>
+              </View>
+              <Button label="Cancel" tone="quiet" onPress={cancelNearbyPairing} />
+            </View>
+          ) : nearbyHosts.map(host => (
+            <MotionPressable
+              key={host.hostId ?? host.endpoint}
+              style={styles.nearbyHost}
+              onPress={() => void connectNearby(host)}
+              accessibilityLabel={`Connect to ${lowercaseMilimBrand(host.name)}`}>
+              <Image source={milimLogo} style={styles.nearbyHostMark} />
+              <View style={styles.nearbyHostBody}>
+                <Text style={styles.nearbyHostName} numberOfLines={1}>
+                  {lowercaseMilimBrand(host.name)}
+                </Text>
+                <Text style={styles.nearbyHostEndpoint} numberOfLines={1}>
+                  {friendlyEndpoint(host.endpoint)}
+                </Text>
+              </View>
+              <View style={styles.nearbyConnectAction}>
+                <Text style={styles.nearbyConnectText}>Connect</Text>
+                <MilimIcon name="chevron-right" size={13} color={palette.text} />
+              </View>
+            </MotionPressable>
+          ))}
+          {!discovering && !nearbyHosts.length ? (
+            <Text style={styles.nearbyEmpty}>
+              {discoveryError
+                ? 'Local discovery is unavailable. You can still pair with the QR code or link below.'
+                : 'Enable the companion bridge and trusted-network discovery on your desktop. Some emulators and VPNs block local discovery.'}
+            </Text>
+          ) : null}
+          {nearbyHosts.length ? (
+            <Text style={styles.nearbyHelp}>
+              Tap a desktop, then approve the request there. No code or link needed.
+            </Text>
+          ) : null}
+          {error ? <Text style={styles.formError}>{error}</Text> : null}
+        </View>
+        <MotionPressable
+          style={styles.manualPairToggle}
+          onPress={() => setShowManualPairing(current => !current)}
+          accessibilityLabel="Pair with QR code or link">
+          <View style={styles.manualPairIcon}>
+            <MilimIcon name="link" size={16} color={palette.secondary} />
+          </View>
+          <View style={styles.flex}>
+            <Text style={styles.manualPairTitle}>Pair another way</Text>
+            <Text style={styles.manualPairCopy}>Use a QR code or link when nearby discovery is unavailable.</Text>
+          </View>
+          <MilimIcon
+            name={showManualPairing ? 'chevron-up' : 'chevron-down'}
+            size={15}
+            color={palette.muted}
+          />
+        </MotionPressable>
+        {showManualPairing ? <View style={styles.pairingPanel}>
           <View style={styles.panelHeading}>
             <View style={styles.panelIcon}>
               <MilimIcon name="smartphone" size={17} color={palette.text} />
             </View>
             <View style={styles.flex}>
-              <Text style={styles.panelTitle}>Connect this device</Text>
-              <Text style={styles.help}>Settings → Mobile on your desktop</Text>
+              <Text style={styles.panelTitle}>QR code or pairing link</Text>
+              <Text style={styles.help}>For Tailscale, VPNs, or networks that block discovery</Text>
             </View>
           </View>
           <Text style={styles.fieldLabel}>DEVICE NAME</Text>
@@ -537,12 +759,11 @@ function Onboarding({
         autoCorrect={false}
         multiline
       />
-      {error ? <Text style={styles.formError}>{error}</Text> : null}
       <View style={styles.pairActions}>
         <Button label="Scan QR" icon="scan" tone="quiet" onPress={() => setScanner(true)} />
         <Button label={busy ? 'Pairing…' : 'Pair desktop'} icon="arrow-up" onPress={() => void pair()} disabled={busy || !claim.trim()} />
       </View>
-        </View>
+        </View> : null}
         <View style={styles.directNote}>
           <View style={[styles.dot, styles.dotOnline]} />
           <Text style={styles.directNoteText}>
@@ -925,6 +1146,18 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
     () => projectTranscript(controller.timeline?.items ?? [], threadApprovals),
     [controller.timeline?.items, threadApprovals],
   );
+  const inspectableRunIds = useMemo(
+    () => new Set(
+      transcriptItems
+        .filter(item => item.kind === 'message' && item.role === 'assistant' && item.ledgerVersion === 1 && item.runId)
+        .map(item => (item as Extract<ProjectedTranscriptItem, {kind: 'message'}>).runId as string),
+    ),
+    [transcriptItems],
+  );
+  const activeRun = useMemo(
+    () => controller.bootstrap?.active_runs.find(run => run.thread_id === thread?.id) ?? null,
+    [controller.bootstrap?.active_runs, thread?.id],
+  );
   const [attachments, setAttachments] = useState<ControlAttachmentV1[]>([]);
   const [busy, setBusy] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -941,9 +1174,9 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
   const messageList = useRef<FlatList<ProjectedTranscriptItem>>(null);
   const composerInput = useRef<React.ElementRef<typeof TextInput>>(null);
   const composerProgress = useRef(new Animated.Value(0)).current;
-  const returnToLatestOnExpand = useRef(false);
   const shouldScrollToLatest = useRef(true);
   const followingLatest = useRef(true);
+  const returningToLatest = useRef(false);
   const modelsForPicker = useMemo(() => {
     const models = [...(controller.bootstrap?.models ?? [])];
     const ids = new Set(models.map(modelId).filter(Boolean));
@@ -970,6 +1203,11 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
     pendingApproval: hasPendingApproval,
     forcedOpen: forcedComposerOpen,
   });
+  const composerHeight = composerProgress.interpolate({
+    inputRange: [0, 1],
+    outputRange: [expandedComposerHeight, compactComposerHeight],
+  });
+  const transcriptBottomInset = Animated.add(composerHeight, TRANSCRIPT_FADE_HEIGHT);
 
   useEffect(() => {
     setComposerCompact(shouldCompactComposer);
@@ -988,49 +1226,28 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
 
   useEffect(() => {
     if (!forcedComposerOpen || composerCompact) return;
-    let settleTimer: ReturnType<typeof setTimeout> | undefined;
     const focusTimer = setTimeout(() => {
-      if (returnToLatestOnExpand.current) {
-        messageList.current?.scrollToEnd({animated: false});
-      }
       composerInput.current?.focus();
-      settleTimer = setTimeout(() => {
-        if (!returnToLatestOnExpand.current) return;
-        messageList.current?.scrollToEnd({animated: false});
-        followingLatest.current = true;
-        setShowLatest(false);
-        setAwayFromLatest(false);
-        returnToLatestOnExpand.current = false;
-      }, reduced ? 0 : 360);
     }, reduced ? 0 : 160);
-    return () => {
-      clearTimeout(focusTimer);
-      if (settleTimer) clearTimeout(settleTimer);
-    };
+    return () => clearTimeout(focusTimer);
   }, [composerCompact, forcedComposerOpen, reduced]);
 
   useEffect(() => {
-    const subscription = Keyboard.addListener('keyboardDidShow', () => {
-      if (!returnToLatestOnExpand.current) return;
-      requestAnimationFrame(() => {
-        messageList.current?.scrollToEnd({animated: false});
-        followingLatest.current = true;
-        setShowLatest(false);
-        setAwayFromLatest(false);
-        returnToLatestOnExpand.current = false;
-      });
-    });
-    return () => subscription.remove();
-  }, []);
+    if ((!shouldScrollToLatest.current && !followingLatest.current) || !transcriptItems.length) return;
+    const animated = !shouldScrollToLatest.current;
+    shouldScrollToLatest.current = false;
+    const frame = requestAnimationFrame(() => messageList.current?.scrollToEnd({animated}));
+    return () => cancelAnimationFrame(frame);
+  }, [transcriptItems]);
 
   useEffect(() => {
     shouldScrollToLatest.current = true;
     followingLatest.current = true;
+    returningToLatest.current = false;
     setShowLatest(false);
     setAwayFromLatest(false);
     setForcedComposerOpen(false);
     setInputFocused(false);
-    returnToLatestOnExpand.current = false;
   }, [thread?.id]);
   if (!thread) {
     return <Empty title="Choose a thread" copy="Open the thread drawer to select or create a conversation." action="Open threads" onAction={openThreads} />;
@@ -1054,6 +1271,39 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
         } as unknown as JsonValue,
         thread.id,
         thread.revision,
+      );
+      controller.setDraft('');
+      await cleanupAttachments(attachments);
+      setAttachments([]);
+      shouldScrollToLatest.current = true;
+      followingLatest.current = true;
+      returningToLatest.current = false;
+      setShowLatest(false);
+      setAwayFromLatest(false);
+      requestAnimationFrame(() => messageList.current?.scrollToEnd({animated: !reduced}));
+    } catch (error) {
+      showError(error);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const steer = async () => {
+    if (!activeRun?.capabilities.steering) return;
+    if (controller.status !== 'online') {
+      Alert.alert('Desktop offline', 'Steering requires the active desktop run.');
+      return;
+    }
+    setBusy(true);
+    try {
+      await controller.command(
+        'turn.steer',
+        {
+          run_id: activeRun.id,
+          text: promptWithAttachments(controller.draft, attachments),
+          display_text: controller.draft,
+          attachments: wireAttachments(attachments),
+        } as unknown as JsonValue,
+        thread.id,
       );
       controller.setDraft('');
       await cleanupAttachments(attachments);
@@ -1094,8 +1344,11 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
           </View>
         ) : null}
       </View>
-      <View style={styles.transcriptStage}>
-        <MaskedView style={styles.transcriptMask} maskElement={<TranscriptFadeMask />}>
+      <View style={styles.chatBody}>
+        <MaskedView
+          style={styles.transcriptMask}
+          maskElement={<TranscriptFadeMask bottomInset={composerHeight} />}
+          androidRenderingMode="software">
         <FlatList
           ref={messageList}
           style={styles.messageList}
@@ -1112,55 +1365,68 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
             </MotionPressable>
           ) : undefined}
           ListEmptyComponent={<Empty title="Ready when you are" copy="Runs continue on the desktop process even if this screen disconnects." />}
+          ListFooterComponent={<Animated.View style={{height: transcriptBottomInset}} />}
           maintainVisibleContentPosition={{minIndexForVisible: 0}}
           scrollEventThrottle={32}
+          onScrollBeginDrag={() => {
+            returningToLatest.current = false;
+          }}
+          onContentSizeChange={() => {
+            if (!followingLatest.current || !transcriptItems.length) return;
+            messageList.current?.scrollToEnd({animated: false});
+          }}
           onScroll={({nativeEvent}) => {
-            const distance = Math.max(0, nativeEvent.contentSize.height - nativeEvent.layoutMeasurement.height - nativeEvent.contentOffset.y);
-            const nearLatest = distance <= 96;
+            const distance = transcriptDistanceFromLatest({
+              contentHeight: nativeEvent.contentSize.height,
+              viewportHeight: nativeEvent.layoutMeasurement.height,
+              offsetY: nativeEvent.contentOffset.y,
+              bottomInset: (composerCompact ? compactComposerHeight : expandedComposerHeight) + TRANSCRIPT_FADE_HEIGHT,
+            });
+            const nearLatest = !shouldHoldCompactComposerForLatestReturn(distance);
+            if (returningToLatest.current) {
+              if (!nearLatest) return;
+              returningToLatest.current = false;
+              followingLatest.current = true;
+              setShowLatest(false);
+              setAwayFromLatest(false);
+              return;
+            }
             followingLatest.current = nearLatest;
             setShowLatest(!nearLatest);
             setAwayFromLatest(current => nextAwayFromLatest(current, distance));
-          }}
-          onContentSizeChange={() => {
-            if ((shouldScrollToLatest.current || followingLatest.current) && transcriptItems.length) {
-              const animated = !shouldScrollToLatest.current;
-              shouldScrollToLatest.current = false;
-              messageList.current?.scrollToEnd({animated});
-            }
           }}
           renderItem={({item}) => (
             <TranscriptItemView
               item={item}
               markdownStyles={markdownStyles}
               execute={controller.execute}
+              runDetailsEnabled={item.kind === 'activity' && inspectableRunIds.has(item.runId)}
+              loadRunDetails={controller.loadRunDetails}
+              loadMoreRunEvents={controller.loadMoreRunEvents}
             />
           )}
         />
         </MaskedView>
         {showLatest ? (
-          <MotionPressable
-            style={styles.latestButton}
-            onPress={() => {
-              followingLatest.current = true;
-              setShowLatest(false);
-              setAwayFromLatest(false);
-              messageList.current?.scrollToEnd({animated: true});
-            }}>
-            <MilimIcon name="chevron-down" size={13} color={palette.secondary} />
-            <Text style={styles.latestText}>Latest</Text>
-          </MotionPressable>
+          <Animated.View pointerEvents="box-none" style={[styles.latestDock, {bottom: composerHeight}]}>
+            <MotionPressable
+              style={styles.latestButton}
+              onPress={() => {
+                returningToLatest.current = !reduced;
+                followingLatest.current = true;
+                setShowLatest(false);
+                messageList.current?.scrollToEnd({animated: !reduced});
+                if (reduced) setAwayFromLatest(false);
+              }}>
+              <MilimIcon name="chevron-down" size={13} color={palette.secondary} />
+              <Text style={styles.latestText}>Latest</Text>
+            </MotionPressable>
+          </Animated.View>
         ) : null}
-      </View>
-      {missingAgent ? <Text style={styles.missing}>This Agent was deleted. Clear or replace it before sending.</Text> : null}
       <Animated.View
         style={[
           styles.composerDock,
-          {
-            height: composerProgress.interpolate({
-              inputRange: [0, 1],
-              outputRange: [expandedComposerHeight, compactComposerHeight],
-            }),
-          },
+          {height: composerHeight},
         ]}>
         <Animated.View
           style={[
@@ -1177,17 +1443,13 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
           accessibilityElementsHidden={!composerCompact}
           importantForAccessibility={composerCompact ? 'auto' : 'no-hide-descendants'}
           onLayout={({nativeEvent}) => setCompactComposerHeight(nativeEvent.layout.height)}>
+        {missingAgent ? <Text style={styles.missing}>This Agent was deleted. Clear or replace it before sending.</Text> : null}
         <View style={styles.compactComposer}>
           <MotionPressable
             style={styles.compactComposerPrompt}
             hitSlop={3}
             onPress={() => {
-              returnToLatestOnExpand.current = true;
-              followingLatest.current = true;
-              setShowLatest(false);
-              setAwayFromLatest(false);
               setForcedComposerOpen(true);
-              messageList.current?.scrollToEnd({animated: !reduced});
             }}
             accessibilityLabel="Expand message composer">
             {thread.busy ? <View style={[styles.dot, styles.dotOnline]} /> : <MilimIcon name="sparkles" size={13} color={palette.muted} />}
@@ -1215,10 +1477,12 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
           accessibilityElementsHidden={composerCompact}
           importantForAccessibility={composerCompact ? 'no-hide-descendants' : 'auto'}
           onLayout={({nativeEvent}) => setExpandedComposerHeight(nativeEvent.layout.height)}>
+        {missingAgent ? <Text style={styles.missing}>This Agent was deleted. Clear or replace it before sending.</Text> : null}
         <View style={styles.composer}>
         <View style={styles.composerContextRow}>
           <PickerChip
             icon="sparkles"
+            providerBrand={selectedModel?.brand ?? null}
             label={selectedModel?.label || thread.model || 'Choose model'}
             onPress={() => setModelPickerVisible(true)}
           />
@@ -1270,7 +1534,18 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
           />
           <View style={styles.composerSpacer} />
           {thread.busy ? (
-            <IconButton icon="square" label="Stop generating" tone="quiet" onPress={() => void controller.command('turn.stop', null, thread.id).catch(showError)} />
+            <>
+              {activeRun?.capabilities.steering ? (
+                <IconButton
+                  icon="bolt"
+                  label="Steer next step"
+                  tone="quiet"
+                  disabled={busy || (!controller.draft.trim() && !attachments.length)}
+                  onPress={() => void steer()}
+                />
+              ) : null}
+              <IconButton icon="square" label="Stop generating" tone="quiet" onPress={() => void controller.command('turn.stop', null, thread.id).catch(showError)} />
+            </>
           ) : (
             <IconButton icon="refresh" label="Regenerate" onPress={() => void controller.command('turn.regenerate', null, thread.id, thread.revision).catch(showError)} />
           )}
@@ -1285,6 +1560,7 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
       </View>
         </Animated.View>
       </Animated.View>
+      </View>
       <PickerSheetFrame
         visible={attachmentMenuVisible}
         title="Add attachment"
@@ -1299,12 +1575,19 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
       </PickerSheetFrame>
       <ModelPickerSheet
         visible={modelPickerVisible}
+        hostId={controller.activeHost?.hostId ?? controller.bootstrap?.host_id ?? ''}
         models={modelsForPicker}
         selectedId={thread.model}
+        reasoningEffortOverrides={thread.reasoning_effort_overrides}
         onClose={() => setModelPickerVisible(false)}
-        onSelect={id => {
+        onSelect={(id, reasoningEffort) => {
           setModelPickerVisible(false);
-          void controller.command('thread.set_model', {model: id}, thread.id, thread.revision).catch(showError);
+          void controller.command(
+            'thread.set_model',
+            {model: id, ...(reasoningEffort ? {reasoning_effort: reasoningEffort} : {})},
+            thread.id,
+            thread.revision,
+          ).catch(showError);
         }}
       />
       <AgentPickerSheet
@@ -1388,7 +1671,130 @@ function ActivityRow({row}: {row: ProjectedActivityRow}) {
   );
 }
 
-function ActivityGroup({group}: {group: ProjectedActivityGroup}) {
+function RunDetailSection({label, value}: {label: string; value: unknown}) {
+  const {palette, styles} = useAppTheme();
+  const [open, setOpen] = useState(false);
+  return (
+    <View style={styles.runDetailSection}>
+      <MotionPressable
+        style={styles.runDetailSectionHeader}
+        accessibilityLabel={`${open ? 'Collapse' : 'Expand'} ${label}`}
+        onPress={() => setOpen(current => !current)}>
+        <Text style={styles.runDetailSectionLabel}>{label}</Text>
+        <MilimIcon name={open ? 'chevron-up' : 'chevron-down'} size={12} color={palette.muted} />
+      </MotionPressable>
+      {open ? (
+        <ScrollView horizontal nestedScrollEnabled showsHorizontalScrollIndicator={false}>
+          <Text style={styles.runDetailJson} selectable>{JSON.stringify(value, null, 2)}</Text>
+        </ScrollView>
+      ) : null}
+    </View>
+  );
+}
+
+function runEventGroups(events: RunEventV1[], inspection: RunInspectionV1) {
+  const contains = (event: RunEventV1, needles: string[]) => needles.some(needle => event.type.includes(needle));
+  const model = events.filter(event => contains(event, ['model_', 'request', 'response']));
+  const tools = events.filter(event => contains(event, ['tool_', 'approval']));
+  const inbox = events.filter(event => contains(event, ['inbox', 'steer', 'inject', 'followup']));
+  const failures = events.filter(event => contains(event, ['error', 'fail', 'cancel', 'interrupt']));
+  return [
+    {label: 'Composition', value: inspection.composition},
+    {label: 'Model steps', value: model},
+    {label: 'Tools', value: tools},
+    {label: 'Inbox', value: inbox},
+    ...(inspection.run.error !== null || failures.length
+      ? [{label: 'Failure information', value: {error: inspection.run.error, events: failures}}]
+      : []),
+  ];
+}
+
+function MobileRunDetails({
+  runId,
+  load,
+  loadMore,
+}: {
+  runId: string;
+  load: ReturnType<typeof useMilimController>['loadRunDetails'];
+  loadMore: ReturnType<typeof useMilimController>['loadMoreRunEvents'];
+}) {
+  const {palette, styles} = useAppTheme();
+  const [details, setDetails] = useState<{inspection: RunInspectionV1; events: RunEventPageV1} | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const requestDetails = async () => {
+    if (details || loading) return;
+    setLoading(true);
+    setError(null);
+    try {
+      setDetails(await load(runId));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setLoading(false);
+    }
+  };
+  const requestMore = async () => {
+    const next = details?.events.next_seq;
+    if (!details || next == null || loading) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const page = await loadMore(runId, next);
+      setDetails(current => current ? {
+        ...current,
+        events: {...page, events: [...current.events.events, ...page.events]},
+      } : current);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (!details) {
+    return (
+      <View style={styles.runDetailsFooter}>
+        <MotionPressable
+          style={styles.runDetailsAction}
+          disabled={loading}
+          onPress={() => void requestDetails()}>
+          {loading ? <ActivityIndicator size="small" color={palette.muted} /> : <MilimIcon name="info" size={12} color={palette.muted} />}
+          <Text style={styles.runDetailsActionText}>{loading ? 'Loading run details…' : 'Run details'}</Text>
+        </MotionPressable>
+        {error ? <Text style={styles.runDetailsError}>{error}</Text> : null}
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.runDetailsPanel}>
+      {runEventGroups(details.events.events, details.inspection).map(section => (
+        <RunDetailSection key={section.label} label={section.label} value={section.value} />
+      ))}
+      {details.events.has_more ? (
+        <MotionPressable style={styles.runDetailsAction} disabled={loading} onPress={() => void requestMore()}>
+          {loading ? <ActivityIndicator size="small" color={palette.muted} /> : <MilimIcon name="refresh" size={12} color={palette.muted} />}
+          <Text style={styles.runDetailsActionText}>{loading ? 'Loading…' : 'Load more events'}</Text>
+        </MotionPressable>
+      ) : null}
+      {error ? <Text style={styles.runDetailsError}>{error}</Text> : null}
+    </View>
+  );
+}
+
+function ActivityGroup({
+  group,
+  runDetailsEnabled,
+  loadRunDetails,
+  loadMoreRunEvents,
+}: {
+  group: ProjectedActivityGroup;
+  runDetailsEnabled: boolean;
+  loadRunDetails: ReturnType<typeof useMilimController>['loadRunDetails'];
+  loadMoreRunEvents: ReturnType<typeof useMilimController>['loadMoreRunEvents'];
+}) {
   const {palette, styles} = useAppTheme();
   const [open, setOpen] = useState(group.status === 'running' || group.status === 'failed');
   const previousStatus = useRef(group.status);
@@ -1418,6 +1824,9 @@ function ActivityGroup({group}: {group: ProjectedActivityGroup}) {
       {open ? (
         <View style={styles.activityRows}>
           {group.rows.map(row => <ActivityRow key={row.id} row={row} />)}
+          {runDetailsEnabled ? (
+            <MobileRunDetails runId={group.runId} load={loadRunDetails} loadMore={loadMoreRunEvents} />
+          ) : null}
         </View>
       ) : null}
     </View>
@@ -1428,13 +1837,26 @@ function TranscriptItemView({
   item,
   markdownStyles,
   execute,
+  runDetailsEnabled,
+  loadRunDetails,
+  loadMoreRunEvents,
 }: {
   item: ProjectedTranscriptItem;
   markdownStyles: ReturnType<typeof createMarkdownStyles>;
   execute: ReturnType<typeof useMilimController>['execute'];
+  runDetailsEnabled: boolean;
+  loadRunDetails: ReturnType<typeof useMilimController>['loadRunDetails'];
+  loadMoreRunEvents: ReturnType<typeof useMilimController>['loadMoreRunEvents'];
 }) {
   const {palette, styles} = useAppTheme();
-  if (item.kind === 'activity') return <ActivityGroup group={item} />;
+  if (item.kind === 'activity') return (
+    <ActivityGroup
+      group={item}
+      runDetailsEnabled={runDetailsEnabled}
+      loadRunDetails={loadRunDetails}
+      loadMoreRunEvents={loadMoreRunEvents}
+    />
+  );
   if (item.kind === 'approval') {
     if (item.approval) return <ApprovalCard approval={item.approval} execute={execute} inline />;
     const color = activityStatusColor(item.status, palette);
@@ -1453,16 +1875,32 @@ function TranscriptItemView({
     <View style={[styles.message, item.role === 'user' ? styles.userMessage : styles.assistantMessage]}>
       {item.role === 'system' ? <Text style={styles.messageRole}>SYSTEM</Text> : null}
       {item.reasoning ? <ReasoningBlock text={item.reasoning} /> : null}
-      <Markdown style={markdownStyles} rules={mobileMarkdownRules}>{item.content || '…'}</Markdown>
+      <Markdown markdownit={mobileMarkdownParser} style={markdownStyles} rules={mobileMarkdownRules}>
+        {item.content || '…'}
+      </Markdown>
     </View>
   );
 }
 
-function PickerChip({label, icon, onPress, warning}: {label: string; icon: MilimIconName; onPress: () => void; warning?: boolean}) {
+function PickerChip({
+  label,
+  icon,
+  providerBrand,
+  onPress,
+  warning,
+}: {
+  label: string;
+  icon: MilimIconName;
+  providerBrand?: MobileModelOption['brand'];
+  onPress: () => void;
+  warning?: boolean;
+}) {
   const {palette, styles} = useAppTheme();
   return (
     <MotionPressable style={[styles.chip, warning && styles.warningChip]} hitSlop={8} onPress={onPress}>
-      <MilimIcon name={icon} size={12} color={warning ? palette.warning : palette.secondary} />
+      {providerBrand !== undefined
+        ? <ProviderIcon brand={providerBrand} size={12} color={warning ? palette.warning : palette.secondary} />
+        : <MilimIcon name={icon} size={12} color={warning ? palette.warning : palette.secondary} />}
       <Text style={styles.chipText} numberOfLines={1}>{label}</Text>
       <MilimIcon name="chevron-down" size={12} color={palette.muted} />
     </MotionPressable>
@@ -1528,42 +1966,116 @@ function PickerSheetFrame({
   );
 }
 
-const capabilityLabels: Record<MobileModelCapability, string> = {
-  vision: 'VISION',
-  tools: 'TOOLS',
-  reasoning: 'REASON',
-  fast: 'FAST',
-  image: 'IMAGE',
-  video: 'VIDEO',
-  music: 'MUSIC',
+const capabilityIcons: Record<MobileModelCapability, MilimIconName> = {
+  vision: 'eye',
+  tools: 'plug',
+  reasoning: 'sparkles',
+  fast: 'bolt',
+  image: 'image',
+  video: 'video',
+  music: 'volume',
+};
+
+const reasoningEffortLabels: Record<string, string> = {
+  auto: 'Auto',
+  none: 'Off',
+  minimal: 'Minimal',
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  on: 'On',
+  xhigh: 'X-high',
+  max: 'Max',
 };
 
 function ModelPickerSheet({
   visible,
+  hostId,
   models,
   selectedId,
+  reasoningEffortOverrides,
   onClose,
   onSelect,
 }: {
   visible: boolean;
+  hostId: string;
   models: JsonValue[];
   selectedId: string | null;
+  reasoningEffortOverrides?: Record<string, string>;
   onClose: () => void;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, reasoningEffort?: string) => void;
 }) {
   const {palette, styles} = useAppTheme();
   const [query, setQuery] = useState('');
-  const groups = useMemo(() => modelPickerGroups(models, query), [models, query]);
+  const [effortModelId, setEffortModelId] = useState<string | null>(null);
+  const [preferences, setPreferences] = useState(DEFAULT_MODEL_PICKER_PREFERENCES);
+  const groups = useMemo(
+    () => modelPickerGroups(models, query, preferences.favorites, preferences.favoritesOnly),
+    [models, preferences.favorites, preferences.favoritesOnly, query],
+  );
+  const collapsedGroups = useMemo(
+    () => new Set(preferences.collapsedGroups),
+    [preferences.collapsedGroups],
+  );
+  const filtering = Boolean(query.trim()) || preferences.favoritesOnly;
   const rows = useMemo(
-    () => groups.flatMap(group => [
-      {type: 'header' as const, key: `header:${group.title}`, title: group.title, count: group.models.length},
-      ...group.models.map(model => ({type: 'model' as const, key: `${model.provider}:${model.id}`, model})),
-    ]),
-    [groups],
+    () => groups.flatMap(group => {
+      const collapsible = group.title !== 'Favorites' && !filtering;
+      const collapsed = collapsible && collapsedGroups.has(group.title);
+      return [
+        {
+          type: 'header' as const,
+          key: `header:${group.title}`,
+          title: group.title,
+          count: group.models.length,
+          brand: group.models[0]?.brand ?? null,
+          collapsible,
+          collapsed,
+        },
+        ...(collapsed ? [] : group.models.flatMap(model => [
+          {type: 'model' as const, key: `${group.title}:${model.id}`, model},
+          ...(effortModelId === model.id
+            ? [{type: 'effort' as const, key: `${group.title}:${model.id}:effort`, model}]
+            : []),
+        ])),
+      ];
+    }),
+    [collapsedGroups, effortModelId, filtering, groups],
   );
   useEffect(() => {
-    if (!visible) setQuery('');
-  }, [visible]);
+    if (!visible) {
+      setQuery('');
+      setEffortModelId(null);
+      return;
+    }
+    setPreferences(DEFAULT_MODEL_PICKER_PREFERENCES);
+    if (!hostId) return;
+    let cancelled = false;
+    void readModelPickerPreferences(hostId)
+      .then(next => {
+        if (!cancelled) setPreferences(next);
+      })
+      .catch(showError);
+    return () => {
+      cancelled = true;
+    };
+  }, [hostId, visible]);
+  const updatePreferences = useCallback((next: typeof preferences) => {
+    setPreferences(next);
+    if (hostId) void saveModelPickerPreferences(hostId, next).catch(showError);
+  }, [hostId]);
+  const toggleFavorite = useCallback((favoriteModelId: string) => {
+    const favorites = preferences.favorites.includes(favoriteModelId)
+      ? preferences.favorites.filter(id => id !== favoriteModelId)
+      : [...preferences.favorites, favoriteModelId];
+    updatePreferences({...preferences, favorites});
+  }, [preferences, updatePreferences]);
+  const toggleGroup = useCallback((title: string) => {
+    const next = new Set(preferences.collapsedGroups);
+    if (next.has(title)) next.delete(title);
+    else next.add(title);
+    updatePreferences({...preferences, collapsedGroups: [...next]});
+  }, [preferences, updatePreferences]);
   return (
     <PickerSheetFrame
       visible={visible}
@@ -1597,46 +2109,151 @@ function ModelPickerSheet({
         windowSize={7}
         ListEmptyComponent={<Empty title="No matching models" copy="Try a model name, provider, or runtime." />}
         renderItem={({item}) => item.type === 'header' ? (
-          <View style={styles.pickerGroupHeader}>
+          <MotionPressable
+            style={styles.pickerGroupHeader}
+            disabled={!item.collapsible}
+            accessibilityRole={item.collapsible ? 'button' : undefined}
+            accessibilityState={item.collapsible ? {expanded: !item.collapsed} : undefined}
+            onPress={() => item.collapsible && toggleGroup(item.title)}>
+            {item.title === 'Favorites'
+              ? <MilimIcon name="star" filled size={13} color={palette.accent} />
+              : <ProviderIcon brand={item.brand} size={13} color={palette.secondary} />}
             <Text style={styles.pickerGroupTitle}>{item.title.toUpperCase()}</Text>
             <Text style={styles.pickerGroupCount}>{item.count}</Text>
-          </View>
+            {item.collapsible
+              ? <MilimIcon name={item.collapsed ? 'chevron-right' : 'chevron-down'} size={12} color={palette.muted} />
+              : null}
+          </MotionPressable>
+        ) : item.type === 'effort' ? (
+          <ReasoningEffortChoices
+            model={item.model}
+            selected={reasoningEffortOverrides?.[item.model.id] ?? 'auto'}
+            onSelect={effort => onSelect(item.model.id, effort)}
+          />
         ) : (
           <ModelPickerRow
             model={item.model}
             selected={item.model.id === selectedId}
+            favorite={preferences.favorites.includes(item.model.id)}
+            reasoningEffort={reasoningEffortOverrides?.[item.model.id] ?? 'auto'}
             onPress={() => onSelect(item.model.id)}
+            onFavorite={() => toggleFavorite(item.model.id)}
+            onToggleReasoning={item.model.reasoningEfforts.length
+              ? () => setEffortModelId(current => current === item.model.id ? null : item.model.id)
+              : undefined}
           />
         )}
       />
+      <MotionPressable
+        style={styles.pickerFavoritesOnly}
+        accessibilityRole="switch"
+        accessibilityState={{checked: preferences.favoritesOnly}}
+        onPress={() => updatePreferences({...preferences, favoritesOnly: !preferences.favoritesOnly})}>
+        <MilimIcon name="star" filled={preferences.favoritesOnly} size={14} color={preferences.favoritesOnly ? palette.accent : palette.muted} />
+        <Text style={styles.pickerFavoritesOnlyText}>Favorites only</Text>
+        <View style={[styles.pickerSwitch, preferences.favoritesOnly && styles.pickerSwitchOn]}>
+          <View style={[styles.pickerSwitchThumb, preferences.favoritesOnly && styles.pickerSwitchThumbOn]} />
+        </View>
+      </MotionPressable>
     </PickerSheetFrame>
   );
 }
 
-function ModelPickerRow({model, selected, onPress}: {model: MobileModelOption; selected: boolean; onPress: () => void}) {
+function ModelPickerRow({
+  model,
+  selected,
+  favorite,
+  reasoningEffort,
+  onPress,
+  onFavorite,
+  onToggleReasoning,
+}: {
+  model: MobileModelOption;
+  selected: boolean;
+  favorite: boolean;
+  reasoningEffort: string;
+  onPress: () => void;
+  onFavorite: () => void;
+  onToggleReasoning?: () => void;
+}) {
   const {palette, styles} = useAppTheme();
   return (
-    <MotionPressable style={[styles.pickerRow, selected && styles.pickerRowSelected]} onPress={onPress}>
-      <View style={[styles.pickerRowIcon, selected && styles.pickerRowIconSelected]}>
-        <MilimIcon name="sparkles" size={15} color={selected ? palette.accent : palette.secondary} />
-      </View>
-      <View style={styles.pickerRowBody}>
-        <View style={styles.pickerRowTopline}>
-          <Text style={styles.pickerRowTitle} numberOfLines={1}>{model.label}</Text>
-          {selected ? <MilimIcon name="check" size={15} color={palette.accent} /> : null}
+    <View style={[styles.pickerRow, selected && styles.pickerRowSelected]}>
+      <MotionPressable style={styles.pickerRowMain} onPress={onPress}>
+        <View style={styles.pickerRowIcon}>
+          <ProviderIcon brand={model.brand} size={17} color={selected ? palette.accent : palette.secondary} />
         </View>
-        <Text style={styles.pickerRowRoute} numberOfLines={1}>
-          {[model.route, model.detail].filter(Boolean).join(' · ')}
-        </Text>
-        {model.capabilities.length ? (
-          <View style={styles.capabilityRow}>
-            {model.capabilities.slice(0, 5).map(capability => (
-              <Text key={capability} style={styles.capabilityTag}>{capabilityLabels[capability]}</Text>
-            ))}
+        <View style={styles.pickerRowBody}>
+          <View style={styles.pickerRowTopline}>
+            <Text style={styles.pickerRowTitle} numberOfLines={1}>{model.label}</Text>
+            {selected ? <MilimIcon name="check" size={14} color={palette.accent} /> : null}
           </View>
-        ) : null}
-      </View>
-    </MotionPressable>
+          <View style={styles.pickerRowMeta}>
+            <Text style={styles.pickerRowRoute} numberOfLines={1}>
+              {[model.route, model.detail].filter(Boolean).join(' · ')}
+            </Text>
+            {model.capabilities.length ? (
+              <View style={styles.capabilityRow}>
+                {model.capabilities.slice(0, 5).map(capability => (
+                  <View key={capability} accessibilityLabel={capability}>
+                    <MilimIcon name={capabilityIcons[capability]} size={11} color={palette.muted} />
+                  </View>
+                ))}
+              </View>
+            ) : null}
+          </View>
+        </View>
+      </MotionPressable>
+      {onToggleReasoning ? (
+        <MotionPressable
+          style={styles.pickerRowEffort}
+          hitSlop={4}
+          accessibilityLabel={`Reasoning effort for ${model.label}: ${reasoningEffortLabels[reasoningEffort] ?? reasoningEffort}`}
+          onPress={onToggleReasoning}>
+          <MilimIcon name="sparkles" size={12} color={reasoningEffort === 'auto' ? palette.muted : palette.accent} />
+          {reasoningEffort !== 'auto'
+            ? <Text style={styles.pickerRowEffortText}>{reasoningEffortLabels[reasoningEffort] ?? reasoningEffort}</Text>
+            : null}
+        </MotionPressable>
+      ) : null}
+      <MotionPressable
+        style={styles.pickerRowFavorite}
+        hitSlop={4}
+        accessibilityLabel={favorite ? `Remove ${model.label} from favorites` : `Add ${model.label} to favorites`}
+        onPress={onFavorite}>
+        <MilimIcon name="star" filled={favorite} size={14} color={favorite ? palette.accent : palette.muted} />
+      </MotionPressable>
+    </View>
+  );
+}
+
+function ReasoningEffortChoices({
+  model,
+  selected,
+  onSelect,
+}: {
+  model: MobileModelOption;
+  selected: string;
+  onSelect: (effort: string) => void;
+}) {
+  const {styles} = useAppTheme();
+  const choices = ['auto', ...new Set(model.reasoningEfforts)];
+  return (
+    <View style={styles.reasoningEffortChoices}>
+      <Text style={styles.reasoningEffortLabel}>Reasoning</Text>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.reasoningEffortScroll}>
+        {choices.map(effort => (
+          <MotionPressable
+            key={effort}
+            style={[styles.reasoningEffortChoice, effort === selected && styles.reasoningEffortChoiceSelected]}
+            onPress={() => onSelect(effort)}>
+            <Text style={[styles.reasoningEffortChoiceText, effort === selected && styles.reasoningEffortChoiceTextSelected]}>
+              {reasoningEffortLabels[effort] ?? effort}
+            </Text>
+          </MotionPressable>
+        ))}
+      </ScrollView>
+    </View>
   );
 }
 
@@ -2098,18 +2715,21 @@ function showError(error: unknown) {
   Alert.alert('milim', error instanceof Error ? error.message : String(error));
 }
 
-function createMarkdownStyles(palette: MobilePalette) {
+function createMarkdownStyles(theme: MobileTheme) {
+  const {fontFamily, monoFamily, palette} = theme;
   return {
-    body: {color: palette.text, fontSize: 14.5, lineHeight: 22},
-    code_inline: {color: palette.accent, backgroundColor: palette.raised},
-    fence: {color: palette.text, backgroundColor: palette.bg, borderColor: palette.border},
+    body: {color: palette.text, fontFamily, fontSize: 14.5, lineHeight: 22},
+    code_inline: {color: palette.accent, backgroundColor: palette.raised, fontFamily: monoFamily},
+    code_block: {color: palette.text, backgroundColor: palette.bg, borderColor: palette.border, fontFamily: monoFamily},
+    fence: {color: palette.text, backgroundColor: palette.bg, borderColor: palette.border, fontFamily: monoFamily},
     link: {color: palette.accent},
   };
 }
 
 function createStyles(theme: MobileTheme) {
-  const {cardRadius, inputRadius, palette} = theme;
+  const {cardRadius, fontFamily, inputRadius, monoFamily, palette} = theme;
   return StyleSheet.create({
+  appText: fontFamily ? {fontFamily} : {},
   root: {flex: 1, backgroundColor: palette.bg},
   app: {flex: 1, backgroundColor: 'transparent'},
   backgroundImage: {position: 'absolute', top: 0, right: 0, bottom: 0, left: 0},
@@ -2143,7 +2763,7 @@ function createStyles(theme: MobileTheme) {
   screenSubtitle: {color: palette.muted, fontSize: 10.5},
   eyebrow: {color: palette.secondary, fontSize: 9.5, fontWeight: '700', letterSpacing: 1.5},
   screenTitle: {color: palette.text, fontSize: 20, lineHeight: 25, fontWeight: '700', letterSpacing: -0.55},
-  input: {minHeight: 40, paddingHorizontal: 11, paddingVertical: 8, borderRadius: inputRadius, borderWidth: 1, borderColor: palette.borderStrong, backgroundColor: palette.input, color: palette.text, fontSize: 13.5},
+  input: {minHeight: 40, paddingHorizontal: 11, paddingVertical: 8, borderRadius: inputRadius, borderWidth: 1, borderColor: palette.borderStrong, backgroundColor: palette.input, color: palette.text, fontFamily, fontSize: 13.5},
   flex: {flex: 1},
   list: {flexGrow: 1, paddingBottom: 24, gap: 2},
   threadCard: {minHeight: 58, flexDirection: 'row', alignItems: 'center', backgroundColor: 'transparent', borderWidth: 1, borderColor: 'transparent', borderRadius: 8, paddingLeft: 7, paddingRight: 4, gap: 9},
@@ -2209,31 +2829,50 @@ function createStyles(theme: MobileTheme) {
   pickerSubtitle: {color: palette.muted, fontSize: 10.5, marginTop: 1},
   pickerClose: {width: 34, height: 34, borderRadius: 8, alignItems: 'center', justifyContent: 'center'},
   pickerSearch: {minHeight: 40, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 10, borderRadius: 8, borderWidth: 1, borderColor: palette.borderStrong, backgroundColor: palette.input, marginBottom: 8},
-  pickerSearchInput: {flex: 1, color: palette.text, fontSize: 13, paddingVertical: 7},
+  pickerSearchInput: {flex: 1, color: palette.text, fontFamily, fontSize: 13, paddingVertical: 7},
   pickerSearchClear: {width: 28, height: 28, alignItems: 'center', justifyContent: 'center'},
   pickerListView: {flexGrow: 1},
-  pickerList: {flexGrow: 1, paddingBottom: 22, gap: 2},
-  pickerGroupHeader: {flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 5, paddingTop: 4, paddingBottom: 2},
-  pickerGroupTitle: {color: palette.muted, fontSize: 9, fontWeight: '800', letterSpacing: 1.2},
+  pickerList: {flexGrow: 1, paddingBottom: 8, gap: 2},
+  pickerGroupHeader: {minHeight: 34, flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: 8, paddingTop: 4, paddingBottom: 2},
+  pickerGroupTitle: {flex: 1, color: palette.muted, fontSize: 9, fontWeight: '800', letterSpacing: 1.2},
   pickerGroupCount: {color: palette.muted, fontSize: 10, fontWeight: '700'},
-  pickerRow: {minHeight: 56, flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 9, paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: 'transparent', backgroundColor: 'transparent'},
+  pickerRow: {minHeight: 52, flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: 5, paddingVertical: 3, borderRadius: 8, borderWidth: 1, borderColor: 'transparent', backgroundColor: 'transparent'},
   pickerRowSelected: {borderColor: palette.accentBorder, backgroundColor: palette.accentSoft},
-  pickerRowIcon: {width: 30, height: 30, flexShrink: 0, borderRadius: 7, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: palette.border, backgroundColor: palette.input},
+  pickerRowMain: {flex: 1, minWidth: 0, minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 4},
+  pickerRowIcon: {width: 24, height: 30, flexShrink: 0, alignItems: 'center', justifyContent: 'center'},
   pickerRowIconSelected: {borderColor: palette.accent},
-  pickerRowBody: {flex: 1, gap: 3},
+  pickerRowBody: {flex: 1, minWidth: 0, gap: 3},
   pickerRowTopline: {flexDirection: 'row', alignItems: 'center', gap: 8},
   pickerRowTitle: {flex: 1, color: palette.text, fontSize: 13, fontWeight: '600'},
-  pickerRowRoute: {color: palette.muted, fontSize: 9.5},
+  pickerRowMeta: {flexDirection: 'row', alignItems: 'center', gap: 6},
+  pickerRowRoute: {flex: 1, color: palette.muted, fontSize: 9.5},
   pickerRowDescription: {color: palette.secondary, fontSize: 10.5, lineHeight: 15},
-  capabilityRow: {flexDirection: 'row', alignItems: 'center', gap: 5, flexWrap: 'wrap', marginTop: 3},
+  capabilityRow: {flexDirection: 'row', alignItems: 'center', gap: 4},
   capabilityTag: {color: palette.secondary, fontSize: 8, fontWeight: '800', letterSpacing: 0.6, paddingHorizontal: 5, paddingVertical: 2, borderRadius: 4, overflow: 'hidden', backgroundColor: palette.input, borderWidth: StyleSheet.hairlineWidth, borderColor: palette.border},
-  transcriptStage: {flex: 1, marginHorizontal: -12, position: 'relative'},
+  pickerRowFavorite: {width: 38, height: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 7},
+  pickerRowEffort: {minWidth: 36, height: 44, paddingHorizontal: 6, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, borderRadius: 7},
+  pickerRowEffortText: {color: palette.accent, fontSize: 9, fontWeight: '700'},
+  reasoningEffortChoices: {marginLeft: 37, marginRight: 5, marginBottom: 3, paddingVertical: 6, gap: 5, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border},
+  reasoningEffortLabel: {color: palette.muted, fontSize: 8.5, fontWeight: '800', letterSpacing: 0.8, textTransform: 'uppercase'},
+  reasoningEffortScroll: {gap: 5, paddingRight: 8},
+  reasoningEffortChoice: {minHeight: 38, minWidth: 48, paddingHorizontal: 10, alignItems: 'center', justifyContent: 'center', borderRadius: 7, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.input},
+  reasoningEffortChoiceSelected: {borderColor: palette.accentBorder, backgroundColor: palette.accentSoft},
+  reasoningEffortChoiceText: {color: palette.secondary, fontSize: 10.5, fontWeight: '700'},
+  reasoningEffortChoiceTextSelected: {color: palette.accent},
+  pickerFavoritesOnly: {minHeight: 46, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border},
+  pickerFavoritesOnlyText: {flex: 1, color: palette.secondary, fontSize: 11, fontWeight: '600'},
+  pickerSwitch: {width: 34, height: 20, padding: 2, borderRadius: 10, justifyContent: 'center', backgroundColor: palette.raised, borderWidth: 1, borderColor: palette.borderStrong},
+  pickerSwitchOn: {backgroundColor: palette.accentSoft, borderColor: palette.accent},
+  pickerSwitchThumb: {width: 14, height: 14, borderRadius: 7, backgroundColor: palette.muted},
+  pickerSwitchThumbOn: {alignSelf: 'flex-end', backgroundColor: palette.accent},
+  chatBody: {flex: 1, marginHorizontal: -12, position: 'relative'},
   transcriptMask: {flex: 1},
   messageList: {flex: 1},
   messageContent: {flexGrow: 1, paddingHorizontal: 14, paddingTop: 12, paddingBottom: 18, gap: 12},
   historyControl: {minHeight: 44, alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.panel},
   historyText: {color: palette.secondary, fontSize: 11, fontWeight: '600'},
-  latestButton: {position: 'absolute', alignSelf: 'center', bottom: 8, minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 13, borderRadius: 9, borderWidth: 1, borderColor: palette.borderStrong, backgroundColor: palette.popover, shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 12, shadowOffset: {width: 0, height: 5}, elevation: 6},
+  latestDock: {position: 'absolute', right: 0, left: 0, alignItems: 'center'},
+  latestButton: {marginBottom: 8, minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 13, borderRadius: 9, borderWidth: 1, borderColor: palette.borderStrong, backgroundColor: palette.popover, shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 12, shadowOffset: {width: 0, height: 5}, elevation: 6},
   latestText: {color: palette.secondary, fontSize: 10.5, fontWeight: '700'},
   message: {borderRadius: 8, paddingHorizontal: 12, paddingVertical: 9, maxWidth: '82%'},
   userMessage: {backgroundColor: palette.accentSoft, borderWidth: 1, borderColor: palette.accentBorder, alignSelf: 'flex-end'},
@@ -2252,6 +2891,15 @@ function createStyles(theme: MobileTheme) {
   activitySummaryDetail: {color: palette.secondary, fontSize: 11.5, lineHeight: 16},
   activitySummaryStatus: {fontSize: 10.5, lineHeight: 15, fontWeight: '700'},
   activityRows: {paddingLeft: 17, paddingBottom: 8, borderLeftWidth: StyleSheet.hairlineWidth, borderLeftColor: palette.border, marginLeft: 16},
+  runDetailsFooter: {gap: 5, paddingTop: 5, paddingRight: 4},
+  runDetailsAction: {minHeight: 34, alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 4},
+  runDetailsActionText: {color: palette.muted, fontSize: 10.5, fontWeight: '600'},
+  runDetailsError: {color: palette.danger, fontSize: 10.5, lineHeight: 15, paddingRight: 8},
+  runDetailsPanel: {gap: 2, paddingTop: 5, paddingRight: 4},
+  runDetailSection: {borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border},
+  runDetailSectionHeader: {minHeight: 38, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8, paddingHorizontal: 4},
+  runDetailSectionLabel: {color: palette.secondary, fontSize: 11, lineHeight: 16, fontWeight: '600'},
+  runDetailJson: {color: palette.muted, fontFamily: monoFamily, fontSize: 10, lineHeight: 15, paddingHorizontal: 4, paddingBottom: 9},
   activityRow: {minHeight: 46, flexDirection: 'row', gap: 8, paddingVertical: 7, paddingRight: 3},
   activityRowIcon: {width: 22, height: 22, flexShrink: 0, alignItems: 'center', justifyContent: 'center'},
   activityRowBody: {flex: 1, minWidth: 0, gap: 3},
@@ -2259,9 +2907,9 @@ function createStyles(theme: MobileTheme) {
   activityRowLabel: {flex: 1, color: palette.text, fontSize: 12.5, lineHeight: 17, fontWeight: '600'},
   activityRowStatus: {fontSize: 10.5, lineHeight: 16, fontWeight: '600'},
   activityDetailScroll: {minWidth: '100%', paddingRight: 14},
-  activityRowDetail: {color: palette.muted, fontFamily: Platform.select({ios: 'Menlo', android: 'monospace'}), fontSize: 11, lineHeight: 16},
+  activityRowDetail: {color: palette.muted, fontFamily: monoFamily, fontSize: 11, lineHeight: 16},
   diffChips: {flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 2},
-  diffChip: {paddingHorizontal: 6, paddingVertical: 2, borderRadius: 5, overflow: 'hidden', fontFamily: Platform.select({ios: 'Menlo', android: 'monospace'}), fontSize: 10.5, fontWeight: '700'},
+  diffChip: {paddingHorizontal: 6, paddingVertical: 2, borderRadius: 5, overflow: 'hidden', fontFamily: monoFamily, fontSize: 10.5, fontWeight: '700'},
   diffChipAdded: {color: palette.success, backgroundColor: palette.raised},
   diffChipRemoved: {color: palette.danger, backgroundColor: palette.dangerSurface},
   activityNotice: {minHeight: 48, alignSelf: 'stretch', flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 4, paddingVertical: 8, borderTopWidth: StyleSheet.hairlineWidth, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: palette.border},
@@ -2269,15 +2917,15 @@ function createStyles(theme: MobileTheme) {
   attachments: {gap: 5, paddingTop: 6, paddingBottom: 2},
   attachment: {height: 27, maxWidth: 210, flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: palette.raised, borderWidth: 1, borderColor: palette.border, borderRadius: 7, paddingHorizontal: 7},
   attachmentText: {maxWidth: 155, color: palette.secondary, fontSize: 10},
-  composerDock: {position: 'relative', overflow: 'hidden'},
+  composerDock: {position: 'absolute', right: 12, bottom: 0, left: 12, overflow: 'hidden'},
   composerLayer: {position: 'absolute', top: 0, right: 0, left: 0, zIndex: 1, paddingTop: 5, paddingBottom: 3},
   composerLayerFront: {zIndex: 2},
-  composer: {backgroundColor: 'transparent', borderWidth: 1, borderColor: palette.borderStrong, borderRadius: inputRadius, padding: 8, shadowColor: '#000', shadowOpacity: 0.13, shadowRadius: 18, shadowOffset: {width: 0, height: 7}, elevation: 6},
-  compactComposer: {minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 4, padding: 4, borderWidth: 1, borderColor: palette.borderStrong, borderRadius: inputRadius, backgroundColor: palette.popover, shadowColor: '#000', shadowOpacity: 0.14, shadowRadius: 16, shadowOffset: {width: 0, height: 6}, elevation: 6},
+  composer: {backgroundColor: 'transparent', borderWidth: 1, borderColor: palette.borderStrong, borderRadius: inputRadius, padding: 8},
+  compactComposer: {minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 4, padding: 4, borderWidth: 1, borderColor: palette.borderStrong, borderRadius: inputRadius, backgroundColor: 'transparent'},
   compactComposerPrompt: {flex: 1, minHeight: 38, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 10, borderRadius: Math.max(6, inputRadius - 3)},
   compactComposerText: {flex: 1, color: palette.placeholder, fontSize: 13, fontWeight: '500'},
   composerContextRow: {minHeight: 33, flexDirection: 'row', alignItems: 'center', gap: 6, paddingBottom: 5, marginBottom: 3, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: palette.border},
-  composerInput: {color: palette.text, minHeight: 46, maxHeight: 126, paddingHorizontal: 2, paddingTop: 5, paddingBottom: 4, fontSize: 14, lineHeight: 20, textAlignVertical: 'top'},
+  composerInput: {color: palette.text, minHeight: 46, maxHeight: 126, paddingHorizontal: 2, paddingTop: 5, paddingBottom: 4, fontFamily, fontSize: 14, lineHeight: 20, textAlignVertical: 'top'},
   composerActions: {height: 44, flexDirection: 'row', alignItems: 'center', gap: 4},
   composerSpacer: {flex: 1},
   iconButton: {width: 44, height: 44, borderRadius: 8, alignItems: 'center', justifyContent: 'center', backgroundColor: 'transparent'},
@@ -2289,7 +2937,7 @@ function createStyles(theme: MobileTheme) {
   attentionCard: {backgroundColor: palette.panel, borderWidth: 1, borderColor: palette.border, borderRadius: cardRadius, padding: 14, gap: 10},
   inlineApprovalCard: {alignSelf: 'stretch', borderColor: palette.warning, backgroundColor: palette.input, borderRadius: Math.max(8, cardRadius - 2), padding: 12},
   attentionTitle: {color: palette.text, fontSize: 16, fontWeight: '600'},
-  codeBlock: {color: palette.text, backgroundColor: palette.bg, borderRadius: inputRadius, padding: 10, fontFamily: Platform.select({ios: 'Menlo', android: 'monospace'}), fontSize: 12, maxHeight: 180},
+  codeBlock: {color: palette.text, backgroundColor: palette.bg, borderRadius: inputRadius, padding: 10, fontFamily: monoFamily, fontSize: 12, maxHeight: 180},
   approvalDetailScroll: {minWidth: '100%'},
   actionRow: {flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', gap: 8, flexWrap: 'wrap'},
   dialogBackdrop: {flex: 1, justifyContent: 'center', padding: 24, backgroundColor: 'rgba(0, 0, 0, 0.72)'},
@@ -2352,6 +3000,28 @@ function createStyles(theme: MobileTheme) {
   onboardingIntro: {gap: 9},
   heroTitle: {color: palette.text, fontSize: 34, lineHeight: 38, fontWeight: '700', letterSpacing: -1.5},
   heroCopy: {color: palette.secondary, fontSize: 14, lineHeight: 20},
+  nearbyPanel: {gap: 9, padding: 13, borderRadius: cardRadius, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.panel},
+  nearbyHeading: {minHeight: 36, flexDirection: 'row', alignItems: 'center', gap: 10},
+  nearbyTitle: {color: palette.text, fontSize: 14.5, fontWeight: '600'},
+  nearbySubtitle: {color: palette.muted, fontSize: 10.5, lineHeight: 15},
+  nearbyRefresh: {width: 36, height: 36, alignItems: 'center', justifyContent: 'center', borderRadius: 8, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.raised},
+  nearbyHost: {minHeight: 58, flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 10, paddingVertical: 8, borderRadius: 9, borderWidth: 1, borderColor: palette.borderStrong, backgroundColor: palette.input},
+  nearbyHostPending: {borderColor: palette.accent, backgroundColor: palette.raised},
+  nearbyHostMark: {width: 30, height: 30, resizeMode: 'contain'},
+  nearbyPairingSpinner: {width: 30, height: 30, alignItems: 'center', justifyContent: 'center'},
+  nearbyHostBody: {flex: 1, minWidth: 0, gap: 2},
+  nearbyHostName: {color: palette.text, fontSize: 12.5, fontWeight: '700'},
+  nearbyHostEndpoint: {color: palette.muted, fontSize: 9.5},
+  nearbyStatus: {flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 7, height: 24, borderRadius: 7, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.raised},
+  nearbyStatusText: {color: palette.secondary, fontSize: 8, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.45},
+  nearbyConnectAction: {flexDirection: 'row', alignItems: 'center', gap: 4, paddingLeft: 8},
+  nearbyConnectText: {color: palette.text, fontSize: 10.5, fontWeight: '700'},
+  nearbyEmpty: {color: palette.muted, fontSize: 11.5, lineHeight: 17},
+  nearbyHelp: {color: palette.secondary, fontSize: 10.5, lineHeight: 15},
+  manualPairToggle: {minHeight: 58, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 13, paddingVertical: 10, borderRadius: cardRadius, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.panel},
+  manualPairIcon: {width: 34, height: 34, borderRadius: 8, alignItems: 'center', justifyContent: 'center', backgroundColor: palette.raised},
+  manualPairTitle: {color: palette.text, fontSize: 13, fontWeight: '600'},
+  manualPairCopy: {color: palette.muted, fontSize: 10.5, lineHeight: 14},
   pairingPanel: {gap: 10, padding: 15, borderRadius: cardRadius, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.panel},
   panelHeading: {flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 3},
   panelIcon: {width: 34, height: 34, borderRadius: 8, borderWidth: 1, borderColor: palette.borderStrong, backgroundColor: palette.raised, alignItems: 'center', justifyContent: 'center'},

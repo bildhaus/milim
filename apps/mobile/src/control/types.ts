@@ -25,6 +25,10 @@ export interface ControlCapabilitiesV1 {
   push_notifications: boolean;
   inline_branches: boolean;
   appearance_assets?: boolean;
+  run_ledger?: boolean;
+  run_inspection?: boolean;
+  steering?: boolean;
+  context_injection?: boolean;
 }
 
 export interface ThreadSummaryV1 {
@@ -35,6 +39,7 @@ export interface ThreadSummaryV1 {
   updated_at_ms: number;
   archived_at_ms: number | null;
   model: string | null;
+  reasoning_effort_overrides?: Record<string, string>;
   agent_id: string | null;
   workspace: string | null;
   busy: boolean;
@@ -93,6 +98,12 @@ export interface RunSnapshotV1 {
   status: string;
   adapter: string;
   config: FrozenRunConfigV1;
+  capabilities: {
+    ledger: boolean;
+    inspectable: boolean;
+    steering: boolean;
+    visibility: string;
+  };
   created_at_ms: number;
   updated_at_ms: number;
   completed_at_ms: number | null;
@@ -114,6 +125,15 @@ export interface QueuedTurnV1 {
   thread_id: string;
   command_id: string;
   accepted_at_ms: number;
+}
+
+export interface PendingInputV1 {
+  id: string;
+  thread_id: string;
+  target_run_id: string | null;
+  kind: string;
+  state: string;
+  created_at_ms: number;
 }
 
 export interface AppearanceSnapshotV1 {
@@ -182,6 +202,7 @@ export interface ControlBootstrapV1 {
   agents: AgentSummaryV1[];
   active_runs: RunSnapshotV1[];
   queued_turns: QueuedTurnV1[];
+  pending_inputs: PendingInputV1[];
   pending_approvals: PendingApprovalV1[];
 }
 
@@ -227,6 +248,9 @@ export type ControlCommandKindV1 =
   | 'thread.set_agent'
   | 'message.delete'
   | 'turn.send'
+  | 'turn.steer'
+  | 'context.inject'
+  | 'turn.inbox_delete'
   | 'turn.stop'
   | 'turn.regenerate'
   | 'turn.queue_resume'
@@ -278,6 +302,18 @@ export interface PairedCredential {
   device_id: string;
   device_key: string;
   device_name: string;
+}
+
+export interface PairingRequestCreated {
+  request_id: string;
+  request_key: string;
+  expires_at: number;
+}
+
+export interface PairingRequestStatus {
+  request_id: string;
+  status: 'pending' | 'approved' | 'denied' | 'paired';
+  expires_at: number;
 }
 
 export interface MobileHostProbe {

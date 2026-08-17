@@ -4,9 +4,12 @@ import type {
   ControlCommandV1,
   ControlEventV1,
   MobileHostProbe,
+  PairingRequestCreated,
+  PairingRequestStatus,
   PairedCredential,
   TimelinePageV1,
 } from './types';
+import type {RunEventPageV1, RunInspectionV1} from './generated-v1';
 
 export class ControlHttpError extends Error {
   constructor(
@@ -76,8 +79,72 @@ export async function claimPairing(
   });
 }
 
-export async function fetchMobileHostProbe(endpoint: string): Promise<MobileHostProbe> {
-  return requestJson(endpoint, '/mobile');
+export async function fetchMobileHostProbe(
+  endpoint: string,
+  signal?: AbortSignal,
+): Promise<MobileHostProbe> {
+  return requestJson(endpoint, '/mobile', undefined, signal ? {signal} : undefined);
+}
+
+export async function createPairingRequest(
+  endpoint: string,
+  deviceName: string,
+  platform: 'android' | 'ios',
+  signal?: AbortSignal,
+): Promise<PairingRequestCreated> {
+  return requestJson(endpoint, '/mobile/pair-requests', undefined, {
+    method: 'POST',
+    body: JSON.stringify({device_name: deviceName, platform}),
+    signal,
+  });
+}
+
+export async function fetchPairingRequestStatus(
+  endpoint: string,
+  requestId: string,
+  requestKey: string,
+  signal?: AbortSignal,
+): Promise<PairingRequestStatus> {
+  return requestJson(
+    endpoint,
+    `/mobile/pair-requests/${encodeURIComponent(requestId)}`,
+    undefined,
+    {headers: {'X-Milim-Pairing-Key': requestKey}, signal},
+  );
+}
+
+export async function claimPairingRequest(
+  endpoint: string,
+  requestId: string,
+  requestKey: string,
+  signal?: AbortSignal,
+): Promise<PairedCredential> {
+  return requestJson(
+    endpoint,
+    `/mobile/pair-requests/${encodeURIComponent(requestId)}/claim`,
+    undefined,
+    {
+      method: 'POST',
+      headers: {'X-Milim-Pairing-Key': requestKey},
+      signal,
+    },
+  );
+}
+
+export async function cancelPairingRequest(
+  endpoint: string,
+  requestId: string,
+  requestKey: string,
+): Promise<void> {
+  await requestJson(
+    endpoint,
+    `/mobile/pair-requests/${encodeURIComponent(requestId)}`,
+    undefined,
+    {
+      method: 'DELETE',
+      headers: {'X-Milim-Pairing-Key': requestKey},
+    },
+  );
 }
 
 export async function fetchBootstrap(
@@ -100,6 +167,33 @@ export async function fetchTimeline(
   return requestJson(
     endpoint,
     `/control/v1/threads/${encodeURIComponent(threadId)}/timeline?${params}`,
+    deviceKey,
+  );
+}
+
+export async function fetchRunInspection(
+  endpoint: string,
+  deviceKey: string,
+  runId: string,
+): Promise<RunInspectionV1> {
+  return requestJson(
+    endpoint,
+    `/control/v1/runs/${encodeURIComponent(runId)}`,
+    deviceKey,
+  );
+}
+
+export async function fetchRunEvents(
+  endpoint: string,
+  deviceKey: string,
+  runId: string,
+  afterSeq?: number,
+): Promise<RunEventPageV1> {
+  const params = new URLSearchParams({limit: '50'});
+  if (afterSeq !== undefined) params.set('after_seq', String(afterSeq));
+  return requestJson(
+    endpoint,
+    `/control/v1/runs/${encodeURIComponent(runId)}/events?${params}`,
     deviceKey,
   );
 }

@@ -927,17 +927,19 @@ fn rpc_error(error: &Value) -> String {
 
 #[cfg(windows)]
 fn opencode_command() -> Command {
-    if let Some(path) = crate::child_process::find_on_path("opencode.cmd") {
+    let command = if let Some(path) = crate::child_process::find_on_path("opencode.cmd") {
         let mut command = Command::new("cmd");
         command.arg("/C").arg(path);
-        return command;
-    }
-    Command::new("opencode")
+        command
+    } else {
+        Command::new("opencode")
+    };
+    crate::child_process::account_runtime_inherited(command)
 }
 
 #[cfg(not(windows))]
 fn opencode_command() -> Command {
-    crate::cli_path::command("opencode")
+    crate::child_process::account_runtime_inherited(crate::cli_path::command("opencode"))
 }
 
 #[cfg(test)]
