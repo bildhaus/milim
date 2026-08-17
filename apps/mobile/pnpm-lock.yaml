@@ -15,6 +15,9 @@ importers:
       '@op-engineering/op-sqlite':
         specifier: 18.0.0
         version: 18.0.0(react-native@0.86.0(@babel/core@7.29.7)(@react-native-community/cli@20.2.0(typescript@6.0.3))(@react-native/jest-preset@0.86.0(@babel/core@7.29.7)(react@19.2.3))(@react-native/metro-config@0.86.0(@babel/core@7.29.7))(@types/react@19.2.18)(react@19.2.3))(react@19.2.3)
+      '@oshtz/shatz-avatars':
+        specifier: file:../desktop/vendor/oshtz-shatz-avatars-0.1.0.tgz
+        version: file:../desktop/vendor/oshtz-shatz-avatars-0.1.0.tgz
       '@react-native-documents/picker':
         specifier: 12.0.2
         version: 12.0.2(react-native@0.86.0(@babel/core@7.29.7)(@react-native-community/cli@20.2.0(typescript@6.0.3))(@react-native/jest-preset@0.86.0(@babel/core@7.29.7)(react@19.2.3))(@react-native/metro-config@0.86.0(@babel/core@7.29.7))(@types/react@19.2.18)(react@19.2.3))(react@19.2.3)
@@ -950,6 +953,10 @@ packages:
     peerDependenciesMeta:
       '@sqlite.org/sqlite-wasm':
         optional: true
+
+  '@oshtz/shatz-avatars@file:../desktop/vendor/oshtz-shatz-avatars-0.1.0.tgz':
+    resolution: {integrity: sha512-HP419mTFECT+kiPSj5gXlzYiXuZZOelevKKYVR2HChYeKxhaUM1PiliQIsLN205spnHmomdgm4WCrGj86Xvu5A==, tarball: file:../desktop/vendor/oshtz-shatz-avatars-0.1.0.tgz}
+    version: 0.1.0
 
   '@react-native-community/cli-clean@20.2.0':
     resolution: {integrity: sha512-krqbhFiwHN8l5wZ2XTcrNq9N+DqDWHxW8RK0bIcrK0O+fMvjYi9e/1Pnx2W0CTotOVcZpHzUbgZ4TQVF231Skw==}
@@ -4827,6 +4834,8 @@ snapshots:
     dependencies:
       react: 19.2.3
       react-native: 0.86.0(@babel/core@7.29.7)(@react-native-community/cli@20.2.0(typescript@6.0.3))(@react-native/jest-preset@0.86.0(@babel/core@7.29.7)(react@19.2.3))(@react-native/metro-config@0.86.0(@babel/core@7.29.7))(@types/react@19.2.18)(react@19.2.3)
+
+  '@oshtz/shatz-avatars@file:../desktop/vendor/oshtz-shatz-avatars-0.1.0.tgz': {}
 
   '@react-native-community/cli-clean@20.2.0':
     dependencies:

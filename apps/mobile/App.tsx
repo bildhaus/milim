@@ -91,6 +91,7 @@ import {
   type MobileThreadGroup,
 } from './src/mobileUi';
 import {MilimIcon, type MilimIconName} from './src/ui/MilimIcon';
+import {AgentAvatar} from './src/ui/AgentAvatar';
 import {ProviderIcon} from './src/ui/ProviderIcon';
 
 type AppScreen = 'chat' | 'attention' | 'hosts';
@@ -1251,6 +1252,7 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
   const missingAgent = Boolean(
     thread.agent_id && !controller.bootstrap?.agents.some(agent => agent.id === thread.agent_id),
   );
+  const activeAgent = controller.bootstrap?.agents.find(agent => agent.id === thread.agent_id) ?? null;
   const send = async () => {
     if (controller.status !== 'online') {
       Alert.alert('Saved as a draft', 'milim will not auto-send this prompt after reconnecting.');
@@ -1484,7 +1486,8 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
           />
           <PickerChip
             icon="bolt"
-            label={missingAgent ? 'Missing Agent' : controller.bootstrap?.agents.find(agent => agent.id === thread.agent_id)?.name || 'No Agent'}
+            leading={activeAgent ? <AgentAvatar {...activeAgent} size={14} /> : undefined}
+            label={missingAgent ? 'Missing Agent' : activeAgent?.name || 'No Agent'}
             warning={missingAgent}
             onPress={() => setAgentPickerVisible(true)}
           />
@@ -1881,12 +1884,14 @@ function TranscriptItemView({
 function PickerChip({
   label,
   icon,
+  leading,
   providerBrand,
   onPress,
   warning,
 }: {
   label: string;
   icon: MilimIconName;
+  leading?: React.ReactNode;
   providerBrand?: MobileModelOption['brand'];
   onPress: () => void;
   warning?: boolean;
@@ -1894,9 +1899,9 @@ function PickerChip({
   const {palette, styles} = useAppTheme();
   return (
     <MotionPressable style={[styles.chip, warning && styles.warningChip]} hitSlop={8} onPress={onPress}>
-      {providerBrand !== undefined
+      {leading ?? (providerBrand !== undefined
         ? <ProviderIcon brand={providerBrand} size={12} color={warning ? palette.warning : palette.secondary} />
-        : <MilimIcon name={icon} size={12} color={warning ? palette.warning : palette.secondary} />}
+        : <MilimIcon name={icon} size={12} color={warning ? palette.warning : palette.secondary} />)}
       <Text style={styles.chipText} numberOfLines={1}>{label}</Text>
       <MilimIcon name="chevron-down" size={12} color={palette.muted} />
     </MotionPressable>
@@ -2312,7 +2317,7 @@ function AgentPickerSheet({
             style={[styles.pickerRow, agent.id === selectedId && styles.pickerRowSelected]}
             onPress={() => onSelect(agent.id)}>
             <View style={[styles.pickerRowIcon, agent.id === selectedId && styles.pickerRowIconSelected]}>
-              <MilimIcon name="sparkles" size={15} color={agent.id === selectedId ? palette.accent : palette.secondary} />
+              <AgentAvatar {...agent} size={24} />
             </View>
             <View style={styles.pickerRowBody}>
               <View style={styles.pickerRowTopline}>
