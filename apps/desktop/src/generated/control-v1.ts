@@ -4,7 +4,7 @@ export type JsonValue = null | boolean | number | string | JsonValue[] | { [key:
 
 export type ControlProtocolRangeV1 = { min: number, max: number, };
 
-export type ControlCapabilitiesV1 = { timeline_sync: boolean, queued_turns: boolean, approvals: boolean, agents: boolean, workers: boolean, attachments: boolean, websocket_tickets: boolean, lan_discovery: boolean, push_notifications: boolean, inline_branches: boolean, appearance_assets: boolean, run_ledger?: boolean, run_inspection?: boolean, steering?: boolean, context_injection?: boolean, };
+export type ControlCapabilitiesV1 = { timeline_sync: boolean, queued_turns: boolean, approvals: boolean, agents: boolean, workers: boolean, attachments: boolean, websocket_tickets: boolean, lan_discovery: boolean, push_notifications: boolean, inline_branches: boolean, appearance_assets: boolean, run_ledger?: boolean, run_inspection?: boolean, steering?: boolean, context_injection?: boolean, model_favorites?: boolean, };
 
 export type ThreadSummaryV1 = { id: string, title: string, revision: number, epoch: string, updated_at_ms: number, archived_at_ms: number | null, model: string | null, reasoning_effort_overrides: { [key in string]?: string }, agent_id: string | null, workspace: string | null, busy: boolean, queued_turns: number, };
 
@@ -38,7 +38,7 @@ export type AppearanceTypographyV1 = { font_family: string, mono_family: string,
 
 export type AppearanceSnapshotV1 = { revision: string, theme_id: string, name: string, is_dark: boolean, colors: AppearanceColorsV1, glass: AppearanceGlassV1, background: AppearanceBackgroundV1, borders: AppearanceBordersV1, typography: AppearanceTypographyV1, };
 
-export type ControlBootstrapV1 = { protocol: ControlProtocolRangeV1, host_id: string, host_name: string, capabilities: ControlCapabilitiesV1, appearance: AppearanceSnapshotV1, threads: Array<ThreadSummaryV1>, models: Array<JsonValue>, agents: Array<AgentSummaryV1>, active_runs: Array<RunSnapshotV1>, queued_turns: Array<QueuedTurnV1>, pending_inputs: Array<PendingInputV1>, pending_approvals: Array<PendingApprovalV1>, };
+export type ControlBootstrapV1 = { protocol: ControlProtocolRangeV1, host_id: string, host_name: string, capabilities: ControlCapabilitiesV1, appearance: AppearanceSnapshotV1, threads: Array<ThreadSummaryV1>, models: Array<JsonValue>, favorite_model_ids: Array<string>, agents: Array<AgentSummaryV1>, active_runs: Array<RunSnapshotV1>, queued_turns: Array<QueuedTurnV1>, pending_inputs: Array<PendingInputV1>, pending_approvals: Array<PendingApprovalV1>, };
 
 export type TimelineItemV1 = { id: string, thread_id: string, epoch: string, seq: number, run_id: string | null, type: string, data: JsonValue, created_at_ms: number, };
 
@@ -48,7 +48,7 @@ export type ControlEventV1 = { event_id: string, host_id: string, thread_id?: st
 
 export type ControlCommandStatusV1 = "applied" | "accepted" | "queued" | "needs_confirmation" | "conflict" | "failed";
 
-export type ControlCommandKindV1 = "thread.create" | "thread.rename" | "thread.archive" | "thread.delete" | "thread.set_model" | "thread.set_agent" | "message.delete" | "turn.send" | "turn.steer" | "context.inject" | "turn.inbox_delete" | "turn.stop" | "turn.regenerate" | "turn.queue_resume" | "turn.queue_delete" | "approval.resolve" | "worker.start" | "worker.continue_solo" | "worker.stop";
+export type ControlCommandKindV1 = "thread.create" | "thread.rename" | "thread.archive" | "thread.delete" | "thread.set_model" | "thread.set_agent" | "message.delete" | "model_favorites.set" | "turn.send" | "turn.steer" | "context.inject" | "turn.inbox_delete" | "turn.stop" | "turn.regenerate" | "turn.queue_resume" | "turn.queue_delete" | "approval.resolve" | "worker.start" | "worker.continue_solo" | "worker.stop";
 
 export type ControlCommandV1 = { command_id: string, kind: ControlCommandKindV1, thread_id?: string, expected_revision?: number, payload: JsonValue, confirmation_token?: string, };
 

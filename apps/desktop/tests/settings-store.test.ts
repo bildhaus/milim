@@ -75,6 +75,12 @@ equal(useSettings.getState().favoritesOnly, true, "favorites-only mode should en
 useSettings.getState().setFavoritesOnly(false);
 useSettings.getState().toggleFavorite("gpt-5");
 deepEqual(useSettings.getState().favorites, ["gpt-5"], "favorites should persist as the only model shortcut");
+useSettings.getState().setFavorites([" claude:opus ", "claude:opus", "provider:model"]);
+deepEqual(
+  useSettings.getState().favorites,
+  ["claude:opus", "provider:model"],
+  "canonical favorite updates should normalize and replace the desktop list",
+);
 
 useSettings.getState().setModelGroupCollapsed("OpenAI", true);
 useSettings.getState().setModelGroupCollapsed("OpenAI", true);

@@ -25,6 +25,7 @@ export function controlEventInvalidatesBootstrap(eventType: string): boolean {
     eventType.startsWith('worker.') ||
     eventType === 'appearance.updated' ||
     eventType === 'models.updated' ||
+    eventType === 'model_favorites.updated' ||
     eventType === 'timeline.appended' ||
     eventType === 'sync.required';
 }

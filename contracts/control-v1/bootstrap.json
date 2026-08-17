@@ -13,7 +13,8 @@
     "lan_discovery": false,
     "push_notifications": false,
     "inline_branches": false,
-    "appearance_assets": true
+    "appearance_assets": true,
+    "model_favorites": true
   },
   "appearance": {
     "revision": "fixture-revision",
@@ -86,6 +87,7 @@
     }
   ],
   "models": [{ "id": "mock-echo", "object": "model", "created": 0, "owned_by": "milim" }],
+  "favorite_model_ids": ["mock-echo"],
   "agents": [],
   "active_runs": [],
   "queued_turns": [],

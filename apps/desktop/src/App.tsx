@@ -103,6 +103,38 @@ const inTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const DOCS_URL = "https://docs.milim.ai/";
 const APP_MENU_EVENT = "milim://menu-action";
+const MODEL_FAVORITES_UPDATED_EVENT = "milim://model-favorites-updated";
+const SETTINGS_STATE_KEY = "milim.settings";
+
+function normalizedFavoriteModelIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return Array.from(new Set(
+    value
+      .filter((item): item is string => typeof item === "string")
+      .map((item) => item.trim())
+      .filter(Boolean),
+  ));
+}
+
+function persistedFavoriteModelIds(value: string | null): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value) as { state?: { favorites?: unknown } };
+    return normalizedFavoriteModelIds(parsed.state?.favorites);
+  } catch {
+    return [];
+  }
+}
+
+function applyCanonicalFavoriteModelIds(value: unknown) {
+  const favorites = normalizedFavoriteModelIds(value);
+  const current = useSettings.getState().favorites;
+  if (
+    current.length === favorites.length &&
+    current.every((id, index) => id === favorites[index])
+  ) return;
+  useSettings.getState().setFavorites(favorites);
+}
 
 function BackgroundLayer() {
   const source = animatedBackgroundSource(useTheme.getState().theme.background.image);
@@ -376,6 +408,7 @@ function AppContent() {
     useSessions.persist.hasHydrated(),
   );
   const [uiHydrated, setUiHydrated] = useState(() => useUiPreferences.persist.hasHydrated());
+  const [settingsHydrated, setSettingsHydrated] = useState(() => useSettings.persist.hasHydrated());
   const startupAppliedRef = useRef(false);
   useEffect(() => {
     installUserStateFlushHandlers();
@@ -391,6 +424,37 @@ function AppContent() {
     if (uiHydrated) return;
     return useUiPreferences.persist.onFinishHydration(() => setUiHydrated(true));
   }, [uiHydrated]);
+  useEffect(() => {
+    if (settingsHydrated) return;
+    return useSettings.persist.onFinishHydration(() => setSettingsHydrated(true));
+  }, [settingsHydrated]);
+  useEffect(() => {
+    if (!inTauri || !settingsHydrated) return;
+    let cancelled = false;
+    let dispose: (() => void) | undefined;
+    void import("@tauri-apps/api/event")
+      .then(async ({ listen }) => {
+        const unlisten = await listen<unknown>(MODEL_FAVORITES_UPDATED_EVENT, (event) => {
+          applyCanonicalFavoriteModelIds(event.payload);
+        });
+        if (cancelled) {
+          unlisten();
+          return;
+        }
+        dispose = unlisten;
+        const persisted = await invoke<string | null>("user_state_get", {
+          key: SETTINGS_STATE_KEY,
+        });
+        if (!cancelled) {
+          applyCanonicalFavoriteModelIds(persistedFavoriteModelIds(persisted));
+        }
+      })
+      .catch((error) => console.warn("Failed to sync model favorites:", error));
+    return () => {
+      cancelled = true;
+      dispose?.();
+    };
+  }, [settingsHydrated]);
   useEffect(() => {
     if (!sessionsHydrated || !uiHydrated || startupAppliedRef.current) return;
     startupAppliedRef.current = true;

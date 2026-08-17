@@ -42,6 +42,10 @@ pub struct ControlCapabilitiesV1 {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub context_injection: Option<bool>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model_favorites: Option<bool>,
 }
 
 impl Default for ControlCapabilitiesV1 {
@@ -62,6 +66,7 @@ impl Default for ControlCapabilitiesV1 {
             run_inspection: Some(true),
             steering: Some(true),
             context_injection: Some(true),
+            model_favorites: Some(true),
         }
     }
 }
@@ -363,6 +368,8 @@ pub struct ControlBootstrapV1 {
     pub appearance: AppearanceSnapshotV1,
     pub threads: Vec<ThreadSummaryV1>,
     pub models: Vec<Value>,
+    #[serde(default)]
+    pub favorite_model_ids: Vec<String>,
     pub agents: Vec<AgentSummaryV1>,
     pub active_runs: Vec<RunSnapshotV1>,
     pub queued_turns: Vec<QueuedTurnV1>,
@@ -465,6 +472,9 @@ pub enum ControlCommandKindV1 {
     #[serde(rename = "message.delete")]
     #[ts(rename = "message.delete")]
     MessageDelete,
+    #[serde(rename = "model_favorites.set")]
+    #[ts(rename = "model_favorites.set")]
+    ModelFavoritesSet,
     #[serde(rename = "turn.send")]
     #[ts(rename = "turn.send")]
     TurnSend,
@@ -513,6 +523,7 @@ impl ControlCommandKindV1 {
             Self::ThreadSetModel => "thread.set_model",
             Self::ThreadSetAgent => "thread.set_agent",
             Self::MessageDelete => "message.delete",
+            Self::ModelFavoritesSet => "model_favorites.set",
             Self::TurnSend => "turn.send",
             Self::TurnSteer => "turn.steer",
             Self::ContextInject => "context.inject",

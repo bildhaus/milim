@@ -34,6 +34,20 @@ export const DEFAULT_MODEL_PICKER_PREFERENCES: MobileModelPickerPreferences = {
   collapsedGroups: [],
 };
 
+export function modelPickerFavoriteIds(
+  hostFavorites: string[] | undefined,
+  localFavorites: string[],
+): string[] {
+  const source = hostFavorites ?? localFavorites;
+  return [...new Set(source.map(id => id.trim()).filter(Boolean))];
+}
+
+export function toggledModelFavoriteIds(favorites: string[], modelId: string): string[] {
+  return favorites.includes(modelId)
+    ? favorites.filter(id => id !== modelId)
+    : [...favorites, modelId];
+}
+
 export function normalizeModelPickerPreferences(value: unknown): MobileModelPickerPreferences {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return {...DEFAULT_MODEL_PICKER_PREFERENCES};

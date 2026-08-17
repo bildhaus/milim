@@ -29,6 +29,7 @@ export interface ControlCapabilitiesV1 {
   run_inspection?: boolean;
   steering?: boolean;
   context_injection?: boolean;
+  model_favorites?: boolean;
 }
 
 export interface ThreadSummaryV1 {
@@ -199,6 +200,7 @@ export interface ControlBootstrapV1 {
   appearance?: AppearanceSnapshotV1;
   threads: ThreadSummaryV1[];
   models: JsonValue[];
+  favorite_model_ids?: string[];
   agents: AgentSummaryV1[];
   active_runs: RunSnapshotV1[];
   queued_turns: QueuedTurnV1[];
@@ -247,6 +249,7 @@ export type ControlCommandKindV1 =
   | 'thread.set_model'
   | 'thread.set_agent'
   | 'message.delete'
+  | 'model_favorites.set'
   | 'turn.send'
   | 'turn.steer'
   | 'context.inject'

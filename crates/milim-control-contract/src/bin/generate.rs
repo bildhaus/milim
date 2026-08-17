@@ -55,6 +55,7 @@ fn generated_fixture() -> String {
         ControlCommandKindV1::ThreadSetModel,
         ControlCommandKindV1::ThreadSetAgent,
         ControlCommandKindV1::MessageDelete,
+        ControlCommandKindV1::ModelFavoritesSet,
         ControlCommandKindV1::TurnSend,
         ControlCommandKindV1::TurnSteer,
         ControlCommandKindV1::ContextInject,

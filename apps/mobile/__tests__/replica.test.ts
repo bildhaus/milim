@@ -16,6 +16,7 @@ import type {
 
 test('model catalog events invalidate bootstrap without entering the timeline', () => {
   expect(controlEventInvalidatesBootstrap('models.updated')).toBe(true);
+  expect(controlEventInvalidatesBootstrap('model_favorites.updated')).toBe(true);
   expect(controlEventInvalidatesBootstrap('appearance.updated')).toBe(true);
   expect(controlEventInvalidatesBootstrap('unrelated.event')).toBe(false);
 });
