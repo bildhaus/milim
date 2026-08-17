@@ -1,4 +1,9 @@
 {
+  "0.2.39": {
+    "version": "0.2.39",
+    "summary": "Milim 0.2.39 lets macOS provider connections trust certificates from the system Keychain while keeping bundled roots as a fallback.",
+    "items": []
+  },
   "0.2.38": {
     "version": "0.2.38",
     "summary": "Milim 0.2.38 keeps long live answers formatted and gives the mobile companion cleaner chat-first navigation.",
