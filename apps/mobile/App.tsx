@@ -93,7 +93,7 @@ import {
 import {MilimIcon, type MilimIconName} from './src/ui/MilimIcon';
 import {ProviderIcon} from './src/ui/ProviderIcon';
 
-type Tab = 'chat' | 'attention' | 'hosts';
+type AppScreen = 'chat' | 'attention' | 'hosts';
 
 const milimLogo = require('./src/assets/milim-icon.png');
 const TRANSCRIPT_FADE_HEIGHT = 40;
@@ -328,7 +328,7 @@ function App(): React.JSX.Element {
     [appearance],
   );
   const {styles} = theme;
-  const [tab, setTab] = useState<Tab>('chat');
+  const [screen, setScreen] = useState<AppScreen>('chat');
   const [threadDrawerVisible, setThreadDrawerVisible] = useState(false);
   const [pairingVisible, setPairingVisible] = useState(false);
   const [pairingClaim, setPairingClaim] = useState('');
@@ -375,7 +375,12 @@ function App(): React.JSX.Element {
         <AppearanceBackground uri={controller.appearanceBackgroundUri} />
         <SafeAreaView style={styles.app} edges={['top', 'right', 'bottom', 'left']}>
         <View style={styles.topbar}>
-          <View style={styles.brandGroup}>
+          <MotionPressable
+            style={[styles.brandGroup, screen === 'hosts' && styles.topbarDestinationActive]}
+            onPress={() => setScreen('hosts')}
+            hitSlop={4}
+            accessibilityLabel="Open desktop hosts"
+            accessibilityState={{selected: screen === 'hosts'}}>
             <Image source={milimLogo} style={styles.brandMark} />
             <View>
               <Text style={styles.brand}>milim</Text>
@@ -383,9 +388,14 @@ function App(): React.JSX.Element {
                 {lowercaseMilimBrand(controller.activeHost.displayName)}
               </Text>
             </View>
-          </View>
+          </MotionPressable>
           <View style={styles.topbarActions}>
-            <ConnectionPill status={controller.status} />
+            <ConnectionPill
+              status={controller.status}
+              count={attentionCount}
+              active={screen === 'attention'}
+              onPress={() => setScreen('attention')}
+            />
             <MotionPressable
               style={styles.topbarButton}
               hitSlop={5}
@@ -414,36 +424,27 @@ function App(): React.JSX.Element {
           </Pressable>
         ) : null}
         <View style={styles.content}>
-          <ScreenStage key={tab}>
-          {tab === 'chat' ? (
+          <ScreenStage key={screen}>
+          {screen === 'chat' ? (
             <ChatScreen controller={controller} openThreads={() => setThreadDrawerVisible(true)} />
           ) : null}
-          {tab === 'attention' ? (
+          {screen === 'attention' ? (
             <AttentionScreen
               approvals={controller.bootstrap?.pending_approvals ?? []}
               queuedTurns={controller.bootstrap?.queued_turns ?? []}
               timeline={controller.timeline?.items ?? []}
               execute={controller.execute}
+              onBack={() => setScreen('chat')}
             />
           ) : null}
-          {tab === 'hosts' ? (
+          {screen === 'hosts' ? (
             <HostsScreen
               controller={controller}
               onPair={() => setPairingVisible(true)}
+              onBack={() => setScreen('chat')}
             />
           ) : null}
           </ScreenStage>
-        </View>
-        <View style={styles.tabs}>
-          <TabButton icon="sparkles" label="Chat" active={tab === 'chat'} onPress={() => setTab('chat')} />
-          <TabButton
-            icon="bolt"
-            label="Attention"
-            count={attentionCount}
-            active={tab === 'attention'}
-            onPress={() => setTab('attention')}
-          />
-          <TabButton icon="smartphone" label="Hosts" active={tab === 'hosts'} onPress={() => setTab('hosts')} />
         </View>
         </SafeAreaView>
         </View>
@@ -455,7 +456,7 @@ function App(): React.JSX.Element {
           selectedThreadId={controller.selectedThreadId}
           onSelect={id => {
             controller.setSelectedThreadId(id);
-            setTab('chat');
+            setScreen('chat');
             setThreadDrawerVisible(false);
           }}
           command={controller.command}
@@ -477,37 +478,32 @@ function App(): React.JSX.Element {
   );
 }
 
-function ConnectionPill({status}: {status: string}) {
-  const {styles} = useAppTheme();
-  return (
-    <View style={[styles.connection, status === 'online' && styles.connectionOnline]}>
-      <View style={[styles.dot, status === 'online' && styles.dotOnline]} />
-      <Text style={styles.connectionText}>{status}</Text>
-    </View>
-  );
-}
-
-function TabButton({
-  icon,
-  label,
+function ConnectionPill({
+  status,
   count,
   active,
   onPress,
 }: {
-  icon: MilimIconName;
-  label: string;
-  count?: number;
+  status: string;
+  count: number;
   active: boolean;
   onPress: () => void;
 }) {
-  const {palette, styles} = useAppTheme();
+  const {styles} = useAppTheme();
   return (
-    <MotionPressable style={[styles.tab, active && styles.tabActive]} onPress={onPress}>
-      <View style={styles.tabIcon}>
-        <MilimIcon name={icon} size={18} color={active ? palette.text : palette.muted} />
-        {count ? <Text style={styles.tabBadge}>{count > 9 ? '9+' : count}</Text> : null}
-      </View>
-      <Text style={[styles.tabText, active && styles.tabTextActive]}>{label}</Text>
+    <MotionPressable
+      style={[
+        styles.connection,
+        status === 'online' && styles.connectionOnline,
+        active && styles.topbarDestinationActive,
+      ]}
+      onPress={onPress}
+      hitSlop={5}
+      accessibilityLabel={`Open Attention, ${status}${count ? `, ${count} pending` : ''}`}
+      accessibilityState={{selected: active}}>
+      <View style={[styles.dot, status === 'online' && styles.dotOnline]} />
+      <Text style={styles.connectionText}>{status}</Text>
+      {count ? <Text style={styles.connectionCount}>{count > 9 ? '9+' : count}</Text> : null}
     </MotionPressable>
   );
 }
@@ -2335,13 +2331,30 @@ function AgentPickerSheet({
   );
 }
 
-function AttentionScreen({approvals, queuedTurns, timeline, execute}: {approvals: PendingApprovalV1[]; queuedTurns: QueuedTurnV1[]; timeline: NonNullable<ReturnType<typeof useMilimController>['timeline']>['items']; execute: ReturnType<typeof useMilimController>['execute']}) {
+function AttentionScreen({
+  approvals,
+  queuedTurns,
+  timeline,
+  execute,
+  onBack,
+}: {
+  approvals: PendingApprovalV1[];
+  queuedTurns: QueuedTurnV1[];
+  timeline: NonNullable<ReturnType<typeof useMilimController>['timeline']>['items'];
+  execute: ReturnType<typeof useMilimController>['execute'];
+  onBack: () => void;
+}) {
   const {styles} = useAppTheme();
   const proposals = timeline.filter(item => item.type.includes('worker') && JSON.stringify(item.data).includes('proposed'));
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.list}>
-      <Text style={styles.eyebrow}>REVIEW</Text>
-      <Text style={styles.screenTitle}>Attention</Text>
+      <View style={styles.pageHeadingRow}>
+        <IconButton icon="arrow-left" label="Back to chat" onPress={onBack} />
+        <View style={styles.pageHeadingCopy}>
+          <Text style={styles.eyebrow}>REVIEW</Text>
+          <Text style={styles.screenTitle}>Attention</Text>
+        </View>
+      </View>
       {!approvals.length && !queuedTurns.length && !proposals.length ? <Empty title="Nothing pending" copy="Review approvals, paused queued turns, and Worker proposals appear here when you foreground the app." /> : null}
       {approvals.map(approval => <ApprovalCard key={approval.id} approval={approval} execute={execute} />)}
       {queuedTurns.map(turn => (
@@ -2436,7 +2449,15 @@ function ApprovalCard({approval, execute, inline = false}: {approval: PendingApp
   );
 }
 
-function HostsScreen({controller, onPair}: {controller: ReturnType<typeof useMilimController>; onPair: () => void}) {
+function HostsScreen({
+  controller,
+  onPair,
+  onBack,
+}: {
+  controller: ReturnType<typeof useMilimController>;
+  onPair: () => void;
+  onBack: () => void;
+}) {
   const {palette, styles} = useAppTheme();
   const [manual, setManual] = useState('');
   const [manualOpen, setManualOpen] = useState(false);
@@ -2450,8 +2471,9 @@ function HostsScreen({controller, onPair}: {controller: ReturnType<typeof useMil
   return (
     <View style={styles.screen}>
       <ScrollView contentContainerStyle={styles.hostList}>
-        <View style={styles.hostsHeadingRow}>
-          <View style={styles.hostsHeadingCopy}>
+        <View style={styles.pageHeadingRow}>
+          <IconButton icon="arrow-left" label="Back to chat" onPress={onBack} />
+          <View style={styles.pageHeadingCopy}>
             <Text style={styles.eyebrow}>DIRECT CONNECTIONS</Text>
             <Text style={styles.screenTitle}>Desktop hosts</Text>
           </View>
@@ -2736,12 +2758,14 @@ function createStyles(theme: MobileTheme) {
   backgroundImageCover: {transform: [{scale: 1.06}]},
   backgroundDim: {backgroundColor: 'rgba(0,0,0,0.18)'},
   topbar: {height: 46, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: palette.sidebar, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: palette.border},
-  brandGroup: {flexDirection: 'row', alignItems: 'center', gap: 8},
+  brandGroup: {minHeight: 38, flexShrink: 1, flexDirection: 'row', alignItems: 'center', gap: 8, marginLeft: -5, paddingHorizontal: 5, borderRadius: 8},
   brandMark: {width: 23, height: 23, resizeMode: 'contain'},
   brand: {color: palette.text, fontSize: 13.5, lineHeight: 15, fontWeight: '700', letterSpacing: -0.35},
   hostLabel: {color: palette.muted, fontSize: 9, lineHeight: 11, maxWidth: 210},
   connection: {height: 25, flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 8, borderRadius: 8, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.panel},
   connectionOnline: {borderColor: palette.borderStrong},
+  connectionCount: {minWidth: 16, height: 16, marginRight: -4, paddingHorizontal: 4, borderRadius: 8, overflow: 'hidden', backgroundColor: palette.text, color: palette.accentInk, fontSize: 8.5, lineHeight: 16, fontWeight: '800', textAlign: 'center'},
+  topbarDestinationActive: {backgroundColor: palette.raised},
   dot: {width: 6, height: 6, borderRadius: 3, backgroundColor: palette.muted},
   dotOnline: {backgroundColor: palette.success},
   connectionText: {color: palette.secondary, fontSize: 9, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.7},
@@ -2751,13 +2775,6 @@ function createStyles(theme: MobileTheme) {
   errorText: {color: palette.danger, fontSize: 12, flex: 1},
   retry: {color: palette.text, fontSize: 11, fontWeight: '700'},
   content: {flex: 1},
-  tabs: {minHeight: 54, flexDirection: 'row', paddingHorizontal: 8, paddingTop: 3, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border, backgroundColor: palette.sidebar},
-  tab: {flex: 1, minHeight: 48, alignItems: 'center', justifyContent: 'center', gap: 2, borderRadius: 7, borderWidth: 1, borderColor: 'transparent'},
-  tabActive: {backgroundColor: 'transparent', borderColor: 'transparent'},
-  tabIcon: {position: 'relative'},
-  tabBadge: {position: 'absolute', top: -7, right: -12, minWidth: 17, height: 17, borderRadius: 9, paddingHorizontal: 4, overflow: 'hidden', backgroundColor: palette.text, color: palette.accentInk, fontSize: 9, lineHeight: 17, fontWeight: '800', textAlign: 'center'},
-  tabText: {color: palette.muted, fontSize: 11, fontWeight: '600'},
-  tabTextActive: {color: palette.text},
   screen: {flex: 1, paddingHorizontal: 12, paddingTop: 8},
   screenHeader: {height: 38, flexDirection: 'row', alignItems: 'baseline', gap: 8},
   screenSubtitle: {color: palette.muted, fontSize: 10.5},
@@ -2943,8 +2960,8 @@ function createStyles(theme: MobileTheme) {
   dialogBackdrop: {flex: 1, justifyContent: 'center', padding: 24, backgroundColor: 'rgba(0, 0, 0, 0.72)'},
   dialogCard: {gap: 14, padding: 18, borderRadius: cardRadius, borderWidth: 1, borderColor: palette.borderStrong, backgroundColor: palette.panel},
   hostList: {paddingBottom: 24, gap: 12},
-  hostsHeadingRow: {minHeight: 54, flexDirection: 'row', alignItems: 'center', gap: 12},
-  hostsHeadingCopy: {flex: 1, gap: 1},
+  pageHeadingRow: {minHeight: 54, flexDirection: 'row', alignItems: 'center', gap: 4},
+  pageHeadingCopy: {flex: 1, gap: 1},
   hostPairAction: {height: 34, flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 11, borderRadius: 8, borderWidth: 1, borderColor: palette.borderStrong, backgroundColor: palette.panel},
   hostPairActionText: {color: palette.secondary, fontSize: 11.5, fontWeight: '700'},
   hostPrimaryCard: {padding: 12, borderRadius: cardRadius, borderWidth: 1, borderColor: palette.focus, backgroundColor: palette.panel, gap: 11, shadowColor: '#000', shadowOpacity: 0.12, shadowRadius: 18, shadowOffset: {width: 0, height: 7}, elevation: 5},
