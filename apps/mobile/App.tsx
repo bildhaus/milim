@@ -62,11 +62,16 @@ import {
 } from './src/controller/useMilimController';
 import {discoverMilimHosts, type DiscoveredHost} from './src/discovery';
 import {
+  DEFAULT_MODEL_PICKER_PREFERENCES,
   modelPickerGroups,
   parseMobileModel,
   type MobileModelCapability,
   type MobileModelOption,
 } from './src/modelPicker';
+import {
+  readModelPickerPreferences,
+  saveModelPickerPreferences,
+} from './src/storage/cache';
 import {
   createMobileTheme,
   mobileBackgroundResizeMode,
@@ -86,6 +91,7 @@ import {
   type MobileThreadGroup,
 } from './src/mobileUi';
 import {MilimIcon, type MilimIconName} from './src/ui/MilimIcon';
+import {ProviderIcon} from './src/ui/ProviderIcon';
 
 type Tab = 'chat' | 'attention' | 'hosts';
 
@@ -215,6 +221,8 @@ function MotionPressable({
   disabled,
   hitSlop,
   accessibilityLabel,
+  accessibilityRole = 'button',
+  accessibilityState,
 }: {
   children: React.ReactNode;
   style?: StyleProp<ViewStyle>;
@@ -222,6 +230,8 @@ function MotionPressable({
   disabled?: boolean;
   hitSlop?: number;
   accessibilityLabel?: string;
+  accessibilityRole?: React.ComponentProps<typeof Pressable>['accessibilityRole'];
+  accessibilityState?: React.ComponentProps<typeof Pressable>['accessibilityState'];
 }) {
   const reduced = useReducedMotion();
   const scale = useRef(new Animated.Value(1)).current;
@@ -242,8 +252,9 @@ function MotionPressable({
       onPress={onPress}
       disabled={disabled}
       hitSlop={hitSlop}
-      accessibilityRole="button"
+      accessibilityRole={accessibilityRole}
       accessibilityLabel={accessibilityLabel}
+      accessibilityState={accessibilityState}
       onPressIn={() => animate(0.97, 100)}
       onPressOut={() => animate(1, 140)}>
       {children}
@@ -1471,6 +1482,7 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
         <View style={styles.composerContextRow}>
           <PickerChip
             icon="sparkles"
+            providerBrand={selectedModel?.brand ?? null}
             label={selectedModel?.label || thread.model || 'Choose model'}
             onPress={() => setModelPickerVisible(true)}
           />
@@ -1563,12 +1575,19 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
       </PickerSheetFrame>
       <ModelPickerSheet
         visible={modelPickerVisible}
+        hostId={controller.activeHost?.hostId ?? controller.bootstrap?.host_id ?? ''}
         models={modelsForPicker}
         selectedId={thread.model}
+        reasoningEffortOverrides={thread.reasoning_effort_overrides}
         onClose={() => setModelPickerVisible(false)}
-        onSelect={id => {
+        onSelect={(id, reasoningEffort) => {
           setModelPickerVisible(false);
-          void controller.command('thread.set_model', {model: id}, thread.id, thread.revision).catch(showError);
+          void controller.command(
+            'thread.set_model',
+            {model: id, ...(reasoningEffort ? {reasoning_effort: reasoningEffort} : {})},
+            thread.id,
+            thread.revision,
+          ).catch(showError);
         }}
       />
       <AgentPickerSheet
@@ -1863,11 +1882,25 @@ function TranscriptItemView({
   );
 }
 
-function PickerChip({label, icon, onPress, warning}: {label: string; icon: MilimIconName; onPress: () => void; warning?: boolean}) {
+function PickerChip({
+  label,
+  icon,
+  providerBrand,
+  onPress,
+  warning,
+}: {
+  label: string;
+  icon: MilimIconName;
+  providerBrand?: MobileModelOption['brand'];
+  onPress: () => void;
+  warning?: boolean;
+}) {
   const {palette, styles} = useAppTheme();
   return (
     <MotionPressable style={[styles.chip, warning && styles.warningChip]} hitSlop={8} onPress={onPress}>
-      <MilimIcon name={icon} size={12} color={warning ? palette.warning : palette.secondary} />
+      {providerBrand !== undefined
+        ? <ProviderIcon brand={providerBrand} size={12} color={warning ? palette.warning : palette.secondary} />
+        : <MilimIcon name={icon} size={12} color={warning ? palette.warning : palette.secondary} />}
       <Text style={styles.chipText} numberOfLines={1}>{label}</Text>
       <MilimIcon name="chevron-down" size={12} color={palette.muted} />
     </MotionPressable>
@@ -1933,42 +1966,116 @@ function PickerSheetFrame({
   );
 }
 
-const capabilityLabels: Record<MobileModelCapability, string> = {
-  vision: 'VISION',
-  tools: 'TOOLS',
-  reasoning: 'REASON',
-  fast: 'FAST',
-  image: 'IMAGE',
-  video: 'VIDEO',
-  music: 'MUSIC',
+const capabilityIcons: Record<MobileModelCapability, MilimIconName> = {
+  vision: 'eye',
+  tools: 'plug',
+  reasoning: 'sparkles',
+  fast: 'bolt',
+  image: 'image',
+  video: 'video',
+  music: 'volume',
+};
+
+const reasoningEffortLabels: Record<string, string> = {
+  auto: 'Auto',
+  none: 'Off',
+  minimal: 'Minimal',
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  on: 'On',
+  xhigh: 'X-high',
+  max: 'Max',
 };
 
 function ModelPickerSheet({
   visible,
+  hostId,
   models,
   selectedId,
+  reasoningEffortOverrides,
   onClose,
   onSelect,
 }: {
   visible: boolean;
+  hostId: string;
   models: JsonValue[];
   selectedId: string | null;
+  reasoningEffortOverrides?: Record<string, string>;
   onClose: () => void;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, reasoningEffort?: string) => void;
 }) {
   const {palette, styles} = useAppTheme();
   const [query, setQuery] = useState('');
-  const groups = useMemo(() => modelPickerGroups(models, query), [models, query]);
+  const [effortModelId, setEffortModelId] = useState<string | null>(null);
+  const [preferences, setPreferences] = useState(DEFAULT_MODEL_PICKER_PREFERENCES);
+  const groups = useMemo(
+    () => modelPickerGroups(models, query, preferences.favorites, preferences.favoritesOnly),
+    [models, preferences.favorites, preferences.favoritesOnly, query],
+  );
+  const collapsedGroups = useMemo(
+    () => new Set(preferences.collapsedGroups),
+    [preferences.collapsedGroups],
+  );
+  const filtering = Boolean(query.trim()) || preferences.favoritesOnly;
   const rows = useMemo(
-    () => groups.flatMap(group => [
-      {type: 'header' as const, key: `header:${group.title}`, title: group.title, count: group.models.length},
-      ...group.models.map(model => ({type: 'model' as const, key: `${model.provider}:${model.id}`, model})),
-    ]),
-    [groups],
+    () => groups.flatMap(group => {
+      const collapsible = group.title !== 'Favorites' && !filtering;
+      const collapsed = collapsible && collapsedGroups.has(group.title);
+      return [
+        {
+          type: 'header' as const,
+          key: `header:${group.title}`,
+          title: group.title,
+          count: group.models.length,
+          brand: group.models[0]?.brand ?? null,
+          collapsible,
+          collapsed,
+        },
+        ...(collapsed ? [] : group.models.flatMap(model => [
+          {type: 'model' as const, key: `${group.title}:${model.id}`, model},
+          ...(effortModelId === model.id
+            ? [{type: 'effort' as const, key: `${group.title}:${model.id}:effort`, model}]
+            : []),
+        ])),
+      ];
+    }),
+    [collapsedGroups, effortModelId, filtering, groups],
   );
   useEffect(() => {
-    if (!visible) setQuery('');
-  }, [visible]);
+    if (!visible) {
+      setQuery('');
+      setEffortModelId(null);
+      return;
+    }
+    setPreferences(DEFAULT_MODEL_PICKER_PREFERENCES);
+    if (!hostId) return;
+    let cancelled = false;
+    void readModelPickerPreferences(hostId)
+      .then(next => {
+        if (!cancelled) setPreferences(next);
+      })
+      .catch(showError);
+    return () => {
+      cancelled = true;
+    };
+  }, [hostId, visible]);
+  const updatePreferences = useCallback((next: typeof preferences) => {
+    setPreferences(next);
+    if (hostId) void saveModelPickerPreferences(hostId, next).catch(showError);
+  }, [hostId]);
+  const toggleFavorite = useCallback((favoriteModelId: string) => {
+    const favorites = preferences.favorites.includes(favoriteModelId)
+      ? preferences.favorites.filter(id => id !== favoriteModelId)
+      : [...preferences.favorites, favoriteModelId];
+    updatePreferences({...preferences, favorites});
+  }, [preferences, updatePreferences]);
+  const toggleGroup = useCallback((title: string) => {
+    const next = new Set(preferences.collapsedGroups);
+    if (next.has(title)) next.delete(title);
+    else next.add(title);
+    updatePreferences({...preferences, collapsedGroups: [...next]});
+  }, [preferences, updatePreferences]);
   return (
     <PickerSheetFrame
       visible={visible}
@@ -2002,46 +2109,151 @@ function ModelPickerSheet({
         windowSize={7}
         ListEmptyComponent={<Empty title="No matching models" copy="Try a model name, provider, or runtime." />}
         renderItem={({item}) => item.type === 'header' ? (
-          <View style={styles.pickerGroupHeader}>
+          <MotionPressable
+            style={styles.pickerGroupHeader}
+            disabled={!item.collapsible}
+            accessibilityRole={item.collapsible ? 'button' : undefined}
+            accessibilityState={item.collapsible ? {expanded: !item.collapsed} : undefined}
+            onPress={() => item.collapsible && toggleGroup(item.title)}>
+            {item.title === 'Favorites'
+              ? <MilimIcon name="star" filled size={13} color={palette.accent} />
+              : <ProviderIcon brand={item.brand} size={13} color={palette.secondary} />}
             <Text style={styles.pickerGroupTitle}>{item.title.toUpperCase()}</Text>
             <Text style={styles.pickerGroupCount}>{item.count}</Text>
-          </View>
+            {item.collapsible
+              ? <MilimIcon name={item.collapsed ? 'chevron-right' : 'chevron-down'} size={12} color={palette.muted} />
+              : null}
+          </MotionPressable>
+        ) : item.type === 'effort' ? (
+          <ReasoningEffortChoices
+            model={item.model}
+            selected={reasoningEffortOverrides?.[item.model.id] ?? 'auto'}
+            onSelect={effort => onSelect(item.model.id, effort)}
+          />
         ) : (
           <ModelPickerRow
             model={item.model}
             selected={item.model.id === selectedId}
+            favorite={preferences.favorites.includes(item.model.id)}
+            reasoningEffort={reasoningEffortOverrides?.[item.model.id] ?? 'auto'}
             onPress={() => onSelect(item.model.id)}
+            onFavorite={() => toggleFavorite(item.model.id)}
+            onToggleReasoning={item.model.reasoningEfforts.length
+              ? () => setEffortModelId(current => current === item.model.id ? null : item.model.id)
+              : undefined}
           />
         )}
       />
+      <MotionPressable
+        style={styles.pickerFavoritesOnly}
+        accessibilityRole="switch"
+        accessibilityState={{checked: preferences.favoritesOnly}}
+        onPress={() => updatePreferences({...preferences, favoritesOnly: !preferences.favoritesOnly})}>
+        <MilimIcon name="star" filled={preferences.favoritesOnly} size={14} color={preferences.favoritesOnly ? palette.accent : palette.muted} />
+        <Text style={styles.pickerFavoritesOnlyText}>Favorites only</Text>
+        <View style={[styles.pickerSwitch, preferences.favoritesOnly && styles.pickerSwitchOn]}>
+          <View style={[styles.pickerSwitchThumb, preferences.favoritesOnly && styles.pickerSwitchThumbOn]} />
+        </View>
+      </MotionPressable>
     </PickerSheetFrame>
   );
 }
 
-function ModelPickerRow({model, selected, onPress}: {model: MobileModelOption; selected: boolean; onPress: () => void}) {
+function ModelPickerRow({
+  model,
+  selected,
+  favorite,
+  reasoningEffort,
+  onPress,
+  onFavorite,
+  onToggleReasoning,
+}: {
+  model: MobileModelOption;
+  selected: boolean;
+  favorite: boolean;
+  reasoningEffort: string;
+  onPress: () => void;
+  onFavorite: () => void;
+  onToggleReasoning?: () => void;
+}) {
   const {palette, styles} = useAppTheme();
   return (
-    <MotionPressable style={[styles.pickerRow, selected && styles.pickerRowSelected]} onPress={onPress}>
-      <View style={[styles.pickerRowIcon, selected && styles.pickerRowIconSelected]}>
-        <MilimIcon name="sparkles" size={15} color={selected ? palette.accent : palette.secondary} />
-      </View>
-      <View style={styles.pickerRowBody}>
-        <View style={styles.pickerRowTopline}>
-          <Text style={styles.pickerRowTitle} numberOfLines={1}>{model.label}</Text>
-          {selected ? <MilimIcon name="check" size={15} color={palette.accent} /> : null}
+    <View style={[styles.pickerRow, selected && styles.pickerRowSelected]}>
+      <MotionPressable style={styles.pickerRowMain} onPress={onPress}>
+        <View style={styles.pickerRowIcon}>
+          <ProviderIcon brand={model.brand} size={17} color={selected ? palette.accent : palette.secondary} />
         </View>
-        <Text style={styles.pickerRowRoute} numberOfLines={1}>
-          {[model.route, model.detail].filter(Boolean).join(' · ')}
-        </Text>
-        {model.capabilities.length ? (
-          <View style={styles.capabilityRow}>
-            {model.capabilities.slice(0, 5).map(capability => (
-              <Text key={capability} style={styles.capabilityTag}>{capabilityLabels[capability]}</Text>
-            ))}
+        <View style={styles.pickerRowBody}>
+          <View style={styles.pickerRowTopline}>
+            <Text style={styles.pickerRowTitle} numberOfLines={1}>{model.label}</Text>
+            {selected ? <MilimIcon name="check" size={14} color={palette.accent} /> : null}
           </View>
-        ) : null}
-      </View>
-    </MotionPressable>
+          <View style={styles.pickerRowMeta}>
+            <Text style={styles.pickerRowRoute} numberOfLines={1}>
+              {[model.route, model.detail].filter(Boolean).join(' · ')}
+            </Text>
+            {model.capabilities.length ? (
+              <View style={styles.capabilityRow}>
+                {model.capabilities.slice(0, 5).map(capability => (
+                  <View key={capability} accessibilityLabel={capability}>
+                    <MilimIcon name={capabilityIcons[capability]} size={11} color={palette.muted} />
+                  </View>
+                ))}
+              </View>
+            ) : null}
+          </View>
+        </View>
+      </MotionPressable>
+      {onToggleReasoning ? (
+        <MotionPressable
+          style={styles.pickerRowEffort}
+          hitSlop={4}
+          accessibilityLabel={`Reasoning effort for ${model.label}: ${reasoningEffortLabels[reasoningEffort] ?? reasoningEffort}`}
+          onPress={onToggleReasoning}>
+          <MilimIcon name="sparkles" size={12} color={reasoningEffort === 'auto' ? palette.muted : palette.accent} />
+          {reasoningEffort !== 'auto'
+            ? <Text style={styles.pickerRowEffortText}>{reasoningEffortLabels[reasoningEffort] ?? reasoningEffort}</Text>
+            : null}
+        </MotionPressable>
+      ) : null}
+      <MotionPressable
+        style={styles.pickerRowFavorite}
+        hitSlop={4}
+        accessibilityLabel={favorite ? `Remove ${model.label} from favorites` : `Add ${model.label} to favorites`}
+        onPress={onFavorite}>
+        <MilimIcon name="star" filled={favorite} size={14} color={favorite ? palette.accent : palette.muted} />
+      </MotionPressable>
+    </View>
+  );
+}
+
+function ReasoningEffortChoices({
+  model,
+  selected,
+  onSelect,
+}: {
+  model: MobileModelOption;
+  selected: string;
+  onSelect: (effort: string) => void;
+}) {
+  const {styles} = useAppTheme();
+  const choices = ['auto', ...new Set(model.reasoningEfforts)];
+  return (
+    <View style={styles.reasoningEffortChoices}>
+      <Text style={styles.reasoningEffortLabel}>Reasoning</Text>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.reasoningEffortScroll}>
+        {choices.map(effort => (
+          <MotionPressable
+            key={effort}
+            style={[styles.reasoningEffortChoice, effort === selected && styles.reasoningEffortChoiceSelected]}
+            onPress={() => onSelect(effort)}>
+            <Text style={[styles.reasoningEffortChoiceText, effort === selected && styles.reasoningEffortChoiceTextSelected]}>
+              {reasoningEffortLabels[effort] ?? effort}
+            </Text>
+          </MotionPressable>
+        ))}
+      </ScrollView>
+    </View>
   );
 }
 
@@ -2620,21 +2832,39 @@ function createStyles(theme: MobileTheme) {
   pickerSearchInput: {flex: 1, color: palette.text, fontFamily, fontSize: 13, paddingVertical: 7},
   pickerSearchClear: {width: 28, height: 28, alignItems: 'center', justifyContent: 'center'},
   pickerListView: {flexGrow: 1},
-  pickerList: {flexGrow: 1, paddingBottom: 22, gap: 2},
-  pickerGroupHeader: {flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 5, paddingTop: 4, paddingBottom: 2},
-  pickerGroupTitle: {color: palette.muted, fontSize: 9, fontWeight: '800', letterSpacing: 1.2},
+  pickerList: {flexGrow: 1, paddingBottom: 8, gap: 2},
+  pickerGroupHeader: {minHeight: 34, flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: 8, paddingTop: 4, paddingBottom: 2},
+  pickerGroupTitle: {flex: 1, color: palette.muted, fontSize: 9, fontWeight: '800', letterSpacing: 1.2},
   pickerGroupCount: {color: palette.muted, fontSize: 10, fontWeight: '700'},
-  pickerRow: {minHeight: 56, flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 9, paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: 'transparent', backgroundColor: 'transparent'},
+  pickerRow: {minHeight: 52, flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: 5, paddingVertical: 3, borderRadius: 8, borderWidth: 1, borderColor: 'transparent', backgroundColor: 'transparent'},
   pickerRowSelected: {borderColor: palette.accentBorder, backgroundColor: palette.accentSoft},
-  pickerRowIcon: {width: 30, height: 30, flexShrink: 0, borderRadius: 7, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: palette.border, backgroundColor: palette.input},
+  pickerRowMain: {flex: 1, minWidth: 0, minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 4},
+  pickerRowIcon: {width: 24, height: 30, flexShrink: 0, alignItems: 'center', justifyContent: 'center'},
   pickerRowIconSelected: {borderColor: palette.accent},
-  pickerRowBody: {flex: 1, gap: 3},
+  pickerRowBody: {flex: 1, minWidth: 0, gap: 3},
   pickerRowTopline: {flexDirection: 'row', alignItems: 'center', gap: 8},
   pickerRowTitle: {flex: 1, color: palette.text, fontSize: 13, fontWeight: '600'},
-  pickerRowRoute: {color: palette.muted, fontSize: 9.5},
+  pickerRowMeta: {flexDirection: 'row', alignItems: 'center', gap: 6},
+  pickerRowRoute: {flex: 1, color: palette.muted, fontSize: 9.5},
   pickerRowDescription: {color: palette.secondary, fontSize: 10.5, lineHeight: 15},
-  capabilityRow: {flexDirection: 'row', alignItems: 'center', gap: 5, flexWrap: 'wrap', marginTop: 3},
+  capabilityRow: {flexDirection: 'row', alignItems: 'center', gap: 4},
   capabilityTag: {color: palette.secondary, fontSize: 8, fontWeight: '800', letterSpacing: 0.6, paddingHorizontal: 5, paddingVertical: 2, borderRadius: 4, overflow: 'hidden', backgroundColor: palette.input, borderWidth: StyleSheet.hairlineWidth, borderColor: palette.border},
+  pickerRowFavorite: {width: 38, height: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 7},
+  pickerRowEffort: {minWidth: 36, height: 44, paddingHorizontal: 6, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, borderRadius: 7},
+  pickerRowEffortText: {color: palette.accent, fontSize: 9, fontWeight: '700'},
+  reasoningEffortChoices: {marginLeft: 37, marginRight: 5, marginBottom: 3, paddingVertical: 6, gap: 5, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border},
+  reasoningEffortLabel: {color: palette.muted, fontSize: 8.5, fontWeight: '800', letterSpacing: 0.8, textTransform: 'uppercase'},
+  reasoningEffortScroll: {gap: 5, paddingRight: 8},
+  reasoningEffortChoice: {minHeight: 38, minWidth: 48, paddingHorizontal: 10, alignItems: 'center', justifyContent: 'center', borderRadius: 7, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.input},
+  reasoningEffortChoiceSelected: {borderColor: palette.accentBorder, backgroundColor: palette.accentSoft},
+  reasoningEffortChoiceText: {color: palette.secondary, fontSize: 10.5, fontWeight: '700'},
+  reasoningEffortChoiceTextSelected: {color: palette.accent},
+  pickerFavoritesOnly: {minHeight: 46, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border},
+  pickerFavoritesOnlyText: {flex: 1, color: palette.secondary, fontSize: 11, fontWeight: '600'},
+  pickerSwitch: {width: 34, height: 20, padding: 2, borderRadius: 10, justifyContent: 'center', backgroundColor: palette.raised, borderWidth: 1, borderColor: palette.borderStrong},
+  pickerSwitchOn: {backgroundColor: palette.accentSoft, borderColor: palette.accent},
+  pickerSwitchThumb: {width: 14, height: 14, borderRadius: 7, backgroundColor: palette.muted},
+  pickerSwitchThumbOn: {alignSelf: 'flex-end', backgroundColor: palette.accent},
   chatBody: {flex: 1, marginHorizontal: -12, position: 'relative'},
   transcriptMask: {flex: 1},
   messageList: {flex: 1},

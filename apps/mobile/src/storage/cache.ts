@@ -1,5 +1,9 @@
 import {open} from '@op-engineering/op-sqlite';
 import type {SavedHost, TimelinePageV1} from '../control/types';
+import {
+  normalizeModelPickerPreferences,
+  type MobileModelPickerPreferences,
+} from '../modelPicker';
 
 const db = open({name: 'milim-mobile.sqlite'});
 let ready: Promise<void> | null = null;
@@ -43,6 +47,13 @@ function initialize(): Promise<void> {
             created_at INTEGER NOT NULL
           )`,
         ],
+        [
+          `CREATE TABLE IF NOT EXISTS model_picker_preferences (
+            host_id TEXT PRIMARY KEY,
+            preferences_json TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+          )`,
+        ],
         ]),
       )
       .then(() => undefined);
@@ -71,6 +82,7 @@ export async function removeHost(hostId: string): Promise<void> {
   await db.executeBatch([
     ['DELETE FROM timeline_tails WHERE host_id = ?', [hostId]],
     ['DELETE FROM drafts WHERE host_id = ?', [hostId]],
+    ['DELETE FROM model_picker_preferences WHERE host_id = ?', [hostId]],
     ['DELETE FROM hosts WHERE host_id = ?', [hostId]],
   ]);
 }
@@ -143,4 +155,35 @@ export async function staleTemporaryFiles(maxAgeMs = 24 * 60 * 60 * 1000): Promi
     [Date.now() - maxAgeMs],
   );
   return result.rows.map(row => String(row.uri));
+}
+
+export async function readModelPickerPreferences(
+  hostId: string,
+): Promise<MobileModelPickerPreferences> {
+  await initialize();
+  const result = await db.execute(
+    'SELECT preferences_json FROM model_picker_preferences WHERE host_id = ?',
+    [hostId],
+  );
+  const raw = result.rows[0]?.preferences_json;
+  if (!raw) return normalizeModelPickerPreferences(null);
+  try {
+    return normalizeModelPickerPreferences(JSON.parse(String(raw)));
+  } catch {
+    return normalizeModelPickerPreferences(null);
+  }
+}
+
+export async function saveModelPickerPreferences(
+  hostId: string,
+  preferences: MobileModelPickerPreferences,
+): Promise<void> {
+  await initialize();
+  const normalized = normalizeModelPickerPreferences(preferences);
+  await db.execute(
+    `INSERT INTO model_picker_preferences(host_id, preferences_json, updated_at) VALUES(?, ?, ?)
+     ON CONFLICT(host_id) DO UPDATE SET preferences_json = excluded.preferences_json,
+       updated_at = excluded.updated_at`,
+    [hostId, JSON.stringify(normalized), Date.now()],
+  );
 }

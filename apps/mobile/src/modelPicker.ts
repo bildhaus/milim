@@ -1,4 +1,5 @@
 import type {JsonValue} from './control/types';
+import {providerBrandForModel, type ProviderBrand} from './providerBrand';
 
 export type MobileModelCapability =
   | 'vision'
@@ -18,6 +19,34 @@ export interface MobileModelOption {
   detail: string | null;
   capabilities: MobileModelCapability[];
   reasoningEfforts: string[];
+  brand: ProviderBrand | null;
+}
+
+export interface MobileModelPickerPreferences {
+  favorites: string[];
+  favoritesOnly: boolean;
+  collapsedGroups: string[];
+}
+
+export const DEFAULT_MODEL_PICKER_PREFERENCES: MobileModelPickerPreferences = {
+  favorites: [],
+  favoritesOnly: false,
+  collapsedGroups: [],
+};
+
+export function normalizeModelPickerPreferences(value: unknown): MobileModelPickerPreferences {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {...DEFAULT_MODEL_PICKER_PREFERENCES};
+  }
+  const candidate = value as Partial<MobileModelPickerPreferences>;
+  const strings = (items: unknown) => Array.isArray(items)
+    ? [...new Set(items.filter((item): item is string => typeof item === 'string' && Boolean(item.trim())))]
+    : [];
+  return {
+    favorites: strings(candidate.favorites),
+    favoritesOnly: candidate.favoritesOnly === true,
+    collapsedGroups: strings(candidate.collapsedGroups),
+  };
 }
 
 function record(value: JsonValue | undefined): Record<string, JsonValue> | null {
@@ -70,6 +99,7 @@ export function parseMobileModel(value: JsonValue): MobileModelOption | null {
       detail: null,
       capabilities: [],
       reasoningEfforts: [],
+      brand: providerBrandForModel({id: value}),
     };
   }
   const model = record(value);
@@ -109,8 +139,10 @@ export function parseMobileModel(value: JsonValue): MobileModelOption | null {
     provider = runtime;
     route = nested ? `${runtime} · ${titleCase(nested)}` : runtime;
     label = routed.slice(routed.indexOf('/') + 1) || routed;
-  } else if (!owner && ownerLower !== 'milim') {
-    provider = route = 'Local models';
+  } else if (!owner || ownerLower === 'milim') {
+    const namespace = id.includes('/') ? id.split('/')[0] : '';
+    provider = 'Local models';
+    route = namespace ? `Local models · ${titleCase(namespace)}` : provider;
   }
   const context = Number(model?.context_length ?? model?.max_prompt_tokens ?? 0);
   const detail = Number.isFinite(context) && context > 0 ? `${compactTokens(context)} context` : null;
@@ -126,27 +158,42 @@ export function parseMobileModel(value: JsonValue): MobileModelOption | null {
     detail,
     capabilities: [...new Set(output)],
     reasoningEfforts: efforts,
+    brand: providerBrandForModel({
+      id,
+      owner: ownerLower === 'milim' ? id.split('/')[0] : owner,
+      provider,
+    }),
   };
 }
 
 export function modelPickerGroups(
   values: JsonValue[],
   query: string,
+  favorites: string[] = [],
+  favoritesOnly = false,
 ): Array<{title: string; models: MobileModelOption[]}> {
   const normalized = query.trim().toLowerCase();
+  const favoriteIds = new Set(favorites);
   const groups = new Map<string, MobileModelOption[]>();
+  const favoriteModels: MobileModelOption[] = [];
   for (const value of values) {
     const model = parseMobileModel(value);
     if (!model) continue;
+    const favorite = favoriteIds.has(model.id);
+    if (favoritesOnly && !favorite) continue;
     if (
       normalized &&
       ![model.label, model.id, model.provider, model.route, model.owner].some(part =>
         part.toLowerCase().includes(normalized),
       )
     ) continue;
-    groups.set(model.provider, [...(groups.get(model.provider) ?? []), model]);
+    if (favorite) favoriteModels.push(model);
+    else groups.set(model.provider, [...(groups.get(model.provider) ?? []), model]);
   }
-  return Array.from(groups, ([title, models], index) => ({title, models, index}))
+  const providerGroups = Array.from(groups, ([title, models], index) => ({title, models, index}))
     .sort((left, right) => left.models.length - right.models.length || left.index - right.index)
     .map(({title, models}) => ({title, models}));
+  return favoriteModels.length
+    ? [{title: 'Favorites', models: favoriteModels}, ...providerGroups]
+    : providerGroups;
 }

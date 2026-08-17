@@ -1,6 +1,7 @@
 const mockCalls: string[] = [];
 const drafts = new Map<string, string>();
 const timelines = new Map<string, string>();
+const modelPickerPreferences = new Map<string, string>();
 const key = (values: unknown[] = []) => `${values[0]}\u0000${values[1]}`;
 const mockExecute = jest.fn(async (sql: string, values: unknown[] = []) => {
   mockCalls.push(`execute:${sql}`);
@@ -15,6 +16,13 @@ const mockExecute = jest.fn(async (sql: string, values: unknown[] = []) => {
     const page_json = timelines.get(key(values));
     return {rows: page_json === undefined ? [] : [{page_json}]};
   }
+  if (sql.startsWith('INSERT INTO model_picker_preferences')) {
+    modelPickerPreferences.set(String(values[0]), String(values[1]));
+  }
+  if (sql.startsWith('SELECT preferences_json FROM model_picker_preferences')) {
+    const preferences_json = modelPickerPreferences.get(String(values[0]));
+    return {rows: preferences_json === undefined ? [] : [{preferences_json}]};
+  }
   return {rows: []};
 });
 const mockExecuteBatch = jest.fn(async () => {
@@ -25,7 +33,7 @@ jest.mock('@op-engineering/op-sqlite', () => ({
   open: () => ({execute: mockExecute, executeBatch: mockExecuteBatch}),
 }));
 
-const {listHosts, readDraft, readTimelineTail, saveDraft, saveTimelineTail} = require('../src/storage/cache') as typeof import('../src/storage/cache');
+const {listHosts, readDraft, readModelPickerPreferences, readTimelineTail, saveDraft, saveModelPickerPreferences, saveTimelineTail} = require('../src/storage/cache') as typeof import('../src/storage/cache');
 
 test('enables WAL before the schema batch opens its transaction', async () => {
   await listHosts();
@@ -33,6 +41,25 @@ test('enables WAL before the schema batch opens its transaction', async () => {
   expect(mockCalls[0]).toBe('execute:PRAGMA journal_mode = WAL');
   expect(mockCalls[1]).toBe('batch');
   expect(mockCalls[2]).toContain('SELECT metadata_json FROM hosts');
+});
+
+test('persists model picker preferences per host', async () => {
+  await saveModelPickerPreferences('host-a', {
+    favorites: ['codex:gpt-5'],
+    favoritesOnly: true,
+    collapsedGroups: ['OpenRouter'],
+  });
+
+  expect(await readModelPickerPreferences('host-a')).toEqual({
+    favorites: ['codex:gpt-5'],
+    favoritesOnly: true,
+    collapsedGroups: ['OpenRouter'],
+  });
+  expect(await readModelPickerPreferences('host-b')).toEqual({
+    favorites: [],
+    favoritesOnly: false,
+    collapsedGroups: [],
+  });
 });
 
 test('partitions drafts and timeline tails by host id', async () => {
