@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { createElement, type ComponentType } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
@@ -23,7 +24,7 @@ const server = await createServer({
 try {
   const { AssistantMessage } = (await server.ssrLoadModule(
     "/src/components/AssistantMessage.tsx",
-  )) as { AssistantMessage: ComponentType<{ content: string; streamParts: ChatStreamPart[]; runDetailsRunId?: string }> };
+  )) as { AssistantMessage: ComponentType<{ content: string; streamParts: ChatStreamPart[]; streaming?: boolean; runDetailsRunId?: string }> };
   const { ToolApprovalPrompt } = (await server.ssrLoadModule(
     "/src/components/ToolApprovalPrompt.tsx",
   )) as { ToolApprovalPrompt: ComponentType<{ part: Extract<ChatStreamPart, { kind: "event" }> }> };
@@ -110,6 +111,22 @@ try {
   assert(
     runtimeImportGroupSelection(importGroups[0], projectSelection, new Set()) === "some",
     "project selection should expose a mixed state for partial selections",
+  );
+
+  const softWrappedCodexText = "Rain\ngathers\non\na\ncity\nwindow.";
+  const streamingFallback = renderToStaticMarkup(createElement(AssistantMessage, {
+    content: softWrappedCodexText,
+    streamParts: [{ kind: "text", content: softWrappedCodexText }],
+    streaming: true,
+  }));
+  assert(
+    streamingFallback.includes("md-streaming-answer-fallback"),
+    "streaming answers should use the soft-newline fallback",
+  );
+  const chatCss = readFileSync("src/chat.css", "utf8");
+  assert(
+    /\.md-streaming-answer-fallback\s*\{[^}]*white-space:\s*normal;[^}]*overflow-wrap:\s*break-word;/s.test(chatCss),
+    "the streaming answer fallback should collapse Codex token newlines without affecting reasoning text",
   );
 
   const approvalPart = (

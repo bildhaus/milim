@@ -1,4 +1,9 @@
 {
+  "0.2.40": {
+    "version": "0.2.40",
+    "summary": "Milim 0.2.40 adds local vLLM discovery, shared mobile agent avatars and edge-swipe thread navigation, fixes fragmented Codex response streaming, and refreshes the project README.",
+    "items": []
+  },
   "0.2.39": {
     "version": "0.2.39",
     "summary": "Milim 0.2.39 lets macOS provider connections trust certificates from the system Keychain while keeping bundled roots as a fallback.",

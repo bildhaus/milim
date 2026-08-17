@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::convert::Infallible;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path as FsPath, PathBuf};
 use std::process::{Command, Output};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -65,6 +65,7 @@ use milim_inference::remote::RemoteBackend;
 use milim_inference::{
     CompletionRequest, EventStream, ModelService, SamplingParams, StreamEvent, ToolCallAccumulator,
 };
+use milim_sandbox::{DockerBackend, DockerPublishedPort};
 use milim_tools::{Tool, ToolEffect, ToolRegistry};
 
 mod account_runtimes;
@@ -167,9 +168,9 @@ pub(crate) struct ProviderUpsert {
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ProviderDiscovery {
-    name: &'static str,
+    name: String,
     kind: crate::providers::ProviderKind,
-    base_url: &'static str,
+    base_url: String,
     configured: bool,
     provider_id: Option<String>,
     reachable: bool,
@@ -177,11 +178,90 @@ pub(crate) struct ProviderDiscovery {
     error: Option<String>,
 }
 
-const LOCAL_PROVIDER_CANDIDATES: &[(&str, &str)] = &[
-    ("Ollama (local)", "http://localhost:11434/v1"),
-    ("LM Studio (local)", "http://localhost:1234/v1"),
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalProviderCandidate {
+    name: String,
+    base_url: String,
+    require_vllm_owner: bool,
+}
+
+const LOCAL_PROVIDER_CANDIDATES: &[(&str, &str, bool)] = &[
+    ("Ollama (local)", "http://localhost:11434/v1", false),
+    ("LM Studio (local)", "http://localhost:1234/v1", false),
+    ("vLLM (local)", "http://localhost:8000/v1", true),
 ];
 const LOCAL_PROVIDER_PROBE_TIMEOUT: Duration = Duration::from_millis(900);
+
+fn local_provider_candidates(
+    docker_ports: impl IntoIterator<Item = DockerPublishedPort>,
+) -> Vec<LocalProviderCandidate> {
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+
+    for (name, base_url, require_vllm_owner) in LOCAL_PROVIDER_CANDIDATES {
+        seen.insert(normalize_provider_endpoint(base_url));
+        candidates.push(LocalProviderCandidate {
+            name: (*name).to_string(),
+            base_url: (*base_url).to_string(),
+            require_vllm_owner: *require_vllm_owner,
+        });
+    }
+
+    for port in docker_ports {
+        if !is_vllm_container(&port) {
+            continue;
+        }
+        let base_url = docker_published_base_url(&port.host_ip, port.host_port);
+        if seen.insert(normalize_provider_endpoint(&base_url)) {
+            candidates.push(LocalProviderCandidate {
+                name: format!("vLLM (Docker: {})", port.name),
+                base_url,
+                require_vllm_owner: true,
+            });
+        }
+    }
+
+    candidates
+}
+
+fn is_vllm_container(port: &DockerPublishedPort) -> bool {
+    port.image.to_ascii_lowercase().contains("vllm")
+        || port.name.to_ascii_lowercase().contains("vllm")
+}
+
+fn docker_published_base_url(host_ip: &str, host_port: u16) -> String {
+    let host = match host_ip.parse::<IpAddr>() {
+        Ok(ip) if ip.is_loopback() || ip.is_unspecified() => "localhost".to_string(),
+        Ok(IpAddr::V6(ip)) => format!("[{ip}]"),
+        _ => host_ip.to_string(),
+    };
+    format!("http://{host}:{host_port}/v1")
+}
+
+fn normalize_provider_endpoint(base_url: &str) -> String {
+    let Ok(url) = reqwest::Url::parse(base_url) else {
+        return base_url.trim_end_matches('/').to_ascii_lowercase();
+    };
+    let raw_host = url
+        .host_str()
+        .unwrap_or_default()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    let host = match raw_host.parse::<IpAddr>().ok() {
+        Some(ip) if ip.is_loopback() || ip.is_unspecified() => "loopback".to_string(),
+        _ if raw_host.eq_ignore_ascii_case("localhost") => "loopback".to_string(),
+        _ => raw_host.to_ascii_lowercase(),
+    };
+    let port = url.port_or_known_default().unwrap_or_default();
+    let path = url.path().trim_end_matches('/');
+    format!("{}://{host}:{port}{path}", url.scheme())
+}
+
+fn vllm_owner_verified(models: &[Model]) -> bool {
+    models
+        .iter()
+        .any(|model| model.owned_by.eq_ignore_ascii_case("vllm"))
+}
 
 /// `GET /providers` — list configured providers (keys redacted to `has_key`).
 pub(crate) async fn providers_list(
@@ -221,19 +301,33 @@ pub(crate) async fn providers_discover(
         Some(reg) => reg.list().await,
         None => Vec::new(),
     };
-    let out = join_all(LOCAL_PROVIDER_CANDIDATES.iter().map(|(name, base_url)| {
+    let docker_ports = DockerBackend::new()
+        .published_ports()
+        .await
+        .unwrap_or_default();
+    let candidates = local_provider_candidates(docker_ports);
+    let out = join_all(candidates.into_iter().map(|candidate| {
         let existing = configured.iter().find(|p| {
             p.kind == crate::providers::ProviderKind::OpenAiCompatible
-                && p.base_url.trim_end_matches('/') == base_url.trim_end_matches('/')
+                && normalize_provider_endpoint(&p.base_url)
+                    == normalize_provider_endpoint(&candidate.base_url)
         });
         let configured = existing.is_some();
         let provider_id = existing.map(|p| p.id.clone());
         async move {
-            let backend = RemoteBackend::new(*name, *base_url, None);
+            let backend = RemoteBackend::new(&candidate.name, &candidate.base_url, None);
             let (models, error) =
                 match tokio::time::timeout(LOCAL_PROVIDER_PROBE_TIMEOUT, backend.list_models())
                     .await
                 {
+                    Ok(Ok(models))
+                        if candidate.require_vllm_owner && !vllm_owner_verified(&models) =>
+                    {
+                        (
+                            Vec::new(),
+                            Some("endpoint did not identify as vLLM".to_string()),
+                        )
+                    }
                     Ok(Ok(models)) => (models.into_iter().map(|m| m.id).collect(), None),
                     Ok(Err(err)) => (Vec::new(), Some(err.to_string())),
                     Err(_) => (
@@ -242,9 +336,9 @@ pub(crate) async fn providers_discover(
                     ),
                 };
             ProviderDiscovery {
-                name,
+                name: candidate.name,
                 kind: crate::providers::ProviderKind::OpenAiCompatible,
-                base_url,
+                base_url: candidate.base_url,
                 configured,
                 provider_id,
                 reachable: error.is_none(),
@@ -256,6 +350,82 @@ pub(crate) async fn providers_discover(
     .await;
 
     Ok(Json(json!({ "providers": out })).into_response())
+}
+
+#[cfg(test)]
+mod provider_discovery_tests {
+    use super::{
+        local_provider_candidates, normalize_provider_endpoint, vllm_owner_verified, Model,
+    };
+    use milim_sandbox::DockerPublishedPort;
+
+    fn published_port(
+        image: &str,
+        name: &str,
+        host_ip: &str,
+        host_port: u16,
+    ) -> DockerPublishedPort {
+        DockerPublishedPort {
+            image: image.to_string(),
+            name: name.to_string(),
+            host_ip: host_ip.to_string(),
+            host_port,
+        }
+    }
+
+    #[test]
+    fn docker_vllm_candidates_are_deduplicated_and_keep_nonstandard_ports() {
+        let candidates = local_provider_candidates([
+            published_port("vllm/vllm-openai", "main", "127.0.0.1", 8000),
+            published_port("vllm/vllm-openai", "main", "::", 8000),
+            published_port("custom/image", "vllm-one", "0.0.0.0", 18000),
+            published_port("vllm/vllm-openai", "vllm-two", "::1", 19000),
+            published_port("unrelated/image", "other", "127.0.0.1", 20000),
+        ]);
+
+        assert_eq!(candidates.len(), 5);
+        assert_eq!(candidates[2].name, "vLLM (local)");
+        assert_eq!(candidates[2].base_url, "http://localhost:8000/v1");
+        assert_eq!(candidates[3].name, "vLLM (Docker: vllm-one)");
+        assert_eq!(candidates[3].base_url, "http://localhost:18000/v1");
+        assert_eq!(candidates[4].name, "vLLM (Docker: vllm-two)");
+        assert_eq!(candidates[4].base_url, "http://localhost:19000/v1");
+    }
+
+    #[test]
+    fn loopback_and_wildcard_endpoints_normalize_for_deduplication() {
+        let expected = normalize_provider_endpoint("http://localhost:8000/v1/");
+        assert_eq!(
+            normalize_provider_endpoint("http://127.0.0.1:8000/v1"),
+            expected
+        );
+        assert_eq!(
+            normalize_provider_endpoint("http://[::1]:8000/v1"),
+            expected
+        );
+        assert_eq!(
+            normalize_provider_endpoint("http://0.0.0.0:8000/v1"),
+            expected
+        );
+        assert_eq!(normalize_provider_endpoint("http://[::]:8000/v1"), expected);
+    }
+
+    #[test]
+    fn vllm_discovery_requires_the_owner_marker() {
+        let vllm: Model = serde_json::from_value(serde_json::json!({
+            "id": "model",
+            "owned_by": "vllm"
+        }))
+        .unwrap();
+        let unrelated: Model = serde_json::from_value(serde_json::json!({
+            "id": "model",
+            "owned_by": "someone-else"
+        }))
+        .unwrap();
+
+        assert!(vllm_owner_verified(&[vllm]));
+        assert!(!vllm_owner_verified(&[unrelated]));
+    }
 }
 
 /// `POST /providers` — create (no id) or update (with id) a provider.

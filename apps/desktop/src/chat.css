@@ -5613,6 +5613,7 @@ g.native-chart-mark:focus-visible .native-chart-point {
 .md table { border-collapse: collapse; margin: 0 0 10px; font-size: 13px; display: block; overflow-x: auto; }
 .md th, .md td { border: 1px solid var(--border-primary); padding: 5px 9px; text-align: left; }
 .md th { background: transparent; }
+.md-streaming-answer-fallback { width: 100%; min-width: 0; white-space: normal; overflow-wrap: break-word; }
 .md-streaming-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .md :not(pre) > code {
   font-family: var(--mono);

@@ -84,9 +84,21 @@ export function groupCompletedStreamActivity(parts: ChatStreamPart[], streaming:
   const next: ChatStreamDisplayPart[] = [];
   let group: ChatStreamPart[] = [];
 
+  const push = (part: ChatStreamDisplayPart) => {
+    const last = next[next.length - 1];
+    if (part.kind === "text" && last?.kind === "text") {
+      next[next.length - 1] = {
+        ...last,
+        content: last.content + part.content,
+      };
+      return;
+    }
+    next.push(part);
+  };
+
   const flush = () => {
-    if (group.length === 1) next.push(group[0]);
-    else if (group.length > 1) next.push({ kind: "workGroup", parts: group });
+    if (group.length === 1) push(group[0]);
+    else if (group.length > 1) push({ kind: "workGroup", parts: group });
     group = [];
   };
 
@@ -95,7 +107,7 @@ export function groupCompletedStreamActivity(parts: ChatStreamPart[], streaming:
       group.push(part);
     } else {
       flush();
-      next.push(part);
+      push(part);
     }
   }
   flush();

@@ -1121,7 +1121,7 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                 type="button"
                 onClick={detectLocal}
                 disabled={detecting}
-                title="Find Ollama or LM Studio on this machine."
+                title="Find Ollama, LM Studio, or vLLM on this machine."
                 aria-label={
                   detecting
                     ? "Detecting local providers"
@@ -1132,7 +1132,7 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                 <strong>
                   {detecting ? "Detecting local" : "Detect local"}
                 </strong>
-                <span>Find Ollama or LM Studio.</span>
+                <span>Find Ollama, LM Studio, or vLLM.</span>
               </button>
               {([
                 ["OpenAI", "openai"],

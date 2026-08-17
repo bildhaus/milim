@@ -3613,6 +3613,11 @@ async function runProviderSetup(page) {
   await page.getByTestId("detect-local-providers").click();
   await page.getByText("Ollama (local)").waitFor({ timeout: 20_000 });
   await page.getByText("LM Studio (local)").waitFor({ timeout: 20_000 });
+  await page.getByText("vLLM (local)").waitFor({ timeout: 20_000 });
+  await page
+    .locator(".provider-discovery-row", { hasText: "vLLM (local)" })
+    .locator('[data-provider-brand="vllm"]')
+    .waitFor();
   await page.getByTestId("new-provider").click();
   await page.getByTestId("provider-name-input").fill("E2E Local Provider");
   await page.getByTestId("provider-kind-select").click();

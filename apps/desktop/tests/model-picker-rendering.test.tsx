@@ -286,6 +286,14 @@ try {
   };
   assert(providerBrandForProvider(providers[0]) === "openai", "Known provider endpoints should resolve their brand");
   assert(
+    providerBrandForProvider({ name: "vLLM (local)", base_url: "http://localhost:8000/v1" }) === "vllm",
+    "The standard vLLM discovery candidate should resolve its brand",
+  );
+  assert(
+    providerBrandForProvider({ name: "vLLM (Docker: qwen38-vllm)", base_url: "http://localhost:18000/v1" }) === "vllm",
+    "Docker vLLM discovery candidates should resolve their brand on arbitrary published ports",
+  );
+  assert(
     providerBrandForModel({ id: "pi:github-copilot/claude", owned_by: "Local Pi CLI" }) === "pi",
     "Account-runtime prefixes should win over the underlying model provider",
   );

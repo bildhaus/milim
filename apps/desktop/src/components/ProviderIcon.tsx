@@ -12,6 +12,7 @@ export type ProviderBrand =
   | "fal"
   | "ollama"
   | "lmstudio"
+  | "vllm"
   | "codex"
   | "opencode"
   | "pi";
@@ -26,6 +27,7 @@ const ICONS: Record<ProviderBrand, string> = {
   fal: new URL("../assets/providers/fal.svg", import.meta.url).href,
   ollama: new URL("../assets/providers/ollama.svg", import.meta.url).href,
   lmstudio: new URL("../assets/providers/lmstudio.svg", import.meta.url).href,
+  vllm: new URL("../assets/providers/vllm.svg", import.meta.url).href,
   codex: new URL("../assets/providers/codex.svg", import.meta.url).href,
   opencode: new URL("../assets/providers/opencode.svg", import.meta.url).href,
   pi: new URL("../assets/providers/pi.svg", import.meta.url).href,
@@ -48,6 +50,8 @@ const NAMES: Record<string, ProviderBrand> = {
   ollamalocal: "ollama",
   lmstudio: "lmstudio",
   lmstudiolocal: "lmstudio",
+  vllm: "vllm",
+  vllmlocal: "vllm",
   codex: "codex",
   opencode: "opencode",
   localopencodecli: "opencode",
@@ -60,6 +64,7 @@ export function providerBrandForProvider(
 ): ProviderBrand | null {
   if (!provider) return null;
   const url = provider.base_url.toLowerCase();
+  const name = provider.name.toLowerCase().replace(/[^a-z0-9]+/g, "");
   if (url.includes("api.openai.com")) return "openai";
   if (url.includes("openrouter.ai")) return "openrouter";
   if (url.includes("groq.com")) return "groq";
@@ -69,7 +74,8 @@ export function providerBrandForProvider(
   if (url.includes("fal.run") || url.includes("fal.ai")) return "fal";
   if (/localhost|127\.0\.0\.1/.test(url) && url.includes(":11434")) return "ollama";
   if (/localhost|127\.0\.0\.1/.test(url) && url.includes(":1234")) return "lmstudio";
-  return NAMES[provider.name.toLowerCase().replace(/[^a-z0-9]+/g, "")] ?? null;
+  if (name.startsWith("vllm")) return "vllm";
+  return NAMES[name] ?? null;
 }
 
 export function providerBrandForModel(

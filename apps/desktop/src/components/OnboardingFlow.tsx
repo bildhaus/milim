@@ -259,11 +259,12 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
     onboarding.setSetupPath("local_detect");
     try {
       const found = await discoverLocalProviders();
+      const reachableCount = found.filter((discovery) => discovery.reachable).length;
       setDiscoveries(found);
       setProviderNotice(
-        found.length
-          ? { tone: "success", message: `${found.length} local endpoint${found.length === 1 ? "" : "s"} found.` }
-          : { tone: "info", message: "No Ollama or LM Studio endpoint answered. Start one and try again." },
+        reachableCount
+          ? { tone: "success", message: `${reachableCount} local endpoint${reachableCount === 1 ? "" : "s"} found.` }
+          : { tone: "info", message: "No Ollama, LM Studio, or vLLM endpoint answered. Start one and try again." },
       );
     } catch (error) {
       setProviderNotice({ tone: "error", message: error instanceof Error ? error.message : "Local detection failed." });
@@ -534,7 +535,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
                   <div className="onboarding-path-list" aria-label="Model setup paths">
                     <button className={"onboarding-path-option" + (activeSetupPath === "local_detect" ? " active" : "")} type="button" aria-pressed={activeSetupPath === "local_detect"} onClick={() => chooseSetupPath("local_detect")}>
                       <span className="onboarding-path-icon"><Search size={14} /></span>
-                      <span><strong>Detect local</strong><small>Ollama or LM Studio</small></span>
+                      <span><strong>Detect local</strong><small>Ollama, LM Studio, or vLLM</small></span>
                     </button>
                     <button className={"onboarding-path-option" + (activeSetupPath === "hosted" ? " active" : "")} type="button" aria-pressed={activeSetupPath === "hosted"} onClick={() => chooseSetupPath("hosted")}>
                       <span className="onboarding-path-icon"><PlusSquare size={14} /></span>
@@ -553,7 +554,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
                         <span className="onboarding-path-icon"><Search size={15} /></span>
                         <div>
                           <h4>Detect a local runtime</h4>
-                          <p>Use this if Ollama or LM Studio is already running on this machine.</p>
+                          <p>Use this if Ollama, LM Studio, or vLLM is already running on this machine.</p>
                         </div>
                       </div>
                       <button className="btn-accent" type="button" onClick={() => void detectLocal()} disabled={discovering}>
@@ -568,14 +569,14 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
                                 <strong>{discovery.name}</strong>
                                 <small>{discovery.models.length ? `${discovery.models.length} models at ${discovery.base_url}` : discovery.error ?? discovery.base_url}</small>
                               </span>
-                              <button className="btn-ghost" type="button" onClick={() => void addDiscovery(discovery)} disabled={discovery.configured}>
-                                {discovery.configured ? "Added" : "Add"}
+                              <button className="btn-ghost" type="button" onClick={() => void addDiscovery(discovery)} disabled={discovery.configured || !discovery.reachable}>
+                                {discovery.configured ? "Added" : discovery.reachable ? "Add" : "Unavailable"}
                               </button>
                             </div>
                           ))}
                         </div>
                       ) : (
-                        <p className="onboarding-path-note">Start Ollama or LM Studio, then run detection. No API key is needed for local endpoints.</p>
+                        <p className="onboarding-path-note">Start Ollama, LM Studio, or vLLM, then run detection. No API key is needed for local endpoints.</p>
                       )}
                     </>
                   )}

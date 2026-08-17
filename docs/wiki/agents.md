@@ -6,7 +6,7 @@ title: Agents, tools, skills, and schedules
 summary: Reusable Agent profiles, Worker Runs, tool modes, skills, schedules, and approval policies.
 group: Core
 order: 50
-updated: 2026-08-15
+updated: 2026-08-17
 ---
 
 Agents are for repeatable behavior, tool access, and longer work. Keep one-off questions in plain chat; save an agent when the same instructions or tool policy should survive across threads.
@@ -15,7 +15,7 @@ Agents are for repeatable behavior, tool access, and longer work. Keep one-off q
 
 | Block | Behavior |
 |---|---|
-| Named Agents | Model-agnostic profiles with name, description, deterministic avatar seed, system prompt, tool mode, and skill mode. **Start chat** creates a normal thread bound to the Agent while model choice remains thread-owned. The generated avatar follows the Agent through persona, schedule, and assigned Worker surfaces; unassigned Workers receive deterministic run-local identities. An Agent is a saved role; a Worker is one live instance of that role. |
+| Named Agents | Model-agnostic profiles with name, description, deterministic avatar seed, system prompt, tool mode, and skill mode. **Start chat** creates a normal thread bound to the Agent while model choice remains thread-owned. The generated avatar follows the Agent through desktop persona, schedule, and assigned Worker surfaces plus the native mobile composer and Agent sheet; unassigned Workers receive deterministic run-local identities. An Agent is a saved role; a Worker is one live instance of that role. |
 | Tool modes | `all`, `custom`, or `none`. |
 | Skill modes | `auto`, `custom`, or `none`; auto selects enabled skills by keyword, while explicit `@Skill Name` and `/Skill Name` prompt tags inject matching enabled skills for that turn. |
 | Run timeline | Start, token, reasoning, tool call, bounded tool result, memory, Worker Run, per-request usage deltas, final usage, and error events render as structured stream parts. Tool results are capped before timeline persistence and again for model replay. Worker events carry monotonic cursors and reload on demand. Runs stop at 100 model turns by default (`stopped_at_limit: true`), and stream-open failures are retried once before surfacing an error. |
