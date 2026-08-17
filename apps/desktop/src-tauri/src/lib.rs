@@ -53,7 +53,9 @@ use milim_inference::{remote::RemoteBackend, unavailable::UnavailableBackend, Sh
 use milim_sandbox::{DockerBackend, RunOpts};
 use milim_server::AppState;
 use milim_storage::{Database, DatabaseOptions, EncryptedStore, JournalMode, SessionsDelta};
-use milim_tools::{atomic_write, resolve_workspace_path, Tool, ToolEffect, ToolRegistry};
+use milim_tools::{
+    atomic_write, resolve_workspace_path, ProcessEnvironmentPolicy, Tool, ToolEffect, ToolRegistry,
+};
 
 /// Simple Rust/JS bridge example.
 #[tauri::command]
@@ -827,11 +829,18 @@ fn api_base_url(base: tauri::State<'_, DesktopApiBaseUrl>) -> String {
 #[tauri::command]
 async fn refresh_provider_models(
     providers: tauri::State<'_, DesktopProviders>,
+    runtime: tauri::State<'_, DesktopServerRuntime>,
 ) -> std::result::Result<bool, String> {
     let Some(providers) = providers.0.clone() else {
         return Ok(false);
     };
-    providers.refresh_all().await.map_err(|e| e.to_string())
+    let refreshed = providers.refresh_all().await.map_err(|e| e.to_string())?;
+    if refreshed {
+        if let Some(control) = &runtime.0.control {
+            control.publish_model_catalog();
+        }
+    }
+    Ok(refreshed)
 }
 
 #[tauri::command]
@@ -3875,6 +3884,10 @@ fn open_user_data_store_at(path: &Path) -> Result<Arc<milim_storage::UserDataSto
             journal_mode: JournalMode::Wal,
         },
     )?;
+    if db.schema_version_scoped("user_data")? == 4 {
+        let snapshot = path.with_extension("pre-v5.sqlite3");
+        db.vacuum_snapshot_into(&snapshot)?;
+    }
     milim_storage::UserDataStore::new(db).map(Arc::new)
 }
 
@@ -4169,6 +4182,9 @@ impl Tool for RunCommandTool {
     }
     fn effect(&self) -> ToolEffect {
         ToolEffect::Command
+    }
+    fn environment_policy(&self) -> ProcessEnvironmentPolicy {
+        ProcessEnvironmentPolicy::SandboxSanitized
     }
     async fn invoke(&self, args: Value) -> Result<Value> {
         let command = args

@@ -1,5 +1,17 @@
 import { lazy, memo, Suspense, useEffect, useRef, useState } from "react";
-import { type ChatArtifact, type ChatStreamEventIcon, type ChatStreamPart, type NativeChartDescriptor, type ToolApprovalMode, type ToolUiDescriptor } from "../api";
+import {
+  getControlRunEvents,
+  getControlRunDetails,
+  type ChatArtifact,
+  type ChatStreamEventIcon,
+  type ChatStreamPart,
+  type NativeChartDescriptor,
+  type RunEventPageV1,
+  type RunEventV1,
+  type RunInspectionV1,
+  type ToolApprovalMode,
+  type ToolUiDescriptor,
+} from "../api";
 import { markPerfRender } from "../lib/perf";
 import {
   groupCompletedStreamActivity,
@@ -38,6 +50,7 @@ type AssistantMessageProps = {
   workDurationMs?: number;
   toolApproval?: ToolApprovalMode;
   workspaceFolder?: string;
+  runDetailsRunId?: string;
 };
 
 function escapeRegExp(value: string): string {
@@ -272,6 +285,7 @@ function StreamWorkGroup({
   workspaceFolder,
   previewArtifacts,
   onOpenPreview,
+  runDetailsRunId,
 }: {
   group: ChatStreamWorkGroup;
   durationMs?: number;
@@ -279,6 +293,7 @@ function StreamWorkGroup({
   workspaceFolder?: string;
   previewArtifacts?: ChatArtifact[];
   onOpenPreview?: (artifact: ChatArtifact) => void;
+  runDetailsRunId?: string;
 }) {
   const liveSummary = streaming ? liveWorkGroupSummary(group) : null;
   const latestEvent = [...group.parts].reverse().find(
@@ -387,8 +402,151 @@ function StreamWorkGroup({
             />
           );
         })}
+        {runDetailsRunId ? <RunDetails runId={runDetailsRunId} /> : null}
       </div>
     </details>
+  );
+}
+
+function runEventGroup(event: RunEventV1): "model" | "tools" | "inbox" | "failure" {
+  const type = event.type.toLowerCase();
+  if (type.includes("tool") || type.includes("approval")) return "tools";
+  if (type.includes("inbox") || type.includes("steer") || type.includes("inject")) return "inbox";
+  if (type.includes("fail") || type.includes("error") || type.includes("interrupt")) return "failure";
+  return "model";
+}
+
+function RunEventDetails({ event }: { event: RunEventV1 }) {
+  return (
+    <div className="stream-run-detail-event">
+      <span>{event.type.replace(/_/g, " ")}</span>
+      {event.step_id ? <small>{event.step_id}</small> : null}
+      <details>
+        <summary>Raw JSON</summary>
+        <pre>{JSON.stringify(event.data, null, 2)}</pre>
+      </details>
+    </div>
+  );
+}
+
+function RunDetailSection({
+  title,
+  events,
+  emptyLabel,
+}: {
+  title: string;
+  events: RunEventV1[];
+  emptyLabel?: string;
+}) {
+  if (!events.length && !emptyLabel) return null;
+  return (
+    <details className="stream-run-detail-section">
+      <summary>
+        <span>{title}</span>
+        <small>{events.length || emptyLabel}</small>
+      </summary>
+      <div>
+        {events.map((event) => <RunEventDetails key={event.id} event={event} />)}
+      </div>
+    </details>
+  );
+}
+
+function RunDetails({ runId }: { runId: string }) {
+  const [inspection, setInspection] = useState<RunInspectionV1 | null>(null);
+  const [page, setPage] = useState<RunEventPageV1 | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [attempted, setAttempted] = useState(false);
+  const [error, setError] = useState("");
+
+  const load = async () => {
+    if (loading || attempted) return;
+    setLoading(true);
+    setAttempted(true);
+    setError("");
+    try {
+      const details = await getControlRunDetails(runId);
+      setInspection(details.inspection);
+      setPage(details.events);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadMore = async () => {
+    if (!page?.has_more || page.next_seq == null || loading) return;
+    setLoading(true);
+    try {
+      const next = await getControlRunEvents(runId, page.next_seq);
+      setPage({ ...next, events: [...page.events, ...next.events] });
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (attempted && !loading && !inspection?.composition && !page?.events.length && !error) {
+    return null;
+  }
+  const events = page?.events ?? [];
+  const modelEvents = events.filter((event) => runEventGroup(event) === "model");
+  const toolEvents = events.filter((event) => runEventGroup(event) === "tools");
+  const inboxEvents = events.filter((event) => runEventGroup(event) === "inbox");
+  const failureEvents = events.filter((event) => runEventGroup(event) === "failure");
+  return (
+    <div className="stream-run-details">
+      {!inspection ? (
+        <button
+          type="button"
+          className="stream-run-details-action"
+          onClick={() => void load()}
+          disabled={loading}
+        >
+                {loading ? "Loading run details..." : "Run details"}
+        </button>
+      ) : (
+        <div className="stream-run-details-body" data-testid="assistant-run-details">
+          <details className="stream-run-detail-section">
+            <summary><span>Composition</span><small>{inspection.run.capabilities.visibility}</small></summary>
+            <div className="stream-run-composition">
+              <span>{inspection.run.adapter} · {inspection.run.config.model}</span>
+              {inspection.composition ? (
+                <>
+                  <span>{inspection.composition.environment_policy}</span>
+                  <details>
+                    <summary>Prompts, schemas, and raw JSON</summary>
+                    <pre>{JSON.stringify(inspection.composition, null, 2)}</pre>
+                  </details>
+                </>
+              ) : null}
+            </div>
+          </details>
+          <RunDetailSection title="Model steps" events={modelEvents} />
+          <RunDetailSection title="Tools" events={toolEvents} />
+          <RunDetailSection title="Inbox" events={inboxEvents} />
+          <RunDetailSection
+            title="Failure information"
+            events={failureEvents}
+            emptyLabel={inspection.run.error ? "recorded" : undefined}
+          />
+          {inspection.run.error ? (
+            <details className="stream-run-detail-section">
+              <summary>Run error</summary>
+              <pre>{JSON.stringify(inspection.run.error, null, 2)}</pre>
+            </details>
+          ) : null}
+          {page?.has_more ? (
+            <button type="button" className="stream-run-details-action" onClick={() => void loadMore()} disabled={loading}>
+                  {loading ? "Loading..." : "Load more"}
+            </button>
+          ) : null}
+        </div>
+      )}
+      {error ? <small className="stream-run-details-error">{error}</small> : null}
+    </div>
   );
 }
 
@@ -600,6 +758,7 @@ function AssistantMessageView({
   workDurationMs,
   toolApproval = "guarded",
   workspaceFolder,
+  runDetailsRunId,
 }: AssistantMessageProps) {
   markPerfRender("AssistantMessage");
   if (streaming) markPerfRender("StreamingAssistantMessage");
@@ -630,6 +789,7 @@ function AssistantMessageView({
               workspaceFolder={workspaceFolder}
               previewArtifacts={previewArtifacts}
               onOpenPreview={onOpenPreview}
+              runDetailsRunId={runDetailsRunId}
             />
           );
         if (part.kind === "thinking") {

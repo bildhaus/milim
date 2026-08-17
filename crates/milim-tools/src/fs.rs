@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 
 use milim_core::{Error, Result};
 
-use crate::{Tool, ToolEffect};
+use crate::{Tool, ToolConcurrency, ToolEffect};
 
 /// Max bytes returned by `read_file`.
 const MAX_READ: usize = 1024 * 1024;
@@ -193,6 +193,9 @@ impl Tool for ReadFileTool {
     fn effect(&self) -> ToolEffect {
         ToolEffect::ReadOnly
     }
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Parallel
+    }
     async fn invoke(&self, args: Value) -> Result<Value> {
         let path = safe_join(&self.root, arg_str(&args, "path")?)?;
         let offset = optional_u64(&args, "offset", 0)?;
@@ -221,6 +224,9 @@ impl Tool for ListDirTool {
     }
     fn effect(&self) -> ToolEffect {
         ToolEffect::ReadOnly
+    }
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Parallel
     }
     async fn invoke(&self, args: Value) -> Result<Value> {
         let rel = match args.get("path") {

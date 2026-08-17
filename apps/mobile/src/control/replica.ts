@@ -17,6 +17,18 @@ export interface TimelineReplica {
   needsTailRefresh: boolean;
 }
 
+export function controlEventInvalidatesBootstrap(eventType: string): boolean {
+  return eventType.startsWith('thread.') ||
+    eventType.startsWith('run.') ||
+    eventType.startsWith('turn.') ||
+    eventType.startsWith('approval_') ||
+    eventType.startsWith('worker.') ||
+    eventType === 'appearance.updated' ||
+    eventType === 'models.updated' ||
+    eventType === 'timeline.appended' ||
+    eventType === 'sync.required';
+}
+
 export function emptyReplica(threadId: string): TimelineReplica {
   return {
     threadId,
@@ -114,6 +126,7 @@ export interface ProjectedMessage {
   content: string;
   reasoning: string;
   runId: string | null;
+  ledgerVersion?: number;
   seq: number;
 }
 
@@ -484,7 +497,11 @@ function approvalCopy(approval: PendingApprovalV1 | null, data: Record<string, u
   const label = stringField(request, 'name', 'title', 'server_name') || 'Runtime approval';
   const detail = stringField(request, 'command', 'arguments', 'prompt', 'message', 'url') ||
     stringField(data, 'arguments');
-  return {label: compactText(label), detail: compactText(detail)};
+  const notice = stringField(request, 'environment_notice');
+  return {
+    label: compactText(label),
+    detail: compactText([detail, notice].filter(Boolean).join(' · ')),
+  };
 }
 
 export function projectTranscript(
@@ -547,6 +564,7 @@ export function projectTranscript(
         content: typeof data.content === 'string' ? data.content : '',
         reasoning: typeof data.reasoning === 'string' ? data.reasoning : '',
         runId: item.run_id,
+        ledgerVersion: typeof data.ledgerVersion === 'number' ? data.ledgerVersion : undefined,
         seq: item.seq,
       });
       continue;

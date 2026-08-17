@@ -100,6 +100,14 @@ pub fn build_router(state: AppState) -> Router {
             "/control/v1/threads/{id}/timeline",
             get(routes::control_timeline),
         )
+        .route(
+            "/control/v1/runs/{run_id}",
+            get(routes::control_run_inspection),
+        )
+        .route(
+            "/control/v1/runs/{run_id}/events",
+            get(routes::control_run_events),
+        )
         .route("/control/v1/commands", post(routes::control_command))
         .route(
             "/control/v1/socket-ticket",
@@ -445,6 +453,14 @@ pub fn build_mobile_companion_router(state: AppState) -> Router {
         .route(
             "/control/v1/threads/{id}/timeline",
             get(routes::control_timeline),
+        )
+        .route(
+            "/control/v1/runs/{run_id}",
+            get(routes::control_run_inspection),
+        )
+        .route(
+            "/control/v1/runs/{run_id}/events",
+            get(routes::control_run_events),
         )
         .route("/control/v1/commands", post(routes::control_command))
         .route(

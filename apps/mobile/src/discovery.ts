@@ -100,10 +100,11 @@ function mergeDiscoveredHosts(...groups: DiscoveredHost[][]): DiscoveredHost[] {
   const hosts = new Map<string, DiscoveredHost>();
   for (const group of groups) {
     for (const host of group) {
-      hosts.set(host.hostId ?? host.endpoint, host);
+      const key = host.hostId ?? host.endpoint;
+      if (!hosts.has(key)) hosts.set(key, host);
     }
   }
-  return [...hosts.values()].sort((left, right) => left.name.localeCompare(right.name));
+  return [...hosts.values()];
 }
 
 async function startMilimHostDiscovery(timeoutMs: number): Promise<DiscoveredHost[]> {
@@ -117,7 +118,7 @@ async function startMilimHostDiscovery(timeoutMs: number): Promise<DiscoveredHos
     discoverSimulatorHost(),
   ]);
   if (native.error && simulatorHosts.length === 0) throw native.error;
-  return mergeDiscoveredHosts(native.hosts, simulatorHosts);
+  return mergeDiscoveredHosts(simulatorHosts, native.hosts);
 }
 
 export function discoverMilimHosts(timeoutMs = 5_000): Promise<DiscoveredHost[]> {

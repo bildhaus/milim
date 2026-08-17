@@ -3944,6 +3944,80 @@ html[data-dark="true"] .preview-control-cursor {
   color: var(--secondary-text);
   font-size: 13px;
 }
+.stream-run-details {
+  margin-top: 2px;
+  color: var(--tertiary-text);
+  font-size: 12px;
+}
+.stream-run-details-action {
+  width: fit-content;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--tertiary-text);
+  font: inherit;
+  cursor: pointer;
+}
+.stream-run-details-action:hover:not(:disabled) {
+  color: var(--secondary-text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.stream-run-details-action:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+.stream-run-details-body,
+.stream-run-detail-section > div,
+.stream-run-composition {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.stream-run-detail-section {
+  border: 0;
+}
+.stream-run-detail-section > summary {
+  display: flex;
+  gap: 8px;
+  width: fit-content;
+  cursor: pointer;
+  color: var(--secondary-text);
+  list-style: none;
+}
+.stream-run-detail-section > summary small,
+.stream-run-detail-event small {
+  color: var(--tertiary-text);
+}
+.stream-run-detail-section > div {
+  margin: 4px 0 4px 8px;
+  padding-left: 8px;
+  border-left: 1px solid var(--border-primary);
+}
+.stream-run-detail-event {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 3px 8px;
+}
+.stream-run-detail-event > details {
+  grid-column: 1 / -1;
+}
+.stream-run-details pre {
+  max-width: min(70ch, 100%);
+  max-height: 320px;
+  margin: 4px 0;
+  padding: 8px;
+  overflow: auto;
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  color: var(--secondary-text);
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+.stream-run-details-error {
+  color: var(--error);
+}
 .stream-reasoning {
   margin: 0;
   border: 0;
@@ -7219,6 +7293,12 @@ span.provider-brand-icon {
 }
 
 .composer-send { display: flex; align-items: center; gap: 10px; }
+.composer-busy-actions { position: relative; display: flex; }
+.composer-busy-menu {
+  right: 0;
+  bottom: calc(100% + 6px);
+  min-width: 150px;
+}
 .composer-status { font-size: 12px; color: var(--tertiary-text); white-space: nowrap; }
 .composer-status.history {
   padding: 3px 7px;

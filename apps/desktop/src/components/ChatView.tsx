@@ -1694,6 +1694,7 @@ export function ChatView({
   });
   const persistingTurnIdsRef = useRef<Set<string>>(new Set());
   const canonicalRunIdsRef = useRef<Map<string, string>>(new Map());
+  const canonicalSteeringRef = useRef<Map<string, boolean>>(new Map());
   const {
     activeMediaTarget,
     mediaAdvanced,
@@ -2383,6 +2384,7 @@ export function ChatView({
         });
         if (!controller) return;
         canonicalRunIdsRef.current.set(activeId, run.id);
+        canonicalSteeringRef.current.set(activeId, run.capabilities.steering);
         await pollControlRun(activeId, run.id, controller.signal, (items) => {
           if (disposed) return;
           const projected = projectControlRunMessages(items, run.id);
@@ -2408,6 +2410,7 @@ export function ChatView({
         if (canonicalRunIdsRef.current.get(activeId)) {
           canonicalRunIdsRef.current.delete(activeId);
         }
+        canonicalSteeringRef.current.delete(activeId);
         controller = null;
         if (!disposed) retryTimer = window.setTimeout(syncActiveRun, 500);
       }
@@ -5451,6 +5454,13 @@ export function ChatView({
       }
       const runId = command.run_id;
       canonicalRunIdsRef.current.set(sessionId, runId);
+      const capabilities = command.data && typeof command.data === "object" && !Array.isArray(command.data)
+        ? command.data.capabilities
+        : null;
+      canonicalSteeringRef.current.set(
+        sessionId,
+        Boolean(capabilities && typeof capabilities === "object" && !Array.isArray(capabilities) && capabilities.steering),
+      );
       const terminal = await pollControlRun(
         sessionId,
         runId,
@@ -5483,6 +5493,7 @@ export function ChatView({
       return { status: "error", messages: sessionMessages(sessionId), error: message };
     } finally {
       canonicalRunIdsRef.current.delete(sessionId);
+      canonicalSteeringRef.current.delete(sessionId);
       releaseTurnGeneration({
         sessionId,
         store,
@@ -6131,6 +6142,10 @@ export function ChatView({
         });
         return;
       }
+      if (canonicalRunIdsRef.current.has(activeId)) {
+        void queueCanonicalFollowup(text, pendingAttachments);
+        return;
+      }
       enqueueQueuedMessage(activeId, {
         content: text,
         attachments: pendingAttachments,
@@ -6200,6 +6215,56 @@ export function ChatView({
       conversation,
       selectedModel,
     );
+  }
+
+  async function queueCanonicalFollowup(text: string, attachments: ChatAttachment[]) {
+    try {
+      const result = await sendControlCommand({
+        command_id: createControlCommandId(),
+        kind: "turn.send",
+        thread_id: activeId,
+        payload: {
+          text: wireMessageContent({ role: "user", content: text, attachments }),
+          display_text: text,
+          attachments: controlAttachments(attachments),
+        },
+      });
+      if (result.status !== "queued") throw new Error(result.message || `Control command ${result.status}.`);
+      if (text) recordGlobalPrompt(text);
+      setInput((current) => current.trim() === text ? "" : current);
+      const sentIds = new Set(attachments.map((attachment) => attachment.id));
+      setPendingAttachments((current) => current.filter((attachment) => !sentIds.has(attachment.id)));
+      setChatNotice({ tone: "info", message: "Message queued. It will run after the current reply finishes." });
+    } catch (error) {
+      setChatNotice({ tone: "error", message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  async function steerCanonicalRun() {
+    const runId = canonicalRunIdsRef.current.get(activeId);
+    const text = input.trim();
+    const attachments = pendingAttachments;
+    if (!runId || (!text && attachments.length === 0)) return;
+    try {
+      const result = await sendControlCommand({
+        command_id: createControlCommandId(),
+        kind: "turn.steer",
+        thread_id: activeId,
+        payload: {
+          run_id: runId,
+          text: wireMessageContent({ role: "user", content: text, attachments }),
+          display_text: text,
+          attachments: controlAttachments(attachments),
+        },
+      });
+      if (result.status !== "accepted") throw new Error(result.message || `Control command ${result.status}.`);
+      if (text) recordGlobalPrompt(text);
+      setInput("");
+      setPendingAttachments([]);
+      setChatNotice({ tone: "info", message: "Steering will be applied at the next model step." });
+    } catch (error) {
+      setChatNotice({ tone: "error", message: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   function sendArtifactFixPrompt(prompt: string) {
@@ -7081,6 +7146,7 @@ export function ChatView({
                 value={input}
                 onChange={setInput}
                 onSend={send}
+                onSteer={() => void steerCanonicalRun()}
                 onStop={stop}
                 attachments={pendingAttachments}
                 onAttachFiles={handleAttachFiles}
@@ -7129,6 +7195,10 @@ export function ChatView({
                 tokens={tokens}
                 contextBudgetTokens={activeContextBudget?.promptBudget}
                 busy={busy}
+                canSteer={Boolean(
+                  canonicalRunIdsRef.current.get(activeId)
+                  && canonicalSteeringRef.current.get(activeId)
+                )}
                 hasReviewComments={pendingReviewComments.length > 0}
               />
             </ComposerSurface>

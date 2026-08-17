@@ -7,6 +7,19 @@ import { assertValidImageAttachment } from "./lib/attachmentInput.js";
 import { assertDesktopRequestBodyFits } from "./lib/requestBody.js";
 import type { GoogleRevocationStatus } from "./lib/googleWorkspace.js";
 import type { AppearanceSnapshotV1 } from "./theme/appearanceSnapshot.js";
+import type {
+  ControlBootstrapV1 as GeneratedControlBootstrapV1,
+  ControlCommandKindV1 as GeneratedControlCommandKindV1,
+  ControlCommandResultV1 as GeneratedControlCommandResultV1,
+  ControlCommandV1 as GeneratedControlCommandV1,
+  RunEventPageV1,
+  RunInspectionV1,
+  RunSnapshotV1 as GeneratedControlRunSnapshotV1,
+  ThreadSummaryV1 as GeneratedControlThreadSummaryV1,
+  TimelineItemV1 as GeneratedControlTimelineItemV1,
+  TimelinePageV1 as GeneratedControlTimelinePageV1,
+} from "./generated/control-v1.js";
+export type { RunEventPageV1, RunEventV1, RunInspectionV1 } from "./generated/control-v1.js";
 export {
   attachmentsToPromptContext,
   wireMessageContent,
@@ -254,6 +267,10 @@ export interface ChatMessage {
   id?: string;
   role: string;
   content: string;
+  /** Canonical control run owning this message, when present. */
+  runId?: string;
+  /** Present only for runs with a durable, inspectable local ledger. */
+  ledgerVersion?: number;
   attachments?: ChatAttachment[];
   mediaResults?: MediaGenerationResult[];
   mediaRequestId?: string;
@@ -868,134 +885,22 @@ export interface MobileCompanionPairing {
 
 // ----- Canonical desktop/mobile control protocol v1 -----
 
-export interface ControlThreadSummaryV1 {
-  id: string;
-  title: string;
-  revision: number;
-  epoch: string;
-  updated_at_ms: number;
-  archived_at_ms?: number | null;
-  model?: string | null;
-  agent_id?: string | null;
-  workspace?: string | null;
-  busy: boolean;
-  queued_turns: number;
-}
-
-export interface ControlRunSnapshotV1 {
-  id: string;
-  thread_id: string;
-  status: string;
-  adapter: string;
-  created_at_ms: number;
-  updated_at_ms: number;
-  completed_at_ms?: number | null;
-  error?: unknown;
-}
-
-export interface ControlBootstrapV1 {
-  protocol: { min: number; max: number };
-  host_id: string;
-  host_name: string;
-  capabilities: Record<string, boolean>;
+export type ControlThreadSummaryV1 = GeneratedControlThreadSummaryV1;
+export type ControlRunSnapshotV1 = GeneratedControlRunSnapshotV1;
+export type ControlBootstrapV1 = Omit<GeneratedControlBootstrapV1, "appearance"> & {
   appearance?: AppearanceSnapshotV1;
-  threads: ControlThreadSummaryV1[];
-  models: unknown[];
-  agents: Array<{
-    id: string;
-    name: string;
-    description: string;
-    avatar: string;
-    tool_mode: string;
-    enabled_tool_count: number;
-    skill_mode: string;
-    enabled_skill_count: number;
-  }>;
-  active_runs: ControlRunSnapshotV1[];
-  queued_turns: Array<{
-    id: string;
-    thread_id: string;
-    command_id: string;
-    accepted_at_ms: number;
-  }>;
-  pending_approvals: Array<{
-    id: string;
-    run_id: string;
-    thread_id: string;
-    kind: string;
-    request: unknown;
-    status: string;
-    created_at_ms: number;
-  }>;
-}
-
-export interface ControlTimelineItemV1 {
-  id: string;
-  thread_id: string;
-  epoch: string;
-  seq: number;
-  run_id?: string | null;
-  type: string;
+};
+export type ControlTimelineItemV1 = Omit<GeneratedControlTimelineItemV1, "data"> & {
   data: Record<string, unknown>;
-  created_at_ms: number;
-}
-
-export interface ControlTimelinePageV1 {
-  thread_id: string;
-  epoch: string;
-  first_seq?: number | null;
-  last_seq?: number | null;
-  has_older: boolean;
-  has_newer: boolean;
-  before_seq?: number | null;
-  after_seq?: number | null;
+};
+export type ControlTimelinePageV1 = Omit<GeneratedControlTimelinePageV1, "items"> & {
   items: ControlTimelineItemV1[];
-}
-
-export type ControlCommandKindV1 =
-  | "thread.create"
-  | "thread.rename"
-  | "thread.archive"
-  | "thread.delete"
-  | "thread.set_model"
-  | "thread.set_agent"
-  | "message.delete"
-  | "turn.send"
-  | "turn.stop"
-  | "turn.regenerate"
-  | "turn.queue_resume"
-  | "turn.queue_delete"
-  | "approval.resolve"
-  | "worker.start"
-  | "worker.continue_solo"
-  | "worker.stop";
-
-export interface ControlCommandV1 {
-  command_id: string;
-  kind: ControlCommandKindV1;
-  thread_id?: string;
-  expected_revision?: number;
+};
+export type ControlCommandKindV1 = GeneratedControlCommandKindV1;
+export type ControlCommandV1 = Omit<GeneratedControlCommandV1, "payload"> & {
   payload?: unknown;
-  confirmation_token?: string;
-}
-
-export interface ControlCommandResultV1 {
-  command_id: string;
-  status:
-    | "applied"
-    | "accepted"
-    | "queued"
-    | "needs_confirmation"
-    | "conflict"
-    | "failed";
-  thread_id?: string;
-  revision?: number;
-  run_id?: string;
-  queue_id?: string;
-  confirmation_token?: string;
-  message?: string;
-  data?: unknown;
-}
+};
+export type ControlCommandResultV1 = GeneratedControlCommandResultV1;
 
 export async function getControlBootstrap(): Promise<ControlBootstrapV1> {
   const response = await authFetch(`${BASE}/control/v1/bootstrap`);
@@ -1020,6 +925,40 @@ export async function getControlTimeline(
     throw new Error(await responseErrorMessage(response, "Timeline fetch failed."));
   }
   return response.json() as Promise<ControlTimelinePageV1>;
+}
+
+export async function getControlRunInspection(runId: string): Promise<RunInspectionV1> {
+  const response = await authFetch(`${BASE}/control/v1/runs/${encodeURIComponent(runId)}`);
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response, "Run details fetch failed."));
+  }
+  return response.json() as Promise<RunInspectionV1>;
+}
+
+export async function getControlRunEvents(
+  runId: string,
+  afterSeq?: number,
+  limit = 100,
+): Promise<RunEventPageV1> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (afterSeq != null) params.set("after_seq", String(afterSeq));
+  const response = await authFetch(
+    `${BASE}/control/v1/runs/${encodeURIComponent(runId)}/events?${params}`,
+  );
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response, "Run events fetch failed."));
+  }
+  return response.json() as Promise<RunEventPageV1>;
+}
+
+export async function getControlRunDetails(
+  runId: string,
+): Promise<{ inspection: RunInspectionV1; events: RunEventPageV1 }> {
+  const [inspection, events] = await Promise.all([
+    getControlRunInspection(runId),
+    getControlRunEvents(runId),
+  ]);
+  return { inspection, events };
 }
 
 export async function sendControlCommand(

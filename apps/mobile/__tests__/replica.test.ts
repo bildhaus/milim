@@ -1,6 +1,7 @@
 import {
   applyControlEvent,
   applyTimelinePage,
+  controlEventInvalidatesBootstrap,
   emptyReplica,
   projectMessages,
   projectTranscript,
@@ -12,6 +13,12 @@ import type {
   TimelineItemV1,
   TimelinePageV1,
 } from '../src/control/types';
+
+test('model catalog events invalidate bootstrap without entering the timeline', () => {
+  expect(controlEventInvalidatesBootstrap('models.updated')).toBe(true);
+  expect(controlEventInvalidatesBootstrap('appearance.updated')).toBe(true);
+  expect(controlEventInvalidatesBootstrap('unrelated.event')).toBe(false);
+});
 
 function item(seq: number, type = 'message', data: any = {id: `m-${seq}`, role: 'user', content: String(seq)}): TimelineItemV1 {
   return {id: `i-${seq}`, thread_id: 't', epoch: 'e1', seq, run_id: null, type, data, created_at_ms: seq};
@@ -181,4 +188,17 @@ test('a later tool update recovers the live summary from an earlier tool failure
     label: 'Reading file',
     detail: 'README.md',
   });
+});
+
+test('marks only ledger-backed assistant messages as inspectable without projecting diagnostics', () => {
+  const transcript = projectTranscript([
+    {...item(1, 'tool_started', {id: 'read', name: 'read_file', status: 'running'}), run_id: 'run-5'},
+    {...item(2, 'turn_completed', {status: 'completed'}), run_id: 'run-5'},
+    {...item(3, 'message', {id: 'assistant-5', role: 'assistant', content: 'Done', ledgerVersion: 1}), run_id: 'run-5'},
+    {...item(4, 'message', {id: 'assistant-legacy', role: 'assistant', content: 'Old'}), run_id: 'run-old'},
+  ]);
+  const messages = transcript.filter(entry => entry.kind === 'message');
+  expect(messages[0]).toMatchObject({runId: 'run-5', ledgerVersion: 1});
+  expect(messages[1].ledgerVersion).toBeUndefined();
+  expect(JSON.stringify(transcript)).not.toContain('model_request_resolved');
 });

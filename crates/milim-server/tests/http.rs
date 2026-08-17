@@ -775,6 +775,255 @@ async fn mobile_control_router_is_device_authenticated_and_isolated() {
     assert_eq!(revoked.status(), reqwest::StatusCode::UNAUTHORIZED);
 }
 
+async fn wait_for_control_run(
+    client: &reqwest::Client,
+    base: &str,
+    run_id: &str,
+    timeout: Duration,
+) -> Value {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let inspection: Value = client
+            .get(format!("{base}/control/v1/runs/{run_id}"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let status = inspection["run"]["status"].as_str().unwrap_or_default();
+        if matches!(status, "completed" | "failed" | "cancelled" | "interrupted") {
+            return inspection;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for control run {run_id}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn create_and_send_control_smoke(
+    client: &reqwest::Client,
+    base: &str,
+    thread_id: &str,
+    model: &str,
+) -> String {
+    let created: Value = client
+        .post(format!("{base}/control/v1/commands"))
+        .json(&json!({
+            "command_id": format!("real-create-{thread_id}"),
+            "kind": "thread.create",
+            "payload": {
+                "id": thread_id,
+                "title": "Real harness smoke",
+                "settings": {
+                    "model": model,
+                    "privacy": "off",
+                    "toolApproval": "guarded",
+                    "memory": false
+                }
+            }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(created["status"], "applied");
+    let sent: Value = client
+        .post(format!("{base}/control/v1/commands"))
+        .json(&json!({
+            "command_id": format!("real-send-{thread_id}"),
+            "kind": "turn.send",
+            "thread_id": thread_id,
+            "payload": {
+                "text": "Reply with exactly MILIM_REAL_HARNESS_OK. Do not call tools.",
+                "attachments": []
+            }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(sent["status"], "accepted", "{sent}");
+    sent["run_id"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn control_v1_real_harness_smoke_when_env_configured() {
+    if std::env::var("MILIM_REAL_HARNESS_SMOKE").ok().as_deref() != Some("1") {
+        return;
+    }
+    let base_url = std::env::var("MILIM_REAL_HARNESS_BASE_URL")
+        .expect("MILIM_REAL_HARNESS_BASE_URL is required when real harness smoke is enabled");
+    let api_key = std::env::var("MILIM_REAL_HARNESS_API_KEY")
+        .expect("MILIM_REAL_HARNESS_API_KEY is required when real harness smoke is enabled");
+    let model = std::env::var("MILIM_REAL_HARNESS_MODEL")
+        .expect("MILIM_REAL_HARNESS_MODEL is required when real harness smoke is enabled");
+    let kind = match std::env::var("MILIM_REAL_HARNESS_KIND")
+        .unwrap_or_else(|_| "openai_compatible".into())
+        .as_str()
+    {
+        "openai_compatible" => milim_server::providers::ProviderKind::OpenAiCompatible,
+        "anthropic" => milim_server::providers::ProviderKind::Anthropic,
+        "gemini" => milim_server::providers::ProviderKind::Gemini,
+        other => panic!("unsupported MILIM_REAL_HARNESS_KIND {other}"),
+    };
+    let root = unique_temp_path("milim-real-harness");
+    let registry = Arc::new(
+        milim_server::providers::ProviderRegistry::open(&root, Arc::new(TestBackend::new()))
+            .unwrap(),
+    );
+    let provider = registry
+        .upsert(milim_server::providers::Provider {
+            id: "real-harness".into(),
+            name: "Real harness smoke".into(),
+            kind,
+            base_url,
+            api_key: Some(api_key.clone()),
+            enabled: true,
+            models: Vec::new(),
+            pricing: Default::default(),
+            model_context: Default::default(),
+            model_reasoning: Default::default(),
+            model_capabilities: Default::default(),
+            last_error: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        provider.models.iter().any(|candidate| candidate == &model),
+        "configured provider did not advertise MILIM_REAL_HARNESS_MODEL"
+    );
+    let store = Arc::new(
+        milim_storage::UserDataStore::new(milim_storage::Database::open_in_memory().unwrap())
+            .unwrap(),
+    );
+    let manager = milim_server::control::RunManager::new(store, "Real harness smoke").unwrap();
+    let state = test_state().with_providers(registry).with_control(manager);
+    let base = spawn(state).await;
+    let client = reqwest::Client::new();
+    let run_id = create_and_send_control_smoke(
+        &client,
+        &base,
+        "real-provider-thread",
+        &format!("provider:real-harness:{model}"),
+    )
+    .await;
+    let inspection = wait_for_control_run(&client, &base, &run_id, Duration::from_secs(180)).await;
+    assert_eq!(inspection["run"]["status"], "completed", "{inspection}");
+    assert_eq!(
+        inspection["run"]["capabilities"]["visibility"],
+        "model_visible"
+    );
+    let events: Value = client
+        .get(format!("{base}/control/v1/runs/{run_id}/events?limit=200"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let event_types = events["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|event| event["type"].as_str())
+        .collect::<Vec<_>>();
+    assert!(event_types.contains(&"model_request_resolved"));
+    assert!(event_types.contains(&"model_response_committed"));
+    assert!(!serde_json::to_string(&events).unwrap().contains(&api_key));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn authenticated_account_runtime_boundary_smokes_when_env_configured() {
+    if std::env::var("MILIM_REAL_ACCOUNT_RUNTIME_SMOKE")
+        .ok()
+        .as_deref()
+        != Some("1")
+    {
+        return;
+    }
+    let configured = [
+        ("codex", "MILIM_REAL_CODEX_SMOKE_MODEL"),
+        ("claude", "MILIM_REAL_CLAUDE_SMOKE_MODEL"),
+        ("opencode", "MILIM_REAL_OPENCODE_SMOKE_MODEL"),
+        ("pi", "MILIM_REAL_PI_SMOKE_MODEL"),
+    ]
+    .into_iter()
+    .filter_map(|(runtime, variable)| {
+        std::env::var(variable)
+            .ok()
+            .filter(|model| !model.trim().is_empty())
+            .map(|model| (runtime, model))
+    })
+    .collect::<Vec<_>>();
+    assert!(
+        !configured.is_empty(),
+        "enable at least one MILIM_REAL_<RUNTIME>_SMOKE_MODEL"
+    );
+
+    for (runtime, model) in configured {
+        let store = Arc::new(
+            milim_storage::UserDataStore::new(milim_storage::Database::open_in_memory().unwrap())
+                .unwrap(),
+        );
+        let manager =
+            milim_server::control::RunManager::new(store, "Account runtime smoke").unwrap();
+        let base = spawn(test_state().with_control(manager)).await;
+        let client = reqwest::Client::new();
+        let run_id = create_and_send_control_smoke(
+            &client,
+            &base,
+            &format!("real-{runtime}-thread"),
+            &format!("{runtime}:{model}"),
+        )
+        .await;
+        let inspection =
+            wait_for_control_run(&client, &base, &run_id, Duration::from_secs(240)).await;
+        assert_eq!(inspection["run"]["status"], "completed", "{inspection}");
+        assert_eq!(
+            inspection["run"]["capabilities"]["visibility"],
+            "harness_boundary"
+        );
+        assert_eq!(
+            inspection["composition"]["environment_policy"],
+            "AccountRuntimeInherited"
+        );
+        let events: Value = client
+            .get(format!("{base}/control/v1/runs/{run_id}/events?limit=200"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let event_types = events["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|event| event["type"].as_str())
+            .collect::<Vec<_>>();
+        assert!(event_types.contains(&"harness_request_committed"));
+        assert!(event_types.contains(&"model_response_committed"));
+    }
+}
+
 struct MemoryToolBackend;
 
 #[async_trait]

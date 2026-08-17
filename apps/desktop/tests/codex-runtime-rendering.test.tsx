@@ -23,7 +23,7 @@ const server = await createServer({
 try {
   const { AssistantMessage } = (await server.ssrLoadModule(
     "/src/components/AssistantMessage.tsx",
-  )) as { AssistantMessage: ComponentType<{ content: string; streamParts: ChatStreamPart[] }> };
+  )) as { AssistantMessage: ComponentType<{ content: string; streamParts: ChatStreamPart[]; runDetailsRunId?: string }> };
   const { ToolApprovalPrompt } = (await server.ssrLoadModule(
     "/src/components/ToolApprovalPrompt.tsx",
   )) as { ToolApprovalPrompt: ComponentType<{ part: Extract<ChatStreamPart, { kind: "event" }> }> };
@@ -195,6 +195,24 @@ try {
   assert(transcript.includes("Approval"), "approval transcript should keep the request summary");
   assert(transcript.includes("command"), "approval transcript should keep the requested arguments");
   assert(!transcript.includes(">Approve<") && !transcript.includes(">Deny<"), "approval actions should render only by the composer");
+
+  const completedWork: ChatStreamPart[] = [
+    {kind: "event", eventType: "tool", label: "shell", detail: "echo done", status: "done"},
+    {kind: "text", content: "Finished."},
+  ];
+  const ordinaryWork = renderToStaticMarkup(createElement(AssistantMessage, {
+    content: "",
+    streamParts: completedWork,
+  }));
+  assert(ordinaryWork.includes("Worked"), "completed work should retain its existing closed summary");
+  assert(!ordinaryWork.includes("Run details"), "legacy and ordinary transcript rendering should add no ledger UI");
+  const ledgerWork = renderToStaticMarkup(createElement(AssistantMessage, {
+    content: "",
+    streamParts: completedWork,
+    runDetailsRunId: "run-ledger-1",
+  }));
+  assert(ledgerWork.includes("Run details"), "ledger-backed work should expose one quiet drawer action");
+  assert(!ledgerWork.includes("Composition") && !ledgerWork.includes("Raw JSON"), "run bodies must remain unloaded and collapsed until selected");
 
   const pending = approvalPart({ kind: "command" });
   const secondPending = { ...pending, approvalId: "approval-2", label: "Approval 2" };

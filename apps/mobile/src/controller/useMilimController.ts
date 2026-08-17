@@ -13,6 +13,8 @@ import {
   fetchBootstrap,
   fetchMobileHostProbe,
   fetchPairingRequestStatus,
+  fetchRunEvents,
+  fetchRunInspection,
   fetchTimeline,
   newCommandId,
   normalizeEndpoint,
@@ -21,6 +23,7 @@ import {
 import {
   applyControlEvent,
   applyTimelinePage,
+  controlEventInvalidatesBootstrap,
   emptyReplica,
   type TimelineReplica,
 } from '../control/replica';
@@ -32,6 +35,7 @@ import type {
   SavedHost,
 } from '../control/types';
 import {isProtocolCompatible} from '../control/types';
+import type {RunEventPageV1, RunInspectionV1} from '../control/generated-v1';
 import {discoverMilimHosts} from '../discovery';
 import type {DiscoveredHost} from '../discovery';
 import {friendlyConnectionError} from '../mobileUi';
@@ -268,16 +272,7 @@ export function useMilimController() {
               timelineRef.current = next;
               setTimeline(next);
             }
-            if (
-              event.type.startsWith('thread.') ||
-              event.type.startsWith('run.') ||
-              event.type.startsWith('turn.') ||
-              event.type.startsWith('approval_') ||
-              event.type.startsWith('worker.') ||
-              event.type === 'appearance.updated' ||
-              event.type === 'timeline.appended' ||
-              event.type === 'sync.required'
-            ) {
+            if (controlEventInvalidatesBootstrap(event.type)) {
               if (bootstrapRefreshTimer.current) clearTimeout(bootstrapRefreshTimer.current);
               bootstrapRefreshTimer.current = setTimeout(() => void refreshBootstrap(), 120);
             }
@@ -608,6 +603,30 @@ export function useMilimController() {
     return execute(pendingRetry);
   }, [execute, pendingRetry]);
 
+  const loadRunDetails = useCallback(
+    async (runId: string): Promise<{inspection: RunInspectionV1; events: RunEventPageV1}> => {
+      if (!activeHost?.lastSuccessfulUrl || !credential.current || status !== 'online') {
+        throw new Error('Reconnect to the desktop to inspect this run.');
+      }
+      const [inspection, events] = await Promise.all([
+        fetchRunInspection(activeHost.lastSuccessfulUrl, credential.current, runId),
+        fetchRunEvents(activeHost.lastSuccessfulUrl, credential.current, runId),
+      ]);
+      return {inspection, events};
+    },
+    [activeHost, status],
+  );
+
+  const loadMoreRunEvents = useCallback(
+    async (runId: string, afterSeq: number): Promise<RunEventPageV1> => {
+      if (!activeHost?.lastSuccessfulUrl || !credential.current || status !== 'online') {
+        throw new Error('Reconnect to the desktop to inspect this run.');
+      }
+      return fetchRunEvents(activeHost.lastSuccessfulUrl, credential.current, runId, afterSeq);
+    },
+    [activeHost, status],
+  );
+
   return {
     hosts,
     activeHost,
@@ -631,6 +650,8 @@ export function useMilimController() {
     refreshTimeline,
     execute,
     command,
+    loadRunDetails,
+    loadMoreRunEvents,
     retryPendingCommand,
   };
 }

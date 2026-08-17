@@ -404,8 +404,13 @@ pub(crate) async fn mcp_app_tool_call(
     })?;
     enforce_mcp_app_approval(req.approval.as_deref(), req.approval_granted, tool.effect)
         .map_err(ApiError)?;
-    let result = hub
-        .call_app_tool(&req.server_id, &req.name, req.arguments)
+    let mut registry = ToolRegistry::new();
+    registry.register(
+        hub.app_tool_proxy(&req.server_id, &req.name)
+            .map_err(ApiError)?,
+    );
+    let result = registry
+        .call(&req.name, req.arguments)
         .await
         .map_err(ApiError)?;
     let size = serde_json::to_vec(&result)

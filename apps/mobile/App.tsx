@@ -38,6 +38,7 @@ import {
 } from './src/attachments';
 import {MOBILE_MARKDOWN_OPTIONS} from './src/markdown';
 import {newCommandId} from './src/control/client';
+import type {RunEventPageV1, RunEventV1, RunInspectionV1} from './src/control/generated-v1';
 import {
   projectTranscript,
   type ActivityStatus,
@@ -1134,6 +1135,18 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
     () => projectTranscript(controller.timeline?.items ?? [], threadApprovals),
     [controller.timeline?.items, threadApprovals],
   );
+  const inspectableRunIds = useMemo(
+    () => new Set(
+      transcriptItems
+        .filter(item => item.kind === 'message' && item.role === 'assistant' && item.ledgerVersion === 1 && item.runId)
+        .map(item => (item as Extract<ProjectedTranscriptItem, {kind: 'message'}>).runId as string),
+    ),
+    [transcriptItems],
+  );
+  const activeRun = useMemo(
+    () => controller.bootstrap?.active_runs.find(run => run.thread_id === thread?.id) ?? null,
+    [controller.bootstrap?.active_runs, thread?.id],
+  );
   const [attachments, setAttachments] = useState<ControlAttachmentV1[]>([]);
   const [busy, setBusy] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -1263,6 +1276,33 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
       setBusy(false);
     }
   };
+  const steer = async () => {
+    if (!activeRun?.capabilities.steering) return;
+    if (controller.status !== 'online') {
+      Alert.alert('Desktop offline', 'Steering requires the active desktop run.');
+      return;
+    }
+    setBusy(true);
+    try {
+      await controller.command(
+        'turn.steer',
+        {
+          run_id: activeRun.id,
+          text: promptWithAttachments(controller.draft, attachments),
+          display_text: controller.draft,
+          attachments: wireAttachments(attachments),
+        } as unknown as JsonValue,
+        thread.id,
+      );
+      controller.setDraft('');
+      await cleanupAttachments(attachments);
+      setAttachments([]);
+    } catch (error) {
+      showError(error);
+    } finally {
+      setBusy(false);
+    }
+  };
   const loadOlder = async () => {
     setLoadingOlder(true);
     try {
@@ -1349,6 +1389,9 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
               item={item}
               markdownStyles={markdownStyles}
               execute={controller.execute}
+              runDetailsEnabled={item.kind === 'activity' && inspectableRunIds.has(item.runId)}
+              loadRunDetails={controller.loadRunDetails}
+              loadMoreRunEvents={controller.loadMoreRunEvents}
             />
           )}
         />
@@ -1479,7 +1522,18 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
           />
           <View style={styles.composerSpacer} />
           {thread.busy ? (
-            <IconButton icon="square" label="Stop generating" tone="quiet" onPress={() => void controller.command('turn.stop', null, thread.id).catch(showError)} />
+            <>
+              {activeRun?.capabilities.steering ? (
+                <IconButton
+                  icon="bolt"
+                  label="Steer next step"
+                  tone="quiet"
+                  disabled={busy || (!controller.draft.trim() && !attachments.length)}
+                  onPress={() => void steer()}
+                />
+              ) : null}
+              <IconButton icon="square" label="Stop generating" tone="quiet" onPress={() => void controller.command('turn.stop', null, thread.id).catch(showError)} />
+            </>
           ) : (
             <IconButton icon="refresh" label="Regenerate" onPress={() => void controller.command('turn.regenerate', null, thread.id, thread.revision).catch(showError)} />
           )}
@@ -1598,7 +1652,130 @@ function ActivityRow({row}: {row: ProjectedActivityRow}) {
   );
 }
 
-function ActivityGroup({group}: {group: ProjectedActivityGroup}) {
+function RunDetailSection({label, value}: {label: string; value: unknown}) {
+  const {palette, styles} = useAppTheme();
+  const [open, setOpen] = useState(false);
+  return (
+    <View style={styles.runDetailSection}>
+      <MotionPressable
+        style={styles.runDetailSectionHeader}
+        accessibilityLabel={`${open ? 'Collapse' : 'Expand'} ${label}`}
+        onPress={() => setOpen(current => !current)}>
+        <Text style={styles.runDetailSectionLabel}>{label}</Text>
+        <MilimIcon name={open ? 'chevron-up' : 'chevron-down'} size={12} color={palette.muted} />
+      </MotionPressable>
+      {open ? (
+        <ScrollView horizontal nestedScrollEnabled showsHorizontalScrollIndicator={false}>
+          <Text style={styles.runDetailJson} selectable>{JSON.stringify(value, null, 2)}</Text>
+        </ScrollView>
+      ) : null}
+    </View>
+  );
+}
+
+function runEventGroups(events: RunEventV1[], inspection: RunInspectionV1) {
+  const contains = (event: RunEventV1, needles: string[]) => needles.some(needle => event.type.includes(needle));
+  const model = events.filter(event => contains(event, ['model_', 'request', 'response']));
+  const tools = events.filter(event => contains(event, ['tool_', 'approval']));
+  const inbox = events.filter(event => contains(event, ['inbox', 'steer', 'inject', 'followup']));
+  const failures = events.filter(event => contains(event, ['error', 'fail', 'cancel', 'interrupt']));
+  return [
+    {label: 'Composition', value: inspection.composition},
+    {label: 'Model steps', value: model},
+    {label: 'Tools', value: tools},
+    {label: 'Inbox', value: inbox},
+    ...(inspection.run.error !== null || failures.length
+      ? [{label: 'Failure information', value: {error: inspection.run.error, events: failures}}]
+      : []),
+  ];
+}
+
+function MobileRunDetails({
+  runId,
+  load,
+  loadMore,
+}: {
+  runId: string;
+  load: ReturnType<typeof useMilimController>['loadRunDetails'];
+  loadMore: ReturnType<typeof useMilimController>['loadMoreRunEvents'];
+}) {
+  const {palette, styles} = useAppTheme();
+  const [details, setDetails] = useState<{inspection: RunInspectionV1; events: RunEventPageV1} | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const requestDetails = async () => {
+    if (details || loading) return;
+    setLoading(true);
+    setError(null);
+    try {
+      setDetails(await load(runId));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setLoading(false);
+    }
+  };
+  const requestMore = async () => {
+    const next = details?.events.next_seq;
+    if (!details || next == null || loading) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const page = await loadMore(runId, next);
+      setDetails(current => current ? {
+        ...current,
+        events: {...page, events: [...current.events.events, ...page.events]},
+      } : current);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (!details) {
+    return (
+      <View style={styles.runDetailsFooter}>
+        <MotionPressable
+          style={styles.runDetailsAction}
+          disabled={loading}
+          onPress={() => void requestDetails()}>
+          {loading ? <ActivityIndicator size="small" color={palette.muted} /> : <MilimIcon name="info" size={12} color={palette.muted} />}
+          <Text style={styles.runDetailsActionText}>{loading ? 'Loading run details…' : 'Run details'}</Text>
+        </MotionPressable>
+        {error ? <Text style={styles.runDetailsError}>{error}</Text> : null}
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.runDetailsPanel}>
+      {runEventGroups(details.events.events, details.inspection).map(section => (
+        <RunDetailSection key={section.label} label={section.label} value={section.value} />
+      ))}
+      {details.events.has_more ? (
+        <MotionPressable style={styles.runDetailsAction} disabled={loading} onPress={() => void requestMore()}>
+          {loading ? <ActivityIndicator size="small" color={palette.muted} /> : <MilimIcon name="refresh" size={12} color={palette.muted} />}
+          <Text style={styles.runDetailsActionText}>{loading ? 'Loading…' : 'Load more events'}</Text>
+        </MotionPressable>
+      ) : null}
+      {error ? <Text style={styles.runDetailsError}>{error}</Text> : null}
+    </View>
+  );
+}
+
+function ActivityGroup({
+  group,
+  runDetailsEnabled,
+  loadRunDetails,
+  loadMoreRunEvents,
+}: {
+  group: ProjectedActivityGroup;
+  runDetailsEnabled: boolean;
+  loadRunDetails: ReturnType<typeof useMilimController>['loadRunDetails'];
+  loadMoreRunEvents: ReturnType<typeof useMilimController>['loadMoreRunEvents'];
+}) {
   const {palette, styles} = useAppTheme();
   const [open, setOpen] = useState(group.status === 'running' || group.status === 'failed');
   const previousStatus = useRef(group.status);
@@ -1628,6 +1805,9 @@ function ActivityGroup({group}: {group: ProjectedActivityGroup}) {
       {open ? (
         <View style={styles.activityRows}>
           {group.rows.map(row => <ActivityRow key={row.id} row={row} />)}
+          {runDetailsEnabled ? (
+            <MobileRunDetails runId={group.runId} load={loadRunDetails} loadMore={loadMoreRunEvents} />
+          ) : null}
         </View>
       ) : null}
     </View>
@@ -1638,13 +1818,26 @@ function TranscriptItemView({
   item,
   markdownStyles,
   execute,
+  runDetailsEnabled,
+  loadRunDetails,
+  loadMoreRunEvents,
 }: {
   item: ProjectedTranscriptItem;
   markdownStyles: ReturnType<typeof createMarkdownStyles>;
   execute: ReturnType<typeof useMilimController>['execute'];
+  runDetailsEnabled: boolean;
+  loadRunDetails: ReturnType<typeof useMilimController>['loadRunDetails'];
+  loadMoreRunEvents: ReturnType<typeof useMilimController>['loadMoreRunEvents'];
 }) {
   const {palette, styles} = useAppTheme();
-  if (item.kind === 'activity') return <ActivityGroup group={item} />;
+  if (item.kind === 'activity') return (
+    <ActivityGroup
+      group={item}
+      runDetailsEnabled={runDetailsEnabled}
+      loadRunDetails={loadRunDetails}
+      loadMoreRunEvents={loadMoreRunEvents}
+    />
+  );
   if (item.kind === 'approval') {
     if (item.approval) return <ApprovalCard approval={item.approval} execute={execute} inline />;
     const color = activityStatusColor(item.status, palette);
@@ -2468,6 +2661,15 @@ function createStyles(theme: MobileTheme) {
   activitySummaryDetail: {color: palette.secondary, fontSize: 11.5, lineHeight: 16},
   activitySummaryStatus: {fontSize: 10.5, lineHeight: 15, fontWeight: '700'},
   activityRows: {paddingLeft: 17, paddingBottom: 8, borderLeftWidth: StyleSheet.hairlineWidth, borderLeftColor: palette.border, marginLeft: 16},
+  runDetailsFooter: {gap: 5, paddingTop: 5, paddingRight: 4},
+  runDetailsAction: {minHeight: 34, alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 4},
+  runDetailsActionText: {color: palette.muted, fontSize: 10.5, fontWeight: '600'},
+  runDetailsError: {color: palette.danger, fontSize: 10.5, lineHeight: 15, paddingRight: 8},
+  runDetailsPanel: {gap: 2, paddingTop: 5, paddingRight: 4},
+  runDetailSection: {borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border},
+  runDetailSectionHeader: {minHeight: 38, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8, paddingHorizontal: 4},
+  runDetailSectionLabel: {color: palette.secondary, fontSize: 11, lineHeight: 16, fontWeight: '600'},
+  runDetailJson: {color: palette.muted, fontFamily: monoFamily, fontSize: 10, lineHeight: 15, paddingHorizontal: 4, paddingBottom: 9},
   activityRow: {minHeight: 46, flexDirection: 'row', gap: 8, paddingVertical: 7, paddingRight: 3},
   activityRowIcon: {width: 22, height: 22, flexShrink: 0, alignItems: 'center', justifyContent: 'center'},
   activityRowBody: {flex: 1, minWidth: 0, gap: 3},

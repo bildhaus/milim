@@ -779,6 +779,7 @@ mod tests {
 
     fn block_on<F: Future>(future: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread()
+            .enable_all()
             .build()
             .unwrap()
             .block_on(future)
@@ -953,6 +954,30 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("mixed line endings"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn host_shell_inherits_user_environment_and_declares_the_policy() {
+        let root = temp_workspace();
+        let tools = host_tools(Arc::new(RwLock::new(Some(root.clone()))));
+        let shell = tool(&tools, "shell");
+        assert_eq!(
+            shell.environment_policy(),
+            milim_tools::ProcessEnvironmentPolicy::HostShellInherited
+        );
+        let key = format!("MILIM_HOST_ENV_PROOF_{}", std::process::id());
+        let value = "host-environment-visible";
+        std::env::set_var(&key, value);
+        let command = if cfg!(windows) {
+            format!("[Console]::Write($env:{key})")
+        } else {
+            format!("printf '%s' \"${key}\"")
+        };
+        let result = block_on(shell.invoke(json!({"command": command}))).unwrap();
+        std::env::remove_var(&key);
+        assert_eq!(result["stdout"], value);
+        assert_eq!(result["exit_code"], 0);
         let _ = std::fs::remove_dir_all(root);
     }
 }

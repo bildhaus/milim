@@ -1,0 +1,63 @@
+{
+  "capabilities": {
+    "agents": true,
+    "appearance_assets": true,
+    "approvals": true,
+    "attachments": true,
+    "context_injection": true,
+    "inline_branches": false,
+    "lan_discovery": true,
+    "push_notifications": false,
+    "queued_turns": true,
+    "run_inspection": true,
+    "run_ledger": true,
+    "steering": true,
+    "timeline_sync": true,
+    "websocket_tickets": true,
+    "workers": true
+  },
+  "command_kinds": [
+    "thread.create",
+    "thread.rename",
+    "thread.archive",
+    "thread.delete",
+    "thread.set_model",
+    "thread.set_agent",
+    "message.delete",
+    "turn.send",
+    "turn.steer",
+    "context.inject",
+    "turn.inbox_delete",
+    "turn.stop",
+    "turn.regenerate",
+    "turn.queue_resume",
+    "turn.queue_delete",
+    "approval.resolve",
+    "worker.start",
+    "worker.continue_solo",
+    "worker.stop"
+  ],
+  "examples": {
+    "inject": {
+      "command_id": "fixture-inject-1",
+      "kind": "context.inject",
+      "payload": {
+        "text": "Visible context for the next request"
+      },
+      "thread_id": "thread-fixture"
+    },
+    "steer": {
+      "command_id": "fixture-steer-1",
+      "kind": "turn.steer",
+      "payload": {
+        "run_id": "run-fixture",
+        "text": "Change direction"
+      },
+      "thread_id": "thread-fixture"
+    }
+  },
+  "protocol": {
+    "max": 1,
+    "min": 1
+  }
+}

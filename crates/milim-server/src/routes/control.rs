@@ -1,6 +1,8 @@
 use super::*;
 
-use crate::control::{ControlCommandV1, ControlEventV1, RunManager, TimelinePageV1};
+use crate::control::{
+    ControlCommandV1, ControlEventV1, RunEventPageV1, RunInspectionV1, RunManager, TimelinePageV1,
+};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 
 fn control_manager(st: &AppState) -> Result<Arc<RunManager>, ApiError> {
@@ -70,6 +72,12 @@ pub(crate) struct ControlSocketQuery {
 #[derive(Debug, Deserialize)]
 pub(crate) struct ControlAppearanceBackgroundQuery {
     revision: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ControlRunEventsQuery {
+    after_seq: Option<u64>,
+    limit: Option<usize>,
 }
 
 /// `GET /control/v1/bootstrap`
@@ -144,6 +152,41 @@ pub(crate) async fn control_timeline(
         .timeline_page(&id, query.after_seq, query.before_seq, tail, limit)
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(Error::ModelNotFound(format!("thread {id}"))))?;
+    Ok(Json(page).into_response())
+}
+
+/// `GET /control/v1/runs/{run_id}` — loaded only when an existing work
+/// surface explicitly asks for details.
+pub(crate) async fn control_run_inspection(
+    State(st): State<AppState>,
+    Path(run_id): Path<String>,
+    headers: HeaderMap,
+    peer: Peer,
+) -> Result<Response, ApiError> {
+    control_identity(&st, &headers, peer_addr(peer))?;
+    let manager = control_manager(&st)?;
+    let inspection: RunInspectionV1 = manager
+        .run_inspection(&run_id)
+        .map_err(ApiError)?
+        .ok_or_else(|| ApiError(Error::ModelNotFound(format!("run {run_id}"))))?;
+    Ok(Json(inspection).into_response())
+}
+
+/// `GET /control/v1/runs/{run_id}/events` — bounded, forward-only ledger
+/// pagination for the nested run-details surface.
+pub(crate) async fn control_run_events(
+    State(st): State<AppState>,
+    Path(run_id): Path<String>,
+    Query(query): Query<ControlRunEventsQuery>,
+    headers: HeaderMap,
+    peer: Peer,
+) -> Result<Response, ApiError> {
+    control_identity(&st, &headers, peer_addr(peer))?;
+    let manager = control_manager(&st)?;
+    let page: RunEventPageV1 = manager
+        .run_event_page(&run_id, query.after_seq, query.limit.unwrap_or(100))
+        .map_err(ApiError)?
+        .ok_or_else(|| ApiError(Error::ModelNotFound(format!("run {run_id}"))))?;
     Ok(Json(page).into_response())
 }
 

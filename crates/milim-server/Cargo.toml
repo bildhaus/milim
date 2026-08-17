@@ -9,6 +9,7 @@ description = "Axum HTTP server exposing the OpenAI/Ollama-compatible API."
 
 [dependencies]
 milim-core.workspace = true
+milim-control-contract.workspace = true
 milim-inference.workspace = true
 milim-storage.workspace = true
 milim-identity.workspace = true

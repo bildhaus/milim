@@ -12,6 +12,39 @@ const artifactDir = resolve(
 const artifactPath = join(artifactDir, "runtime-conformance.json");
 const node = process.execPath;
 const checks = [
+  cargoCheck("contract.control-v1-generated", [
+    "run",
+    "-p",
+    "milim-control-contract",
+    "--bin",
+    "generate-control-contract",
+    "--",
+    "--check",
+  ]),
+  cargoCheck("storage.v5-migration", [
+    "test",
+    "-p",
+    "milim-storage",
+    "v5_migration",
+  ]),
+  cargoCheck("storage.ledger-projection-atomicity", [
+    "test",
+    "-p",
+    "milim-storage",
+    "message_projection_and_ledger_event_commit_or_rollback_together",
+  ]),
+  cargoCheck("storage.inbox-lifecycle", [
+    "test",
+    "-p",
+    "milim-storage",
+    "durable_inbox_claim_cancel_retarget_and_restart_are_atomic",
+  ]),
+  cargoCheck("storage.control-backup-v1-v2", [
+    "test",
+    "-p",
+    "milim-storage",
+    "v1_and_v2_control_backups_restore_inbox_and_ledger",
+  ]),
   cargoCheck("providers.protocols", ["test", "-p", "milim-inference"]),
   cargoCheck("providers.routing", ["test", "-p", "milim-server", "providers::tests"]),
   cargoCheck("runtimes.codex.adapter", ["test", "-p", "milim-server", "codex_bridge::tests"]),
@@ -25,14 +58,71 @@ const checks = [
     "routes::harnesses::tests",
   ]),
   cargoCheck("runtimes.approval-lifecycle", ["test", "-p", "milim-agents", "approval"]),
+  cargoCheck("runtimes.ledger-failure-barrier", [
+    "test",
+    "-p",
+    "milim-agents",
+    "commit_prevents",
+  ]),
+  cargoCheck("tools.model-call-result-order", [
+    "test",
+    "-p",
+    "milim-agents",
+    "parallel_tool_results_preserve_model_call_order",
+  ]),
+  cargoCheck("runtimes.run-ledger", ["test", "-p", "milim-server", "run_ledger"]),
+  cargoCheck("runtimes.run-ledger-sqlite-authority", [
+    "test",
+    "-p",
+    "milim-server",
+    "subsequent_model_step_rebuilds_text_and_tool_context_from_sqlite",
+  ]),
+  cargoCheck("runtimes.run-ledger-privacy-block", [
+    "test",
+    "-p",
+    "milim-server",
+    "privacy_block_rejection_leaves_no_request_ledger_rows",
+  ]),
+  cargoCheck("runtimes.durable-inbox-contract", ["test", "-p", "milim-server", "inbox_"]),
+  cargoCheck("environment.account-runtime-inherited", [
+    "test",
+    "-p",
+    "milim-server",
+    "account_runtime_processes_inherit_the_user_environment",
+  ]),
+  cargoCheck("environment.mcp-sanitized", [
+    "test",
+    "-p",
+    "milim-mcp-client",
+    "configured_mcp_environment_excludes_host_credentials_and_keeps_explicit_grants",
+  ]),
+  cargoCheck("environment.sandbox-sanitized", [
+    "test",
+    "-p",
+    "milim-sandbox",
+    "sandbox_payload_does_not_forward_host_environment",
+  ]),
+  cargoCheck("tools.execution-pipeline", ["test", "-p", "milim-tools"]),
+  cargoCheck("tools.mcp-app-pipeline", [
+    "test",
+    "-p",
+    "milim-server",
+    "mcp_apps_http_bridge_auth_validation_and_isolation",
+  ]),
   desktopCheck("desktop.runtime-selection", ["tests/turn-runtime.test.ts"]),
   desktopCheck("desktop.stream", ["tests/turn-stream.test.ts"]),
   desktopCheck("desktop.hot-swap", ["tests/hot-swap.test.ts"]),
   desktopCheck("desktop.queue", ["tests/turn-queue.test.ts"]),
   desktopCheck("desktop.persistence", ["tests/session-store.test.ts"]),
   desktopCheck("desktop.approval-events", ["tests/turn-events.test.ts"]),
+  desktopCheck("desktop.quiet-run-details", ["tests/codex-runtime-rendering.test.tsx"]),
   nodeCheck("desktop.model-catalog-discovery", ["tests/api-model-discovery.test.mjs"]),
   nodeCheck("desktop.model-catalog-startup", ["tests/api-model-startup.test.mjs"]),
+  nodeCheck("desktop.run-details-lazy-fetch", ["tests/run-details-lazy.test.mjs"]),
+  nodeCheck("environment.host-shell-inherited", [
+    "tests/run-tauri-rust-test.mjs",
+    "host_shell_inherits_user_environment_and_declares_the_policy",
+  ]),
 ];
 
 const results = [];

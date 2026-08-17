@@ -235,6 +235,30 @@ impl Database {
         Ok(v as u32)
     }
 
+    /// Create and validate the one-time recovery point used before the
+    /// forward-only control-ledger migration.
+    pub fn vacuum_snapshot_into(&self, target: &Path) -> Result<()> {
+        if target.exists() {
+            return Ok(());
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        self.conn
+            .execute("VACUUM INTO ?1", params![target.to_string_lossy().as_ref()])
+            .map_err(sqlite)?;
+        let snapshot = Connection::open(target).map_err(sqlite)?;
+        let check: String = snapshot
+            .query_row("PRAGMA quick_check", [], |row| row.get(0))
+            .map_err(sqlite)?;
+        if !check.eq_ignore_ascii_case("ok") {
+            return Err(Error::Other(format!(
+                "pre-migration SQLite snapshot failed validation: {check}"
+            )));
+        }
+        Ok(())
+    }
+
     /// A key/value secret store over this DB, encrypting values at rest.
     pub fn secrets<'a>(&'a self, enc: &'a EncryptedStore) -> SecretKv<'a> {
         SecretKv { db: self, enc }
@@ -367,6 +391,56 @@ const USER_DATA_MIGRATIONS: &[Migration] = &[
         );
         CREATE INDEX IF NOT EXISTS idx_user_pending_approvals_status
             ON user_pending_approvals(status, created_at_ms);",
+    },
+    Migration {
+        version: 5,
+        name: "user_run_ledger_and_inbox",
+        sql: "CREATE TABLE IF NOT EXISTS user_run_events (
+            run_id TEXT NOT NULL,
+            seq INTEGER NOT NULL,
+            event_id TEXT NOT NULL UNIQUE,
+            step_id TEXT,
+            event_type TEXT NOT NULL,
+            data_json TEXT NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (run_id, seq),
+            FOREIGN KEY (run_id) REFERENCES user_runs(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_run_events_type
+            ON user_run_events(run_id, event_type, seq);
+        CREATE TABLE IF NOT EXISTS user_run_artifacts (
+            run_id TEXT NOT NULL,
+            digest TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            data_json TEXT NOT NULL,
+            byte_len INTEGER NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (run_id, digest),
+            FOREIGN KEY (run_id) REFERENCES user_runs(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS user_run_inbox (
+            id TEXT PRIMARY KEY,
+            thread_id TEXT NOT NULL,
+            target_run_id TEXT,
+            command_id TEXT UNIQUE,
+            kind TEXT NOT NULL CHECK (kind IN ('followup', 'steer', 'inject')),
+            state TEXT NOT NULL CHECK (state IN ('pending', 'claimed', 'cancelled', 'discarded')),
+            payload_json TEXT NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            claimed_at_ms INTEGER,
+            resolved_at_ms INTEGER,
+            FOREIGN KEY (thread_id) REFERENCES user_sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY (target_run_id) REFERENCES user_runs(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_run_inbox_pending
+            ON user_run_inbox(thread_id, state, created_at_ms, id);
+        INSERT OR IGNORE INTO user_run_inbox
+            (id, thread_id, target_run_id, command_id, kind, state, payload_json,
+             created_at_ms, claimed_at_ms, resolved_at_ms)
+        SELECT id, thread_id, NULL, command_id, 'followup', 'pending', request_json,
+               accepted_at_ms, NULL, NULL
+        FROM user_queued_turns;
+        DROP TABLE user_queued_turns;",
     },
 ];
 
@@ -509,8 +583,45 @@ pub struct ControlApprovalRecord {
     pub resolved_at_ms: Option<i64>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlRunEventRecord {
+    pub run_id: String,
+    pub seq: u64,
+    pub event_id: String,
+    pub step_id: Option<String>,
+    pub event_type: String,
+    pub data_json: String,
+    pub created_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlRunArtifactRecord {
+    pub run_id: String,
+    pub digest: String,
+    pub kind: String,
+    pub data_json: String,
+    pub byte_len: u64,
+    pub created_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlInboxRecord {
+    pub id: String,
+    pub thread_id: String,
+    pub target_run_id: Option<String>,
+    pub command_id: Option<String>,
+    pub kind: String,
+    pub state: String,
+    pub payload_json: String,
+    pub created_at_ms: i64,
+    pub claimed_at_ms: Option<i64>,
+    pub resolved_at_ms: Option<i64>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlBackupState {
+    #[serde(default = "default_control_backup_version")]
+    pub schema_version: u32,
     pub host: Option<ControlHostRecord>,
     pub threads: Vec<ControlThreadRecord>,
     pub runs: Vec<ControlRunRecord>,
@@ -518,6 +629,16 @@ pub struct ControlBackupState {
     pub queued_turns: Vec<ControlQueuedTurnRecord>,
     pub command_receipts: Vec<ControlCommandReceiptRecord>,
     pub approvals: Vec<ControlApprovalRecord>,
+    #[serde(default)]
+    pub run_events: Vec<ControlRunEventRecord>,
+    #[serde(default)]
+    pub run_artifacts: Vec<ControlRunArtifactRecord>,
+    #[serde(default)]
+    pub inbox: Vec<ControlInboxRecord>,
+}
+
+fn default_control_backup_version() -> u32 {
+    1
 }
 
 #[derive(Debug, Deserialize)]
@@ -547,6 +668,22 @@ pub struct SessionMessageDelta {
 
 impl UserDataStore {
     pub fn new(db: Database) -> Result<Self> {
+        if db.schema_version_scoped("user_data")? == 4 {
+            let mut statement = db
+                .conn()
+                .prepare("SELECT id, request_json FROM user_queued_turns ORDER BY id")
+                .map_err(sqlite)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(sqlite)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sqlite)?;
+            for (id, request_json) in rows {
+                validate_control_json(&request_json, &format!("queued turn {id}"))?;
+            }
+        }
         db.migrate_scoped("user_data", USER_DATA_MIGRATIONS)?;
         Ok(Self { db: Mutex::new(db) })
     }
@@ -1054,6 +1191,52 @@ impl UserDataStore {
             .map_err(sqlite)
     }
 
+    /// Rebuild the provider-visible transcript from the canonical timeline.
+    /// Compatibility message rows remain a projection, never the replay
+    /// authority for new model steps.
+    pub fn control_projected_messages(&self, thread_id: &str) -> Result<Vec<String>> {
+        let thread_id = required_control_text(thread_id, "thread id")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let mut stmt = db
+            .conn()
+            .prepare(
+                "SELECT item_type, data_json
+                 FROM user_timeline_events
+                 WHERE thread_id = ?1 AND item_type IN ('message', 'message_deleted')
+                 ORDER BY seq ASC",
+            )
+            .map_err(sqlite)?;
+        let events = stmt
+            .query_map(params![thread_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(sqlite)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sqlite)?;
+        let mut messages = Vec::<(String, String)>::new();
+        for (event_type, data_json) in events {
+            let data: serde_json::Value = serde_json::from_str(&data_json)
+                .map_err(|error| Error::Other(format!("invalid timeline message JSON: {error}")))?;
+            if event_type == "message" {
+                if let Some(id) = data.get("id").and_then(serde_json::Value::as_str) {
+                    if let Some(existing) =
+                        messages.iter_mut().find(|(message_id, _)| message_id == id)
+                    {
+                        existing.1 = data_json;
+                    } else {
+                        messages.push((id.to_string(), data_json));
+                    }
+                }
+            } else if let Some(id) = data.get("message_id").and_then(serde_json::Value::as_str) {
+                messages.retain(|(message_id, _)| message_id != id);
+            }
+        }
+        Ok(messages.into_iter().map(|(_, json)| json).collect())
+    }
+
     /// Delete one canonical user-session message by its stable JSON `id` and
     /// compact the positional indices used by the legacy desktop snapshot.
     pub fn control_delete_message(&self, thread_id: &str, message_id: &str) -> Result<bool> {
@@ -1245,6 +1428,133 @@ impl UserDataStore {
         finish_control_transaction(conn, result)
     }
 
+    /// Atomically append a compatibility message row, its canonical timeline
+    /// projection, and the immutable ledger event that accounts for it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn control_commit_message_projection_and_event(
+        &self,
+        thread_id: &str,
+        run_id: &str,
+        item_id: &str,
+        message_json: &str,
+        event_id: &str,
+        step_id: Option<&str>,
+        event_type: &str,
+        event_data_json: &str,
+    ) -> Result<(ControlTimelineRecord, ControlRunEventRecord)> {
+        let thread_id = required_control_text(thread_id, "thread id")?;
+        let run_id = required_control_text(run_id, "run id")?;
+        let item_id = required_control_text(item_id, "timeline item id")?;
+        let event_id = required_control_text(event_id, "run event id")?;
+        let event_type = required_control_text(event_type, "run event type")?;
+        validate_control_json(message_json, "message projection")?;
+        validate_control_json(event_data_json, "run event")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
+        let result = (|| -> Result<(ControlTimelineRecord, ControlRunEventRecord)> {
+            let message_index: i64 = conn
+                .query_row(
+                    "SELECT COALESCE(MAX(message_index), -1) + 1
+                     FROM user_session_messages WHERE session_id = ?1",
+                    params![thread_id],
+                    |row| row.get(0),
+                )
+                .map_err(sqlite)?;
+            conn.execute(
+                "INSERT INTO user_session_messages
+                 (session_id, message_index, message_json) VALUES (?1, ?2, ?3)",
+                params![thread_id, message_index, message_json],
+            )
+            .map_err(sqlite)?;
+
+            let (epoch, timeline_seq): (String, i64) = conn
+                .query_row(
+                    "SELECT epoch, next_seq FROM user_thread_control WHERE thread_id = ?1",
+                    params![thread_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(sqlite)?;
+            let created_at_ms = now_ms();
+            conn.execute(
+                "INSERT INTO user_timeline_events
+                 (thread_id, epoch, seq, item_id, run_id, item_type, data_json, created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'message', ?6, ?7)",
+                params![
+                    thread_id,
+                    epoch,
+                    timeline_seq,
+                    item_id,
+                    run_id,
+                    message_json,
+                    created_at_ms
+                ],
+            )
+            .map_err(sqlite)?;
+
+            let event_seq: i64 = conn
+                .query_row(
+                    "SELECT COALESCE(MAX(seq), 0) + 1 FROM user_run_events WHERE run_id = ?1",
+                    params![run_id],
+                    |row| row.get(0),
+                )
+                .map_err(sqlite)?;
+            conn.execute(
+                "INSERT INTO user_run_events
+                 (run_id, seq, event_id, step_id, event_type, data_json, created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    run_id,
+                    event_seq,
+                    event_id,
+                    step_id,
+                    event_type,
+                    event_data_json,
+                    created_at_ms
+                ],
+            )
+            .map_err(sqlite)?;
+            conn.execute(
+                "UPDATE user_thread_control
+                 SET next_seq = ?2, revision = revision + 2, updated_at_ms = ?3
+                 WHERE thread_id = ?1",
+                params![thread_id, timeline_seq.saturating_add(1), created_at_ms],
+            )
+            .map_err(sqlite)?;
+            conn.execute(
+                "UPDATE user_sessions SET updated_at_ms = ?2 WHERE id = ?1",
+                params![thread_id, created_at_ms],
+            )
+            .map_err(sqlite)?;
+
+            Ok((
+                ControlTimelineRecord {
+                    thread_id: thread_id.to_string(),
+                    epoch,
+                    seq: i64_to_u64(timeline_seq, "timeline sequence")?,
+                    item_id: item_id.to_string(),
+                    run_id: Some(run_id.to_string()),
+                    item_type: "message".to_string(),
+                    data_json: message_json.to_string(),
+                    created_at_ms,
+                },
+                ControlRunEventRecord {
+                    run_id: run_id.to_string(),
+                    seq: i64_to_u64(event_seq, "run event sequence")?,
+                    event_id: event_id.to_string(),
+                    step_id: step_id.map(str::to_string),
+                    event_type: event_type.to_string(),
+                    data_json: event_data_json.to_string(),
+                    created_at_ms,
+                },
+            ))
+        })();
+        finish_control_transaction(conn, result)
+    }
+
     /// Seed an existing desktop transcript into the canonical timeline before
     /// the first control event is appended. The operation is idempotent and
     /// intentionally leaves the thread revision unchanged.
@@ -1417,9 +1727,20 @@ impl UserDataStore {
             .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
         db.conn()
             .execute(
-                "INSERT INTO user_queued_turns
-                 (id, thread_id, command_id, request_json, accepted_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO user_run_inbox
+                 (id, thread_id, target_run_id, command_id, kind, state, payload_json,
+                  created_at_ms, claimed_at_ms, resolved_at_ms)
+                 VALUES (?1, ?2, NULL, ?3, 'followup', 'pending', ?4, ?5, NULL, NULL)
+                 ON CONFLICT(id) DO UPDATE SET
+                    thread_id = excluded.thread_id,
+                    target_run_id = NULL,
+                    command_id = excluded.command_id,
+                    kind = 'followup',
+                    state = 'pending',
+                    payload_json = excluded.payload_json,
+                    created_at_ms = excluded.created_at_ms,
+                    claimed_at_ms = NULL,
+                    resolved_at_ms = NULL",
                 params![
                     turn.id,
                     turn.thread_id,
@@ -1442,14 +1763,17 @@ impl UserDataStore {
             .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
         let (sql, value) = match thread_id {
             Some(id) => (
-                "SELECT id, thread_id, command_id, request_json, accepted_at_ms
-                 FROM user_queued_turns WHERE thread_id = ?1
-                 ORDER BY accepted_at_ms ASC, id ASC",
+                "SELECT id, thread_id, COALESCE(command_id, id), payload_json, created_at_ms
+                 FROM user_run_inbox
+                 WHERE kind = 'followup' AND state = 'pending' AND thread_id = ?1
+                 ORDER BY created_at_ms ASC, id ASC",
                 Some(required_control_text(id, "thread id")?),
             ),
             None => (
-                "SELECT id, thread_id, command_id, request_json, accepted_at_ms
-                 FROM user_queued_turns ORDER BY accepted_at_ms ASC, id ASC",
+                "SELECT id, thread_id, COALESCE(command_id, id), payload_json, created_at_ms
+                 FROM user_run_inbox
+                 WHERE kind = 'followup' AND state = 'pending'
+                 ORDER BY created_at_ms ASC, id ASC",
                 None,
             ),
         };
@@ -1475,8 +1799,323 @@ impl UserDataStore {
             .lock()
             .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
         db.conn()
-            .execute("DELETE FROM user_queued_turns WHERE id = ?1", params![id])
+            .execute(
+                "UPDATE user_run_inbox
+                 SET state = 'claimed', claimed_at_ms = ?2, resolved_at_ms = ?2
+                 WHERE id = ?1 AND kind = 'followup' AND state = 'pending'",
+                params![id, now_ms()],
+            )
             .map(|changed| changed > 0)
+            .map_err(sqlite)
+    }
+
+    pub fn control_append_run_event(
+        &self,
+        run_id: &str,
+        event_id: &str,
+        step_id: Option<&str>,
+        event_type: &str,
+        data_json: &str,
+    ) -> Result<ControlRunEventRecord> {
+        let run_id = required_control_text(run_id, "run id")?;
+        let event_id = required_control_text(event_id, "run event id")?;
+        let event_type = required_control_text(event_type, "run event type")?;
+        validate_control_json(data_json, "run event")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
+        let result = (|| -> Result<ControlRunEventRecord> {
+            let seq = conn
+                .query_row(
+                    "SELECT COALESCE(MAX(seq), 0) + 1 FROM user_run_events WHERE run_id = ?1",
+                    params![run_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(sqlite)?;
+            let created_at_ms = now_ms();
+            conn.execute(
+                "INSERT INTO user_run_events
+                 (run_id, seq, event_id, step_id, event_type, data_json, created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    run_id,
+                    seq,
+                    event_id,
+                    step_id,
+                    event_type,
+                    data_json,
+                    created_at_ms
+                ],
+            )
+            .map_err(sqlite)?;
+            Ok(ControlRunEventRecord {
+                run_id: run_id.to_string(),
+                seq: i64_to_u64(seq, "run event sequence")?,
+                event_id: event_id.to_string(),
+                step_id: step_id.map(str::to_string),
+                event_type: event_type.to_string(),
+                data_json: data_json.to_string(),
+                created_at_ms,
+            })
+        })();
+        finish_control_transaction(conn, result)
+    }
+
+    pub fn control_run_events(
+        &self,
+        run_id: &str,
+        after_seq: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<ControlRunEventRecord>> {
+        let run_id = required_control_text(run_id, "run id")?;
+        let after_seq = u64_to_i64(after_seq.unwrap_or_default())?;
+        let limit = i64::try_from(limit.clamp(1, 500))
+            .map_err(|_| Error::InvalidRequest("run event limit is too large".into()))?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let mut stmt = db
+            .conn()
+            .prepare(
+                "SELECT run_id, seq, event_id, step_id, event_type, data_json, created_at_ms
+                 FROM user_run_events
+                 WHERE run_id = ?1 AND seq > ?2
+                 ORDER BY seq ASC LIMIT ?3",
+            )
+            .map_err(sqlite)?;
+        let rows = stmt
+            .query_map(
+                params![run_id, after_seq, limit],
+                control_run_event_from_row,
+            )
+            .map_err(sqlite)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sqlite)
+    }
+
+    pub fn control_put_run_artifact(&self, artifact: &ControlRunArtifactRecord) -> Result<()> {
+        validate_control_json(&artifact.data_json, "run artifact")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        db.conn()
+            .execute(
+                "INSERT OR IGNORE INTO user_run_artifacts
+                 (run_id, digest, kind, data_json, byte_len, created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    artifact.run_id,
+                    artifact.digest,
+                    artifact.kind,
+                    artifact.data_json,
+                    u64_to_i64(artifact.byte_len)?,
+                    artifact.created_at_ms
+                ],
+            )
+            .map_err(sqlite)?;
+        Ok(())
+    }
+
+    pub fn control_run_artifacts(&self, run_id: &str) -> Result<Vec<ControlRunArtifactRecord>> {
+        let run_id = required_control_text(run_id, "run id")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let mut stmt = db
+            .conn()
+            .prepare(
+                "SELECT run_id, digest, kind, data_json, byte_len, created_at_ms
+                 FROM user_run_artifacts WHERE run_id = ?1 ORDER BY created_at_ms, digest",
+            )
+            .map_err(sqlite)?;
+        let rows = stmt
+            .query_map(params![run_id], control_run_artifact_from_row)
+            .map_err(sqlite)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sqlite)
+    }
+
+    pub fn control_put_inbox(&self, item: &ControlInboxRecord) -> Result<()> {
+        if !matches!(item.kind.as_str(), "followup" | "steer" | "inject") {
+            return Err(Error::InvalidRequest("invalid inbox kind".into()));
+        }
+        if !matches!(
+            item.state.as_str(),
+            "pending" | "claimed" | "cancelled" | "discarded"
+        ) {
+            return Err(Error::InvalidRequest("invalid inbox state".into()));
+        }
+        validate_control_json(&item.payload_json, "inbox payload")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        db.conn()
+            .execute(
+                "INSERT INTO user_run_inbox
+                 (id, thread_id, target_run_id, command_id, kind, state, payload_json,
+                  created_at_ms, claimed_at_ms, resolved_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    item.id,
+                    item.thread_id,
+                    item.target_run_id,
+                    item.command_id,
+                    item.kind,
+                    item.state,
+                    item.payload_json,
+                    item.created_at_ms,
+                    item.claimed_at_ms,
+                    item.resolved_at_ms
+                ],
+            )
+            .map_err(sqlite)?;
+        Ok(())
+    }
+
+    pub fn control_pending_inbox(
+        &self,
+        thread_id: Option<&str>,
+    ) -> Result<Vec<ControlInboxRecord>> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let (sql, thread_id) = match thread_id {
+            Some(thread_id) => (
+                "SELECT id, thread_id, target_run_id, command_id, kind, state, payload_json,
+                        created_at_ms, claimed_at_ms, resolved_at_ms
+                 FROM user_run_inbox WHERE state = 'pending' AND thread_id = ?1
+                 ORDER BY created_at_ms, id",
+                Some(required_control_text(thread_id, "thread id")?),
+            ),
+            None => (
+                "SELECT id, thread_id, target_run_id, command_id, kind, state, payload_json,
+                        created_at_ms, claimed_at_ms, resolved_at_ms
+                 FROM user_run_inbox WHERE state = 'pending'
+                 ORDER BY created_at_ms, id",
+                None,
+            ),
+        };
+        let mut stmt = db.conn().prepare(sql).map_err(sqlite)?;
+        let rows = match thread_id {
+            Some(thread_id) => stmt
+                .query_map(params![thread_id], control_inbox_from_row)
+                .map_err(sqlite)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sqlite)?,
+            None => stmt
+                .query_map([], control_inbox_from_row)
+                .map_err(sqlite)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sqlite)?,
+        };
+        Ok(rows)
+    }
+
+    pub fn control_claim_step_inputs(
+        &self,
+        thread_id: &str,
+        run_id: &str,
+    ) -> Result<Vec<ControlInboxRecord>> {
+        let thread_id = required_control_text(thread_id, "thread id")?;
+        let run_id = required_control_text(run_id, "run id")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
+        let result = (|| -> Result<Vec<ControlInboxRecord>> {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, thread_id, target_run_id, command_id, kind, state, payload_json,
+                            created_at_ms, claimed_at_ms, resolved_at_ms
+                     FROM user_run_inbox
+                     WHERE thread_id = ?1 AND state = 'pending'
+                       AND ((kind = 'steer' AND target_run_id = ?2) OR kind = 'inject')
+                     ORDER BY created_at_ms, id",
+                )
+                .map_err(sqlite)?;
+            let items = stmt
+                .query_map(params![thread_id, run_id], control_inbox_from_row)
+                .map_err(sqlite)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sqlite)?;
+            drop(stmt);
+            let now = now_ms();
+            for item in &items {
+                conn.execute(
+                    "UPDATE user_run_inbox SET state = 'claimed', claimed_at_ms = ?2, resolved_at_ms = ?2
+                     WHERE id = ?1 AND state = 'pending'",
+                    params![item.id, now],
+                )
+                .map_err(sqlite)?;
+            }
+            Ok(items
+                .into_iter()
+                .map(|mut item| {
+                    item.state = "claimed".into();
+                    item.claimed_at_ms = Some(now);
+                    item.resolved_at_ms = Some(now);
+                    item
+                })
+                .collect())
+        })();
+        finish_control_transaction(conn, result)
+    }
+
+    pub fn control_cancel_inbox(&self, id: &str) -> Result<bool> {
+        let id = required_control_text(id, "inbox id")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        db.conn()
+            .execute(
+                "UPDATE user_run_inbox SET state = 'cancelled', resolved_at_ms = ?2
+                 WHERE id = ?1 AND state = 'pending'",
+                params![id, now_ms()],
+            )
+            .map(|changed| changed > 0)
+            .map_err(sqlite)
+    }
+
+    pub fn control_discard_inbox(&self, id: &str) -> Result<bool> {
+        let id = required_control_text(id, "inbox id")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        db.conn()
+            .execute(
+                "UPDATE user_run_inbox SET state = 'discarded', resolved_at_ms = ?2
+                 WHERE id = ?1 AND state = 'pending'",
+                params![id, now_ms()],
+            )
+            .map(|changed| changed > 0)
+            .map_err(sqlite)
+    }
+
+    pub fn control_retarget_pending_steers(&self, run_id: &str) -> Result<usize> {
+        let run_id = required_control_text(run_id, "run id")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        db.conn()
+            .execute(
+                "UPDATE user_run_inbox
+                 SET kind = 'followup', target_run_id = NULL
+                 WHERE kind = 'steer' AND state = 'pending' AND target_run_id = ?1",
+                params![run_id],
+            )
             .map_err(sqlite)
     }
 
@@ -1660,8 +2299,10 @@ impl UserDataStore {
         let queued_turns = {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, thread_id, command_id, request_json, accepted_at_ms
-                     FROM user_queued_turns ORDER BY accepted_at_ms, id",
+                    "SELECT id, thread_id, COALESCE(command_id, id), payload_json, created_at_ms
+                     FROM user_run_inbox
+                     WHERE kind = 'followup' AND state = 'pending'
+                     ORDER BY created_at_ms, id",
                 )
                 .map_err(sqlite)?;
             let rows = stmt
@@ -1701,7 +2342,51 @@ impl UserDataStore {
                 .map_err(sqlite)?;
             rows
         };
+        let run_events = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT run_id, seq, event_id, step_id, event_type, data_json, created_at_ms
+                     FROM user_run_events ORDER BY run_id, seq",
+                )
+                .map_err(sqlite)?;
+            let rows = stmt
+                .query_map([], control_run_event_from_row)
+                .map_err(sqlite)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sqlite)?;
+            rows
+        };
+        let run_artifacts = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT run_id, digest, kind, data_json, byte_len, created_at_ms
+                     FROM user_run_artifacts ORDER BY run_id, created_at_ms, digest",
+                )
+                .map_err(sqlite)?;
+            let rows = stmt
+                .query_map([], control_run_artifact_from_row)
+                .map_err(sqlite)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sqlite)?;
+            rows
+        };
+        let inbox = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, thread_id, target_run_id, command_id, kind, state, payload_json,
+                            created_at_ms, claimed_at_ms, resolved_at_ms
+                     FROM user_run_inbox ORDER BY created_at_ms, id",
+                )
+                .map_err(sqlite)?;
+            let rows = stmt
+                .query_map([], control_inbox_from_row)
+                .map_err(sqlite)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sqlite)?;
+            rows
+        };
         Ok(ControlBackupState {
+            schema_version: 2,
             host,
             threads,
             runs,
@@ -1709,10 +2394,19 @@ impl UserDataStore {
             queued_turns,
             command_receipts,
             approvals,
+            run_events,
+            run_artifacts,
+            inbox,
         })
     }
 
     pub fn replace_control_backup_state(&self, backup: &ControlBackupState) -> Result<()> {
+        if !matches!(backup.schema_version, 1 | 2) {
+            return Err(Error::InvalidRequest(format!(
+                "unsupported control backup version {}",
+                backup.schema_version
+            )));
+        }
         for run in &backup.runs {
             validate_control_json(&run.request_json, "run request")?;
             validate_optional_control_json(run.agent_snapshot_json.as_deref(), "agent snapshot")?;
@@ -1733,6 +2427,15 @@ impl UserDataStore {
             validate_control_json(&approval.request_json, "approval request")?;
             validate_optional_control_json(approval.decision_json.as_deref(), "approval decision")?;
         }
+        for event in &backup.run_events {
+            validate_control_json(&event.data_json, "run event")?;
+        }
+        for artifact in &backup.run_artifacts {
+            validate_control_json(&artifact.data_json, "run artifact")?;
+        }
+        for item in &backup.inbox {
+            validate_control_json(&item.payload_json, "inbox payload")?;
+        }
         let db = self
             .db
             .lock()
@@ -1741,9 +2444,11 @@ impl UserDataStore {
         conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
         let result = (|| -> Result<()> {
             conn.execute_batch(
-                "DELETE FROM user_pending_approvals;
+                "DELETE FROM user_run_events;
+                 DELETE FROM user_run_artifacts;
+                 DELETE FROM user_run_inbox;
+                 DELETE FROM user_pending_approvals;
                  DELETE FROM user_timeline_events;
-                 DELETE FROM user_queued_turns;
                  DELETE FROM user_command_receipts;
                  DELETE FROM user_runs;
                  DELETE FROM user_thread_control;
@@ -1817,17 +2522,43 @@ impl UserDataStore {
                 )
                 .map_err(sqlite)?;
             }
-            for turn in &backup.queued_turns {
+            let inbox = if backup.inbox.is_empty() {
+                backup
+                    .queued_turns
+                    .iter()
+                    .map(|turn| ControlInboxRecord {
+                        id: turn.id.clone(),
+                        thread_id: turn.thread_id.clone(),
+                        target_run_id: None,
+                        command_id: Some(turn.command_id.clone()),
+                        kind: "followup".into(),
+                        state: "pending".into(),
+                        payload_json: turn.request_json.clone(),
+                        created_at_ms: turn.accepted_at_ms,
+                        claimed_at_ms: None,
+                        resolved_at_ms: None,
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                backup.inbox.clone()
+            };
+            for item in &inbox {
                 conn.execute(
-                    "INSERT INTO user_queued_turns
-                     (id, thread_id, command_id, request_json, accepted_at_ms)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    "INSERT INTO user_run_inbox
+                     (id, thread_id, target_run_id, command_id, kind, state, payload_json,
+                      created_at_ms, claimed_at_ms, resolved_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     params![
-                        turn.id,
-                        turn.thread_id,
-                        turn.command_id,
-                        turn.request_json,
-                        turn.accepted_at_ms
+                        item.id,
+                        item.thread_id,
+                        item.target_run_id,
+                        item.command_id,
+                        item.kind,
+                        item.state,
+                        item.payload_json,
+                        item.created_at_ms,
+                        item.claimed_at_ms,
+                        item.resolved_at_ms
                     ],
                 )
                 .map_err(sqlite)?;
@@ -1859,6 +2590,39 @@ impl UserDataStore {
                         approval.decision_json,
                         approval.created_at_ms,
                         approval.resolved_at_ms
+                    ],
+                )
+                .map_err(sqlite)?;
+            }
+            for artifact in &backup.run_artifacts {
+                conn.execute(
+                    "INSERT INTO user_run_artifacts
+                     (run_id, digest, kind, data_json, byte_len, created_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        artifact.run_id,
+                        artifact.digest,
+                        artifact.kind,
+                        artifact.data_json,
+                        u64_to_i64(artifact.byte_len)?,
+                        artifact.created_at_ms
+                    ],
+                )
+                .map_err(sqlite)?;
+            }
+            for event in &backup.run_events {
+                conn.execute(
+                    "INSERT INTO user_run_events
+                     (run_id, seq, event_id, step_id, event_type, data_json, created_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        event.run_id,
+                        u64_to_i64(event.seq)?,
+                        event.event_id,
+                        event.step_id,
+                        event.event_type,
+                        event.data_json,
+                        event.created_at_ms
                     ],
                 )
                 .map_err(sqlite)?;
@@ -1899,6 +2663,14 @@ impl UserDataStore {
                     params![now],
                 )
                 .map_err(sqlite)?;
+            conn.execute(
+                "UPDATE user_run_inbox
+                 SET kind = 'followup', target_run_id = NULL
+                 WHERE kind = 'steer' AND state = 'pending'
+                   AND target_run_id IN (SELECT id FROM user_runs WHERE status = 'interrupted')",
+                [],
+            )
+            .map_err(sqlite)?;
             Ok((runs, approvals))
         })();
         finish_control_transaction(conn, result)
@@ -2033,6 +2805,49 @@ fn control_queued_turn_from_row(
         command_id: row.get(2)?,
         request_json: row.get(3)?,
         accepted_at_ms: row.get(4)?,
+    })
+}
+
+fn control_run_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ControlRunEventRecord> {
+    let seq = row.get::<_, i64>(1)?;
+    Ok(ControlRunEventRecord {
+        run_id: row.get(0)?,
+        seq: u64::try_from(seq).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(1, seq))?,
+        event_id: row.get(2)?,
+        step_id: row.get(3)?,
+        event_type: row.get(4)?,
+        data_json: row.get(5)?,
+        created_at_ms: row.get(6)?,
+    })
+}
+
+fn control_run_artifact_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ControlRunArtifactRecord> {
+    let byte_len = row.get::<_, i64>(4)?;
+    Ok(ControlRunArtifactRecord {
+        run_id: row.get(0)?,
+        digest: row.get(1)?,
+        kind: row.get(2)?,
+        data_json: row.get(3)?,
+        byte_len: u64::try_from(byte_len)
+            .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(4, byte_len))?,
+        created_at_ms: row.get(5)?,
+    })
+}
+
+fn control_inbox_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ControlInboxRecord> {
+    Ok(ControlInboxRecord {
+        id: row.get(0)?,
+        thread_id: row.get(1)?,
+        target_run_id: row.get(2)?,
+        command_id: row.get(3)?,
+        kind: row.get(4)?,
+        state: row.get(5)?,
+        payload_json: row.get(6)?,
+        created_at_ms: row.get(7)?,
+        claimed_at_ms: row.get(8)?,
+        resolved_at_ms: row.get(9)?,
     })
 }
 
@@ -2631,6 +3446,7 @@ fn sqlite(e: rusqlite::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn migrations_apply_once_and_track_version() {
@@ -3486,6 +4302,367 @@ mod tests {
         let messages = store.control_messages("thread-1").unwrap();
         assert!(messages[0].contains("authoritative"));
         assert!(!messages[0].contains("stale"));
+    }
+
+    #[test]
+    fn v5_migration_validates_and_converts_the_v4_queue() {
+        let db = Database::open_in_memory().unwrap();
+        db.migrate_scoped("user_data", &USER_DATA_MIGRATIONS[..4])
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO user_sessions
+                 (id, sort_order, session_json, updated_at_ms)
+                 VALUES ('thread-1', 0, '{}', 1)",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO user_thread_control
+                 (thread_id, epoch, revision, next_seq, updated_at_ms)
+                 VALUES ('thread-1', 'epoch-1', 0, 1, 1)",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO user_queued_turns
+                 (id, thread_id, command_id, request_json, accepted_at_ms)
+                 VALUES ('queue-1', 'thread-1', 'command-1', '{\"text\":\"next\"}', 2)",
+                [],
+            )
+            .unwrap();
+
+        let store = UserDataStore::new(db).unwrap();
+        let pending = store.control_pending_inbox(Some("thread-1")).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].kind, "followup");
+        assert_eq!(pending[0].command_id.as_deref(), Some("command-1"));
+    }
+
+    #[test]
+    fn v5_migration_refuses_an_invalid_v4_queue_payload() {
+        let db = Database::open_in_memory().unwrap();
+        db.migrate_scoped("user_data", &USER_DATA_MIGRATIONS[..4])
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO user_sessions
+                 (id, sort_order, session_json, updated_at_ms)
+                 VALUES ('thread-1', 0, '{}', 1)",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO user_thread_control
+                 (thread_id, epoch, revision, next_seq, updated_at_ms)
+                 VALUES ('thread-1', 'epoch-1', 0, 1, 1)",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO user_queued_turns
+                 (id, thread_id, command_id, request_json, accepted_at_ms)
+                 VALUES ('queue-1', 'thread-1', 'command-1', 'not-json', 2)",
+                [],
+            )
+            .unwrap();
+
+        let error = UserDataStore::new(db)
+            .err()
+            .expect("invalid queue must block v5");
+        assert!(error.to_string().contains("queued turn queue-1"));
+    }
+
+    #[test]
+    fn durable_inbox_claim_cancel_retarget_and_restart_are_atomic() {
+        let store = Arc::new(UserDataStore::new(Database::open_in_memory().unwrap()).unwrap());
+        store
+            .control_create_thread(
+                "thread-1",
+                r#"{"id":"thread-1","title":"Fixture"}"#,
+                "epoch-1",
+            )
+            .unwrap();
+        store
+            .control_put_run(&ControlRunRecord {
+                id: "run-1".into(),
+                thread_id: "thread-1".into(),
+                status: "running".into(),
+                adapter: "provider".into(),
+                request_json: r#"{"text":"hello"}"#.into(),
+                agent_snapshot_json: None,
+                native_session_json: None,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                completed_at_ms: None,
+                error_json: None,
+            })
+            .unwrap();
+        for item in [
+            ControlInboxRecord {
+                id: "steer-1".into(),
+                thread_id: "thread-1".into(),
+                target_run_id: Some("run-1".into()),
+                command_id: Some("command-steer-1".into()),
+                kind: "steer".into(),
+                state: "pending".into(),
+                payload_json: r#"{"text":"first"}"#.into(),
+                created_at_ms: 1,
+                claimed_at_ms: None,
+                resolved_at_ms: None,
+            },
+            ControlInboxRecord {
+                id: "inject-1".into(),
+                thread_id: "thread-1".into(),
+                target_run_id: None,
+                command_id: Some("command-inject-1".into()),
+                kind: "inject".into(),
+                state: "pending".into(),
+                payload_json: r#"{"text":"second"}"#.into(),
+                created_at_ms: 2,
+                claimed_at_ms: None,
+                resolved_at_ms: None,
+            },
+        ] {
+            store.control_put_inbox(&item).unwrap();
+        }
+
+        let left = store.clone();
+        let right = store.clone();
+        let first = std::thread::spawn(move || {
+            left.control_claim_step_inputs("thread-1", "run-1").unwrap()
+        });
+        let second = std::thread::spawn(move || {
+            right
+                .control_claim_step_inputs("thread-1", "run-1")
+                .unwrap()
+        });
+        let mut claims = [first.join().unwrap(), second.join().unwrap()];
+        claims.sort_by_key(Vec::len);
+        assert!(claims[0].is_empty());
+        assert_eq!(
+            claims[1]
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["steer-1", "inject-1"]
+        );
+        assert!(!store.control_cancel_inbox("steer-1").unwrap());
+
+        for item in [
+            ControlInboxRecord {
+                id: "steer-retarget".into(),
+                thread_id: "thread-1".into(),
+                target_run_id: Some("run-1".into()),
+                command_id: None,
+                kind: "steer".into(),
+                state: "pending".into(),
+                payload_json: r#"{"text":"later"}"#.into(),
+                created_at_ms: 3,
+                claimed_at_ms: None,
+                resolved_at_ms: None,
+            },
+            ControlInboxRecord {
+                id: "inject-persist".into(),
+                thread_id: "thread-1".into(),
+                target_run_id: None,
+                command_id: None,
+                kind: "inject".into(),
+                state: "pending".into(),
+                payload_json: r#"{"text":"context"}"#.into(),
+                created_at_ms: 4,
+                claimed_at_ms: None,
+                resolved_at_ms: None,
+            },
+            ControlInboxRecord {
+                id: "followup-cancel".into(),
+                thread_id: "thread-1".into(),
+                target_run_id: None,
+                command_id: None,
+                kind: "followup".into(),
+                state: "pending".into(),
+                payload_json: r#"{"text":"future"}"#.into(),
+                created_at_ms: 5,
+                claimed_at_ms: None,
+                resolved_at_ms: None,
+            },
+        ] {
+            store.control_put_inbox(&item).unwrap();
+        }
+        assert!(store.control_cancel_inbox("followup-cancel").unwrap());
+        assert!(!store.control_cancel_inbox("followup-cancel").unwrap());
+        assert_eq!(store.reconcile_control_startup().unwrap(), (1, 0));
+
+        let pending = store.control_pending_inbox(Some("thread-1")).unwrap();
+        let retargeted = pending
+            .iter()
+            .find(|item| item.id == "steer-retarget")
+            .unwrap();
+        assert_eq!(retargeted.kind, "followup");
+        assert!(retargeted.target_run_id.is_none());
+        assert!(pending
+            .iter()
+            .any(|item| item.id == "inject-persist" && item.kind == "inject"));
+        assert!(!pending.iter().any(|item| item.id == "followup-cancel"));
+    }
+
+    #[test]
+    fn message_projection_and_ledger_event_commit_or_rollback_together() {
+        let store = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        store
+            .control_create_thread(
+                "thread-1",
+                r#"{"id":"thread-1","title":"Fixture"}"#,
+                "epoch-1",
+            )
+            .unwrap();
+        let failed = store.control_commit_message_projection_and_event(
+            "thread-1",
+            "missing-run",
+            "message-1",
+            r#"{"id":"message-1","role":"assistant","content":"hi"}"#,
+            "event-1",
+            None,
+            "assistant_message_projected",
+            r#"{"ledger_version":1}"#,
+        );
+        assert!(failed.is_err());
+        assert!(store.control_messages("thread-1").unwrap().is_empty());
+        assert!(store
+            .control_timeline_page("thread-1", None, None, true, 10)
+            .unwrap()
+            .unwrap()
+            .items
+            .is_empty());
+
+        store
+            .control_put_run(&ControlRunRecord {
+                id: "run-1".into(),
+                thread_id: "thread-1".into(),
+                status: "running".into(),
+                adapter: "provider".into(),
+                request_json: r#"{"text":"hello"}"#.into(),
+                agent_snapshot_json: None,
+                native_session_json: None,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                completed_at_ms: None,
+                error_json: None,
+            })
+            .unwrap();
+        let (timeline, event) = store
+            .control_commit_message_projection_and_event(
+                "thread-1",
+                "run-1",
+                "message-1",
+                r#"{"id":"message-1","role":"assistant","content":"hi"}"#,
+                "event-1",
+                Some("step-1"),
+                "assistant_message_projected",
+                r#"{"ledger_version":1}"#,
+            )
+            .unwrap();
+        assert_eq!(timeline.seq, 1);
+        assert_eq!(event.seq, 1);
+        assert_eq!(store.control_messages("thread-1").unwrap().len(), 1);
+        assert_eq!(
+            store.control_run_events("run-1", None, 10).unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn v1_and_v2_control_backups_restore_inbox_and_ledger() {
+        let source = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        source
+            .control_create_thread(
+                "thread-1",
+                r#"{"id":"thread-1","title":"Fixture"}"#,
+                "epoch-1",
+            )
+            .unwrap();
+        source
+            .control_put_run(&ControlRunRecord {
+                id: "run-1".into(),
+                thread_id: "thread-1".into(),
+                status: "completed".into(),
+                adapter: "provider".into(),
+                request_json: r#"{"text":"hello"}"#.into(),
+                agent_snapshot_json: None,
+                native_session_json: None,
+                created_at_ms: 1,
+                updated_at_ms: 2,
+                completed_at_ms: Some(2),
+                error_json: None,
+            })
+            .unwrap();
+        source
+            .control_append_run_event(
+                "run-1",
+                "event-1",
+                Some("step-1"),
+                "model_request_resolved",
+                r#"{"artifact_digest":"digest-1"}"#,
+            )
+            .unwrap();
+        source
+            .control_put_run_artifact(&ControlRunArtifactRecord {
+                run_id: "run-1".into(),
+                digest: "digest-1".into(),
+                kind: "provider_request".into(),
+                data_json: r#"{"messages":[]}"#.into(),
+                byte_len: 15,
+                created_at_ms: 1,
+            })
+            .unwrap();
+        source
+            .control_enqueue_turn(&ControlQueuedTurnRecord {
+                id: "queue-1".into(),
+                thread_id: "thread-1".into(),
+                command_id: "command-1".into(),
+                request_json: r#"{"text":"next"}"#.into(),
+                accepted_at_ms: 3,
+            })
+            .unwrap();
+        let v2 = source.control_backup_state().unwrap();
+        assert_eq!(v2.schema_version, 2);
+
+        let target_v2 = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        target_v2
+            .set_sessions_snapshot(
+                r#"{"state":{"sessions":[{"id":"thread-1","messages":[]}]},"version":0}"#,
+            )
+            .unwrap();
+        target_v2.replace_control_backup_state(&v2).unwrap();
+        assert_eq!(
+            target_v2
+                .control_run_events("run-1", None, 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(target_v2.control_run_artifacts("run-1").unwrap().len(), 1);
+        assert_eq!(target_v2.control_pending_inbox(None).unwrap().len(), 1);
+
+        let mut v1 = v2;
+        v1.schema_version = 1;
+        v1.run_events.clear();
+        v1.run_artifacts.clear();
+        v1.inbox.clear();
+        let target_v1 = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        target_v1
+            .set_sessions_snapshot(
+                r#"{"state":{"sessions":[{"id":"thread-1","messages":[]}]},"version":0}"#,
+            )
+            .unwrap();
+        target_v1.replace_control_backup_state(&v1).unwrap();
+        let converted = target_v1.control_pending_inbox(None).unwrap();
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0].kind, "followup");
     }
 
     #[test]
