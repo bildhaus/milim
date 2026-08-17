@@ -24,5 +24,8 @@ bytes.workspace = true
 tracing.workspace = true
 base64.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+reqwest = { workspace = true, features = ["rustls-tls-native-roots"] }
+
 [dev-dependencies]
 tokio = { workspace = true }
