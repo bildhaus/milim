@@ -5929,8 +5929,19 @@ g.native-chart-mark:focus-visible .native-chart-point {
 /* typing indicator + stop button */
 .typing { display: inline-block; color: var(--tertiary-text); animation: blink 1s steps(2) infinite; }
 @keyframes blink { 50% { opacity: 0.2; } }
-.send-btn.stop { background: transparent; color: var(--primary-text); border: 1px solid var(--border-secondary); box-shadow: none; }
-.send-btn.stop:hover { background: var(--chip-hover); }
+.send-btn.stop {
+  background: transparent;
+  color: var(--secondary-text);
+  border: 1px solid var(--border-secondary);
+  box-shadow: none;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.send-btn.stop:hover,
+.send-btn.stop:active {
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+  border-color: color-mix(in srgb, var(--error) 55%, var(--border-secondary));
+  color: var(--error);
+}
 
 /* ---- Dock (control bar + composer) ---- */
 .dock {
@@ -7029,6 +7040,9 @@ span.provider-brand-icon {
   width: 28px;
   height: 28px;
 }
+.composer.compact .composer-queue-actions.split .composer-busy-actions > .tool-btn {
+  height: 28px;
+}
 .composer.drag-over {
   border-radius: 8px;
   outline: 1px solid var(--accent);
@@ -7380,8 +7394,26 @@ span.provider-brand-icon {
   z-index: 90;
 }
 
-.composer-send { display: flex; align-items: center; gap: 10px; }
+.composer-send { display: flex; align-items: center; gap: 8px; }
+.composer-queue-actions { display: flex; align-items: center; }
 .composer-busy-actions { position: relative; display: flex; }
+.composer-queue-actions.split > .send-btn {
+  border-radius: 8px 0 0 8px;
+}
+.composer-queue-actions.split .composer-busy-actions > .tool-btn {
+  width: 24px;
+  height: 32px;
+  border-left: 1px solid color-mix(in srgb, var(--accent-contrast) 18%, transparent);
+  border-radius: 0 8px 8px 0;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  transition: opacity 0.15s;
+}
+.composer-queue-actions.split .composer-busy-actions > .tool-btn:hover {
+  background: var(--accent);
+  color: var(--accent-contrast);
+  opacity: 0.92;
+}
 .composer-busy-menu {
   right: 0;
   bottom: calc(100% + 6px);
@@ -7412,3 +7444,8 @@ span.provider-brand-icon {
 }
 .send-btn:hover:not(:disabled) { opacity: 0.92; }
 .send-btn:disabled { opacity: 0.4; cursor: default; box-shadow: none; }
+.send-btn:focus-visible,
+.composer-queue-actions.split .composer-busy-actions > .tool-btn:focus-visible {
+  outline: 2px solid var(--focus-border);
+  outline-offset: 2px;
+}
