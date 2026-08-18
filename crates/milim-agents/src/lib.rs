@@ -58,6 +58,9 @@ pub struct AgentRunConfig {
     /// Durable boundary hook. A failed commit aborts the loop before another
     /// provider request can leave Milim.
     pub step_hook: Option<Arc<dyn AgentStepHook>>,
+    /// Sampling controls frozen for the whole agent run. The same values are
+    /// reused for every model turn so tool loops cannot silently drift.
+    pub sampling: SamplingParams,
 }
 
 impl Default for AgentRunConfig {
@@ -69,6 +72,7 @@ impl Default for AgentRunConfig {
             ),
             approval_broker: None,
             step_hook: None,
+            sampling: SamplingParams::default(),
         }
     }
 }
@@ -647,7 +651,7 @@ pub async fn run_agent_with_config(
             response_format: None,
             prompt: None,
             suffix: None,
-            sampling: SamplingParams::default(),
+            sampling: config.sampling.clone(),
             reasoning_effort,
         };
         let out = service.complete(req).await?;
@@ -857,7 +861,7 @@ pub fn run_agent_stream_with_config(
                 response_format: None,
                 prompt: None,
                 suffix: None,
-                sampling: SamplingParams::default(),
+                sampling: config.sampling.clone(),
                 reasoning_effort,
             };
             if let Some(hook) = config.step_hook.as_ref() {
@@ -1664,6 +1668,7 @@ mod tests {
                 initial_stream_retry_backoff: Duration::ZERO,
                 approval_broker: None,
                 step_hook: None,
+                sampling: SamplingParams::default(),
             },
         )
         .await
@@ -1775,6 +1780,7 @@ mod tests {
                 initial_stream_retry_backoff: Duration::ZERO,
                 approval_broker: None,
                 step_hook: None,
+                sampling: SamplingParams::default(),
             },
         ));
 

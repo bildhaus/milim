@@ -207,6 +207,7 @@ fn legacy_completion_to_completion(req: LegacyCompletionRequest) -> CompletionRe
             seed: req.seed,
             frequency_penalty: req.frequency_penalty,
             presence_penalty: req.presence_penalty,
+            ..Default::default()
         },
         reasoning_effort: None,
     }
@@ -902,6 +903,7 @@ fn ollama_generate_to_completion(req: OllamaGenerateRequest) -> CompletionReques
             seed: opt_i64(&opts, "seed"),
             frequency_penalty: opt_f32(&opts, "frequency_penalty"),
             presence_penalty: opt_f32(&opts, "presence_penalty"),
+            ..Default::default()
         },
         reasoning_effort: ollama_think_effort(req.think.as_ref()),
     }

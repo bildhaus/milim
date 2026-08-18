@@ -131,6 +131,24 @@ pub struct ControlAttachmentV1 {
     pub truncated: bool,
 }
 
+/// Provider sampling controls frozen at turn acceptance time. Missing values
+/// deliberately mean "use the model/server default".
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, TS)]
+pub struct GenerationSettingsV1 {
+    pub max_tokens: Option<u32>,
+    pub temperature: Option<f32>,
+    pub top_p: Option<f32>,
+    pub seed: Option<i64>,
+    #[serde(default)]
+    pub stop: Vec<String>,
+    pub frequency_penalty: Option<f32>,
+    pub presence_penalty: Option<f32>,
+    pub top_k: Option<i32>,
+    pub min_p: Option<f32>,
+    pub repetition_penalty: Option<f32>,
+    pub thinking_token_budget: Option<u32>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 pub struct FrozenRunConfigV1 {
     pub model: String,
@@ -155,6 +173,8 @@ pub struct FrozenRunConfigV1 {
     pub attachments: Vec<ControlAttachmentV1>,
     pub native_session_id: Option<String>,
     pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub generation: GenerationSettingsV1,
     pub adapter: String,
 }
 
@@ -608,6 +628,8 @@ pub struct ResolvedRunCompositionV1 {
     pub adapter: String,
     pub model: String,
     pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub generation: GenerationSettingsV1,
     pub workspace: Option<String>,
     pub environment_policy: String,
     pub prompt_sections: Vec<Value>,

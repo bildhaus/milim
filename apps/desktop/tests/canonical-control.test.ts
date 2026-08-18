@@ -33,6 +33,20 @@ assert.equal(streaming.length, 2);
 assert.equal(streaming[1].content, "hello");
 assert.equal(streaming[1].id, "control-stream-run-1");
 
+const streamedReasoning = projectControlRunMessages(
+  [
+    item(1, "assistant_delta", { text: "", reasoning: "first " }),
+    item(2, "assistant_delta", { text: "", reasoning: "second " }),
+    item(3, "assistant_delta", { text: "answer", reasoning: "" }),
+    item(4, "assistant_delta", { text: " continued", reasoning: "" }),
+  ],
+  "run-1",
+)[0];
+assert.deepEqual(streamedReasoning.streamParts, [
+  { kind: "thinking", content: "first second " },
+  { kind: "text", content: "answer continued" },
+]);
+
 const completed = projectControlRunMessages(
   [
     item(1, "message", { id: "user-1", role: "user", content: "hello" }),

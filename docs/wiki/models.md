@@ -6,7 +6,7 @@ title: Models and providers
 summary: Model-agnostic dev chat routing across provider APIs, local runtimes, Codex, Claude, OpenCode, and Pi bridges.
 group: Core
 order: 40
-updated: 2026-08-17
+updated: 2026-08-18
 ---
 
 Model routing is provider-agnostic and centered on the active dev thread. The provider registry stores enabled remotes and their model metadata, then the desktop model picker merges local API runtime models, provider models, account runtime models, and media-capable models. Duplicate provider model ids stay provider-scoped in the picker and route back to the selected provider; provider sections with fewer visible models appear first.
@@ -43,6 +43,14 @@ Requests to OpenRouter include its app-attribution headers with `https://milim.a
 
 Local detection probes Ollama on `localhost:11434`, LM Studio on `localhost:1234`, and vLLM on `localhost:8000`. It also reads published TCP ports from running Docker containers whose image or name contains `vllm`; it never inspects container arguments or environment. A vLLM candidate is marked reachable only when its unauthenticated `/v1/models` response identifies at least one model with `owned_by: "vllm"`. Containers without a published host port, authenticated vLLM servers, and setups where Milim itself runs inside Docker must be added manually with a URL reachable from Milim's network.
 
+### vLLM capabilities and controls
+
+vLLM is an OpenAI-compatible server, but vision, reasoning, and tool use are model- and server-configuration capabilities rather than universal vLLM features. Milim reads `max_model_len` as the model context window, recognizes the vLLM owner marker, and reads the installed server's `reasoning_effort` enum from `/openapi.json`. Standard multimodal `image_url` content, streamed `reasoning`/`reasoning_content`, and function tools pass through the normal provider route. The matching model must support the modality, and vLLM may still require launch-time chat templates, reasoning parsers, tool-call parsers, or automatic tool-choice flags.
+
+The Provider sheet exposes per-model Vision, Reasoning, and Tools choices. **Auto** keeps discovery; **Yes** or **No** is an encrypted explicit override that survives later model refreshes. **Verify vision, reasoning, and tools** runs three small live requests against the selected model and reports each result without changing metadata. Applying reliable results creates unsaved overrides, which take effect after **Save changes**. These probes execute real inference and may consume provider resources.
+
+The composer session menu exposes per-model generation overrides. Common controls are output tokens, temperature, Top P, seed, stop sequences, frequency penalty, and presence penalty. vLLM models additionally expose Top K, Min P, repetition penalty, and thinking-token budget. Blank values use the server/model default. Milim validates the values, freezes them when a turn is accepted, records them in run details, and reuses the same values for every model request in a tool-agent loop. Reasoning effort remains the model picker's separate per-model control and is forwarded to recognized vLLM reasoning models.
+
 ## Runtime lanes
 
 | Lane | When it appears | What happens next |
@@ -61,7 +69,7 @@ Local detection probes Ollama on `localhost:11434`, LM Studio on `localhost:1234
 |---|---|---|
 | Best local privacy | Ollama, LM Studio, or vLLM | Prompts stay on your machine unless that runtime is configured otherwise. |
 | General reasoning | OpenAI, Anthropic, Gemini, or OpenRouter | Use hosted providers when quality, context length, or latency matters more than staying fully local. |
-| Local reasoning control | Ollama thinking models or LM Studio models with reasoning metadata | Ollama uses `/v1/chat/completions`; LM Studio uses `/api/v1/chat` for advertised native reasoning options without custom tools and `/v1/responses` when Milim function tools are attached. `gpt-oss` still uses `/v1/responses` for `low`, `medium`, and `high` effort. |
+| Local reasoning control | Ollama thinking models, LM Studio models with reasoning metadata, or vLLM reasoning models | Ollama uses `/v1/chat/completions`; LM Studio uses `/api/v1/chat` for advertised native reasoning options without custom tools and `/v1/responses` when Milim function tools are attached. `gpt-oss` still uses `/v1/responses` for `low`, `medium`, and `high` effort. vLLM uses `/v1/chat/completions` with its advertised `reasoning_effort` values and configured reasoning parser. |
 | Media workflow | Replicate, fal, or OpenRouter media models | Use image, video, or prompt-to-music generation from the same Milim surface. |
 
 OpenRouter video uses its asynchronous `/videos` submission and polling workflow; completed bytes are fetched through Milim's authenticated content proxy so provider credentials never enter the webview. OpenRouter music buffers streamed audio chunks into a completed MP3 result. fal and Replicate keep their provider job URLs and polling behavior. Discovery includes text-to-music generators only, excluding TTS, transcription, generic voice, and conversational audio models.

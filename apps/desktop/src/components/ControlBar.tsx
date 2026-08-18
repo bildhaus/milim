@@ -8,6 +8,7 @@ import {
   type ToolApprovalMode,
 } from "../api";
 import { goalChipVisible, type GoalSettings } from "../lib/goals";
+import { normalizeGenerationSettings, type GenerationSettings } from "../lib/generationSettings";
 import { modelDevProfile, modelDisplayName } from "../lib/modelPicker";
 import { REASONING_EFFORT_LABEL, reasoningEffortForThread } from "../lib/reasoningEffort";
 import { ChevronDown, Cube, Lightbulb, Pin, Sliders } from "./icons";
@@ -91,6 +92,8 @@ export function ControlBar({
   reasoningEffortByModel,
   reasoningEffortOverrides,
   onReasoningEffort,
+  generationSettings,
+  onGenerationSettings,
   providers,
   toolIntent,
   onModel,
@@ -121,6 +124,8 @@ export function ControlBar({
   reasoningEffortByModel: Record<string, ReasoningEffort>;
   reasoningEffortOverrides?: Record<string, ReasoningEffort>;
   onReasoningEffort?: (modelId: string, effort: ReasoningEffort) => void;
+  generationSettings?: GenerationSettings;
+  onGenerationSettings?: (settings: GenerationSettings) => void;
   providers?: ProviderInfo[];
   toolIntent?: boolean;
   onModel: (selection: ModelPickerSelection) => void;
@@ -199,6 +204,17 @@ export function ControlBar({
         : activeModelProfile.setupTone === "off"
           ? "dot-off"
           : "dot-green";
+  const activeProviderBrand = providerBrandForModel(activeModel, providers);
+  const generationOverrideCount = Object.keys(generationSettings ?? {}).length;
+  const setGenerationNumber = (key: keyof GenerationSettings, raw: string) => {
+    if (!onGenerationSettings) return false;
+    const next = { ...(generationSettings ?? {}) };
+    if (!raw.trim()) delete next[key];
+    else (next as Record<string, unknown>)[key] = Number(raw);
+    const normalized = normalizeGenerationSettings(next);
+    onGenerationSettings(normalized);
+    return !raw.trim() || normalized[key] !== undefined;
+  };
 
   return (
     <div className="control-bar">
@@ -447,6 +463,77 @@ export function ControlBar({
                     {TOOL_APPROVAL_DESCRIPTION[toolApproval]}
                   </span>
                 </div>
+
+                {model && onGenerationSettings && !["codex", "claude", "opencode", "pi"].includes(activeProviderBrand ?? "") && (
+                  <details className="generation-controls">
+                    <summary>
+                      <span>Generation</span>
+                      <span>{generationOverrideCount ? `${generationOverrideCount} customized` : "Model defaults"}</span>
+                    </summary>
+                    <p>Overrides for {activeModelLabel || model}. Blank fields use the server default.</p>
+                    <div className="generation-grid">
+                      {([
+                        ["maxTokens", "Output tokens", "1–1,000,000", "1"],
+                        ["temperature", "Temperature", "0–2", "0.01"],
+                        ["topP", "Top P", ">0–1", "0.01"],
+                        ["seed", "Seed", "integer", "1"],
+                        ["frequencyPenalty", "Frequency penalty", "−2–2", "0.01"],
+                        ["presencePenalty", "Presence penalty", "−2–2", "0.01"],
+                      ] as const).map(([key, label, placeholder, step]) => (
+                        <label key={key}>
+                          <span>{label}</span>
+                          <input
+                            key={`${model}-${key}-${generationSettings?.[key] ?? "default"}`}
+                            type="number"
+                            defaultValue={generationSettings?.[key] ?? ""}
+                            placeholder={placeholder}
+                            step={step}
+                            onBlur={(event) => {
+                              if (!setGenerationNumber(key, event.currentTarget.value)) event.currentTarget.value = "";
+                            }}
+                          />
+                        </label>
+                      ))}
+                      {activeProviderBrand === "vllm" && ([
+                        ["topK", "Top K", "−1 or ≥1", "1"],
+                        ["minP", "Min P", "0–1", "0.01"],
+                        ["repetitionPenalty", "Repetition penalty", ">0–2", "0.01"],
+                        ["thinkingTokenBudget", "Thinking budget", "0–1,000,000", "1"],
+                      ] as const).map(([key, label, placeholder, step]) => (
+                        <label key={key}>
+                          <span>{label}<em>vLLM</em></span>
+                          <input
+                            key={`${model}-${key}-${generationSettings?.[key] ?? "default"}`}
+                            type="number"
+                            defaultValue={generationSettings?.[key] ?? ""}
+                            placeholder={placeholder}
+                            step={step}
+                            onBlur={(event) => {
+                              if (!setGenerationNumber(key, event.currentTarget.value)) event.currentTarget.value = "";
+                            }}
+                          />
+                        </label>
+                      ))}
+                    </div>
+                    <label className="generation-stop">
+                      <span>Stop sequences <small>one per line, up to 8</small></span>
+                      <textarea
+                        value={generationSettings?.stop?.join("\n") ?? ""}
+                        placeholder="Model default"
+                        rows={2}
+                        onChange={(event) => onGenerationSettings({
+                          ...(generationSettings ?? {}),
+                          stop: event.currentTarget.value ? event.currentTarget.value.split("\n") : undefined,
+                        })}
+                      />
+                    </label>
+                    {generationOverrideCount > 0 && (
+                      <button type="button" className="generation-reset" onClick={() => onGenerationSettings({})}>
+                        Reset generation overrides
+                      </button>
+                    )}
+                  </details>
+                )}
               </div>
             )}
           </div>

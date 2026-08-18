@@ -116,6 +116,7 @@ fn generated_contract() -> String {
         AgentSummaryV1,
         AgentSnapshotV1,
         ControlAttachmentV1,
+        GenerationSettingsV1,
         FrozenRunConfigV1,
         RunCapabilitiesV1,
         RunSnapshotV1,

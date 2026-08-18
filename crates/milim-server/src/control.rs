@@ -158,7 +158,25 @@ mod legacy_control_contract {
         pub attachments: Vec<ControlAttachmentV1>,
         pub native_session_id: Option<String>,
         pub reasoning_effort: Option<String>,
+        #[serde(default)]
+        pub generation: GenerationSettingsV1,
         pub adapter: String,
+    }
+
+    #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+    pub struct GenerationSettingsV1 {
+        pub max_tokens: Option<u32>,
+        pub temperature: Option<f32>,
+        pub top_p: Option<f32>,
+        pub seed: Option<i64>,
+        #[serde(default)]
+        pub stop: Vec<String>,
+        pub frequency_penalty: Option<f32>,
+        pub presence_penalty: Option<f32>,
+        pub top_k: Option<i32>,
+        pub min_p: Option<f32>,
+        pub repetition_penalty: Option<f32>,
+        pub thinking_token_budget: Option<u32>,
     }
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -902,6 +920,7 @@ impl RunJournal {
             "adapter": accepted.config.adapter,
             "model": accepted.config.model,
             "reasoning_effort": accepted.config.reasoning_effort,
+            "generation": accepted.config.generation,
             "native_session_boundary": accepted.config.native_session_id,
             "workspace": accepted.config.workspace,
             "environment_policy": environment_policy,
@@ -2552,7 +2571,7 @@ impl RunManager {
             response_format: None,
             prompt: None,
             suffix: None,
-            sampling: SamplingParams::default(),
+            sampling: sampling_from_generation(&accepted.config.generation),
             reasoning_effort,
         };
         let journal = RunJournal {
@@ -2693,6 +2712,7 @@ impl RunManager {
             thread_id,
             run_id,
             reasoning_effort,
+            sampling_from_generation(&accepted.config.generation),
             journal.clone(),
         )?;
         let mut content = String::new();
@@ -3830,6 +3850,12 @@ fn resolve_frozen_config(
         .and_then(|overrides| overrides.get(&selected_model))
         .and_then(Value::as_str)
         .map(str::to_string);
+    let generation = settings
+        .and_then(|settings| settings.get("generationOverrides"))
+        .and_then(Value::as_object)
+        .and_then(|overrides| overrides.get(&selected_model))
+        .map(normalize_generation_settings)
+        .unwrap_or_default();
     let enabled_tools = agent
         .as_ref()
         .map(|agent| agent.enabled_tools.clone())
@@ -3866,8 +3892,82 @@ fn resolve_frozen_config(
         attachments,
         native_session_id,
         reasoning_effort,
+        generation,
         adapter,
     })
+}
+
+fn normalize_generation_settings(value: &Value) -> GenerationSettingsV1 {
+    let value = value.as_object();
+    let bounded_f32 = |key: &str, min: f64, max: f64, include_min: bool| {
+        value
+            .and_then(|value| value.get(key))
+            .and_then(Value::as_f64)
+            .filter(|number| {
+                number.is_finite()
+                    && if include_min {
+                        *number >= min
+                    } else {
+                        *number > min
+                    }
+                    && *number <= max
+            })
+            .map(|number| number as f32)
+    };
+    let stop = value
+        .and_then(|value| value.get("stop"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|item| !item.is_empty() && item.chars().count() <= 256)
+        .take(8)
+        .map(str::to_string)
+        .collect();
+    GenerationSettingsV1 {
+        max_tokens: value
+            .and_then(|value| value.get("maxTokens"))
+            .and_then(Value::as_u64)
+            .filter(|number| (1..=1_000_000).contains(number))
+            .and_then(|number| u32::try_from(number).ok()),
+        temperature: bounded_f32("temperature", 0.0, 2.0, true),
+        top_p: bounded_f32("topP", 0.0, 1.0, false),
+        seed: value
+            .and_then(|value| value.get("seed"))
+            .and_then(Value::as_i64),
+        stop,
+        frequency_penalty: bounded_f32("frequencyPenalty", -2.0, 2.0, true),
+        presence_penalty: bounded_f32("presencePenalty", -2.0, 2.0, true),
+        top_k: value
+            .and_then(|value| value.get("topK"))
+            .and_then(Value::as_i64)
+            .filter(|number| *number == -1 || (1..=1_000_000).contains(number))
+            .and_then(|number| i32::try_from(number).ok()),
+        min_p: bounded_f32("minP", 0.0, 1.0, true),
+        repetition_penalty: bounded_f32("repetitionPenalty", 0.0, 2.0, false),
+        thinking_token_budget: value
+            .and_then(|value| value.get("thinkingTokenBudget"))
+            .and_then(Value::as_u64)
+            .filter(|number| *number <= 1_000_000)
+            .and_then(|number| u32::try_from(number).ok()),
+    }
+}
+
+fn sampling_from_generation(generation: &GenerationSettingsV1) -> SamplingParams {
+    SamplingParams {
+        temperature: generation.temperature,
+        top_p: generation.top_p,
+        max_tokens: generation.max_tokens,
+        stop: generation.stop.clone(),
+        seed: generation.seed,
+        frequency_penalty: generation.frequency_penalty,
+        presence_penalty: generation.presence_penalty,
+        top_k: generation.top_k,
+        min_p: generation.min_p,
+        repetition_penalty: generation.repetition_penalty,
+        thinking_token_budget: generation.thinking_token_budget,
+    }
 }
 
 fn runtime_adapter(model: &str) -> &str {
@@ -4133,6 +4233,10 @@ fn completion_request_value(request: &CompletionRequest) -> Result<Value> {
             "seed": request.sampling.seed,
             "frequency_penalty": request.sampling.frequency_penalty,
             "presence_penalty": request.sampling.presence_penalty,
+            "top_k": request.sampling.top_k,
+            "min_p": request.sampling.min_p,
+            "repetition_penalty": request.sampling.repetition_penalty,
+            "thinking_token_budget": request.sampling.thinking_token_budget,
         },
         "reasoning_effort": request.reasoning_effort,
     }))
@@ -4777,6 +4881,47 @@ mod tests {
             session["settings"]["reasoningEffortOverrides"]["codex:gpt-5"],
             "auto"
         );
+    }
+
+    #[test]
+    fn generation_settings_are_normalized_and_mapped_to_sampling() {
+        let generation = normalize_generation_settings(&json!({
+            "maxTokens": 4096,
+            "temperature": 0.4,
+            "topP": 0.95,
+            "seed": 7,
+            "stop": [" END ", "", "x".repeat(257)],
+            "frequencyPenalty": -0.25,
+            "presencePenalty": 0.5,
+            "topK": 40,
+            "minP": 0.1,
+            "repetitionPenalty": 1.05,
+            "thinkingTokenBudget": 2048
+        }));
+        let sampling = sampling_from_generation(&generation);
+
+        assert_eq!(sampling.max_tokens, Some(4096));
+        assert_eq!(sampling.temperature, Some(0.4));
+        assert_eq!(sampling.top_p, Some(0.95));
+        assert_eq!(sampling.seed, Some(7));
+        assert_eq!(sampling.stop, ["END"]);
+        assert_eq!(sampling.frequency_penalty, Some(-0.25));
+        assert_eq!(sampling.presence_penalty, Some(0.5));
+        assert_eq!(sampling.top_k, Some(40));
+        assert_eq!(sampling.min_p, Some(0.1));
+        assert_eq!(sampling.repetition_penalty, Some(1.05));
+        assert_eq!(sampling.thinking_token_budget, Some(2048));
+
+        let invalid = normalize_generation_settings(&json!({
+            "temperature": 3,
+            "topP": 0,
+            "topK": 0,
+            "repetitionPenalty": 0
+        }));
+        assert!(invalid.temperature.is_none());
+        assert!(invalid.top_p.is_none());
+        assert!(invalid.top_k.is_none());
+        assert!(invalid.repetition_penalty.is_none());
     }
 
     #[test]

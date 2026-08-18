@@ -88,6 +88,20 @@ function eventPart(item: ControlTimelineItemV1): ChatStreamPart | null {
   return null;
 }
 
+function appendStreamContent(
+  parts: ChatStreamPart[],
+  kind: "text" | "thinking",
+  content: string,
+) {
+  if (!content) return;
+  const last = parts[parts.length - 1];
+  if (last?.kind === kind) {
+    parts[parts.length - 1] = { ...last, content: last.content + content };
+  } else {
+    parts.push({ kind, content });
+  }
+}
+
 /** Fold the authoritative items for one run into the two user-visible turns. */
 export function projectControlRunMessages(
   items: ControlTimelineItemV1[],
@@ -106,8 +120,8 @@ export function projectControlRunMessages(
       const reasoning = typeof data.reasoning === "string" ? data.reasoning : "";
       streamingText += text;
       streamingReasoning += reasoning;
-      if (text) streamParts.push({ kind: "text", content: text });
-      if (reasoning) streamParts.push({ kind: "thinking", content: reasoning });
+      appendStreamContent(streamParts, "text", text);
+      appendStreamContent(streamParts, "thinking", reasoning);
       continue;
     }
     if (item.type === "message" && typeof data.id === "string") {

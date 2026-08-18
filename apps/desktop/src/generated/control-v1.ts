@@ -14,7 +14,9 @@ export type AgentSnapshotV1 = { id: string, name: string, description: string, a
 
 export type ControlAttachmentV1 = { id: string, name: string, mime: string, size: number, content?: string, data_url?: string, truncated: boolean, };
 
-export type FrozenRunConfigV1 = { model: string, instructions: string, workspace: string | null, privacy: string, approval_mode: string, plan_mode: boolean, sandbox: boolean, computer_use: boolean, memory: boolean, delegation_policy: string, worker_model: string, agent: AgentSnapshotV1 | null, tool_mode: string, enabled_tools: Array<string>, skill_mode: string, enabled_skills: Array<string>, attachments: Array<ControlAttachmentV1>, native_session_id: string | null, reasoning_effort: string | null, adapter: string, };
+export type GenerationSettingsV1 = { max_tokens: number | null, temperature: number | null, top_p: number | null, seed: number | null, stop: Array<string>, frequency_penalty: number | null, presence_penalty: number | null, top_k: number | null, min_p: number | null, repetition_penalty: number | null, thinking_token_budget: number | null, };
+
+export type FrozenRunConfigV1 = { model: string, instructions: string, workspace: string | null, privacy: string, approval_mode: string, plan_mode: boolean, sandbox: boolean, computer_use: boolean, memory: boolean, delegation_policy: string, worker_model: string, agent: AgentSnapshotV1 | null, tool_mode: string, enabled_tools: Array<string>, skill_mode: string, enabled_skills: Array<string>, attachments: Array<ControlAttachmentV1>, native_session_id: string | null, reasoning_effort: string | null, generation: GenerationSettingsV1, adapter: string, };
 
 export type RunCapabilitiesV1 = { ledger: boolean, inspectable: boolean, steering: boolean, visibility: string, };
 
@@ -54,7 +56,7 @@ export type ControlCommandV1 = { command_id: string, kind: ControlCommandKindV1,
 
 export type ControlCommandResultV1 = { command_id: string, status: ControlCommandStatusV1, thread_id?: string, revision?: number, run_id?: string, queue_id?: string, confirmation_token?: string, message?: string, data: JsonValue, };
 
-export type ResolvedRunCompositionV1 = { visibility: string, adapter: string, model: string, reasoning_effort: string | null, workspace: string | null, environment_policy: string, prompt_sections: Array<JsonValue>, tools: Array<JsonValue>, policies: JsonValue, attachments: Array<JsonValue>, };
+export type ResolvedRunCompositionV1 = { visibility: string, adapter: string, model: string, reasoning_effort: string | null, generation: GenerationSettingsV1, workspace: string | null, environment_policy: string, prompt_sections: Array<JsonValue>, tools: Array<JsonValue>, policies: JsonValue, attachments: Array<JsonValue>, };
 
 export type RunEventV1 = { id: string, run_id: string, seq: number, step_id: string | null, type: string, data: JsonValue, created_at_ms: number, };
 

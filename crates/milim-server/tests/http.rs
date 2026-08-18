@@ -897,6 +897,7 @@ async fn control_v1_real_harness_smoke_when_env_configured() {
             model_context: Default::default(),
             model_reasoning: Default::default(),
             model_capabilities: Default::default(),
+            model_overrides: Default::default(),
             last_error: None,
         })
         .await

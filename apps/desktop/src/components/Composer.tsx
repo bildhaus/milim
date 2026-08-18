@@ -1199,38 +1199,40 @@ export function Composer({
           </span>
           {busy ? (
             <>
-              <button className="send-btn" data-testid="composer-send" onClick={submitComposer} disabled={!canSend} title={`Queue (${sendShortcutLabel})`} aria-label="Queue message">
-                <ArrowUp size={18} />
-              </button>
-              {canSteer && onSteer ? (
-                <div className="composer-busy-actions">
-                  <button
-                    type="button"
-                    className="tool-btn"
-                    aria-label="More actions for active run"
-                    aria-expanded={busyActionsOpen}
-                    onClick={() => setBusyActionsOpen((open) => !open)}
-                  >
-                    <ChevronDown size={13} />
-                  </button>
-                  {busyActionsOpen ? (
-                    <div className="menu composer-busy-menu" role="menu">
-                      <button
-                        type="button"
-                        className="menu-item"
-                        role="menuitem"
-                        disabled={!canSend}
-                        onClick={() => {
-                          setBusyActionsOpen(false);
-                          onSteer();
-                        }}
-                      >
-                        Steer next step
-                      </button>
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
+              <div className={`composer-queue-actions${canSteer && onSteer ? " split" : ""}`}>
+                <button className="send-btn" data-testid="composer-send" onClick={submitComposer} disabled={!canSend} title={`Queue (${sendShortcutLabel})`} aria-label="Queue message">
+                  <ArrowUp size={18} />
+                </button>
+                {canSteer && onSteer ? (
+                  <div className="composer-busy-actions">
+                    <button
+                      type="button"
+                      className="tool-btn"
+                      aria-label="More actions for active run"
+                      aria-expanded={busyActionsOpen}
+                      onClick={() => setBusyActionsOpen((open) => !open)}
+                    >
+                      <ChevronDown size={13} />
+                    </button>
+                    {busyActionsOpen ? (
+                      <div className="menu composer-busy-menu" role="menu">
+                        <button
+                          type="button"
+                          className="menu-item"
+                          role="menuitem"
+                          disabled={!canSend}
+                          onClick={() => {
+                            setBusyActionsOpen(false);
+                            onSteer();
+                          }}
+                        >
+                          Steer next step
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
               <button className="send-btn stop" onClick={onStop} title="Stop generating" aria-label="Stop generating">
                 <Square size={13} />
               </button>
