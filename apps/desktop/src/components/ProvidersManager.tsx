@@ -18,6 +18,7 @@ import {
   PROVIDER_PRESETS,
   recoverCodexThread,
   saveProvider,
+  verifyProviderModelCapabilities,
   streamCodexDeviceLogin,
   updateAccountRuntime,
   type AccountRuntimeUpdateStatus,
@@ -32,6 +33,8 @@ import {
   type ProviderDiscovery,
   type ProviderInfo,
   type ProviderKind,
+  type ModelCapabilityOverride,
+  type ModelCapabilityVerification,
 } from "../api";
 import { recoveredCodexSession, recoveredCodexSessionId } from "../lib/codexRecovery";
 import { importedClaudeSession, importedClaudeSessionId } from "../lib/claudeImport";
@@ -214,6 +217,10 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
   const [discoveries, setDiscoveries] = useState<ProviderDiscovery[]>([]);
   const [note, setNote] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [modelOverrides, setModelOverrides] = useState<Record<string, ModelCapabilityOverride>>({});
+  const [capabilityModel, setCapabilityModel] = useState("");
+  const [verification, setVerification] = useState<ModelCapabilityVerification | null>(null);
+  const [verifying, setVerifying] = useState(false);
   const accountRuntimeEnabled = useSettings((s) => s.accountRuntimeEnabled);
   const setAccountRuntimeEnabled = useSettings(
     (s) => s.setAccountRuntimeEnabled,
@@ -260,18 +267,23 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
     setSel(p);
     setNote(null);
     setConfirmDeleteId(null);
+    setVerification(null);
     if (p === "new") {
       setName("");
       setKind("openai_compatible");
       setBaseUrl("");
       setApiKey("");
       setEnabled(true);
+      setModelOverrides({});
+      setCapabilityModel("");
     } else {
       setName(p.name);
       setKind(p.kind);
       setBaseUrl(p.base_url);
       setApiKey("");
       setEnabled(p.enabled);
+      setModelOverrides(p.model_overrides ?? {});
+      setCapabilityModel(p.models[0] ?? "");
     }
   }
 
@@ -521,6 +533,8 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
     setBaseUrl(saved.base_url);
     setApiKey("");
     setEnabled(saved.enabled);
+    setModelOverrides(saved.model_overrides ?? {});
+    setCapabilityModel(saved.models[0] ?? "");
     setNote(
       saved.models.length
         ? `Connected - ${saved.models.length} models available`
@@ -543,6 +557,7 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
       base_url: baseUrl.trim(),
       api_key: apiKey || undefined,
       enabled,
+      model_overrides: modelOverrides,
     });
     setBusy(false);
     if (!saved) {
@@ -556,6 +571,8 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
     setBaseUrl(saved.base_url);
     setApiKey("");
     setEnabled(saved.enabled);
+    setModelOverrides(saved.model_overrides ?? {});
+    setCapabilityModel((current) => saved.models.includes(current) ? current : (saved.models[0] ?? ""));
     setNote(
       isMediaProvider(saved)
         ? action === "test"
@@ -575,6 +592,48 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
 
   async function testConnection() {
     await persistProvider("test");
+  }
+
+  function setCapabilityOverride(
+    model: string,
+    key: "image_input" | "tool_use" | "reasoning",
+    value: "auto" | "yes" | "no",
+  ) {
+    setModelOverrides((current) => {
+      const next = { ...current };
+      const entry = { ...(next[model] ?? {}) };
+      if (value === "auto") delete entry[key];
+      else entry[key] = value === "yes";
+      if (Object.keys(entry).length) next[model] = entry;
+      else delete next[model];
+      return next;
+    });
+  }
+
+  async function verifyCapabilities() {
+    if (!selectedProvider || !capabilityModel || verifying) return;
+    setVerifying(true);
+    setVerification(null);
+    const result = await verifyProviderModelCapabilities(selectedProvider.id, capabilityModel);
+    setVerifying(false);
+    if (!result) {
+      setNote("Error: Capability verification failed before results were returned.");
+      return;
+    }
+    setVerification(result);
+  }
+
+  function applyVerification() {
+    if (!verification) return;
+    const results = [
+      ["image_input", verification.vision],
+      ["reasoning", verification.reasoning],
+      ["tool_use", verification.tools],
+    ] as const;
+    for (const [key, result] of results) {
+      if (!result.error) setCapabilityOverride(verification.model, key, result.supported ? "yes" : "no");
+    }
+    setNote("Capability results applied as unsaved overrides. Save changes to keep them.");
   }
 
   async function connectCodex() {
@@ -727,7 +786,8 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
             kind !== selectedProvider.kind ||
             baseUrl !== selectedProvider.base_url ||
             enabled !== selectedProvider.enabled ||
-            apiKey.length > 0),
+            apiKey.length > 0 ||
+            JSON.stringify(modelOverrides) !== JSON.stringify(selectedProvider.model_overrides ?? {})),
         );
   const canSave = Boolean(name.trim() && baseUrl.trim() && !busy);
   const saveStateLabel =
@@ -1366,6 +1426,70 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                     populate this provider.
                   </p>
                 )}
+                {selectedProvider?.models.length && !isMediaProvider(selectedProvider) ? (
+                  <div className="provider-model-capabilities">
+                    <div className="provider-capabilities-head">
+                      <div>
+                        <strong>Per-model capabilities</strong>
+                        <span>Auto uses discovery. Overrides survive model refreshes.</span>
+                      </div>
+                      <select
+                        className="css-input"
+                        aria-label="Capability model"
+                        value={capabilityModel}
+                        onChange={(event) => {
+                          setCapabilityModel(event.currentTarget.value);
+                          setVerification(null);
+                        }}
+                      >
+                        {selectedProvider.models.map((model) => <option key={model} value={model}>{model}</option>)}
+                      </select>
+                    </div>
+                    <div className="provider-capability-overrides">
+                      {([
+                        ["image_input", "Vision", selectedProvider.model_capabilities?.[capabilityModel]?.image_input],
+                        ["reasoning", "Reasoning", Boolean(selectedProvider.model_reasoning?.[capabilityModel])],
+                        ["tool_use", "Tools", selectedProvider.model_capabilities?.[capabilityModel]?.tool_use],
+                      ] as const).map(([key, label, detected]) => {
+                        const override = modelOverrides[capabilityModel]?.[key];
+                        const value = override == null ? "auto" : override ? "yes" : "no";
+                        return (
+                          <label key={key}>
+                            <span>{label}<small>Detected: {detected == null ? "unknown" : detected ? "yes" : "no"}</small></span>
+                            <select
+                              className="css-input"
+                              value={value}
+                              onChange={(event) => setCapabilityOverride(
+                                capabilityModel,
+                                key,
+                                event.currentTarget.value as "auto" | "yes" | "no",
+                              )}
+                            >
+                              <option value="auto">Auto</option>
+                              <option value="yes">Yes</option>
+                              <option value="no">No</option>
+                            </select>
+                          </label>
+                        );
+                      })}
+                    </div>
+                    <div className="provider-capability-actions">
+                      <button className="btn-ghost" type="button" disabled={verifying} onClick={() => void verifyCapabilities()}>
+                        <Refresh size={13} />
+                        <span>{verifying ? "Running 3 probes..." : "Verify vision, reasoning, and tools"}</span>
+                      </button>
+                      {verification && <button className="btn-ghost" type="button" onClick={applyVerification}>Apply reliable results</button>}
+                    </div>
+                    {verification && (
+                      <div className="provider-probe-results" aria-live="polite">
+                        {(["vision", "reasoning", "tools"] as const).map((key) => {
+                          const result = verification[key];
+                          return <span key={key} className={result.supported ? "ready" : result.error ? "error" : "off"} title={result.error}>{key}: {result.supported ? "yes" : result.error ? "error" : "no"}</span>;
+                        })}
+                      </div>
+                    )}
+                  </div>
+                ) : null}
                 <div className="provider-diagnostics-row">
                   <button
                     className="btn-ghost"

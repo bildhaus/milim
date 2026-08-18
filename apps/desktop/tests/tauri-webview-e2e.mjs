@@ -29,6 +29,7 @@ const appMenuOnly = process.argv.includes("--app-menu-only");
 const turnChangesOnly = process.argv.includes("--turn-changes-only");
 const chatAffordancesOnly = process.argv.includes("--chat-affordances-only");
 const reasoningEffortOnly = process.argv.includes("--reasoning-effort-only");
+const generationControlsOnly = process.argv.includes("--generation-controls-only");
 const mediaOnly = process.argv.includes("--media-only");
 const mcpAppKinds = ["chart", "diagram", "form", "dashboard", "viewer"];
 const screenshots = {
@@ -148,6 +149,10 @@ try {
   } else if (reasoningEffortOnly) {
     const errors = collectErrors(session.page);
     await runReasoningEffortIsolationCheck(session.page);
+    consoleErrors.push(...errors.filter((message) => !message.includes("/codex/models")));
+  } else if (generationControlsOnly) {
+    const errors = collectErrors(session.page);
+    await runGenerationControlsCheck(session.page);
     consoleErrors.push(...errors.filter((message) => !message.includes("/codex/models")));
   } else if (browserProfileOnly) {
     const errors = collectErrors(session.page);
@@ -2955,6 +2960,90 @@ async function runReasoningEffortIsolationCheck(page) {
     return state.activeId !== previousId && active?.settings?.reasoningEffortOverrides?.[modelId] === undefined;
   }, { modelId: model, previousId: changedId });
   await page.screenshot({ path: screenshots.reasoningEffort, fullPage: false });
+}
+
+async function runGenerationControlsCheck(page) {
+  const model = "vllm-e2e-model";
+  const sessionId = "generation-controls";
+  await page.route("**/v1/models", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ data: [{ id: model, owned_by: "vLLM (local)" }] }),
+  }));
+  await page.evaluate(async ({ modelId, threadId }) => {
+    const invoke = window.__TAURI_INTERNALS__.invoke;
+    await invoke("user_state_set", {
+      key: "milim.settings",
+      value: JSON.stringify({
+        state: {
+          accountRuntimeEnabled: { codex: false, claude: false, opencode: false, pi: false },
+          newThreadBehavior: "inherit",
+        },
+        version: 0,
+      }),
+    });
+    await invoke("user_sessions_set", {
+      value: JSON.stringify({
+        state: {
+          sessions: [{
+            id: threadId,
+            title: "Generation controls",
+            messages: [],
+            settings: {
+              model: modelId,
+              instructions: "",
+              activeAgentId: null,
+              folder: "",
+              sandbox: false,
+              computerUse: false,
+              memory: true,
+              privacy: "off",
+              toolApproval: "review",
+              delegationPolicy: "off",
+              workerModel: "",
+              planMode: false,
+            },
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          }],
+          activeId: threadId,
+        },
+        version: 0,
+      }),
+    });
+  }, { modelId: model, threadId: sessionId });
+
+  await page.reload();
+  await page.getByTestId("chat-shell").waitFor();
+  await dismissOnboardingIfPresent(page);
+  await page.getByTestId("context-menu-trigger").click();
+  const controls = page.locator(".generation-controls");
+  await controls.getByText("Generation", { exact: true }).click();
+  await controls.getByText("Model defaults", { exact: true }).waitFor();
+  await controls.getByLabel("Output tokens").fill("512");
+  await controls.getByLabel("Temperature").fill("0.4");
+  await controls.getByLabel("Top K").fill("40");
+  await controls.getByLabel("Thinking budget").fill("2048");
+  await controls.getByLabel(/Stop sequences/).fill("END\nSTOP");
+  await controls.getByText(/Overrides for vllm-e2e-model/).click();
+
+  await page.waitForFunction(async ({ modelId, threadId }) => {
+    const raw = await window.__TAURI_INTERNALS__.invoke("user_state_get", { key: "milim.sessions" });
+    const session = raw ? JSON.parse(raw).state?.sessions?.find((item) => item.id === threadId) : null;
+    const generation = session?.settings?.generationOverrides?.[modelId];
+    return generation?.maxTokens === 512
+      && generation?.temperature === 0.4
+      && generation?.topK === 40
+      && generation?.thinkingTokenBudget === 2048
+      && generation?.stop?.join(",") === "END,STOP";
+  }, { modelId: model, threadId: sessionId });
+
+  await controls.getByRole("button", { name: "Reset generation overrides" }).click();
+  await page.waitForFunction(async ({ modelId, threadId }) => {
+    const raw = await window.__TAURI_INTERNALS__.invoke("user_state_get", { key: "milim.sessions" });
+    const session = raw ? JSON.parse(raw).state?.sessions?.find((item) => item.id === threadId) : null;
+    return session?.settings?.generationOverrides?.[modelId] == null;
+  }, { modelId: model, threadId: sessionId });
 }
 
 async function runArtifactCheck(page) {

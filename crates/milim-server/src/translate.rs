@@ -23,6 +23,26 @@ pub fn openai_to_completion(req: ChatCompletionRequest) -> CompletionRequest {
         seed: req.seed,
         frequency_penalty: req.frequency_penalty,
         presence_penalty: req.presence_penalty,
+        top_k: req
+            .extra
+            .get("top_k")
+            .and_then(Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok()),
+        min_p: req
+            .extra
+            .get("min_p")
+            .and_then(Value::as_f64)
+            .map(|v| v as f32),
+        repetition_penalty: req
+            .extra
+            .get("repetition_penalty")
+            .and_then(Value::as_f64)
+            .map(|v| v as f32),
+        thinking_token_budget: req
+            .extra
+            .get("thinking_token_budget")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok()),
     };
     CompletionRequest {
         model: req.model,
@@ -48,6 +68,7 @@ pub fn ollama_to_completion(req: OllamaChatRequest) -> CompletionRequest {
         seed: opt_i64(&opts, "seed"),
         frequency_penalty: opt_f32(&opts, "frequency_penalty"),
         presence_penalty: opt_f32(&opts, "presence_penalty"),
+        ..Default::default()
     };
     CompletionRequest {
         model: req.model,
@@ -185,6 +206,7 @@ pub fn anthropic_to_completion(req: MessagesRequest) -> Result<CompletionRequest
         seed: None,
         frequency_penalty: None,
         presence_penalty: None,
+        ..Default::default()
     };
 
     let tools = req

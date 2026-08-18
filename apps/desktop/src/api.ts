@@ -3795,7 +3795,36 @@ export interface ProviderInfo {
   models: string[];
   pricing?: Record<string, ProviderModelPricing>;
   model_reasoning?: Record<string, ModelReasoningMetadata>;
+  model_context?: Record<string, {
+    context_length?: number;
+    max_prompt_tokens?: number;
+    max_completion_tokens?: number;
+  }>;
+  model_capabilities?: Record<string, {
+    image_input?: boolean;
+    tool_use?: boolean;
+  }>;
+  model_overrides?: Record<string, ModelCapabilityOverride>;
   error?: string | null;
+}
+
+export interface ModelCapabilityOverride {
+  image_input?: boolean;
+  tool_use?: boolean;
+  reasoning?: boolean;
+  supported_efforts?: ReasoningEffort[];
+}
+
+export interface CapabilityProbeResult {
+  supported: boolean;
+  error?: string;
+}
+
+export interface ModelCapabilityVerification {
+  model: string;
+  vision: CapabilityProbeResult;
+  reasoning: CapabilityProbeResult;
+  tools: CapabilityProbeResult;
 }
 
 export interface ProviderModelPricing {
@@ -3912,6 +3941,7 @@ export async function saveProvider(p: {
   base_url: string;
   api_key?: string;
   enabled: boolean;
+  model_overrides?: Record<string, ModelCapabilityOverride>;
 }): Promise<ProviderInfo | null> {
   try {
     const r = await authFetch(`${BASE}/providers`, {
@@ -3920,6 +3950,25 @@ export async function saveProvider(p: {
       body: JSON.stringify(p),
     });
     return r.ok ? ((await r.json()) as ProviderInfo) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function verifyProviderModelCapabilities(
+  providerId: string,
+  model: string,
+): Promise<ModelCapabilityVerification | null> {
+  try {
+    const r = await authFetch(
+      `${BASE}/providers/${encodeURIComponent(providerId)}/models/verify`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model }),
+      },
+    );
+    return r.ok ? ((await r.json()) as ModelCapabilityVerification) : null;
   } catch {
     return null;
   }

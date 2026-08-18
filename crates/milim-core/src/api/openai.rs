@@ -389,6 +389,7 @@ pub struct Model {
         alias = "contextLength",
         alias = "context_window",
         alias = "contextWindow",
+        alias = "max_model_len",
         skip_serializing_if = "Option::is_none"
     )]
     pub context_length: Option<u32>,
@@ -566,6 +567,14 @@ mod tests {
         assert_eq!(m.context_length, Some(32768));
         assert_eq!(m.max_prompt_tokens, Some(30000));
         assert_eq!(m.max_completion_tokens, Some(2048));
+    }
+
+    #[test]
+    fn model_parses_vllm_context_length() {
+        let m: Model =
+            serde_json::from_str(r#"{"id":"local/test","owned_by":"vllm","max_model_len":196608}"#)
+                .unwrap();
+        assert_eq!(m.context_length, Some(196608));
     }
 
     #[test]

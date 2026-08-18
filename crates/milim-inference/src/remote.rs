@@ -73,6 +73,15 @@ impl RemoteBackend {
         format!("{}/{}", self.base_url, path.trim_start_matches('/'))
     }
 
+    fn api_root_endpoint(&self, path: &str) -> String {
+        let root = self.base_url.strip_suffix("/v1").unwrap_or(&self.base_url);
+        format!(
+            "{}/{}",
+            root.trim_end_matches('/'),
+            path.trim_start_matches('/')
+        )
+    }
+
     fn auth(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         let rb = if self.is_openrouter() {
             rb.header("HTTP-Referer", OPENROUTER_HTTP_REFERER)
@@ -90,12 +99,24 @@ impl RemoteBackend {
     fn build_body(&self, req: &CompletionRequest, stream: bool) -> ChatCompletionRequest {
         let s = &req.sampling;
         let mut extra = serde_json::Map::new();
-        let reasoning_effort = self.reasoning_effort_for_body(req.reasoning_effort, &req.model);
+        let reasoning_effort = self.reasoning_effort_for_body(req.reasoning_effort);
         if let Some(effort) = reasoning_effort.openrouter {
             extra.insert(
                 "reasoning".to_string(),
                 json!({ "effort": effort.as_str() }),
             );
+        }
+        if let Some(value) = s.top_k {
+            extra.insert("top_k".to_string(), json!(value));
+        }
+        if let Some(value) = s.min_p {
+            extra.insert("min_p".to_string(), json!(value));
+        }
+        if let Some(value) = s.repetition_penalty {
+            extra.insert("repetition_penalty".to_string(), json!(value));
+        }
+        if let Some(value) = s.thinking_token_budget {
+            extra.insert("thinking_token_budget".to_string(), json!(value));
         }
         ChatCompletionRequest {
             model: req.model.clone(),
@@ -121,11 +142,7 @@ impl RemoteBackend {
         }
     }
 
-    fn reasoning_effort_for_body(
-        &self,
-        effort: Option<ReasoningEffort>,
-        model: &str,
-    ) -> RemoteReasoningEffort {
+    fn reasoning_effort_for_body(&self, effort: Option<ReasoningEffort>) -> RemoteReasoningEffort {
         let Some(effort) = effort.filter(|e| !e.is_auto()) else {
             return RemoteReasoningEffort::default();
         };
@@ -135,8 +152,7 @@ impl RemoteBackend {
                 openai: None,
             };
         }
-        if self.is_lm_studio() || self.is_generic_local_endpoint() || !looks_reasoning_model(model)
-        {
+        if self.is_lm_studio() {
             return RemoteReasoningEffort::default();
         }
         RemoteReasoningEffort {
@@ -165,11 +181,21 @@ impl RemoteBackend {
         label.contains("lm studio") || label.contains("lmstudio") || base.contains(":1234/")
     }
 
-    fn is_generic_local_endpoint(&self) -> bool {
-        let base = self.base_url.to_ascii_lowercase();
-        (base.contains("localhost:") || base.contains("127.0.0.1:"))
-            && !self.is_ollama()
-            && !self.is_lm_studio()
+    async fn vllm_reasoning_efforts(&self) -> Vec<ReasoningEffort> {
+        let Ok(response) = self
+            .auth(self.client.get(self.api_root_endpoint("openapi.json")))
+            .send()
+            .await
+        else {
+            return Vec::new();
+        };
+        if !response.status().is_success() {
+            return Vec::new();
+        }
+        let Ok(spec) = response.json::<Value>().await else {
+            return Vec::new();
+        };
+        vllm_reasoning_efforts_from_openapi(&spec)
     }
 
     fn ollama_generate_endpoint(&self) -> String {
@@ -324,6 +350,28 @@ impl ModelService for RemoteBackend {
             )));
         }
         let mut parsed: ModelsResponse = resp.json().await.map_err(upstream)?;
+        let is_vllm = parsed
+            .data
+            .iter()
+            .any(|model| model.owned_by.eq_ignore_ascii_case("vllm"));
+        if is_vllm {
+            let efforts = self.vllm_reasoning_efforts().await;
+            for model in &mut parsed.data {
+                if model.reasoning.is_none()
+                    && looks_reasoning_model(&model.id)
+                    && !efforts.is_empty()
+                {
+                    model.reasoning = Some(ModelReasoningMetadata {
+                        default_effort: efforts
+                            .contains(&ReasoningEffort::Medium)
+                            .then_some(ReasoningEffort::Medium),
+                        default_enabled: Some(true),
+                        mandatory: Some(!efforts.contains(&ReasoningEffort::None)),
+                        supported_efforts: efforts.clone(),
+                    });
+                }
+            }
+        }
         if self.is_lm_studio() {
             if let Ok(metadata) = self.lm_studio_native_metadata().await {
                 for model in &mut parsed.data {
@@ -1145,6 +1193,21 @@ fn looks_reasoning_model(model: &str) -> bool {
         || id.contains("reason")
 }
 
+fn vllm_reasoning_efforts_from_openapi(spec: &Value) -> Vec<ReasoningEffort> {
+    let Some(variants) = spec
+        .pointer("/components/schemas/ChatCompletionRequest/properties/reasoning_effort/anyOf")
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    variants
+        .iter()
+        .filter_map(|variant| variant.get("enum").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|effort| serde_json::from_value(effort.clone()).ok())
+        .collect()
+}
+
 #[derive(Serialize)]
 struct LegacyCompletionRequest {
     model: String,
@@ -1934,13 +1997,58 @@ mod tests {
     }
 
     #[test]
-    fn skips_reasoning_effort_for_generic_local_openai_compatible() {
+    fn sends_reasoning_and_sampling_extensions_for_vllm() {
+        let backend = RemoteBackend::new("vLLM (local)", "http://localhost:8000/v1", None);
+        let mut req = empty_req();
+        req.model = "qwen3.8-27b".into();
+        req.reasoning_effort = Some(ReasoningEffort::High);
+        req.sampling.top_k = Some(50);
+        req.sampling.min_p = Some(0.1);
+        req.sampling.repetition_penalty = Some(1.05);
+        req.sampling.thinking_token_budget = Some(2_048);
+
+        let body = backend.build_body(&req, true);
+
+        assert_eq!(body.reasoning_effort, Some(ReasoningEffort::High));
+        assert_eq!(body.extra["top_k"], 50);
+        assert!((body.extra["min_p"].as_f64().unwrap() - 0.1).abs() < 0.000_001);
+        assert!((body.extra["repetition_penalty"].as_f64().unwrap() - 1.05).abs() < 0.000_001);
+        assert_eq!(body.extra["thinking_token_budget"], 2_048);
+    }
+
+    #[test]
+    fn reads_vllm_reasoning_efforts_from_openapi() {
+        let spec = json!({
+            "components": { "schemas": { "ChatCompletionRequest": {
+                "properties": { "reasoning_effort": { "anyOf": [
+                    { "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"] },
+                    { "type": "null" }
+                ] } }
+            } } }
+        });
+
+        assert_eq!(
+            vllm_reasoning_efforts_from_openapi(&spec),
+            vec![
+                ReasoningEffort::None,
+                ReasoningEffort::Minimal,
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+                ReasoningEffort::Xhigh,
+                ReasoningEffort::Max,
+            ]
+        );
+    }
+
+    #[test]
+    fn respects_explicit_reasoning_effort_for_generic_openai_compatible() {
         let backend = RemoteBackend::new("custom", "http://localhost:9999/v1", None);
         let mut req = empty_req();
         req.model = "deepseek-r1".into();
         req.reasoning_effort = Some(ReasoningEffort::High);
         let body = backend.build_body(&req, true);
-        assert!(body.reasoning_effort.is_none());
+        assert_eq!(body.reasoning_effort, Some(ReasoningEffort::High));
         assert!(body.extra.is_empty());
     }
 

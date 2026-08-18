@@ -6724,6 +6724,8 @@ span.provider-brand-icon {
   border: 1px solid var(--popover-border);
   box-shadow: var(--popover-shadow);
   backdrop-filter: blur(var(--popover-blur));
+  max-height: min(720px, calc(100vh - 24px));
+  overflow-y: auto;
 }
 .context-row {
   display: grid;
@@ -6842,6 +6844,91 @@ span.provider-brand-icon {
   outline: 2px solid var(--focus-border);
   outline-offset: -2px;
 }
+
+.generation-controls {
+  margin: 3px 3px 0;
+  padding-top: 3px;
+  border-top: 1px solid var(--border-primary);
+}
+.generation-controls summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 34px;
+  padding: 4px 5px;
+  color: var(--primary-text);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.generation-controls summary span:last-child {
+  color: var(--tertiary-text);
+  font-size: 10.5px;
+  font-weight: 500;
+}
+.generation-controls > p {
+  margin: 0 5px 8px;
+  color: var(--tertiary-text);
+  font-size: 10.5px;
+  line-height: 1.35;
+}
+.generation-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  padding: 0 5px;
+}
+.generation-grid label,
+.generation-stop {
+  display: grid;
+  gap: 3px;
+  color: var(--secondary-text);
+  font-size: 10.5px;
+}
+.generation-grid label > span {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+}
+.generation-grid em {
+  color: var(--accent-light);
+  font-size: 8.5px;
+  font-style: normal;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.generation-grid input,
+.generation-stop textarea {
+  min-width: 0;
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  background: var(--input-bg);
+  color: var(--primary-text);
+  font: inherit;
+  font-size: 11.5px;
+  outline: none;
+}
+.generation-grid input { height: 29px; padding: 0 7px; }
+.generation-grid input:focus,
+.generation-stop textarea:focus { border-color: var(--focus-border); }
+.generation-stop { margin: 8px 5px 0; }
+.generation-stop span { display: flex; justify-content: space-between; }
+.generation-stop small { color: var(--tertiary-text); font: inherit; }
+.generation-stop textarea { resize: vertical; padding: 6px 7px; line-height: 1.35; }
+.generation-reset {
+  width: calc(100% - 10px);
+  margin: 8px 5px 4px;
+  min-height: 29px;
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--secondary-text);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.generation-reset:hover { background: var(--chip-hover); color: var(--primary-text); }
 
 .app-context-menu {
   position: fixed;

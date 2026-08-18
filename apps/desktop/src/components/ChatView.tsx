@@ -182,6 +182,10 @@ import {
 } from "../lib/gitRefresh";
 import { reasoningEffortForThread, reasoningEffortOverridesWithSelection } from "../lib/reasoningEffort";
 import {
+  generationOverridesWithSelection,
+  generationSettingsForModel,
+} from "../lib/generationSettings";
+import {
   buildQuickSummary,
   type QuickSummarySectionId,
   type QuickSummarySource,
@@ -1587,6 +1591,7 @@ export function ChatView({
     workerModel,
     planMode,
     reasoningEffortOverrides,
+    generationOverrides,
     goal,
   } = threadSettings;
   const visibleApprovalPrompts = useMemo(
@@ -7268,6 +7273,16 @@ export function ChatView({
                       reasoningEffortOverrides,
                       modelId,
                       effort,
+                    ),
+                  });
+                }}
+                generationSettings={generationSettingsForModel(generationOverrides, model)}
+                onGenerationSettings={(settings) => {
+                  updateThreadSettings(activeId, {
+                    generationOverrides: generationOverridesWithSelection(
+                      generationOverrides,
+                      model,
+                      settings,
                     ),
                   });
                 }}

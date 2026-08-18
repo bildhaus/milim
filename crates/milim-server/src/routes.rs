@@ -98,7 +98,10 @@ fn peer_addr(peer: Peer) -> Option<SocketAddr> {
 }
 
 fn agent_run_config_from_request(req: &ChatCompletionRequest) -> milim_agents::AgentRunConfig {
-    let mut config = milim_agents::AgentRunConfig::default();
+    let mut config = milim_agents::AgentRunConfig {
+        sampling: openai_to_completion(req.clone()).sampling,
+        ..Default::default()
+    };
     if let Some(max_iterations) = req
         .extra
         .get("agent_max_iterations")
@@ -164,6 +167,8 @@ pub(crate) struct ProviderUpsert {
     api_key: Option<String>,
     #[serde(default = "default_enabled")]
     enabled: bool,
+    #[serde(default)]
+    model_overrides: Option<BTreeMap<String, crate::providers::ModelCapabilityOverride>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -281,6 +286,10 @@ pub(crate) async fn providers_list(
                 "id": p.id, "name": p.name, "kind": p.kind, "base_url": p.base_url,
                 "enabled": p.enabled, "has_key": p.api_key.is_some(), "models": p.models,
                 "pricing": p.pricing,
+                "model_context": p.model_context,
+                "model_reasoning": p.model_reasoning,
+                "model_capabilities": p.model_capabilities,
+                "model_overrides": p.model_overrides,
                 "error": p.last_error,
             })
         })
@@ -441,8 +450,19 @@ pub(crate) async fn provider_upsert(
             "providers are not enabled".to_string(),
         ))
     })?;
+    let id = req.id.unwrap_or_else(|| gen_id("prov"));
+    let model_overrides = match req.model_overrides {
+        Some(overrides) => overrides,
+        None => reg
+            .list()
+            .await
+            .into_iter()
+            .find(|provider| provider.id == id)
+            .map(|provider| provider.model_overrides)
+            .unwrap_or_default(),
+    };
     let cfg = crate::providers::Provider {
-        id: req.id.unwrap_or_else(|| gen_id("prov")),
+        id,
         name: req.name,
         kind: req.kind,
         base_url: req.base_url,
@@ -453,6 +473,7 @@ pub(crate) async fn provider_upsert(
         model_context: BTreeMap::new(),
         model_reasoning: BTreeMap::new(),
         model_capabilities: BTreeMap::new(),
+        model_overrides,
         last_error: None,
     };
     let saved = reg.upsert(cfg).await.map_err(ApiError)?;
@@ -463,8 +484,47 @@ pub(crate) async fn provider_upsert(
         "id": saved.id, "name": saved.name, "kind": saved.kind, "base_url": saved.base_url,
         "enabled": saved.enabled, "has_key": saved.api_key.is_some(), "models": saved.models,
         "pricing": saved.pricing,
+        "model_context": saved.model_context,
+        "model_reasoning": saved.model_reasoning,
+        "model_capabilities": saved.model_capabilities,
+        "model_overrides": saved.model_overrides,
         "error": saved.last_error,
     }))
+    .into_response())
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ProviderModelVerifyRequest {
+    model: String,
+}
+
+/// `POST /providers/{id}/models/verify` — opt-in live probes for model
+/// capabilities. Results are diagnostic until the user saves overrides.
+pub(crate) async fn provider_model_verify(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    peer: Peer,
+    Json(req): Json<ProviderModelVerifyRequest>,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    let model = req.model.trim();
+    if model.is_empty() {
+        return Err(ApiError(Error::InvalidRequest(
+            "model is required".to_string(),
+        )));
+    }
+    let registry = st.providers.as_ref().ok_or_else(|| {
+        ApiError(Error::InvalidRequest(
+            "providers are not enabled".to_string(),
+        ))
+    })?;
+    Ok(Json(
+        registry
+            .verify_model_capabilities(&id, model)
+            .await
+            .map_err(ApiError)?,
+    )
     .into_response())
 }
 

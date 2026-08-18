@@ -123,6 +123,10 @@ pub fn build_router(state: AppState) -> Router {
             get(routes::providers_list).post(routes::provider_upsert),
         )
         .route("/providers/discover", get(routes::providers_discover))
+        .route(
+            "/providers/{id}/models/verify",
+            post(routes::provider_model_verify),
+        )
         .route("/providers/{id}", delete(routes::provider_delete))
         // Desktop-selected Google Drive, Docs, Sheets, and Slides.
         .route(

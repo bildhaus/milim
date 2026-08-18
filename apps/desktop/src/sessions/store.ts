@@ -38,6 +38,10 @@ import {
   type GoalSettings,
 } from "../lib/goals.js";
 import { recordPerfMeasure, startPerfMeasure } from "../lib/perf.js";
+import {
+  normalizeGenerationOverrides,
+  type GenerationOverrides,
+} from "../lib/generationSettings.js";
 import { previewRuntimeKeyForThread } from "../lib/previewRuntimeKeys.js";
 import { normalizeProjectColor } from "../lib/projectColors.js";
 import type { PullRequestSnapshot } from "../lib/pullRequests.js";
@@ -131,6 +135,8 @@ export interface ThreadSettings {
   planMode: boolean;
   /** Per-model reasoning effort chosen inside this thread; absent models inherit the app-wide default. */
   reasoningEffortOverrides?: Record<string, ReasoningEffort>;
+  /** Per-model provider sampling overrides; absent values inherit model/server defaults. */
+  generationOverrides?: GenerationOverrides;
   goal: GoalSettings;
 }
 
@@ -706,6 +712,9 @@ function normalizeSettings(
   } else {
     delete next.reasoningEffortOverrides;
   }
+  const generationOverrides = normalizeGenerationOverrides(next.generationOverrides);
+  if (Object.keys(generationOverrides).length) next.generationOverrides = generationOverrides;
+  else delete next.generationOverrides;
   if (
     next.delegationPolicy !== "off" &&
     next.delegationPolicy !== "ask" &&
@@ -2029,6 +2038,7 @@ export const useSessions = create<SessionState>()(
             : normalizeSettings(current?.settings);
           const newThreadBase = { ...base };
           delete newThreadBase.reasoningEffortOverrides;
+          delete newThreadBase.generationOverrides;
           return get().newChat({
             ...newThreadBase,
             ...settings,

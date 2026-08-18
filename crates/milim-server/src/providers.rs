@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use milim_core::api::openai::{
-    Model, ModelCapabilities, ModelPricing, ModelReasoningMetadata, ReasoningEffort,
+    ChatMessage, Content, ContentPart, ImageUrl, Model, ModelCapabilities, ModelPricing,
+    ModelReasoningMetadata, ReasoningEffort, Tool, ToolFunction,
 };
 use milim_core::{Error, Result};
 use milim_inference::anthropic::AnthropicBackend;
@@ -82,10 +83,41 @@ pub struct Provider {
     /// Provider-supplied model capabilities keyed by model id.
     #[serde(default)]
     pub model_capabilities: BTreeMap<String, ModelCapabilities>,
+    /// Explicit user choices layered over provider discovery. These are kept
+    /// separately so a refresh cannot erase them.
+    #[serde(default)]
+    pub model_overrides: BTreeMap<String, ModelCapabilityOverride>,
     /// Last connection error from the model fetch (so the UI can explain an
     /// empty model list — e.g. server down, bad key, wrong URL).
     #[serde(default)]
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelCapabilityOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_input: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_use: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_efforts: Vec<ReasoningEffort>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CapabilityProbeResult {
+    pub supported: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelCapabilityVerification {
+    pub model: String,
+    pub vision: CapabilityProbeResult,
+    pub reasoning: CapabilityProbeResult,
+    pub tools: CapabilityProbeResult,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -297,6 +329,7 @@ impl ProviderRegistry {
             cfg.model_capabilities = BTreeMap::new();
             cfg.last_error = None;
         }
+        apply_model_overrides(&mut cfg);
 
         let mut w = self.inner.write().await;
         let mut next = w.clone();
@@ -346,6 +379,7 @@ impl ProviderRegistry {
                         rt.cfg.last_error = Some(error.to_string());
                     }
                 }
+                apply_model_overrides(&mut rt.cfg);
             }
         }
         let snapshot = self
@@ -372,6 +406,155 @@ impl ProviderRegistry {
             *w = next;
         }
         Ok(removed)
+    }
+
+    /// Run small, explicit capability probes against one configured model.
+    /// This never changes provider metadata; the UI may choose which results
+    /// to save as overrides after showing them to the user.
+    pub async fn verify_model_capabilities(
+        &self,
+        provider_id: &str,
+        model: &str,
+    ) -> Result<ModelCapabilityVerification> {
+        let backend = self
+            .inner
+            .read()
+            .await
+            .iter()
+            .find(|runtime| {
+                runtime.cfg.id == provider_id
+                    && runtime.cfg.enabled
+                    && runtime
+                        .cfg
+                        .models
+                        .iter()
+                        .any(|candidate| candidate == model)
+            })
+            .map(|runtime| runtime.backend.clone())
+            .ok_or_else(|| {
+                Error::ModelNotFound(format!("model {model} for provider {provider_id}"))
+            })?;
+        let sampling = milim_inference::SamplingParams {
+            max_tokens: Some(32),
+            temperature: Some(0.0),
+            ..Default::default()
+        };
+        let base_request = |messages: Vec<ChatMessage>| CompletionRequest {
+            model: model.to_string(),
+            messages,
+            tools: Vec::new(),
+            tool_choice: None,
+            response_format: None,
+            prompt: None,
+            suffix: None,
+            sampling: sampling.clone(),
+            reasoning_effort: None,
+        };
+
+        let vision = probe_completion(
+            backend.as_ref(),
+            base_request(vec![ChatMessage {
+                role: "user".into(),
+                content: Some(Content::Parts(vec![
+                    ContentPart::Text {
+                        text: "Reply with the dominant color of this one-pixel image.".into(),
+                    },
+                    ContentPart::ImageUrl {
+                        image_url: ImageUrl {
+                            url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6ZJAAAAAASUVORK5CYII=".into(),
+                            detail: Some("low".into()),
+                        },
+                    },
+                ])),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            }]),
+            |_| true,
+        )
+        .await;
+
+        let mut reasoning_request = base_request(vec![ChatMessage::text(
+            "user",
+            "Think briefly, then answer only: 4.",
+        )]);
+        reasoning_request.reasoning_effort = Some(ReasoningEffort::Low);
+        let reasoning = probe_completion(backend.as_ref(), reasoning_request, |output| {
+            output
+                .message
+                .reasoning_content
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+        })
+        .await;
+
+        let mut tools_request = base_request(vec![ChatMessage::text(
+            "user",
+            "Call the capability probe tool exactly once.",
+        )]);
+        tools_request.tools = vec![Tool {
+            kind: "function".into(),
+            function: ToolFunction {
+                name: "milim_capability_probe".into(),
+                description: Some("Return a fixed capability probe value".into()),
+                parameters: Some(serde_json::json!({
+                    "type": "object",
+                    "properties": { "value": { "type": "string" } },
+                    "required": ["value"]
+                })),
+            },
+        }];
+        tools_request.tool_choice = Some(serde_json::json!({
+            "type": "function",
+            "function": { "name": "milim_capability_probe" }
+        }));
+        tools_request.sampling.max_tokens = Some(256);
+        let tools = probe_completion(backend.as_ref(), tools_request, |output| {
+            output.message.tool_calls.as_ref().is_some_and(|calls| {
+                calls
+                    .iter()
+                    .any(|call| call.function.name == "milim_capability_probe")
+            })
+        })
+        .await;
+
+        Ok(ModelCapabilityVerification {
+            model: model.to_string(),
+            vision,
+            reasoning,
+            tools,
+        })
+    }
+}
+
+async fn probe_completion(
+    backend: &dyn ModelService,
+    request: CompletionRequest,
+    supported: impl FnOnce(&milim_inference::CompletionOutput) -> bool,
+) -> CapabilityProbeResult {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(45),
+        backend.complete(request),
+    )
+    .await
+    {
+        Ok(Ok(output)) => {
+            let is_supported = supported(&output);
+            CapabilityProbeResult {
+                supported: is_supported,
+                error: (!is_supported && output.finish_reason == "length")
+                    .then(|| "capability probe reached its output-token limit".into()),
+            }
+        }
+        Ok(Err(error)) => CapabilityProbeResult {
+            supported: false,
+            error: Some(error.to_string()),
+        },
+        Err(_) => CapabilityProbeResult {
+            supported: false,
+            error: Some("capability probe timed out".into()),
+        },
     }
 }
 
@@ -447,6 +630,73 @@ fn collect_model_reasoning(
             Some((model.id.clone(), reasoning))
         })
         .collect()
+}
+
+fn apply_model_overrides(provider: &mut Provider) {
+    for (model, override_) in provider.model_overrides.clone() {
+        if override_.image_input.is_some() || override_.tool_use.is_some() {
+            let capabilities = provider
+                .model_capabilities
+                .entry(model.clone())
+                .or_default();
+            if let Some(value) = override_.image_input {
+                capabilities.image_input = Some(value);
+            }
+            if let Some(value) = override_.tool_use {
+                capabilities.tool_use = Some(value);
+            }
+        }
+        match override_.reasoning {
+            Some(false) => {
+                provider.model_reasoning.remove(&model);
+            }
+            Some(true) => {
+                let efforts = if override_.supported_efforts.is_empty() {
+                    vec![
+                        ReasoningEffort::None,
+                        ReasoningEffort::Minimal,
+                        ReasoningEffort::Low,
+                        ReasoningEffort::Medium,
+                        ReasoningEffort::High,
+                        ReasoningEffort::Xhigh,
+                        ReasoningEffort::Max,
+                    ]
+                } else {
+                    override_.supported_efforts.clone()
+                };
+                let default_effort = efforts
+                    .contains(&ReasoningEffort::Medium)
+                    .then_some(ReasoningEffort::Medium)
+                    .or_else(|| efforts.first().copied());
+                provider.model_reasoning.insert(
+                    model,
+                    reasoning_meta(
+                        &efforts,
+                        default_effort,
+                        true,
+                        !efforts.contains(&ReasoningEffort::None),
+                    ),
+                );
+            }
+            None if !override_.supported_efforts.is_empty() => {
+                let default_effort = override_
+                    .supported_efforts
+                    .contains(&ReasoningEffort::Medium)
+                    .then_some(ReasoningEffort::Medium)
+                    .or_else(|| override_.supported_efforts.first().copied());
+                provider.model_reasoning.insert(
+                    model,
+                    reasoning_meta(
+                        &override_.supported_efforts,
+                        default_effort,
+                        true,
+                        !override_.supported_efforts.contains(&ReasoningEffort::None),
+                    ),
+                );
+            }
+            None => {}
+        }
+    }
 }
 
 fn fallback_model_context(provider: &Provider, model: &str) -> ModelContextMetadata {
@@ -550,7 +800,9 @@ fn fallback_model_reasoning(provider: &Provider, model: &str) -> Option<ModelRea
                 local_ollama_reasoning(model)
             } else if is_lm_studio_provider(provider) {
                 local_lm_studio_reasoning(model)
-            } else if is_local_provider(provider) || !looks_reasoning_model(model) {
+            } else if (is_local_provider(provider) && !is_vllm_provider(provider))
+                || !looks_reasoning_model(model)
+            {
                 None
             } else {
                 Some(reasoning_meta(
@@ -652,6 +904,10 @@ fn is_lm_studio_provider(provider: &Provider) -> bool {
     let name = provider.name.to_ascii_lowercase();
     let base = provider.base_url.to_ascii_lowercase();
     name.contains("lm studio") || name.contains("lmstudio") || base.contains(":1234/")
+}
+
+fn is_vllm_provider(provider: &Provider) -> bool {
+    provider.name.to_ascii_lowercase().contains("vllm")
 }
 
 fn is_gpt_oss_model(model: &str) -> bool {
@@ -967,6 +1223,7 @@ mod tests {
             model_context: BTreeMap::new(),
             model_reasoning: BTreeMap::new(),
             model_capabilities: BTreeMap::new(),
+            model_overrides: BTreeMap::new(),
             last_error: None,
         }
     }
@@ -1100,6 +1357,51 @@ mod tests {
             "http://localhost:9999/v1",
         );
         assert!(fallback_model_reasoning(&custom, "deepseek-r1").is_none());
+    }
+
+    #[test]
+    fn explicit_model_overrides_replace_discovery_and_survive_refresh_layers() {
+        let mut vllm = provider(
+            "vLLM (local)",
+            ProviderKind::OpenAiCompatible,
+            "http://localhost:8000/v1",
+        );
+        vllm.model_capabilities.insert(
+            "qwen".into(),
+            ModelCapabilities {
+                image_input: Some(false),
+                tool_use: Some(false),
+                ..Default::default()
+            },
+        );
+        vllm.model_overrides.insert(
+            "qwen".into(),
+            ModelCapabilityOverride {
+                image_input: Some(true),
+                tool_use: Some(true),
+                reasoning: Some(true),
+                supported_efforts: vec![ReasoningEffort::Low, ReasoningEffort::High],
+            },
+        );
+
+        apply_model_overrides(&mut vllm);
+
+        assert_eq!(vllm.model_capabilities["qwen"].image_input, Some(true));
+        assert_eq!(vllm.model_capabilities["qwen"].tool_use, Some(true));
+        assert_eq!(
+            vllm.model_reasoning["qwen"].supported_efforts,
+            [ReasoningEffort::Low, ReasoningEffort::High]
+        );
+    }
+
+    #[test]
+    fn vllm_reasoning_fallback_is_not_suppressed_as_generic_loopback() {
+        let vllm = provider(
+            "vLLM (local)",
+            ProviderKind::OpenAiCompatible,
+            "http://localhost:8000/v1",
+        );
+        assert!(fallback_model_reasoning(&vllm, "qwen3.8-27b").is_some());
     }
 
     #[tokio::test]

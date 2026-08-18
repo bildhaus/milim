@@ -22,6 +22,12 @@ pub struct SamplingParams {
     pub seed: Option<i64>,
     pub frequency_penalty: Option<f32>,
     pub presence_penalty: Option<f32>,
+    /// vLLM-compatible extension controls. They remain absent for providers
+    /// that should use their own model defaults.
+    pub top_k: Option<i32>,
+    pub min_p: Option<f32>,
+    pub repetition_penalty: Option<f32>,
+    pub thinking_token_budget: Option<u32>,
 }
 
 /// A backend-neutral generation request. The server builds this from an

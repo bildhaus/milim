@@ -3030,6 +3030,7 @@ pub(crate) fn control_agent_stream(
     thread_id: &str,
     message_id: &str,
     reasoning_effort: Option<ReasoningEffort>,
+    sampling: SamplingParams,
     step_hook: Arc<dyn milim_agents::AgentStepHook>,
 ) -> milim_core::Result<ControlAgentStream> {
     let run_context = RunContext::from_control(st, workspace, privacy)?;
@@ -3054,6 +3055,7 @@ pub(crate) fn control_agent_stream(
         agent_config.approval_broker = Some(st.tool_approvals.clone());
     }
     agent_config.step_hook = Some(step_hook);
+    agent_config.sampling = sampling;
     let query = messages
         .iter()
         .rev()

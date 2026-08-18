@@ -6,7 +6,7 @@ title: Desktop app
 summary: Unified threads, projects, composer controls, artifacts, plan mode, goals, search, rendering, settings, and slash commands.
 group: Core
 order: 30
-updated: 2026-08-17
+updated: 2026-08-18
 ---
 
 Milim is your local control plane for coding agents: use your own models and subscriptions, keep one canonical thread, review the diff, and ship.
@@ -87,6 +87,7 @@ The latest eligible turn ends with a compact review card whose explicit state is
 | Control | Behavior |
 |---|---|
 | Model | Pick any discovered chat, account-runtime, or media-capable model. The chip and picker groups use branded icons for provider/runtime identity while keeping readiness as a separate status. They also show runtime lane, capabilities, favorite state, and reasoning effort where supported. |
+| Generation | Expand **Generation** in session controls for per-model provider overrides. Common fields cover output limit, temperature, Top P, seed, stop sequences, and frequency/presence penalties; vLLM adds Top K, Min P, repetition penalty, and thinking-token budget. Blank means model default, and accepted turns freeze their values for direct and tool-agent requests. |
 | Folder | Sets the host working folder. Each run captures that folder immutably; filesystem tools reject symlink/junction escapes, writes replace files atomically, directory results are sorted and bounded, and `read_file` accepts byte `offset`/`limit` ranges. |
 | Docker sandbox | Enables bounded Docker execution through `run_command`: no network, read-only root, dropped capabilities, no-new-privileges, memory/CPU/PID limits, output caps, timeout, and cancellation cleanup. It is separate from each installed account runtime's native sandbox. |
 | Computer use | Enables OS-level screen capture plus mouse/keyboard tools when the desktop build includes the feature. |
