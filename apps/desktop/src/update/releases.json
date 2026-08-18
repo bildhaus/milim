@@ -1,4 +1,9 @@
 {
+  "0.2.44": {
+    "version": "0.2.44",
+    "summary": "Milim 0.2.44 repairs stale model routing in existing desktop chats and synchronizes model changes before the next message is sent.",
+    "items": []
+  },
   "0.2.43": {
     "version": "0.2.43",
     "summary": "Milim 0.2.43 brings deeper vLLM support with continuous reasoning streams, verified model capabilities, and per-model generation controls.",

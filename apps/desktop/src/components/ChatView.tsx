@@ -225,6 +225,7 @@ import { isNearScrollBottom } from "../lib/scroll";
 import {
   mergeModelListsForPicker,
   providerOwnsModel,
+  reconcileStoredThreadModel,
 } from "../lib/modelPicker";
 import { assessHotSwap, type HotSwapAssessment } from "../lib/hotSwap";
 import {
@@ -1018,6 +1019,11 @@ type RunTurnOptions = {
   legacyRuntime?: boolean;
 };
 
+type CanonicalModelWrite = {
+  signature: string;
+  promise: Promise<void>;
+};
+
 type ToolApprovalScope = ChatApprovalRequest["scope"];
 
 function toolApprovalMessage(
@@ -1546,6 +1552,7 @@ export function ChatView({
   const {
     models,
     modelsLoaded,
+    modelsSettled,
     providers,
     skills,
     composerTools,
@@ -1724,6 +1731,9 @@ export function ChatView({
   const persistingTurnIdsRef = useRef<Set<string>>(new Set());
   const canonicalRunIdsRef = useRef<Map<string, string>>(new Map());
   const canonicalSteeringRef = useRef<Map<string, boolean>>(new Map());
+  const canonicalModelWritesRef = useRef<Map<string, CanonicalModelWrite>>(new Map());
+  const canonicalThreadModelsRef = useRef(new Map<string, string>());
+  const handledUnavailableModelRoutesRef = useRef(new Set<string>());
   const canonicalQueuedMessages = useMemo(
     () =>
       canonicalQueuedTurns
@@ -1890,6 +1900,58 @@ export function ChatView({
     activeWorker?.status === "running" ||
     activeWorkerRun?.run.status === "running";
   const busy = generatingSessionIds.includes(activeId) || activeWorkerRunning;
+  useEffect(() => {
+    const selected = effectiveModel.trim();
+    if (!sessionsHydrated || !modelsSettled || busy || !selected) return;
+    const reconciliation = reconcileStoredThreadModel(selected, models);
+    const sourceKey = `${activeId}\0${selected}`;
+    if (reconciliation.status === "defer") return;
+    if (reconciliation.status === "choose") {
+      const choiceKey = `choose\0${sourceKey}`;
+      if (handledUnavailableModelRoutesRef.current.has(choiceKey)) return;
+      handledUnavailableModelRoutesRef.current.add(choiceKey);
+      updateThreadSettings(activeId, { model: "" });
+      void writeCanonicalThreadModel(activeId, "").catch((error) =>
+        setChatNotice({
+          tone: "error",
+          message: `Milim could not clear the unavailable model: ${error instanceof Error ? error.message : String(error)}`,
+        }),
+      );
+      setChatNotice({
+        tone: "error",
+        message: "This chat's saved provider route is no longer available. Use the model picker to choose a model.",
+      });
+      return;
+    }
+    const target = reconciliation.model;
+    if (canonicalThreadModelsRef.current.get(activeId) === target) return;
+    if (reconciliation.status === "repair") {
+      updateThreadSettings(activeId, { model: target });
+    }
+    void writeCanonicalThreadModel(activeId, target)
+      .then(() => {
+        if (reconciliation.status === "repair") {
+          setChatNotice({
+            tone: "info",
+            message: "Milim repaired this chat's saved model route.",
+          });
+        }
+      })
+      .catch((error) =>
+        setChatNotice({
+          tone: "error",
+          message: `Milim could not synchronize this chat's model: ${error instanceof Error ? error.message : String(error)}`,
+        }),
+      );
+  }, [
+    activeId,
+    busy,
+    effectiveModel,
+    models,
+    modelsSettled,
+    sessionsHydrated,
+    updateThreadSettings,
+  ]);
   const latestTurnMessage = messages[messages.length - 1];
   const latestTurnCheckpoint = latestTurnMessage?.workspaceCheckpoint;
   const latestTurnChangesKey =
@@ -3560,6 +3622,12 @@ export function ChatView({
       return;
     }
     updateThreadSettings(activeId, { model: target.id });
+    void writeCanonicalThreadModel(activeId, target.id).catch((error) =>
+      setChatNotice({
+        tone: "error",
+        message: `Milim could not save this model selection: ${error instanceof Error ? error.message : String(error)}`,
+      }),
+    );
     if (action === "continue" || action === "review") {
       useSessions.getState().setPendingHotSwap(activeId, {
         fromModel,
@@ -3928,6 +3996,41 @@ export function ChatView({
       setPreviewPanelOverlay(false);
       resizePreviewPanel(DEFAULT_PREVIEW_PANEL_WIDTH, false);
     }
+  }
+
+  function writeCanonicalThreadModel(
+    sessionId: string,
+    nextModel: string,
+    reasoningEffort?: ReasoningEffort,
+  ): Promise<void> {
+    const model = nextModel.trim();
+    const signature = `${model}\0${reasoningEffort ?? ""}`;
+    const current = canonicalModelWritesRef.current.get(sessionId);
+    if (current?.signature === signature) return current.promise;
+    const previous = current?.promise.catch(() => undefined) ?? Promise.resolve();
+    const promise = previous.then(async () => {
+      const result = await sendControlCommand({
+        command_id: createControlCommandId(),
+        kind: "thread.set_model",
+        thread_id: sessionId,
+        payload: {
+          model,
+          ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+        },
+      });
+      if (result.status !== "applied") {
+        throw new Error(result.message || `Model synchronization ${result.status}.`);
+      }
+      canonicalThreadModelsRef.current.set(sessionId, model);
+    });
+    canonicalModelWritesRef.current.set(sessionId, { signature, promise });
+    const clear = () => {
+      if (canonicalModelWritesRef.current.get(sessionId)?.promise === promise) {
+        canonicalModelWritesRef.current.delete(sessionId);
+      }
+    };
+    void promise.then(clear, clear);
+    return promise;
   }
 
   function requireChatModel(): string | null {
@@ -5453,6 +5556,7 @@ export function ChatView({
     convo: ChatMessage[],
     options: RunTurnOptions,
     sessionId: string,
+    selectedModel: string,
   ): Promise<RunTurnResult> {
     const store = useSessions.getState();
     const last = convo[convo.length - 1];
@@ -5463,7 +5567,18 @@ export function ChatView({
         error: "A canonical turn must end with a user message.",
       };
     }
-    await flushDeferredUserStateWrites("milim.sessions");
+    try {
+      if (canonicalThreadModelsRef.current.get(sessionId) !== selectedModel.trim()) {
+        await writeCanonicalThreadModel(sessionId, selectedModel);
+      } else {
+        await canonicalModelWritesRef.current.get(sessionId)?.promise;
+      }
+      await flushDeferredUserStateWrites("milim.sessions");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setChatNotice({ tone: "error", message });
+      return { status: "error", messages: sessionMessages(sessionId, convo), error: message };
+    }
     const controller = claimTurnGeneration({
       sessionId,
       store,
@@ -5634,7 +5749,7 @@ export function ChatView({
       options.claudeSessionRecoveryGrant == null &&
       options.delegationPolicyOverride == null;
     if (canonicalEligible) {
-      return runCanonicalControlTurn(convo, options, id);
+      return runCanonicalControlTurn(convo, options, id, turnModel);
     }
     const store = useSessions.getState();
     if (persistingTurnIdsRef.current.has(id)) {
@@ -7275,6 +7390,14 @@ export function ChatView({
                       effort,
                     ),
                   });
+                  if (modelId === effectiveModel) {
+                    void writeCanonicalThreadModel(activeId, modelId, effort).catch((error) =>
+                      setChatNotice({
+                        tone: "error",
+                        message: `Milim could not save this reasoning setting: ${error instanceof Error ? error.message : String(error)}`,
+                      }),
+                    );
+                  }
                 }}
                 generationSettings={generationSettingsForModel(generationOverrides, model)}
                 onGenerationSettings={(settings) => {
