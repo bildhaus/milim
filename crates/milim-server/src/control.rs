@@ -1421,7 +1421,10 @@ impl RunManager {
             .into_iter()
             .map(run_snapshot)
             .collect::<Result<Vec<_>>>()?;
-        let queued_turns = queued.into_iter().map(queued_turn).collect();
+        let queued_turns = queued
+            .into_iter()
+            .map(queued_turn)
+            .collect::<Result<Vec<_>>>()?;
         let pending_inputs = self
             .store
             .control_pending_inbox(None)?
@@ -1589,6 +1592,7 @@ impl RunManager {
                 | ControlCommandKindV1::TurnInboxDelete
                 | ControlCommandKindV1::TurnRegenerate
                 | ControlCommandKindV1::TurnQueueResume
+                | ControlCommandKindV1::TurnQueueMove
                 | ControlCommandKindV1::TurnQueueDelete
                 | ControlCommandKindV1::WorkerContinueSolo
         ) {
@@ -1647,6 +1651,7 @@ impl RunManager {
                 self.regenerate_turn(state, &command, None).await
             }
             ControlCommandKindV1::TurnQueueResume => self.resume_queued_turn(state, &command).await,
+            ControlCommandKindV1::TurnQueueMove => self.move_queued_turn(&command),
             ControlCommandKindV1::TurnQueueDelete => self.delete_queued_turn(&command),
             ControlCommandKindV1::ApprovalResolve => self.resolve_approval(&state, &command).await,
             ControlCommandKindV1::WorkerStart => self.worker_start(&state, &command).await,
@@ -3214,6 +3219,51 @@ impl RunManager {
         })
     }
 
+    fn move_queued_turn(&self, command: &ControlCommandV1) -> Result<ControlCommandResultV1> {
+        let thread_id = required_thread_id(command)?.to_string();
+        let queue_id = required_payload_string(&command.payload, "queue_id")?;
+        let target_id = required_payload_string(&command.payload, "target_id")?;
+        let position = required_payload_string(&command.payload, "position")?;
+        let after = match position.as_str() {
+            "before" => false,
+            "after" => true,
+            _ => {
+                return Err(Error::InvalidRequest(
+                    "payload.position must be before or after".into(),
+                ))
+            }
+        };
+        if !self
+            .store
+            .control_move_queued_turn(&thread_id, &queue_id, &target_id, after)?
+        {
+            return Err(Error::ModelNotFound(format!(
+                "queued turn {queue_id} or target {target_id}"
+            )));
+        }
+        self.emit(
+            "turn.queue_moved",
+            Some(&thread_id),
+            self.store
+                .control_thread(&thread_id)?
+                .as_ref()
+                .map(|thread| thread.epoch.as_str()),
+            None,
+            json!({ "queue_id": queue_id, "target_id": target_id, "position": position }),
+        );
+        Ok(ControlCommandResultV1 {
+            command_id: command.command_id.clone(),
+            status: ControlCommandStatusV1::Applied,
+            thread_id: Some(thread_id),
+            revision: None,
+            run_id: None,
+            queue_id: Some(queue_id),
+            confirmation_token: None,
+            message: None,
+            data: Value::Null,
+        })
+    }
+
     async fn resolve_approval(
         &self,
         state: &AppState,
@@ -3948,13 +3998,17 @@ fn pending_input(item: ControlInboxRecord) -> PendingInputV1 {
     }
 }
 
-fn queued_turn(turn: ControlQueuedTurnRecord) -> QueuedTurnV1 {
-    QueuedTurnV1 {
+fn queued_turn(turn: ControlQueuedTurnRecord) -> Result<QueuedTurnV1> {
+    let accepted = serde_json::from_str::<AcceptedTurnV1>(&turn.request_json)
+        .map_err(|error| Error::Other(format!("stored queued turn is invalid: {error}")))?;
+    Ok(QueuedTurnV1 {
         id: turn.id,
         thread_id: turn.thread_id,
         command_id: turn.command_id,
         accepted_at_ms: turn.accepted_at_ms,
-    }
+        display_text: accepted.display_text.unwrap_or(accepted.text),
+        attachments: accepted.config.attachments,
+    })
 }
 
 fn pending_approval(approval: ControlApprovalRecord) -> Result<PendingApprovalV1> {
@@ -5078,13 +5132,78 @@ mod tests {
                     kind: ControlCommandKindV1::TurnSend,
                     thread_id: Some("thread-fixture".into()),
                     expected_revision: None,
-                    payload: json!({ "text": "second", "attachments": [] }),
+                    payload: json!({
+                        "text": "second",
+                        "display_text": "Second shown",
+                        "attachments": []
+                    }),
                     confirmation_token: None,
                 },
             )
             .await
             .unwrap();
         assert_eq!(queued.status, ControlCommandStatusV1::Queued);
+        let third = manager
+            .command(
+                state.clone(),
+                None,
+                ControlCommandV1 {
+                    command_id: "send-third".into(),
+                    kind: ControlCommandKindV1::TurnSend,
+                    thread_id: Some("thread-fixture".into()),
+                    expected_revision: None,
+                    payload: json!({ "text": "third", "attachments": [] }),
+                    confirmation_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(third.status, ControlCommandStatusV1::Queued);
+        let moved = manager
+            .command(
+                state.clone(),
+                None,
+                ControlCommandV1 {
+                    command_id: "move-third".into(),
+                    kind: ControlCommandKindV1::TurnQueueMove,
+                    thread_id: Some("thread-fixture".into()),
+                    expected_revision: None,
+                    payload: json!({
+                        "queue_id": third.queue_id,
+                        "target_id": queued.queue_id,
+                        "position": "before"
+                    }),
+                    confirmation_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(moved.status, ControlCommandStatusV1::Applied);
+        let pending = manager
+            .store
+            .control_queued_turns(Some("thread-fixture"))
+            .unwrap();
+        assert_eq!(pending[0].id, third.queue_id.clone().unwrap());
+        let deleted = manager
+            .command(
+                state.clone(),
+                None,
+                ControlCommandV1 {
+                    command_id: "delete-third".into(),
+                    kind: ControlCommandKindV1::TurnQueueDelete,
+                    thread_id: Some("thread-fixture".into()),
+                    expected_revision: None,
+                    payload: json!({ "queue_id": third.queue_id }),
+                    confirmation_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(deleted.status, ControlCommandStatusV1::Applied);
+        let bootstrap = manager.bootstrap(&state).await.unwrap();
+        assert_eq!(bootstrap.queued_turns.len(), 1);
+        assert_eq!(bootstrap.queued_turns[0].display_text, "Second shown");
+        assert!(bootstrap.queued_turns[0].attachments.is_empty());
         manager
             .command(
                 state.clone(),

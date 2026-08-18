@@ -63,6 +63,7 @@ fn generated_fixture() -> String {
         ControlCommandKindV1::TurnStop,
         ControlCommandKindV1::TurnRegenerate,
         ControlCommandKindV1::TurnQueueResume,
+        ControlCommandKindV1::TurnQueueMove,
         ControlCommandKindV1::TurnQueueDelete,
         ControlCommandKindV1::ApprovalResolve,
         ControlCommandKindV1::WorkerStart,

@@ -3,8 +3,10 @@ import {
   type ChatAttachment,
   type ChatMessage,
   type ChatStreamPart,
+  type ControlQueuedTurnV1,
   type ControlTimelineItemV1,
 } from "../api.js";
+import type { QueuedMessage } from "../sessions/store.js";
 
 type CanonicalMessage = ChatMessage;
 
@@ -12,7 +14,20 @@ export function controlAttachments(attachments?: ChatAttachment[]) {
   return (attachments ?? []).map(({ dataUrl, sourcePath: _sourcePath, ...attachment }) => ({
     ...attachment,
     data_url: dataUrl,
+    truncated: Boolean(attachment.truncated),
   }));
+}
+
+export function controlQueuedMessage(turn: ControlQueuedTurnV1): QueuedMessage {
+  return {
+    id: turn.id,
+    content: turn.display_text,
+    createdAt: turn.accepted_at_ms,
+    attachments: turn.attachments.map(({ data_url, ...attachment }) => ({
+      ...attachment,
+      dataUrl: data_url,
+    })),
+  };
 }
 
 function eventPart(item: ControlTimelineItemV1): ChatStreamPart | null {
