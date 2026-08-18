@@ -33,6 +33,7 @@
     "turn.stop",
     "turn.regenerate",
     "turn.queue_resume",
+    "turn.queue_move",
     "turn.queue_delete",
     "approval.resolve",
     "worker.start",

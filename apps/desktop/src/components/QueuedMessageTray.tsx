@@ -30,6 +30,10 @@ type QueuedPointerDrag = {
 
 const QUEUED_DRAG_THRESHOLD = 4;
 
+export type QueuedMessageTrayItem = QueuedMessage & {
+  source: "canonical" | "legacy";
+};
+
 export function QueuedMessageTray({
   items,
   busy,
@@ -41,7 +45,7 @@ export function QueuedMessageTray({
   onMove,
   onRemove,
 }: {
-  items: QueuedMessage[];
+  items: QueuedMessageTrayItem[];
   busy: boolean;
   canActivate: boolean;
   interruptingMessageId?: string;
@@ -50,14 +54,14 @@ export function QueuedMessageTray({
     items: ContextMenuItem[],
     label?: string,
   ) => boolean;
-  onActivate: (item: QueuedMessage) => void;
-  onEdit: (item: QueuedMessage) => void;
+  onActivate: (item: QueuedMessageTrayItem) => void;
+  onEdit: (item: QueuedMessageTrayItem) => void;
   onMove: (
-    messageId: string,
-    targetId: string,
+    item: QueuedMessageTrayItem,
+    target: QueuedMessageTrayItem,
     position: "before" | "after",
   ) => void;
-  onRemove: (id: string) => void;
+  onRemove: (item: QueuedMessageTrayItem) => void;
 }) {
   const pointerDragRef = useRef<QueuedPointerDrag | null>(null);
   const dropTargetRef = useRef<QueuedDropTarget | null>(null);
@@ -156,7 +160,11 @@ export function QueuedMessageTray({
         dropTargetAt(event.clientX, event.clientY, drag.id) ??
         dropTargetRef.current;
       if (target) {
-        onMove(drag.id, target.id, target.position);
+        const sourceItem = items.find((item) => item.id === drag.id);
+        const targetItem = items.find((item) => item.id === target.id);
+        if (sourceItem && targetItem) {
+          onMove(sourceItem, targetItem, target.position);
+        }
         const nextItems = items.filter((item) => item.id !== drag.id);
         const targetIndex = nextItems.findIndex(
           (item) => item.id === target.id,
@@ -179,7 +187,7 @@ export function QueuedMessageTray({
 
   function moveQueuedWithKeyboard(
     event: KeyboardEvent<HTMLButtonElement>,
-    item: QueuedMessage,
+    item: QueuedMessageTrayItem,
     index: number,
   ) {
     if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
@@ -187,11 +195,7 @@ export function QueuedMessageTray({
     const targetIndex = index + (event.key === "ArrowUp" ? -1 : 1);
     const target = items[targetIndex];
     if (!target) return;
-    onMove(
-      item.id,
-      target.id,
-      event.key === "ArrowUp" ? "before" : "after",
-    );
+    onMove(item, target, event.key === "ArrowUp" ? "before" : "after");
     setReorderStatus(
       `Queued message moved to position ${targetIndex + 1} of ${items.length}.`,
     );
@@ -260,7 +264,7 @@ export function QueuedMessageTray({
                 title="Remove queued message"
                 aria-label="Remove queued message"
                 disabled={Boolean(interruptingMessageId)}
-                onClick={() => onRemove(item.id)}
+                onClick={() => onRemove(item)}
               >
                 <Trash size={12} />
               </button>

@@ -7,14 +7,15 @@ on:
         description: Existing release tag, for example v0.2.33
         required: true
         type: string
-      ios_build_number:
-        description: Monotonically increasing App Store build number
+      platform:
+        description: Store lane to deliver
         required: true
-        type: number
-      android_version_code:
-        description: Monotonically increasing Play version code
-        required: true
-        type: number
+        default: both
+        type: choice
+        options:
+          - both
+          - ios
+          - android
 
 permissions:
   contents: read
@@ -25,6 +26,7 @@ concurrency:
 
 jobs:
   ios-testflight:
+    if: ${{ inputs.platform == 'both' || inputs.platform == 'ios' }}
     name: iOS TestFlight
     runs-on: macos-latest
     timeout-minutes: 90
@@ -33,6 +35,40 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.release_tag }}
+      - name: Require protected iOS delivery secrets
+        env:
+          IOS_DISTRIBUTION_CERTIFICATE_P12_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_P12_BASE64 }}
+          IOS_DISTRIBUTION_CERTIFICATE_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_PASSWORD }}
+          IOS_APPSTORE_PROFILE_BASE64: ${{ secrets.IOS_APPSTORE_PROFILE_BASE64 }}
+          IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          required=(
+            IOS_DISTRIBUTION_CERTIFICATE_P12_BASE64
+            IOS_DISTRIBUTION_CERTIFICATE_PASSWORD
+            IOS_APPSTORE_PROFILE_BASE64
+            IOS_TEAM_ID
+            APP_STORE_CONNECT_KEY_ID
+            APP_STORE_CONNECT_ISSUER_ID
+            APP_STORE_CONNECT_PRIVATE_KEY
+          )
+          missing=0
+          for name in "${required[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::Missing mobile-store-ios secret: $name"
+              missing=1
+            fi
+          done
+          if (( missing )); then
+            exit 1
+          fi
+          if [[ "$APP_STORE_CONNECT_PRIVATE_KEY" != *"BEGIN PRIVATE KEY"* ]]; then
+            echo "::error::APP_STORE_CONNECT_PRIVATE_KEY must contain the downloaded App Store Connect .p8 key."
+            exit 1
+          fi
       - uses: pnpm/action-setup@v5
         with:
           version: 9
@@ -47,12 +83,50 @@ jobs:
           bundler-cache: false
       - run: pnpm -C apps/mobile install --frozen-lockfile
       - name: Verify release version
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
         shell: bash
         run: |
-          expected="${{ inputs.release_tag }}"
-          expected="${expected#v}"
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tag must use the stable vMAJOR.MINOR.PATCH format."
+            exit 1
+          fi
+          if ! git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            echo "::error::The requested ref is not an existing Git tag."
+            exit 1
+          fi
+          if [[ "$(git rev-list -n 1 "refs/tags/$RELEASE_TAG")" != "$(git rev-parse HEAD)" ]]; then
+            echo "::error::The checked-out commit does not match the requested release tag."
+            exit 1
+          fi
+          expected="${RELEASE_TAG#v}"
           test "$(tr -d '\r\n' < VERSION)" = "$expected"
           test "$(node -p "require('./apps/mobile/package.json').version")" = "$expected"
+          echo "MILIM_MOBILE_VERSION=$expected" >> "$GITHUB_ENV"
+      - name: Compute retry-safe store build number
+        shell: bash
+        run: |
+          if (( GITHUB_RUN_ATTEMPT < 1 || GITHUB_RUN_ATTEMPT > 99 )); then
+            echo "::error::GitHub run attempt must be between 1 and 99."
+            exit 1
+          fi
+          build_number=$((GITHUB_RUN_NUMBER * 100 + GITHUB_RUN_ATTEMPT))
+          if (( build_number > 2100000000 )); then
+            echo "::error::Computed store build number exceeds the Play Console limit."
+            exit 1
+          fi
+          echo "MILIM_STORE_BUILD_NUMBER=$build_number" >> "$GITHUB_ENV"
+          echo "Store build number: $build_number" >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify App Store build toolchain
+        shell: bash
+        run: |
+          xcodebuild -version
+          sdk_version="$(xcrun --sdk iphoneos --show-sdk-version)"
+          sdk_major="${sdk_version%%.*}"
+          if (( sdk_major < 26 )); then
+            echo "::error::App Store uploads require the iOS 26 SDK or newer; runner has $sdk_version."
+            exit 1
+          fi
       - name: Install CocoaPods
         working-directory: apps/mobile
         run: bundle install --jobs 4 --retry 3 && bundle exec pod install --project-directory=ios
@@ -74,47 +148,89 @@ jobs:
       - name: Install App Store provisioning profile
         env:
           PROFILE_BASE64: ${{ secrets.IOS_APPSTORE_PROFILE_BASE64 }}
+          EXPECTED_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
         shell: bash
         run: |
           profile="$RUNNER_TEMP/milim.mobileprovision"
+          profile_plist="$RUNNER_TEMP/milim-profile.plist"
           printf '%s' "$PROFILE_BASE64" | base64 --decode > "$profile"
-          uuid="$(security cms -D -i "$profile" | plutil -extract UUID raw -)"
+          security cms -D -i "$profile" > "$profile_plist"
+          uuid="$(plutil -extract UUID raw "$profile_plist")"
+          profile_name="$(plutil -extract Name raw "$profile_plist")"
+          profile_team="$(plutil -extract TeamIdentifier.0 raw "$profile_plist")"
+          application_identifier="$(plutil -extract Entitlements.application-identifier raw "$profile_plist")"
+          if [[ "$profile_team" != "$EXPECTED_TEAM_ID" ]]; then
+            echo "::error::Provisioning profile belongs to a different Apple team."
+            exit 1
+          fi
+          if [[ "${application_identifier#*.}" != "com.omershatz.milim" ]]; then
+            echo "::error::Provisioning profile does not authorize com.omershatz.milim."
+            exit 1
+          fi
           mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
           cp "$profile" "$HOME/Library/MobileDevice/Provisioning Profiles/$uuid.mobileprovision"
-          echo "MILIM_PROFILE_UUID=$uuid" >> "$GITHUB_ENV"
+          echo "MILIM_PROFILE_NAME=$profile_name" >> "$GITHUB_ENV"
       - name: Archive signed iOS app
         working-directory: apps/mobile
         env:
           MILIM_IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
         shell: bash
         run: |
-          version="${{ inputs.release_tag }}"
-          version="${version#v}"
           xcodebuild \
             -workspace ios/MilimMobile.xcworkspace \
             -scheme MilimMobile \
             -configuration Release \
             -destination 'generic/platform=iOS' \
             -archivePath "$RUNNER_TEMP/MilimMobile.xcarchive" \
-            MARKETING_VERSION="$version" \
-            CURRENT_PROJECT_VERSION="${{ inputs.ios_build_number }}" \
+            MARKETING_VERSION="$MILIM_MOBILE_VERSION" \
+            CURRENT_PROJECT_VERSION="$MILIM_STORE_BUILD_NUMBER" \
             DEVELOPMENT_TEAM="$MILIM_IOS_TEAM_ID" \
-            PROVISIONING_PROFILE_SPECIFIER="$MILIM_PROFILE_UUID" \
+            PROVISIONING_PROFILE_SPECIFIER="$MILIM_PROFILE_NAME" \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
             CODE_SIGN_STYLE=Manual \
             archive
           /usr/libexec/PlistBuddy -c "Add :method string app-store-connect" "$RUNNER_TEMP/ExportOptions.plist"
           /usr/libexec/PlistBuddy -c "Add :teamID string $MILIM_IOS_TEAM_ID" "$RUNNER_TEMP/ExportOptions.plist"
           /usr/libexec/PlistBuddy -c "Add :signingStyle string manual" "$RUNNER_TEMP/ExportOptions.plist"
+          /usr/libexec/PlistBuddy -c "Add :signingCertificate string Apple Distribution" "$RUNNER_TEMP/ExportOptions.plist"
+          /usr/libexec/PlistBuddy -c "Add :manageAppVersionAndBuildNumber bool false" "$RUNNER_TEMP/ExportOptions.plist"
           /usr/libexec/PlistBuddy -c "Add :provisioningProfiles dict" "$RUNNER_TEMP/ExportOptions.plist"
-          /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:com.milim.mobile string $MILIM_PROFILE_UUID" "$RUNNER_TEMP/ExportOptions.plist"
+          /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:com.omershatz.milim string $MILIM_PROFILE_NAME" "$RUNNER_TEMP/ExportOptions.plist"
           xcodebuild -exportArchive \
             -archivePath "$RUNNER_TEMP/MilimMobile.xcarchive" \
             -exportPath "$RUNNER_TEMP/ios-export" \
             -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist"
+      - name: Verify signed iOS export
+        shell: bash
+        run: |
+          ipa="$(find "$RUNNER_TEMP/ios-export" -name '*.ipa' -print -quit)"
+          if [[ -z "$ipa" ]]; then
+            echo "::error::The iOS export did not produce an IPA."
+            exit 1
+          fi
+          verify_dir="$RUNNER_TEMP/ios-verify"
+          mkdir -p "$verify_dir"
+          ditto -x -k "$ipa" "$verify_dir"
+          app="$(find "$verify_dir/Payload" -maxdepth 1 -name '*.app' -print -quit)"
+          if [[ -z "$app" ]]; then
+            echo "::error::The IPA does not contain an application bundle."
+            exit 1
+          fi
+          codesign --verify --deep --strict --verbose=2 "$app"
+          if ! codesign -dv --verbose=4 "$app" 2>&1 | grep -q '^Authority=Apple Distribution:'; then
+            echo "::error::The exported application is not signed by an Apple Distribution identity."
+            exit 1
+          fi
+          bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")"
+          marketing_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Info.plist")"
+          build_number="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Info.plist")"
+          test "$bundle_id" = "com.omershatz.milim"
+          test "$marketing_version" = "$MILIM_MOBILE_VERSION"
+          test "$build_number" = "$MILIM_STORE_BUILD_NUMBER"
       - name: Upload iOS evidence
         uses: actions/upload-artifact@v4
         with:
-          name: milim-ios-${{ inputs.ios_build_number }}
+          name: milim-ios-${{ github.run_number }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/ios-export/*.ipa
             ${{ runner.temp }}/MilimMobile.xcarchive/dSYMs
@@ -133,6 +249,7 @@ jobs:
           xcrun altool --upload-app --type ios --file "$ipa" --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
 
   android-internal:
+    if: ${{ inputs.platform == 'both' || inputs.platform == 'android' }}
     name: Android Play internal
     runs-on: ubuntu-latest
     timeout-minutes: 75
@@ -141,6 +258,43 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.release_tag }}
+      - name: Require protected Android delivery secrets
+        env:
+          ANDROID_UPLOAD_KEYSTORE_BASE64: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_BASE64 }}
+          ANDROID_UPLOAD_STORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_STORE_PASSWORD }}
+          ANDROID_UPLOAD_KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
+          ANDROID_UPLOAD_KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEY_PASSWORD }}
+          GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+        shell: bash
+        run: |
+          required=(
+            ANDROID_UPLOAD_KEYSTORE_BASE64
+            ANDROID_UPLOAD_STORE_PASSWORD
+            ANDROID_UPLOAD_KEY_ALIAS
+            ANDROID_UPLOAD_KEY_PASSWORD
+            GOOGLE_PLAY_SERVICE_ACCOUNT_JSON
+          )
+          missing=0
+          for name in "${required[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::Missing mobile-store-android secret: $name"
+              missing=1
+            fi
+          done
+          if (( missing )); then
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json
+          import os
+
+          try:
+              value = json.loads(os.environ["GOOGLE_PLAY_SERVICE_ACCOUNT_JSON"])
+          except json.JSONDecodeError as error:
+              raise SystemExit("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON is not valid JSON") from error
+          if value.get("type") != "service_account" or not value.get("client_email") or not value.get("private_key"):
+              raise SystemExit("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON is not a complete service-account credential")
+          PY
       - uses: pnpm/action-setup@v5
         with:
           version: 9
@@ -156,43 +310,88 @@ jobs:
           cache: gradle
       - run: pnpm -C apps/mobile install --frozen-lockfile
       - name: Verify release version
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
         shell: bash
         run: |
-          expected="${{ inputs.release_tag }}"
-          expected="${expected#v}"
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tag must use the stable vMAJOR.MINOR.PATCH format."
+            exit 1
+          fi
+          if ! git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            echo "::error::The requested ref is not an existing Git tag."
+            exit 1
+          fi
+          if [[ "$(git rev-list -n 1 "refs/tags/$RELEASE_TAG")" != "$(git rev-parse HEAD)" ]]; then
+            echo "::error::The checked-out commit does not match the requested release tag."
+            exit 1
+          fi
+          expected="${RELEASE_TAG#v}"
           test "$(tr -d '\r\n' < VERSION)" = "$expected"
           test "$(node -p "require('./apps/mobile/package.json').version")" = "$expected"
           echo "MILIM_MOBILE_VERSION=$expected" >> "$GITHUB_ENV"
+      - name: Compute retry-safe store build number
+        shell: bash
+        run: |
+          if (( GITHUB_RUN_ATTEMPT < 1 || GITHUB_RUN_ATTEMPT > 99 )); then
+            echo "::error::GitHub run attempt must be between 1 and 99."
+            exit 1
+          fi
+          build_number=$((GITHUB_RUN_NUMBER * 100 + GITHUB_RUN_ATTEMPT))
+          if (( build_number > 2100000000 )); then
+            echo "::error::Computed store build number exceeds the Play Console limit."
+            exit 1
+          fi
+          echo "MILIM_STORE_BUILD_NUMBER=$build_number" >> "$GITHUB_ENV"
+          echo "MILIM_ANDROID_VERSION_CODE=$build_number" >> "$GITHUB_ENV"
+          echo "Store build number: $build_number" >> "$GITHUB_STEP_SUMMARY"
       - name: Prepare protected Android signing
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
         shell: bash
         run: |
           keystore="$RUNNER_TEMP/milim-upload.keystore"
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          keytool -list -keystore "$keystore" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" >/dev/null
           echo "ORG_GRADLE_PROJECT_MILIM_UPLOAD_STORE_FILE=$keystore" >> "$GITHUB_ENV"
       - name: Build signed AAB
         working-directory: apps/mobile/android
         env:
-          MILIM_ANDROID_VERSION_CODE: ${{ inputs.android_version_code }}
           ORG_GRADLE_PROJECT_MILIM_UPLOAD_STORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_STORE_PASSWORD }}
           ORG_GRADLE_PROJECT_MILIM_UPLOAD_KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
           ORG_GRADLE_PROJECT_MILIM_UPLOAD_KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEY_PASSWORD }}
         run: ./gradlew bundleRelease --no-daemon
+      - name: Verify signed Android App Bundle
+        shell: bash
+        run: |
+          shopt -s nullglob
+          bundles=(apps/mobile/android/app/build/outputs/bundle/release/*.aab)
+          if (( ${#bundles[@]} != 1 )); then
+            echo "::error::Expected exactly one release AAB, found ${#bundles[@]}."
+            exit 1
+          fi
+          verification="$(jarsigner -verify "${bundles[0]}")"
+          if [[ "$verification" != *"jar verified."* ]]; then
+            echo "::error::The release AAB signature could not be verified."
+            exit 1
+          fi
+          keytool -printcert -jarfile "${bundles[0]}" >/dev/null
       - name: Upload Android evidence
         uses: actions/upload-artifact@v4
         with:
-          name: milim-android-${{ inputs.android_version_code }}
+          name: milim-android-${{ github.run_number }}-${{ github.run_attempt }}
           path: |
             apps/mobile/android/app/build/outputs/bundle/release/*.aab
             apps/mobile/android/app/build/outputs/mapping/release
             apps/mobile/android/app/build/outputs/native-debug-symbols/release
           if-no-files-found: error
       - name: Upload to Play internal testing
-        uses: r0adkll/upload-google-play@v1
+        uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5 # v1
         with:
           serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
-          packageName: com.milim.mobile
+          packageName: com.omershatz.milim
           releaseFiles: apps/mobile/android/app/build/outputs/bundle/release/*.aab
           track: internal
           status: completed

@@ -209,6 +209,12 @@ export function Composer({
     right?: number;
   } | null>(null);
 
+  useEffect(() => {
+    if (slashDismissedValue && value !== slashDismissedValue) {
+      setSlashDismissedValue("");
+    }
+  }, [slashDismissedValue, value]);
+
   const slashInput = parseSlashInput(value);
   const activeTrigger = composerAutocompleteTriggerAt(value, cursor);
   const suggestionPrefix = activeTrigger?.prefix ?? "";

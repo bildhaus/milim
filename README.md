@@ -61,7 +61,7 @@ pnpm -C apps/mobile verify
 pnpm -C apps/mobile android
 ```
 
-Run iOS from macOS with CocoaPods and `apps/mobile/ios/MilimMobile.xcworkspace`. Pairing and control require the milim desktop process to remain alive.
+Run iOS from macOS with CocoaPods and `apps/mobile/ios/MilimMobile.xcworkspace`. Pairing and control require the milim desktop process to remain alive. Signed beta builds are delivered from immutable release tags through the protected, manual mobile-store workflow to TestFlight and Play internal testing; public promotion remains a separate manual store action.
 
 ### Run the standalone server
 

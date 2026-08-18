@@ -206,6 +206,8 @@ pub struct QueuedTurnV1 {
     pub thread_id: String,
     pub command_id: String,
     pub accepted_at_ms: i64,
+    pub display_text: String,
+    pub attachments: Vec<ControlAttachmentV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
@@ -496,6 +498,9 @@ pub enum ControlCommandKindV1 {
     #[serde(rename = "turn.queue_resume")]
     #[ts(rename = "turn.queue_resume")]
     TurnQueueResume,
+    #[serde(rename = "turn.queue_move")]
+    #[ts(rename = "turn.queue_move")]
+    TurnQueueMove,
     #[serde(rename = "turn.queue_delete")]
     #[ts(rename = "turn.queue_delete")]
     TurnQueueDelete,
@@ -531,6 +536,7 @@ impl ControlCommandKindV1 {
             Self::TurnStop => "turn.stop",
             Self::TurnRegenerate => "turn.regenerate",
             Self::TurnQueueResume => "turn.queue_resume",
+            Self::TurnQueueMove => "turn.queue_move",
             Self::TurnQueueDelete => "turn.queue_delete",
             Self::ApprovalResolve => "approval.resolve",
             Self::WorkerStart => "worker.start",

@@ -1,4 +1,9 @@
 {
+  "0.2.42": {
+    "version": "0.2.42",
+    "summary": "Milim 0.2.42 restores desktop composer suggestions and durable queued-message controls while hardening protected mobile beta delivery.",
+    "items": []
+  },
   "0.2.41": {
     "version": "0.2.41",
     "summary": "Milim 0.2.41 keeps favorite models synchronized between the desktop app and paired mobile companions.",

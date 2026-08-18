@@ -86,6 +86,7 @@ import {
   type ChatApprovalRequest,
   type ChatMessage,
   type ChatStreamPart,
+  type ControlQueuedTurnV1,
   type ChildThreadInfo,
   type DelegationPolicy,
   type CodexLoginEvent,
@@ -289,6 +290,7 @@ import {
 import { checkpointWorkspaceBeforeTurn } from "../lib/turnWorkspace";
 import {
   controlAttachments,
+  controlQueuedMessage,
   mergeControlRunMessages,
   pollControlRun,
   projectControlRunMessages,
@@ -342,7 +344,10 @@ import { SheetDialog } from "./SheetDialog";
 import { WorkspaceLauncherButton } from "./WorkspaceLauncher";
 import { BatonTargetSheet, HotSwapPreflightSheet } from "./HotSwapDialogs";
 import { MessageRow, type MessageRowActions } from "./ChatMessageRow";
-import { QueuedMessageTray } from "./QueuedMessageTray";
+import {
+  QueuedMessageTray,
+  type QueuedMessageTrayItem,
+} from "./QueuedMessageTray";
 import { MilimUsageRidgeline } from "./MilimUsageRidgeline";
 import { useChatCatalogController } from "./chat/useChatCatalogController";
 import {
@@ -370,6 +375,22 @@ const inTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const EMPTY: ChatMessage[] = [];
 const EMPTY_QUEUE: QueuedMessage[] = [];
+
+function moveItemById<T extends { id: string }>(
+  items: T[],
+  id: string,
+  targetId: string,
+  position: "before" | "after",
+): T[] {
+  const sourceIndex = items.findIndex((item) => item.id === id);
+  if (sourceIndex < 0 || id === targetId) return items;
+  const next = [...items];
+  const [source] = next.splice(sourceIndex, 1);
+  const targetIndex = next.findIndex((item) => item.id === targetId);
+  if (targetIndex < 0) return items;
+  next.splice(targetIndex + (position === "after" ? 1 : 0), 0, source);
+  return next;
+}
 const EMPTY_CONTEXT_SECTION_IDS: QuickSummarySectionId[] = [];
 const NON_EMPTY_USAGE_MESSAGES: ChatMessage[] = [{ role: "user", content: "" }];
 const PREVIEW_PANEL_MIN_WIDTH = 360;
@@ -1338,6 +1359,9 @@ export function ChatView({
   const [queueInterrupts, setQueueInterrupts] = useState<
     Record<string, string>
   >({});
+  const [canonicalQueuedTurns, setCanonicalQueuedTurns] = useState<
+    ControlQueuedTurnV1[]
+  >([]);
   const [sessionsHydrated, setSessionsHydrated] = useState(() =>
     useSessions.persist.hasHydrated(),
   );
@@ -1449,7 +1473,7 @@ export function ChatView({
       .map((session) => session.id)
       .join("\0"),
   );
-  const queuedMessages = useSessions(
+  const legacyQueuedMessages = useSessions(
     (s) => s.queuedMessagesBySession[s.activeId] ?? EMPTY_QUEUE,
   );
   const inspectorState = useSessions((s) =>
@@ -1695,6 +1719,29 @@ export function ChatView({
   const persistingTurnIdsRef = useRef<Set<string>>(new Set());
   const canonicalRunIdsRef = useRef<Map<string, string>>(new Map());
   const canonicalSteeringRef = useRef<Map<string, boolean>>(new Map());
+  const canonicalQueuedMessages = useMemo(
+    () =>
+      canonicalQueuedTurns
+        .filter((turn) => turn.thread_id === activeId)
+        .map((turn) => ({
+          ...controlQueuedMessage(turn),
+          source: "canonical" as const,
+        })),
+    [activeId, canonicalQueuedTurns],
+  );
+  const canonicalQueueIds = useMemo(
+    () => new Set(canonicalQueuedMessages.map((message) => message.id)),
+    [canonicalQueuedMessages],
+  );
+  const queuedMessages = useMemo(
+    () => [
+      ...canonicalQueuedMessages,
+      ...legacyQueuedMessages
+        .filter((message) => !canonicalQueueIds.has(message.id))
+        .map((message) => ({ ...message, source: "legacy" as const })),
+    ],
+    [canonicalQueueIds, canonicalQueuedMessages, legacyQueuedMessages],
+  );
   const {
     activeMediaTarget,
     mediaAdvanced,
@@ -2374,6 +2421,7 @@ export function ChatView({
       }
       try {
         const bootstrap = await getControlBootstrap();
+        setCanonicalQueuedTurns(bootstrap.queued_turns);
         const run = bootstrap.active_runs.find((item) => item.thread_id === activeId);
         if (!run || disposed || generationControllersRef.current.has(activeId)) return;
         const store = useSessions.getState();
@@ -6219,8 +6267,9 @@ export function ChatView({
 
   async function queueCanonicalFollowup(text: string, attachments: ChatAttachment[]) {
     try {
+      const commandId = createControlCommandId();
       const result = await sendControlCommand({
-        command_id: createControlCommandId(),
+        command_id: commandId,
         kind: "turn.send",
         thread_id: activeId,
         payload: {
@@ -6230,6 +6279,19 @@ export function ChatView({
         },
       });
       if (result.status !== "queued") throw new Error(result.message || `Control command ${result.status}.`);
+      if (!result.queue_id) throw new Error("The queued turn did not return an ID.");
+      const queuedTurn: ControlQueuedTurnV1 = {
+        id: result.queue_id,
+        thread_id: activeId,
+        command_id: commandId,
+        accepted_at_ms: Date.now(),
+        display_text: text,
+        attachments: controlAttachments(attachments),
+      };
+      setCanonicalQueuedTurns((current) => [
+        ...current.filter((turn) => turn.id !== queuedTurn.id),
+        queuedTurn,
+      ]);
       if (text) recordGlobalPrompt(text);
       setInput((current) => current.trim() === text ? "" : current);
       const sentIds = new Set(attachments.map((attachment) => attachment.id));
@@ -6618,8 +6680,150 @@ export function ChatView({
       moveQueuedMessage(activeId, messageId, first, "before");
   }
 
-  function activateQueuedMessage(item: QueuedMessage) {
+  async function moveCanonicalQueuedMessage(
+    messageId: string,
+    targetId: string,
+    position: "before" | "after",
+  ) {
+    const result = await sendControlCommand({
+      command_id: createControlCommandId(),
+      kind: "turn.queue_move",
+      thread_id: activeId,
+      payload: {
+        queue_id: messageId,
+        target_id: targetId,
+        position,
+      },
+    });
+    if (result.status !== "applied") {
+      throw new Error(result.message || "The queued message could not be moved.");
+    }
+    setCanonicalQueuedTurns((current) =>
+      moveItemById(current, messageId, targetId, position),
+    );
+  }
+
+  function moveQueuedMessageFromTray(
+    item: QueuedMessageTrayItem,
+    target: QueuedMessageTrayItem,
+    position: "before" | "after",
+  ) {
+    const messageId = item.id;
+    const targetId = target.id;
+    const canonicalSource = item.source === "canonical";
+    const canonicalTarget = target.source === "canonical";
+    if (canonicalSource && canonicalTarget) {
+      void moveCanonicalQueuedMessage(messageId, targetId, position).catch(
+        (error) =>
+          setChatNotice({
+            tone: "error",
+            message: error instanceof Error ? error.message : String(error),
+          }),
+      );
+      return;
+    }
+    if (!canonicalSource && !canonicalTarget) {
+      moveQueuedMessage(activeId, messageId, targetId, position);
+      return;
+    }
+    setChatNotice({
+      tone: "info",
+      message: "Queued messages from different runtimes cannot be interleaved.",
+    });
+  }
+
+  async function removeCanonicalQueuedMessage(messageId: string) {
+    const result = await sendControlCommand({
+      command_id: createControlCommandId(),
+      kind: "turn.queue_delete",
+      thread_id: activeId,
+      payload: { queue_id: messageId },
+    });
+    if (result.status !== "applied") {
+      throw new Error(result.message || "The queued message could not be removed.");
+    }
+    setCanonicalQueuedTurns((current) =>
+      current.filter((turn) => turn.id !== messageId),
+    );
+  }
+
+  function removeQueuedMessageFromTray(item: QueuedMessageTrayItem) {
+    if (item.source === "legacy") {
+      removeQueuedMessage(activeId, item.id);
+      return;
+    }
+    void removeCanonicalQueuedMessage(item.id).catch((error) =>
+      setChatNotice({
+        tone: "error",
+        message: error instanceof Error ? error.message : String(error),
+      }),
+    );
+  }
+
+  async function activateCanonicalQueuedMessage(item: QueuedMessageTrayItem) {
     if (queueInterrupts[activeId]) return;
+    try {
+      if (busy) {
+        setQueueInterrupts((current) => ({ ...current, [activeId]: item.id }));
+        const first = canonicalQueuedMessages[0]?.id;
+        if (first && first !== item.id) {
+          await moveCanonicalQueuedMessage(item.id, first, "before");
+        }
+        await stopSessionRun(activeId);
+        const deadline = Date.now() + 5_000;
+        while (Date.now() < deadline) {
+          const bootstrap = await getControlBootstrap();
+          setCanonicalQueuedTurns(bootstrap.queued_turns);
+          if (!bootstrap.active_runs.some((run) => run.thread_id === activeId)) {
+            break;
+          }
+          await new Promise((resolve) => window.setTimeout(resolve, 100));
+        }
+      }
+      const result = await sendControlCommand({
+        command_id: createControlCommandId(),
+        kind: "turn.queue_resume",
+        thread_id: activeId,
+        payload: { queue_id: item.id },
+      });
+      if (result.status !== "accepted") {
+        throw new Error(result.message || "The queued message could not be started.");
+      }
+      setCanonicalQueuedTurns((current) =>
+        current.filter((turn) => turn.id !== item.id),
+      );
+      setQueueInterrupts((current) => {
+        const next = { ...current };
+        delete next[activeId];
+        return next;
+      });
+      setChatNotice({
+        tone: "info",
+        message: busy
+          ? "Current response interrupted; running the selected message."
+          : "Running the selected queued message.",
+      });
+    } catch (error) {
+      setQueueInterrupts((current) => {
+        const next = { ...current };
+        delete next[activeId];
+        return next;
+      });
+      throw error;
+    }
+  }
+
+  function activateQueuedMessage(item: QueuedMessageTrayItem) {
+    if (queueInterrupts[activeId]) return;
+    if (item.source === "canonical") {
+      void activateCanonicalQueuedMessage(item).catch((error) =>
+        setChatNotice({
+          tone: "error",
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      );
+      return;
+    }
     if (activeMediaTarget) {
       setChatNotice({
         tone: "error",
@@ -6653,7 +6857,7 @@ export function ChatView({
     });
   }
 
-  function editQueuedMessage(item: QueuedMessage) {
+  async function editQueuedMessage(item: QueuedMessageTrayItem) {
     if (input.trim() || pendingAttachments.length > 0) {
       setChatNotice({
         tone: "info",
@@ -6661,7 +6865,19 @@ export function ChatView({
       });
       return;
     }
-    removeQueuedMessage(activeId, item.id);
+    if (item.source === "canonical") {
+      try {
+        await removeCanonicalQueuedMessage(item.id);
+      } catch (error) {
+        setChatNotice({
+          tone: "error",
+          message: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
+    } else {
+      removeQueuedMessage(activeId, item.id);
+    }
     setInput(item.content);
     setPendingAttachments(item.attachments ?? []);
     setChatNotice({
@@ -7114,11 +7330,9 @@ export function ChatView({
                 interruptingMessageId={queueInterrupts[activeId]}
                 openContextMenu={openContextMenu}
                 onActivate={activateQueuedMessage}
-                onEdit={editQueuedMessage}
-                onMove={(messageId, targetId, position) =>
-                  moveQueuedMessage(activeId, messageId, targetId, position)
-                }
-                onRemove={(id) => removeQueuedMessage(activeId, id)}
+                onEdit={(item) => void editQueuedMessage(item)}
+                onMove={moveQueuedMessageFromTray}
+                onRemove={removeQueuedMessageFromTray}
               />
               {pendingReviewComments.length ? (
                 <div className="review-comment-tray" aria-label="Pending review comments">

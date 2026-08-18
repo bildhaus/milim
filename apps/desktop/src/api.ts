@@ -14,6 +14,7 @@ import type {
   ControlCommandV1 as GeneratedControlCommandV1,
   RunEventPageV1,
   RunInspectionV1,
+  QueuedTurnV1 as GeneratedControlQueuedTurnV1,
   RunSnapshotV1 as GeneratedControlRunSnapshotV1,
   ThreadSummaryV1 as GeneratedControlThreadSummaryV1,
   TimelineItemV1 as GeneratedControlTimelineItemV1,
@@ -887,6 +888,7 @@ export interface MobileCompanionPairing {
 
 export type ControlThreadSummaryV1 = GeneratedControlThreadSummaryV1;
 export type ControlRunSnapshotV1 = GeneratedControlRunSnapshotV1;
+export type ControlQueuedTurnV1 = GeneratedControlQueuedTurnV1;
 export type ControlBootstrapV1 = Omit<GeneratedControlBootstrapV1, "appearance"> & {
   appearance?: AppearanceSnapshotV1;
 };

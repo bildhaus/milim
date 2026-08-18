@@ -4327,6 +4327,8 @@ async function runMicroUiCheck(page) {
   await page.screenshot({ path: screenshots.microUi, fullPage: false });
   await history.waitFor({ state: "hidden", timeout: 3000 });
 
+  await runComposerAutocompleteDismissalCheck(page, composer);
+
   const sidebarHandle = page.getByTestId("sidebar-resize-handle");
   await sidebarHandle.focus();
   await page.keyboard.press("ArrowRight");
@@ -4478,6 +4480,18 @@ async function runMicroUiCheck(page) {
     throw new Error("Reopened inspector should remain resizable.");
   }
   await page.keyboard.press("Enter");
+}
+
+async function runComposerAutocompleteDismissalCheck(page, composer) {
+  await composer.fill("/");
+  const slashMenu = page.getByTestId("slash-menu");
+  await slashMenu.waitFor();
+  await page.keyboard.press("Escape");
+  await slashMenu.waitFor({ state: "hidden" });
+  await composer.fill("");
+  await composer.fill("/");
+  await slashMenu.waitFor();
+  await composer.fill("");
 }
 
 async function runHoverScrollTextCheck(page) {
@@ -5201,12 +5215,31 @@ async function runHarnessHardeningUiCheck(page) {
   await page.route("**/control/v1/commands", async (route) => {
     const body = JSON.parse(route.request().postData() ?? "{}");
     commandBodies.push(body);
+    if (body.kind === "turn.send") {
+      bootstrap.queued_turns = [{
+        id: "e2e-followup",
+        thread_id: body.thread_id,
+        command_id: body.command_id,
+        accepted_at_ms: Date.now(),
+        display_text: body.payload?.display_text ?? body.payload?.text ?? "",
+        attachments: body.payload?.attachments ?? [],
+      }];
+      bootstrap.threads[0].queued_turns = 1;
+    } else if (body.kind === "turn.queue_delete") {
+      bootstrap.queued_turns = bootstrap.queued_turns.filter((turn) => turn.id !== body.payload?.queue_id);
+      bootstrap.threads[0].queued_turns = bootstrap.queued_turns.length;
+    }
+    const status = body.kind === "turn.send"
+      ? "queued"
+      : body.kind === "turn.queue_delete" || body.kind === "turn.queue_move"
+        ? "applied"
+        : "accepted";
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
         command_id: body.command_id,
-        status: body.kind === "turn.send" ? "queued" : "accepted",
+        status,
         thread_id: body.thread_id,
         revision: 7,
         run_id: body.kind === "turn.steer" ? "e2e-active-provider-run" : null,
@@ -5224,6 +5257,11 @@ async function runHarnessHardeningUiCheck(page) {
   await composer.fill("Queue this follow-up");
   await page.getByLabel("Queue message").click();
   await page.waitForFunction(() => document.body.textContent?.includes("Message queued"));
+  const queuedRow = page.getByTestId("queued-message").filter({ hasText: "Queue this follow-up" });
+  await queuedRow.waitFor();
+  await queuedRow.getByRole("button", { name: "Interrupt", exact: true }).waitFor();
+  await queuedRow.getByLabel("Remove queued message").waitFor();
+  await queuedRow.getByLabel("More queued message actions").waitFor();
   await composer.fill("Steer with this input");
   await page.getByLabel("More actions for active run").click();
   await page.getByRole("menuitem", { name: "Steer next step" }).click();
@@ -5239,6 +5277,23 @@ async function runHarnessHardeningUiCheck(page) {
   await page.getByTestId("chat-shell").waitFor();
   await page.getByLabel("Queue message").waitFor();
   await page.getByLabel("More actions for active run").waitFor();
+  const restoredQueuedRow = page.getByTestId("queued-message").filter({ hasText: "Queue this follow-up" });
+  await restoredQueuedRow.waitFor();
+  await restoredQueuedRow.getByRole("button", { name: "Interrupt", exact: true }).waitFor();
+  await restoredQueuedRow.getByLabel("Remove queued message").waitFor();
+  await composer.fill("");
+  await restoredQueuedRow.getByLabel("More queued message actions").click();
+  await page.getByRole("menuitem", { name: "Edit queued message" }).click();
+  await page.waitForFunction(() =>
+    document.querySelector('[data-testid="composer-input"]')?.value === "Queue this follow-up",
+  );
+  for (let attempt = 0; attempt < 40 && commandBodies.at(-1)?.kind !== "turn.queue_delete"; attempt += 1) {
+    await delay(50);
+  }
+  if (commandBodies.at(-1)?.kind !== "turn.queue_delete") {
+    throw new Error(`Editing a canonical queued message should delete it durably first: ${JSON.stringify(commandBodies)}.`);
+  }
+  await runComposerAutocompleteDismissalCheck(page, composer);
 }
 
 async function seedChatSearchFixture(page, withQueuedMessages = false) {

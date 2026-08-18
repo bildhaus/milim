@@ -442,6 +442,16 @@ const USER_DATA_MIGRATIONS: &[Migration] = &[
         FROM user_queued_turns;
         DROP TABLE user_queued_turns;",
     },
+    Migration {
+        version: 6,
+        name: "user_run_inbox_queue_order",
+        sql: "ALTER TABLE user_run_inbox ADD COLUMN sort_key INTEGER;
+        UPDATE user_run_inbox
+        SET sort_key = created_at_ms
+        WHERE kind = 'followup' AND state = 'pending';
+        CREATE INDEX IF NOT EXISTS idx_user_run_inbox_queue_order
+            ON user_run_inbox(thread_id, state, sort_key, created_at_ms, id);",
+    },
 ];
 
 /// Encrypted key/value store (API keys, OAuth tokens, agent secrets).
@@ -1729,8 +1739,8 @@ impl UserDataStore {
             .execute(
                 "INSERT INTO user_run_inbox
                  (id, thread_id, target_run_id, command_id, kind, state, payload_json,
-                  created_at_ms, claimed_at_ms, resolved_at_ms)
-                 VALUES (?1, ?2, NULL, ?3, 'followup', 'pending', ?4, ?5, NULL, NULL)
+                  created_at_ms, claimed_at_ms, resolved_at_ms, sort_key)
+                 VALUES (?1, ?2, NULL, ?3, 'followup', 'pending', ?4, ?5, NULL, NULL, ?5)
                  ON CONFLICT(id) DO UPDATE SET
                     thread_id = excluded.thread_id,
                     target_run_id = NULL,
@@ -1739,6 +1749,7 @@ impl UserDataStore {
                     state = 'pending',
                     payload_json = excluded.payload_json,
                     created_at_ms = excluded.created_at_ms,
+                    sort_key = COALESCE(user_run_inbox.sort_key, excluded.sort_key),
                     claimed_at_ms = NULL,
                     resolved_at_ms = NULL",
                 params![
@@ -1766,14 +1777,14 @@ impl UserDataStore {
                 "SELECT id, thread_id, COALESCE(command_id, id), payload_json, created_at_ms
                  FROM user_run_inbox
                  WHERE kind = 'followup' AND state = 'pending' AND thread_id = ?1
-                 ORDER BY created_at_ms ASC, id ASC",
+                 ORDER BY COALESCE(sort_key, created_at_ms) ASC, created_at_ms ASC, id ASC",
                 Some(required_control_text(id, "thread id")?),
             ),
             None => (
                 "SELECT id, thread_id, COALESCE(command_id, id), payload_json, created_at_ms
                  FROM user_run_inbox
                  WHERE kind = 'followup' AND state = 'pending'
-                 ORDER BY created_at_ms ASC, id ASC",
+                 ORDER BY COALESCE(sort_key, created_at_ms) ASC, created_at_ms ASC, id ASC",
                 None,
             ),
         };
@@ -1790,6 +1801,66 @@ impl UserDataStore {
                 .map_err(sqlite)?
         };
         Ok(rows)
+    }
+
+    pub fn control_move_queued_turn(
+        &self,
+        thread_id: &str,
+        id: &str,
+        target_id: &str,
+        after: bool,
+    ) -> Result<bool> {
+        let thread_id = required_control_text(thread_id, "thread id")?;
+        let id = required_control_text(id, "queued turn id")?;
+        let target_id = required_control_text(target_id, "target queued turn id")?;
+        if id == target_id {
+            return Ok(false);
+        }
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
+        let result = (|| -> Result<bool> {
+            let mut statement = conn
+                .prepare(
+                    "SELECT id
+                     FROM user_run_inbox
+                     WHERE kind = 'followup' AND state = 'pending' AND thread_id = ?1
+                     ORDER BY COALESCE(sort_key, created_at_ms) ASC, created_at_ms ASC, id ASC",
+                )
+                .map_err(sqlite)?;
+            let mut ids = statement
+                .query_map(params![thread_id], |row| row.get::<_, String>(0))
+                .map_err(sqlite)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sqlite)?;
+            let Some(source_index) = ids.iter().position(|item| item == id) else {
+                return Ok(false);
+            };
+            if !ids.iter().any(|item| item == target_id) {
+                return Ok(false);
+            }
+            let moved = ids.remove(source_index);
+            let target_index = ids
+                .iter()
+                .position(|item| item == target_id)
+                .expect("target checked before queue move");
+            ids.insert(target_index + usize::from(after), moved);
+            let base = now_ms().saturating_sub(i64::try_from(ids.len()).unwrap_or(i64::MAX));
+            for (index, queued_id) in ids.iter().enumerate() {
+                let sort_key = base.saturating_add(i64::try_from(index).unwrap_or(i64::MAX));
+                conn.execute(
+                    "UPDATE user_run_inbox SET sort_key = ?2
+                     WHERE id = ?1 AND kind = 'followup' AND state = 'pending'",
+                    params![queued_id, sort_key],
+                )
+                .map_err(sqlite)?;
+            }
+            Ok(true)
+        })();
+        finish_control_transaction(conn, result)
     }
 
     pub fn control_remove_queued_turn(&self, id: &str) -> Result<bool> {
@@ -4249,6 +4320,73 @@ mod tests {
         assert!(store.control_pending_approvals().unwrap().is_empty());
         let run = store.control_runs(false).unwrap().pop().unwrap();
         assert_eq!(run.status, "interrupted");
+    }
+
+    #[test]
+    fn control_queued_turns_can_be_reordered_without_changing_acceptance_time() {
+        let store = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        store
+            .control_create_thread(
+                "thread-1",
+                r#"{"id":"thread-1","title":"Queue"}"#,
+                "epoch-1",
+            )
+            .unwrap();
+        for (id, accepted_at_ms) in [("queued-1", 10), ("queued-2", 20), ("queued-3", 30)] {
+            store
+                .control_enqueue_turn(&ControlQueuedTurnRecord {
+                    id: id.into(),
+                    thread_id: "thread-1".into(),
+                    command_id: format!("command-{id}"),
+                    request_json: format!(r#"{{"text":"{id}"}}"#),
+                    accepted_at_ms,
+                })
+                .unwrap();
+        }
+
+        assert!(store
+            .control_move_queued_turn("thread-1", "queued-3", "queued-1", false)
+            .unwrap());
+        assert!(store
+            .control_move_queued_turn("thread-1", "queued-1", "queued-2", true)
+            .unwrap());
+        let queued = store.control_queued_turns(Some("thread-1")).unwrap();
+        assert_eq!(
+            queued
+                .iter()
+                .map(|turn| turn.id.as_str())
+                .collect::<Vec<_>>(),
+            ["queued-3", "queued-2", "queued-1"]
+        );
+        assert_eq!(
+            queued
+                .iter()
+                .map(|turn| turn.accepted_at_ms)
+                .collect::<Vec<_>>(),
+            [30, 20, 10]
+        );
+        assert!(store.control_remove_queued_turn("queued-3").unwrap());
+        store
+            .control_enqueue_turn(&ControlQueuedTurnRecord {
+                id: "queued-3".into(),
+                thread_id: "thread-1".into(),
+                command_id: "command-queued-3".into(),
+                request_json: r#"{"text":"queued-3"}"#.into(),
+                accepted_at_ms: 30,
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .control_queued_turns(Some("thread-1"))
+                .unwrap()
+                .iter()
+                .map(|turn| turn.id.as_str())
+                .collect::<Vec<_>>(),
+            ["queued-3", "queued-2", "queued-1"]
+        );
+        assert!(!store
+            .control_move_queued_turn("thread-1", "missing", "queued-1", false)
+            .unwrap());
     }
 
     #[test]

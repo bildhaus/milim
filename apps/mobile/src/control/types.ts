@@ -126,6 +126,8 @@ export interface QueuedTurnV1 {
   thread_id: string;
   command_id: string;
   accepted_at_ms: number;
+  display_text: string;
+  attachments: ControlAttachmentV1[];
 }
 
 export interface PendingInputV1 {
@@ -257,6 +259,7 @@ export type ControlCommandKindV1 =
   | 'turn.stop'
   | 'turn.regenerate'
   | 'turn.queue_resume'
+  | 'turn.queue_move'
   | 'turn.queue_delete'
   | 'approval.resolve'
   | 'worker.start'

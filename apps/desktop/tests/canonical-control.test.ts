@@ -1,9 +1,10 @@
 import { strict as assert } from "node:assert";
 import {
+  controlQueuedMessage,
   mergeControlRunMessages,
   projectControlRunMessages,
 } from "../src/lib/canonicalControl.js";
-import type { ControlTimelineItemV1 } from "../src/api.js";
+import type { ControlQueuedTurnV1, ControlTimelineItemV1 } from "../src/api.js";
 
 const item = (
   seq: number,
@@ -72,5 +73,24 @@ assert.equal(
   ).length,
   3,
 );
+
+const queued = controlQueuedMessage({
+  id: "queue-1",
+  thread_id: "thread-1",
+  command_id: "command-1",
+  accepted_at_ms: 42,
+  display_text: "Queued content",
+  attachments: [{
+    id: "attachment-1",
+    name: "note.txt",
+    mime: "text/plain",
+    size: 4,
+    content: "note",
+    truncated: false,
+  }],
+} satisfies ControlQueuedTurnV1);
+assert.equal(queued.content, "Queued content");
+assert.equal(queued.createdAt, 42);
+assert.equal(queued.attachments?.[0].content, "note");
 
 console.log("canonical control projection tests passed");

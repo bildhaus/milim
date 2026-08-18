@@ -65,6 +65,36 @@ test('mobile app identifiers and versions match the release-ready configuration'
   expect(project).not.toContain('TARGETED_DEVICE_FAMILY = "1,2";');
 });
 
+test('mobile store delivery preserves protected, retry-safe release invariants', () => {
+  const workflow = fs.readFileSync(
+    path.join(repoRoot, '.github', 'workflows', 'mobile-store.yml'),
+    'utf8',
+  );
+
+  expect(workflow).toContain('environment: mobile-store-ios');
+  expect(workflow).toContain('environment: mobile-store-android');
+  expect(workflow).toMatch(/options:\s+- both\s+- ios\s+- android/);
+  expect(occurrences(workflow, 'RELEASE_TAG: ${{ inputs.release_tag }}')).toBe(2);
+  expect(workflow).not.toContain('expected="${{ inputs.release_tag }}"');
+  expect(
+    occurrences(workflow, 'git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"'),
+  ).toBe(2);
+  expect(workflow).toContain('GITHUB_RUN_NUMBER * 100 + GITHUB_RUN_ATTEMPT');
+  expect(workflow).not.toContain('ios_build_number:');
+  expect(workflow).not.toContain('android_version_code:');
+  expect(workflow).toContain('provisioningProfiles:com.omershatz.milim');
+  expect(workflow).toContain('packageName: com.omershatz.milim');
+  expect(workflow).not.toContain('com.milim.mobile');
+  expect(workflow).toContain('CODE_SIGN_IDENTITY="Apple Distribution"');
+  expect(workflow).toContain('codesign --verify --deep --strict');
+  expect(workflow).toContain('jarsigner -verify');
+  expect(workflow).toContain(
+    'r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5',
+  );
+  expect(workflow).toContain('track: internal');
+  expect(workflow).not.toMatch(/^\s+track:\s+production\s*$/m);
+});
+
 test('iOS metadata preserves pairing and bundles the privacy manifest', () => {
   const info = read('ios', 'MilimMobile', 'Info.plist');
   const privacy = read('ios', 'MilimMobile', 'PrivacyInfo.xcprivacy');
