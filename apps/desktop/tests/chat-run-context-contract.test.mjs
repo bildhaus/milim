@@ -89,6 +89,33 @@ assert.match(
   "failed or canceled native turns must discard their divergent runtime session",
 );
 
+const canonicalModelWrite = section(
+  chatView,
+  "function writeCanonicalThreadModel(",
+  "function requireChatModel()",
+);
+assert.match(canonicalModelWrite, /kind: "thread\.set_model"/);
+assert.match(canonicalModelWrite, /reasoning_effort: reasoningEffort/);
+
+const canonicalTurn = section(
+  chatView,
+  "async function runCanonicalControlTurn(",
+  "async function runTurn(",
+);
+const modelWriteIndex = canonicalTurn.indexOf(
+  "await writeCanonicalThreadModel(sessionId, selectedModel)",
+);
+const canonicalFlushIndex = canonicalTurn.indexOf(
+  'await flushDeferredUserStateWrites("milim.sessions")',
+);
+const canonicalClaimIndex = canonicalTurn.indexOf("claimTurnGeneration({");
+assert.ok(
+  modelWriteIndex >= 0 &&
+    modelWriteIndex < canonicalFlushIndex &&
+    canonicalFlushIndex < canonicalClaimIndex,
+  "canonical sends must commit the selected model and persisted task state before generation",
+);
+
 for (const [name, body] of [
   [
     "normal send",

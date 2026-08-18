@@ -1827,7 +1827,13 @@ impl RunManager {
                 }
             }
             ThreadPatch::Model => {
-                let model = required_payload_string(&command.payload, "model")?;
+                let model = command
+                    .payload
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| Error::InvalidRequest("payload.model must be a string".into()))?
+                    .trim()
+                    .to_string();
                 let reasoning_effort = match command.payload.get("reasoning_effort") {
                     Some(value) => {
                         let raw = value.as_str().ok_or_else(|| {
@@ -1845,17 +1851,20 @@ impl RunManager {
                 };
                 let settings = settings_object(object)?;
                 settings.insert("model".into(), Value::String(model.clone()));
-                if let Some(reasoning_effort) = reasoning_effort {
-                    let overrides = settings
-                        .entry("reasoningEffortOverrides")
-                        .or_insert_with(|| json!({}))
-                        .as_object_mut()
-                        .ok_or_else(|| {
-                            Error::Other(
-                                "stored reasoning effort overrides are not an object".into(),
-                            )
-                        })?;
-                    overrides.insert(model, Value::String(reasoning_effort.as_str().to_string()));
+                if !model.is_empty() {
+                    if let Some(reasoning_effort) = reasoning_effort {
+                        let overrides = settings
+                            .entry("reasoningEffortOverrides")
+                            .or_insert_with(|| json!({}))
+                            .as_object_mut()
+                            .ok_or_else(|| {
+                                Error::Other(
+                                    "stored reasoning effort overrides are not an object".into(),
+                                )
+                            })?;
+                        overrides
+                            .insert(model, Value::String(reasoning_effort.as_str().to_string()));
+                    }
                 }
             }
             ThreadPatch::Agent => {
@@ -3775,11 +3784,20 @@ fn resolve_frozen_config(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    let selected_model = settings
-        .and_then(|settings| settings.get("model"))
+    let selected_model = value
+        .get("worker")
+        .and_then(Value::as_object)
+        .and_then(|worker| worker.get("model"))
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        .or_else(|| {
+            settings
+                .and_then(|settings| settings.get("model"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
         .ok_or_else(|| Error::InvalidRequest("thread has no selected model".into()))?
         .to_string();
     let workspace = settings
@@ -4031,6 +4049,8 @@ fn thread_summary(
         model: settings
             .and_then(|settings| settings.get("model"))
             .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
             .map(str::to_string),
         reasoning_effort_overrides: settings
             .and_then(|settings| settings.get("reasoningEffortOverrides"))
@@ -4854,7 +4874,7 @@ mod tests {
 
         let explicit_auto = manager
             .command(
-                state,
+                state.clone(),
                 None,
                 ControlCommandV1 {
                     command_id: "set-reasoning-auto".into(),
@@ -4881,6 +4901,52 @@ mod tests {
             session["settings"]["reasoningEffortOverrides"]["codex:gpt-5"],
             "auto"
         );
+
+        let cleared = manager
+            .command(
+                state.clone(),
+                None,
+                ControlCommandV1 {
+                    command_id: "clear-model".into(),
+                    kind: ControlCommandKindV1::ThreadSetModel,
+                    thread_id: Some("thread-fixture".into()),
+                    expected_revision: explicit_auto.revision,
+                    payload: json!({"model": ""}),
+                    confirmation_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(cleared.status, ControlCommandStatusV1::Applied);
+        let bootstrap = manager.bootstrap(&state).await.unwrap();
+        assert_eq!(bootstrap.threads[0].model, None);
+        let thread = manager
+            .store
+            .control_thread("thread-fixture")
+            .unwrap()
+            .unwrap();
+        assert!(resolve_frozen_config(&state, &thread, vec![]).is_err());
+    }
+
+    #[test]
+    fn frozen_config_prefers_the_worker_model_for_legacy_child_threads() {
+        let (manager, state) = manager_and_state();
+        let thread = manager
+            .store
+            .control_create_thread(
+                "legacy-child",
+                &json!({
+                    "id": "legacy-child",
+                    "settings": { "model": "provider:stale:old-model" },
+                    "worker": { "model": "provider:current:new-model" }
+                })
+                .to_string(),
+                "epoch-1",
+            )
+            .unwrap();
+
+        let frozen = resolve_frozen_config(&state, &thread, vec![]).unwrap();
+        assert_eq!(frozen.model, "provider:current:new-model");
     }
 
     #[test]

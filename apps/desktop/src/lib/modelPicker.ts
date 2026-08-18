@@ -113,6 +113,44 @@ export function qualifyDuplicateProviderModels(models: ModelInfo[]): ModelInfo[]
   );
 }
 
+export type StoredThreadModelReconciliation =
+  | { status: "current"; model: string }
+  | { status: "repair"; model: string }
+  | { status: "choose" }
+  | { status: "defer" };
+
+export function reconcileStoredThreadModel(
+  selectedModel: string,
+  models: readonly ModelInfo[],
+): StoredThreadModelReconciliation {
+  const selected = selectedModel.trim();
+  if (!selected) return { status: "current", model: "" };
+  if (models.some((model) => model.id === selected)) {
+    return { status: "current", model: selected };
+  }
+  const normalized = selected.toLowerCase();
+  if (
+    !models.length ||
+    [CODEX_MODEL_PREFIX, CLAUDE_MODEL_PREFIX, OPENCODE_MODEL_PREFIX, PI_MODEL_PREFIX]
+      .some((prefix) => normalized.startsWith(prefix))
+  ) {
+    return { status: "defer" };
+  }
+  const raw = rawModelId(selected);
+  const candidates = Array.from(new Set(
+    models
+      .filter((model) => model.provider_id && rawModelId(model.id) === raw)
+      .map((model) => model.id),
+  ));
+  if (candidates.length === 1) {
+    return { status: "repair", model: candidates[0] };
+  }
+  if (parseProviderModelId(selected) || candidates.length > 1) {
+    return { status: "choose" };
+  }
+  return { status: "defer" };
+}
+
 export function providerOwnsModel(provider: ProviderInfo, model: string): boolean {
   const routed = parseProviderModelId(model);
   if (routed) {

@@ -17,6 +17,7 @@ export function useChatCatalogController(
 ) {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelsLoaded, setModelsLoaded] = useState(false);
+  const [modelsSettled, setModelsSettled] = useState(false);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [composerTools, setComposerTools] = useState<ToolInfo[]>([]);
@@ -28,6 +29,7 @@ export function useChatCatalogController(
 
   useEffect(() => {
     let cancelled = false;
+    setModelsSettled(false);
     void loadStartupModels(
       (nextModels) => {
         if (cancelled) return;
@@ -37,7 +39,9 @@ export function useChatCatalogController(
       },
       accountRuntimeEnabled,
       modelsRef.current,
-    );
+    ).finally(() => {
+      if (!cancelled) setModelsSettled(true);
+    });
     return () => {
       cancelled = true;
     };
@@ -68,6 +72,7 @@ export function useChatCatalogController(
   return {
     models,
     modelsLoaded,
+    modelsSettled,
     providers,
     skills,
     composerTools,

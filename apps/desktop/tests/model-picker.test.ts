@@ -10,6 +10,7 @@ import {
   providerOwnsModel,
   qualifyDuplicateProviderModels,
   rawModelId,
+  reconcileStoredThreadModel,
 } from "../src/lib/modelPicker.js";
 
 equal(isModelPickerGroupCollapsed("OpenAI", ["OpenAI"], false), true, "saved provider groups should collapse");
@@ -122,6 +123,37 @@ const providers = [
 equal(providerOwnsModel(providers[1], "provider:prov-b:same-model"), true);
 equal(providerOwnsModel(providers[0], "provider:prov-b:same-model"), false);
 equal(rawModelId("provider:prov-b:same-model"), "same-model");
+
+deepEqual(
+  reconcileStoredThreadModel("provider:old-route:unique-model", duplicated),
+  { status: "repair", model: "unique-model" },
+  "a stale provider route should migrate when its raw model has one current route",
+);
+deepEqual(
+  reconcileStoredThreadModel("provider:old-route:same-model", duplicated),
+  { status: "choose" },
+  "a stale provider route must not guess between duplicate current routes",
+);
+deepEqual(
+  reconcileStoredThreadModel("provider:old-route:missing-model", duplicated),
+  { status: "choose" },
+  "a removed provider route should require a new selection",
+);
+deepEqual(
+  reconcileStoredThreadModel("future-provider-model", duplicated),
+  { status: "defer" },
+  "plain model ids missing from a partial catalog should not be cleared",
+);
+deepEqual(
+  reconcileStoredThreadModel("codex:gpt-5.6-sol", duplicated),
+  { status: "defer" },
+  "account-runtime models should wait for their catalog lane",
+);
+deepEqual(
+  reconcileStoredThreadModel("unique-model", duplicated),
+  { status: "current", model: "unique-model" },
+  "current model routes should remain unchanged",
+);
 
 const profileProviders = [
   {
