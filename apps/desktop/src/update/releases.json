@@ -1,7 +1,7 @@
 {
   "0.2.45": {
     "version": "0.2.45",
-    "summary": "Milim 0.2.45 gives desktop Settings a dedicated full-window workspace and moves custom theme editing into a focused subpage.",
+    "summary": "Milim 0.2.45 gives Settings a dedicated workspace and brings clearer controls, notices, and activity states to desktop conversations.",
     "items": [
       {
         "id": "full-window-settings",
