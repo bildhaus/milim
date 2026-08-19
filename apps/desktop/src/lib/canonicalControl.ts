@@ -249,7 +249,31 @@ export function mergeControlRunMessages(
   projected: ChatMessage[],
 ): ChatMessage[] {
   const base = current.filter((message) => (message as CanonicalMessage).runId !== runId);
-  return [...base, ...projected];
+  if (projected.length === 0) return base;
+
+  const projectedUser = projected.find((message) => message.role === "user");
+  let nextBase = base;
+  let nextProjected = projected;
+  if (projectedUser) {
+    for (let index = base.length - 1; index >= 0; index -= 1) {
+      const candidate = base[index];
+      if (
+        candidate.role !== "user" ||
+        (candidate as CanonicalMessage).runId ||
+        (candidate.id !== projectedUser.id && candidate.content !== projectedUser.content)
+      ) {
+        continue;
+      }
+      nextBase = [...base.slice(0, index), ...base.slice(index + 1)];
+      if (candidate.id && candidate.id !== projectedUser.id) {
+        nextProjected = projected.map((message) =>
+          message.id === projectedUser.id ? { ...message, id: candidate.id } : message,
+        );
+      }
+      break;
+    }
+  }
+  return [...nextBase, ...nextProjected];
 }
 
 export async function pollControlRun(

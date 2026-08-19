@@ -304,8 +304,8 @@ export function Composer({
     );
   }, [composerDisplay]);
 
-  // Auto-grow the textarea up to a cap.
-  useEffect(() => {
+  // Auto-grow the textarea up to a cap before paint so send does not fling the thread.
+  useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
     const resize = () => {

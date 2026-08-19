@@ -223,7 +223,7 @@ import {
   type GoalDecision,
   type GoalSettings,
 } from "../lib/goals";
-import { isNearScrollBottom } from "../lib/scroll";
+import { followScrollTop, isNearScrollBottom } from "../lib/scroll";
 import {
   mergeModelListsForPicker,
   providerOwnsModel,
@@ -2052,9 +2052,13 @@ export function ChatView({
 
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const chatBodyRef = useRef<HTMLDivElement>(null);
+  const chatDockRef = useRef<HTMLDivElement>(null);
   const previewResizeHandleRef = useRef<HTMLDivElement>(null);
   const contextLauncherRef = useRef<HTMLButtonElement>(null);
+  const emptyDockTopRef = useRef<number | null>(null);
   const stickToBottomRef = useRef(true);
+  const lastAnimatedThreadIdRef = useRef<string | null>(null);
+  const [enteringMessageIds, setEnteringMessageIds] = useState<string[]>([]);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const {
     approvedWorkerRunsRef,
@@ -2179,8 +2183,15 @@ export function ChatView({
   function scrollToChatBottom() {
     const el = chatScrollRef.current;
     if (!el) return;
-    el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
+    el.scrollTo({ top: followScrollTop(el), behavior: "auto" });
   }
+
+  const markMessageEntered = useCallback((id: string) => {
+    setEnteringMessageIds((current) => {
+      if (!current.includes(id)) return current;
+      return current.filter((item) => item !== id);
+    });
+  }, []);
 
   function jumpToLatest() {
     stickToBottomRef.current = true;
@@ -2574,13 +2585,50 @@ export function ChatView({
   }, [activeId, model, models, modelsLoaded, updateThreadSettings]);
 
   useLayoutEffect(() => {
+    const dock = chatDockRef.current;
+    const threadChanged = lastAnimatedThreadIdRef.current !== activeId;
+    if (threadChanged) {
+      lastAnimatedThreadIdRef.current = activeId;
+      emptyDockTopRef.current = null;
+      if (enteringMessageIds.length) setEnteringMessageIds([]);
+      stickToBottomRef.current = true;
+      setShowJumpToLatest(false);
+      if (dock) {
+        dock.style.transition = "";
+        dock.style.transform = "";
+      }
+    }
+    if (dock) {
+      if (messages.length === 0) {
+        emptyDockTopRef.current = dock.getBoundingClientRect().top;
+        dock.style.transition = "";
+        dock.style.transform = "";
+      } else if (!threadChanged) {
+        const firstTop = emptyDockTopRef.current;
+        emptyDockTopRef.current = null;
+        const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        if (firstTop != null && !reduceMotion) {
+          const delta = firstTop - dock.getBoundingClientRect().top;
+          if (Math.abs(delta) > 1) {
+            const clearDockMotion = () => {
+              dock.style.transition = "";
+              dock.style.transform = "";
+              dock.removeEventListener("transitionend", clearDockMotion);
+            };
+            dock.style.transition = "none";
+            dock.style.transform = `translateY(${delta}px)`;
+            dock.getBoundingClientRect();
+            dock.style.transition = "transform var(--motion-standard) var(--motion-ease-out)";
+            dock.style.transform = "translateY(0)";
+            dock.addEventListener("transitionend", clearDockMotion);
+          }
+        }
+      }
+    }
     if (stickToBottomRef.current) scrollToChatBottom();
-  }, [messages]);
+  }, [activeId, enteringMessageIds.length, messages]);
 
   useEffect(() => {
-    stickToBottomRef.current = true;
-    setShowJumpToLatest(false);
-    scrollToChatBottom();
     setPendingAttachments([]);
     setChatNotice(null);
   }, [activeId]);
@@ -5625,6 +5673,10 @@ export function ChatView({
     }
     const baseMessages =
       options.canonicalAction === "regenerate" ? convo : convo.slice(0, -1);
+    let accepted = false;
+    if (options.canonicalAction !== "regenerate") {
+      setMessages(sessionId, convo, { autoTitle: autoTitleChats });
+    }
     try {
       const command = await sendControlCommand({
         command_id: createControlCommandId(),
@@ -5652,6 +5704,7 @@ export function ChatView({
       if (command.status !== "accepted" || !command.run_id) {
         throw new Error(command.message || `Control command ${command.status}.`);
       }
+      accepted = true;
       const runId = command.run_id;
       canonicalRunIdsRef.current.set(sessionId, runId);
       const capabilities = command.data && typeof command.data === "object" && !Array.isArray(command.data)
@@ -5670,7 +5723,7 @@ export function ChatView({
           if (!projected.length) return;
           setMessages(
             sessionId,
-            mergeControlRunMessages(baseMessages, runId, projected),
+            mergeControlRunMessages(sessionMessages(sessionId, convo), runId, projected),
             { autoTitle: autoTitleChats },
           );
         },
@@ -5689,6 +5742,9 @@ export function ChatView({
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (!accepted && options.canonicalAction !== "regenerate") {
+        setMessages(sessionId, baseMessages, { autoTitle: false });
+      }
       setChatNotice({ tone: "error", message });
       return { status: "error", messages: sessionMessages(sessionId), error: message };
     } finally {
@@ -6413,17 +6469,26 @@ export function ChatView({
     if (!selectedModel) return;
     const attachments = pendingAttachments;
     const reviewComments = pendingReviewComments;
-    setInput("");
-    setPendingAttachments([]);
-    setPendingReviewComments([]);
     const conversation = appendUserTurn(messages, text, attachments);
-    if (text) recordGlobalPrompt(text);
     if (reviewComments.length) {
       conversation[conversation.length - 1] = {
         ...conversation[conversation.length - 1],
         reviewComments,
       };
     }
+    stickToBottomRef.current = true;
+    setShowJumpToLatest(false);
+    const sentId = conversation[conversation.length - 1]?.id;
+    if (sentId) {
+      setEnteringMessageIds((current) =>
+        current.includes(sentId) ? current : [...current, sentId],
+      );
+    }
+    setMessages(activeId, conversation, { autoTitle: autoTitleChats });
+    setInput("");
+    setPendingAttachments([]);
+    setPendingReviewComments([]);
+    if (text) recordGlobalPrompt(text);
     void runTurnAndDrain(
       conversation,
       selectedModel,
@@ -7362,6 +7427,12 @@ export function ChatView({
                             : null
                         }
                         actionsRef={messageRowActionsRef}
+                        entering={Boolean(
+                          lastAnimatedThreadIdRef.current === activeId &&
+                            m.id &&
+                            enteringMessageIds.includes(m.id),
+                        )}
+                        onEntered={markMessageEntered}
                       />
                     );
                   })}
@@ -7383,7 +7454,7 @@ export function ChatView({
             )}
           </div>
 
-          <div className="dock">
+          <div className="dock" ref={chatDockRef}>
             {emptyThread && showEmptyChatRidgeline && <MilimUsageRidgeline usage={milimUsage} />}
             {composerNotice && (
               <div

@@ -233,6 +233,8 @@ type MessageRowProps = {
   toolApproval: ToolApprovalMode;
   turnReview?: TurnReviewState | null;
   actionsRef: MutableRefObject<MessageRowActions | null>;
+  entering?: boolean;
+  onEntered?: (id: string) => void;
 };
 
 function MessageRowView({
@@ -254,6 +256,8 @@ function MessageRowView({
   toolApproval,
   turnReview,
   actionsRef,
+  entering = false,
+  onEntered,
 }: MessageRowProps) {
   markPerfRender("MessageRow");
   const [copied, setCopied] = useState(false);
@@ -457,7 +461,7 @@ function MessageRowView({
 
   if (isEditing) {
     return (
-      <div className={"msg " + m.role}>
+      <div className={"msg " + m.role + (entering ? " msg-enter" : "")}>
         <MessageEditor
           initial={m.content}
           saveLabel={m.role === "user" ? "Send" : "Save"}
@@ -474,11 +478,15 @@ function MessageRowView({
 
   return (
     <div
-      className={`msg ${m.role}${modelAvatarSeed ? " has-model-avatar" : ""}`}
+      className={`msg ${m.role}${modelAvatarSeed ? " has-model-avatar" : ""}${entering ? " msg-enter" : ""}`}
       data-testid={
         m.role === "assistant" ? "assistant-message" : "user-message"
       }
       onContextMenu={openMessageContextMenu}
+      onAnimationEnd={(event) => {
+        if (event.target !== event.currentTarget) return;
+        if (entering && m.id) onEntered?.(m.id);
+      }}
     >
       {showModelAvatar && modelAvatarSeed && (
         <AgentAvatar avatar={modelAvatarSeed} className="message-agent-avatar" />
@@ -748,7 +756,9 @@ export const MessageRow = memo(
     prev.previewAppStatus === next.previewAppStatus &&
     prev.toolApproval === next.toolApproval &&
     prev.turnReview === next.turnReview &&
-    prev.actionsRef === next.actionsRef,
+    prev.actionsRef === next.actionsRef &&
+    prev.entering === next.entering &&
+    prev.onEntered === next.onEntered,
 );
 
 

@@ -142,6 +142,7 @@
 }
 .chat-scroll {
   --chat-scroll-fade: 34px;
+  overflow-anchor: none;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
@@ -3594,13 +3595,21 @@ html[data-dark="true"] .preview-control-cursor {
   }
 }
 /* ---- Messages ---- */
-.messages { width: 100%; max-width: var(--chat-content-width); margin: 0 auto; display: flex; flex-direction: column; gap: 12px; padding: 8px 0 4px; user-select: text; cursor: auto; }
+.messages { width: 100%; max-width: var(--chat-content-width); margin: 0 auto; display: flex; flex-direction: column; gap: 12px; padding: 8px 0 4px; user-select: text; cursor: auto; overflow-anchor: none; }
 .messages, .msg-content, .md, .md * { user-select: text; -webkit-user-select: text; }
 .msg { display: flex; flex-direction: column; gap: 3px; }
-.messages .msg:not(:last-child) { content-visibility: auto; contain-intrinsic-size: auto 140px; }
+.messages .msg:not(:nth-last-child(-n+3)) { content-visibility: auto; contain-intrinsic-size: auto 140px; }
 .messages .msg:has(.baton-menu.open),
 .messages .msg:has(.md-source:hover),
-.messages .msg:has(.md-source:focus-within) { content-visibility: visible; contain-intrinsic-size: none; }
+.messages .msg:has(.md-source:focus-within),
+.messages .msg.msg-enter { content-visibility: visible; contain-intrinsic-size: none; }
+@keyframes msg-enter {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.msg.msg-enter {
+  animation: msg-enter var(--motion-standard) var(--motion-ease-out) both;
+}
 .msg.user { align-items: flex-end; }
 .msg-content { padding: 9px 12px; border-radius: 8px; line-height: 1.6; }
 .msg.user .msg-content {
@@ -7488,6 +7497,9 @@ span.provider-brand-icon {
   transition-duration: 170ms;
 }
 @media (prefers-reduced-motion: reduce) {
+  .msg.msg-enter {
+    animation: none;
+  }
   .composer-queue-actions.split,
   .composer-busy-toggle svg,
   .composer-busy-menu {

@@ -164,6 +164,26 @@ assert.equal(
   3,
 );
 
+const optimisticUser = { id: "local-user", role: "user" as const, content: "hello" };
+assert.deepEqual(
+  mergeControlRunMessages(
+    [{ id: "old", role: "user", content: "old" }, optimisticUser],
+    "run-1",
+    streaming.filter((message) => message.role === "assistant"),
+  ).map((message) => message.id),
+  ["old", "local-user", "control-stream-run-1"],
+  "an optimistic user turn should stay visible until the control plane echoes it",
+);
+assert.deepEqual(
+  mergeControlRunMessages(
+    [{ id: "old", role: "user", content: "old" }, optimisticUser],
+    "run-1",
+    completed,
+  ).map((message) => message.id),
+  ["old", "local-user", "assistant-1"],
+  "the echoed user turn should reuse the optimistic message id",
+);
+
 const queued = controlQueuedMessage({
   id: "queue-1",
   thread_id: "thread-1",
