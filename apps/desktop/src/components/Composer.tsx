@@ -171,6 +171,7 @@ export function Composer({
   const highlightRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const personaRef = useRef<HTMLDivElement>(null);
+  const busyActionsRef = useRef<HTMLDivElement>(null);
   const projectRef = useRef<HTMLDivElement>(null);
   const composerSendShortcut = useUiPreferences((s) => s.composerSendShortcut);
   const composerDensity = useUiPreferences((s) => s.composerDensity);
@@ -416,6 +417,26 @@ export function Composer({
       cancelled = true;
     };
   }, [autocompleteMode, autocompleteSources.files, listWorkspaceFiles, suggestionPrefix, suggestionQuery, workspaceFolder]);
+
+  useEffect(() => {
+    if (!busy) setBusyActionsOpen(false);
+  }, [busy]);
+
+  useEffect(() => {
+    if (!busyActionsOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (busyActionsRef.current && !busyActionsRef.current.contains(e.target as Node)) setBusyActionsOpen(false);
+    };
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape") setBusyActionsOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [busyActionsOpen]);
 
   useEffect(() => {
     if (!personaOpen) return;
@@ -1204,32 +1225,38 @@ export function Composer({
                   <ArrowUp size={18} />
                 </button>
                 {canSteer && onSteer ? (
-                  <div className="composer-busy-actions">
+                  <div className="composer-busy-actions" ref={busyActionsRef}>
                     <button
                       type="button"
-                      className="tool-btn"
+                      className="composer-busy-toggle"
                       aria-label="More actions for active run"
+                      aria-haspopup="menu"
                       aria-expanded={busyActionsOpen}
+                      disabled={!canSend}
                       onClick={() => setBusyActionsOpen((open) => !open)}
                     >
                       <ChevronDown size={13} />
                     </button>
-                    {busyActionsOpen ? (
-                      <div className="menu composer-busy-menu" role="menu">
-                        <button
-                          type="button"
-                          className="menu-item"
-                          role="menuitem"
-                          disabled={!canSend}
-                          onClick={() => {
-                            setBusyActionsOpen(false);
-                            onSteer();
-                          }}
-                        >
-                          Steer next step
-                        </button>
-                      </div>
-                    ) : null}
+                    <div
+                      className="menu composer-busy-menu"
+                      role="menu"
+                      data-open={busyActionsOpen ? "true" : "false"}
+                      aria-hidden={!busyActionsOpen}
+                    >
+                      <button
+                        type="button"
+                        className="menu-item"
+                        role="menuitem"
+                        tabIndex={busyActionsOpen ? 0 : -1}
+                        disabled={!canSend}
+                        onClick={() => {
+                          setBusyActionsOpen(false);
+                          onSteer();
+                        }}
+                      >
+                        Steer next step
+                      </button>
+                    </div>
                   </div>
                 ) : null}
               </div>
