@@ -2,6 +2,8 @@ import { equal } from "node:assert/strict";
 import type { AccountRuntimeEnablement, ModelInfo, ProviderInfo } from "../src/api";
 import {
   composerNoticeAction,
+  composerNoticeAutoDismissMs,
+  composerNoticeIsDismissible,
   modelComposerBlocker,
   prioritizeComposerNotice,
 } from "../src/lib/composerBlocker.js";
@@ -77,3 +79,14 @@ const proactive = {
 };
 equal(prioritizeComposerNotice(authoritative, proactive), authoritative, "authoritative failures should win");
 equal(prioritizeComposerNotice({ tone: "info", message: "Saved" }, proactive), proactive, "a blocker should replace informational status");
+
+equal(composerNoticeAutoDismissMs({ tone: "info", message: "Goal saved." }), 5000, "transient info notices should auto-dismiss");
+equal(composerNoticeAutoDismissMs({ tone: "error", message: "preview app requires package.json" }), null, "errors should stay until dismissed");
+equal(composerNoticeAutoDismissMs({ tone: "info", message: "Compacting thread context..." }), null, "progress notices should stay while work is running");
+equal(composerNoticeAutoDismissMs({ tone: "info", message: "Goal running." }), null, "goal progress should stay while the goal is running");
+equal(
+  composerNoticeIsDismissible({ tone: "error", message: "preview app requires package.json" }, proactive),
+  true,
+  "chat notices should be dismissible",
+);
+equal(composerNoticeIsDismissible(proactive, proactive), false, "proactive blockers should stay until the condition clears");

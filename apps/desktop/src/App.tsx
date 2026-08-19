@@ -6,6 +6,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type ErrorInfo,
@@ -64,9 +65,9 @@ import {
 } from "./lib/nativeNotifications";
 import { useUiPreferences } from "./ui/store";
 
-const SettingsDialog = lazy(() =>
+const SettingsPage = lazy(() =>
   import("./settings/SettingsDialog").then((mod) => ({
-    default: mod.SettingsDialog,
+    default: mod.SettingsPage,
   })),
 );
 const AgentsManager = lazy(() =>
@@ -496,6 +497,8 @@ function AppContent() {
   }, []);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const mainRef = useRef<HTMLDivElement>(null);
+  const settingsReturnFocusRef = useRef<HTMLElement | null>(null);
   const [runtimeFailed, setRuntimeFailed] = useState(false);
   const [agentsOpen, setAgentsOpen] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
@@ -542,6 +545,14 @@ function AppContent() {
   ].join(" ");
 
   useEffect(() => setInterfaceSoundsEnabled(interfaceSounds), [interfaceSounds]);
+  useLayoutEffect(() => {
+    const main = mainRef.current;
+    if (!main) return;
+    main.inert = settingsOpen;
+    return () => {
+      main.inert = false;
+    };
+  }, [settingsOpen]);
   useEffect(() => {
     if (!interfaceSounds || !soundOnInteractions) return;
     return installInterfaceSoundClicks();
@@ -551,6 +562,22 @@ function AppContent() {
     document
       .querySelector<HTMLTextAreaElement>('[data-testid="composer-input"]')
       ?.focus();
+  }
+
+  function openSettings() {
+    if (!settingsReturnFocusRef.current && document.activeElement instanceof HTMLElement) {
+      settingsReturnFocusRef.current = document.activeElement;
+    }
+    setSettingsOpen(true);
+  }
+
+  function closeSettings() {
+    const returnTarget = settingsReturnFocusRef.current;
+    settingsReturnFocusRef.current = null;
+    setSettingsOpen(false);
+    window.requestAnimationFrame(() => {
+      if (returnTarget?.isConnected) returnTarget.focus({ preventScroll: true });
+    });
   }
 
   function startNewChat() {
@@ -605,7 +632,7 @@ function AppContent() {
         id: "settings",
         label: "Settings",
         icon: <Gear size={13} />,
-        action: () => setSettingsOpen(true),
+        action: openSettings,
       },
       {
         id: "documentation",
@@ -683,7 +710,7 @@ function AppContent() {
             startNewChat();
             break;
           case "settings":
-            setSettingsOpen(true);
+            openSettings();
             break;
           case "toggle-sidebar":
             if (useUiPreferences.getState().threadNavigationPlacement === "sidebar") {
@@ -721,7 +748,7 @@ function AppContent() {
       placement={threadNavigationPlacement}
       onToggle={toggleSidebar}
       onSearchChats={() => setChatSearchRequest((value) => value + 1)}
-      onOpenSettings={() => setSettingsOpen(true)}
+      onOpenSettings={openSettings}
       onManageSkills={() => setSkillsOpen(true)}
       onManageSchedules={() => setSchedulesOpen(true)}
       onManageMedia={() => setMediaOpen(true)}
@@ -737,7 +764,11 @@ function AppContent() {
   return (
     <div className={appClassName} onContextMenu={openAppContextMenu}>
       <BackgroundLayer />
-      <div className="main">
+      <div
+        ref={mainRef}
+        className="main"
+        aria-hidden={settingsOpen || undefined}
+      >
         {threadNavigationPlacement === "sidebar" && threadNavigation}
         <div className="content">
           <TopBar
@@ -747,7 +778,7 @@ function AppContent() {
           <ChatView
             onManageAgents={() => setAgentsOpen(true)}
             onOpenSchedules={() => setSchedulesOpen(true)}
-            onOpenSettings={() => setSettingsOpen(true)}
+            onOpenSettings={openSettings}
             composerDraft={composerDraft}
             gitPanelRequest={gitPanelRequest}
             mcpManagerRequest={mcpManagerRequest}
@@ -764,7 +795,7 @@ function AppContent() {
       </div>
       <Suspense fallback={null}>
         <OnboardingGate />
-        {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} />}
+        {settingsOpen && <SettingsPage onClose={closeSettings} />}
         {agentsOpen && <AgentsManager onClose={() => setAgentsOpen(false)} />}
         {skillsOpen && (
           <SkillsManager

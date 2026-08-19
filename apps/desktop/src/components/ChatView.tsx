@@ -160,6 +160,8 @@ import {
 } from "../lib/emptyStarterSuggestions";
 import {
   composerNoticeAction,
+  composerNoticeAutoDismissMs,
+  composerNoticeIsDismissible,
   modelComposerBlocker,
   prioritizeComposerNotice,
   type ComposerBlockerAction,
@@ -1866,6 +1868,15 @@ export function ChatView({
       : composerAction === "privacy_settings"
         ? "Review privacy"
         : "";
+  const composerNoticeDismissible = composerNoticeIsDismissible(composerNotice, proactiveModelBlocker);
+  useEffect(() => {
+    const delay = composerNoticeAutoDismissMs(chatNotice);
+    if (delay == null) return;
+    const timer = window.setTimeout(() => {
+      setChatNotice((notice) => (notice === chatNotice ? null : notice));
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [chatNotice]);
   const composerCompletionRequest = useMemo(() => {
     if (composerCompletionMode === "off" || !model.trim() || isCodexModel(model) || isClaudeModel(model) || isOpenCodeModel(model) || isPiModel(model)) return undefined;
     const modelInfo = pickerModels.find((item) => item.id === model);
@@ -1925,11 +1936,14 @@ export function ChatView({
     }
     const target = reconciliation.model;
     if (canonicalThreadModelsRef.current.get(activeId) === target) return;
+    const syncFailKey = `sync-fail\0${sourceKey}`;
+    if (handledUnavailableModelRoutesRef.current.has(syncFailKey)) return;
     if (reconciliation.status === "repair") {
       updateThreadSettings(activeId, { model: target });
     }
     void writeCanonicalThreadModel(activeId, target)
       .then(() => {
+        handledUnavailableModelRoutesRef.current.delete(syncFailKey);
         if (reconciliation.status === "repair") {
           setChatNotice({
             tone: "info",
@@ -1937,12 +1951,13 @@ export function ChatView({
           });
         }
       })
-      .catch((error) =>
+      .catch((error) => {
+        handledUnavailableModelRoutesRef.current.add(syncFailKey);
         setChatNotice({
           tone: "error",
           message: `Milim could not synchronize this chat's model: ${error instanceof Error ? error.message : String(error)}`,
-        }),
-      );
+        });
+      });
   }, [
     activeId,
     busy,
@@ -7358,6 +7373,17 @@ export function ChatView({
                     }}
                   >
                     {composerActionLabel}
+                  </button>
+                )}
+                {composerNoticeDismissible && (
+                  <button
+                    className="icon-btn dock-notice-dismiss"
+                    type="button"
+                    title="Dismiss"
+                    aria-label="Dismiss notice"
+                    onClick={() => setChatNotice(null)}
+                  >
+                    <X size={13} />
                   </button>
                 )}
               </div>

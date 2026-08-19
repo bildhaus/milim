@@ -13,6 +13,15 @@ function equal<T>(actual: T, expected: T, message: string): void {
 }
 
 const source = readFileSync(resolve(process.cwd(), "src/settings/SettingsDialog.tsx"), "utf8");
+const surfaceSource = readFileSync(resolve(process.cwd(), "src/settings/SettingsSurface.tsx"), "utf8");
+assert(source.includes("export function SettingsPage({ onClose }"), "Settings should expose the full-window page contract");
+assert(source.includes('testId="settings-page"'), "Settings should expose the page test identifier");
+assert(source.includes('backLabel="Back to app"'), "Settings should provide dedicated back navigation");
+assert(source.includes("<SettingsSurface"), "Settings should use the shared full-window surface");
+assert(!source.includes("<SheetDialog"), "Settings should not render with modal sheet chrome");
+assert(surfaceSource.includes("<WindowControls />"), "The settings title bar should retain native window controls");
+assert(surfaceSource.includes("startWindowDrag"), "The settings title bar should use guarded native dragging");
+assert(surfaceSource.includes('event.key !== "Escape"'), "The settings page should close with Escape");
 assert(source.includes('{ label: "Preferences", sections: ["app", "chat", "appearance"] }'), "Settings should group preferences");
 assert(source.includes('{ label: "Workflows", sections: ["models", "workspace"] }'), "Settings should group workflow defaults");
 assert(source.includes('{ label: "Data & devices", sections: ["history", "google", "mobile"] }'), "Settings should group data and devices");

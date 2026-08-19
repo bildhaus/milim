@@ -1,7 +1,5 @@
 import type { ChatStreamEventIcon, ChatStreamEventStatus, ChatStreamPart } from "../api";
 
-type ChatStreamEventPart = Extract<ChatStreamPart, { kind: "event" }>;
-
 export type ChatStreamWorkGroup = {
   kind: "workGroup";
   parts: ChatStreamPart[];
@@ -36,14 +34,19 @@ export function liveWorkGroupSummary(group: ChatStreamWorkGroup): WorkGroupSumma
   return null;
 }
 
-function isCompletedToolEvent(part: ChatStreamPart): part is ChatStreamEventPart {
-  return part.kind === "event" && part.eventType === "tool" && !part.mcpApp && (part.status ?? "done") !== "running";
-}
-
-function isCompletedInternalPart(part: ChatStreamPart): boolean {
-  return part.kind === "thinking" ||
-    (part.kind === "event" && part.approvalId != null && (part.status ?? "done") === "done") ||
-    isCompletedToolEvent(part);
+function completedInternalPart(part: ChatStreamPart): ChatStreamPart | null {
+  if (part.kind === "thinking") return part;
+  if (
+    part.kind === "event" &&
+    part.approvalId != null &&
+    (part.status ?? "done") === "done"
+  ) return part;
+  if (part.kind === "event" && part.eventType === "tool" && !part.mcpApp) {
+    // A terminal assistant message is authoritative even when a provider omitted
+    // the matching tool-result event. Do not leave stale starts flat or animated.
+    return part.status === "running" ? { ...part, status: "done" } : part;
+  }
+  return null;
 }
 
 function isLiveInternalPart(part: ChatStreamPart): boolean {
@@ -67,12 +70,13 @@ export function groupCompletedStreamActivity(parts: ChatStreamPart[], streaming:
     const work: ChatStreamPart[] = [];
     let workIndex = -1;
     parts.forEach((part, index) => {
+      const completed = completedInternalPart(part);
       const collapsible =
         (part.kind === "text" && index !== finalAnswerIndex) ||
-        isCompletedInternalPart(part);
+        completed != null;
       if (collapsible) {
         if (workIndex < 0) workIndex = visible.length;
-        work.push(part);
+        work.push(completed ?? part);
       } else {
         visible.push(part);
       }

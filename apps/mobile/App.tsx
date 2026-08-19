@@ -914,6 +914,11 @@ function ThreadDrawer({
   const {width} = useWindowDimensions();
   const drawerWidth = Math.min(width * 0.9, 380);
   const translateX = useRef(new Animated.Value(-drawerWidth)).current;
+  const edgeOpacity = translateX.interpolate({
+    inputRange: [-drawerWidth, 0],
+    outputRange: [0, 1],
+    extrapolate: 'clamp',
+  });
   const [title, setTitle] = useState('');
   const [renaming, setRenaming] = useState<ThreadSummaryV1 | null>(null);
   const [actionsFor, setActionsFor] = useState<ThreadSummaryV1 | null>(null);
@@ -1003,13 +1008,15 @@ function ThreadDrawer({
 
   return (
     <Modal visible={visible} transparent animationType="none" onRequestClose={close} statusBarTranslucent>
+      <SafeAreaProvider>
       <View style={styles.drawerBackdrop}>
-        <Pressable style={styles.drawerDismiss} onPress={close} accessibilityRole="button" accessibilityLabel="Close threads">
-          <DrawerBackdropFade />
-        </Pressable>
+        <Pressable style={styles.drawerDismiss} onPress={close} accessibilityRole="button" accessibilityLabel="Close threads" />
         <Animated.View
           style={[styles.drawer, {width: drawerWidth, transform: [{translateX}]}]}
           {...dismissGesture.panHandlers}>
+          <Animated.View pointerEvents="none" style={[styles.drawerEdgeFade, {opacity: edgeOpacity}]}>
+            <DrawerBackdropFade />
+          </Animated.View>
           <SafeAreaView style={styles.drawerSafe} edges={['top', 'left', 'bottom']}>
             <View style={styles.drawerHeader}>
               <View style={styles.drawerHeading}>
@@ -1156,6 +1163,7 @@ function ThreadDrawer({
           </View>
         </View>
       </Modal>
+      </SafeAreaProvider>
     </Modal>
   );
 }
@@ -2267,6 +2275,9 @@ function ModelPickerRow({
   onToggleReasoning?: () => void;
 }) {
   const {palette, styles} = useAppTheme();
+  const visibleCapabilities = onToggleReasoning
+    ? model.capabilities.filter(capability => capability !== 'reasoning')
+    : model.capabilities;
   return (
     <View style={[styles.pickerRow, selected && styles.pickerRowSelected]}>
       <MotionPressable style={styles.pickerRowMain} onPress={onPress}>
@@ -2282,11 +2293,11 @@ function ModelPickerRow({
             <Text style={styles.pickerRowRoute} numberOfLines={1}>
               {[model.route, model.detail].filter(Boolean).join(' · ')}
             </Text>
-            {model.capabilities.length ? (
+            {visibleCapabilities.length ? (
               <View style={styles.capabilityRow}>
-                {model.capabilities.slice(0, 5).map(capability => (
-                  <View key={capability} accessibilityLabel={capability}>
-                    <MilimIcon name={capabilityIcons[capability]} size={11} color={palette.muted} />
+                {visibleCapabilities.slice(0, 5).map(capability => (
+                  <View key={capability} style={styles.pickerCapabilityIcon} accessibilityLabel={capability}>
+                    <MilimIcon name={capabilityIcons[capability]} size={12} color={palette.muted} />
                   </View>
                 ))}
               </View>
@@ -2892,7 +2903,8 @@ function createStyles(theme: MobileTheme) {
   threadMenu: {width: 38, height: 38, borderRadius: 7, alignItems: 'center', justifyContent: 'center'},
   drawerBackdrop: {flex: 1, flexDirection: 'row-reverse'},
   drawerDismiss: {flex: 1},
-  drawer: {height: '100%', borderRightWidth: 1, borderRightColor: palette.glassEdge, backgroundColor: palette.popover, shadowColor: '#000', shadowOpacity: 0.34, shadowRadius: 26, shadowOffset: {width: 10, height: 0}, elevation: 18},
+  drawer: {height: '100%', borderRightWidth: 1, borderRightColor: palette.glassEdge, backgroundColor: palette.popover},
+  drawerEdgeFade: {position: 'absolute', left: '100%', top: 0, bottom: 0, width: 96},
   drawerSafe: {flex: 1},
   drawerHeader: {minHeight: 72, flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 14, paddingTop: 5, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: palette.border},
   drawerHeading: {flex: 1, gap: 2},
@@ -2956,10 +2968,11 @@ function createStyles(theme: MobileTheme) {
   pickerRowBody: {flex: 1, minWidth: 0, gap: 3},
   pickerRowTopline: {flexDirection: 'row', alignItems: 'center', gap: 8},
   pickerRowTitle: {flex: 1, color: palette.text, fontSize: 13, fontWeight: '600'},
-  pickerRowMeta: {flexDirection: 'row', alignItems: 'center', gap: 6},
-  pickerRowRoute: {flex: 1, color: palette.muted, fontSize: 9.5},
+  pickerRowMeta: {flexDirection: 'row', alignItems: 'center', gap: 6, minHeight: 14},
+  pickerRowRoute: {flex: 1, color: palette.muted, fontSize: 9.5, lineHeight: 14},
   pickerRowDescription: {color: palette.secondary, fontSize: 10.5, lineHeight: 15},
-  capabilityRow: {flexDirection: 'row', alignItems: 'center', gap: 4},
+  capabilityRow: {flexDirection: 'row', alignItems: 'center', height: 14, gap: 4},
+  pickerCapabilityIcon: {width: 14, height: 14, alignItems: 'center', justifyContent: 'center'},
   capabilityTag: {color: palette.secondary, fontSize: 8, fontWeight: '800', letterSpacing: 0.6, paddingHorizontal: 5, paddingVertical: 2, borderRadius: 4, overflow: 'hidden', backgroundColor: palette.input, borderWidth: StyleSheet.hairlineWidth, borderColor: palette.border},
   pickerRowFavorite: {width: 38, height: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 7},
   pickerRowEffort: {minWidth: 36, height: 44, paddingHorizontal: 6, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, borderRadius: 7},

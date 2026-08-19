@@ -63,6 +63,24 @@ export function modelComposerBlocker({
   };
 }
 
+const PROGRESS_INFO_NOTICE = /^(Goal running\.|Starting Codex login\.\.\.)$/i;
+
+export function composerNoticeAutoDismissMs(
+  notice: { tone: "info" | "warning" | "error"; message: string } | null,
+): number | null {
+  if (!notice || notice.tone !== "info") return null;
+  const message = notice.message.trim();
+  if (!message || message.endsWith("...") || PROGRESS_INFO_NOTICE.test(message)) return null;
+  return 5000;
+}
+
+export function composerNoticeIsDismissible<T extends { tone: "info" | "warning" | "error" }>(
+  notice: T | ComposerBlocker | null,
+  proactive: ComposerBlocker | null,
+): boolean {
+  return Boolean(notice && notice !== proactive);
+}
+
 export function composerNoticeAction(message: string): ComposerBlockerAction | null {
   const text = message.toLowerCase();
   if (text.includes("blocked by the privacy gate")) return "privacy_settings";

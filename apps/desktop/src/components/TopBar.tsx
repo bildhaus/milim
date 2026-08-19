@@ -14,6 +14,7 @@ import { deriveThreadTitle, shouldReplaceThreadTitle } from "../lib/threadTitles
 import { readUserStateKey } from "../persistence/userStateStorage.js";
 import { useSessions } from "../sessions/store";
 import { shortcutMatchesEvent, uiSizeShortcutDelta } from "../ui/shortcuts";
+import { startWindowDrag } from "../ui/windowDrag";
 import {
   DEFAULT_UI_SIZE,
   MAX_UI_SIZE,
@@ -29,15 +30,6 @@ import { WindowControls } from "./WindowControls";
 const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const PINNED_KEY = "milim.window.alwaysOnTop";
 const ZOOM_CHIP_IDLE_MS = 3000;
-const INTERACTIVE_TITLEBAR_SELECTOR = [
-  "a",
-  "button",
-  "input",
-  "select",
-  "textarea",
-  '[role="button"]',
-  "[data-window-drag-ignore]",
-].join(",");
 
 export function TopBar({
   onOpenAppMenu,
@@ -220,18 +212,6 @@ export function TopBar({
     } finally {
       setUpdateActionRunning(false);
     }
-  }
-
-  function startWindowDrag(e: MouseEvent<HTMLElement>) {
-    if (!inTauri || e.button !== 0) return;
-    const target = e.target;
-    if (!(target instanceof Element)) return;
-    if (target.closest(INTERACTIVE_TITLEBAR_SELECTOR)) return;
-
-    e.preventDefault();
-    getCurrentWindow()
-      .startDragging()
-      .catch(() => {});
   }
 
   return (

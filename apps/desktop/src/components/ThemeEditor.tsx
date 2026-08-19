@@ -2,7 +2,7 @@ import { useState } from "react";
 import { themeContrastIssues } from "../theme/contrast";
 import { useTheme } from "../theme/store";
 import type { Theme } from "../theme/types";
-import { SheetDialog } from "./SheetDialog";
+import { SettingsSurface } from "../settings/SettingsSurface";
 import { ColorField, Select, Slider as Range, Toggle } from "./ui";
 
 const COLOR_GROUPS: Array<{ title: string; fields: Array<[string, keyof Theme["colors"]]> }> = [
@@ -115,13 +115,16 @@ export function ThemeEditor({ base, isNew, onClose }: { base: Theme; isNew: bool
   }
 
   return (
-    <SheetDialog
-      title={isNew ? "Customize theme" : "Edit theme"}
-      className="sheet editor"
+    <SettingsSurface
+      ariaLabel={isNew ? "Customize theme" : "Edit theme"}
+      backLabel="Back to Appearance"
+      backTestId="theme-editor-back"
+      className="settings-theme-editor"
       testId="theme-editor"
-      onClose={() => { revert(); onClose(); }}
+      onBack={() => { revert(); onClose(); }}
     >
-      <div className="sheet-header editor-header">
+      <div className="settings-theme-editor-page">
+      <div className="editor-header">
         <div className="editor-title">
           <span className="editor-kicker">{isNew ? "New theme" : "Custom theme"}</span>
           <input
@@ -366,7 +369,8 @@ export function ThemeEditor({ base, isNew, onClose }: { base: Theme; isNew: bool
           </section>
         </aside>
       </div>
-    </SheetDialog>
+      </div>
+    </SettingsSurface>
   );
 }
 
