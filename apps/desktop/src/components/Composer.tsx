@@ -3,6 +3,7 @@ import { openExternalUrl, type Agent, type ChatAttachment, type MediaKind, type 
 import type { WorkspaceFileSuggestion } from "../api";
 import { composerAutocompleteTriggerAt, composerCommandRunsOnSelection, composerSuggestionMatchScore, mcpToolTagCompletion, replaceComposerAutocompleteTrigger, skillTagCompletion } from "../lib/composerAutocomplete";
 import { canNavigateComposerHistory, moveComposerHistory, type ComposerHistoryDirection } from "../lib/composerHistory";
+import { clipboardFiles, isDuplicateClipboardPaste, type ClipboardPasteStamp } from "../lib/clipboardFiles";
 import { composerDisplayForText, composerLinkClickAction, composerTokensForText, pasteComposerUrl, type ComposerToken } from "../lib/composerTokens";
 import { shortcutLabel, shortcutMatchesEvent } from "../ui/shortcuts";
 import { useUiPreferences } from "../ui/store";
@@ -76,19 +77,6 @@ function attachmentSizeLabel(size: number): string {
 
 function folderLabel(folder: string): string {
   return folder.split(/[\\/]/).filter(Boolean).pop() || folder || "No project";
-}
-
-function clipboardFiles(data: DataTransfer): File[] {
-  const byKey = new Map<string, File>();
-  for (const file of Array.from(data.files ?? [])) {
-    byKey.set(`${file.name}:${file.size}:${file.type}:${file.lastModified}`, file);
-  }
-  for (const item of Array.from(data.items ?? [])) {
-    if (item.kind !== "file") continue;
-    const file = item.getAsFile();
-    if (file) byKey.set(`${file.name}:${file.size}:${file.type}:${file.lastModified}`, file);
-  }
-  return Array.from(byKey.values());
 }
 
 function isGithubLinkToken(token: ComposerToken): boolean {
@@ -185,6 +173,7 @@ export function Composer({
   const historyDraftRef = useRef("");
   const historyNoticeTimerRef = useRef<number | null>(null);
   const completionControllerRef = useRef<AbortController | null>(null);
+  const lastClipboardPasteRef = useRef<ClipboardPasteStamp | null>(null);
   const pendingSelectionRef = useRef<{
     start: number;
     end: number;
@@ -932,7 +921,9 @@ export function Composer({
             const files = clipboardFiles(e.clipboardData);
             if (files.length) {
               e.preventDefault();
-              onAttachFiles(files);
+              const decision = isDuplicateClipboardPaste(files, lastClipboardPasteRef.current);
+              lastClipboardPasteRef.current = decision.stamp;
+              if (!decision.duplicate) onAttachFiles(files);
               return;
             }
             const selection = rawSelection(e.currentTarget);
