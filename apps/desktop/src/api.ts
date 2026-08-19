@@ -195,11 +195,16 @@ export interface TokenUsage {
   total_tokens: number;
 }
 
+export type CostSource = "provider" | "estimate";
+export type CostAggregation = CostSource | "mixed";
+
 export interface ChatCompactionMetrics {
   responseCount: number;
   durationMs: number;
   usage: TokenUsage;
   costUsd?: number;
+  costSource?: CostAggregation;
+  costPartial?: boolean;
 }
 
 export interface ChatCompactionSummaryMetrics {
@@ -208,6 +213,7 @@ export interface ChatCompactionSummaryMetrics {
   durationMs?: number;
   usage?: TokenUsage;
   costUsd?: number;
+  costSource?: CostAggregation;
 }
 
 export interface ChatCompactionCheckpoint {
@@ -285,7 +291,7 @@ export interface ChatMessage {
   streamParts?: ChatStreamPart[];
   /** UI-only structured trace of an agent/tool run (never sent to the server). */
   run?: RunTrace;
-  /** UI-only response timing, token usage, and optional estimated cost. */
+  /** UI-only response timing, token usage, and optional cost snapshot. */
   metrics?: ResponseMetrics;
   /** Git worktree snapshot captured immediately before this assistant turn. */
   workspaceCheckpoint?: WorkspaceCheckpoint;
@@ -314,6 +320,8 @@ export interface ResponseMetrics {
   provider?: string;
   usage?: TokenUsage;
   costUsd?: number;
+  /** How `costUsd` was produced. Omitted when cost is absent. */
+  costSource?: CostSource;
   limits?: ProviderLimitInfo[];
 }
 

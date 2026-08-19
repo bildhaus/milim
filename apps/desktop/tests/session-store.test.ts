@@ -929,6 +929,7 @@ useSessions.getState().commitResponseMetrics(first, {
   provider: "OpenRouter",
   usage: { prompt_tokens: 1_000, completion_tokens: 400, total_tokens: 1_400 },
   costUsd: 0.004,
+  costSource: "estimate",
   limits: [
     {
       provider: "Local Claude CLI",
@@ -975,6 +976,7 @@ const compactedBreakdown = formatThreadMetricsBreakdown([
         total_tokens: 1_400,
       },
       costUsd: 0.004,
+      costSource: "estimate",
     },
   },
   {
@@ -994,6 +996,7 @@ const compactedBreakdown = formatThreadMetricsBreakdown([
           total_tokens: 1_400,
         },
         costUsd: 0.004,
+        costSource: "estimate",
       },
       summary: {
         model: "openrouter/test",
@@ -1005,6 +1008,7 @@ const compactedBreakdown = formatThreadMetricsBreakdown([
           total_tokens: 800,
         },
         costUsd: 0.001,
+        costSource: "estimate",
       },
     },
   },
@@ -1019,12 +1023,13 @@ const compactedBreakdown = formatThreadMetricsBreakdown([
       model: "openrouter/test",
       usage: { prompt_tokens: 300, completion_tokens: 100, total_tokens: 400 },
       costUsd: 0.002,
+      costSource: "estimate",
     },
   },
 ]);
 assert(
-  compactedBreakdown.label?.includes("since compact"),
-  "thread usage label should show post-compaction usage",
+  !compactedBreakdown.label?.includes("since compact"),
+  "thread usage label should show one lifetime total instead of two windows",
 );
 assert(
   compactedBreakdown.label?.includes("est. $0.007"),
@@ -1206,6 +1211,7 @@ deepEqual(
     provider: "OpenRouter",
     usage,
     costUsd: 0.002,
+    costSource: "estimate",
   },
   "turn response metrics should derive duration, provider, and estimated cost",
 );
@@ -1228,6 +1234,7 @@ deepEqual(
     provider: "Codex",
     usage,
     costUsd: 0.5,
+    costSource: "provider",
   },
   "account-runtime turn metrics should use runtime provider and explicit cost only",
 );
@@ -1259,6 +1266,52 @@ equal(
   }),
   "Local Pi CLI · openai-codex/gpt-5.4-mini · 30ms",
   "account-runtime response footers should identify the runtime and model",
+);
+equal(
+  formatResponseMetrics({
+    startedAt: 10,
+    endedAt: 40,
+    durationMs: 30,
+    model: "claude:opus",
+    provider: "Local Claude CLI",
+    usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+    costUsd: 0.02,
+    costSource: "provider",
+  }),
+  "Local Claude CLI · opus · 30ms · 15 tokens · $0.02",
+  "provider-reported cost should not be labeled as an estimate",
+);
+equal(
+  formatThreadMetrics(
+    summarizeResponseMetrics([
+      {
+        role: "assistant",
+        content: "priced",
+        metrics: {
+          startedAt: 1,
+          endedAt: 2,
+          durationMs: 1_000,
+          model: "openrouter/test",
+          usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+          costUsd: 0.006,
+          costSource: "estimate",
+        },
+      },
+      {
+        role: "assistant",
+        content: "unpriced",
+        metrics: {
+          startedAt: 3,
+          endedAt: 4,
+          durationMs: 1_000,
+          model: "opencode:free",
+          usage: { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30 },
+        },
+      },
+    ]),
+  ),
+  "2.0s · 45 tokens · ~est. $0.006",
+  "thread totals should mark incomplete spend when some turns have no cost",
 );
 equal(
   approvalWaitDuration({

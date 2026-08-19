@@ -416,10 +416,13 @@
   font-weight: 650;
 }
 .topbar-usage {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
   color: color-mix(in srgb, var(--tertiary-text) 86%, var(--primary-text));
   font-family: var(--mono);
   font-size: 10.5px;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 .topbar-account-usage {
@@ -910,7 +913,9 @@
 .thread-bar-popover .session-empty { margin: 4px; }
 
 @media (max-width: 960px) {
-  .topbar-with-thread-navigation .topbar-usage { display: none; }
+  .topbar-with-thread-navigation .topbar-usage {
+    max-width: min(220px, 28vw);
+  }
   .thread-bar-action > span { display: none; }
   .thread-bar-action { width: 30px; padding: 0; }
   .thread-bar-new-chat > .new-chat,

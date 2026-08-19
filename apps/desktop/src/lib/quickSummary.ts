@@ -377,7 +377,7 @@ export function buildQuickSummary(input: BuildQuickSummaryInput): QuickSummary {
   if (usage.label) {
     rows.push({
       kind: "usage",
-      label: "Cumulative usage",
+      label: "Thread totals",
       value: usage.label,
       title: usage.title ?? undefined,
     });

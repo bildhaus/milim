@@ -232,6 +232,8 @@ import {
 import { assessHotSwap, type HotSwapAssessment } from "../lib/hotSwap";
 import {
   approvalWaitDuration,
+  combineCostSources,
+  costSnapshotForAmount,
   estimateResponseCostUsd,
   responseMetricsForTurn,
   summarizeMilimUsage,
@@ -432,6 +434,7 @@ type CompactionSummaryResult = {
   content: string;
   usage?: TokenUsage;
   costUsd?: number;
+  costSource?: "provider" | "estimate";
   finishReason?: string;
 };
 
@@ -445,6 +448,7 @@ async function collectHarnessUtilityRun(
   let error: string | null = null;
   let usage: TokenUsage | undefined;
   let costUsd: number | undefined;
+  let costSource: "provider" | undefined;
   await streamHarnessRun(
     harnessId,
     request,
@@ -465,15 +469,17 @@ async function collectHarnessUtilityRun(
         event.type === "turn_completed"
       ) {
         if (event.usage) usage = event.usage;
-        if (typeof event.cost_usd === "number" && event.cost_usd > 0)
+        if (typeof event.cost_usd === "number" && event.cost_usd > 0) {
           costUsd = event.cost_usd;
+          costSource = "provider";
+        }
       }
     },
     signal,
   );
   if (error) throw new Error(error);
   if (warning) throw new Error(warning);
-  return { content, usage, costUsd };
+  return { content, usage, costUsd, costSource };
 }
 
 function mergeTokenUsage(
@@ -4201,6 +4207,7 @@ export function ChatView({
       compactionSummaryReasoningEffort(selectedProvider);
     let usage: TokenUsage | undefined;
     let costUsd: number | undefined;
+    let costSource: "provider" | "estimate" | "mixed" | undefined;
     let lastError = "Compaction failed.";
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -4272,17 +4279,26 @@ export function ChatView({
             toolContext: options.toolContext,
           },
         );
+        const estimated = costSnapshotForAmount(
+          estimateResponseCostUsd(model, completion.usage, providers),
+          "estimate",
+        );
         summary = {
           content: completion.content,
           usage: completion.usage,
           finishReason: completion.finishReason,
-          costUsd: estimateResponseCostUsd(model, completion.usage, providers),
+          costUsd: estimated?.costUsd,
+          costSource: estimated?.costSource,
         };
       }
 
       usage = mergeTokenUsage(usage, summary.usage);
-      if (typeof summary.costUsd === "number")
+      if (typeof summary.costUsd === "number") {
         costUsd = (costUsd ?? 0) + summary.costUsd;
+        if (summary.costSource) {
+          costSource = combineCostSources(costSource, summary.costSource);
+        }
+      }
 
       const clean = summary.content.trim();
       const validationError = validateCompactionCheckpointSummary(clean, {
@@ -4302,6 +4318,7 @@ export function ChatView({
             durationMs: Date.now() - summaryStartedAt,
             usage,
             costUsd,
+            costSource,
           },
         });
       }
@@ -5961,9 +5978,8 @@ export function ChatView({
     const { runRef, snapshot } = createTurnRunTraceState((run) =>
       store.commitRun(id, assistantMessageId, run),
     );
-    const captureAgentUsageDelta = (usage?: TokenUsage) => {
-      const totalUsage = metricsCapture.captureUsageDelta(usage);
-      if (!totalUsage || !assistantStart.state.started) return;
+    const commitLiveTurnMetrics = () => {
+      if (!assistantStart.state.started) return;
       commitResponseMetrics(
         id,
         assistantMessageId,
@@ -5975,10 +5991,23 @@ export function ChatView({
           providers,
           codexModel,
           claudeModel,
-          usage: totalUsage,
+          usage: metricsCapture.state.usage,
+          costUsd: metricsCapture.state.costUsd,
+          costSource: metricsCapture.state.costSource,
           limits: metricsCapture.state.limits,
         }),
       );
+    };
+    const captureAgentUsageDelta = (usage?: TokenUsage) => {
+      const totalUsage = metricsCapture.captureUsageDelta(usage);
+      if (!totalUsage) return;
+      commitLiveTurnMetrics();
+    };
+    const captureHarnessRuntimeMetrics = (
+      event: Parameters<typeof metricsCapture.captureRuntimeMetrics>[0],
+    ) => {
+      metricsCapture.captureRuntimeMetrics(event);
+      if (event.usage || typeof event.cost_usd === "number") commitLiveTurnMetrics();
     };
     const onToolCompleted = (name: string) => {
       if (isGoogleWorkspaceEditTool(name)) {
@@ -6066,7 +6095,7 @@ export function ChatView({
             store.appendStreamEvent(id, assistantMessageId, part),
           completeStreamEvent: (name, part) =>
             store.completeStreamEvent(id, assistantMessageId, name, part),
-          captureRuntimeMetrics: metricsCapture.captureRuntimeMetrics,
+          captureRuntimeMetrics: captureHarnessRuntimeMetrics,
           captureProviderLimit: metricsCapture.captureProviderLimit,
           onToolCompleted,
           onNativeWorker:
@@ -6264,6 +6293,7 @@ export function ChatView({
             claudeModel,
             usage: metricsCapture.state.usage,
             costUsd: metricsCapture.state.costUsd,
+            costSource: metricsCapture.state.costSource,
             limits: metricsCapture.state.limits,
           })
         : undefined;

@@ -237,7 +237,7 @@ export function TopBar({
             className="topbar-usage"
             data-testid="thread-usage"
             title={threadMetrics.title ?? undefined}
-            aria-label={`Cumulative thread usage: ${threadMetrics.label}`}
+            aria-label={`Thread totals: ${threadMetrics.label}`}
             data-tauri-drag-region
           >
             {threadMetrics.label}
@@ -248,7 +248,7 @@ export function TopBar({
             className="topbar-account-usage"
             data-testid="account-usage-pill"
             title={providerLimitTitle ?? providerLimitText}
-            aria-label={`Account usage: ${providerLimitTitle ?? providerLimitText}`}
+            aria-label={`Account quota: ${providerLimitTitle ?? providerLimitText}`}
             data-tauri-drag-region
           >
             {providerLimitText}

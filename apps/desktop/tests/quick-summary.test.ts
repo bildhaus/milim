@@ -245,7 +245,7 @@ try {
       { kind: "context", label: "Repository rules", value: "2,559 tokens" },
       { kind: "context", label: "Plan / Goal", value: "82 tokens" },
       { kind: "context", label: "Skills", value: "2,752 tokens" },
-      { kind: "usage", label: "Cumulative usage", value: "14.7s - 12k tokens - est. $0.04" },
+      { kind: "usage", label: "Thread totals", value: "14.7s - 12k tokens - est. $0.04" },
     ],
     context: {
       model: "gpt-5",
@@ -314,7 +314,7 @@ try {
   assert.ok(repositoryRulesIndex >= 0 && agentsIndex > repositoryRulesIndex, "Rule files should follow Repository rules");
   assert.match(promptMarkup, /quick-summary-row quick-summary-rule-source warning/);
   assert.ok(promptMarkup.includes('title="C:\\rules\\AGENTS.md"'));
-  assert.ok(groupedMarkup.indexOf(">Cumulative usage<") > promptEnd, "Cumulative usage should remain outside Prompt context");
+  assert.ok(groupedMarkup.indexOf(">Thread totals<") > promptEnd, "Thread totals should remain outside Prompt context");
 
   const collapsedMarkup = renderToStaticMarkup(
     createElement(QuickSummaryPanel, {

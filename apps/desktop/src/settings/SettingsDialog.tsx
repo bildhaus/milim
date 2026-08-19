@@ -1074,10 +1074,10 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                 </div>
                 <div className="setting-toggle-row">
                   <div>
-                    <strong>Show account usage in title bar</strong>
-                    <span>Show compact quota details for the active Codex or Claude runtime.</span>
+                    <strong>Show account quota in title bar</strong>
+                    <span>Show remaining Codex or Claude quota. Thread spend stays visible separately.</span>
                   </div>
-                  <Toggle checked={showAccountUsageInTitleBar} onChange={setShowAccountUsageInTitleBar} ariaLabel="Show account usage in title bar" testId="general-titlebar-account-usage-toggle" />
+                  <Toggle checked={showAccountUsageInTitleBar} onChange={setShowAccountUsageInTitleBar} ariaLabel="Show account quota in title bar" testId="general-titlebar-account-usage-toggle" />
                 </div>
                 {threadNavigationPlacement === "sidebar" && <div className="setting-toggle-row">
                   <div>

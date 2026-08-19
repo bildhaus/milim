@@ -1,5 +1,7 @@
 import type {
   ChatMessage,
+  CostAggregation,
+  CostSource,
   ProviderInfo,
   ProviderLimitInfo,
   ResponseMetrics,
@@ -29,6 +31,8 @@ export interface ThreadMetricsSummary {
   durationMs: number;
   usage: TokenUsage;
   costUsd?: number;
+  costSource?: CostAggregation;
+  costPartial?: boolean;
 }
 
 export interface ThreadMetricsBreakdown {
@@ -124,6 +128,14 @@ export function estimateResponseCostUsd(
   return Number.isFinite(cost) && cost > 0 ? cost : undefined;
 }
 
+export function costSnapshotForAmount(
+  amount: number | undefined,
+  source: CostSource,
+): { costUsd: number; costSource: CostSource } | undefined {
+  const costUsd = normalizeCostUsd(amount);
+  return costUsd == null ? undefined : { costUsd, costSource: source };
+}
+
 export function responseMetricsForTurn({
   startedAt,
   endedAt,
@@ -134,6 +146,7 @@ export function responseMetricsForTurn({
   claudeModel,
   usage,
   costUsd,
+  costSource,
   limits,
 }: {
   startedAt: number;
@@ -145,17 +158,19 @@ export function responseMetricsForTurn({
   claudeModel?: string | null;
   usage?: TokenUsage;
   costUsd?: number;
+  costSource?: CostSource;
   limits?: ProviderLimitInfo[];
 }): ResponseMetrics {
-  const runtimeProvider = codexModel || model.startsWith("codex:")
-    ? "Codex"
-    : claudeModel || model.startsWith("claude:")
-      ? "Local Claude CLI"
-      : model.startsWith("opencode:")
-        ? "Local OpenCode CLI"
-        : model.startsWith("pi:")
-          ? "Local Pi CLI"
-          : undefined;
+  const runtimeProvider = runtimeProviderName(model, { codexModel, claudeModel });
+  const provided = costSnapshotForAmount(costUsd, costSource ?? "provider");
+  const estimated =
+    !provided && !runtimeProvider
+      ? costSnapshotForAmount(
+          estimateResponseCostUsd(model, usage, providers),
+          "estimate",
+        )
+      : undefined;
+  const snapshot = provided ?? estimated;
   return {
     startedAt,
     endedAt,
@@ -163,11 +178,8 @@ export function responseMetricsForTurn({
     model,
     provider: runtimeProvider ?? providerNameForModel(model, providers),
     usage,
-    costUsd:
-      costUsd ??
-      (runtimeProvider
-        ? undefined
-        : estimateResponseCostUsd(model, usage, providers)),
+    costUsd: snapshot?.costUsd,
+    costSource: snapshot?.costSource,
     limits: limits?.length ? limits : undefined,
   };
 }
@@ -180,26 +192,18 @@ export function summarizeResponseMetrics(
     durationMs: 0,
     usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
   };
-  let costUsd = 0;
-  let hasCost = false;
 
   for (const message of messages) {
     const metrics = message.role === "assistant" ? message.metrics : undefined;
     if (!metrics) continue;
-    summary.responseCount += 1;
-    summary.durationMs += metrics.durationMs ?? 0;
-    if (metrics.usage) {
-      summary.usage.prompt_tokens += metrics.usage.prompt_tokens;
-      summary.usage.completion_tokens += metrics.usage.completion_tokens;
-      summary.usage.total_tokens += metrics.usage.total_tokens;
-    }
-    if (metrics.costUsd != null) {
-      costUsd += metrics.costUsd;
-      hasCost = true;
-    }
+    addMetricsToSummary(summary, {
+      durationMs: metrics.durationMs,
+      usage: metrics.usage,
+      costUsd: metrics.costUsd,
+      costSource: inferredCostSource(metrics),
+    });
   }
 
-  if (hasCost) summary.costUsd = costUsd;
   return summary;
 }
 
@@ -370,6 +374,7 @@ export function formatResponseMetrics(
       metrics.durationMs ?? 0,
       metrics.usage?.total_tokens ?? 0,
       metrics.costUsd,
+      inferredCostSource(metrics),
     ),
   ].filter(Boolean).join(" · ");
 }
@@ -382,6 +387,8 @@ export function formatThreadMetrics(
     summary.durationMs,
     summary.usage.total_tokens,
     summary.costUsd,
+    summary.costSource,
+    summary.costPartial,
   );
 }
 
@@ -393,7 +400,12 @@ export function formatThreadMetricsBreakdown(
   if (!breakdown.checkpoint) {
     return {
       label: lifetimeLabel,
-      title: lifetimeLabel ? `Thread totals: ${lifetimeLabel}` : null,
+      title: [
+        lifetimeLabel ? `Thread totals: ${lifetimeLabel}` : null,
+        breakdown.lifetime.costPartial
+          ? "Some turns have tokens but no recorded cost, so the dollar total is incomplete."
+          : null,
+      ].filter(Boolean).join("\n") || null,
     };
   }
 
@@ -407,14 +419,15 @@ export function formatThreadMetricsBreakdown(
   const summaryLabel = formatCompactionSummaryMetrics(
     breakdown.checkpoint.summary,
   );
-  const label = lifetimeLabel
-    ? `${lifetimeLabel} · since compact ${sinceLabel}`
-    : `since compact ${sinceLabel}`;
+  const label = lifetimeLabel ?? `since compact ${sinceLabel}`;
   const titleLines = [
     lifetimeLabel ? `Thread lifetime: ${lifetimeLabel}` : null,
     `At latest checkpoint: ${checkpointLabel}`,
     summaryLabel ? `Compaction summary: ${summaryLabel}` : null,
     `Since checkpoint: ${sinceLabel}`,
+    breakdown.lifetime.costPartial
+      ? "Some turns have tokens but no recorded cost, so the dollar total is incomplete."
+      : null,
   ].filter(Boolean);
 
   return {
@@ -434,26 +447,16 @@ function addCompactionSummaryMetrics(
   summary: ThreadMetricsSummary,
   messages: ChatMessage[],
 ): void {
-  let costUsd = summary.costUsd ?? 0;
-  let hasCost = summary.costUsd != null;
-
   for (const message of messages) {
     const metrics = message.compaction?.summary;
     if (!metrics) continue;
-    summary.responseCount += 1;
-    summary.durationMs += metrics.durationMs ?? 0;
-    if (metrics.usage) {
-      summary.usage.prompt_tokens += metrics.usage.prompt_tokens;
-      summary.usage.completion_tokens += metrics.usage.completion_tokens;
-      summary.usage.total_tokens += metrics.usage.total_tokens;
-    }
-    if (metrics.costUsd != null) {
-      costUsd += metrics.costUsd;
-      hasCost = true;
-    }
+    addMetricsToSummary(summary, {
+      durationMs: metrics.durationMs,
+      usage: metrics.usage,
+      costUsd: metrics.costUsd,
+      costSource: inferredCostSource(metrics),
+    });
   }
-
-  if (hasCost) summary.costUsd = costUsd;
 }
 
 function formatCompactionSummaryMetrics(
@@ -464,6 +467,7 @@ function formatCompactionSummaryMetrics(
     summary.durationMs ?? 0,
     summary.usage?.total_tokens ?? 0,
     summary.costUsd,
+    inferredCostSource(summary),
   );
 }
 
@@ -723,11 +727,104 @@ function formatMetricParts(
   durationMs: number,
   tokens: number,
   costUsd?: number,
+  costSource?: CostAggregation,
+  costPartial?: boolean,
 ): string | null {
   const parts = [formatDuration(durationMs)];
   if (tokens > 0) parts.push(formatTokens(tokens));
-  if (costUsd != null) parts.push(`est. ${formatUsd(costUsd)}`);
+  const costLabel = formatCostLabel(costUsd, costSource, costPartial);
+  if (costLabel) parts.push(costLabel);
   return parts.filter(Boolean).join(" · ") || null;
+}
+
+function formatCostLabel(
+  costUsd?: number,
+  costSource?: CostAggregation,
+  costPartial?: boolean,
+): string | null {
+  if (costUsd == null) return null;
+  const prefix =
+    costSource === "estimate" || costSource === "mixed" || !costSource
+      ? "est. "
+      : "";
+  return `${costPartial ? "~" : ""}${prefix}${formatUsd(costUsd)}`;
+}
+
+function inferredCostSource(
+  metrics?: {
+    costUsd?: number;
+    costSource?: CostAggregation;
+    provider?: string;
+    model?: string;
+  },
+): CostAggregation | undefined {
+  if (!metrics || metrics.costUsd == null) return undefined;
+  if (metrics.costSource) return metrics.costSource;
+  const model = metrics.model ?? "";
+  if (runtimeProviderName(model, {}) || /cli|codex|claude/i.test(metrics.provider ?? "")) {
+    return "provider";
+  }
+  return "estimate";
+}
+
+function runtimeProviderName(
+  model: string,
+  options: { codexModel?: string | null; claudeModel?: string | null },
+): string | undefined {
+  return options.codexModel || model.startsWith("codex:")
+    ? "Codex"
+    : options.claudeModel || model.startsWith("claude:")
+      ? "Local Claude CLI"
+      : model.startsWith("opencode:")
+        ? "Local OpenCode CLI"
+        : model.startsWith("pi:")
+          ? "Local Pi CLI"
+          : undefined;
+}
+
+function addMetricsToSummary(
+  summary: ThreadMetricsSummary,
+  metrics: {
+    durationMs?: number;
+    usage?: TokenUsage;
+    costUsd?: number;
+    costSource?: CostAggregation;
+  },
+): void {
+  summary.responseCount += 1;
+  summary.durationMs += metrics.durationMs ?? 0;
+  if (metrics.usage) {
+    summary.usage.prompt_tokens += metrics.usage.prompt_tokens;
+    summary.usage.completion_tokens += metrics.usage.completion_tokens;
+    summary.usage.total_tokens += metrics.usage.total_tokens;
+  }
+  const snapshot = costSnapshotForAmount(
+    metrics.costUsd,
+    metrics.costSource === "mixed" ? "estimate" : (metrics.costSource ?? "estimate"),
+  );
+  if (snapshot) {
+    summary.costUsd = (summary.costUsd ?? 0) + snapshot.costUsd;
+    summary.costSource = combineCostSources(
+      summary.costSource,
+      metrics.costSource ?? snapshot.costSource,
+    );
+  } else if (metrics.usage?.total_tokens) {
+    summary.costPartial = true;
+  }
+}
+
+export function combineCostSources(
+  current: CostAggregation | undefined,
+  next: CostAggregation,
+): CostAggregation {
+  if (!current) return next;
+  return current === next ? current : "mixed";
+}
+
+function normalizeCostUsd(value: number | undefined): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : undefined;
 }
 
 export function formatDuration(ms: number): string {
@@ -746,7 +843,11 @@ export function formatTokens(tokens: number): string {
 }
 
 function formatUsd(value: number): string {
-  if (value >= 0.01) return `$${value.toFixed(2)}`;
+  if (value >= 1) return `$${value.toFixed(2)}`;
+  if (value >= 0.01) {
+    const cents = value.toFixed(3);
+    return cents.endsWith("0") ? `$${value.toFixed(2)}` : `$${cents}`;
+  }
   if (value >= 0.001) return `$${value.toFixed(3)}`;
   return `$${value.toFixed(4)}`;
 }

@@ -1328,16 +1328,18 @@ async function runInboxSidebarCheck(page) {
       accountUsageClipped: accountUsage instanceof HTMLElement
         ? accountUsage.clientWidth < accountUsage.scrollWidth
         : true,
-      threadUsageHidden: !threadUsage || getComputedStyle(threadUsage).display === "none",
+      threadUsageForcedHidden: threadUsage
+        ? getComputedStyle(threadUsage).display === "none"
+        : false,
     };
   });
   if (
     narrowTopFlow.titleWidth == null ||
     narrowTopFlow.titleWidth < 60 ||
     narrowTopFlow.accountUsageClipped ||
-    !narrowTopFlow.threadUsageHidden
+    narrowTopFlow.threadUsageForcedHidden
   ) {
-    throw new Error(`Narrow top thread navigation should preserve the title and account usage: ${JSON.stringify(narrowTopFlow)}.`);
+    throw new Error(`Narrow top thread navigation should preserve the title, visible thread spend, and account quota: ${JSON.stringify(narrowTopFlow)}.`);
   }
   await page.screenshot({ path: screenshots.threadBarTopNarrow, fullPage: false });
   await page.setViewportSize(topViewport);
