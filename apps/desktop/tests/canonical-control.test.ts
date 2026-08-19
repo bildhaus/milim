@@ -61,6 +61,69 @@ const completed = projectControlRunMessages(
   "run-1",
 );
 assert.equal(completed[1].id, "assistant-1");
+
+const reconciledTools = projectControlRunMessages(
+  [
+    item(1, "tool_call", {
+      call_id: "call-1",
+      name: "read_file",
+    }),
+    item(2, "tool_result", {
+      call_id: "call-1",
+      name: "read_file",
+    }),
+    item(3, "tool_start", {
+      callId: "call-2",
+      tool_name: "list_dir",
+    }),
+    item(4, "tool_end", {
+      callId: "call-2",
+      tool_name: "list_dir",
+    }),
+    item(5, "message", {
+      id: "assistant-tools",
+      role: "assistant",
+      content: "done",
+    }),
+  ],
+  "run-1",
+)[0];
+const reconciledParts = reconciledTools.streamParts ?? [];
+assert.equal(reconciledParts.length, 3, "tool results should replace their starts instead of duplicating them");
+assert.deepEqual(
+  reconciledParts.filter((part) => part.kind === "event").map((part) => part.status),
+  ["done", "done"],
+  "canonical tool rows should be terminal when the assistant message is complete",
+);
+
+const sameNameTools = projectControlRunMessages(
+  [
+    item(1, "tool_call", { call_id: "call-a", name: "edit_file" }),
+    item(2, "tool_call", { call_id: "call-b", name: "edit_file" }),
+    item(3, "tool_result", { call_id: "call-a", name: "edit_file" }),
+    item(4, "tool_result", { call_id: "call-b", name: "edit_file" }),
+  ],
+  "run-1",
+)[0];
+assert.deepEqual(
+  sameNameTools.streamParts?.map((part) => part.kind === "event" ? [part.callId, part.status] : null),
+  [["call-a", "done"], ["call-b", "done"]],
+  "parallel tools with the same name should reconcile by call id",
+);
+
+const mismatchedToolIds = projectControlRunMessages(
+  [
+    item(1, "tool_call", { call_id: "call-left", name: "read_file" }),
+    item(2, "tool_result", { call_id: "call-right", name: "read_file" }),
+  ],
+  "run-1",
+)[0];
+assert.deepEqual(
+  mismatchedToolIds.streamParts?.map((part) => part.kind === "event" ? [part.callId, part.status] : null),
+  [["call-left", "running"], ["call-right", "done"]],
+  "a present call id should never fall back to a different same-name start",
+);
+
 const approval = projectControlRunMessages(
   [
     item(1, "tool_approval_required", {

@@ -30,16 +30,38 @@ export function controlQueuedMessage(turn: ControlQueuedTurnV1): QueuedMessage {
   };
 }
 
+function streamEventCallId(item: ControlTimelineItemV1): string | undefined {
+  const data = item.data;
+  return typeof data.call_id === "string"
+    ? data.call_id
+    : typeof data.callId === "string"
+      ? data.callId
+      : typeof data.id === "string"
+        ? data.id
+        : undefined;
+}
+
+function streamEventName(item: ControlTimelineItemV1): string {
+  const data = item.data;
+  return typeof data.name === "string"
+    ? data.name
+    : typeof data.tool_name === "string"
+      ? data.tool_name
+      : item.type;
+}
+
 function eventPart(item: ControlTimelineItemV1): ChatStreamPart | null {
   const data = item.data;
-  const name = typeof data.name === "string" ? data.name : item.type;
+  const name = streamEventName(item);
+  const callId = streamEventCallId(item);
   if (item.type === "tool_call" || item.type === "tool_start") {
     return {
       kind: "event",
       eventType: "tool",
       label: name,
+      name,
       status: "running",
-      callId: typeof data.call_id === "string" ? data.call_id : undefined,
+      callId,
     };
   }
   if (item.type === "tool_result" || item.type === "tool_end") {
@@ -47,8 +69,9 @@ function eventPart(item: ControlTimelineItemV1): ChatStreamPart | null {
       kind: "event",
       eventType: "tool",
       label: name,
+      name,
       status: data.error ? "error" : "done",
-      callId: typeof data.call_id === "string" ? data.call_id : undefined,
+      callId,
     };
   }
   if (item.type === "approval_requested" || item.type === "tool_approval_required") {
@@ -100,6 +123,55 @@ function appendStreamContent(
   } else {
     parts.push({ kind, content });
   }
+}
+
+function appendStreamEvent(
+  parts: ChatStreamPart[],
+  part: ChatStreamPart,
+): void {
+  if (part.kind !== "event" || part.eventType !== "tool" || part.status === "running") {
+    parts.push(part);
+    return;
+  }
+  const runningIndex = (() => {
+    if (part.callId) {
+      for (let index = parts.length - 1; index >= 0; index -= 1) {
+        const current = parts[index];
+        if (
+          current.kind === "event" &&
+          current.eventType === "tool" &&
+          current.status === "running" &&
+          current.callId === part.callId
+        ) return index;
+      }
+    }
+    if (!part.callId) {
+      for (let index = parts.length - 1; index >= 0; index -= 1) {
+        const current = parts[index];
+        if (
+          current.kind === "event" &&
+          current.eventType === "tool" &&
+          current.status === "running" &&
+          current.name === part.name
+        ) return index;
+      }
+    }
+    return -1;
+  })();
+  if (runningIndex < 0) {
+    parts.push(part);
+    return;
+  }
+  const started = parts[runningIndex];
+  parts[runningIndex] = started.kind === "event"
+    ? {
+        ...started,
+        ...part,
+        detail: part.detail ?? started.detail,
+        mcpApp: part.mcpApp ?? started.mcpApp,
+        toolArguments: part.toolArguments ?? started.toolArguments,
+      }
+    : part;
 }
 
 /** Fold the authoritative items for one run into the two user-visible turns. */
@@ -159,7 +231,7 @@ export function projectControlRunMessages(
       continue;
     }
     const part = eventPart(item);
-    if (part) streamParts.push(part);
+    if (part) appendStreamEvent(streamParts, part);
   }
   if (!assistant && (streamingText || streamingReasoning || streamParts.length)) {
     assistant = {

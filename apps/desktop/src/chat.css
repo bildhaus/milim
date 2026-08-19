@@ -3932,7 +3932,10 @@ html[data-dark="true"] .preview-control-cursor {
   opacity: 0.8;
   transform: translateY(-1px) rotate(45deg);
 }
-.stream-tool-group-body {
+.stream-tool-group:not([open]) > .stream-tool-group-body {
+  display: none;
+}
+.stream-tool-group[open] > .stream-tool-group-body {
   display: flex;
   flex-direction: column;
   gap: 5px;

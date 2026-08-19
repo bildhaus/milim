@@ -1,4 +1,6 @@
 import { strict as assert } from "node:assert";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { createElement, type ComponentType } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
@@ -51,6 +53,13 @@ const reasoningAfterTool = liveWorkGroupSummary({
 assert.equal(reasoningAfterTool?.label, "reasoning...");
 assert.equal(reasoningAfterTool?.status, "running");
 assert.equal(formatDuration(4_774_000), "1h 19m 34s");
+
+const chatCss = readFileSync(resolve(process.cwd(), "src/chat.css"), "utf8");
+assert.match(
+  chatCss,
+  /\.stream-tool-group:not\(\[open\]\) > \.stream-tool-group-body\s*\{\s*display:\s*none;/,
+  "closed work drawers should hide their bodies even when browser details defaults are overridden",
+);
 
 const ridgelineMarkup = renderToStaticMarkup(createElement(MilimUsageRidgeline, {
   usage: {
@@ -244,6 +253,33 @@ try {
     completedToolsTag,
     /\sopen=""/,
     "completed tool-only work should collapse",
+  );
+
+  const staleOpenRouterMarkup = renderToStaticMarkup(
+    createElement(AssistantMessage, {
+      content: "Done.",
+      streamParts: [
+        tool("Reading file", "running", "src/App.tsx"),
+        tool("Editing file", "running", "src/App.tsx"),
+        { kind: "text", content: "Done." },
+      ],
+      streaming: false,
+    }),
+  );
+  assert.equal(
+    (staleOpenRouterMarkup.match(/assistant-stream-work-group/g) ?? []).length,
+    1,
+    "a completed provider turn should collapse stale running tool starts into one work drawer",
+  );
+  assert.equal(
+    (staleOpenRouterMarkup.match(/shiny-text/g) ?? []).length,
+    0,
+    "a completed provider turn should not retain tool shimmer",
+  );
+  assert.equal(
+    (staleOpenRouterMarkup.match(/stream-event-running/g) ?? []).length,
+    0,
+    "a completed provider turn should not render running tool state",
   );
 
   const failedToolsMarkup = renderToStaticMarkup(
