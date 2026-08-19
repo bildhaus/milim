@@ -47,6 +47,19 @@ assert.deepEqual(streamedReasoning.streamParts, [
   { kind: "text", content: "answer continued" },
 ]);
 
+const interleavedReasoning = projectControlRunMessages(
+  [
+    item(1, "assistant_delta", { text: "Let me see what gcloud", reasoning: "" }),
+    item(2, "assistant_delta", { text: "", reasoning: "working folder... " }),
+    item(3, "assistant_delta", { text: " has configured.", reasoning: "" }),
+  ],
+  "run-1",
+)[0];
+assert.deepEqual(interleavedReasoning.streamParts, [
+  { kind: "text", content: "Let me see what gcloud has configured." },
+  { kind: "thinking", content: "working folder... " },
+]);
+
 const completed = projectControlRunMessages(
   [
     item(1, "message", { id: "user-1", role: "user", content: "hello" }),

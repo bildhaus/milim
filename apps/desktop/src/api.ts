@@ -1709,9 +1709,13 @@ export async function streamChat(
       const usage = parseTokenUsage(json.usage);
       if (usage) onUsage?.(usage);
       const delta: string | undefined = json.choices?.[0]?.delta?.content;
-      const reasoning: string | undefined =
+      const reasoningRaw: string | undefined =
         json.choices?.[0]?.delta?.reasoning_content ??
         json.choices?.[0]?.delta?.reasoning;
+      const reasoning =
+        reasoningRaw && reasoningRaw.trim() && reasoningRaw !== delta
+          ? reasoningRaw
+          : undefined;
       if (reasoning) onReasoning?.(reasoning);
       if (delta) onToken(delta);
     }

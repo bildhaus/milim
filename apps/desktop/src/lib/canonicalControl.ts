@@ -6,6 +6,7 @@ import {
   type ControlQueuedTurnV1,
   type ControlTimelineItemV1,
 } from "../api.js";
+import { appendPhaseStreamPart } from "./streamParts.js";
 import type { QueuedMessage } from "../sessions/store.js";
 
 type CanonicalMessage = ChatMessage;
@@ -117,12 +118,9 @@ function appendStreamContent(
   content: string,
 ) {
   if (!content) return;
-  const last = parts[parts.length - 1];
-  if (last?.kind === kind) {
-    parts[parts.length - 1] = { ...last, content: last.content + content };
-  } else {
-    parts.push({ kind, content });
-  }
+  const next = appendPhaseStreamPart(parts, kind, content);
+  parts.length = 0;
+  parts.push(...next);
 }
 
 function appendStreamEvent(

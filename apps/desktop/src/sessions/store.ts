@@ -50,6 +50,7 @@ import {
   type QuickSummarySectionId,
 } from "../lib/quickSummary.js";
 import { normalizeReasoningEffortOverrides } from "../lib/reasoningEffort.js";
+import { appendPhaseStreamPart, coalesceStreamPhases } from "../lib/streamParts.js";
 import { deriveThreadTitle, NEW_CHAT_TITLE } from "../lib/threadTitles.js";
 import {
   readUserStateKey,
@@ -1131,28 +1132,14 @@ function appendTextStreamPart(
   parts: ChatStreamPart[] | undefined,
   token: string,
 ): ChatStreamPart[] {
-  const next = parts ? parts.slice() : [];
-  const last = next[next.length - 1];
-  if (last?.kind === "text") {
-    next[next.length - 1] = { ...last, content: last.content + token };
-  } else {
-    next.push({ kind: "text", content: token });
-  }
-  return next;
+  return appendPhaseStreamPart(parts, "text", token);
 }
 
 function appendThinkingStreamPart(
   parts: ChatStreamPart[] | undefined,
   token: string,
 ): ChatStreamPart[] {
-  const next = parts ? parts.slice() : [];
-  const last = next[next.length - 1];
-  if (last?.kind === "thinking") {
-    next[next.length - 1] = { ...last, content: last.content + token };
-  } else {
-    next.push({ kind: "thinking", content: token });
-  }
-  return next;
+  return appendPhaseStreamPart(parts, "thinking", token);
 }
 
 function appendEventStreamPart(
@@ -1259,12 +1246,17 @@ function appendStreamChunksToMessages(
 
 function normalizePersistedStreamParts(message: ChatMessage): ChatMessage {
   if (!message.streamParts?.length) return message;
-  if (message.streamParts.some((part) => part.kind === "text")) return message;
-  if (!message.content.trim()) return message;
+  const streamParts = coalesceStreamPhases(message.streamParts);
+  if (streamParts.some((part) => part.kind === "text")) {
+    return streamParts === message.streamParts ? message : { ...message, streamParts };
+  }
+  if (!message.content.trim()) {
+    return streamParts === message.streamParts ? message : { ...message, streamParts };
+  }
   return {
     ...message,
     streamParts: [
-      ...message.streamParts,
+      ...streamParts,
       { kind: "text", content: message.content },
     ],
   };

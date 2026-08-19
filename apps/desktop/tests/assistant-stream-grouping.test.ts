@@ -1,5 +1,9 @@
 import type { ChatStreamPart } from "../src/api.js";
-import { groupCompletedStreamActivity } from "../src/lib/streamParts.js";
+import {
+  appendPhaseStreamPart,
+  coalesceStreamPhases,
+  groupCompletedStreamActivity,
+} from "../src/lib/streamParts.js";
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -8,6 +12,14 @@ function assert(condition: unknown, message: string): asserts condition {
 function equal<T>(actual: T, expected: T, message: string): void {
   if (actual !== expected) {
     throw new Error(`${message}: expected ${String(expected)}, got ${String(actual)}`);
+  }
+}
+
+function deepEqual<T>(actual: T, expected: T, message: string): void {
+  const actualJson = JSON.stringify(actual);
+  const expectedJson = JSON.stringify(expected);
+  if (actualJson !== expectedJson) {
+    throw new Error(`${message}: expected ${expectedJson}, got ${actualJson}`);
   }
 }
 
@@ -103,3 +115,67 @@ const toolsWithApproval = groupCompletedStreamActivity([
 ], false);
 equal(toolsWithApproval.length, 1, "approval history should not split collapsed tool activity");
 assert(toolsWithApproval[0].kind === "workGroup", "approval history should remain inside the work group");
+
+const openRouterFlicker: ChatStreamPart[] = [
+  { kind: "text", content: "Let me see what gcloud" },
+  { kind: "thinking", content: "working folder..." },
+  { kind: "text", content: " has configured." },
+];
+const coalescedFlicker = coalesceStreamPhases(openRouterFlicker);
+deepEqual(
+  coalescedFlicker,
+  [
+    { kind: "text", content: "Let me see what gcloud has configured." },
+    { kind: "thinking", content: "working folder..." },
+  ],
+  "interleaved OpenRouter channels should become one thinking part and one answer in a phase",
+);
+
+const liveFlicker = groupCompletedStreamActivity(openRouterFlicker, true);
+equal(liveFlicker.length, 2, "live flicker should render one reasoning card and one answer");
+assert(liveFlicker[0].kind === "text" && liveFlicker[0].content === "Let me see what gcloud has configured.", "live answer should stay unsplit");
+assert(liveFlicker[1].kind === "thinking" && liveFlicker[1].content === "working folder...", "live reasoning should not split the answer");
+
+const completedFlicker = groupCompletedStreamActivity(openRouterFlicker, false);
+equal(completedFlicker.length, 2, "completed flicker should keep the full answer outside the drawer");
+const completedFlickerAnswer = completedFlicker.find((part) => part.kind === "text");
+const completedFlickerWork = completedFlicker.find((part) => part.kind === "workGroup");
+assert(completedFlickerWork?.kind === "workGroup", "completed reasoning should collapse into the work drawer");
+assert(completedFlickerAnswer?.kind === "text" && completedFlickerAnswer.content === "Let me see what gcloud has configured.", "completed grouping should not hide the first answer fragment");
+
+const phaseBoundary = coalesceStreamPhases([
+  { kind: "thinking", content: "before tools" },
+  { kind: "text", content: "I will look." },
+  tool("shell"),
+  { kind: "text", content: "gcloud is ready." },
+  { kind: "thinking", content: "after tools" },
+]);
+deepEqual(
+  phaseBoundary,
+  [
+    { kind: "thinking", content: "before tools" },
+    { kind: "text", content: "I will look." },
+    tool("shell"),
+    { kind: "text", content: "gcloud is ready." },
+    { kind: "thinking", content: "after tools" },
+  ],
+  "tool events should keep later thinking and text in a new phase",
+);
+
+const ingested = appendPhaseStreamPart(
+  appendPhaseStreamPart(
+    appendPhaseStreamPart(undefined, "text", "Let me see what gcloud"),
+    "thinking",
+    "working folder...",
+  ),
+  "text",
+  " has configured.",
+);
+deepEqual(
+  ingested,
+  [
+    { kind: "text", content: "Let me see what gcloud has configured." },
+    { kind: "thinking", content: "working folder..." },
+  ],
+  "phase-aware ingest should append into the current text and thinking parts",
+);

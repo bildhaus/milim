@@ -15,6 +15,73 @@ export type WorkGroupSummary = {
   status: ChatStreamEventStatus;
 };
 
+function phaseStartIndex(parts: readonly ChatStreamPart[]): number {
+  for (let index = parts.length - 1; index >= 0; index -= 1) {
+    if (parts[index].kind === "event") return index + 1;
+  }
+  return 0;
+}
+
+function findPhasePartIndex(
+  parts: readonly ChatStreamPart[],
+  kind: "text" | "thinking",
+  phaseStart: number,
+): number {
+  for (let index = parts.length - 1; index >= phaseStart; index -= 1) {
+    if (parts[index].kind === kind) return index;
+  }
+  return -1;
+}
+
+/** Append text or thinking onto the current tool-bounded phase, not just the tail. */
+export function appendPhaseStreamPart(
+  parts: ChatStreamPart[] | undefined,
+  kind: "text" | "thinking",
+  content: string,
+): ChatStreamPart[] {
+  const next = parts ? parts.slice() : [];
+  if (!content) return next;
+  const phaseStart = phaseStartIndex(next);
+  const existingIndex = findPhasePartIndex(next, kind, phaseStart);
+  if (existingIndex >= 0) {
+    const current = next[existingIndex];
+    if (current.kind === kind) {
+      next[existingIndex] = { ...current, content: current.content + content };
+    }
+    return next;
+  }
+  next.push({ kind, content });
+  return next;
+}
+
+/** Merge interleaved text/thinking between event boundaries without reordering first-seen parts. */
+export function coalesceStreamPhases(parts: readonly ChatStreamPart[]): ChatStreamPart[] {
+  let changed = false;
+  const next: ChatStreamPart[] = [];
+  for (const part of parts) {
+    if (part.kind !== "text" && part.kind !== "thinking") {
+      next.push(part);
+      continue;
+    }
+    if (!part.content) {
+      changed = true;
+      continue;
+    }
+    const phaseStart = phaseStartIndex(next);
+    const existingIndex = findPhasePartIndex(next, part.kind, phaseStart);
+    if (existingIndex >= 0) {
+      const current = next[existingIndex];
+      if (current.kind === part.kind) {
+        next[existingIndex] = { ...current, content: current.content + part.content };
+        changed = true;
+      }
+      continue;
+    }
+    next.push(part);
+  }
+  return changed ? next : parts as ChatStreamPart[];
+}
+
 export function liveWorkGroupSummary(group: ChatStreamWorkGroup): WorkGroupSummary | null {
   for (let i = group.parts.length - 1; i >= 0; i -= 1) {
     const part = group.parts[i];
@@ -56,6 +123,7 @@ function isLiveInternalPart(part: ChatStreamPart): boolean {
 }
 
 export function groupCompletedStreamActivity(parts: ChatStreamPart[], streaming: boolean): ChatStreamDisplayPart[] {
+  parts = coalesceStreamPhases(parts);
   if (!streaming) {
     let finalAnswerIndex = -1;
     for (let index = parts.length - 1; index >= 0; index -= 1) {

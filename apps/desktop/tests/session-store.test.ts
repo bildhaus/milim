@@ -821,11 +821,10 @@ equal(
 deepEqual(
   streamedAssistant?.streamParts,
   [
-    { kind: "text", content: "Hello world" },
+    { kind: "text", content: "Hello world!" },
     { kind: "thinking", content: "checking" },
-    { kind: "text", content: "!" },
   ],
-  "batched stream chunks should preserve text/thinking order",
+  "batched stream chunks should coalesce interleaved text around thinking",
 );
 useSessions.getState().appendStreamEvent(first, {
   kind: "event",
