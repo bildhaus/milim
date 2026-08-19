@@ -30,6 +30,10 @@ const windowControls = readFileSync(
   join(root, "src", "components", "WindowControls.tsx"),
   "utf8",
 );
+const windowDrag = readFileSync(
+  join(root, "src", "ui", "windowDrag.ts"),
+  "utf8",
+);
 const resizeHandles = readFileSync(
   join(root, "src", "components", "ResizeHandles.tsx"),
   "utf8",
@@ -80,6 +84,7 @@ const nativePreviewBlockerFiles = [
   [join("components", "ModelPicker.tsx"), 1],
   [join("components", "GitPanel.tsx"), 3],
   [join("components", "TopBar.tsx"), 1],
+  [join("settings", "SettingsSurface.tsx"), 1],
 ];
 const cargoVersion = cargoToml.match(/^version = "([^"]+)"$/m)?.[1];
 const tauriFeatures =
@@ -461,8 +466,6 @@ for (const needle of [
   "milim.window.alwaysOnTop",
   'data-testid="pin-window"',
   "startWindowDrag",
-  "startDragging",
-  "INTERACTIVE_TITLEBAR_SELECTOR",
   'shortcutMatchesEvent("Mod+W", event)',
   "getCurrentWindow().close()",
   "data-tauri-drag-region",
@@ -474,6 +477,18 @@ for (const needle of [
 ]) {
   if (!topBar.includes(needle)) {
     throw new Error(`TopBar must include ${needle}`);
+  }
+}
+
+for (const needle of [
+  "getCurrentWindow",
+  "startDragging",
+  "INTERACTIVE_TITLEBAR_SELECTOR",
+  "event.button !== 0",
+  "target.closest(INTERACTIVE_TITLEBAR_SELECTOR)",
+]) {
+  if (!windowDrag.includes(needle)) {
+    throw new Error(`Shared window drag helper must include ${needle}`);
   }
 }
 

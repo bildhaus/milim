@@ -49,6 +49,7 @@ import {
   AppearanceCodeBlockThemeChoices,
   AppearanceMessageWidthChoices,
 } from "./AppearancePreviewChoices";
+import { SettingsSurface } from "./SettingsSurface";
 import { useTheme } from "../theme/store";
 import { themeContrastIssues } from "../theme/contrast";
 import type { Theme } from "../theme/types";
@@ -85,7 +86,6 @@ import {
 import { playInterfaceSound } from "../ui/sounds";
 import { Archive, Check, Code, Download, ExternalLink, FileText, FolderOpen, Gear, GitLogo, Pencil, PlusSquare, Refresh, Search, Sidebar, Smartphone, Sun, Trash, X } from "../components/icons";
 import { MobileCompanionSettings } from "../components/MobileCompanionSettings";
-import { SheetDialog } from "../components/SheetDialog";
 import { ThemeEditor } from "../components/ThemeEditor";
 import { Select, Slider, Toggle } from "../components/ui";
 
@@ -227,7 +227,7 @@ function updateStatusLabel(status: UpdateStatus): string {
   return "Not checked";
 }
 
-export function SettingsDialog({ onClose }: { onClose: () => void }) {
+export function SettingsPage({ onClose }: { onClose: () => void }) {
   const themes = useTheme((s) => s.themes);
   const custom = useTheme((s) => s.custom);
   const themeId = useTheme((s) => s.themeId);
@@ -883,20 +883,12 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const settingHighlightClass = (id: string) => highlightedSettingId === id ? " setting-highlight" : "";
 
   return (
-    <SheetDialog title="Settings" className="sheet" testId="settings-dialog" onClose={onClose}>
-        <div className="sheet-header">
-          <h2>Settings</h2>
-          <button
-            className="icon-btn sheet-close"
-            data-testid="close-settings"
-            onClick={onClose}
-            title="Close"
-            aria-label="Close settings"
-          >
-            <X size={15} />
-          </button>
-        </div>
-
+    <SettingsSurface
+      backLabel="Back to app"
+      backTestId="close-settings"
+      testId="settings-page"
+      onBack={onClose}
+    >
         <div className="settings-layout">
           <nav className="settings-nav" aria-label="Settings sections">
             <div className="settings-nav-search">
@@ -1724,7 +1716,11 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                   );
                 })}
 
-                <button className="theme-card new-card" onClick={() => setEditing({ base: current, isNew: true })}>
+                <button
+                  className="theme-card new-card"
+                  data-testid="theme-customize"
+                  onClick={() => setEditing({ base: current, isNew: true })}
+                >
                   <span className="theme-preview new">
                     <PlusSquare size={22} />
                   </span>
@@ -2170,6 +2166,6 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           </div>
           </div>
         </div>
-      </SheetDialog>
+      </SettingsSurface>
   );
 }

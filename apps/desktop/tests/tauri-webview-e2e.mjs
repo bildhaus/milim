@@ -38,6 +38,8 @@ const screenshots = {
   profiles: join(tmpdir(), "milim-tauri-webview-personalized-profiles.png"),
   settings: join(tmpdir(), "milim-tauri-webview-provider-settings.png"),
   settingsNarrow: join(tmpdir(), "milim-tauri-webview-settings-narrow.png"),
+  settingsMinimum: join(tmpdir(), "milim-tauri-webview-settings-minimum.png"),
+  settingsThemeEditor: join(tmpdir(), "milim-tauri-webview-settings-theme-editor.png"),
   chat: join(tmpdir(), "milim-tauri-webview-personalized-chat.png"),
   zoom: join(tmpdir(), "milim-tauri-webview-zoom-chip.png"),
   accountUsage: join(tmpdir(), "milim-tauri-webview-account-usage.png"),
@@ -3958,7 +3960,7 @@ async function runAppMenuCheck(page) {
 
   await trigger.click();
   await menu.getByText("Settings", { exact: true }).click();
-  await page.getByTestId("settings-dialog").waitFor();
+  await page.getByTestId("settings-page").waitFor();
   await closeSettings(page);
 }
 
@@ -3983,23 +3985,45 @@ async function closeProviders(page) {
 
 async function openSettings(page) {
   await page.getByTestId("open-settings").click();
+  const settingsPage = page.getByTestId("settings-page");
+  await settingsPage.waitFor();
   await page.getByTestId("settings-section-app").waitFor();
-  const sheetMotion = await page.locator(".sheet-overlay .sheet").evaluate((element) => {
+  const surface = await settingsPage.evaluate((element) => {
     const style = getComputedStyle(element);
-    const origin = style.transformOrigin.split(" ").map(Number.parseFloat);
+    const rect = element.getBoundingClientRect();
     return {
       transitionDuration: style.transitionDuration,
       transitionProperty: style.transitionProperty,
-      centeredOrigin: Math.abs(origin[0] - element.offsetWidth / 2) < 1 && Math.abs(origin[1] - element.offsetHeight / 2) < 1,
+      position: style.position,
+      bounds: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+      viewport: { width: innerWidth, height: innerHeight },
     };
   });
   if (
-    !sheetMotion.transitionDuration.includes("0.18s") ||
-    !sheetMotion.transitionProperty.includes("scale") ||
-    !sheetMotion.transitionProperty.includes("translate") ||
-    !sheetMotion.centeredOrigin
+    !surface.transitionDuration.includes("0.18s") ||
+    !surface.transitionProperty.includes("opacity") ||
+    surface.transitionProperty.includes("scale") ||
+    surface.transitionProperty.includes("translate") ||
+    surface.position !== "fixed" ||
+    Math.abs(surface.bounds.left) > 1 ||
+    Math.abs(surface.bounds.top) > 1 ||
+    Math.abs(surface.bounds.width - surface.viewport.width) > 1 ||
+    Math.abs(surface.bounds.height - surface.viewport.height) > 1
   ) {
-    throw new Error(`Settings sheet should use centered 180ms entry motion: ${JSON.stringify(sheetMotion)}.`);
+    throw new Error(`Settings should fill the viewport with opacity-only 180ms entry motion: ${JSON.stringify(surface)}.`);
+  }
+  if (await page.locator(".settings-page .sheet-overlay").count()) {
+    throw new Error("Settings should not render modal sheet chrome or a backdrop.");
+  }
+  await settingsPage.locator(".settings-page-titlebar").getByText("Back to app", { exact: true }).waitFor();
+  await settingsPage.getByRole("button", { name: "Close window" }).waitFor();
+  const workspace = await page.locator(".main").evaluate((element) => ({
+    inert: element.inert,
+    ariaHidden: element.getAttribute("aria-hidden"),
+    chatMounted: Boolean(element.querySelector('[data-testid="chat-shell"]')),
+  }));
+  if (!workspace.inert || workspace.ariaHidden !== "true" || !workspace.chatMounted) {
+    throw new Error(`Settings should inert but preserve the mounted workspace: ${JSON.stringify(workspace)}.`);
   }
   const usageToggle = page.getByTestId("general-titlebar-account-usage-toggle");
   if (await usageToggle.isVisible() && await usageToggle.getAttribute("aria-checked") !== "true") {
@@ -4008,6 +4032,7 @@ async function openSettings(page) {
 }
 
 async function runSettingsLayoutCheck(page) {
+  await page.setViewportSize({ width: 1000, height: 720 });
   await page.getByTestId("chat-shell").waitFor();
   await dismissOnboardingIfPresent(page);
   const ridgeline = page.getByTestId("empty-usage-ridgeline");
@@ -4035,7 +4060,75 @@ async function runSettingsLayoutCheck(page) {
   if (await ridgelineToggle.getAttribute("aria-checked") !== "true") {
     throw new Error("The empty-chat ridgeline should default on.");
   }
+  await page.locator(".settings-content").evaluate((element) => { element.scrollTop = 0; });
   await page.screenshot({ path: screenshots.settings, fullPage: false });
+
+  const initialSurfaceColor = await page.evaluate(() =>
+    getComputedStyle(document.documentElement).getPropertyValue("--bg-primary").trim(),
+  );
+  await page.getByTestId("theme-customize").click();
+  const themeEditor = page.getByTestId("theme-editor");
+  await themeEditor.waitFor();
+  const editorBounds = await themeEditor.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return { left: rect.left, top: rect.top, width: rect.width, height: rect.height, viewportWidth: innerWidth, viewportHeight: innerHeight };
+  });
+  if (
+    Math.abs(editorBounds.left) > 1 ||
+    Math.abs(editorBounds.top) > 1 ||
+    Math.abs(editorBounds.width - editorBounds.viewportWidth) > 1 ||
+    Math.abs(editorBounds.height - editorBounds.viewportHeight) > 1
+  ) {
+    throw new Error(`Theme editor should replace Settings at full-window bounds: ${JSON.stringify(editorBounds)}.`);
+  }
+  await themeEditor.getByText("Back to Appearance", { exact: true }).waitFor();
+  await page.waitForTimeout(220);
+  await page.screenshot({ path: screenshots.settingsThemeEditor, fullPage: false });
+  await setThemeEditorColor(page, "Background", "#ff00ff");
+  const previewSurfaceColor = await page.evaluate(() =>
+    getComputedStyle(document.documentElement).getPropertyValue("--bg-primary").trim(),
+  );
+  if (previewSurfaceColor === initialSurfaceColor) {
+    throw new Error("Theme editor color changes should preview live.");
+  }
+  await page.keyboard.press("Escape");
+  await themeEditor.waitFor({ state: "detached" });
+  await page.getByTestId("settings-page").waitFor();
+  await assertThemeSurfaceColor(page, initialSurfaceColor, "Escape should revert theme preview");
+
+  await page.getByTestId("theme-customize").click();
+  await page.getByTestId("theme-editor").waitFor();
+  await setThemeEditorColor(page, "Background", "#00ffff");
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.getByTestId("settings-page").waitFor();
+  await assertThemeSurfaceColor(page, initialSurfaceColor, "Cancel should revert theme preview");
+
+  await page.getByTestId("theme-customize").click();
+  await page.getByTestId("theme-editor").waitFor();
+  const originalPrimary = await themeEditorColorValue(page, "Primary");
+  await setThemeEditorColor(page, "Background", originalPrimary);
+  const saveBlocked = page.getByRole("button", { name: "Save", exact: true });
+  if (!(await saveBlocked.isDisabled())) {
+    throw new Error("Theme editor should block saving a low-contrast theme.");
+  }
+  await page.getByTestId("theme-editor-back").click();
+  await page.getByTestId("settings-page").waitFor();
+  await assertThemeSurfaceColor(page, initialSurfaceColor, "Back to Appearance should revert theme preview");
+
+  const customThemeName = `Settings E2E ${Date.now()}`;
+  await page.getByTestId("theme-customize").click();
+  await page.getByTestId("theme-editor").waitFor();
+  await page.getByRole("textbox", { name: "Theme name" }).fill(customThemeName);
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await page.getByTestId("settings-page").waitFor();
+  const savedTheme = page.locator(".theme-card").filter({ hasText: customThemeName });
+  await savedTheme.waitFor();
+  await page.getByRole("button", { name: `Edit ${customThemeName}` }).click();
+  await page.getByTestId("theme-editor").waitFor();
+  await page.getByRole("button", { name: `Delete ${customThemeName}` }).click();
+  await page.getByRole("button", { name: `Confirm delete ${customThemeName}` }).click();
+  await page.getByTestId("settings-page").waitFor();
+  await savedTheme.waitFor({ state: "detached" });
 
   await page.setViewportSize({ width: 740, height: 720 });
   await page.waitForTimeout(200);
@@ -4047,15 +4140,70 @@ async function runSettingsLayoutCheck(page) {
     throw new Error(`Settings navigation should become horizontal below 760px: ${JSON.stringify(navigation)}.`);
   }
   await ridgelineToggle.scrollIntoViewIfNeeded();
+  await page.locator(".settings-content").evaluate((element) => { element.scrollTop = 0; });
   await page.screenshot({ path: screenshots.settingsNarrow, fullPage: false });
+
+  await page.setViewportSize({ width: 640, height: 480 });
+  await page.waitForTimeout(200);
+  const minimumLayout = await page.getByTestId("settings-page").evaluate((element) => {
+    const closeButton = element.querySelector('[aria-label="Close window"]');
+    const content = element.querySelector(".settings-content");
+    const closeRect = closeButton?.getBoundingClientRect();
+    return {
+      closeVisible: Boolean(closeRect && closeRect.width > 0 && closeRect.right <= innerWidth + 1 && closeRect.top >= -1),
+      contentOverflow: content ? getComputedStyle(content).overflowY : "missing",
+      contentScrollable: Boolean(content && content.scrollHeight > content.clientHeight),
+    };
+  });
+  if (!minimumLayout.closeVisible || minimumLayout.contentOverflow !== "auto" || !minimumLayout.contentScrollable) {
+    throw new Error(`Settings should remain controllable and scrollable at 640x480: ${JSON.stringify(minimumLayout)}.`);
+  }
+  await page.locator(".settings-content").evaluate((element) => { element.scrollTop = 0; });
+  await page.screenshot({ path: screenshots.settingsMinimum, fullPage: false });
 
   await ridgelineToggle.click();
   await closeSettings(page);
+  await expectFocusedTestId(page, "open-settings");
   await ridgeline.waitFor({ state: "hidden" });
+
+  await openSettings(page);
+  await page.keyboard.press("Escape");
+  await page.getByTestId("settings-page").waitFor({ state: "detached" });
+  await expectFocusedTestId(page, "open-settings");
 }
 
 async function closeSettings(page) {
   await page.getByTestId("close-settings").click();
+  await page.getByTestId("settings-page").waitFor({ state: "detached" });
+  const workspace = await page.locator(".main").evaluate((element) => ({
+    inert: element.inert,
+    ariaHidden: element.getAttribute("aria-hidden"),
+  }));
+  if (workspace.inert || workspace.ariaHidden !== null) {
+    throw new Error(`Closing Settings should reactivate the workspace: ${JSON.stringify(workspace)}.`);
+  }
+}
+
+function themeEditorColorField(page, label) {
+  return page.locator(".ui-color").filter({ hasText: label }).first();
+}
+
+async function themeEditorColorValue(page, label) {
+  return (await themeEditorColorField(page, label).locator("code").innerText()).trim();
+}
+
+async function setThemeEditorColor(page, label, value) {
+  const field = themeEditorColorField(page, label);
+  await field.locator(".ui-color-swatch").click();
+  await field.locator(".ui-hex").fill(value);
+  await page.locator(".editor-header").click();
+}
+
+async function assertThemeSurfaceColor(page, expected, message) {
+  const actual = await page.evaluate(() =>
+    getComputedStyle(document.documentElement).getPropertyValue("--bg-primary").trim(),
+  );
+  if (actual !== expected) throw new Error(`${message}: expected ${expected}, got ${actual}.`);
 }
 
 async function runAppShortcutSettingsCheck(page) {
@@ -4112,7 +4260,7 @@ async function runCommandPaletteCheck(page) {
   await page.getByTestId("command-palette-input").fill("open settings");
   await page.getByTestId("command-palette-command").filter({ hasText: "Open settings" }).waitFor();
   await page.keyboard.press("Enter");
-  await page.getByTestId("settings-dialog").waitFor();
+  await page.getByTestId("settings-page").waitFor();
   await closeSettings(page);
 
   await page.keyboard.press("Control+K");
@@ -5951,6 +6099,8 @@ function printEvidencePaths(milimHome) {
   console.log(`profilesScreenshot=${screenshots.profiles}`);
   console.log(`settingsScreenshot=${screenshots.settings}`);
   console.log(`settingsNarrowScreenshot=${screenshots.settingsNarrow}`);
+  console.log(`settingsMinimumScreenshot=${screenshots.settingsMinimum}`);
+  console.log(`settingsThemeEditorScreenshot=${screenshots.settingsThemeEditor}`);
   console.log(`chatScreenshot=${screenshots.chat}`);
   console.log(`zoomScreenshot=${screenshots.zoom}`);
   console.log(`accountUsageScreenshot=${screenshots.accountUsage}`);

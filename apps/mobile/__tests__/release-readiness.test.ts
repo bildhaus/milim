@@ -111,10 +111,50 @@ test('iOS metadata preserves pairing and bundles the privacy manifest', () => {
   expect(privacy).toMatch(/<key>NSPrivacyTracking<\/key>\s*<false\/>/);
   expect(project).toContain('PrivacyInfo.xcprivacy in Resources');
   expect(project).toMatch(/PBXResourcesBuildPhase[\s\S]*13B07FC01A68108700A75B9A \/\* PrivacyInfo\.xcprivacy in Resources \*\//);
-  expect(launchScreen).toContain('text="milim"');
+  expect(launchScreen).toContain('image="MilimLaunchMark"');
+  expect(launchScreen).not.toContain('text="milim"');
+  expect(launchScreen).toContain('constant="72"');
   expect(launchScreen).toContain('systemColor="systemBackgroundColor"');
-  expect(launchScreen).toContain('systemColor="labelColor"');
   expect(launchScreen).not.toContain('Powered by React Native');
+});
+
+test('iOS launch screen bundles a smaller transparent milim mark', () => {
+  const launchAssetRoot = path.join(
+    mobileRoot,
+    'ios',
+    'MilimMobile',
+    'Images.xcassets',
+    'MilimLaunchMark.imageset',
+  );
+  const catalog = read(
+    'ios',
+    'MilimMobile',
+    'Images.xcassets',
+    'MilimLaunchMark.imageset',
+    'Contents.json',
+  );
+  const expected = new Map<string, number>([
+    ['milim-launch-mark.png', 72],
+    ['milim-launch-mark@2x.png', 144],
+    ['milim-launch-mark@3x.png', 216],
+  ]);
+
+  expect(catalog).toContain('"template-rendering-intent" : "template"');
+  for (const [filename, size] of expected) {
+    expect(pngDimensions(path.join(launchAssetRoot, filename))).toEqual({
+      width: size,
+      height: size,
+      colorType: 6,
+    });
+  }
+});
+
+test('iOS picker and drawer source keep one reasoning sparkle and modal-safe insets', () => {
+  const app = read('App.tsx');
+  expect(app).toContain("capability !== 'reasoning'");
+  expect(app).toContain("pickerRowMeta: {flexDirection: 'row', alignItems: 'center', gap: 6, minHeight: 14}");
+  expect(app).toMatch(/<Modal visible=\{visible\}[\s\S]*<SafeAreaProvider>[\s\S]*<SafeAreaView style=\{styles\.drawerSafe\} edges=\{\['top', 'left', 'bottom'\]\}>/);
+  expect(app).toContain('styles.drawerEdgeFade, {opacity: edgeOpacity}');
 });
 
 test('iOS app icon catalog contains complete opaque assets', () => {

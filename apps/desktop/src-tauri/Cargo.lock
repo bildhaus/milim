@@ -3107,7 +3107,7 @@ dependencies = [
 
 [[package]]
 name = "milim-agents"
-version = "0.2.44"
+version = "0.2.45"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3125,7 +3125,7 @@ dependencies = [
 
 [[package]]
 name = "milim-automation"
-version = "0.2.44"
+version = "0.2.45"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3141,7 +3141,7 @@ dependencies = [
 
 [[package]]
 name = "milim-control-contract"
-version = "0.2.44"
+version = "0.2.45"
 dependencies = [
  "serde",
  "serde_json",
@@ -3150,7 +3150,7 @@ dependencies = [
 
 [[package]]
 name = "milim-core"
-version = "0.2.44"
+version = "0.2.45"
 dependencies = [
  "directories",
  "serde",
@@ -3161,7 +3161,7 @@ dependencies = [
 
 [[package]]
 name = "milim-desktop"
-version = "0.2.44"
+version = "0.2.45"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3203,7 +3203,7 @@ dependencies = [
 
 [[package]]
 name = "milim-identity"
-version = "0.2.44"
+version = "0.2.45"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -3218,7 +3218,7 @@ dependencies = [
 
 [[package]]
 name = "milim-inference"
-version = "0.2.44"
+version = "0.2.45"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3235,7 +3235,7 @@ dependencies = [
 
 [[package]]
 name = "milim-mcp-client"
-version = "0.2.44"
+version = "0.2.45"
 dependencies = [
  "async-trait",
  "milim-core",
@@ -3250,7 +3250,7 @@ dependencies = [
 
 [[package]]
 name = "milim-memory"
-version = "0.2.44"
+version = "0.2.45"
 dependencies = [
  "milim-core",
  "milim-inference",
@@ -3264,7 +3264,7 @@ dependencies = [
 
 [[package]]
 name = "milim-privacy"
-version = "0.2.44"
+version = "0.2.45"
 dependencies = [
  "regex",
  "serde",
@@ -3272,7 +3272,7 @@ dependencies = [
 
 [[package]]
 name = "milim-sandbox"
-version = "0.2.44"
+version = "0.2.45"
 dependencies = [
  "milim-core",
  "serde",
@@ -3281,7 +3281,7 @@ dependencies = [
 
 [[package]]
 name = "milim-server"
-version = "0.2.44"
+version = "0.2.45"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3316,7 +3316,7 @@ dependencies = [
 
 [[package]]
 name = "milim-skills"
-version = "0.2.44"
+version = "0.2.45"
 dependencies = [
  "milim-core",
  "milim-storage",
@@ -3329,7 +3329,7 @@ dependencies = [
 
 [[package]]
 name = "milim-storage"
-version = "0.2.44"
+version = "0.2.45"
 dependencies = [
  "aes-gcm",
  "milim-core",
@@ -3341,7 +3341,7 @@ dependencies = [
 
 [[package]]
 name = "milim-tools"
-version = "0.2.44"
+version = "0.2.45"
 dependencies = [
  "async-trait",
  "milim-core",

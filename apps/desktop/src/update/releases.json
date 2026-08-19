@@ -1,4 +1,23 @@
 {
+  "0.2.45": {
+    "version": "0.2.45",
+    "summary": "Milim 0.2.45 gives desktop Settings a dedicated full-window workspace and moves custom theme editing into a focused subpage.",
+    "items": [
+      {
+        "id": "full-window-settings",
+        "eyebrow": "Desktop settings",
+        "title": "Use Settings as a full workspace",
+        "description": "Settings now fills the Milim window while keeping your active chat and background work mounted underneath.",
+        "details": [
+          "Navigate settings from a dedicated title bar with Back to app and native window controls",
+          "Customize themes in a focused subpage with exact preview rollback on Cancel, Back, or Escape",
+          "Keep navigation and controls usable down to Milim's 640 × 480 minimum window size"
+        ],
+        "accent": "var(--accent)",
+        "icon": "file-text"
+      }
+    ]
+  },
   "0.2.44": {
     "version": "0.2.44",
     "summary": "Milim 0.2.44 repairs stale model routing in existing desktop chats and synchronizes model changes before the next message is sent.",
