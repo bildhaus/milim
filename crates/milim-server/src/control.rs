@@ -18,8 +18,8 @@ use milim_core::{Error, Result};
 use milim_inference::{CompletionRequest, SamplingParams, StreamEvent};
 use milim_storage::{
     ControlApprovalRecord, ControlCommandReceiptRecord, ControlHostRecord, ControlInboxRecord,
-    ControlMailboxRecord, ControlQueuedTurnRecord, ControlRunArtifactRecord, ControlRunRecord,
-    ControlThreadRecord, ControlThreadLinkRecord, ControlTimelineRecord, UserDataStore,
+    ControlQueuedTurnRecord, ControlRunArtifactRecord, ControlRunRecord, ControlThreadRecord,
+    ControlTimelineRecord, UserDataStore,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -565,8 +565,6 @@ struct AcceptedTurnV1 {
     config: FrozenRunConfigV1,
     #[serde(default = "control_default_true")]
     append_user: bool,
-    #[serde(default)]
-    mailbox_origin: Option<MailboxOriginV1>,
 }
 
 struct ActiveRun {
@@ -2030,7 +2028,6 @@ impl RunManager {
             display_text: payload.display_text,
             config,
             append_user: true,
-            mailbox_origin: None,
         };
         let busy = self
             .active
@@ -2135,7 +2132,6 @@ impl RunManager {
             display_text: payload.display_text,
             config: resolve_frozen_config(state, &thread, payload.attachments)?,
             append_user: true,
-            mailbox_origin: None,
         };
         let inbox_id = Uuid::new_v4().to_string();
         self.store.control_put_inbox(&ControlInboxRecord {
@@ -2336,7 +2332,6 @@ impl RunManager {
             display_text,
             config,
             append_user: false,
-            mailbox_origin: None,
         };
         let run_id = self.start_turn(state, thread_id.clone(), accepted)?;
         Ok(ControlCommandResultV1 {
@@ -3930,8 +3925,6 @@ fn resolve_frozen_config(
         reasoning_effort,
         generation,
         adapter,
-        linked_thread_grants: Vec::new(),
-        claimed_mailbox_ids: Vec::new(),
     })
 }
 
@@ -4096,7 +4089,6 @@ fn thread_summary(
             .map(str::to_string),
         busy,
         queued_turns,
-        linked_threads: Vec::new(),
     })
 }
 
@@ -4149,7 +4141,6 @@ fn queued_turn(turn: ControlQueuedTurnRecord) -> Result<QueuedTurnV1> {
         accepted_at_ms: turn.accepted_at_ms,
         display_text: accepted.display_text.unwrap_or(accepted.text),
         attachments: accepted.config.attachments,
-        mailbox_origin: accepted.mailbox_origin,
     })
 }
 
