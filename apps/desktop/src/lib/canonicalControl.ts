@@ -219,11 +219,13 @@ export function projectControlRunMessages(
       if (message.role === "user") user = message;
       if (message.role === "assistant") {
         const reasoning = typeof data.reasoning === "string" ? data.reasoning : streamingReasoning;
-        message.streamParts = [
-          ...(reasoning ? [{ kind: "thinking", content: reasoning } as const] : []),
-          ...streamParts.filter((part) => part.kind === "event"),
-          ...(message.content ? [{ kind: "text", content: message.content } as const] : []),
-        ];
+        message.streamParts = message.content === streamingText && reasoning === streamingReasoning
+          ? streamParts
+          : [
+              ...(reasoning ? [{ kind: "thinking", content: reasoning } as const] : []),
+              ...streamParts.filter((part) => part.kind === "event"),
+              ...(message.content ? [{ kind: "text", content: message.content } as const] : []),
+            ];
         assistant = message;
       }
       continue;

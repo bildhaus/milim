@@ -75,6 +75,36 @@ const completed = projectControlRunMessages(
 );
 assert.equal(completed[1].id, "assistant-1");
 
+const completedWithOrderedWork = projectControlRunMessages(
+  [
+    item(1, "assistant_delta", { text: "I'll inspect.", reasoning: "Planning." }),
+    item(2, "tool_call", { call_id: "call-1", name: "shell" }),
+    item(3, "tool_result", { call_id: "call-1", name: "shell" }),
+    item(4, "assistant_delta", { text: "Complete.", reasoning: "" }),
+    item(5, "message", {
+      id: "assistant-ordered",
+      role: "assistant",
+      content: "I'll inspect.Complete.",
+      reasoning: "Planning.",
+    }),
+  ],
+  "run-1",
+)[0];
+assert.deepEqual(
+  completedWithOrderedWork.streamParts?.map((part) =>
+    part.kind === "event"
+      ? `${part.kind}:${part.name}:${part.status}`
+      : `${part.kind}:${part.content}`,
+  ),
+  [
+    "text:I'll inspect.",
+    "thinking:Planning.",
+    "event:shell:done",
+    "text:Complete.",
+  ],
+  "completion should preserve the streamed order around tool activity",
+);
+
 const reconciledTools = projectControlRunMessages(
   [
     item(1, "tool_call", {
