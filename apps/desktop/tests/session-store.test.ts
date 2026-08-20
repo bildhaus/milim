@@ -1553,7 +1553,7 @@ deepEqual(
     { label: "Projects", value: "0" },
     { label: "Active days", value: "0" },
     { label: "Tokens", value: "0" },
-    { label: "Spend", value: "—" },
+    { label: "Spend", value: "-" },
   ],
   "empty Milim usage should render zero metrics",
 );

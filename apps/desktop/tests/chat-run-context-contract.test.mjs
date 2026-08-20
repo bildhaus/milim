@@ -106,7 +106,7 @@ const modelWriteIndex = canonicalTurn.indexOf(
   "await writeCanonicalThreadModel(sessionId, selectedModel)",
 );
 const canonicalFlushIndex = canonicalTurn.indexOf(
-  'await flushDeferredUserStateWrites("milim.sessions")',
+  "await flushDeferredUserStateWrites()",
 );
 const canonicalClaimIndex = canonicalTurn.indexOf("claimTurnGeneration({");
 assert.ok(

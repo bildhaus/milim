@@ -379,7 +379,7 @@ export function summarizeMilimUsage(
     accumulated.costUsd,
     accumulated.costSource,
     accumulated.costPartial,
-  ) ?? "—";
+  ) ?? "-";
 
   return {
     months,

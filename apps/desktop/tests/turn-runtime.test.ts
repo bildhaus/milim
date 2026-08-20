@@ -496,6 +496,7 @@ let streamedModelSignal: AbortSignal | undefined;
 let streamedToolContext: AgentToolContext | undefined;
 await runModelChatTurn({
   promptContext: {
+    globalInstructionMessages: [],
     instructionMessages: [{ role: "system", content: "Be terse." }],
     planMessages: [],
     goalMessages: [],
@@ -572,6 +573,7 @@ let compactionAbortBegan = false;
 try {
   await runModelChatTurn({
     promptContext: {
+      globalInstructionMessages: [],
       instructionMessages: [],
       planMessages: [],
       goalMessages: [],
@@ -624,6 +626,7 @@ assert.equal(compactionAbortBegan, true);
 assert.equal(compactionAbortStreamed, false);
 
 const accountPromptContext = {
+  globalInstructionMessages: [],
   instructionMessages: [{ role: "system", content: "System rule" }],
   planMessages: [],
   goalMessages: [],
@@ -1140,6 +1143,7 @@ let toolPreparedSignal: AbortSignal | undefined;
 let toolStreamSignal: AbortSignal | undefined;
 await runToolAgentTurn({
   promptContext: {
+    globalInstructionMessages: [],
     instructionMessages: [{ role: "system", content: "Root instruction" }],
     planMessages: [],
     goalMessages: [],
@@ -1238,6 +1242,7 @@ assert(toolSnapshots >= 3);
 let failingRun: RunTrace | null = null;
 const failing = await runToolAgentTurn({
   promptContext: {
+    globalInstructionMessages: [],
     instructionMessages: [],
     planMessages: [],
     goalMessages: [],
