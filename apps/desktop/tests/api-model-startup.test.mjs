@@ -9,6 +9,7 @@ const seen = [];
 let modelReads = 0;
 let refreshCalls = 0;
 let codexReads = 0;
+let codexAborts = 0;
 let phase = "slow-account";
 
 globalThis.window = {
@@ -49,7 +50,10 @@ globalThis.fetch = async (input, init) => {
     return await new Promise((_, reject) => {
       init?.signal?.addEventListener(
         "abort",
-        () => reject(new DOMException("Aborted", "AbortError")),
+        () => {
+          codexAborts += 1;
+          reject(new DOMException("Aborted", "AbortError"));
+        },
         { once: true },
       );
     });
@@ -111,9 +115,10 @@ try {
   assert.equal(refreshCalls, 1);
   assert.equal(modelReads, 2);
   assert.equal(codexReads, 1);
-  assert.ok(
-    performance.now() - startedAt >= 8_000,
-    "The account probe should remain isolated while its full configured timeout elapses.",
+  assert.equal(
+    codexAborts,
+    1,
+    "The account probe should remain isolated until its configured timeout aborts it.",
   );
   assert.ok(
     seen.every((ids) => ids.includes("codex:existing")),
