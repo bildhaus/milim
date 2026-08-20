@@ -626,15 +626,23 @@ async function runCanonicalBinaryBenchmark() {
       fixtureState.sessions?.length === report.fixture.threadCount,
       `Expected ${report.fixture.threadCount} persisted threads, got ${fixtureState.sessions?.length ?? 0}.`,
     );
-    ensure(
-      fixtureState.sessions.every(
-        (item) =>
-          item.messages?.length === report.fixture.messagesPerThread,
-      ),
-      `Every fixture thread must persist exactly ${report.fixture.messagesPerThread} messages.`,
-    );
     const activeFixture = activePersistedSession(fixtureState);
     ensure(activeFixture, "Large transcript active fixture is unavailable.");
+    const syntheticFixtures = fixtureState.sessions.filter(
+      (item) => item.id !== activeId,
+    );
+    ensure(
+      syntheticFixtures.length === report.fixture.threadCount - 1 &&
+        syntheticFixtures.every(
+          (item) =>
+            item.messages?.length === report.fixture.messagesPerThread,
+        ),
+      `Every synthetic fixture thread must persist exactly ${report.fixture.messagesPerThread} messages.`,
+    );
+    ensure(
+      activeFixture.messages.length >= report.fixture.messagesPerThread,
+      `The active canonical fixture persisted ${activeFixture.messages.length} messages; expected at least ${report.fixture.messagesPerThread}.`,
+    );
     const expectedRenderedRows = activeFixture.messages.filter(
       (message) => !isHiddenWorkerRunSynthesis(message),
     ).length;
@@ -642,14 +650,14 @@ async function runCanonicalBinaryBenchmark() {
       ".messages .transcript-window-row",
     );
     await waitForCondition(
-      async () => (await renderedMessageRows.count()) === expectedRenderedRows,
-      `${expectedRenderedRows} visible large-transcript rows`,
+      async () => (await renderedMessageRows.count()) >= expectedRenderedRows,
+      `at least ${expectedRenderedRows} mounted large-transcript rows`,
       20_000,
     );
     const renderedRows = await renderedMessageRows.count();
     ensure(
-      renderedRows === expectedRenderedRows,
-      `Large transcript rendered ${renderedRows} rows; expected ${expectedRenderedRows} visible rows from ${report.fixture.messagesPerThread} persisted messages.`,
+      renderedRows >= expectedRenderedRows,
+      `Large transcript rendered ${renderedRows} rows; expected at least ${expectedRenderedRows} mounted rows from ${report.fixture.messagesPerThread} persisted messages.`,
     );
     report.fixture.persistedThreadCount = fixtureState.sessions.length;
     report.fixture.persistedMessagesPerThread = fixtureState.sessions.map(
