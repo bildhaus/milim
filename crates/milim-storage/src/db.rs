@@ -5237,6 +5237,69 @@ fn apply_sessions_delta_locked(conn: &Connection, delta: SessionsDelta) -> Resul
                 continue;
             }
 
+            // A terminal control commit can land between the renderer's last
+            // acknowledged snapshot and its deferred flush. If that stale
+            // positional delta tries to append an ID that already survives at
+            // another index, keep the canonical rows instead of turning the
+            // idempotent projection race into a persistence error.
+            let changed_indices = session
+                .messages
+                .iter()
+                .map(|message| message.index)
+                .collect::<BTreeSet<_>>();
+            let current_message_indices = conn
+                .prepare(
+                    "SELECT message_index, message_json
+                     FROM user_session_messages WHERE session_id = ?1",
+                )
+                .map_err(sqlite)?
+                .query_map(params![session.id], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(sqlite)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sqlite)?;
+            let mut current_index_by_id = BTreeMap::new();
+            for (index, message_json) in current_message_indices {
+                let message = parse_json(&message_json)?;
+                let Some(id) = message
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                else {
+                    continue;
+                };
+                let index = usize::try_from(index)
+                    .map_err(|_| Error::Other("message index is outside usize range".into()))?;
+                current_index_by_id.insert(id.to_owned(), index);
+            }
+            let mut stale_projection = false;
+            for message_delta in &session.messages {
+                let message = parse_json(&message_delta.message_json)?;
+                let Some(id) = message
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                else {
+                    continue;
+                };
+                let Some(existing_index) = current_index_by_id.get(id).copied() else {
+                    continue;
+                };
+                if existing_index != message_delta.index
+                    && existing_index < session.message_count
+                    && !changed_indices.contains(&existing_index)
+                {
+                    stale_projection = true;
+                    break;
+                }
+            }
+            if stale_projection {
+                continue;
+            }
+
             conn.execute(
                 "DELETE FROM user_session_messages
                  WHERE session_id = ?1 AND message_index >= ?2",
@@ -6497,7 +6560,7 @@ mod tests {
     }
 
     #[test]
-    fn renderer_message_delta_cannot_duplicate_a_completed_control_message() {
+    fn renderer_message_delta_ignores_a_stale_completed_control_projection() {
         let store = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
         store
             .control_create_thread(
@@ -6528,7 +6591,7 @@ mod tests {
             })
             .unwrap();
 
-        let error = store
+        store
             .apply_sessions_delta(SessionsDelta {
                 meta_json: r#"{"state":{"activeId":"thread-1"},"version":0}"#.into(),
                 session_order: vec!["thread-1".into()],
@@ -6546,13 +6609,53 @@ mod tests {
                 }],
                 deleted_session_ids: Vec::new(),
             })
-            .unwrap_err();
+            .unwrap();
 
-        assert!(error.to_string().contains("message ids must be unique"));
         let messages = store.control_messages("thread-1").unwrap();
         assert_eq!(messages.len(), 1);
         assert!(messages[0].contains("authoritative"));
         assert!(!messages[0].contains("stale renderer completion"));
+    }
+
+    #[test]
+    fn renderer_message_delta_rejects_duplicate_stable_ids() {
+        let store = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        store
+            .control_create_thread(
+                "thread-1",
+                r#"{"id":"thread-1","title":"Fixture"}"#,
+                "epoch-1",
+            )
+            .unwrap();
+
+        let error = store
+            .apply_sessions_delta(SessionsDelta {
+                meta_json: r#"{"state":{"activeId":"thread-1"},"version":0}"#.into(),
+                session_order: vec!["thread-1".into()],
+                upserts: vec![SessionDelta {
+                    id: "thread-1".into(),
+                    session_json: None,
+                    message_count: 2,
+                    preserve_messages: false,
+                    messages: vec![
+                        SessionMessageDelta {
+                            index: 0,
+                            message_json: r#"{"id":"message-1","role":"user","content":"one"}"#
+                                .into(),
+                        },
+                        SessionMessageDelta {
+                            index: 1,
+                            message_json:
+                                r#"{"id":"message-1","role":"assistant","content":"two"}"#.into(),
+                        },
+                    ],
+                }],
+                deleted_session_ids: Vec::new(),
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("message ids must be unique"));
+        assert!(store.control_messages("thread-1").unwrap().is_empty());
     }
 
     #[test]
