@@ -633,12 +633,23 @@ async function runCanonicalBinaryBenchmark() {
       ),
       `Every fixture thread must persist exactly ${report.fixture.messagesPerThread} messages.`,
     );
-    const renderedRows = await session.page
-      .locator(".messages .msg")
-      .count();
+    const activeFixture = activePersistedSession(fixtureState);
+    ensure(activeFixture, "Large transcript active fixture is unavailable.");
+    const expectedRenderedRows = activeFixture.messages.filter(
+      (message) => !isHiddenWorkerRunSynthesis(message),
+    ).length;
+    const renderedMessageRows = session.page.locator(
+      ".messages .transcript-window-row",
+    );
+    await waitForCondition(
+      async () => (await renderedMessageRows.count()) === expectedRenderedRows,
+      `${expectedRenderedRows} visible large-transcript rows`,
+      20_000,
+    );
+    const renderedRows = await renderedMessageRows.count();
     ensure(
-      renderedRows === report.fixture.messagesPerThread,
-      `Large transcript rendered ${renderedRows} rows; expected ${report.fixture.messagesPerThread}.`,
+      renderedRows === expectedRenderedRows,
+      `Large transcript rendered ${renderedRows} rows; expected ${expectedRenderedRows} visible rows from ${report.fixture.messagesPerThread} persisted messages.`,
     );
     report.fixture.persistedThreadCount = fixtureState.sessions.length;
     report.fixture.persistedMessagesPerThread = fixtureState.sessions.map(
@@ -1447,6 +1458,14 @@ async function waitForPersistedState(
 
 function activePersistedSession(state) {
   return state.sessions?.find((session) => session.id === state.activeId) ?? null;
+}
+
+function isHiddenWorkerRunSynthesis(message) {
+  if (message?.role !== "system") return false;
+  return Boolean(
+    message.workerRunId?.trim?.() ||
+      /^Worker Run (\S+) finished with status\b/.test(message.content ?? ""),
+  );
 }
 
 function persistedModelMatches(value, model) {
