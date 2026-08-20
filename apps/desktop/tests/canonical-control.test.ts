@@ -4,7 +4,9 @@ import {
   hostBusySessionIdsFromBootstrap,
   mailboxMessagesFromTimeline,
   mergeMailboxMessages,
+  mergeModelChangeMessages,
   mergeControlRunMessages,
+  modelChangeMessagesFromTimeline,
   projectControlRunMessages,
   shouldQueueCanonicalFollowup,
 } from "../src/lib/canonicalControl.js";
@@ -308,5 +310,28 @@ const provenance = projectControlRunMessages([
   }),
 ], "run-1")[0];
 assert.equal(provenance.mailboxOrigin?.origin_title, "Origin");
+
+const modelChanges = modelChangeMessagesFromTimeline([{
+  ...item(32, "model_changed", {
+    previous_model: "codex:gpt-5",
+    model: "claude:sonnet",
+  }),
+  run_id: null,
+}]);
+assert.deepEqual(modelChanges[0].modelChange, {
+  previousModel: "codex:gpt-5",
+  model: "claude:sonnet",
+});
+assert.deepEqual(
+  mergeModelChangeMessages(
+    [
+      { id: "before", role: "assistant", content: "before", controlSeq: 31 },
+      { id: "after", role: "user", content: "after", controlSeq: 33 },
+    ],
+    modelChanges,
+  ).map((message) => message.id),
+  ["before", "timeline-event-32", "after"],
+  "model changes should keep their canonical position between turns",
+);
 
 console.log("canonical control projection tests passed");

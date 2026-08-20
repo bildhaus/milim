@@ -71,6 +71,7 @@ import {
   modelPickerFavoriteIds,
   modelPickerGroups,
   parseMobileModel,
+  transcriptModelLabel,
   toggledModelFavoriteIds,
   type MobileModelCapability,
   type MobileModelOption,
@@ -1943,6 +1944,29 @@ function TranscriptItemView({
   loadMoreRunEvents: ReturnType<typeof useMilimController>['loadMoreRunEvents'];
 }) {
   const {palette, styles} = useAppTheme();
+  if (item.kind === 'model-change') {
+    const previousModel = transcriptModelLabel(item.previousModel);
+    const model = transcriptModelLabel(item.model);
+    return (
+      <View
+        style={styles.modelChangeEvent}
+        accessible
+        accessibilityRole="text"
+        accessibilityLabel={`Continuing with ${model}. Previously ${previousModel}. Thread retained.`}>
+        <View style={styles.modelChangeLine} />
+        <View style={styles.modelChangeCopy}>
+          <View style={styles.modelChangeTopline}>
+            <MilimIcon name="cube" size={14} color={palette.muted} />
+            <Text style={styles.modelChangePrimary}>
+              Continuing with <Text style={styles.modelChangeModel}>{model}</Text>
+            </Text>
+          </View>
+          <Text style={styles.modelChangeDetail}>Previously {previousModel} · thread retained</Text>
+        </View>
+        <View style={styles.modelChangeLine} />
+      </View>
+    );
+  }
   if (item.kind === 'activity') return (
     <ActivityGroup
       group={item}
@@ -3021,6 +3045,13 @@ function createStyles(theme: MobileTheme) {
   userMessage: {backgroundColor: palette.accentSoft, borderWidth: 1, borderColor: palette.accentBorder, alignSelf: 'flex-end'},
   assistantMessage: {backgroundColor: 'transparent', alignSelf: 'stretch', maxWidth: '100%', paddingHorizontal: 2, paddingVertical: 4},
   messageRole: {color: palette.muted, fontSize: 10.5, fontWeight: '700', letterSpacing: 1, marginBottom: 5},
+  modelChangeEvent: {alignSelf: 'stretch', minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 9, paddingVertical: 6},
+  modelChangeLine: {flex: 1, height: StyleSheet.hairlineWidth, backgroundColor: palette.border},
+  modelChangeCopy: {maxWidth: '76%', alignItems: 'center', gap: 2},
+  modelChangeTopline: {flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5},
+  modelChangePrimary: {color: palette.secondary, fontSize: 12, lineHeight: 17},
+  modelChangeModel: {color: palette.text, fontWeight: '700'},
+  modelChangeDetail: {color: palette.muted, fontSize: 10.5, lineHeight: 15, textAlign: 'center'},
   reasoningBlock: {borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: palette.border, paddingBottom: 7, marginBottom: 6},
   reasoningHeader: {minHeight: 28, flexDirection: 'row', alignItems: 'center', gap: 6},
   reasoningLabel: {color: palette.muted, fontSize: 10.5, fontWeight: '600'},

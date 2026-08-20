@@ -196,7 +196,7 @@ export function isCompactionCheckpoint(message: ChatMessage): boolean {
 }
 
 export function isTranscriptControlMessage(message: ChatMessage): boolean {
-  return Boolean(message.approval);
+  return Boolean(message.approval || message.modelChange);
 }
 
 export function latestCompactionIndex(messages: readonly ChatMessage[]): number {

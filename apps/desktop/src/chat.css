@@ -3597,6 +3597,29 @@ html[data-dark="true"] .preview-control-cursor {
 /* ---- Messages ---- */
 .messages { width: 100%; max-width: var(--chat-content-width); margin: 0 auto; display: flex; flex-direction: column; gap: 12px; padding: 8px 0 4px; user-select: text; cursor: auto; overflow-anchor: none; }
 .messages, .msg-content, .md, .md * { user-select: text; -webkit-user-select: text; }
+.model-change-event {
+  display: grid;
+  grid-template-columns: minmax(24px, 1fr) auto minmax(24px, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  color: var(--tertiary-text);
+  font-size: 12px;
+  line-height: 1.35;
+}
+.model-change-line { height: 1px; background: var(--border-primary); }
+.model-change-copy {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 4px 7px;
+  text-align: center;
+}
+.model-change-copy > svg { flex: none; }
+.model-change-primary { color: var(--secondary-text); }
+.model-change-primary strong { color: var(--primary-text); font-weight: 650; }
+.model-change-detail { color: var(--tertiary-text); }
 .msg { display: flex; flex-direction: column; gap: 3px; }
 .messages .msg:not(:nth-last-child(-n+3)) { content-visibility: auto; contain-intrinsic-size: auto 140px; }
 .messages .msg:has(.baton-menu.open),

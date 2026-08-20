@@ -305,7 +305,9 @@ import {
   hostBusySessionIdsFromBootstrap,
   mailboxMessagesFromTimeline,
   mergeMailboxMessages,
+  mergeModelChangeMessages,
   mergeControlRunMessages,
+  modelChangeMessagesFromTimeline,
   pollControlRun,
   projectControlRunMessages,
   shouldQueueCanonicalFollowup,
@@ -2612,6 +2614,14 @@ export function ChatView({
               { autoTitle: false },
             );
           }
+          const modelChanges = modelChangeMessagesFromTimeline(timeline.items);
+          if (modelChanges.length) {
+            setMessages(
+              activeId,
+              mergeModelChangeMessages(sessionMessages(activeId), modelChanges),
+              { autoTitle: false },
+            );
+          }
         }
         const alreadyAttached =
           canonicalRunIdsRef.current.has(activeId) ||
@@ -2634,7 +2644,10 @@ export function ChatView({
           const current = sessionMessages(activeId);
           setMessages(
             activeId,
-            mergeControlRunMessages(current, run.id, projected),
+            mergeModelChangeMessages(
+              mergeControlRunMessages(current, run.id, projected),
+              modelChangeMessagesFromTimeline(items),
+            ),
             { autoTitle: projected.some((message) => message.mailboxOrigin) ? false : autoTitleChats },
           );
         });
@@ -3785,26 +3798,29 @@ export function ChatView({
       void prepareRetryWithModel(target.id, messageIndex);
       return;
     }
-    updateThreadSettings(activeId, { model: target.id });
-    void writeCanonicalThreadModel(activeId, target.id).catch((error) =>
-      setChatNotice({
-        tone: "error",
-        message: `Milim could not save this model selection: ${error instanceof Error ? error.message : String(error)}`,
-      }),
-    );
-    if (action === "continue" || action === "review") {
-      useSessions.getState().setPendingHotSwap(activeId, {
-        fromModel,
-        toModel: target.id,
-        action,
-        nativeSessionMode,
-        sourceMessageId:
-          messageIndex == null ? undefined : messages[messageIndex]?.id,
-        createdAt: Date.now(),
-      });
-      setInput(action === "continue" ? HOT_SWAP_CONTINUE_PROMPT : HOT_SWAP_REVIEW_PROMPT);
-      focusComposer();
-    }
+    void writeCanonicalThreadModel(activeId, target.id)
+      .then(() => {
+        updateThreadSettings(activeId, { model: target.id });
+        if (action === "continue" || action === "review") {
+          useSessions.getState().setPendingHotSwap(activeId, {
+            fromModel,
+            toModel: target.id,
+            action,
+            nativeSessionMode,
+            sourceMessageId:
+              messageIndex == null ? undefined : messages[messageIndex]?.id,
+            createdAt: Date.now(),
+          });
+          setInput(action === "continue" ? HOT_SWAP_CONTINUE_PROMPT : HOT_SWAP_REVIEW_PROMPT);
+          focusComposer();
+        }
+      })
+      .catch((error) =>
+        setChatNotice({
+          tone: "error",
+          message: `Milim could not save this model selection: ${error instanceof Error ? error.message : String(error)}`,
+        }),
+      );
     setBatonRequest(null);
   }
 
@@ -4195,6 +4211,20 @@ export function ChatView({
         throw new Error(result.message || `Model synchronization ${result.status}.`);
       }
       canonicalThreadModelsRef.current.set(sessionId, model);
+      try {
+        const timeline = await getControlTimeline(sessionId, { tail: 500 });
+        const changes = modelChangeMessagesFromTimeline(timeline.items);
+        if (changes.length) {
+          const currentMessages = sessionMessages(sessionId);
+          const reconciled = mergeModelChangeMessages(currentMessages, changes);
+          if (JSON.stringify(reconciled) !== JSON.stringify(currentMessages)) {
+            setMessages(sessionId, reconciled, { autoTitle: false });
+          }
+        }
+      } catch {
+        // The command is already durable. Startup and socket reconciliation
+        // will retry the timeline read without reverting the model selection.
+      }
     });
     canonicalModelWritesRef.current.set(sessionId, { signature, promise });
     const clear = () => {
@@ -5854,9 +5884,17 @@ export function ChatView({
         (items) => {
           const projected = projectControlRunMessages(items, runId);
           if (!projected.length) return;
+          const reconciled = mergeModelChangeMessages(
+            mergeControlRunMessages(
+              sessionMessages(sessionId, convo),
+              runId,
+              projected,
+            ),
+            modelChangeMessagesFromTimeline(items),
+          );
           setMessages(
             sessionId,
-            mergeControlRunMessages(sessionMessages(sessionId, convo), runId, projected),
+            reconciled,
             { autoTitle: projected.some((message) => message.mailboxOrigin) ? false : autoTitleChats },
           );
         },

@@ -102,6 +102,24 @@ function compactTokens(value: number): string {
   return String(value);
 }
 
+export function transcriptModelLabel(model: string): string {
+  const value = model.trim();
+  if (value.startsWith('provider:')) {
+    const route = value.slice('provider:'.length);
+    const separator = route.indexOf(':');
+    return separator >= 0 ? route.slice(separator + 1) || value : value;
+  }
+  for (const prefix of ['codex:', 'claude:']) {
+    if (value.startsWith(prefix)) return value.slice(prefix.length) || value;
+  }
+  for (const prefix of ['opencode:', 'pi:']) {
+    if (!value.startsWith(prefix)) continue;
+    const routed = value.slice(prefix.length);
+    return routed.slice(routed.indexOf('/') + 1) || routed || value;
+  }
+  return value;
+}
+
 export function parseMobileModel(value: JsonValue): MobileModelOption | null {
   if (typeof value === 'string') {
     return {

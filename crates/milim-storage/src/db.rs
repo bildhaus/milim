@@ -1147,54 +1147,71 @@ impl UserDataStore {
         thread_id: &str,
         session_json: &str,
         expected_revision: Option<u64>,
-    ) -> Result<Option<ControlThreadRecord>> {
+        timeline: Option<(&str, &str, &str)>,
+    ) -> Result<Option<(ControlThreadRecord, Option<ControlTimelineRecord>)>> {
         let thread_id = required_control_text(thread_id, "thread id")?;
         validate_control_json(session_json, "thread")?;
+        if let Some((item_id, item_type, data_json)) = timeline {
+            required_control_text(item_id, "timeline item id")?;
+            required_control_text(item_type, "timeline item type")?;
+            validate_control_json(data_json, "timeline data")?;
+        }
         let db = self
             .db
             .lock()
             .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
         let conn = db.conn();
         conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
-        let result = (|| -> Result<Option<ControlThreadRecord>> {
-            let Some(mut current) = conn
-                .query_row(
-                    "SELECT s.id, s.session_json, c.revision, c.epoch, s.updated_at_ms
+        let result =
+            (|| -> Result<Option<(ControlThreadRecord, Option<ControlTimelineRecord>)>> {
+                let Some(mut current) = conn
+                    .query_row(
+                        "SELECT s.id, s.session_json, c.revision, c.epoch, s.updated_at_ms
                      FROM user_sessions s
                      JOIN user_thread_control c ON c.thread_id = s.id
                      WHERE s.id = ?1",
-                    params![thread_id],
-                    control_thread_from_row,
-                )
-                .optional()
-                .map_err(sqlite)?
-            else {
-                return Ok(None);
-            };
-            if let Some(expected) = expected_revision {
-                if expected != current.revision {
-                    return Err(Error::InvalidRequest(format!(
-                        "thread revision conflict: expected {expected}, current {}",
-                        current.revision
-                    )));
+                        params![thread_id],
+                        control_thread_from_row,
+                    )
+                    .optional()
+                    .map_err(sqlite)?
+                else {
+                    return Ok(None);
+                };
+                if let Some(expected) = expected_revision {
+                    if expected != current.revision {
+                        return Err(Error::InvalidRequest(format!(
+                            "thread revision conflict: expected {expected}, current {}",
+                            current.revision
+                        )));
+                    }
                 }
-            }
-            let now = now_ms();
-            current.revision = current.revision.saturating_add(1);
-            current.session_json = session_json.to_string();
-            current.updated_at_ms = now;
-            conn.execute(
-                "UPDATE user_sessions SET session_json = ?2, updated_at_ms = ?3 WHERE id = ?1",
-                params![thread_id, session_json, now],
-            )
-            .map_err(sqlite)?;
-            conn.execute(
+                let now = now_ms();
+                current.revision = current.revision.saturating_add(1);
+                current.session_json = session_json.to_string();
+                current.updated_at_ms = now;
+                conn.execute(
+                    "UPDATE user_sessions SET session_json = ?2, updated_at_ms = ?3 WHERE id = ?1",
+                    params![thread_id, session_json, now],
+                )
+                .map_err(sqlite)?;
+                conn.execute(
                 "UPDATE user_thread_control SET revision = ?2, updated_at_ms = ?3 WHERE thread_id = ?1",
                 params![thread_id, u64_to_i64(current.revision)?, now],
             )
             .map_err(sqlite)?;
-            Ok(Some(current))
-        })();
+                let timeline = timeline
+                    .map(|(item_id, item_type, data_json)| {
+                        append_control_timeline_locked(
+                            conn, thread_id, item_id, None, item_type, data_json, now,
+                        )
+                    })
+                    .transpose()?;
+                if timeline.is_some() {
+                    current.revision = current.revision.saturating_add(1);
+                }
+                Ok(Some((current, timeline)))
+            })();
         finish_control_transaction(conn, result)
     }
 

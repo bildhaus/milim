@@ -223,6 +223,7 @@ export function projectControlRunMessages(
         role: typeof data.role === "string" ? data.role : "assistant",
         content: typeof data.content === "string" ? data.content : "",
         runId,
+        controlSeq: item.seq,
         ledgerVersion: typeof data.ledgerVersion === "number" ? data.ledgerVersion : undefined,
         mailboxOrigin: data.mailboxOrigin && typeof data.mailboxOrigin === "object"
           ? data.mailboxOrigin as CanonicalMessage["mailboxOrigin"]
@@ -260,11 +261,15 @@ export function projectControlRunMessages(
     if (part) appendStreamEvent(streamParts, part);
   }
   if (!assistant && (streamingText || streamingReasoning || streamParts.length)) {
+    const firstStreamSeq = items.find(
+      (item) => item.run_id === runId && item.type === "assistant_delta",
+    )?.seq;
     assistant = {
       id: `control-stream-${runId}`,
       role: "assistant",
       content: streamingText,
       runId,
+      controlSeq: firstStreamSeq,
       streamParts,
     };
   }
@@ -309,6 +314,7 @@ export function mailboxMessagesFromTimeline(
       id: `mailbox-${exchangeId}`,
       role: "assistant",
       content,
+      controlSeq: item.seq,
       mailboxReply: {
         exchangeId,
         targetThreadId,
@@ -318,6 +324,63 @@ export function mailboxMessagesFromTimeline(
       },
     }];
   });
+}
+
+export function modelChangeMessagesFromTimeline(
+  items: ControlTimelineItemV1[],
+): ChatMessage[] {
+  return items.flatMap((item) => {
+    if (item.type !== "model_changed") return [];
+    const previousModel = typeof item.data.previous_model === "string"
+      ? item.data.previous_model.trim()
+      : "";
+    const model = typeof item.data.model === "string" ? item.data.model.trim() : "";
+    if (!previousModel || !model || previousModel === model) return [];
+    return [{
+      id: `timeline-${item.id}`,
+      role: "system",
+      content: "",
+      controlSeq: item.seq,
+      modelChange: { previousModel, model },
+    }];
+  });
+}
+
+export function mergeModelChangeMessages(
+  current: ChatMessage[],
+  changes: ChatMessage[],
+): ChatMessage[] {
+  if (!changes.length) return current;
+  const replacements = new Map(changes.map((message) => [message.id, message]));
+  const merged = current.map((message) => replacements.get(message.id) ?? message);
+  const existingIds = new Set(current.map((message) => message.id));
+  for (const change of changes) {
+    if (existingIds.has(change.id)) continue;
+    const seq = change.controlSeq;
+    const nextIndex = typeof seq === "number"
+      ? merged.findIndex(
+          (message) => typeof message.controlSeq === "number" && message.controlSeq > seq,
+        )
+      : -1;
+    if (nextIndex >= 0) {
+      merged.splice(nextIndex, 0, change);
+      existingIds.add(change.id);
+      continue;
+    }
+    let previousIndex = -1;
+    if (typeof seq === "number") {
+      for (let index = merged.length - 1; index >= 0; index -= 1) {
+        const candidate = merged[index].controlSeq;
+        if (typeof candidate === "number" && candidate <= seq) {
+          previousIndex = index;
+          break;
+        }
+      }
+    }
+    merged.splice(previousIndex >= 0 ? previousIndex + 1 : merged.length, 0, change);
+    existingIds.add(change.id);
+  }
+  return merged;
 }
 
 export function mergeMailboxMessages(

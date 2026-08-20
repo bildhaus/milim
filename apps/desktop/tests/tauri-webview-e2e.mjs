@@ -28,6 +28,7 @@ const settingsOnly = process.argv.includes("--settings-only");
 const appMenuOnly = process.argv.includes("--app-menu-only");
 const turnChangesOnly = process.argv.includes("--turn-changes-only");
 const chatAffordancesOnly = process.argv.includes("--chat-affordances-only");
+const modelChangeOnly = process.argv.includes("--model-change-only");
 const reasoningEffortOnly = process.argv.includes("--reasoning-effort-only");
 const generationControlsOnly = process.argv.includes("--generation-controls-only");
 const mediaOnly = process.argv.includes("--media-only");
@@ -66,6 +67,7 @@ const screenshots = {
   inboxActive: join(tmpdir(), "milim-tauri-webview-inbox-active.png"),
   inboxSettled: join(tmpdir(), "milim-tauri-webview-inbox-settled.png"),
   workspaceCode: join(tmpdir(), "milim-tauri-webview-workspace-code.png"),
+  modelChange: join(tmpdir(), "milim-tauri-webview-model-change.png"),
   reasoningEffort: join(tmpdir(), "milim-tauri-webview-reasoning-effort.png"),
   failure: join(tmpdir(), "milim-tauri-webview-failure.png"),
   linkedThreadDrop: join(tmpdir(), "milim-tauri-webview-linked-thread-drop.png"),
@@ -154,6 +156,10 @@ try {
   } else if (chatAffordancesOnly) {
     const errors = collectErrors(session.page);
     await runChatAffordancesCheck(session.page);
+    consoleErrors.push(...errors.filter((message) => !message.includes("/codex/models")));
+  } else if (modelChangeOnly) {
+    const errors = collectErrors(session.page);
+    await runModelChangeTranscriptCheck(session.page);
     consoleErrors.push(...errors.filter((message) => !message.includes("/codex/models")));
   } else if (reasoningEffortOnly) {
     const errors = collectErrors(session.page);
@@ -3783,6 +3789,103 @@ async function resetFrontendStorage(page) {
   await page.waitForTimeout(350);
 }
 
+async function runModelChangeTranscriptCheck(page) {
+  const previousModel = "e2e-model-sol";
+  const model = "e2e-model-luna";
+
+  await page.route("**/v1/models", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      data: [
+        { id: previousModel, owned_by: "OpenAI" },
+        { id: model, owned_by: "OpenAI" },
+      ],
+    }),
+  }));
+  await page.evaluate(async () => {
+    const invoke = window.__TAURI_INTERNALS__.invoke;
+    await invoke("user_state_set", {
+      key: "milim.settings",
+      value: JSON.stringify({
+        state: {
+          accountRuntimeEnabled: { codex: false, claude: false, opencode: false, pi: false },
+          newThreadBehavior: "inherit",
+        },
+        version: 0,
+      }),
+    });
+  });
+
+  await page.reload();
+  await page.getByTestId("chat-shell").waitFor();
+  await dismissOnboardingIfPresent(page);
+  await page.waitForTimeout(1_000);
+  const threadId = await page.evaluate(async () => {
+    const raw = await window.__TAURI_INTERNALS__.invoke("user_sessions_get");
+    const activeId = raw ? JSON.parse(raw).state?.activeId : "";
+    if (!activeId) throw new Error("The native model-change fixture has no active thread.");
+    return activeId;
+  });
+  const readModelState = () => page.evaluate(async (sessionId) => {
+    const invoke = window.__TAURI_INTERNALS__.invoke;
+    const [base, token, sessionsRaw] = await Promise.all([
+      invoke("api_base_url"),
+      invoke("api_token"),
+      invoke("user_sessions_get"),
+    ]);
+    const headers = token ? { Authorization: `Bearer ${token}` } : {};
+    const [bootstrap, timeline] = await Promise.all([
+      fetch(`${base}/control/v1/bootstrap`, { headers }).then((response) => response.json()),
+      fetch(`${base}/control/v1/threads/${encodeURIComponent(sessionId)}/timeline?tail=500`, { headers })
+        .then((response) => response.json()),
+    ]);
+    const sessions = sessionsRaw ? JSON.parse(sessionsRaw).state?.sessions ?? [] : [];
+    return {
+      canonicalModel: bootstrap.threads?.find((thread) => thread.id === sessionId)?.model,
+      persistedModel: sessions.find((session) => session.id === sessionId)?.settings?.model,
+      modelChanges: timeline.items?.filter((item) => item.type === "model_changed") ?? [],
+    };
+  }, threadId);
+  const waitForModelState = async (expectedModel, expectChange) => {
+    const started = Date.now();
+    while (Date.now() - started < 10_000) {
+      const state = await readModelState();
+      if (
+        state.canonicalModel === expectedModel &&
+        state.persistedModel === expectedModel &&
+        (!expectChange || state.modelChanges.some(
+          (item) => item.data?.previous_model === previousModel && item.data?.model === model,
+        ))
+      ) return;
+      await delay(100);
+    }
+    throw new Error(`Timed out waiting for durable model state: ${JSON.stringify(await readModelState())}`);
+  };
+  await waitForModelState(previousModel, false);
+  const trigger = page.getByTestId("model-picker-trigger");
+  await assertTextContains(trigger.locator(".chip-label"), previousModel);
+  await trigger.click();
+  const picker = page.locator(".mp");
+  await picker.waitFor();
+  await picker.locator(".mp-item", { hasText: model }).locator(".mp-pick").click();
+
+  await waitForModelState(model, true);
+  const modelChange = page.getByTestId("model-change-event").last();
+  await modelChange.waitFor();
+  await assertTextContains(modelChange, `Continuing with ${model}`);
+  await assertTextContains(modelChange, `Previously ${previousModel} · thread retained`);
+  await page.screenshot({ path: screenshots.modelChange, fullPage: false });
+
+  await page.reload();
+  await page.getByTestId("chat-shell").waitFor();
+  await dismissOnboardingIfPresent(page);
+  const restored = page.getByTestId("model-change-event").last();
+  await restored.waitFor();
+  await assertTextContains(restored, `Continuing with ${model}`);
+  await assertTextContains(restored, `Previously ${previousModel} · thread retained`);
+}
+
 async function runLinkedThreadDropCheck(page) {
   await page.getByTestId("chat-shell").waitFor();
   await dismissOnboardingIfPresent(page);
@@ -6303,6 +6406,7 @@ function printEvidencePaths(milimHome) {
   console.log(`threadBarBottomScreenshot=${screenshots.threadBarBottom}`);
   console.log(`chatSourcesScreenshot=${screenshots.chatSources}`);
   console.log(`chatLatestScreenshot=${screenshots.chatLatest}`);
+  console.log(`modelChangeScreenshot=${screenshots.modelChange}`);
   console.log(`reasoningEffortScreenshot=${screenshots.reasoningEffort}`);
   console.log(`linkedThreadDropScreenshot=${screenshots.linkedThreadDrop}`);
   for (const theme of ["light", "dark"]) {

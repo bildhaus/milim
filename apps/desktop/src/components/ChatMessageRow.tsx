@@ -38,6 +38,7 @@ import {
 } from "../lib/artifactRevisions";
 import { hiddenArtifactIdsForMessage } from "../lib/artifactVisibility";
 import { isCompactionCheckpoint } from "../lib/contextCompaction";
+import { modelDisplayName, rawModelId } from "../lib/modelPicker";
 import { formatResponseMetrics } from "../lib/usageMetrics";
 import { markPerfRender } from "../lib/perf";
 import { shortcutMatchesEvent } from "../ui/shortcuts";
@@ -58,6 +59,7 @@ import {
   Calendar,
   Check,
   Copy,
+  Cube,
   Eye,
   GitBranch,
   Globe,
@@ -71,6 +73,10 @@ import {
 const Markdown = lazy(() =>
   import("./Markdown").then((mod) => ({ default: mod.Markdown })),
 );
+
+function transcriptModelLabel(model: string): string {
+  return modelDisplayName({ id: rawModelId(model), display_id: undefined });
+}
 
 function renderMessageAttachments(attachments?: ChatAttachment[]) {
   if (!attachments?.length) return null;
@@ -270,6 +276,26 @@ function MessageRowView({
   const actions = actionsRef.current;
   const messageIsCompaction = isCompactionCheckpoint(m);
   const isApprovalMessage = Boolean(m.approval);
+  if (m.modelChange) {
+    const previousModel = transcriptModelLabel(m.modelChange.previousModel);
+    const model = transcriptModelLabel(m.modelChange.model);
+    return (
+      <div
+        className="model-change-event"
+        data-testid="model-change-event"
+        role="note"
+        aria-label={`Continuing with ${model}. Previously ${previousModel}. Thread retained.`}
+      >
+        <span className="model-change-line" aria-hidden="true" />
+        <span className="model-change-copy">
+          <Cube size={14} aria-hidden="true" />
+          <span className="model-change-primary">Continuing with <strong>{model}</strong></span>
+          <span className="model-change-detail">Previously {previousModel} · thread retained</span>
+        </span>
+        <span className="model-change-line" aria-hidden="true" />
+      </div>
+    );
+  }
   const artifactContext = m.artifacts?.length ? m.artifacts : previewArtifacts;
   const openMessagePreview = (
     artifact: ChatArtifact,

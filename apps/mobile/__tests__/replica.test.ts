@@ -230,3 +230,24 @@ test('projects linked-chat inputs and mailbox replies with provenance and status
     {content: 'Runtime interrupted', mailboxLabel: 'Failure from Broken chat', mailboxStatus: 'failed'},
   ]);
 });
+
+test('projects model switches as ordered transcript notices', () => {
+  const transcript = projectTranscript([
+    item(1, 'message', {id: 'before', role: 'assistant', content: 'Before'}),
+    item(2, 'model_changed', {
+      previous_model: 'codex:gpt-5',
+      model: 'claude:sonnet',
+    }),
+    item(3, 'message', {id: 'after', role: 'user', content: 'After'}),
+  ]);
+
+  expect(transcript.map(entry => entry.kind)).toEqual([
+    'message',
+    'model-change',
+    'message',
+  ]);
+  expect(transcript[1]).toMatchObject({
+    previousModel: 'codex:gpt-5',
+    model: 'claude:sonnet',
+  });
+});

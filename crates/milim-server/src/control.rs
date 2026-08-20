@@ -2246,6 +2246,7 @@ impl RunManager {
         let object = value
             .as_object_mut()
             .ok_or_else(|| Error::Other("stored thread is not an object".into()))?;
+        let mut model_change: Option<(String, String)> = None;
         match patch {
             ThreadPatch::Rename => {
                 let title = required_payload_string(&command.payload, "title")?;
@@ -2264,6 +2265,14 @@ impl RunManager {
                 }
             }
             ThreadPatch::Model => {
+                let previous_model = object
+                    .get("settings")
+                    .and_then(Value::as_object)
+                    .and_then(|settings| settings.get("model"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .to_string();
                 let model = command
                     .payload
                     .get("model")
@@ -2286,6 +2295,9 @@ impl RunManager {
                     }
                     None => None,
                 };
+                if !previous_model.is_empty() && !model.is_empty() && previous_model != model {
+                    model_change = Some((previous_model, model.clone()));
+                }
                 let settings = settings_object(object)?;
                 settings.insert("model".into(), Value::String(model.clone()));
                 if !model.is_empty() {
@@ -2319,10 +2331,36 @@ impl RunManager {
             }
         }
         object.insert("updatedAt".into(), Value::from(now_ms()));
-        let updated = self
+        let timeline_item_id = model_change
+            .as_ref()
+            .map(|_| format!("model-change-{}", Uuid::new_v4()));
+        let timeline_data = model_change.as_ref().map(|(previous_model, model)| {
+            json!({
+                "previous_model": previous_model,
+                "model": model,
+            })
+            .to_string()
+        });
+        let timeline = timeline_item_id
+            .as_deref()
+            .zip(timeline_data.as_deref())
+            .map(|(item_id, data_json)| (item_id, "model_changed", data_json));
+        let (updated, timeline) = self
             .store
-            .control_update_thread(id, &value.to_string(), command.expected_revision)?
+            .control_update_thread(id, &value.to_string(), command.expected_revision, timeline)?
             .ok_or_else(|| Error::NotFound(format!("thread {id}")))?;
+        if let Some(timeline) = timeline {
+            let epoch = timeline.epoch.clone();
+            let seq = timeline.seq;
+            let item = timeline_item(timeline)?;
+            self.emit(
+                "timeline.appended",
+                Some(id),
+                Some(&epoch),
+                Some(seq),
+                json!({ "item": item }),
+            );
+        }
         self.emit_thread_changed(&updated, "thread.updated");
         Ok(ControlCommandResultV1 {
             command_id: command.command_id.clone(),
@@ -5015,6 +5053,9 @@ fn history_timeline_message(
     base_timestamp: i64,
 ) -> Option<(String, String, i64)> {
     let mut value: Value = serde_json::from_str(raw).ok()?;
+    if value.get("modelChange").is_some() {
+        return None;
+    }
     let role = value.get("role")?.as_str()?.to_string();
     if !matches!(role.as_str(), "user" | "assistant" | "system") {
         return None;
@@ -5806,6 +5847,102 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(resolve_frozen_config(&state, &thread, vec![]).is_err());
+    }
+
+    #[tokio::test]
+    async fn model_patch_records_only_distinct_nonempty_switches() {
+        let (manager, state) = manager_and_state();
+        let created = manager
+            .command(
+                state.clone(),
+                None,
+                create_command("create-model-switch", "codex:gpt-5"),
+            )
+            .await
+            .unwrap();
+        let same = manager
+            .command(
+                state.clone(),
+                None,
+                ControlCommandV1 {
+                    command_id: "same-model".into(),
+                    kind: ControlCommandKindV1::ThreadSetModel,
+                    thread_id: Some("thread-fixture".into()),
+                    expected_revision: created.revision,
+                    payload: json!({"model": "codex:gpt-5", "reasoning_effort": "high"}),
+                    confirmation_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        let switched = manager
+            .command(
+                state.clone(),
+                None,
+                ControlCommandV1 {
+                    command_id: "switch-model".into(),
+                    kind: ControlCommandKindV1::ThreadSetModel,
+                    thread_id: Some("thread-fixture".into()),
+                    expected_revision: same.revision,
+                    payload: json!({"model": "claude:sonnet"}),
+                    confirmation_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            switched.revision,
+            same.revision.map(|revision| revision + 2),
+            "the thread update and timeline append each advance the canonical revision",
+        );
+        let timeline = manager
+            .store
+            .control_timeline_page("thread-fixture", None, None, true, 50)
+            .unwrap()
+            .unwrap();
+        let model_events = timeline
+            .items
+            .iter()
+            .filter(|item| item.item_type == "model_changed")
+            .collect::<Vec<_>>();
+        assert_eq!(model_events.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&model_events[0].data_json).unwrap(),
+            json!({
+                "previous_model": "codex:gpt-5",
+                "model": "claude:sonnet",
+            }),
+        );
+
+        let cleared = manager
+            .command(
+                state,
+                None,
+                ControlCommandV1 {
+                    command_id: "clear-switched-model".into(),
+                    kind: ControlCommandKindV1::ThreadSetModel,
+                    thread_id: Some("thread-fixture".into()),
+                    expected_revision: switched.revision,
+                    payload: json!({"model": ""}),
+                    confirmation_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(cleared.status, ControlCommandStatusV1::Applied);
+        let timeline = manager
+            .store
+            .control_timeline_page("thread-fixture", None, None, true, 50)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            timeline
+                .items
+                .iter()
+                .filter(|item| item.item_type == "model_changed")
+                .count(),
+            1,
+        );
     }
 
     #[test]

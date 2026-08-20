@@ -277,6 +277,13 @@ export interface ChatMessage {
   content: string;
   /** Canonical control run owning this message, when present. */
   runId?: string;
+  /** Canonical timeline position for non-provider transcript projection. */
+  controlSeq?: number;
+  /** Durable notice that this thread will continue with a different model. */
+  modelChange?: {
+    previousModel: string;
+    model: string;
+  };
   /** Present only for runs with a durable, inspectable local ledger. */
   ledgerVersion?: number;
   attachments?: ChatAttachment[];
