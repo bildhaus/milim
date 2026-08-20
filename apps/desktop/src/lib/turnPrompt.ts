@@ -491,7 +491,14 @@ async function skillsForTurn(
   selectSkills: (query: string, limit: number, ids?: string[]) => Promise<SkillInfo[]>,
 ): Promise<{ skills: SkillInfo[]; explicitIds: string[] }> {
   if (!lastUserText) return { skills: [], explicitIds: [] };
-  const tagged = taggedSkillsForText(lastUserText, skills);
+  const catalogTagged = taggedSkillsForText(lastUserText, skills);
+  const fallbackCandidates = catalogTagged.length === 0 && hasPotentialSkillTag(lastUserText)
+    ? await selectSkills(lastUserText, 10)
+    : [];
+  const tagged = mergeSkills(
+    catalogTagged,
+    taggedSkillsForText(lastUserText, fallbackCandidates),
+  );
   const explicitIds = tagged.map((skill) => skill.id);
   if (agent?.skill_mode === "none") return { skills: tagged, explicitIds };
   if (agent?.skill_mode === "custom") {
@@ -502,9 +509,23 @@ async function skillsForTurn(
     return { skills: mergeSkills(tagged, selected), explicitIds };
   }
   return {
-    skills: mergeSkills(tagged, await selectSkills(lastUserText, 3)),
+    skills: mergeSkills(
+      tagged,
+      fallbackCandidates.length > 0
+        ? fallbackCandidates.slice(0, 3)
+        : await selectSkills(lastUserText, 3),
+    ),
     explicitIds,
   };
+}
+
+function hasPotentialSkillTag(text: string): boolean {
+  for (let i = 0; i < text.length; i += 1) {
+    if ((text[i] === "@" || text[i] === "/") && isSkillTagStartBoundary(text, i)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function taggedSkillsForText(text: string, skills: SkillInfo[]): SkillInfo[] {

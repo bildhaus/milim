@@ -655,6 +655,35 @@ const autoTagged = await prepareTurnPromptContext({
 assert.equal(autoTagged.skillMessages[0].content.match(/Code Review/g)?.length, 1, "tagged auto skill should dedupe");
 assert.match(autoTagged.skillMessages[0].content, /Design-Polish/);
 
+const staleCatalogTagged = await prepareTurnPromptContext({
+  sessionId: "s-tags-stale-catalog",
+  threadTitle: "Tags",
+  folder: "",
+  instructions: "",
+  planMode: false,
+  memory: false,
+  conversation: [user("Use @Code Review.")],
+  activeAgent: { skill_mode: "none", enabled_skills: [] },
+  skills: [],
+  turnId: "turn-tags-stale-catalog",
+  model: "local-model",
+  sandbox: false,
+  computerUse: false,
+  activeAgentId: "agent-tags",
+  toolApproval: "guarded",
+  toolApprovalGrant: false,
+  experimentalHashlinePatch: false,
+  messageContent: (message) => message.content,
+  searchMemory: async () => [],
+  selectSkills: async (query, limit, ids) => {
+    assert.equal(query, "Use @Code Review.");
+    assert.equal(limit, 10);
+    assert.equal(ids, undefined);
+    return [tagSkills[0]];
+  },
+});
+assert.match(staleCatalogTagged.skillMessages[0].content, /Review carefully\./);
+
 const accountPrepared = await prepareTurnPromptContext({
   sessionId: "s6",
   threadTitle: "Account",
