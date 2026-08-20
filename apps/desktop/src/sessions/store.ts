@@ -1110,6 +1110,26 @@ function normalizeMessageArtifacts(message: ChatMessage): ChatMessage {
   return { ...withId, artifacts: artifacts.length ? artifacts : undefined };
 }
 
+function messagesWithUniqueIds(messages: ChatMessage[]): ChatMessage[] {
+  const unique: ChatMessage[] = [];
+  const indexById = new Map<string, number>();
+  for (const message of messages) {
+    const id = typeof message.id === "string" ? message.id.trim() : "";
+    if (!id) {
+      unique.push(message);
+      continue;
+    }
+    const existingIndex = indexById.get(id);
+    if (existingIndex === undefined) {
+      indexById.set(id, unique.length);
+      unique.push(message);
+    } else {
+      unique[existingIndex] = message;
+    }
+  }
+  return unique;
+}
+
 function mergeArtifactState(
   artifacts: ChatArtifact[],
   previous?: ChatArtifact[],
@@ -1348,8 +1368,12 @@ function normalizeSessionArtifacts(session: Session): Session {
         )
       : undefined,
     settings: normalizeSettings(session.settings, { pauseRunningGoal: true }),
-    messages: messages.map((message) =>
-      normalizeMessageArtifacts(normalizeStaleToolApprovals(normalizePersistedStreamParts(message))),
+    messages: messagesWithUniqueIds(
+      messages.map((message) =>
+        normalizeMessageArtifacts(
+          normalizeStaleToolApprovals(normalizePersistedStreamParts(message)),
+        ),
+      ),
     ),
   };
 }
@@ -1476,15 +1500,17 @@ function sessionsForPersistence(
   const generating = new Set(generatingSessionIds);
   return sessions.map((session) => {
     const stripTrailingBody = generating.has(session.id);
-    const messages = session.messages.map((message, index) =>
+    const uniqueMessages = messagesWithUniqueIds(session.messages);
+    const messages = uniqueMessages.map((message, index) =>
       messageForPersistence(
         message,
         stripTrailingBody &&
-          index === session.messages.length - 1 &&
+          index === uniqueMessages.length - 1 &&
           message.role === "assistant",
       ),
     );
-    return messages.every((message, index) => message === session.messages[index])
+    return messages.length === session.messages.length &&
+      messages.every((message, index) => message === session.messages[index])
       ? session
       : { ...session, messages };
   });
@@ -3069,23 +3095,25 @@ export const useSessions = create<SessionState>()(
 
         setMessages: (id, messages, options) =>
           set((st) => ({
-            sessions: st.sessions.map((s) =>
-              s.id === id
-                ? {
-                    ...s,
-                    messages: messages.map((message, index) =>
-                      s.messages[index] === message
-                        ? message
-                        : normalizeMessageArtifacts(message),
-                    ),
-                    updatedAt: Date.now(),
-                    title:
-                      s.title === NEW_CHAT_TITLE && options?.autoTitle !== false
-                        ? deriveThreadTitle(messages)
-                        : s.title,
-                  }
-                : s,
-            ),
+            sessions: st.sessions.map((s) => {
+              if (s.id !== id) return s;
+              const normalizedMessages = messagesWithUniqueIds(
+                messages.map((message, index) =>
+                  s.messages[index] === message
+                    ? message
+                    : normalizeMessageArtifacts(message),
+                ),
+              );
+              return {
+                ...s,
+                messages: normalizedMessages,
+                updatedAt: Date.now(),
+                title:
+                  s.title === NEW_CHAT_TITLE && options?.autoTitle !== false
+                    ? deriveThreadTitle(normalizedMessages)
+                    : s.title,
+              };
+            }),
           })),
 
         prependMessagePage: (id, pageMessages, firstIndex, total) =>

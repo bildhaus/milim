@@ -5254,6 +5254,34 @@ fn apply_sessions_delta_locked(conn: &Connection, delta: SessionsDelta) -> Resul
                 )
                 .map_err(sqlite)?;
             }
+            let message_rows = conn
+                .prepare(
+                    "SELECT message_json FROM user_session_messages
+                     WHERE session_id = ?1 ORDER BY message_index ASC",
+                )
+                .map_err(sqlite)?
+                .query_map(params![session.id], |row| row.get::<_, String>(0))
+                .map_err(sqlite)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sqlite)?;
+            let mut message_ids = BTreeSet::new();
+            for message_json in message_rows {
+                let message = parse_json(&message_json)?;
+                let Some(id) = message
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                else {
+                    continue;
+                };
+                if !message_ids.insert(id.to_owned()) {
+                    return Err(Error::InvalidRequest(format!(
+                        "session {} message ids must be unique",
+                        session.id
+                    )));
+                }
+            }
             let (message_count, max_message_index): (i64, i64) = conn
                 .query_row(
                     "SELECT COUNT(*), COALESCE(MAX(message_index), -1)
@@ -6466,6 +6494,65 @@ mod tests {
         let messages = store.control_messages("thread-1").unwrap();
         assert!(messages[0].contains("authoritative"));
         assert!(!messages[0].contains("stale"));
+    }
+
+    #[test]
+    fn renderer_message_delta_cannot_duplicate_a_completed_control_message() {
+        let store = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        store
+            .control_create_thread(
+                "thread-1",
+                r#"{"id":"thread-1","title":"Fixture"}"#,
+                "epoch-1",
+            )
+            .unwrap();
+        store
+            .control_append_message(
+                "thread-1",
+                r#"{"id":"assistant-1","role":"assistant","content":"authoritative","controlSeq":12,"streamTerminalOutcome":"completed"}"#,
+            )
+            .unwrap();
+        store
+            .control_put_run(&ControlRunRecord {
+                id: "run-1".into(),
+                thread_id: "thread-1".into(),
+                status: "completed".into(),
+                adapter: "mock".into(),
+                request_json: r#"{"text":"fixture"}"#.into(),
+                agent_snapshot_json: None,
+                native_session_json: None,
+                created_at_ms: 1,
+                updated_at_ms: 2,
+                completed_at_ms: Some(2),
+                error_json: None,
+            })
+            .unwrap();
+
+        let error = store
+            .apply_sessions_delta(SessionsDelta {
+                meta_json: r#"{"state":{"activeId":"thread-1"},"version":0}"#.into(),
+                session_order: vec!["thread-1".into()],
+                upserts: vec![SessionDelta {
+                    id: "thread-1".into(),
+                    session_json: None,
+                    message_count: 2,
+                    preserve_messages: false,
+                    messages: vec![SessionMessageDelta {
+                        index: 1,
+                        message_json:
+                            r#"{"id":"assistant-1","role":"assistant","content":"stale renderer completion"}"#
+                                .into(),
+                    }],
+                }],
+                deleted_session_ids: Vec::new(),
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("message ids must be unique"));
+        let messages = store.control_messages("thread-1").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].contains("authoritative"));
+        assert!(!messages[0].contains("stale renderer completion"));
     }
 
     #[test]

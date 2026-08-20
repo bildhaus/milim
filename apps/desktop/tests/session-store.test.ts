@@ -146,6 +146,42 @@ equal(
   stableHistory[0],
   "extending a thread should preserve existing message identity",
 );
+useSessions.getState().setMessages(first, [
+  ...extendedHistory,
+  {
+    id: "canonical-completion",
+    role: "assistant",
+    content: "stale renderer completion",
+  },
+  {
+    id: "canonical-completion",
+    role: "assistant",
+    content: "authoritative control completion",
+    controlSeq: 12,
+    streamTerminalOutcome: "completed",
+  },
+]);
+const deduplicatedHistory = useSessions.getState().sessions.find(
+  (session) => session.id === first,
+)!.messages;
+equal(
+  deduplicatedHistory.filter((message) => message.id === "canonical-completion").length,
+  1,
+  "canonical completion messages should remain unique by stable id",
+);
+const canonicalCompletion = deduplicatedHistory.find(
+  (message) => message.id === "canonical-completion",
+)!;
+equal(
+  canonicalCompletion.content,
+  "authoritative control completion",
+  "the later canonical projection should replace a stale duplicate",
+);
+equal(
+  canonicalCompletion.controlSeq,
+  12,
+  "the deduplicated completion should retain canonical projection metadata",
+);
 useSessions.getState().setSessionGenerating(first, true);
 deepEqual(
   useSessions.getState().generatingSessionIds,
