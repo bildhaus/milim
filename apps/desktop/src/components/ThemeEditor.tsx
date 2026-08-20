@@ -120,6 +120,7 @@ export function ThemeEditor({ base, isNew, onClose }: { base: Theme; isNew: bool
       backLabel="Back to Appearance"
       backTestId="theme-editor-back"
       className="settings-theme-editor"
+      hasBackground={Boolean(draft.background.image?.trim())}
       testId="theme-editor"
       onBack={() => { revert(); onClose(); }}
     >

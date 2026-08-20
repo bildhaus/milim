@@ -11,6 +11,7 @@ export type MilimIconName =
   | 'chevron-down'
   | 'chevron-right'
   | 'chevron-up'
+  | 'cube'
   | 'file'
   | 'folder'
   | 'eye'
@@ -75,6 +76,12 @@ export function MilimIcon({
       {name === 'chevron-down' ? <Path d="m6 9 6 6 6-6" {...common} /> : null}
       {name === 'chevron-right' ? <Path d="m9 6 6 6-6 6" {...common} /> : null}
       {name === 'chevron-up' ? <Path d="m6 15 6-6 6 6" {...common} /> : null}
+      {name === 'cube' ? (
+        <>
+          <Path d="M12 2 3 7v10l9 5 9-5V7Z" {...common} />
+          <Path d="m3 7 9 5 9-5M12 12v10" {...common} />
+        </>
+      ) : null}
       {name === 'file' ? (
         <>
           <Path d="M14 3v4a1 1 0 0 0 1 1h4" {...common} />

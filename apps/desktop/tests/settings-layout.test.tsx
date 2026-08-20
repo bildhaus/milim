@@ -14,6 +14,7 @@ function equal<T>(actual: T, expected: T, message: string): void {
 
 const source = readFileSync(resolve(process.cwd(), "src/settings/SettingsDialog.tsx"), "utf8");
 const surfaceSource = readFileSync(resolve(process.cwd(), "src/settings/SettingsSurface.tsx"), "utf8");
+const stylesSource = readFileSync(resolve(process.cwd(), "src/settings.css"), "utf8");
 assert(source.includes("export function SettingsPage({ onClose }"), "Settings should expose the full-window page contract");
 assert(source.includes('testId="settings-page"'), "Settings should expose the page test identifier");
 assert(source.includes('backLabel="Back to app"'), "Settings should provide dedicated back navigation");
@@ -22,15 +23,21 @@ assert(!source.includes("<SheetDialog"), "Settings should not render with modal 
 assert(surfaceSource.includes("<WindowControls />"), "The settings title bar should retain native window controls");
 assert(surfaceSource.includes("startWindowDrag"), "The settings title bar should use guarded native dragging");
 assert(surfaceSource.includes('event.key !== "Escape"'), "The settings page should close with Escape");
-assert(source.includes('{ label: "Preferences", sections: ["app", "chat", "appearance"] }'), "Settings should group preferences");
+assert(surfaceSource.includes('hasBackground ? " has-theme-background"'), "The shared settings surface should expose themed background styling");
+assert(source.includes('hasBackground={Boolean(activeBackgroundImage)}'), "Settings should reveal the active custom theme background");
+assert(source.includes('className="settings-content-inner"'), "Settings should separate the centered content column from its scroll viewport");
+assert(/\.settings-content\s*\{[^}]*width: 100%;[^}]*overflow-y: auto;/s.test(stylesSource), "Settings should scroll at the full detail-pane width");
+assert(/\.settings-content-inner\s*\{[^}]*width: min\(900px, 100%\);/s.test(stylesSource), "Settings should preserve the existing centered content measure");
+assert(source.includes('{ label: "Preferences", sections: ["app", "chat", "appearance", "notifications"] }'), "Settings should group preferences");
 assert(source.includes('{ label: "Workflows", sections: ["models", "workspace"] }'), "Settings should group workflow defaults");
-assert(source.includes('{ label: "Data & devices", sections: ["history", "google", "mobile"] }'), "Settings should group data and devices");
-assert(source.includes('{ label: "Application", sections: ["system", "about", "developer"] }'), "Settings should group application sections");
+assert(source.includes('{ label: "Connections", sections: ["google", "mobile"] }'), "Settings should group external connections");
+assert(source.includes('{ label: "Application", sections: ["history", "about", "developer"] }'), "Settings should group application sections");
 assert(source.includes('label: "General"'), "App should be labeled General");
-assert(source.includes('label: "System"'), "System should be labeled System");
-assert(source.includes('label: "Data"'), "History should be labeled Data");
+assert(source.includes('label: "Notifications"'), "Alerts and sounds should have a dedicated section");
+assert(source.includes('label: "Data & privacy"'), "History should expose its privacy scope");
+assert(source.includes('label: "About & updates"'), "Update policy and application details should stay together");
 assert(source.includes('label: "Google Workspace"'), "Google Workspace should have a dedicated section");
-assert(source.includes('label: "Models & agents"'), "Models and agents should have a workflow section");
+assert(source.includes('label: "Model & agent defaults"'), "The workflow label should match the defaults it contains");
 assert(source.includes('title="Browser data"'), "Data settings should expose browser profile controls");
 assert(source.includes('activeSection === "google"'), "Google Workspace controls should render in their dedicated section");
 assert(source.includes("chooseGoogleFilesFromSettings"), "Google Workspace settings should start the system-browser Picker");
@@ -40,7 +47,10 @@ assert(source.includes('section.id === "google" ? <span className="settings-goog
 assert(source.includes('" · Managed folder"'), "Google Workspace settings should identify Milim's managed Drive folder");
 assert(source.includes("GOOGLE_CONNECT_DISCLOSURE"), "Fresh Google connections should disclose remote-provider transfer");
 assert(source.includes("GOOGLE_REMOVE_MESSAGE"), "Removing a file must use the local-registry-only copy");
-assert(source.includes('data-setting-id="system-secret-storage"'), "System settings should report credential storage");
+assert(source.includes('data-setting-id="system-secret-storage"'), "Data and privacy settings should report credential storage");
+assert(!source.includes('activeSection === "system"'), "Sparse System settings should be folded into their owning sections");
+assert(source.includes('title="Background" data-setting-id="appearance-background"'), "Appearance should always expose background controls");
+assert(source.includes("No custom background"), "Appearance should explain how to add a background when none is active");
 assert(source.includes('testIdPrefix="browser-storage"'), "Browser storage should use the accessible choice control");
 assert(source.includes('{ value: "open", label: "Open", detail: "Run without approval in trusted workspaces." }'), "Configured chat defaults should offer Open approval");
 assert(source.includes('testIdPrefix="sidebar-rail-style"'), "Appearance settings should expose collapsed sidebar rail styles");
@@ -129,5 +139,7 @@ equal(matchingSettingsEntries("thread colors")[0]?.id, "appearance-sidebar-color
 equal(matchingSettingsEntries("cookies")[0]?.id, "browser-data", "Search should find browser data controls");
 equal(matchingSettingsEntries("sheets")[0]?.id, "google-workspace", "Search should find Google Workspace controls");
 equal(matchingSettingsEntries("keychain")[0]?.id, "system-secret-storage", "Search should find credential storage");
+equal(matchingSettingsEntries("keychain")[0]?.section, "history", "Credential storage should open Data & privacy");
+equal(matchingSettingsEntries("sound")[0]?.section, "notifications", "Sound search should open Notifications");
 
 export {};

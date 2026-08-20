@@ -24,8 +24,8 @@ use std::io::{self, Read};
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -56,6 +56,56 @@ use milim_storage::{Database, DatabaseOptions, EncryptedStore, JournalMode, Sess
 use milim_tools::{
     atomic_write, resolve_workspace_path, ProcessEnvironmentPolicy, Tool, ToolEffect, ToolRegistry,
 };
+
+static NATIVE_PERF_STARTED: OnceLock<Instant> = OnceLock::new();
+static NATIVE_PERF_STAGES: OnceLock<Mutex<BTreeMap<String, u64>>> = OnceLock::new();
+static SUBPROCESS_LAUNCHES: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Debug, Serialize)]
+struct PerformanceReportV2 {
+    schema_version: u32,
+    build_profile: &'static str,
+    perf_diagnostics: bool,
+    stages_ms: BTreeMap<String, u64>,
+    subprocess_launches: u64,
+    storage: milim_storage::StoragePerformanceSnapshot,
+}
+
+fn native_perf_mark(stage: &str) {
+    let started = NATIVE_PERF_STARTED.get_or_init(Instant::now);
+    let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let stages = NATIVE_PERF_STAGES.get_or_init(|| Mutex::new(BTreeMap::new()));
+    if let Ok(mut stages) = stages.lock() {
+        stages.entry(stage.to_string()).or_insert(elapsed);
+    }
+}
+
+fn record_subprocess_launch() {
+    SUBPROCESS_LAUNCHES.fetch_add(1, Ordering::Relaxed);
+}
+
+#[tauri::command]
+fn perf_snapshot_v2() -> std::result::Result<PerformanceReportV2, String> {
+    if !cfg!(feature = "perf-diagnostics") {
+        return Err("perf diagnostics are disabled in this build".into());
+    }
+    let stages_ms = NATIVE_PERF_STAGES
+        .get()
+        .and_then(|stages| stages.lock().ok().map(|stages| stages.clone()))
+        .unwrap_or_default();
+    Ok(PerformanceReportV2 {
+        schema_version: 2,
+        build_profile: if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        },
+        perf_diagnostics: cfg!(feature = "perf-diagnostics"),
+        stages_ms,
+        subprocess_launches: SUBPROCESS_LAUNCHES.load(Ordering::Relaxed),
+        storage: milim_storage::storage_performance_snapshot(),
+    })
+}
 
 /// Simple Rust/JS bridge example.
 #[tauri::command]
@@ -173,7 +223,10 @@ impl DesktopServerRuntimeState {
         listener
             .set_nonblocking(true)
             .map_err(|error| error.to_string())?;
-        let port = listener.local_addr().map_err(|error| error.to_string())?.port();
+        let port = listener
+            .local_addr()
+            .map_err(|error| error.to_string())?
+            .port();
         let host_id = control.host().host_id;
         let host_label = host_id
             .chars()
@@ -338,6 +391,9 @@ fn complete_workspace_editor_leave(
 const TAILSCALE_SERVE_PORT: u16 = 10000;
 const MOBILE_LAN_PREFERRED_PORT: u16 = 7378;
 const TAILSCALE_COMMAND_TIMEOUT_SECS: u64 = 12;
+const TAILSCALE_STARTUP_READY_ATTEMPTS: usize = 8;
+const TAILSCALE_STARTUP_CONFIG_ATTEMPTS: usize = 3;
+const TAILSCALE_STARTUP_RETRY_DELAY: Duration = Duration::from_secs(2);
 const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_OPEN_ID: &str = "open";
 const TRAY_QUIT_ID: &str = "quit";
@@ -347,6 +403,7 @@ const WORKSPACE_EDITOR_LEAVE_EVENT: &str = "milim://workspace-editor-leave-reque
 const USER_STATE_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 const DESKTOP_SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const RUNTIME_FAILED_EVENT: &str = "milim://runtime-failed";
+const SCHEDULE_RUN_COMPLETED_EVENT: &str = "milim://schedule-run-completed";
 const MODEL_FAVORITES_UPDATED_EVENT: &str = "milim://model-favorites-updated";
 const APP_MENU_EVENT: &str = "milim://menu-action";
 const APP_MENU_NEW_CHAT_ID: &str = "app.new-chat";
@@ -581,53 +638,52 @@ async fn restore_milim_backup(
     path: String,
 ) -> std::result::Result<String, String> {
     let store = state.0.clone();
-    let recovery_path = tokio::task::spawn_blocking(
-        move || -> std::result::Result<String, String> {
-        let (backup, _) = read_backup(Path::new(&path))?;
-        let recovery = build_backup(&store)?;
-        let recovery_bytes =
-            serde_json::to_vec_pretty(&recovery).map_err(|error| error.to_string())?;
-        let data_path = Paths::resolve().user_db_file();
-        let recovery_path = data_path.parent().unwrap_or(Path::new(".")).join(format!(
-            "pre-restore-{}.milim-backup.json",
-            now_timestamp_ms()
-        ));
-        atomic_write(&recovery_path, &recovery_bytes).map_err(|error| error.to_string())?;
-        let MilimBackupState {
-            sessions,
-            entries,
-            control,
-        } = backup.state;
-        let entries = entries
-            .into_iter()
-            .map(|(key, value)| {
-                serde_json::to_string(&value)
-                    .map(|json| (key, json))
-                    .map_err(|error| error.to_string())
-            })
-            .collect::<std::result::Result<BTreeMap<_, _>, _>>()?;
-        let sessions = serde_json::to_string(&sessions).map_err(|error| error.to_string())?;
-        let replace_keys = BACKUP_STATE_KEYS
-            .iter()
-            .map(|key| (*key).to_string())
-            .collect::<Vec<_>>();
-        store
-            .replace_backup_state(&replace_keys, entries, &sessions)
-            .map_err(|error| error.to_string())?;
-        if let Some(control) = control {
+    let recovery_path =
+        tokio::task::spawn_blocking(move || -> std::result::Result<String, String> {
+            let (backup, _) = read_backup(Path::new(&path))?;
+            let recovery = build_backup(&store)?;
+            let recovery_bytes =
+                serde_json::to_vec_pretty(&recovery).map_err(|error| error.to_string())?;
+            let data_path = Paths::resolve().user_db_file();
+            let recovery_path = data_path.parent().unwrap_or(Path::new(".")).join(format!(
+                "pre-restore-{}.milim-backup.json",
+                now_timestamp_ms()
+            ));
+            atomic_write(&recovery_path, &recovery_bytes).map_err(|error| error.to_string())?;
+            let MilimBackupState {
+                sessions,
+                entries,
+                control,
+            } = backup.state;
+            let entries = entries
+                .into_iter()
+                .map(|(key, value)| {
+                    serde_json::to_string(&value)
+                        .map(|json| (key, json))
+                        .map_err(|error| error.to_string())
+                })
+                .collect::<std::result::Result<BTreeMap<_, _>, _>>()?;
+            let sessions = serde_json::to_string(&sessions).map_err(|error| error.to_string())?;
+            let replace_keys = BACKUP_STATE_KEYS
+                .iter()
+                .map(|key| (*key).to_string())
+                .collect::<Vec<_>>();
             store
-                .replace_control_backup_state(&control)
+                .replace_backup_state(&replace_keys, entries, &sessions)
                 .map_err(|error| error.to_string())?;
-        } else {
-            store
-                .reconcile_control_startup()
-                .map_err(|error| error.to_string())?;
-        }
+            if let Some(control) = control {
+                store
+                    .replace_control_backup_state(&control)
+                    .map_err(|error| error.to_string())?;
+            } else {
+                store
+                    .reconcile_control_startup()
+                    .map_err(|error| error.to_string())?;
+            }
             Ok(recovery_path.to_string_lossy().to_string())
-        },
-    )
-    .await
-    .map_err(|error| error.to_string())??;
+        })
+        .await
+        .map_err(|error| error.to_string())??;
     if let Some(control) = &runtime.0.control {
         control.refresh_host().map_err(|error| error.to_string())?;
     }
@@ -956,9 +1012,7 @@ async fn user_state_delete(
             control.publish_appearance();
         }
     }
-    if matches!(result, Ok(true))
-        && key == milim_server::control::MODEL_FAVORITES_SETTINGS_KEY
-    {
+    if matches!(result, Ok(true)) && key == milim_server::control::MODEL_FAVORITES_SETTINGS_KEY {
         if let Some(control) = runtime.0.control.as_ref() {
             control.publish_model_favorites();
         }
@@ -978,6 +1032,46 @@ async fn user_sessions_get(
 }
 
 #[tauri::command]
+async fn user_sessions_manifest_get(
+    state: tauri::State<'_, UserDataState>,
+) -> std::result::Result<Option<String>, String> {
+    let store = state.0.clone();
+    tokio::task::spawn_blocking(move || store.get_sessions_manifest_snapshot(100))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn user_session_messages_page(
+    state: tauri::State<'_, UserDataState>,
+    session_id: String,
+    before_index: Option<usize>,
+    limit: Option<usize>,
+) -> std::result::Result<milim_storage::SessionMessagesPage, String> {
+    let store = state.0.clone();
+    tokio::task::spawn_blocking(move || {
+        store.session_messages_page(&session_id, before_index, limit.unwrap_or(100))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn user_chat_search(
+    state: tauri::State<'_, UserDataState>,
+    query: String,
+    limit: Option<usize>,
+) -> std::result::Result<Vec<milim_storage::UserChatSearchResult>, String> {
+    let store = state.0.clone();
+    tokio::task::spawn_blocking(move || store.user_chat_search(&query, limit.unwrap_or(20)))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn user_sessions_set(
     state: tauri::State<'_, UserDataState>,
     value: String,
@@ -991,6 +1085,20 @@ async fn user_sessions_set(
 
 #[tauri::command]
 async fn user_sessions_apply_delta(
+    state: tauri::State<'_, UserDataState>,
+    delta: SessionsDelta,
+) -> std::result::Result<(), String> {
+    let store = state.0.clone();
+    tokio::task::spawn_blocking(move || store.apply_sessions_delta(delta))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+/// Typed incremental session mutation path used by the desktop renderer.
+/// Keep `user_sessions_apply_delta` for one compatibility release.
+#[tauri::command]
+async fn user_sessions_apply_ops(
     state: tauri::State<'_, UserDataState>,
     delta: SessionsDelta,
 ) -> std::result::Result<(), String> {
@@ -1175,6 +1283,22 @@ fn secret_env_key(key: &str) -> bool {
 mod tailscale_tests {
     use super::*;
 
+    fn tailscale_status(
+        installed: bool,
+        logged_in: bool,
+        serve_configured: bool,
+        public_url: Option<&str>,
+    ) -> MobileTailscaleStatus {
+        MobileTailscaleStatus {
+            installed,
+            logged_in,
+            serve_configured,
+            public_url: public_url.map(str::to_string),
+            local_target: "http://127.0.0.1:12345".to_string(),
+            message: None,
+        }
+    }
+
     #[test]
     fn tailscale_status_json_reports_dns_url() {
         let raw = r#"{"BackendState":"Running","Self":{"DNSName":"milim-box.tailnet.ts.net."}}"#;
@@ -1241,6 +1365,56 @@ mod tailscale_tests {
         assert!(!status.logged_in);
         assert_eq!(status.local_target, "http://127.0.0.1:12345");
         assert!(status.message.unwrap().contains("Tailscale CLI not found"));
+    }
+
+    #[test]
+    fn macos_tailscale_bundle_is_forced_into_cli_mode() {
+        assert_eq!(
+            tailscale_cli_environment("macos"),
+            Some(("TAILSCALE_BE_CLI", "1"))
+        );
+        assert_eq!(tailscale_cli_environment("windows"), None);
+        assert_eq!(tailscale_cli_environment("linux"), None);
+    }
+
+    #[test]
+    fn tailscale_startup_retry_is_bounded_by_failure_stage() {
+        let starting = tailscale_status(true, false, false, None);
+        assert_eq!(
+            mobile_tailscale_startup_retry_delay(1, &starting),
+            Some(TAILSCALE_STARTUP_RETRY_DELAY)
+        );
+        assert_eq!(
+            mobile_tailscale_startup_retry_delay(TAILSCALE_STARTUP_READY_ATTEMPTS, &starting),
+            None
+        );
+
+        let configuring = tailscale_status(
+            true,
+            true,
+            false,
+            Some("https://milim-box.tailnet.ts.net:10000"),
+        );
+        assert_eq!(
+            mobile_tailscale_startup_retry_delay(2, &configuring),
+            Some(TAILSCALE_STARTUP_RETRY_DELAY)
+        );
+        assert_eq!(
+            mobile_tailscale_startup_retry_delay(TAILSCALE_STARTUP_CONFIG_ATTEMPTS, &configuring),
+            None
+        );
+
+        let ready = tailscale_status(
+            true,
+            true,
+            true,
+            Some("https://milim-box.tailnet.ts.net:10000"),
+        );
+        assert_eq!(mobile_tailscale_startup_retry_delay(1, &ready), None);
+        assert_eq!(
+            mobile_tailscale_startup_retry_delay(1, &tailscale_status(false, false, false, None)),
+            None
+        );
     }
 }
 
@@ -2253,6 +2427,7 @@ fn open_artifact_location_blocking(
     let path = validate_artifact_open_path(Path::new(path.trim()))?;
     let target = parse_artifact_open_target(&target)?;
     let spec = artifact_open_command(&path, target)?;
+    record_subprocess_launch();
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.args);
     milim_core::proc::hide_console(&mut cmd)
@@ -2298,6 +2473,7 @@ fn open_workspace_launcher_blocking(
     let id = parse_workspace_launcher_id(launcher_id)?;
     let platform = current_workspace_launcher_platform();
     let spec = workspace_launcher_command(&root, id, platform)?;
+    record_subprocess_launch();
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.args);
     milim_core::proc::hide_console(&mut cmd)
@@ -2316,6 +2492,7 @@ async fn open_external_url(url: String) -> std::result::Result<(), String> {
 fn open_external_url_blocking(url: String) -> std::result::Result<(), String> {
     let url = validate_external_url(&url)?;
     let spec = external_url_open_command(&url);
+    record_subprocess_launch();
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.args);
     milim_core::proc::hide_console(&mut cmd)
@@ -2494,6 +2671,63 @@ fn disable_mobile_tailscale_blocking(local_target: String) -> MobileTailscaleSta
     mobile_tailscale_status_blocking(local_target)
 }
 
+fn mobile_tailscale_startup_retry_delay(
+    attempt: usize,
+    status: &MobileTailscaleStatus,
+) -> Option<Duration> {
+    if status.serve_configured || !status.installed {
+        return None;
+    }
+    let attempts = if status.logged_in && status.public_url.is_some() {
+        TAILSCALE_STARTUP_CONFIG_ATTEMPTS
+    } else {
+        TAILSCALE_STARTUP_READY_ATTEMPTS
+    };
+    (attempt < attempts).then_some(TAILSCALE_STARTUP_RETRY_DELAY)
+}
+
+async fn restore_mobile_tailscale_startup(local_target: String) {
+    for attempt in 1..=TAILSCALE_STARTUP_READY_ATTEMPTS {
+        let target = local_target.clone();
+        let status =
+            tokio::task::spawn_blocking(move || configure_mobile_tailscale_blocking(target)).await;
+        match status {
+            Ok(status) if status.serve_configured => {
+                tracing::info!(
+                    target: "milim_desktop::server",
+                    attempt,
+                    "mobile control Tailscale restored on startup"
+                );
+                return;
+            }
+            Ok(status) => {
+                if let Some(delay) = mobile_tailscale_startup_retry_delay(attempt, &status) {
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                let message = status
+                    .message
+                    .as_deref()
+                    .unwrap_or("Tailscale Serve did not become ready.");
+                tracing::warn!(
+                    target: "milim_desktop::server",
+                    attempt,
+                    "mobile control Tailscale startup unavailable: {message}"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "milim_desktop::server",
+                    attempt,
+                    "mobile control Tailscale startup task failed: {error}"
+                );
+                return;
+            }
+        }
+    }
+}
+
 fn find_tailscale_command() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("TAILSCALE_CLI").map(PathBuf::from) {
         if path.exists() {
@@ -2532,9 +2766,17 @@ fn tailscale_command_candidates() -> Vec<PathBuf> {
     paths
 }
 
+fn tailscale_cli_environment(target_os: &str) -> Option<(&'static str, &'static str)> {
+    (target_os == "macos").then_some(("TAILSCALE_BE_CLI", "1"))
+}
+
 fn run_tailscale(command: &Path, args: &[&str]) -> io::Result<Output> {
+    record_subprocess_launch();
     let mut cmd = Command::new(command);
     cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    if let Some((key, value)) = tailscale_cli_environment(std::env::consts::OS) {
+        cmd.env(key, value);
+    }
     let mut child = milim_core::proc::hide_console(&mut cmd).spawn()?;
     let deadline = Instant::now() + Duration::from_secs(TAILSCALE_COMMAND_TIMEOUT_SECS);
     loop {
@@ -3738,6 +3980,7 @@ fn apply_update(app: tauri::AppHandle, update_path: String) -> std::result::Resu
                 },
             );
             fs::write(&script_path, script).map_err(|e| e.to_string())?;
+            record_subprocess_launch();
             Command::new("powershell.exe")
                 .args([
                     "-NoProfile",
@@ -3786,6 +4029,7 @@ rm -rf "$backup"
                 escape_bash_literal(&backup.to_string_lossy()),
                 escape_bash_literal(&error_marker.to_string_lossy()),
             );
+            record_subprocess_launch();
             Command::new("bash")
                 .args(["-c", &script])
                 .spawn()
@@ -3806,6 +4050,7 @@ fn extract_app_zip(app: tauri::AppHandle, zip_path: String) -> std::result::Resu
     if app_path.exists() {
         fs::remove_dir_all(&app_path).map_err(|e| e.to_string())?;
     }
+    record_subprocess_launch();
     let status = Command::new("ditto")
         .arg("-xk")
         .arg(zip_file.as_os_str())
@@ -4413,9 +4658,7 @@ fn setup_tray<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()>
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             TRAY_OPEN_ID => show_main_window(app),
-            TRAY_QUIT_ID => {
-                request_workspace_editor_leave(app, WorkspaceEditorLeaveAction::Quit)
-            }
+            TRAY_QUIT_ID => request_workspace_editor_leave(app, WorkspaceEditorLeaveAction::Quit),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| match event {
@@ -4458,6 +4701,7 @@ fn refresh_windows_path() -> io::Result<()> {
         .join("WindowsPowerShell")
         .join("v1.0")
         .join("powershell.exe");
+    record_subprocess_launch();
     let mut command = Command::new(powershell);
     command.args([
         "-NoLogo",
@@ -4507,24 +4751,32 @@ mod windows_path_tests {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    native_perf_mark("process_entry");
     if let Err(error) = diagnostics::init() {
         eprintln!("desktop diagnostics unavailable: {error}");
     }
     #[cfg(target_os = "windows")]
-    if let Err(error) = refresh_windows_path() {
-        tracing::warn!("could not refresh the Windows executable search path: {error}");
-    }
+    std::thread::spawn(|| {
+        native_perf_mark("path_setup_started");
+        if let Err(error) = refresh_windows_path() {
+            tracing::warn!("could not refresh the Windows executable search path: {error}");
+        }
+        native_perf_mark("path_setup_completed");
+    });
+    native_perf_mark("path_setup_scheduled");
     let api_key = milim_server::gen_id("desktop");
     let preview_tools_state = Arc::new(preview_tools::PreviewToolState::default());
     let secret_storage = secret_storage::initialize(Paths::resolve().root());
     let storage_status = secret_storage.status.clone();
     let user_data = open_user_data_store().expect("initialize user data store");
+    native_perf_mark("database_open_migrations_completed");
     let (mut state, preferred_addr, mcp, providers) = build_state(
         api_key.clone(),
         preview_tools_state.clone(),
         secret_storage.encryption,
         user_data.clone(),
     );
+    native_perf_mark("control_reconciliation_completed");
     let (server_listener, addr) =
         bind_desktop_server_listener(preferred_addr).expect("bind embedded milim server");
     // Account-runtime tool endpoints must point at the actual listener. The
@@ -4539,6 +4791,7 @@ pub fn run() {
             .expect("valid mobile control loopback address"),
     )
     .expect("bind embedded mobile control server");
+    native_perf_mark("servers_listening");
     let api_base = format!("http://{addr}");
     let mobile_local_target = format!("http://{mobile_addr}");
     let preview_runtime = state.preview_runtime.clone();
@@ -4554,12 +4807,19 @@ pub fn run() {
     let server_runtime =
         DesktopServerRuntimeState::new(state.control.clone(), Some(mobile_state.clone()));
     let model_favorites_control = state.control.clone();
+    let schedule_run_events = state.schedule_runs.clone();
+    let artifact_migration_store = user_data.clone();
 
+    let perf_runtime = std::env::var_os("MILIM_PERF").is_some();
     let builder = tauri::Builder::default();
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _, _| {
-        show_main_window(app);
-    }));
+    let builder = if perf_runtime {
+        builder
+    } else {
+        builder.plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            show_main_window(app);
+        }))
+    };
 
     builder
         .manage(DesktopApiToken(api_key))
@@ -4577,15 +4837,70 @@ pub fn run() {
         // Persist + restore window size/position/maximized across restarts.
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(preview_webview::init())
-        .on_page_load(preview_webview::handle_page_load)
+        .on_page_load(|webview, payload| {
+            native_perf_mark("window_created");
+            preview_webview::handle_page_load(webview, payload);
+        })
         .on_menu_event(handle_app_menu_event)
         .setup(move |app| {
+            native_perf_mark("tauri_ready");
             setup_native_menu(app.handle())?;
             setup_tray(app.handle())?;
             preview_tools_state.set_app(app.handle().clone());
             // Connect any persisted MCP servers in the background (best-effort).
             tauri::async_runtime::spawn(async move {
                 mcp.connect_all().await;
+            });
+            {
+                let schedule_app = app.handle().clone();
+                let mut events = schedule_run_events.subscribe();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        match events.recv().await {
+                            Ok(_) => {
+                                let _ = schedule_app.emit(SCHEDULE_RUN_COMPLETED_EVENT, ());
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                let _ = schedule_app.emit(SCHEDULE_RUN_COMPLETED_EVENT, ());
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                });
+            }
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    let store = artifact_migration_store.clone();
+                    let progress = tauri::async_runtime::spawn_blocking(move || -> milim_core::Result<
+                        Option<(milim_storage::RunArtifactMigrationProgress, usize)>,
+                    > {
+                        if store.control_has_active_runs()? {
+                            return Ok(None);
+                        }
+                        let artifacts = store.migrate_run_artifacts_batch(4 * 1024 * 1024)?;
+                        let indexed_messages = store.index_session_messages_batch(500)?;
+                        Ok(Some((artifacts, indexed_messages)))
+                    })
+                    .await;
+                    match progress {
+                        Ok(Ok(Some((progress, indexed))))
+                            if progress.remaining == 0 && indexed == 0 =>
+                        {
+                            break;
+                        }
+                        Ok(Ok(Some(_))) | Ok(Ok(None)) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                        }
+                        Ok(Err(error)) => {
+                            tracing::warn!("run artifact migration paused: {error}");
+                            break;
+                        }
+                        Err(error) => {
+                            tracing::warn!("run artifact migration task failed: {error}");
+                            break;
+                        }
+                    }
+                }
             });
             if state.schedules.is_some() {
                 let scheduler_state = state.clone();
@@ -4677,23 +4992,7 @@ pub fn run() {
             if let Some(companion) = mobile_startup_companion {
                 tauri::async_runtime::spawn(async move {
                     if companion.status(milim_server::now_unix()).enabled {
-                        let status = tokio::task::spawn_blocking(move || {
-                            configure_mobile_tailscale_blocking(mobile_startup_target)
-                        })
-                        .await;
-                        match status {
-                            Ok(status) if status.serve_configured => {}
-                            Ok(status) => {
-                                if let Some(message) = status.message {
-                                    tracing::warn!(
-                                        "mobile control Tailscale startup unavailable: {message}"
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!("mobile control Tailscale startup task failed: {e}")
-                            }
-                        }
+                        restore_mobile_tailscale_startup(mobile_startup_target).await;
                     }
                 });
             }
@@ -4712,6 +5011,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             health,
+            perf_snapshot_v2,
             record_frontend_error,
             diagnostics_path,
             restart_app,
@@ -4732,8 +5032,12 @@ pub fn run() {
             user_state_set,
             user_state_delete,
             user_sessions_get,
+            user_sessions_manifest_get,
+            user_session_messages_page,
+            user_chat_search,
             user_sessions_set,
             user_sessions_apply_delta,
+            user_sessions_apply_ops,
             user_sessions_delete,
             user_state_import_legacy,
             export_milim_backup,
@@ -4786,10 +5090,7 @@ mod desktop_control_name_tests {
             normalize_desktop_control_name("  Omer-MacBook-Pro.local  "),
             "Omer-MacBook-Pro"
         );
-        assert_eq!(
-            normalize_desktop_control_name("STUDIO-PC"),
-            "STUDIO-PC"
-        );
+        assert_eq!(normalize_desktop_control_name("STUDIO-PC"), "STUDIO-PC");
         assert_eq!(normalize_desktop_control_name(".local"), "milim desktop");
     }
 

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import "../settings.css";
 import { useAgents } from "../agents/store";
 import {
   deleteAgent,
@@ -19,6 +20,7 @@ import {
   type ToolInfo,
 } from "../api";
 import { useSessions } from "../sessions/store";
+import { createCanonicalChat } from "../lib/newChatCoordinator";
 import { AgentAvatar } from "./AgentAvatar";
 import { Calendar, Copy, Plus, Sparkles, Trash, X } from "./icons";
 import { SheetDialog } from "./SheetDialog";
@@ -515,8 +517,7 @@ export function AgentsManager({ onClose }: { onClose: () => void }) {
   }
 
   function startChat(agent: Agent) {
-    useSessions.getState().newUserChat({ activeAgentId: agent.id });
-    onClose();
+    void createCanonicalChat({ activeAgentId: agent.id }).then(onClose);
   }
 
   const toggleTool = (t: string) =>

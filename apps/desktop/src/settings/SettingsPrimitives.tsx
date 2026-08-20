@@ -12,7 +12,7 @@ export function SettingsBlock({
 }: { title?: string; className?: string; children: ReactNode } & HTMLAttributes<HTMLDivElement>) {
   return (
     <div className={`settings-block${className ? ` ${className}` : ""}`} {...props}>
-      {title ? <div className="settings-block-title">{title}</div> : null}
+      {title ? <h2 className="settings-block-title">{title}</h2> : null}
       {children}
     </div>
   );

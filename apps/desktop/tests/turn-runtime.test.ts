@@ -157,6 +157,8 @@ turnMetrics.captureRuntimeMetrics({
   usage: { prompt_tokens: 4, completion_tokens: 5, total_tokens: 9 },
   cost_usd: 0,
 });
+assert.equal(turnMetrics.state.costUsd, 0);
+assert.equal(turnMetrics.state.costSource, "provider");
 turnMetrics.captureRuntimeMetrics({ cost_usd: 0.02 });
 turnMetrics.captureProviderLimit({
   provider: "Claude",

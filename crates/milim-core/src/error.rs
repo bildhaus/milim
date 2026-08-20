@@ -16,6 +16,10 @@ pub enum Error {
     #[error("model not found: {0}")]
     ModelNotFound(String),
 
+    /// A requested non-model resource does not exist (HTTP 404).
+    #[error("not found: {0}")]
+    NotFound(String),
+
     /// Authentication failed or was missing (HTTP 401).
     #[error("unauthorized: {0}")]
     Unauthorized(String),
@@ -47,6 +51,7 @@ impl Error {
         match self {
             Error::InvalidRequest(_) => "invalid_request_error",
             Error::ModelNotFound(_) => "model_not_found",
+            Error::NotFound(_) => "not_found",
             Error::Unauthorized(_) => "authentication_error",
             Error::Upstream(_) => "upstream_error",
             Error::Inference(_) => "inference_error",

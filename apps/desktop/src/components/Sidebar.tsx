@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type HTMLAttributes, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type CSSProperties, type HTMLAttributes, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
 import { createPortal } from "react-dom";
 import {
   SIDEBAR_CHATS_SECTION_ID,
@@ -29,16 +29,21 @@ import {
   type PullRequestSnapshot,
 } from "../lib/pullRequests";
 import { sessionRecencyLabel } from "../lib/sessionRecency.js";
+import { threadLinkDropDecision } from "../lib/threadLinks.js";
 import { chatExportFilename, sessionExportPayload, sessionMarkdownExport } from "../lib/threadExport";
 import { DEFAULT_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, normalizeSidebarWidth, useUiPreferences, type ThreadNavigationPlacement } from "../ui/store";
 import { useTheme } from "../theme/store";
-import { GitPanel, type GitPanelView } from "./GitPanel";
+import type { GitPanelView } from "./GitPanel";
 import { useContextMenu } from "./ContextMenu";
 import { HoverScrollText } from "./HoverScrollText";
 import { PaneResizeHandle } from "./PaneResizeHandle";
 import { SheetDialog } from "./SheetDialog";
 import { ColorField } from "./ui";
 import { Archive, ArrowUp, Bolt, Calendar, Check, ChevronDown, Code, Cube, Download, FileText, Folder, FolderOpen, Gear, GitBranch, GitPullRequest, Globe, Image, Lightbulb, MoreHorizontal, Pin, Plus, Search, Sidebar as PanelIcon, Star, Terminal } from "./icons";
+
+const GitPanel = lazy(() =>
+  import("./GitPanel").then((mod) => ({ default: mod.GitPanel })),
+);
 
 const SIDEBAR_KEYBOARD_STEP = 32;
 const SIDEBAR_COLLAPSE_OVERSHOOT = 96;
@@ -60,12 +65,35 @@ export function sidebarSectionNextRevealCount(totalSessions: number, visibleLimi
   return Math.max(0, sidebarSectionShownCount(totalSessions, nextLimit, activeIndex) - currentCount);
 }
 
+export function sidebarSectionUsesPagination(sectionId: string, inbox: boolean | undefined, searchActive: boolean): boolean {
+  return !searchActive && !inbox && sectionId !== SIDEBAR_CHATS_SECTION_ID;
+}
+
 export function runningWorkerParentThreadIdsKey(records: readonly { run: { parent_thread_id: string; status: string } }[]): string {
   return [...new Set(
     records
       .filter((record) => record.run.status === "running")
       .map((record) => record.run.parent_thread_id),
   )].sort().join("\0");
+}
+
+export function workingSessionIdsFromSignals({
+  generatingSessionIds,
+  hostBusySessionIds,
+  activityBusySessionIds,
+  runningWorkerParentIds,
+}: {
+  generatingSessionIds?: readonly string[];
+  hostBusySessionIds?: readonly string[];
+  activityBusySessionIds?: readonly string[];
+  runningWorkerParentIds?: readonly string[];
+} = {}): string[] {
+  return [...new Set([
+    ...(generatingSessionIds ?? []),
+    ...(hostBusySessionIds ?? []),
+    ...(activityBusySessionIds ?? []),
+    ...(runningWorkerParentIds ?? []),
+  ])].sort();
 }
 
 type SidebarDragItem = { type: "session" | "section"; id: string };
@@ -80,6 +108,12 @@ type SidebarPointerDrag = {
   active: boolean;
   source: HTMLElement;
   captureTarget: HTMLElement;
+};
+type ThreadLinkDragTarget = {
+  element: HTMLElement;
+  targetThreadId: string;
+  valid: boolean;
+  prompt: string;
 };
 type SidebarSessionSettings = {
   folder?: string;
@@ -690,6 +724,8 @@ export function Sidebar({
   const previewRuntimesByKey = useSessions((s) => s.previewRuntimesByKey);
   const activeId = useSessions((s) => s.activeId);
   const generatingSessionIds = useSessions((s) => s.generatingSessionIds);
+  const hostBusySessionIds = useSessions((s) => s.hostBusySessionIds);
+  const activityBusySessionIds = useSessions((s) => s.activityBusySessionIds);
   const runningWorkerParentIdsKey = useSessions((s) => runningWorkerParentThreadIdsKey(s.workerRuns));
   const unreadSessionIds = useSessions((s) => s.unreadSessionIds);
   const pullRequestsBySession = useSessions((s) => s.pullRequestsBySession);
@@ -740,6 +776,7 @@ export function Sidebar({
   } | null>(null);
   const sidebarResizeCleanupRef = useRef<(() => void) | null>(null);
   const pointerDragRef = useRef<SidebarPointerDrag | null>(null);
+  const dragGhostRef = useRef<HTMLDivElement | null>(null);
   const dragOverRef = useRef<SidebarDragTarget | null>(null);
   const suppressNextClickRef = useRef(false);
   const [sidebarResizing, setSidebarResizing] = useState(false);
@@ -920,8 +957,13 @@ export function Sidebar({
     [runningWorkerParentIdsKey],
   );
   const generatingSessions = useMemo(
-    () => new Set([...generatingSessionIds, ...runningWorkerParentThreads]),
-    [generatingSessionIds, runningWorkerParentThreads],
+    () => new Set(workingSessionIdsFromSignals({
+      generatingSessionIds,
+      hostBusySessionIds,
+      activityBusySessionIds,
+      runningWorkerParentIds: [...runningWorkerParentThreads],
+    })),
+    [activityBusySessionIds, generatingSessionIds, hostBusySessionIds, runningWorkerParentThreads],
   );
   const unreadSessions = useMemo(() => new Set(unreadSessionIds), [unreadSessionIds]);
   const archivedProjectFoldersForStatus = useMemo(
@@ -980,8 +1022,15 @@ export function Sidebar({
     if (!pullRequestTargets.length) return;
     let cancelled = false;
     const refresh = async (openOnly: boolean) => {
-      await Promise.all(
-        pullRequestTargets.map(async (target) => {
+      if (document.visibilityState === "hidden") return;
+      let cursor = 0;
+      const workers = Array.from(
+        { length: Math.min(2, pullRequestTargets.length) },
+        async () => {
+          for (;;) {
+            const target = pullRequestTargets[cursor];
+            cursor += 1;
+            if (!target) return;
           const previous =
             useSessions.getState().pullRequestsBySession[target.sessionId];
           if (
@@ -1013,20 +1062,25 @@ export function Sidebar({
                   : "Couldn't refresh pull request.",
             });
           }
-        }),
+          }
+        },
       );
+      await Promise.all(workers);
     };
     void refresh(false);
     const onFocus = () => void refresh(false);
+    const onVisible = () => void refresh(false);
     const interval = window.setInterval(
       () => void refresh(true),
       GIT_STATUS_REFRESH_INTERVAL_MS,
     );
     window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
       window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [pullRequestTargetsKey, setSessionPullRequest]);
 
@@ -1433,6 +1487,55 @@ export function Sidebar({
     window.removeEventListener("pointerup", endSidebarPointerDrag);
     window.removeEventListener("pointercancel", cancelSidebarPointerDrag);
     document.body.classList.remove("sidebar-pointer-dragging");
+    document.body.classList.remove("thread-link-target-active");
+    document.querySelectorAll<HTMLElement>("[data-thread-link-drop-target]").forEach((element) => {
+      delete element.dataset.threadLinkPrompt;
+    });
+    dragGhostRef.current?.remove();
+    dragGhostRef.current = null;
+  }
+
+  function threadLinkDropTargetFromPoint(
+    clientX: number,
+    clientY: number,
+    item: SidebarDragItem,
+  ): ThreadLinkDragTarget | null {
+    if (item.type !== "session") return null;
+    const element = document
+      .elementFromPoint(clientX, clientY)
+      ?.closest<HTMLElement>("[data-thread-link-drop-target]");
+    const targetThreadId = element?.dataset.threadLinkDropTarget;
+    if (!element || !targetThreadId) return null;
+    const source = sessions.find((session) => session.id === item.id);
+    const target = sessions.find((session) => session.id === targetThreadId);
+    const linkedIds = new Set((element.dataset.linkedThreadIds ?? "").split(/\s+/).filter(Boolean));
+    const decision = threadLinkDropDecision({
+      sourceThreadId: item.id,
+      targetThreadId,
+      linkedThreadIds: [...linkedIds],
+      sourceIsChild: Boolean(source?.parentId),
+    });
+    return {
+      element,
+      targetThreadId,
+      valid: Boolean(source && decision === "valid"),
+      prompt: decision === "self"
+        ? "A chat cannot link to itself"
+        : decision === "duplicate"
+          ? `${source?.title ?? "Chat"} is already linked here`
+          : decision === "child"
+            ? "Worker chats cannot be linked"
+          : `Link ${source?.title ?? "chat"} to ${target?.title ?? "this chat"}`,
+    };
+  }
+
+  function updateThreadLinkAffordance(target: ThreadLinkDragTarget | null) {
+    document.body.classList.toggle("thread-link-target-active", Boolean(target));
+    document.querySelectorAll<HTMLElement>("[data-thread-link-drop-target]").forEach((element) => {
+      if (element === target?.element) element.dataset.threadLinkPrompt = target.prompt;
+      else delete element.dataset.threadLinkPrompt;
+    });
+    dragGhostRef.current?.classList.toggle("invalid", Boolean(target && !target.valid));
   }
 
   function startPointerDrag(event: ReactPointerEvent<HTMLElement>, item: SidebarDragItem, axis: "x" | "y" = "y") {
@@ -1471,23 +1574,42 @@ export function Sidebar({
       drag.source.style.willChange = "translate";
       document.body.classList.add("sidebar-pointer-dragging");
       setDragging(drag.item);
+      if (drag.item.type === "session") {
+        const source = sessions.find((session) => session.id === drag.item.id);
+        const ghost = document.createElement("div");
+        ghost.className = "thread-drag-ghost";
+        ghost.textContent = source?.title ?? "Chat";
+        document.body.appendChild(ghost);
+        dragGhostRef.current = ghost;
+      }
     }
     event.preventDefault();
     drag.source.style.translate = drag.axis === "x"
       ? `${event.clientX - drag.startX}px 0`
       : `0 ${event.clientY - drag.startY}px`;
+    if (dragGhostRef.current) {
+      dragGhostRef.current.style.left = `${event.clientX + 14}px`;
+      dragGhostRef.current.style.top = `${event.clientY + 14}px`;
+    }
     if (threadBarProjectsRef.current) {
       const rect = threadBarProjectsRef.current.getBoundingClientRect();
       const nearStrip = event.clientY >= rect.top - 32 && event.clientY <= rect.bottom + 32;
       if (nearStrip && event.clientX < rect.left + 32) threadBarProjectsRef.current.scrollLeft -= 12;
       else if (nearStrip && event.clientX > rect.right - 32) threadBarProjectsRef.current.scrollLeft += 12;
     }
-    setSidebarDragOver(sidebarDropTargetFromPoint(event.clientX, event.clientY, drag.item));
+    const linkTarget = threadLinkDropTargetFromPoint(event.clientX, event.clientY, drag.item);
+    updateThreadLinkAffordance(linkTarget);
+    setSidebarDragOver(
+      linkTarget ? null : sidebarDropTargetFromPoint(event.clientX, event.clientY, drag.item),
+    );
   }
 
   function endSidebarPointerDrag(event: PointerEvent) {
     const drag = pointerDragRef.current;
     if (!drag || event.pointerId !== drag.pointerId) return;
+    const linkTarget = drag.active
+      ? threadLinkDropTargetFromPoint(event.clientX, event.clientY, drag.item)
+      : null;
     cleanupPointerDragListeners();
     if (drag.active) {
       event.preventDefault();
@@ -1495,7 +1617,18 @@ export function Sidebar({
       window.setTimeout(() => {
         suppressNextClickRef.current = false;
       }, 120);
-      applySidebarDrop(drag.item, sidebarDropTargetFromPoint(event.clientX, event.clientY, drag.item) ?? dragOverRef.current);
+      if (linkTarget) {
+        if (linkTarget.valid && drag.item.type === "session") {
+          window.dispatchEvent(new CustomEvent("milim:link-thread", {
+            detail: {
+              sourceThreadId: drag.item.id,
+              targetThreadId: linkTarget.targetThreadId,
+            },
+          }));
+        }
+      } else {
+        applySidebarDrop(drag.item, sidebarDropTargetFromPoint(event.clientX, event.clientY, drag.item) ?? dragOverRef.current);
+      }
     }
     endSidebarDrag();
   }
@@ -1954,7 +2087,11 @@ export function Sidebar({
                 : undefined;
               const style = projectColor ? { "--project-color": projectColor } as CSSProperties : undefined;
               const active = group.sessions.some((session) => session.id === activeId);
-              const working = group.sessions.some((session) => generatingSessions.has(session.id));
+              const working = group.sessions.some((session) =>
+                generatingSessions.has(session.id) ||
+                session.worker?.status === "queued" ||
+                session.worker?.status === "running",
+              );
               const unread = !working && group.sessions.some((session) => unreadSessions.has(session.id));
               const projectPullRequestOwner = !group.inbox
                 ? sidebarProjectPullRequestOwner(group, pullRequestsBySession)
@@ -2255,9 +2392,10 @@ export function Sidebar({
                 : null;
               const searchActive = Boolean(query.trim());
               const totalSessions = group.sessions.length;
-              const visibleLimit = searchActive || group.inbox
-                ? totalSessions
-                : Math.min(sectionVisibleLimits[group.id] ?? SIDEBAR_SECTION_PREVIEW_LIMIT, totalSessions);
+              const sectionUsesPagination = sidebarSectionUsesPagination(group.id, group.inbox, searchActive);
+              const visibleLimit = sectionUsesPagination
+                ? Math.min(sectionVisibleLimits[group.id] ?? SIDEBAR_SECTION_PREVIEW_LIMIT, totalSessions)
+                : totalSessions;
               const baseVisibleSessions = group.sessions.slice(0, visibleLimit);
               const activeIndex = group.sessions.findIndex((session) => session.id === activeId);
               const visibleSessions = !searchActive && activeIndex >= visibleLimit
@@ -2265,8 +2403,8 @@ export function Sidebar({
                 : baseVisibleSessions;
               const currentShownCount = visibleSessions.length;
               const nextRevealCount = sidebarSectionNextRevealCount(totalSessions, visibleLimit, activeIndex);
-              const canShowMore = !searchActive && !group.inbox && nextRevealCount > 0;
-              const canShowLess = !searchActive && !group.inbox && visibleLimit > SIDEBAR_SECTION_PREVIEW_LIMIT;
+              const canShowMore = sectionUsesPagination && nextRevealCount > 0;
+              const canShowLess = sectionUsesPagination && visibleLimit > SIDEBAR_SECTION_PREVIEW_LIMIT;
               const sectionManuallyExpanded = visibleLimit > SIDEBAR_SECTION_PREVIEW_LIMIT;
               const shownCountLabel = `${currentShownCount} of ${totalSessions} shown`;
               const showMoreLabel = `Show ${nextRevealCount} more ${nextRevealCount === 1 ? "thread" : "threads"} in ${group.label}, ${shownCountLabel}`;
@@ -3003,13 +3141,17 @@ export function Sidebar({
           )}
         </div>
 
-        <GitPanel
-          sessionId={activeId}
-          folder={activeFolder}
-          model={activeModel}
-          onDraftAction={onGitAction}
-          onOpenPanel={() => onOpenGitPanel(activeId, "changes")}
-        />
+        {toolsExpanded && (
+          <Suspense fallback={null}>
+            <GitPanel
+              sessionId={activeId}
+              folder={activeFolder}
+              model={activeModel}
+              onDraftAction={onGitAction}
+              onOpenPanel={() => onOpenGitPanel(activeId, "changes")}
+            />
+          </Suspense>
+        )}
 
         {newChatButtonAtBottom && newChatButton}
 

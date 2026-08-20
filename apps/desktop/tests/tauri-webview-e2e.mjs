@@ -28,9 +28,11 @@ const settingsOnly = process.argv.includes("--settings-only");
 const appMenuOnly = process.argv.includes("--app-menu-only");
 const turnChangesOnly = process.argv.includes("--turn-changes-only");
 const chatAffordancesOnly = process.argv.includes("--chat-affordances-only");
+const modelChangeOnly = process.argv.includes("--model-change-only");
 const reasoningEffortOnly = process.argv.includes("--reasoning-effort-only");
 const generationControlsOnly = process.argv.includes("--generation-controls-only");
 const mediaOnly = process.argv.includes("--media-only");
+const linkedThreadDropOnly = process.argv.includes("--linked-thread-drop-only");
 const mcpAppKinds = ["chart", "diagram", "form", "dashboard", "viewer"];
 const screenshots = {
   avatars: join(tmpdir(), "milim-tauri-webview-agent-avatars.png"),
@@ -65,8 +67,10 @@ const screenshots = {
   inboxActive: join(tmpdir(), "milim-tauri-webview-inbox-active.png"),
   inboxSettled: join(tmpdir(), "milim-tauri-webview-inbox-settled.png"),
   workspaceCode: join(tmpdir(), "milim-tauri-webview-workspace-code.png"),
+  modelChange: join(tmpdir(), "milim-tauri-webview-model-change.png"),
   reasoningEffort: join(tmpdir(), "milim-tauri-webview-reasoning-effort.png"),
   failure: join(tmpdir(), "milim-tauri-webview-failure.png"),
+  linkedThreadDrop: join(tmpdir(), "milim-tauri-webview-linked-thread-drop.png"),
 };
 
 const profiles = [
@@ -139,6 +143,11 @@ try {
           !message.includes("/codex/models"),
       ),
     );
+  } else if (linkedThreadDropOnly) {
+    const errors = collectErrors(session.page);
+    await runLinkedThreadDropCheck(session.page);
+    await session.page.screenshot({ path: screenshots.linkedThreadDrop, fullPage: false });
+    consoleErrors.push(...errors.filter((message) => !message.includes("/codex/models")));
   } else if (turnChangesOnly) {
     const errors = collectErrors(session.page);
     turnChangesRepo = createTurnChangesRepo();
@@ -147,6 +156,10 @@ try {
   } else if (chatAffordancesOnly) {
     const errors = collectErrors(session.page);
     await runChatAffordancesCheck(session.page);
+    consoleErrors.push(...errors.filter((message) => !message.includes("/codex/models")));
+  } else if (modelChangeOnly) {
+    const errors = collectErrors(session.page);
+    await runModelChangeTranscriptCheck(session.page);
     consoleErrors.push(...errors.filter((message) => !message.includes("/codex/models")));
   } else if (reasoningEffortOnly) {
     const errors = collectErrors(session.page);
@@ -1328,16 +1341,18 @@ async function runInboxSidebarCheck(page) {
       accountUsageClipped: accountUsage instanceof HTMLElement
         ? accountUsage.clientWidth < accountUsage.scrollWidth
         : true,
-      threadUsageHidden: !threadUsage || getComputedStyle(threadUsage).display === "none",
+      threadUsageForcedHidden: threadUsage
+        ? getComputedStyle(threadUsage).display === "none"
+        : false,
     };
   });
   if (
     narrowTopFlow.titleWidth == null ||
     narrowTopFlow.titleWidth < 60 ||
     narrowTopFlow.accountUsageClipped ||
-    !narrowTopFlow.threadUsageHidden
+    narrowTopFlow.threadUsageForcedHidden
   ) {
-    throw new Error(`Narrow top thread navigation should preserve the title and account usage: ${JSON.stringify(narrowTopFlow)}.`);
+    throw new Error(`Narrow top thread navigation should preserve the title, visible thread spend, and account quota: ${JSON.stringify(narrowTopFlow)}.`);
   }
   await page.screenshot({ path: screenshots.threadBarTopNarrow, fullPage: false });
   await page.setViewportSize(topViewport);
@@ -1667,6 +1682,17 @@ async function runSidebarSectionMotionCheck(page, splitOnly = false) {
     });
     if (standaloneLayout.wrapped || standaloneLayout.border !== "1px" || standaloneLayout.radius !== "8px") {
       throw new Error(`Gitless new chat button has unexpected geometry: ${JSON.stringify(standaloneLayout)}.`);
+    }
+    const createResponse = page.waitForResponse((response) =>
+      response.url().includes("/control/v1/commands") &&
+      response.request().method() === "POST",
+    );
+    await standaloneNewChat.click();
+    const response = await createResponse;
+    const command = response.request().postDataJSON();
+    const result = await response.json();
+    if (!response.ok() || command.kind !== "thread.create" || result.status !== "applied") {
+      throw new Error(`New chat did not provision canonical state first: ${JSON.stringify({ command, result })}.`);
     }
   }
   const project = await page.evaluate(async ({ folder }) => {
@@ -3760,6 +3786,216 @@ async function resetFrontendStorage(page) {
   await page.reload();
   await page.getByTestId("chat-shell").waitFor();
   await dismissOnboardingIfPresent(page);
+  await page.waitForTimeout(350);
+}
+
+async function runModelChangeTranscriptCheck(page) {
+  const previousModel = "e2e-model-sol";
+  const model = "e2e-model-luna";
+
+  await page.route("**/v1/models", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      data: [
+        { id: previousModel, owned_by: "OpenAI" },
+        { id: model, owned_by: "OpenAI" },
+      ],
+    }),
+  }));
+  await page.evaluate(async () => {
+    const invoke = window.__TAURI_INTERNALS__.invoke;
+    await invoke("user_state_set", {
+      key: "milim.settings",
+      value: JSON.stringify({
+        state: {
+          accountRuntimeEnabled: { codex: false, claude: false, opencode: false, pi: false },
+          newThreadBehavior: "inherit",
+        },
+        version: 0,
+      }),
+    });
+  });
+
+  await page.reload();
+  await page.getByTestId("chat-shell").waitFor();
+  await dismissOnboardingIfPresent(page);
+  await page.waitForTimeout(1_000);
+  const threadId = await page.evaluate(async () => {
+    const raw = await window.__TAURI_INTERNALS__.invoke("user_sessions_get");
+    const activeId = raw ? JSON.parse(raw).state?.activeId : "";
+    if (!activeId) throw new Error("The native model-change fixture has no active thread.");
+    return activeId;
+  });
+  const readModelState = () => page.evaluate(async (sessionId) => {
+    const invoke = window.__TAURI_INTERNALS__.invoke;
+    const [base, token, sessionsRaw] = await Promise.all([
+      invoke("api_base_url"),
+      invoke("api_token"),
+      invoke("user_sessions_get"),
+    ]);
+    const headers = token ? { Authorization: `Bearer ${token}` } : {};
+    const [bootstrap, timeline] = await Promise.all([
+      fetch(`${base}/control/v1/bootstrap`, { headers }).then((response) => response.json()),
+      fetch(`${base}/control/v1/threads/${encodeURIComponent(sessionId)}/timeline?tail=500`, { headers })
+        .then((response) => response.json()),
+    ]);
+    const sessions = sessionsRaw ? JSON.parse(sessionsRaw).state?.sessions ?? [] : [];
+    return {
+      canonicalModel: bootstrap.threads?.find((thread) => thread.id === sessionId)?.model,
+      persistedModel: sessions.find((session) => session.id === sessionId)?.settings?.model,
+      modelChanges: timeline.items?.filter((item) => item.type === "model_changed") ?? [],
+    };
+  }, threadId);
+  const waitForModelState = async (expectedModel, expectChange) => {
+    const started = Date.now();
+    while (Date.now() - started < 10_000) {
+      const state = await readModelState();
+      if (
+        state.canonicalModel === expectedModel &&
+        state.persistedModel === expectedModel &&
+        (!expectChange || state.modelChanges.some(
+          (item) => item.data?.previous_model === previousModel && item.data?.model === model,
+        ))
+      ) return;
+      await delay(100);
+    }
+    throw new Error(`Timed out waiting for durable model state: ${JSON.stringify(await readModelState())}`);
+  };
+  await waitForModelState(previousModel, false);
+  const trigger = page.getByTestId("model-picker-trigger");
+  await assertTextContains(trigger.locator(".chip-label"), previousModel);
+  await trigger.click();
+  const picker = page.locator(".mp");
+  await picker.waitFor();
+  await picker.locator(".mp-item", { hasText: model }).locator(".mp-pick").click();
+
+  await waitForModelState(model, true);
+  const modelChange = page.getByTestId("model-change-event").last();
+  await modelChange.waitFor();
+  await assertTextContains(modelChange, `Continuing with ${model}`);
+  await assertTextContains(modelChange, `Previously ${previousModel} · thread retained`);
+  await page.screenshot({ path: screenshots.modelChange, fullPage: false });
+
+  await page.reload();
+  await page.getByTestId("chat-shell").waitFor();
+  await dismissOnboardingIfPresent(page);
+  const restored = page.getByTestId("model-change-event").last();
+  await restored.waitFor();
+  await assertTextContains(restored, `Continuing with ${model}`);
+  await assertTextContains(restored, `Previously ${previousModel} · thread retained`);
+}
+
+async function runLinkedThreadDropCheck(page) {
+  await page.getByTestId("chat-shell").waitFor();
+  await dismissOnboardingIfPresent(page);
+
+  const targetId = "e2e-linked-target";
+  const originId = "e2e-linked-origin";
+  await page.evaluate(async ({ targetId: target, originId: origin }) => {
+    const invoke = window.__TAURI_INTERNALS__.invoke;
+    const [base, token] = await Promise.all([invoke("api_base_url"), invoke("api_token")]);
+    for (const [id, title] of [[target, "Linked target"], [origin, "Linked origin"]]) {
+      const response = await fetch(`${base}/control/v1/commands`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          command_id: `e2e-create-${id}`,
+          kind: "thread.create",
+          thread_id: id,
+          payload: { id, title, settings: {} },
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok || result.status !== "applied") {
+        throw new Error(`Canonical fixture create failed: ${JSON.stringify({ id, result })}`);
+      }
+    }
+  }, { targetId, originId });
+  await page.reload();
+  await page.getByTestId("chat-shell").waitFor();
+  await page.locator(`[data-sidebar-session-id="${originId}"]:visible`).first().click();
+  await page.locator(`[data-sidebar-session-id="${originId}"].active`).waitFor();
+
+  const fileTargets = [
+    ["sidebar", ".sidebar"],
+    ["top bar", ".topbar"],
+    ["transcript", ".chat-scroll"],
+    ["composer", '[data-testid="composer"]'],
+  ];
+  for (let index = 0; index < fileTargets.length; index += 1) {
+    const [label, selector] = fileTargets[index];
+    const before = await page.locator(".attachment-pill").count();
+    const result = await page.evaluate(({ selector: targetSelector, index: targetIndex }) => {
+      const target = document.querySelector(targetSelector);
+      if (!(target instanceof HTMLElement)) return { found: false };
+      const binary = atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
+      const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([bytes], `native-drop-${targetIndex}.png`, { type: "image/png" }));
+      target.dispatchEvent(new DragEvent("dragenter", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+      return { found: true };
+    }, { selector, index });
+    if (!result.found) throw new Error(`Native file-drop target was missing: ${label}.`);
+    await page.getByTestId("window-file-drop-overlay").waitFor();
+    await page.evaluate(({ selector: targetSelector, index: targetIndex }) => {
+      const target = document.querySelector(targetSelector);
+      const binary = atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
+      const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([bytes], `native-drop-${targetIndex}.png`, { type: "image/png" }));
+      target?.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+    }, { selector, index });
+    await page.waitForFunction((expected) => document.querySelectorAll(".attachment-pill").length === expected, before + 1);
+  }
+
+  await page.getByTestId("open-artifact-browser").click();
+  const inspector = page.getByTestId("inspector-shell");
+  await inspector.waitFor();
+  const beforeInspector = await page.locator(".attachment-pill").count();
+  await inspector.evaluate((target, targetIndex) => {
+    const binary = atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([bytes], `native-drop-${targetIndex}.png`, { type: "image/png" }));
+    target.dispatchEvent(new DragEvent("dragenter", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+    target.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+  }, fileTargets.length);
+  await page.waitForFunction((expected) => document.querySelectorAll(".attachment-pill").length === expected, beforeInspector + 1);
+
+  const beforeTextDrop = await page.locator(".attachment-pill").count();
+  await page.locator(".chat-scroll").evaluate((target) => {
+    const transfer = new DataTransfer();
+    transfer.setData("text/plain", "not a file");
+    target.dispatchEvent(new DragEvent("dragenter", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+    target.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+  });
+  if (await page.getByTestId("window-file-drop-overlay").count()) {
+    throw new Error("A non-file drag activated the native full-window attachment affordance.");
+  }
+  if (await page.locator(".attachment-pill").count() !== beforeTextDrop) {
+    throw new Error("A non-file drag changed native composer attachments.");
+  }
+
+  const source = page.locator(`[data-sidebar-session-id="${targetId}"]:visible`).first();
+  const destination = page.locator(`[data-thread-link-drop-target="${originId}"]`);
+  const sourceBox = await source.boundingBox();
+  const destinationBox = await destination.boundingBox();
+  if (!sourceBox || !destinationBox) throw new Error("Native linked-chat drag endpoints were not visible.");
+  await page.mouse.move(sourceBox.x + sourceBox.width / 2, sourceBox.y + sourceBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(destinationBox.x + destinationBox.width / 2, destinationBox.y + destinationBox.height / 2, { steps: 6 });
+  await page.waitForFunction(() => document.body.classList.contains("thread-link-target-active"));
+  const prompt = await destination.getAttribute("data-thread-link-prompt");
+  if (!prompt?.startsWith("Link ")) {
+    await page.mouse.up();
+    throw new Error(`Native linked-chat affordance was not populated: ${String(prompt)}.`);
+  }
+  await page.mouse.up();
+  const pill = page.getByTestId(`linked-thread-pill-${targetId}`);
+  await pill.waitFor();
+  await pill.getByRole("button", { name: /^Unlink / }).click();
+  await pill.waitFor({ state: "detached" });
 }
 
 async function runWorkersInspectorCheck(page, milimHome) {
@@ -4021,8 +4257,9 @@ async function openSettings(page) {
     inert: element.inert,
     ariaHidden: element.getAttribute("aria-hidden"),
     chatMounted: Boolean(element.querySelector('[data-testid="chat-shell"]')),
+    opacity: getComputedStyle(element).opacity,
   }));
-  if (!workspace.inert || workspace.ariaHidden !== "true" || !workspace.chatMounted) {
+  if (!workspace.inert || workspace.ariaHidden !== "true" || !workspace.chatMounted || workspace.opacity !== "0") {
     throw new Error(`Settings should inert but preserve the mounted workspace: ${JSON.stringify(workspace)}.`);
   }
   const usageToggle = page.getByTestId("general-titlebar-account-usage-toggle");
@@ -4040,6 +4277,37 @@ async function runSettingsLayoutCheck(page) {
     await ridgeline.waitFor();
   }
   await openSettings(page);
+  await page.setViewportSize({ width: 1440, height: 720 });
+  await page.waitForTimeout(120);
+  const wideSettingsLayout = await page.getByTestId("settings-page").evaluate((element) => {
+    const detail = element.querySelector(".settings-detail");
+    const content = element.querySelector(".settings-content");
+    const inner = element.querySelector(".settings-content-inner");
+    const detailRect = detail?.getBoundingClientRect();
+    const contentRect = content?.getBoundingClientRect();
+    const innerRect = inner?.getBoundingClientRect();
+    return {
+      detailRight: detailRect?.right,
+      contentRight: contentRect?.right,
+      innerLeft: innerRect?.left,
+      innerRight: innerRect?.right,
+      innerWidth: innerRect?.width,
+    };
+  });
+  if (
+    wideSettingsLayout.detailRight === undefined ||
+    wideSettingsLayout.contentRight === undefined ||
+    wideSettingsLayout.innerLeft === undefined ||
+    wideSettingsLayout.innerRight === undefined ||
+    wideSettingsLayout.innerWidth === undefined ||
+    Math.abs(wideSettingsLayout.contentRight - wideSettingsLayout.detailRight) > 1 ||
+    wideSettingsLayout.innerWidth > 901 ||
+    wideSettingsLayout.contentRight - wideSettingsLayout.innerRight < 100
+  ) {
+    throw new Error(`Settings scrollbar should stay at the pane edge while content remains centered: ${JSON.stringify(wideSettingsLayout)}.`);
+  }
+  await page.setViewportSize({ width: 1000, height: 720 });
+  await page.waitForTimeout(120);
   await page.getByTestId("settings-section-chat").click();
   await page.getByTestId("new-thread-behavior-configured").click();
   const openApprovalDefault = page.getByTestId("default-approval-open");
@@ -4083,6 +4351,16 @@ async function runSettingsLayoutCheck(page) {
   }
   await themeEditor.getByText("Back to Appearance", { exact: true }).waitFor();
   await page.waitForTimeout(220);
+  const backgroundCss = "linear-gradient(135deg, #3b1d75 0%, #0b4a67 52%, #07111e 100%)";
+  await page.getByRole("textbox", { name: "Image or gradient CSS" }).fill(backgroundCss);
+  const editorThemeSurface = await themeEditor.evaluate((element) => ({
+    hasBackgroundClass: element.classList.contains("has-theme-background"),
+    surfaceBackground: getComputedStyle(element).backgroundColor,
+    workspaceOpacity: getComputedStyle(document.querySelector(".main")).opacity,
+  }));
+  if (!editorThemeSurface.hasBackgroundClass || editorThemeSurface.surfaceBackground !== "rgba(0, 0, 0, 0)" || editorThemeSurface.workspaceOpacity !== "0") {
+    throw new Error(`Theme editor should expose the live custom background without workspace bleed-through: ${JSON.stringify(editorThemeSurface)}.`);
+  }
   await page.screenshot({ path: screenshots.settingsThemeEditor, fullPage: false });
   await setThemeEditorColor(page, "Background", "#ff00ff");
   const previewSurfaceColor = await page.evaluate(() =>
@@ -4119,8 +4397,16 @@ async function runSettingsLayoutCheck(page) {
   await page.getByTestId("theme-customize").click();
   await page.getByTestId("theme-editor").waitFor();
   await page.getByRole("textbox", { name: "Theme name" }).fill(customThemeName);
+  await page.getByRole("textbox", { name: "Image or gradient CSS" }).fill(backgroundCss);
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await page.getByTestId("settings-page").waitFor();
+  const settingsThemeSurface = await page.getByTestId("settings-page").evaluate((element) => ({
+    hasBackgroundClass: element.classList.contains("has-theme-background"),
+    surfaceBackground: getComputedStyle(element).backgroundColor,
+  }));
+  if (!settingsThemeSurface.hasBackgroundClass || settingsThemeSurface.surfaceBackground !== "rgba(0, 0, 0, 0)") {
+    throw new Error(`Settings should retain a saved custom background: ${JSON.stringify(settingsThemeSurface)}.`);
+  }
   const savedTheme = page.locator(".theme-card").filter({ hasText: customThemeName });
   await savedTheme.waitFor();
   await page.getByRole("button", { name: `Edit ${customThemeName}` }).click();
@@ -6120,7 +6406,9 @@ function printEvidencePaths(milimHome) {
   console.log(`threadBarBottomScreenshot=${screenshots.threadBarBottom}`);
   console.log(`chatSourcesScreenshot=${screenshots.chatSources}`);
   console.log(`chatLatestScreenshot=${screenshots.chatLatest}`);
+  console.log(`modelChangeScreenshot=${screenshots.modelChange}`);
   console.log(`reasoningEffortScreenshot=${screenshots.reasoningEffort}`);
+  console.log(`linkedThreadDropScreenshot=${screenshots.linkedThreadDrop}`);
   for (const theme of ["light", "dark"]) {
     for (const kind of mcpAppKinds) console.log(`mcpApp${kind}Screenshot(${theme})=${mcpAppViewScreenshot(kind, theme)}`);
   }

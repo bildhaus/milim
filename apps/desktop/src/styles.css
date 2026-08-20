@@ -1,5 +1,5 @@
 @import "./foundation.css";
+@import "./shell-overlays.css";
 @import "./shell.css";
 @import "./chat.css";
-@import "./settings.css";
 @import "./workspaces.css";

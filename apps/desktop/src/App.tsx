@@ -10,6 +10,7 @@ import {
   useRef,
   useState,
   type ErrorInfo,
+  type DragEvent as ReactDragEvent,
   type MouseEvent,
   type ReactNode,
 } from "react";
@@ -23,9 +24,9 @@ import {
   recordFrontendError,
   requestDesktopQuit,
   restartDesktopApp,
+  type ChatMessage,
 } from "./api";
 import { AutoUpdater } from "./components/AutoUpdater";
-import { ChatView } from "./components/ChatView";
 import { ContextMenuProvider, useContextMenu, type ContextMenuItem } from "./components/ContextMenu";
 import type { GitPanelView } from "./components/GitPanel";
 import { FolderOpen, Gear, Globe, Pencil, Plus, Refresh, Sidebar as SidebarIcon, X } from "./components/icons";
@@ -45,6 +46,7 @@ import {
   importLegacyLocalStorageOnce,
   flushDeferredUserStateWrites,
   installUserStateFlushHandlers,
+  loadSessionMessagePage,
 } from "./persistence/userStateStorage.js";
 import {
   hydrateSessionComposerDraftsFromUserState,
@@ -58,16 +60,23 @@ import {
   setInterfaceSoundsEnabled,
 } from "./ui/sounds";
 import { shortcutLabel } from "./ui/shortcuts";
-import { createInteractiveChat } from "./lib/newChatCoordinator";
+import { createCanonicalChat, createInteractiveChat } from "./lib/newChatCoordinator";
 import {
   nativeBadgeThreadCount,
   setMilimUnreadBadge,
 } from "./lib/nativeNotifications";
 import { useUiPreferences } from "./ui/store";
+import { dataTransferCarriesFiles, WINDOW_ATTACH_FILES_EVENT } from "./lib/windowFileDrop";
+import { markPerfStage } from "./lib/perf";
 
 const SettingsPage = lazy(() =>
   import("./settings/SettingsDialog").then((mod) => ({
     default: mod.SettingsPage,
+  })),
+);
+const ChatView = lazy(() =>
+  import("./components/ChatView").then((mod) => ({
+    default: mod.ChatView,
   })),
 );
 const AgentsManager = lazy(() =>
@@ -86,14 +95,15 @@ const SchedulesManager = lazy(() =>
   })),
 );
 const MediaManager = lazy(() =>
-  import("./components/MediaManager").then((mod) => ({
-    default: mod.MediaManager,
-  })),
+  Promise.all([import("./media-manager.css"), import("./components/MediaManager")]).then(
+    ([, mod]) => ({ default: mod.MediaManager }),
+  ),
 );
 const PullRequestsManager = lazy(() =>
-  import("./components/PullRequestsManager").then((mod) => ({
-    default: mod.PullRequestsManager,
-  })),
+  Promise.all([
+    import("./pull-requests.css"),
+    import("./components/PullRequestsManager"),
+  ]).then(([, mod]) => ({ default: mod.PullRequestsManager })),
 );
 const OnboardingFlow = lazy(() =>
   import("./components/OnboardingFlow").then((mod) => ({
@@ -404,6 +414,9 @@ function AppContent() {
     s.sessions.map((session) => session.id).join("\0"),
   );
   const nativeBadgeCount = useSessions(nativeBadgeThreadCount);
+  const activeThread = useSessions((state) =>
+    state.sessions.find((session) => session.id === state.activeId),
+  );
   const lastSessionIdsRef = useRef<Set<string> | null>(null);
   const [sessionsHydrated, setSessionsHydrated] = useState(() =>
     useSessions.persist.hasHydrated(),
@@ -418,9 +431,52 @@ function AppContent() {
   useEffect(() => {
     if (sessionsHydrated) return;
     return useSessions.persist.onFinishHydration(() =>
-      setSessionsHydrated(true),
+      {
+        markPerfStage("manifest_hydrated");
+        setSessionsHydrated(true);
+      },
     );
   }, [sessionsHydrated]);
+  useEffect(() => {
+    if (!sessionsHydrated) return;
+    markPerfStage("manifest_hydrated");
+    if (activeThread?.messagesHydrated !== false) {
+      markPerfStage("active_tail_loaded");
+    }
+  }, [activeThread?.messagesHydrated, sessionsHydrated]);
+  useEffect(() => {
+    if (
+      !inTauri ||
+      !sessionsHydrated ||
+      !activeThread ||
+      activeThread.messagesHydrated !== false ||
+      activeThread.messages.length > 0
+    ) {
+      return;
+    }
+    let cancelled = false;
+    void loadSessionMessagePage(activeThread.id, undefined, 100)
+      .then((page) => {
+        if (cancelled) return;
+        useSessions.getState().prependMessagePage(
+          activeThread.id,
+          page.messages as ChatMessage[],
+          page.first_index,
+          page.total,
+        );
+        markPerfStage("active_tail_loaded");
+      })
+      .catch((error) =>
+        console.warn("Failed to hydrate active thread messages:", error),
+      );
+    return () => {
+      cancelled = true;
+    };
+  }, [activeThread, sessionsHydrated]);
+  useEffect(() => {
+    if (!sessionsHydrated || !uiHydrated) return;
+    requestAnimationFrame(() => markPerfStage("shell_painted"));
+  }, [sessionsHydrated, uiHydrated]);
   useEffect(() => {
     if (uiHydrated) return;
     return useUiPreferences.persist.onFinishHydration(() => setUiHydrated(true));
@@ -461,7 +517,7 @@ function AppContent() {
     startupAppliedRef.current = true;
     const preferences = useUiPreferences.getState();
     const sessions = useSessions.getState();
-    if (preferences.startupBehavior === "new-chat") sessions.newUserChat();
+    if (preferences.startupBehavior === "new-chat") void createCanonicalChat();
     if (!preferences.restoreOpenPanels) {
       const activeId = useSessions.getState().activeId;
       sessions.setContextPanelOpen(activeId, false);
@@ -512,6 +568,8 @@ function AppContent() {
     id: number;
     text: string;
   } | null>(null);
+  const [windowFileDragActive, setWindowFileDragActive] = useState(false);
+  const fileDragDepthRef = useRef(0);
   const [gitPanelRequest, setGitPanelRequest] = useState<{
     id: number;
     sessionId?: string;
@@ -543,6 +601,37 @@ function AppContent() {
     `bg-fit-${backgroundFit}`,
     `bg-treatment-${backgroundTreatment}`,
   ].join(" ");
+
+  const carriesFiles = useCallback((event: ReactDragEvent<HTMLElement>) =>
+    dataTransferCarriesFiles(Array.from(event.dataTransfer.types ?? [])), []);
+  const handleWindowFileDragEnter = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (!carriesFiles(event)) return;
+    event.preventDefault();
+    fileDragDepthRef.current += 1;
+    setWindowFileDragActive(true);
+  }, [carriesFiles]);
+  const handleWindowFileDragOver = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (!carriesFiles(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setWindowFileDragActive(true);
+  }, [carriesFiles]);
+  const handleWindowFileDragLeave = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (fileDragDepthRef.current === 0 && !carriesFiles(event)) return;
+    event.preventDefault();
+    fileDragDepthRef.current = Math.max(0, fileDragDepthRef.current - 1);
+    if (fileDragDepthRef.current === 0) setWindowFileDragActive(false);
+  }, [carriesFiles]);
+  const handleWindowFileDrop = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (!carriesFiles(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    fileDragDepthRef.current = 0;
+    setWindowFileDragActive(false);
+    const files = Array.from(event.dataTransfer.files ?? []);
+    if (!files.length) return;
+    window.dispatchEvent(new CustomEvent<File[]>(WINDOW_ATTACH_FILES_EVENT, { detail: files }));
+  }, [carriesFiles]);
 
   useEffect(() => setInterfaceSoundsEnabled(interfaceSounds), [interfaceSounds]);
   useLayoutEffect(() => {
@@ -762,11 +851,27 @@ function AppContent() {
   );
 
   return (
-    <div className={appClassName} onContextMenu={openAppContextMenu}>
+    <div
+      className={appClassName}
+      onContextMenu={openAppContextMenu}
+      onDragEnter={handleWindowFileDragEnter}
+      onDragOver={handleWindowFileDragOver}
+      onDragLeave={handleWindowFileDragLeave}
+      onDrop={handleWindowFileDrop}
+    >
       <BackgroundLayer />
+      {windowFileDragActive && (
+        <div className="window-file-drop-overlay" data-testid="window-file-drop-overlay" aria-hidden="true">
+          <div className="window-file-drop-card">
+            <FolderOpen size={22} />
+            <strong>Attach to {activeThread?.title?.trim() || "New chat"}</strong>
+            <span>Drop files anywhere in Milim</span>
+          </div>
+        </div>
+      )}
       <div
         ref={mainRef}
-        className="main"
+        className={`main${settingsOpen ? " settings-background-only" : ""}`}
         aria-hidden={settingsOpen || undefined}
       >
         {threadNavigationPlacement === "sidebar" && threadNavigation}

@@ -129,6 +129,8 @@ export interface ProjectedMessage {
   runId: string | null;
   ledgerVersion?: number;
   seq: number;
+  mailboxLabel?: string;
+  mailboxStatus?: 'incoming' | 'replied' | 'failed';
 }
 
 export type ActivityStatus =
@@ -182,10 +184,19 @@ export interface ProjectedApprovalItem {
   approval: PendingApprovalV1 | null;
 }
 
+export interface ProjectedModelChange {
+  kind: 'model-change';
+  id: string;
+  seq: number;
+  previousModel: string;
+  model: string;
+}
+
 export type ProjectedTranscriptItem =
   | ProjectedMessage
   | ProjectedActivityGroup
-  | ProjectedApprovalItem;
+  | ProjectedApprovalItem
+  | ProjectedModelChange;
 
 type MutableActivityGroup = {
   runId: string;
@@ -514,6 +525,7 @@ export function projectTranscript(
   const streaming = new Map<string, ProjectedMessage>();
   const groups = new Map<string, MutableActivityGroup>();
   const approvals = new Map<string, ProjectedApprovalItem>();
+  const modelChanges: ProjectedModelChange[] = [];
   const pendingById = new Map(pendingApprovals.map(approval => [approval.id, approval]));
 
   const groupFor = (item: TimelineItemV1) => {
@@ -537,6 +549,20 @@ export function projectTranscript(
     const data = asRecord(item.data) ?? {};
     if (item.type === 'message_deleted' && typeof data.message_id === 'string') {
       deleted.add(data.message_id);
+      continue;
+    }
+    if (item.type === 'model_changed') {
+      const previousModel = stringField(data, 'previous_model');
+      const model = stringField(data, 'model');
+      if (previousModel && model && previousModel !== model) {
+        modelChanges.push({
+          kind: 'model-change',
+          id: `model-change-${item.id}`,
+          seq: item.seq,
+          previousModel,
+          model,
+        });
+      }
       continue;
     }
     if (item.type === 'assistant_delta' && item.run_id) {
@@ -567,6 +593,29 @@ export function projectTranscript(
         runId: item.run_id,
         ledgerVersion: typeof data.ledgerVersion === 'number' ? data.ledgerVersion : undefined,
         seq: item.seq,
+        mailboxLabel: asRecord(data.mailboxOrigin)
+          ? `From ${stringField(asRecord(data.mailboxOrigin)!, 'origin_title') || 'linked thread'}`
+          : undefined,
+        mailboxStatus: asRecord(data.mailboxOrigin) ? 'incoming' : undefined,
+      });
+      continue;
+    }
+    if (item.type === 'mailbox_reply') {
+      const reply = asRecord(data.reply) ?? {};
+      const failed = stringField(data, 'status') === 'failed';
+      const targetTitle = stringField(reply, 'target_title') || 'Linked thread';
+      messages.push({
+        kind: 'message',
+        id: `mailbox-${stringField(data, 'exchange_id') || item.id}`,
+        role: 'assistant',
+        content: failed
+          ? stringField(reply, 'error') || 'The linked thread failed.'
+          : stringField(reply, 'content'),
+        reasoning: '',
+        runId: null,
+        seq: item.seq,
+        mailboxLabel: `${failed ? 'Failure' : 'Reply'} from ${targetTitle}`,
+        mailboxStatus: failed ? 'failed' : 'replied',
       });
       continue;
     }
@@ -705,7 +754,7 @@ export function projectTranscript(
     });
   }
 
-  return [...visibleMessages, ...projectedGroups, ...approvals.values()].sort(
+  return [...visibleMessages, ...modelChanges, ...projectedGroups, ...approvals.values()].sort(
     (a, b) => a.seq - b.seq,
   );
 }

@@ -54,6 +54,9 @@ try {
   const shell = readFileSync("src/shell.css", "utf8");
   const chat = readFileSync("src/chat.css", "utf8");
   const workspaces = readFileSync("src/workspaces.css", "utf8");
+  const inspector = readFileSync("src/inspector.css", "utf8");
+  const pullRequests = readFileSync("src/pull-requests.css", "utf8");
+  const mediaManager = readFileSync("src/media-manager.css", "utf8");
   assert(foundation.includes("--pane-resize-target: 12px"), "Pane resize targets should share a 12px hit area");
   assert(foundation.includes("--pane-resize-indicator-thickness: 2px"), "Pane resize indicators should share one thickness");
   assert(foundation.includes("--pane-resize-indicator-length: 42px"), "Pane resize indicators should share one resting length");
@@ -61,12 +64,12 @@ try {
 
   assert(/\.sidebar-resize-handle\s*\{[^}]*right:\s*0/s.test(shell), "The sidebar handle should center on its inset visible edge");
   assert(/\.preview-resize-handle\s*\{[^}]*margin-inline:\s*calc\(-1 \* var\(--pane-resize-half-target\)\)/s.test(chat), "The Inspector handle should straddle its seam without adding a gap");
-  assert(/\.workspace-code-rail-resizer\s*\{[^}]*left:\s*var\(--workspace-code-rail-width\)/s.test(chat), "The Code rail handle should center on the rail width");
+  assert(/\.workspace-code-rail-resizer\s*\{[^}]*left:\s*var\(--workspace-code-rail-width\)/s.test(inspector), "The Code rail handle should center on the rail width");
   assert(/\.git-diff-resize-handle\s*\{[^}]*left:\s*var\(--git-diff-navigator-width/s.test(shell), "The Git handle should center on the navigator width");
-  assert(/\.pull-requests-divider\s*\{[^}]*left:\s*var\(--pull-requests-list-width/s.test(workspaces), "The Pull Requests handle should center on the list width");
-  assert(/\.media-library-resize-handle\s*\{[^}]*left:\s*calc\(-1 \* var\(--pane-resize-half-target\)\)/s.test(workspaces), "The Media Library handle should straddle its seam");
-  assert(workspaces.includes("--media-output-half-gap: 6px") && workspaces.includes("--media-output-half-gap: 4px"), "The Media composer handle should derive its center from each responsive gap");
-  assert(/\.preview-log-resize-handle\s*\{[^}]*top:\s*calc\(-1 \* var\(--pane-resize-half-target\)\)/s.test(chat), "The Logs handle should straddle the drawer seam");
+  assert(/\.pull-requests-divider\s*\{[^}]*left:\s*var\(--pull-requests-list-width/s.test(pullRequests), "The Pull Requests handle should center on the list width");
+  assert(/\.media-library-resize-handle\s*\{[^}]*left:\s*calc\(-1 \* var\(--pane-resize-half-target\)\)/s.test(mediaManager), "The Media Library handle should straddle its seam");
+  assert(mediaManager.includes("--media-output-half-gap: 6px") && mediaManager.includes("--media-output-half-gap: 4px"), "The Media composer handle should derive its center from each responsive gap");
+  assert(/\.preview-log-resize-handle\s*\{[^}]*top:\s*calc\(-1 \* var\(--pane-resize-half-target\)\)/s.test(inspector), "The Logs handle should straddle the drawer seam");
 
   for (const selector of [
     "sidebar-resize-handle",
@@ -78,7 +81,7 @@ try {
     "preview-log-resize-handle",
   ]) {
     const localIndicator = new RegExp(`\\.${selector}::(?:before|after)`);
-    assert(!localIndicator.test(`${shell}\n${chat}\n${workspaces}`), `${selector} should not redefine the shared indicator`);
+    assert(!localIndicator.test(`${shell}\n${chat}\n${workspaces}\n${inspector}\n${pullRequests}\n${mediaManager}`), `${selector} should not redefine the shared indicator`);
   }
 } finally {
   await server.close();

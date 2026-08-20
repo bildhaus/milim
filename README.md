@@ -14,11 +14,12 @@ Release artifacts target Windows and macOS. Linux packaging is not a primary rel
 ## Why milim
 
 - **One canonical thread.** Conversation, workspace context, attachments, tool activity, approvals, and review history stay together when you change models or runtimes.
+- **Threads can collaborate.** Drag one root chat into another to grant bounded transcript reads and asynchronous mailbox sends without merging either history or waking the originating chat.
 - **Your runtime choice.** Switch the next turn between hosted providers, Ollama, LM Studio, or vLLM, and separately installed Codex, Claude, OpenCode, or Pi runtimes. Thread history stays put; provider turns can keep per-model generation and capability overrides.
 - **Explicit local boundaries.** Workspace selection, model routing, outbound privacy, and approval mode remain visible and under your control.
 - **Execution you can inspect.** Consequential tool calls can pause for review. Git diffs, checkpoints, previews, run details, and recovery actions stay beside the conversation.
 - **A workbench when you need it.** Agents, Workers, skills, schedules, MCP servers and Apps, memory, media generation, Google Workspace, and previews extend the core thread through the **Tools** launcher.
-- **Direct mobile control.** The native iOS and Android companion connects to paired desktops over Tailscale, trusted LAN discovery, or a manual URL. milim operates no relay, account service, or cloud transcript store for this path.
+- **Direct mobile control.** The native iOS and Android companion connects to paired desktops over Tailscale, trusted LAN discovery, or a manual URL. Enabled desktop transports restore automatically after milim restarts. milim operates no relay, account service, or cloud transcript store for this path.
 
 Provider-backed chat and installed account runtimes remain distinct. Provider models use milim's tool-agent loop; account runtimes retain their own sessions and tools behind the same visible approval policy.
 
@@ -86,13 +87,17 @@ OpenAI-compatible clients can use `http://127.0.0.1:7377/v1`. milim does not shi
 
 | Part | Responsibility |
 |---|---|
-| Desktop app | Tauri 2 with Vite, React, and TypeScript. Presents canonical thread state plus desktop-only workspace, preview, Git review, and a dedicated full-window Settings surface that leaves the active workspace mounted. |
+| Desktop app | Tauri 2 with Vite, React, and TypeScript. Presents canonical thread state plus desktop-only workspace, preview, Git review, and a dedicated theme-aware full-window Settings surface that leaves the active workspace mounted. |
 | Native mobile app | Bare React Native with TypeScript and Metro. Acts as a bounded, multi-host controller and cache for paired desktops. |
 | Embedded server | In-process Axum server and Rust `RunManager`. Owns active turns, queues, approvals, normalized events, and runtime adapters. |
-| Local data | Desktop SQLite is authoritative for threads, runs, timelines, queues, approvals, and favorite model IDs. Mobile SQLite is a host-partitioned cache for timelines, drafts, and client-only picker layout. |
+| Local data | Desktop SQLite is authoritative for threads, directional thread links, mailbox exchanges, runs, timelines, queues, approvals, and favorite model IDs. Mobile SQLite is a host-partitioned cache for timelines, drafts, and client-only picker layout. |
 | Model sources | Hosted providers, local OpenAI-compatible servers, and separately installed account-runtime CLIs connect through explicit routing and privacy boundaries. |
 
-The desktop and mobile clients are replicas of Rust-owned canonical state. Favorite model changes made in either picker update the desktop-owned list and propagate live to the other client. Desktop model and reasoning changes are committed to canonical thread state before the next turn starts. When an older thread contains a provider route that no longer exists, opening it repairs an unambiguous replacement or asks for a new model selection. Hiding or reloading the desktop renderer does not pause accepted work; explicit quit or restart cancels active runs and records unfinished work as interrupted.
+The desktop and mobile clients are replicas of Rust-owned canonical state. Favorite model changes made in either picker update the desktop-owned list and propagate live to the other client. New desktop chats are created in canonical Rust state before their local replica becomes visible, and desktop model and reasoning changes are committed there before the next turn starts. A successful switch between two selected models adds a quiet, durable transcript notice showing the previous model and that the same thread continues; initial selection and reasoning-only changes stay silent. When an older thread contains a provider route that no longer exists, opening it repairs an unambiguous replacement or asks for a new model selection. Hiding or reloading the desktop renderer does not pause accepted work; explicit quit or restart cancels active runs and records unfinished work as interrupted.
+
+External files can be dropped anywhere in the desktop window and attach once to the active chat's composer. Dragging a canonical root chat from Sidebar, Top, or Bottom navigation over another active chat creates a durable directional link. Linked chats receive bounded read/list/send tools according to the selected Agent and approval mode; mailbox replies return visibly without starting a new run in the origin chat.
+
+Desktop history is loaded lazily: startup hydrates thread summaries and the latest 100 messages of the active or running chats, then pages older messages without moving the reader's scroll position. Long transcripts keep at most 200 message rows mounted. The lossless run ledger deduplicates artifacts by SHA-256, compresses large JSON, and stores repeated provider requests as verified deltas with periodic checkpoints; legacy rows migrate in small idle-only batches.
 
 ## Development
 
@@ -105,6 +110,12 @@ cargo clippy --workspace --all-targets
 
 # Desktop
 pnpm -C apps/desktop verify
+
+# Release-runtime performance proof (Windows WebView2)
+pnpm -C apps/desktop perf:canonical
+
+# Seven fresh canonical processes with median/p95 reporting
+pnpm -C apps/desktop perf:suite
 
 # Native mobile
 pnpm -C apps/mobile verify

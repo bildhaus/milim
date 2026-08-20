@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import "../settings.css";
 import {
   accountRuntimeKind,
   discoverLocalProviders,

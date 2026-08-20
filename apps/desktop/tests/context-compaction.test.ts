@@ -114,6 +114,17 @@ const approvalOutbound = messagesForModelContext([], approvalThread);
 assert.deepEqual(approvalOutbound, [approvalThread[0]], "approval cards should stay out of model context");
 assert.equal(estimateMessagesTokens(approvalThread), estimateMessagesTokens([approvalThread[0]]), "approval cards should not affect token estimates");
 
+const modelChangeNotice: ChatMessage = {
+  role: "system",
+  content: "",
+  modelChange: { previousModel: "codex:gpt-5", model: "claude:sonnet" },
+};
+assert.deepEqual(
+  messagesForModelContext([], [approvalThread[0], modelChangeNotice]),
+  [approvalThread[0]],
+  "model-change notices should remain UI provenance rather than model-visible context",
+);
+
 const interruptedThread = [
   user("use paper-mcp for this"),
   assistant(""),

@@ -64,7 +64,7 @@ globalThis.fetch = async (input) => {
 
 try {
   const { listModelsDetailed } = await server.ssrLoadModule("/src/api.ts");
-  const models = await listModelsDetailed();
+  const models = await listModelsDetailed(undefined, { retry: true });
 
   assert.deepEqual(
     models.map((model) => model.id),

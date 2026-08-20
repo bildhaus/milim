@@ -1,4 +1,5 @@
 import { Fragment, type KeyboardEvent, useEffect, useMemo, useState } from "react";
+import "../settings.css";
 import {
   listModelsDetailed,
   listWorkspaceLaunchers,
@@ -84,7 +85,7 @@ import {
   type PinnedQuickAction,
 } from "../ui/store";
 import { playInterfaceSound } from "../ui/sounds";
-import { Archive, Check, Code, Download, ExternalLink, FileText, FolderOpen, Gear, GitLogo, Pencil, PlusSquare, Refresh, Search, Sidebar, Smartphone, Sun, Trash, X } from "../components/icons";
+import { Archive, Check, Code, Download, ExternalLink, FileText, FolderOpen, Gear, GitLogo, Pencil, PlusSquare, Refresh, Search, Sidebar, Smartphone, Sun, Trash, Volume2, X } from "../components/icons";
 import { MobileCompanionSettings } from "../components/MobileCompanionSettings";
 import { ThemeEditor } from "../components/ThemeEditor";
 import { Select, Slider, Toggle } from "../components/ui";
@@ -133,8 +134,14 @@ const SETTINGS_SECTIONS: SettingsSection[] = [
     icon: Sun,
   },
   {
+    id: "notifications",
+    label: "Notifications",
+    detail: "Native alerts and interface sounds",
+    icon: Volume2,
+  },
+  {
     id: "models",
-    label: "Models & agents",
+    label: "Model & agent defaults",
     detail: "Defaults and unavailable-model behavior",
     icon: Gear,
   },
@@ -146,8 +153,8 @@ const SETTINGS_SECTIONS: SettingsSection[] = [
   },
   {
     id: "history",
-    label: "Data",
-    detail: "Archives, exports, backup, and recovery",
+    label: "Data & privacy",
+    detail: "Storage, browser data, exports, backup, and archives",
     icon: Archive,
   },
   {
@@ -163,15 +170,9 @@ const SETTINGS_SECTIONS: SettingsSection[] = [
     icon: Smartphone,
   },
   {
-    id: "system",
-    label: "System",
-    detail: "Credential storage, shortcuts, and app commands",
-    icon: Gear,
-  },
-  {
     id: "about",
-    label: "About",
-    detail: "Version and GitHub release updates",
+    label: "About & updates",
+    detail: "Update policy, version, releases, and diagnostics",
     icon: GitLogo,
   },
   {
@@ -183,10 +184,10 @@ const SETTINGS_SECTIONS: SettingsSection[] = [
 ];
 
 const SETTINGS_SECTION_GROUPS: Array<{ label: string; sections: SettingsSectionId[] }> = [
-  { label: "Preferences", sections: ["app", "chat", "appearance"] },
+  { label: "Preferences", sections: ["app", "chat", "appearance", "notifications"] },
   { label: "Workflows", sections: ["models", "workspace"] },
-  { label: "Data & devices", sections: ["history", "google", "mobile"] },
-  { label: "Application", sections: ["system", "about", "developer"] },
+  { label: "Connections", sections: ["google", "mobile"] },
+  { label: "Application", sections: ["history", "about", "developer"] },
 ];
 function onboardingSetupLabel(value: string | null): string {
   if (value === "local_detect") return "Local detection";
@@ -886,6 +887,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
     <SettingsSurface
       backLabel="Back to app"
       backTestId="close-settings"
+      hasBackground={Boolean(activeBackgroundImage)}
       testId="settings-page"
       onBack={onClose}
     >
@@ -981,12 +983,13 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
           <div className="settings-detail">
             <div className="settings-detail-head">
               <div>
-                <h3>{activeSettingsSection.label}</h3>
+                <h1>{activeSettingsSection.label}</h1>
                 <p>{activeSettingsSection.detail}</p>
               </div>
             </div>
 
             <div className="settings-content">
+              <div className="settings-content-inner">
             {activeSection === "app" && (
         <section className="settings-section" id="settings-panel-app" role="tabpanel" aria-labelledby="settings-tab-app" tabIndex={-1}>
           <SettingsPanel>
@@ -1074,10 +1077,10 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                 </div>
                 <div className="setting-toggle-row">
                   <div>
-                    <strong>Show account usage in title bar</strong>
-                    <span>Show compact quota details for the active Codex or Claude runtime.</span>
+                    <strong>Show account quota in title bar</strong>
+                    <span>Show remaining Codex or Claude quota. Thread spend stays visible separately.</span>
                   </div>
-                  <Toggle checked={showAccountUsageInTitleBar} onChange={setShowAccountUsageInTitleBar} ariaLabel="Show account usage in title bar" testId="general-titlebar-account-usage-toggle" />
+                  <Toggle checked={showAccountUsageInTitleBar} onChange={setShowAccountUsageInTitleBar} ariaLabel="Show account quota in title bar" testId="general-titlebar-account-usage-toggle" />
                 </div>
                 {threadNavigationPlacement === "sidebar" && <div className="setting-toggle-row">
                   <div>
@@ -1099,7 +1102,55 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                 </div>
               </div>
             </SettingsBlock>
-            <SettingsBlock title="Notifications" data-setting-id="app-notifications" className={settingHighlightClass("app-notifications").trim()}>
+            <SettingsBlock title="Keyboard shortcuts" data-setting-id="system-shortcuts" className={settingHighlightClass("system-shortcuts").trim()}>
+              <div className="setting-stack">
+                {APP_SHORTCUT_ACTIONS.map((action) => (
+                  <div className="shortcut-recorder-row" key={action}>
+                    <div>
+                      <strong>{APP_SHORTCUT_LABELS[action]}</strong>
+                      <span>{recordingShortcut === action ? "Press a key combination..." : shortcutLabel(appShortcuts[action])}</span>
+                    </div>
+                    <button
+                      className={"btn-ghost shortcut-recorder-button" + (recordingShortcut === action ? " active" : "")}
+                      type="button"
+                      data-shortcut-recorder="true"
+                      data-testid={`app-shortcut-${action}`}
+                      aria-pressed={recordingShortcut === action}
+                      onClick={() => startRecordingShortcut(action)}
+                    >
+                      {recordingShortcut === action ? "Recording" : "Change"}
+                    </button>
+                  </div>
+                ))}
+                <div className="settings-action-row">
+                  <div>
+                    <strong>Shortcut defaults</strong>
+                    <span>Restore Milim's default app-window shortcuts.</span>
+                  </div>
+                  <button
+                    className="btn-ghost"
+                    type="button"
+                    data-testid="app-shortcuts-reset"
+                    onClick={() => {
+                      resetAppShortcuts();
+                      setRecordingShortcut(null);
+                      setShortcutError(null);
+                    }}
+                  >
+                    Reset
+                  </button>
+                </div>
+                {shortcutError && <p className="sheet-hint error">{shortcutError}</p>}
+              </div>
+            </SettingsBlock>
+            </SettingsPanel>
+        </section>
+            )}
+
+            {activeSection === "notifications" && (
+        <section className="settings-section" id="settings-panel-notifications" role="tabpanel" aria-labelledby="settings-tab-notifications" tabIndex={-1}>
+          <SettingsPanel>
+            <SettingsBlock title="Native notifications" data-setting-id="app-notifications" className={settingHighlightClass("app-notifications").trim()}>
               <div className="setting-stack">
                 <div className="setting-toggle-row">
                   <div><strong>Run finished</strong><span>Show a native notification after a run and its queue finish.</span></div>
@@ -1120,19 +1171,52 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                 {notificationError ? <p className="sheet-hint error" role="alert">{notificationError}</p> : null}
               </div>
             </SettingsBlock>
-            <SettingsBlock title="Update policy" data-setting-id="app-update-policy" className={settingHighlightClass("app-update-policy").trim()}>
+            <SettingsBlock title="Interface sounds" data-setting-id="appearance-interface-sounds" className={settingHighlightClass("appearance-interface-sounds").trim()}>
               <div className="setting-stack">
                 <div className="setting-toggle-row">
-                  <div><strong>Check automatically</strong><span>Check at startup and periodically while Milim is open.</span></div>
-                  <Toggle checked={automaticCheck} onChange={setAutomaticCheck} ariaLabel="Check for updates automatically" />
+                  <div>
+                    <strong>Enable sounds</strong>
+                    <span>Locally synthesized alerts, off by default.</span>
+                  </div>
+                  <Toggle checked={interfaceSounds} onChange={setInterfaceSounds} ariaLabel="Enable interface sounds" testId="interface-sounds-toggle" />
                 </div>
-                <div className="setting-toggle-row">
-                  <div><strong>Download automatically</strong><span>Download verified updates after an automatic check. Installation always remains manual.</span></div>
-                  <Toggle checked={automaticDownload} onChange={setAutomaticDownload} ariaLabel="Download updates automatically" />
-                </div>
+                {interfaceSounds && (
+                  <>
+                    <div className="setting-toggle-row">
+                      <div><strong>Needs attention</strong><span>Tool approvals, proposed worker plans, and terminal errors.</span></div>
+                      <Toggle checked={soundOnAttention} onChange={setSoundOnAttention} ariaLabel="Needs attention sounds" testId="attention-sounds-toggle" />
+                    </div>
+                    {soundOnAttention && (
+                      <div className="setting-field">
+                        <span className="setting-mini-title">Attention sound</span>
+                        <div className="setting-field-action">
+                          <Select value={attentionSound} options={ATTENTION_SOUND_OPTIONS.map((value) => ({ value, label: SOUND_LABELS[value] }))} onChange={(value) => setAttentionSound(value as AttentionSound)} testId="attention-sound-select" />
+                          <button type="button" className="btn-ghost" onClick={() => playInterfaceSound(attentionSound)}>Preview</button>
+                        </div>
+                      </div>
+                    )}
+                    <div className="setting-toggle-row">
+                      <div><strong>Finished</strong><span>A visible active chat completes, including its queued messages.</span></div>
+                      <Toggle checked={soundOnFinished} onChange={setSoundOnFinished} ariaLabel="Finished sounds" testId="finished-sounds-toggle" />
+                    </div>
+                    {soundOnFinished && (
+                      <div className="setting-field">
+                        <span className="setting-mini-title">Finished sound</span>
+                        <div className="setting-field-action">
+                          <Select value={finishedSound} options={FINISHED_SOUND_OPTIONS.map((value) => ({ value, label: SOUND_LABELS[value] }))} onChange={(value) => setFinishedSound(value as FinishedSound)} testId="finished-sound-select" />
+                          <button type="button" className="btn-ghost" onClick={() => playInterfaceSound(finishedSound)}>Preview</button>
+                        </div>
+                      </div>
+                    )}
+                    <div className="setting-toggle-row">
+                      <div><strong>Interaction feedback</strong><span>Optional cues for toggles, menus, dismissals, and primary actions.</span></div>
+                      <Toggle checked={soundOnInteractions} onChange={setSoundOnInteractions} ariaLabel="Interaction feedback sounds" testId="interaction-sounds-toggle" />
+                    </div>
+                  </>
+                )}
               </div>
             </SettingsBlock>
-            </SettingsPanel>
+          </SettingsPanel>
         </section>
             )}
 
@@ -1502,6 +1586,22 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
             {activeSection === "history" && (
         <section className="settings-section" id="settings-panel-history" role="tabpanel" aria-labelledby="settings-tab-history" tabIndex={-1}>
           <SettingsPanel>
+            <SettingsBlock title="Credential storage" data-setting-id="system-secret-storage" className={settingHighlightClass("system-secret-storage").trim()}>
+              <div className="settings-action-row">
+                <div>
+                  <strong>
+                    {!secretStorage
+                      ? "Checking credential storage"
+                      : secretStorage.mode === "native"
+                        ? "OS credential vault"
+                        : secretStorage.mode === "restricted_file"
+                          ? "Restricted local fallback"
+                          : "Credential storage unavailable"}
+                  </strong>
+                  <span>{secretStorage?.detail ?? "Reading the desktop credential-storage status."}</span>
+                </div>
+              </div>
+            </SettingsBlock>
             <SettingsBlock title="Browser data" data-setting-id="browser-data" className={settingHighlightClass("browser-data").trim()}>
               <div className="setting-stack">
                 <SettingsChoiceGroup
@@ -1730,6 +1830,27 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
 
               {custom.length > 0 && <p className="sheet-hint">Double-click a custom theme to edit or delete it.</p>}
             </SettingsBlock>
+            <SettingsBlock title="Background" data-setting-id="appearance-background" className={settingHighlightClass("appearance-background").trim()}>
+              {activeBackgroundImage ? (
+                <AppearanceBackgroundImageChoices
+                  backgroundImage={activeBackgroundImage}
+                  fit={backgroundFit}
+                  treatment={backgroundTreatment}
+                  onFitChange={setBackgroundFit}
+                  onTreatmentChange={setBackgroundTreatment}
+                />
+              ) : (
+                <div className="settings-action-row">
+                  <div>
+                    <strong>No custom background</strong>
+                    <span>Add an image or gradient in a custom theme.</span>
+                  </div>
+                  <button className="btn-ghost" type="button" onClick={() => setEditing({ base: current, isNew: true })}>
+                    Customize theme
+                  </button>
+                </div>
+              )}
+            </SettingsBlock>
             <SettingsBlock title="Chat surface" data-setting-id="appearance-chat-surface" className={settingHighlightClass("appearance-chat-surface").trim()}>
               <div className="setting-stack">
                 <div className="setting-field">
@@ -1805,150 +1926,6 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                 onChange={setCodeBlockTheme}
               />
             </SettingsBlock>
-            <SettingsBlock title="Interface sounds" data-setting-id="appearance-interface-sounds" className={settingHighlightClass("appearance-interface-sounds").trim()}>
-              <div className="setting-stack">
-                <div className="setting-toggle-row">
-                  <div>
-                    <strong>Enable sounds</strong>
-                    <span>Locally synthesized alerts, off by default.</span>
-                  </div>
-                  <Toggle
-                    checked={interfaceSounds}
-                    onChange={setInterfaceSounds}
-                    ariaLabel="Enable interface sounds"
-                    testId="interface-sounds-toggle"
-                  />
-                </div>
-                {interfaceSounds && (
-                  <>
-                    <div className="setting-toggle-row">
-                      <div>
-                        <strong>Needs attention</strong>
-                        <span>Tool approvals, proposed worker plans, and terminal errors.</span>
-                      </div>
-                      <Toggle checked={soundOnAttention} onChange={setSoundOnAttention} ariaLabel="Needs attention sounds" testId="attention-sounds-toggle" />
-                    </div>
-                    {soundOnAttention && (
-                      <div className="setting-field">
-                        <span className="setting-mini-title">Attention sound</span>
-                        <div className="setting-field-action">
-                          <Select
-                            value={attentionSound}
-                            options={ATTENTION_SOUND_OPTIONS.map((value) => ({ value, label: SOUND_LABELS[value] }))}
-                            onChange={(value) => setAttentionSound(value as AttentionSound)}
-                            testId="attention-sound-select"
-                          />
-                          <button type="button" className="btn-ghost" onClick={() => playInterfaceSound(attentionSound)}>Preview</button>
-                        </div>
-                      </div>
-                    )}
-                    <div className="setting-toggle-row">
-                      <div>
-                        <strong>Finished</strong>
-                        <span>A visible active chat completes, including its queued messages.</span>
-                      </div>
-                      <Toggle checked={soundOnFinished} onChange={setSoundOnFinished} ariaLabel="Finished sounds" testId="finished-sounds-toggle" />
-                    </div>
-                    {soundOnFinished && (
-                      <div className="setting-field">
-                        <span className="setting-mini-title">Finished sound</span>
-                        <div className="setting-field-action">
-                          <Select
-                            value={finishedSound}
-                            options={FINISHED_SOUND_OPTIONS.map((value) => ({ value, label: SOUND_LABELS[value] }))}
-                            onChange={(value) => setFinishedSound(value as FinishedSound)}
-                            testId="finished-sound-select"
-                          />
-                          <button type="button" className="btn-ghost" onClick={() => playInterfaceSound(finishedSound)}>Preview</button>
-                        </div>
-                      </div>
-                    )}
-                    <div className="setting-toggle-row">
-                      <div>
-                        <strong>Interaction feedback</strong>
-                        <span>Optional cues for toggles, menus, dismissals, and primary actions.</span>
-                      </div>
-                      <Toggle checked={soundOnInteractions} onChange={setSoundOnInteractions} ariaLabel="Interaction feedback sounds" testId="interaction-sounds-toggle" />
-                    </div>
-                  </>
-                )}
-              </div>
-            </SettingsBlock>
-            {activeBackgroundImage && (
-              <SettingsBlock title="Background image" data-setting-id="appearance-background" className={settingHighlightClass("appearance-background").trim()}>
-                <AppearanceBackgroundImageChoices
-                  backgroundImage={activeBackgroundImage}
-                  fit={backgroundFit}
-                  treatment={backgroundTreatment}
-                  onFitChange={setBackgroundFit}
-                  onTreatmentChange={setBackgroundTreatment}
-                />
-              </SettingsBlock>
-            )}
-          </SettingsPanel>
-        </section>
-            )}
-
-            {activeSection === "system" && (
-        <section className="settings-section" id="settings-panel-system" role="tabpanel" aria-labelledby="settings-tab-system" tabIndex={-1}>
-          <SettingsPanel>
-            <SettingsBlock title="Credential storage" data-setting-id="system-secret-storage" className={settingHighlightClass("system-secret-storage").trim()}>
-              <div className="settings-action-row">
-                <div>
-                  <strong>
-                    {!secretStorage
-                      ? "Checking credential storage"
-                      : secretStorage.mode === "native"
-                        ? "OS credential vault"
-                        : secretStorage.mode === "restricted_file"
-                          ? "Restricted local fallback"
-                          : "Credential storage unavailable"}
-                  </strong>
-                  <span>{secretStorage?.detail ?? "Reading the desktop credential-storage status."}</span>
-                </div>
-              </div>
-            </SettingsBlock>
-            <SettingsBlock data-setting-id="system-shortcuts" className={settingHighlightClass("system-shortcuts").trim()}>
-              <div className="setting-stack">
-                {APP_SHORTCUT_ACTIONS.map((action) => (
-                  <div className="shortcut-recorder-row" key={action}>
-                    <div>
-                      <strong>{APP_SHORTCUT_LABELS[action]}</strong>
-                      <span>{recordingShortcut === action ? "Press a key combination..." : shortcutLabel(appShortcuts[action])}</span>
-                    </div>
-                    <button
-                      className={"btn-ghost shortcut-recorder-button" + (recordingShortcut === action ? " active" : "")}
-                      type="button"
-                      data-shortcut-recorder="true"
-                      data-testid={`app-shortcut-${action}`}
-                      aria-pressed={recordingShortcut === action}
-                      onClick={() => startRecordingShortcut(action)}
-                    >
-                      {recordingShortcut === action ? "Recording" : "Change"}
-                    </button>
-                  </div>
-                ))}
-                <div className="settings-action-row">
-                  <div>
-                    <strong>Shortcut defaults</strong>
-                    <span>Restore Milim's default app-window shortcuts.</span>
-                  </div>
-                  <button
-                    className="btn-ghost"
-                    type="button"
-                    data-testid="app-shortcuts-reset"
-                    onClick={() => {
-                      resetAppShortcuts();
-                      setRecordingShortcut(null);
-                      setShortcutError(null);
-                    }}
-                  >
-                    Reset
-                  </button>
-                </div>
-                {shortcutError && <p className="sheet-hint error">{shortcutError}</p>}
-              </div>
-            </SettingsBlock>
           </SettingsPanel>
         </section>
             )}
@@ -1966,6 +1943,18 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
             {activeSection === "about" && (
         <section className="settings-section" id="settings-panel-about" role="tabpanel" aria-labelledby="settings-tab-about" tabIndex={-1}>
           <SettingsPanel>
+            <SettingsBlock title="Update policy" data-setting-id="app-update-policy" className={settingHighlightClass("app-update-policy").trim()}>
+              <div className="setting-stack">
+                <div className="setting-toggle-row">
+                  <div><strong>Check automatically</strong><span>Check at startup and periodically while Milim is open.</span></div>
+                  <Toggle checked={automaticCheck} onChange={setAutomaticCheck} ariaLabel="Check for updates automatically" />
+                </div>
+                <div className="setting-toggle-row">
+                  <div><strong>Download automatically</strong><span>Download verified updates after an automatic check. Installation always remains manual.</span></div>
+                  <Toggle checked={automaticDownload} onChange={setAutomaticDownload} ariaLabel="Download updates automatically" />
+                </div>
+              </div>
+            </SettingsBlock>
             <SettingsBlock title="Version" data-setting-id="about-version" className={settingHighlightClass("about-version").trim()}>
               <div className="settings-action-row">
                 <div>
@@ -2163,6 +2152,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
           </SettingsPanel>
         </section>
             )}
+              </div>
           </div>
           </div>
         </div>

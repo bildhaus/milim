@@ -1,0 +1,68 @@
+/* Shell-critical overlay primitives. Feature-specific sheet styles are lazy. */
+.sheet-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  opacity: 1;
+  padding: 16px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(2px);
+  transition: opacity var(--motion-standard) var(--motion-ease-out);
+}
+.sheet {
+  width: min(940px, 94vw);
+  height: min(760px, 88vh);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 16px;
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-secondary) 94%, var(--bg-primary));
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.48);
+  opacity: 1;
+  scale: 1;
+  translate: 0;
+  transform-origin: center;
+  transition: opacity var(--motion-standard) var(--motion-ease-out), scale var(--motion-standard) var(--motion-ease-out), translate var(--motion-standard) var(--motion-ease-out);
+}
+@starting-style {
+  .sheet-overlay { opacity: 0; }
+  .sheet { opacity: 0; scale: 0.985; translate: 0 6px; }
+}
+.sheet-header { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex: none; }
+.sheet-header h2 { margin: 0; font-size: 18px; font-weight: 650; }
+.sheet-close { width: 30px; height: 30px; }
+.sheet-sub { flex: none; max-width: 620px; margin: 3px 0 14px; font-size: 12.5px; line-height: 1.45; color: var(--secondary-text); }
+.sheet-hint { margin: 12px 2px 0; font-size: 12px; color: var(--tertiary-text); }
+.sheet-hint.error { color: var(--error); }
+
+.onboarding-preflight {
+  position: fixed;
+  inset: 0;
+  z-index: 95;
+  display: grid;
+  place-items: center;
+  background: radial-gradient(circle at 50% -12%, rgba(255, 255, 255, 0.08), transparent 34%), linear-gradient(180deg, #030405 0%, #090a0d 50%, #020304 100%), #020304;
+}
+.onboarding-preflight-logo { width: 88px; height: 74px; overflow: visible; fill: rgba(255, 255, 255, 0.74); }
+.onboarding-preflight-logo use { transform-box: fill-box; transform-origin: 50% 100%; }
+@keyframes onboarding-signal-short { 0%, 100% { transform: scaleY(1); } 45% { transform: scaleY(0.83); } 58% { transform: scaleY(1.025); } }
+@keyframes onboarding-signal-medium { 0%, 100% { transform: scaleY(1); } 45% { transform: scaleY(0.91); } 58% { transform: scaleY(1.012); } }
+@keyframes onboarding-signal-long { 0%, 100% { transform: scaleY(1); } 45% { transform: scaleY(0.875); } 58% { transform: scaleY(1.016); } }
+@keyframes onboarding-bounce-dot { 0%, 58% { transform: translateY(0) scale(1); } 68% { transform: translateY(-14.9px) scale(0.92, 1.08); } 78% { transform: translateY(0) scale(1.14, 0.82); } 85% { transform: translateY(-4.4px) scale(0.97, 1.04); } 91% { transform: translateY(0) scale(1.06, 0.93); } 95% { transform: translateY(-1px) scale(0.995, 1.01); } 100% { transform: translateY(0) scale(1); } }
+.onboarding-preflight-logo :is(.signal-short, .signal-medium, .signal-long) { animation-duration: 2.1s; animation-timing-function: cubic-bezier(0.65, 0, 0.22, 1); animation-iteration-count: infinite; }
+.onboarding-preflight-logo .signal-short { animation-name: onboarding-signal-short; }
+.onboarding-preflight-logo .signal-medium { animation-name: onboarding-signal-medium; }
+.onboarding-preflight-logo .signal-long { animation-name: onboarding-signal-long; }
+.onboarding-preflight-logo .bounce-dot { animation: onboarding-bounce-dot 2.1s cubic-bezier(0.22, 0.72, 0.28, 1) infinite; }
+.onboarding-preflight-logo .signal-d1,
+.onboarding-preflight-logo .bounce-d1 { animation-delay: -0.22s; }
+.onboarding-preflight-logo .signal-l { animation-delay: -0.44s; }
+.onboarding-preflight-logo .signal-s2,
+.onboarding-preflight-logo .bounce-d2 { animation-delay: -0.67s; }
+.onboarding-preflight-logo .signal-m2 { animation-delay: -0.89s; }

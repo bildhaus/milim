@@ -1,6 +1,6 @@
 [package]
 name = "milim-desktop"
-version = "0.2.45"
+version = "0.2.46"
 edition = "2021"
 description = "milim desktop app"
 authors = ["Omer Shatzberg <omershatzberg@gmail.com>"]
@@ -23,6 +23,9 @@ default = ["computer-use"]
 # data-URI for vision models). Dormant at runtime until the user enables the
 # "Computer" toggle, which is off by default.
 computer-use = ["dep:enigo", "dep:xcap", "dep:image", "dep:core-graphics"]
+# Enables the read-only native performance snapshot used by the release
+# benchmark. It does not change product behavior.
+perf-diagnostics = []
 
 [dependencies]
 tauri = { version = "2", features = ["unstable", "tray-icon", "macos-private-api"] }

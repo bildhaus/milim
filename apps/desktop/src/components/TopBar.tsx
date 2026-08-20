@@ -139,6 +139,7 @@ export function TopBar({
     }
     let cancelled = false;
     const refresh = async () => {
+      if (document.visibilityState === "hidden") return;
       try {
         const limits = codexLimitsFromRateLimitPayload(await getCodexRateLimits());
         if (!cancelled) setCodexLimits(limits);
@@ -148,9 +149,12 @@ export function TopBar({
     };
     void refresh();
     const timer = setInterval(() => void refresh(), 60_000);
+    const onVisible = () => void refresh();
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       cancelled = true;
       clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [activeModelIsCodex, showAccountUsage]);
 
@@ -237,7 +241,7 @@ export function TopBar({
             className="topbar-usage"
             data-testid="thread-usage"
             title={threadMetrics.title ?? undefined}
-            aria-label={`Cumulative thread usage: ${threadMetrics.label}`}
+            aria-label={`Thread totals: ${threadMetrics.label}`}
             data-tauri-drag-region
           >
             {threadMetrics.label}
@@ -248,7 +252,7 @@ export function TopBar({
             className="topbar-account-usage"
             data-testid="account-usage-pill"
             title={providerLimitTitle ?? providerLimitText}
-            aria-label={`Account usage: ${providerLimitTitle ?? providerLimitText}`}
+            aria-label={`Account quota: ${providerLimitTitle ?? providerLimitText}`}
             data-tauri-drag-region
           >
             {providerLimitText}

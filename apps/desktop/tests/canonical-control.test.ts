@@ -1,8 +1,14 @@
 import { strict as assert } from "node:assert";
 import {
   controlQueuedMessage,
+  hostBusySessionIdsFromBootstrap,
+  mailboxMessagesFromTimeline,
+  mergeMailboxMessages,
+  mergeModelChangeMessages,
   mergeControlRunMessages,
+  modelChangeMessagesFromTimeline,
   projectControlRunMessages,
+  shouldQueueCanonicalFollowup,
 } from "../src/lib/canonicalControl.js";
 import type { ControlQueuedTurnV1, ControlTimelineItemV1 } from "../src/api.js";
 
@@ -20,6 +26,27 @@ const item = (
   data,
   created_at_ms: seq,
 });
+
+assert.equal(
+  shouldQueueCanonicalFollowup("thread-1", ["thread-1"]),
+  true,
+  "a Rust-owned busy thread should queue canonically before the local run id reattaches",
+);
+assert.equal(
+  shouldQueueCanonicalFollowup("thread-1", [], "run-1"),
+  true,
+  "an attached canonical run should queue canonically",
+);
+assert.equal(shouldQueueCanonicalFollowup("thread-1", []), false);
+assert.deepEqual(
+  hostBusySessionIdsFromBootstrap({
+    threads: [{ id: "thread-1", busy: false, queued_turns: 1 }],
+    active_runs: [],
+    queued_turns: [{ thread_id: "thread-1" }],
+  } as never),
+  [],
+  "a preserved queue without an active run must not keep the composer in stop mode",
+);
 
 const streaming = projectControlRunMessages(
   [
@@ -47,6 +74,19 @@ assert.deepEqual(streamedReasoning.streamParts, [
   { kind: "text", content: "answer continued" },
 ]);
 
+const interleavedReasoning = projectControlRunMessages(
+  [
+    item(1, "assistant_delta", { text: "Let me see what gcloud", reasoning: "" }),
+    item(2, "assistant_delta", { text: "", reasoning: "working folder... " }),
+    item(3, "assistant_delta", { text: " has configured.", reasoning: "" }),
+  ],
+  "run-1",
+)[0];
+assert.deepEqual(interleavedReasoning.streamParts, [
+  { kind: "text", content: "Let me see what gcloud has configured." },
+  { kind: "thinking", content: "working folder... " },
+]);
+
 const completed = projectControlRunMessages(
   [
     item(1, "message", { id: "user-1", role: "user", content: "hello" }),
@@ -61,6 +101,36 @@ const completed = projectControlRunMessages(
   "run-1",
 );
 assert.equal(completed[1].id, "assistant-1");
+
+const completedWithOrderedWork = projectControlRunMessages(
+  [
+    item(1, "assistant_delta", { text: "I'll inspect.", reasoning: "Planning." }),
+    item(2, "tool_call", { call_id: "call-1", name: "shell" }),
+    item(3, "tool_result", { call_id: "call-1", name: "shell" }),
+    item(4, "assistant_delta", { text: "Complete.", reasoning: "" }),
+    item(5, "message", {
+      id: "assistant-ordered",
+      role: "assistant",
+      content: "I'll inspect.Complete.",
+      reasoning: "Planning.",
+    }),
+  ],
+  "run-1",
+)[0];
+assert.deepEqual(
+  completedWithOrderedWork.streamParts?.map((part) =>
+    part.kind === "event"
+      ? `${part.kind}:${part.name}:${part.status}`
+      : `${part.kind}:${part.content}`,
+  ),
+  [
+    "text:I'll inspect.",
+    "thinking:Planning.",
+    "event:shell:done",
+    "text:Complete.",
+  ],
+  "completion should preserve the streamed order around tool activity",
+);
 
 const reconciledTools = projectControlRunMessages(
   [
@@ -124,6 +194,19 @@ assert.deepEqual(
   "a present call id should never fall back to a different same-name start",
 );
 
+const interruptedCanonicalTool = projectControlRunMessages(
+  [
+    item(1, "tool_call", { call_id: "call-interrupted", name: "shell" }),
+    item(2, "run_status", { status: "aborted" }),
+  ],
+  "run-1",
+)[0];
+assert.equal(
+  interruptedCanonicalTool.streamTerminalOutcome,
+  "interrupted",
+  "canonical aborted turns should not let the renderer synthesize a successful tool result",
+);
+
 const approval = projectControlRunMessages(
   [
     item(1, "tool_approval_required", {
@@ -151,6 +234,26 @@ assert.equal(
   3,
 );
 
+const optimisticUser = { id: "local-user", role: "user" as const, content: "hello" };
+assert.deepEqual(
+  mergeControlRunMessages(
+    [{ id: "old", role: "user", content: "old" }, optimisticUser],
+    "run-1",
+    streaming.filter((message) => message.role === "assistant"),
+  ).map((message) => message.id),
+  ["old", "local-user", "control-stream-run-1"],
+  "an optimistic user turn should stay visible until the control plane echoes it",
+);
+assert.deepEqual(
+  mergeControlRunMessages(
+    [{ id: "old", role: "user", content: "old" }, optimisticUser],
+    "run-1",
+    completed,
+  ).map((message) => message.id),
+  ["old", "local-user", "assistant-1"],
+  "the echoed user turn should reuse the optimistic message id",
+);
+
 const queued = controlQueuedMessage({
   id: "queue-1",
   thread_id: "thread-1",
@@ -169,5 +272,66 @@ const queued = controlQueuedMessage({
 assert.equal(queued.content, "Queued content");
 assert.equal(queued.createdAt, 42);
 assert.equal(queued.attachments?.[0].content, "note");
+
+const mailbox = mailboxMessagesFromTimeline([{
+  ...item(30, "mailbox_reply", {
+    exchange_id: "exchange-1",
+    target_thread_id: "thread-2",
+    status: "replied",
+    reply: {
+      target_title: "Research",
+      target_project: "milim",
+      content: "The result is ready.",
+    },
+  }),
+  run_id: null,
+}]);
+assert.equal(mailbox[0].content, "The result is ready.");
+assert.equal(mailbox[0].mailboxReply?.targetTitle, "Research");
+assert.deepEqual(
+  mergeMailboxMessages(
+    [{ id: "mailbox-exchange-1", role: "assistant", content: "stale" }, { id: "later", role: "user", content: "later" }],
+    mailbox,
+  ).map((message) => message.id),
+  ["mailbox-exchange-1", "later"],
+  "mailbox refreshes should update in place instead of moving replies to the transcript tail",
+);
+
+const provenance = projectControlRunMessages([
+  item(31, "message", {
+    id: "mail-user",
+    role: "user",
+    content: "Question",
+    mailboxOrigin: {
+      exchange_id: "exchange-1",
+      origin_thread_id: "thread-1",
+      origin_title: "Origin",
+    },
+  }),
+], "run-1")[0];
+assert.equal(provenance.mailboxOrigin?.origin_title, "Origin");
+
+const modelChanges = modelChangeMessagesFromTimeline([{
+  ...item(32, "model_changed", {
+    previous_model: "codex:gpt-5",
+    model: "claude:sonnet",
+  }),
+  run_id: null,
+}]);
+assert.deepEqual(modelChanges[0].modelChange, {
+  previousModel: "codex:gpt-5",
+  model: "claude:sonnet",
+});
+assert.deepEqual(
+  mergeModelChangeMessages(
+    [
+      { id: "before", role: "assistant", content: "before", controlSeq: 31 },
+      { id: "after", role: "user", content: "after", controlSeq: 33 },
+    ],
+    modelChanges,
+  ).map((message) => message.id),
+  ["before", "timeline-event-32", "after"],
+  "model changes should keep their canonical position between turns",
+);
 
 console.log("canonical control projection tests passed");

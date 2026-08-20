@@ -30,6 +30,41 @@ export interface ControlCapabilitiesV1 {
   steering?: boolean;
   context_injection?: boolean;
   model_favorites?: boolean;
+  thread_links?: boolean;
+}
+
+export interface ThreadLinkV1 {
+  owner_thread_id: string;
+  target_thread_id: string;
+  target_title: string;
+  target_workspace: string | null;
+  target_project: string | null;
+  target_model: string | null;
+  target_runtime: string;
+  target_archived_at_ms: number | null;
+  target_busy: boolean;
+  target_queued_turns: number;
+  created_at_ms: number;
+}
+
+export interface FrozenLinkedThreadGrantV1 {
+  target_thread_id: string;
+  title: string;
+  workspace: string | null;
+  project: string | null;
+  model: string | null;
+  runtime: string;
+  revision: number;
+  epoch: string;
+  max_timeline_seq: number;
+}
+
+export interface MailboxOriginV1 {
+  exchange_id: string;
+  origin_thread_id: string;
+  origin_title: string;
+  origin_workspace: string | null;
+  origin_project: string | null;
 }
 
 export interface ThreadSummaryV1 {
@@ -45,6 +80,7 @@ export interface ThreadSummaryV1 {
   workspace: string | null;
   busy: boolean;
   queued_turns: number;
+  linked_threads?: ThreadLinkV1[];
 }
 
 export interface AgentSummaryV1 {
@@ -91,6 +127,8 @@ export interface FrozenRunConfigV1 {
   native_session_id: string | null;
   reasoning_effort: string | null;
   adapter: string;
+  linked_thread_grants?: FrozenLinkedThreadGrantV1[];
+  claimed_mailbox_ids?: string[];
 }
 
 export interface RunSnapshotV1 {
@@ -128,6 +166,7 @@ export interface QueuedTurnV1 {
   accepted_at_ms: number;
   display_text: string;
   attachments: ControlAttachmentV1[];
+  mailbox_origin?: MailboxOriginV1;
 }
 
 export interface PendingInputV1 {

@@ -9,6 +9,7 @@ export function SettingsSurface({
   backTestId,
   children,
   className = "",
+  hasBackground = false,
   onBack,
   testId,
 }: {
@@ -17,6 +18,7 @@ export function SettingsSurface({
   backTestId: string;
   children: ReactNode;
   className?: string;
+  hasBackground?: boolean;
   onBack: () => void;
   testId: string;
 }) {
@@ -29,7 +31,7 @@ export function SettingsSurface({
 
   return (
     <main
-      className={`settings-page${className ? ` ${className}` : ""}`}
+      className={`settings-page${hasBackground ? " has-theme-background" : ""}${className ? ` ${className}` : ""}`}
       data-native-preview-blocker="true"
       data-testid={testId}
       aria-label={ariaLabel}

@@ -38,6 +38,7 @@ import {
 } from "../lib/artifactRevisions";
 import { hiddenArtifactIdsForMessage } from "../lib/artifactVisibility";
 import { isCompactionCheckpoint } from "../lib/contextCompaction";
+import { modelDisplayName, rawModelId } from "../lib/modelPicker";
 import { formatResponseMetrics } from "../lib/usageMetrics";
 import { markPerfRender } from "../lib/perf";
 import { shortcutMatchesEvent } from "../ui/shortcuts";
@@ -58,6 +59,7 @@ import {
   Calendar,
   Check,
   Copy,
+  Cube,
   Eye,
   GitBranch,
   Globe,
@@ -71,6 +73,10 @@ import {
 const Markdown = lazy(() =>
   import("./Markdown").then((mod) => ({ default: mod.Markdown })),
 );
+
+function transcriptModelLabel(model: string): string {
+  return modelDisplayName({ id: rawModelId(model), display_id: undefined });
+}
 
 function renderMessageAttachments(attachments?: ChatAttachment[]) {
   if (!attachments?.length) return null;
@@ -233,6 +239,8 @@ type MessageRowProps = {
   toolApproval: ToolApprovalMode;
   turnReview?: TurnReviewState | null;
   actionsRef: MutableRefObject<MessageRowActions | null>;
+  entering?: boolean;
+  onEntered?: (id: string) => void;
 };
 
 function MessageRowView({
@@ -254,6 +262,8 @@ function MessageRowView({
   toolApproval,
   turnReview,
   actionsRef,
+  entering = false,
+  onEntered,
 }: MessageRowProps) {
   markPerfRender("MessageRow");
   const [copied, setCopied] = useState(false);
@@ -266,6 +276,26 @@ function MessageRowView({
   const actions = actionsRef.current;
   const messageIsCompaction = isCompactionCheckpoint(m);
   const isApprovalMessage = Boolean(m.approval);
+  if (m.modelChange) {
+    const previousModel = transcriptModelLabel(m.modelChange.previousModel);
+    const model = transcriptModelLabel(m.modelChange.model);
+    return (
+      <div
+        className="model-change-event"
+        data-testid="model-change-event"
+        role="note"
+        aria-label={`Continuing with ${model}. Previously ${previousModel}. Thread retained.`}
+      >
+        <span className="model-change-line" aria-hidden="true" />
+        <span className="model-change-copy">
+          <Cube size={14} aria-hidden="true" />
+          <span className="model-change-primary">Continuing with <strong>{model}</strong></span>
+          <span className="model-change-detail">Previously {previousModel} · thread retained</span>
+        </span>
+        <span className="model-change-line" aria-hidden="true" />
+      </div>
+    );
+  }
   const artifactContext = m.artifacts?.length ? m.artifacts : previewArtifacts;
   const openMessagePreview = (
     artifact: ChatArtifact,
@@ -457,7 +487,7 @@ function MessageRowView({
 
   if (isEditing) {
     return (
-      <div className={"msg " + m.role}>
+      <div className={"msg " + m.role + (entering ? " msg-enter" : "")}>
         <MessageEditor
           initial={m.content}
           saveLabel={m.role === "user" ? "Send" : "Save"}
@@ -474,11 +504,15 @@ function MessageRowView({
 
   return (
     <div
-      className={`msg ${m.role}${modelAvatarSeed ? " has-model-avatar" : ""}`}
+      className={`msg ${m.role}${modelAvatarSeed ? " has-model-avatar" : ""}${entering ? " msg-enter" : ""}`}
       data-testid={
         m.role === "assistant" ? "assistant-message" : "user-message"
       }
       onContextMenu={openMessageContextMenu}
+      onAnimationEnd={(event) => {
+        if (event.target !== event.currentTarget) return;
+        if (entering && m.id) onEntered?.(m.id);
+      }}
     >
       {showModelAvatar && modelAvatarSeed && (
         <AgentAvatar avatar={modelAvatarSeed} className="message-agent-avatar" />
@@ -486,6 +520,13 @@ function MessageRowView({
       <div className="msg-content" dir="auto">
         {m.role === "assistant" ? (
           <>
+            {m.mailboxReply && (
+              <div className={`mailbox-provenance ${m.mailboxReply.status}`} data-testid="mailbox-reply">
+                <span>Reply from {m.mailboxReply.targetTitle}</span>
+                {m.mailboxReply.targetProject && <small>{m.mailboxReply.targetProject}</small>}
+                {m.mailboxReply.status === "failed" && <small>Failed</small>}
+              </div>
+            )}
             {m.run && m.run !== activeRun && <RunTimeline run={m.run} />}
             {!hasStreamTranscript && (
               <MemoryBreadcrumbs memories={m.memories} />
@@ -531,6 +572,16 @@ function MessageRowView({
                 toolApproval={toolApproval}
                 workspaceFolder={workspaceFolder}
                 runDetailsRunId={m.ledgerVersion === 1 ? m.runId : undefined}
+                terminalOutcome={
+                  m.streamTerminalOutcome ??
+                    (m.run?.status === "stopped" ||
+                    m.run?.status === "aborted" ||
+                    m.run?.status === "error"
+                      ? "interrupted"
+                      : m.run?.status === "running"
+                        ? "unknown"
+                        : "completed")
+                }
               />
             )}
             {renderMessageMedia(m.mediaResults)}
@@ -617,6 +668,12 @@ function MessageRowView({
           </>
         ) : (
           <>
+            {m.mailboxOrigin && (
+              <div className="mailbox-provenance incoming" data-testid="mailbox-origin">
+                <span>From {m.mailboxOrigin.origin_title}</span>
+                {m.mailboxOrigin.origin_project && <small>{m.mailboxOrigin.origin_project}</small>}
+              </div>
+            )}
             {m.content && (
               <Suspense fallback={<span>{m.content}</span>}>
                 <Markdown
@@ -748,7 +805,9 @@ export const MessageRow = memo(
     prev.previewAppStatus === next.previewAppStatus &&
     prev.toolApproval === next.toolApproval &&
     prev.turnReview === next.turnReview &&
-    prev.actionsRef === next.actionsRef,
+    prev.actionsRef === next.actionsRef &&
+    prev.entering === next.entering &&
+    prev.onEntered === next.onEntered,
 );
 
 

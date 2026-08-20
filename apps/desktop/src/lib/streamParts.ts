@@ -6,6 +6,7 @@ export type ChatStreamWorkGroup = {
 };
 
 export type ChatStreamDisplayPart = ChatStreamPart | ChatStreamWorkGroup;
+export type StreamTerminalOutcome = "completed" | "interrupted" | "unknown";
 
 export type WorkGroupSummary = {
   eventType: "tool" | "thinking";
@@ -14,6 +15,76 @@ export type WorkGroupSummary = {
   icon?: ChatStreamEventIcon;
   status: ChatStreamEventStatus;
 };
+
+function phaseStartIndex(parts: readonly ChatStreamPart[]): number {
+  for (let index = parts.length - 1; index >= 0; index -= 1) {
+    if (parts[index].kind === "event") return index + 1;
+  }
+  return 0;
+}
+
+function findPhasePartIndex(
+  parts: readonly ChatStreamPart[],
+  kind: "text" | "thinking",
+  phaseStart: number,
+): number {
+  for (let index = parts.length - 1; index >= phaseStart; index -= 1) {
+    if (parts[index].kind === kind) return index;
+  }
+  return -1;
+}
+
+/** Append text or thinking onto the current tool-bounded phase, not just the tail. */
+export function appendPhaseStreamPart(
+  parts: ChatStreamPart[] | undefined,
+  kind: "text" | "thinking",
+  content: string,
+): ChatStreamPart[] {
+  const next = parts ? parts.slice() : [];
+  if (!content) return next;
+  const phaseStart = phaseStartIndex(next);
+  const existingIndex = findPhasePartIndex(next, kind, phaseStart);
+  if (existingIndex >= 0) {
+    const current = next[existingIndex];
+    if (current.kind === kind) {
+      next[existingIndex] = { ...current, content: current.content + content };
+    }
+    return next;
+  }
+  next.push({ kind, content });
+  return next;
+}
+
+/**
+ * Text and reasoning are separate provider channels, not a shared chronology.
+ * Coalesce each channel inside tool-event boundaries; tool events retain their order.
+ */
+export function coalesceStreamPhases(parts: readonly ChatStreamPart[]): ChatStreamPart[] {
+  let changed = false;
+  const next: ChatStreamPart[] = [];
+  for (const part of parts) {
+    if (part.kind !== "text" && part.kind !== "thinking") {
+      next.push(part);
+      continue;
+    }
+    if (!part.content) {
+      changed = true;
+      continue;
+    }
+    const phaseStart = phaseStartIndex(next);
+    const existingIndex = findPhasePartIndex(next, part.kind, phaseStart);
+    if (existingIndex >= 0) {
+      const current = next[existingIndex];
+      if (current.kind === part.kind) {
+        next[existingIndex] = { ...current, content: current.content + part.content };
+        changed = true;
+      }
+      continue;
+    }
+    next.push(part);
+  }
+  return changed ? next : parts as ChatStreamPart[];
+}
 
 export function liveWorkGroupSummary(group: ChatStreamWorkGroup): WorkGroupSummary | null {
   for (let i = group.parts.length - 1; i >= 0; i -= 1) {
@@ -34,7 +105,10 @@ export function liveWorkGroupSummary(group: ChatStreamWorkGroup): WorkGroupSumma
   return null;
 }
 
-function completedInternalPart(part: ChatStreamPart): ChatStreamPart | null {
+function completedInternalPart(
+  part: ChatStreamPart,
+  terminalOutcome: StreamTerminalOutcome,
+): ChatStreamPart | null {
   if (part.kind === "thinking") return part;
   if (
     part.kind === "event" &&
@@ -42,9 +116,17 @@ function completedInternalPart(part: ChatStreamPart): ChatStreamPart | null {
     (part.status ?? "done") === "done"
   ) return part;
   if (part.kind === "event" && part.eventType === "tool" && !part.mcpApp) {
-    // A terminal assistant message is authoritative even when a provider omitted
-    // the matching tool-result event. Do not leave stale starts flat or animated.
-    return part.status === "running" ? { ...part, status: "done" } : part;
+    if (part.status !== "running") return part;
+    if (terminalOutcome === "completed") return { ...part, status: "done" };
+    if (terminalOutcome === "interrupted") {
+      return {
+        ...part,
+        label: part.name ? `${part.name} interrupted` : "Tool interrupted",
+        icon: "error",
+        status: "error",
+      };
+    }
+    return part;
   }
   return null;
 }
@@ -55,7 +137,12 @@ function isLiveInternalPart(part: ChatStreamPart): boolean {
     (part.kind === "event" && part.eventType === "tool" && !part.mcpApp);
 }
 
-export function groupCompletedStreamActivity(parts: ChatStreamPart[], streaming: boolean): ChatStreamDisplayPart[] {
+export function groupCompletedStreamActivity(
+  parts: ChatStreamPart[],
+  streaming: boolean,
+  terminalOutcome: StreamTerminalOutcome = "completed",
+): ChatStreamDisplayPart[] {
+  parts = coalesceStreamPhases(parts);
   if (!streaming) {
     let finalAnswerIndex = -1;
     for (let index = parts.length - 1; index >= 0; index -= 1) {
@@ -70,7 +157,7 @@ export function groupCompletedStreamActivity(parts: ChatStreamPart[], streaming:
     const work: ChatStreamPart[] = [];
     let workIndex = -1;
     parts.forEach((part, index) => {
-      const completed = completedInternalPart(part);
+      const completed = completedInternalPart(part, terminalOutcome);
       const collapsible =
         (part.kind === "text" && index !== finalAnswerIndex) ||
         completed != null;

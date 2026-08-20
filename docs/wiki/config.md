@@ -9,7 +9,7 @@ order: 100
 updated: 2026-07-13
 ---
 
-Configuration is intentionally local. The desktop app embeds the server, encrypts provider, Google, MCP, and mobile-companion credentials with a master key held in the OS credential vault, and keeps optional native runtimes behind explicit build flags. If the vault is unavailable, Settings > System reports the permission-restricted local-key fallback.
+Configuration is intentionally local. The desktop app embeds the server, encrypts provider, Google, MCP, and mobile-companion credentials with a master key held in the OS credential vault, and keeps optional native runtimes behind explicit build flags. If the vault is unavailable, Settings > Data & privacy reports the permission-restricted local-key fallback.
 
 ## Default locations
 

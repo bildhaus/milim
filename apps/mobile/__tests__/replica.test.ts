@@ -203,3 +203,51 @@ test('marks only ledger-backed assistant messages as inspectable without project
   expect(messages[1].ledgerVersion).toBeUndefined();
   expect(JSON.stringify(transcript)).not.toContain('model_request_resolved');
 });
+
+test('projects linked-chat inputs and mailbox replies with provenance and status', () => {
+  const messages = projectMessages([
+    item(1, 'message', {
+      id: 'incoming',
+      role: 'user',
+      content: 'Please inspect this',
+      mailboxOrigin: {origin_title: 'Origin chat'},
+    }),
+    item(2, 'mailbox_reply', {
+      exchange_id: 'exchange-ok',
+      status: 'replied',
+      reply: {target_title: 'Target chat', content: 'Finished'},
+    }),
+    item(3, 'mailbox_reply', {
+      exchange_id: 'exchange-failed',
+      status: 'failed',
+      reply: {target_title: 'Broken chat', error: 'Runtime interrupted'},
+    }),
+  ]);
+
+  expect(messages).toMatchObject([
+    {mailboxLabel: 'From Origin chat', mailboxStatus: 'incoming'},
+    {content: 'Finished', mailboxLabel: 'Reply from Target chat', mailboxStatus: 'replied'},
+    {content: 'Runtime interrupted', mailboxLabel: 'Failure from Broken chat', mailboxStatus: 'failed'},
+  ]);
+});
+
+test('projects model switches as ordered transcript notices', () => {
+  const transcript = projectTranscript([
+    item(1, 'message', {id: 'before', role: 'assistant', content: 'Before'}),
+    item(2, 'model_changed', {
+      previous_model: 'codex:gpt-5',
+      model: 'claude:sonnet',
+    }),
+    item(3, 'message', {id: 'after', role: 'user', content: 'After'}),
+  ]);
+
+  expect(transcript.map(entry => entry.kind)).toEqual([
+    'message',
+    'model-change',
+    'message',
+  ]);
+  expect(transcript[1]).toMatchObject({
+    previousModel: 'codex:gpt-5',
+    model: 'claude:sonnet',
+  });
+});

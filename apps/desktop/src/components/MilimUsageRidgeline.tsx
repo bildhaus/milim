@@ -45,7 +45,7 @@ export function MilimUsageRidgeline({ usage }: { usage: MilimUsageSummary }) {
     <section
       className="usage-empty-panel"
       data-testid="empty-usage-ridgeline"
-      aria-label="Milim usage"
+      aria-label="Milim activity"
     >
       <svg
         className="usage-ridgeline"

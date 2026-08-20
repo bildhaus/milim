@@ -8,6 +8,14 @@ export interface DiscoveredHost {
   endpoint: string;
 }
 
+export function filterPairableMilimHosts(
+  hosts: DiscoveredHost[],
+  pairedHostIds: readonly string[],
+): DiscoveredHost[] {
+  const paired = new Set(pairedHostIds);
+  return hosts.filter(host => !host.hostId || !paired.has(host.hostId));
+}
+
 interface ZeroconfService {
   name?: string;
   port?: number;

@@ -3,6 +3,7 @@ import { openExternalUrl, type Agent, type ChatAttachment, type MediaKind, type 
 import type { WorkspaceFileSuggestion } from "../api";
 import { composerAutocompleteTriggerAt, composerCommandRunsOnSelection, composerSuggestionMatchScore, mcpToolTagCompletion, replaceComposerAutocompleteTrigger, skillTagCompletion } from "../lib/composerAutocomplete";
 import { canNavigateComposerHistory, moveComposerHistory, type ComposerHistoryDirection } from "../lib/composerHistory";
+import { clipboardFiles, isDuplicateClipboardPaste, type ClipboardPasteStamp } from "../lib/clipboardFiles";
 import { composerDisplayForText, composerLinkClickAction, composerTokensForText, pasteComposerUrl, type ComposerToken } from "../lib/composerTokens";
 import { shortcutLabel, shortcutMatchesEvent } from "../ui/shortcuts";
 import { useUiPreferences } from "../ui/store";
@@ -76,19 +77,6 @@ function attachmentSizeLabel(size: number): string {
 
 function folderLabel(folder: string): string {
   return folder.split(/[\\/]/).filter(Boolean).pop() || folder || "No project";
-}
-
-function clipboardFiles(data: DataTransfer): File[] {
-  const byKey = new Map<string, File>();
-  for (const file of Array.from(data.files ?? [])) {
-    byKey.set(`${file.name}:${file.size}:${file.type}:${file.lastModified}`, file);
-  }
-  for (const item of Array.from(data.items ?? [])) {
-    if (item.kind !== "file") continue;
-    const file = item.getAsFile();
-    if (file) byKey.set(`${file.name}:${file.size}:${file.type}:${file.lastModified}`, file);
-  }
-  return Array.from(byKey.values());
 }
 
 function isGithubLinkToken(token: ComposerToken): boolean {
@@ -185,6 +173,7 @@ export function Composer({
   const historyDraftRef = useRef("");
   const historyNoticeTimerRef = useRef<number | null>(null);
   const completionControllerRef = useRef<AbortController | null>(null);
+  const lastClipboardPasteRef = useRef<ClipboardPasteStamp | null>(null);
   const pendingSelectionRef = useRef<{
     start: number;
     end: number;
@@ -198,7 +187,6 @@ export function Composer({
   const [slashDismissedValue, setSlashDismissedValue] = useState("");
   const [cursor, setCursor] = useState(0);
   const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceFileSuggestion[]>([]);
-  const [dragOver, setDragOver] = useState(false);
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
   const [historyNotice, setHistoryNotice] = useState<string | null>(null);
   const [ghostCompletion, setGhostCompletion] = useState("");
@@ -315,8 +303,8 @@ export function Composer({
     );
   }, [composerDisplay]);
 
-  // Auto-grow the textarea up to a cap.
-  useEffect(() => {
+  // Auto-grow the textarea up to a cap before paint so send does not fling the thread.
+  useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
     const resize = () => {
@@ -686,19 +674,8 @@ export function Composer({
 
   return (
     <div
-      className={`composer ${composerDensity === "compact" ? "compact" : "comfortable"}${dragOver ? " drag-over" : ""}`}
-      data-testid="composer-drop-zone"
-      onDragOver={(e) => {
-        e.preventDefault();
-        setDragOver(true);
-      }}
-      onDragLeave={() => setDragOver(false)}
-      onDrop={(e) => {
-        e.preventDefault();
-        setDragOver(false);
-        const files = Array.from(e.dataTransfer.files ?? []);
-        if (files.length) onAttachFiles(files);
-      }}
+      className={`composer ${composerDensity === "compact" ? "compact" : "comfortable"}`}
+      data-testid="composer"
     >
       <input
         ref={fileRef}
@@ -932,7 +909,9 @@ export function Composer({
             const files = clipboardFiles(e.clipboardData);
             if (files.length) {
               e.preventDefault();
-              onAttachFiles(files);
+              const decision = isDuplicateClipboardPaste(files, lastClipboardPasteRef.current);
+              lastClipboardPasteRef.current = decision.stamp;
+              if (!decision.duplicate) onAttachFiles(files);
               return;
             }
             const selection = rawSelection(e.currentTarget);

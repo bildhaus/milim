@@ -3,6 +3,7 @@ import {
   modelPickerGroups,
   normalizeModelPickerPreferences,
   parseMobileModel,
+  transcriptModelLabel,
   toggledModelFavoriteIds,
 } from '../src/modelPicker';
 
@@ -80,4 +81,10 @@ test('searches across labels, ids, providers, and routes', () => {
   ];
   expect(modelPickerGroups(values, 'codex')).toHaveLength(1);
   expect(modelPickerGroups(values, 'anthropic')[0].models[0].id).toBe('claude:opus');
+});
+
+test('formats routed model ids for transcript notices', () => {
+  expect(transcriptModelLabel('provider:remote-1:openai/gpt-5.6')).toBe('openai/gpt-5.6');
+  expect(transcriptModelLabel('codex:gpt-5.6-luna')).toBe('gpt-5.6-luna');
+  expect(transcriptModelLabel('opencode:openai/gpt-5.6')).toBe('gpt-5.6');
 });

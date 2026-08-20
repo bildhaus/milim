@@ -1,4 +1,4 @@
-export type SettingsSectionId = "app" | "chat" | "appearance" | "models" | "workspace" | "history" | "google" | "mobile" | "system" | "about" | "developer";
+export type SettingsSectionId = "app" | "chat" | "appearance" | "notifications" | "models" | "workspace" | "history" | "google" | "mobile" | "about" | "developer";
 
 export type SettingSearchEntry = {
   id: string;
@@ -8,7 +8,7 @@ export type SettingSearchEntry = {
 };
 
 export const SETTINGS_SEARCH_ENTRIES: SettingSearchEntry[] = [
-  { id: "app-window-layout", label: "Window and layout", section: "app", aliases: ["app", "general", "always on top", "ui size", "zoom", "account usage", "quota", "codex", "claude", "new chat"] },
+  { id: "app-window-layout", label: "Window and layout", section: "app", aliases: ["app", "general", "always on top", "ui size", "zoom", "account usage", "account quota", "quota", "codex", "claude", "new chat"] },
   { id: "app-thread-navigation", label: "Thread navigation", section: "app", aliases: ["sidebar", "sidebar organization", "thread organization", "top bar", "bottom bar", "placement", "projects", "inbox", "settle", "settled", "finished threads", "recent activity", "folders", "organization"] },
   { id: "chat-composer", label: "Composer", section: "chat", aliases: ["send shortcut", "enter", "density"] },
   { id: "chat-threads", label: "Threads", section: "chat", aliases: ["auto title", "ai names", "naming model"] },
@@ -22,8 +22,8 @@ export const SETTINGS_SEARCH_ENTRIES: SettingSearchEntry[] = [
   { id: "appearance-sidebar-colors", label: "Sidebar appearance", section: "appearance", aliases: ["collapsed rail", "regular rail", "split rail", "centered rail", "thread colors", "thread names", "automatic color", "icons"] },
   { id: "appearance-empty-chat-ridgeline", label: "Empty-chat ridgeline", section: "appearance", aliases: ["usage", "activity", "chart", "composer", "empty thread"] },
   { id: "appearance-code-blocks", label: "Code blocks", section: "appearance", aliases: ["theme", "syntax"] },
-  { id: "appearance-interface-sounds", label: "Interface sounds", section: "appearance", aliases: ["sound", "audio", "feedback", "cuelume", "finished", "completion", "attention", "approval", "alert"] },
-  { id: "appearance-background", label: "Background image", section: "appearance", aliases: ["fit", "treatment"] },
+  { id: "appearance-interface-sounds", label: "Interface sounds", section: "notifications", aliases: ["sound", "audio", "feedback", "cuelume", "finished", "completion", "attention", "approval", "alert"] },
+  { id: "appearance-background", label: "Background", section: "appearance", aliases: ["image", "gradient", "glass", "fit", "treatment"] },
   { id: "models-defaults", label: "Model and agent defaults", section: "models", aliases: ["chat model", "worker model", "agent", "favorite", "fallback", "unavailable"] },
   { id: "workspace-opener", label: "Workspace opener", section: "workspace", aliases: ["launcher", "vscode", "zed", "terminal", "remember per project"] },
   { id: "workspace-new-chat", label: "New project-chat workspace", section: "workspace", aliases: ["checkout", "ask", "isolated worktree"] },
@@ -35,11 +35,11 @@ export const SETTINGS_SEARCH_ENTRIES: SettingSearchEntry[] = [
   { id: "data-export", label: "Thread export defaults", section: "history", aliases: ["json", "markdown"] },
   { id: "data-backup", label: "Backup and restore", section: "history", aliases: ["export backup", "restore backup", "recovery snapshot"] },
   { id: "app-startup", label: "Startup behavior", section: "app", aliases: ["restore last chat", "new chat", "open panels"] },
-  { id: "app-notifications", label: "Notifications", section: "app", aliases: ["run finished", "needs attention", "thread title", "unfocused"] },
-  { id: "app-update-policy", label: "Update policy", section: "app", aliases: ["automatic check", "automatic download"] },
+  { id: "app-notifications", label: "Native notifications", section: "notifications", aliases: ["run finished", "needs attention", "thread title", "unfocused"] },
+  { id: "app-update-policy", label: "Update policy", section: "about", aliases: ["automatic check", "automatic download"] },
   { id: "mobile-companion", label: "Mobile companion", section: "mobile", aliases: ["phone", "pairing", "qr", "tailscale"] },
-  { id: "system-secret-storage", label: "Credential storage", section: "system", aliases: ["keychain", "credential manager", "secrets", "encryption", "fallback"] },
-  { id: "system-shortcuts", label: "Keyboard shortcuts", section: "system", aliases: ["hotkey", "command", "reset"] },
+  { id: "system-secret-storage", label: "Credential storage", section: "history", aliases: ["keychain", "credential manager", "secrets", "encryption", "fallback"] },
+  { id: "system-shortcuts", label: "Keyboard shortcuts", section: "app", aliases: ["hotkey", "command", "reset"] },
   { id: "about-version", label: "Version", section: "about", aliases: ["current", "latest"] },
   { id: "about-updates", label: "Updates", section: "about", aliases: ["github release", "download", "restart"] },
   { id: "about-diagnostics", label: "Diagnostics", section: "about", aliases: ["logs", "recovery", "debug"] },

@@ -21,7 +21,7 @@ impl ApiError {
         match self.0 {
             Error::InvalidRequest(_) | Error::Json(_) => StatusCode::BAD_REQUEST,
             Error::Unauthorized(_) => StatusCode::UNAUTHORIZED,
-            Error::ModelNotFound(_) => StatusCode::NOT_FOUND,
+            Error::ModelNotFound(_) | Error::NotFound(_) => StatusCode::NOT_FOUND,
             Error::Upstream(_) => StatusCode::BAD_GATEWAY,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }

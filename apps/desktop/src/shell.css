@@ -11,6 +11,34 @@
 .app.message-width-wide { --chat-content-width: 960px; }
 .app.message-width-full { --chat-content-width: 100%; }
 
+.window-file-drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--bg-primary) 66%, transparent);
+  backdrop-filter: blur(8px);
+}
+.window-file-drop-card {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  min-width: min(420px, 80vw);
+  padding: 32px 40px;
+  border: 1px solid var(--accent);
+  border-radius: 16px;
+  background: var(--card-bg);
+  box-shadow: 0 18px 60px color-mix(in srgb, var(--bg-primary) 72%, transparent);
+  color: var(--primary-text);
+}
+.window-file-drop-card span {
+  color: var(--secondary-text);
+  font-size: 12px;
+}
+
 .bg-layer {
   position: fixed;
   inset: 0;
@@ -416,10 +444,13 @@
   font-weight: 650;
 }
 .topbar-usage {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
   color: color-mix(in srgb, var(--tertiary-text) 86%, var(--primary-text));
   font-family: var(--mono);
   font-size: 10.5px;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 .topbar-account-usage {
@@ -910,7 +941,9 @@
 .thread-bar-popover .session-empty { margin: 4px; }
 
 @media (max-width: 960px) {
-  .topbar-with-thread-navigation .topbar-usage { display: none; }
+  .topbar-with-thread-navigation .topbar-usage {
+    max-width: min(220px, 28vw);
+  }
   .thread-bar-action > span { display: none; }
   .thread-bar-action { width: 30px; padding: 0; }
   .thread-bar-new-chat > .new-chat,
@@ -1220,7 +1253,7 @@
 .session-menu.project-menu button span {
   white-space: nowrap;
 }
-.session-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 5px; margin: 3px -4px 0 0; padding-right: 5px; }
+.session-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; margin: 3px -4px 0 0; padding-right: 5px; }
 .session-list::-webkit-scrollbar {
   width: 10px;
 }

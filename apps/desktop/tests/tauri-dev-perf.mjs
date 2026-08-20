@@ -1,14 +1,18 @@
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import {
   copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
+  readdirSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { cpus, release as osRelease, totalmem, tmpdir, version as osVersion } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import net from "node:net";
@@ -19,7 +23,7 @@ const binaryMode = process.argv.includes("--binary");
 const tauriCli = join(root, "node_modules", "@tauri-apps", "cli", "tauri.js");
 const perfBinary =
   process.env.MILIM_TAURI_PERF_BINARY ||
-  join(root, "src-tauri", "target", "tauri-verify", "debug", "milim-desktop.exe");
+  join(root, "src-tauri", "target", "release", "milim-desktop.exe");
 const cdpHost = "127.0.0.1";
 const cdpPort = Number(
   (binaryMode
@@ -199,15 +203,21 @@ async function runCanonicalBinaryBenchmark() {
   const partialMarker = "CANONICAL_A_PARTIAL.";
   const terminalMarker = "CANONICAL_B_DONE";
   const canonicalErrors = [];
+  const assertNoCanonicalErrors = (stage) =>
+    ensure(
+      canonicalErrors.length === 0,
+      `Console errors during canonical benchmark (${stage}):\n${canonicalErrors.join("\n")}`,
+    );
   const milimHome = mkdtempSync(join(tmpdir(), "milim-canonical-perf-home-"));
   const report = {
-    schema_version: 1,
+    schema_version: 2,
     generated_at: new Date().toISOString(),
     commit_sha: currentCommitSha(),
     proof: "deterministic_mocked",
     benchmark: "canonical-thread",
     runtime: {
-      mode: "prebuilt-debug-binary",
+      mode: "release-optimized-binary",
+      buildProfile: "release",
       platform: process.platform,
       arch: process.arch,
       cdpPort,
@@ -220,6 +230,7 @@ async function runCanonicalBinaryBenchmark() {
       },
     },
     fixture: {
+      version: "canonical-thread-v2",
       models: [modelA, modelB],
       threadCount: 10,
       messagesPerThread: 100,
@@ -230,6 +241,9 @@ async function runCanonicalBinaryBenchmark() {
     cdp: {},
     processMemory: {},
     layout: {},
+    native: null,
+    fingerprint: buildFingerprint(),
+    bundles: collectInitialBundleSizes(),
     screenshots: Object.fromEntries(
       Object.entries(paths)
         .filter(([name]) => name !== "failure")
@@ -301,6 +315,7 @@ async function runCanonicalBinaryBenchmark() {
     report.continuity.activeThreadId = activeId;
     report.timingsMs.setupToModelA = Date.now() - setupStartedAt;
     await assertLayout(session.page, "canonical-configured");
+    assertNoCanonicalErrors("configured");
 
     await installRuntimeSamplers(session.page);
     await session.page.evaluate(() => window.__MILIM_PERF__?.reset());
@@ -315,6 +330,7 @@ async function runCanonicalBinaryBenchmark() {
       .waitFor({ timeout: 20_000 });
     report.timingsMs.initialSendToFirstToken =
       Date.now() - initialSendStartedAt;
+    assertNoCanonicalErrors("initial turn");
 
     console.log("[canonical] persist queued prompt");
     const queueStartedAt = Date.now();
@@ -398,6 +414,7 @@ async function runCanonicalBinaryBenchmark() {
     await assertLayout(session.page, "canonical-queue-reload-running");
     report.continuity.sameThreadAfterReload = true;
     report.continuity.runningAfterReload = true;
+    assertNoCanonicalErrors("running reload");
 
     console.log("[canonical] stop reattached perf-a turn");
     const stopStartedAt = Date.now();
@@ -579,6 +596,7 @@ async function runCanonicalBinaryBenchmark() {
     report.continuity.settledReloadPersisted = true;
     await assertLayout(session.page, "canonical-persisted");
     await session.page.screenshot({ path: paths.persisted, fullPage: false });
+    assertNoCanonicalErrors("settled reload");
 
     console.log("[canonical] verify 10 x 100 persisted-message fixture");
     await writeLargeTranscriptFixture(session.page, activeId, {
@@ -591,7 +609,7 @@ async function runCanonicalBinaryBenchmark() {
       .getByTestId("chat-shell")
       .waitFor({ timeout: 20_000 });
     await session.page
-      .locator(".messages > .msg")
+      .locator(".messages .msg")
       .last()
       .waitFor({ timeout: 20_000 });
     await installRuntimeSamplers(session.page);
@@ -616,7 +634,7 @@ async function runCanonicalBinaryBenchmark() {
       `Every fixture thread must persist exactly ${report.fixture.messagesPerThread} messages.`,
     );
     const renderedRows = await session.page
-      .locator(".messages > .msg")
+      .locator(".messages .msg")
       .count();
     ensure(
       renderedRows === report.fixture.messagesPerThread,
@@ -634,6 +652,7 @@ async function runCanonicalBinaryBenchmark() {
     report.processMemory.largeTranscript = collectWindowsProcessTreeMemory(
       session.child.pid,
     );
+    assertNoCanonicalErrors("large transcript reload");
     await session.page.screenshot({
       path: paths.largeTranscript,
       fullPage: false,
@@ -642,12 +661,34 @@ async function runCanonicalBinaryBenchmark() {
     console.log("[canonical] send from large transcript");
     const longThreadPrompt = "Canonical long-thread optimistic send.";
     await session.page.getByTestId("composer-input").fill(longThreadPrompt);
-    await session.page.evaluate(() => {
+    await session.page.evaluate((prompt) => {
       const scroll = document.querySelector(".chat-scroll");
       if (!(scroll instanceof HTMLElement))
         throw new Error("Chat scroll container unavailable.");
       scroll.scrollTop = scroll.scrollHeight;
       window.__MILIM_LONG_THREAD_SCROLL_SAMPLES__ = [];
+      window.__MILIM_OPTIMISTIC_SEND_MS__ = new Promise((resolve, reject) => {
+        const send = document.querySelector('[data-testid="composer-send"]');
+        if (!(send instanceof HTMLElement)) {
+          reject(new Error("Composer send button unavailable."));
+          return;
+        }
+        send.addEventListener("click", () => {
+          const startedAt = performance.now();
+          const observer = new MutationObserver(() => {
+            const visible = [...document.querySelectorAll('[data-testid="user-message"]')]
+              .some((node) => node.textContent?.includes(prompt));
+            if (!visible) return;
+            observer.disconnect();
+            requestAnimationFrame(() => resolve(performance.now() - startedAt));
+          });
+          observer.observe(document.querySelector(".messages") ?? document.body, {
+            childList: true,
+            subtree: true,
+            characterData: true,
+          });
+        }, { once: true, capture: true });
+      });
       let remaining = 45;
       const sample = () => {
         window.__MILIM_LONG_THREAD_SCROLL_SAMPLES__.push(
@@ -657,15 +698,15 @@ async function runCanonicalBinaryBenchmark() {
         if (remaining > 0) requestAnimationFrame(sample);
       };
       requestAnimationFrame(sample);
-    });
-    const longThreadSendStartedAt = Date.now();
+    }, longThreadPrompt);
     await session.page.getByTestId("composer-send").click();
     await session.page
       .getByTestId("user-message")
       .filter({ hasText: longThreadPrompt })
       .waitFor({ timeout: 10_000 });
-    report.timingsMs.longThreadSendToOptimistic =
-      Date.now() - longThreadSendStartedAt;
+    report.timingsMs.longThreadSendToOptimistic = await session.page.evaluate(
+      () => window.__MILIM_OPTIMISTIC_SEND_MS__,
+    );
     await session.page
       .getByRole("button", { name: "Stop generating" })
       .waitFor({ state: "hidden", timeout: 20_000 });
@@ -699,6 +740,10 @@ async function runCanonicalBinaryBenchmark() {
       `Canonical upstream models changed after reload: ${JSON.stringify(finalUpstreamModels)}.`,
     );
     report.continuity.upstreamModels = finalUpstreamModels;
+    report.native = await session.page.evaluate(async () =>
+      await window.__TAURI_INTERNALS__.invoke("perf_snapshot_v2"),
+    );
+    report.fingerprint.webview = await collectWebViewFingerprint(session);
     ensure(
       canonicalErrors.length === 0,
       `Console errors during canonical benchmark:\n${canonicalErrors.join("\n")}`,
@@ -713,6 +758,14 @@ async function runCanonicalBinaryBenchmark() {
     }
   } catch (err) {
     failure = err;
+    if (session) {
+      report.runtime.failureProcess = {
+        exitCode: session.child.exitCode,
+        signalCode: session.child.signalCode,
+        stdout: session.stdout,
+        stderr: session.stderr,
+      };
+    }
     if (session?.page && !session.page.isClosed()) {
       await session.page
         .screenshot({ path: paths.failure, fullPage: false })
@@ -1293,6 +1346,12 @@ async function collectRuntimeMetrics(page) {
         totalMs: longTaskTotalMs,
         maxMs: Math.max(0, ...runtime.longTasks.map((entry) => entry.duration)),
       },
+      stagesMs: Object.fromEntries(
+        performance
+          .getEntriesByType("mark")
+          .filter((entry) => entry.name.startsWith("milim."))
+          .map((entry) => [entry.name.slice("milim.".length), entry.startTime]),
+      ),
     };
   });
 }
@@ -1325,7 +1384,7 @@ async function collectLayoutMetrics(page) {
       codeBlocks: document.querySelectorAll(".code-block").length,
       chatShell: rect('[data-testid="chat-shell"]'),
       sidebar: rect(".sidebar"),
-      composer: rect('[data-testid="composer-drop-zone"]'),
+      composer: rect('[data-testid="composer"]'),
       composerInput: rect('[data-testid="composer-input"]'),
       messageColumn: rect(".messages"),
       lastAssistant: rect('[data-testid="assistant-message"]:last-of-type'),
@@ -1428,6 +1487,9 @@ async function writeLargeTranscriptFixture(
       const parsed = JSON.parse(raw);
       const state =
         parsed.state && typeof parsed.state === "object" ? parsed.state : {};
+      const previousIds = new Set(
+        (state.sessions ?? []).map((session) => session.id),
+      );
       const canonical = state.sessions?.find(
         (session) => session.id === activeId,
       );
@@ -1481,9 +1543,27 @@ async function writeLargeTranscriptFixture(
         sessionOrder: sessions.map((session) => session.id),
       };
       parsed.state = state;
-      await invoke("user_state_set", {
-        key,
-        value: JSON.stringify(parsed),
+      const nextIds = new Set(sessions.map((session) => session.id));
+      const meta = structuredClone(parsed);
+      delete meta.state.sessions;
+      await invoke("user_sessions_apply_ops", {
+        delta: {
+          metaJson: JSON.stringify(meta),
+          sessionOrder: sessions.map((session) => session.id),
+          upserts: sessions.map((session) => {
+            const { messages, messagesHydrated, messagesLoadedFrom, persistedMessageCount, ...sessionMeta } = session;
+            return {
+              id: session.id,
+              sessionJson: JSON.stringify(sessionMeta),
+              messageCount: messages.length,
+              messages: messages.map((message, index) => ({
+                index,
+                messageJson: JSON.stringify(message),
+              })),
+            };
+          }),
+          deletedSessionIds: [...previousIds].filter((id) => !nextIds.has(id)),
+        },
       });
     },
     { activeId, threadCount, messagesPerThread },
@@ -1681,7 +1761,7 @@ function assertFiniteMetrics(value, path = "report") {
 }
 
 function assertCanonicalMetricShape(report, paths) {
-  ensure(report.schema_version === 1, "Canonical schema version is invalid.");
+  ensure(report.schema_version === 2, "Canonical schema version is invalid.");
   ensure(
     !Number.isNaN(Date.parse(report.generated_at)),
     "Canonical generated_at is invalid.",
@@ -1698,6 +1778,11 @@ function assertCanonicalMetricShape(report, paths) {
     report.runtime.binary && !isAbsolute(report.runtime.binary),
     "Canonical runtime binary path must be repository-relative.",
   );
+  ensure(report.native?.schema_version === 2, "Native perf snapshot v2 is unavailable.");
+  ensure(report.native?.build_profile === "release", "Canonical binary is not release optimized.");
+  ensure(report.fingerprint?.dirty_diff_sha256, "Dirty-diff fingerprint is missing.");
+  ensure(report.bundles.initialJavaScriptBytes > 0, "Initial JavaScript size is missing.");
+  ensure(report.bundles.initialCssBytes > 0, "Initial CSS size is missing.");
   for (const [phase, metrics] of Object.entries(report.renderer)) {
     ensure(metrics?.perf, `Renderer phase ${phase} has no Milim perf snapshot.`);
     ensure(
@@ -1750,6 +1835,85 @@ function artifactRelativePath(path) {
 
 function repoRelativePath(path) {
   return relative(root, path).replaceAll("\\", "/");
+}
+
+function gitOutput(args) {
+  const result = spawnSync("git", args, {
+    cwd: root,
+    encoding: args.includes("--binary") ? "buffer" : "utf8",
+    maxBuffer: 1024 * 1024 * 1024,
+  });
+  return result.status === 0 ? result.stdout : null;
+}
+
+function buildFingerprint() {
+  const diff = gitOutput(["diff", "--binary", "HEAD"]);
+  const untracked = gitOutput([
+    "ls-files",
+    "--others",
+    "--exclude-standard",
+    "-z",
+    "--",
+    ":/",
+  ]);
+  const dirtyHash = createHash("sha256").update(
+    diff ?? Buffer.from("git-diff-unavailable"),
+  );
+  const untrackedPaths = typeof untracked === "string"
+    ? untracked.split("\0").filter(Boolean).sort()
+    : [];
+  for (const path of untrackedPaths) {
+    const absolutePath = join(root, path);
+    if (!existsSync(absolutePath) || !statSync(absolutePath).isFile()) continue;
+    dirtyHash.update("\0untracked\0").update(path).update("\0");
+    dirtyHash.update(readFileSync(absolutePath));
+  }
+  const cpu = cpus()[0];
+  return {
+    commit_sha: currentCommitSha(),
+    dirty_diff_sha256: dirtyHash.digest("hex"),
+    dirty: Boolean(diff?.length || untrackedPaths.length),
+    cpu: cpu ? `${cpu.model} (${cpus().length} logical)` : "unknown",
+    ram_bytes: totalmem(),
+    os: `${osVersion()} (${osRelease()})`,
+    arch: process.arch,
+    webview: null,
+    build_profile: "release",
+    fixture_version: "canonical-thread-v2",
+  };
+}
+
+function collectInitialBundleSizes() {
+  const assetDir = join(root, "dist", "assets");
+  const assets = existsSync(assetDir) ? readdirSync(assetDir) : [];
+  const largestIndex = (extension) =>
+    assets
+      .filter((name) => name.startsWith("index-") && name.endsWith(extension))
+      .map((name) => ({ name, bytes: statSync(join(assetDir, name)).size }))
+      .sort((left, right) => right.bytes - left.bytes)[0] ?? { name: null, bytes: 0 };
+  const javascript = largestIndex(".js");
+  const css = largestIndex(".css");
+  return {
+    initialJavaScriptBytes: javascript.bytes,
+    initialCssBytes: css.bytes,
+    initialJavaScriptAsset: javascript.name,
+    initialCssAsset: css.name,
+  };
+}
+
+async function collectWebViewFingerprint(session) {
+  try {
+    const client =
+      session.cdpClient ?? await session.context.newCDPSession(session.page);
+    const version = await client.send("Browser.getVersion");
+    return {
+      product: version.product,
+      userAgent: version.userAgent,
+      jsVersion: version.jsVersion,
+    };
+  } catch (error) {
+    return { unavailable: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 function currentCommitSha() {

@@ -45,7 +45,10 @@ Object.defineProperty(globalThis, "__MILIM_TEST_INVOKE__", {
     if (command === "user_state_get") {
       return dbValues.get(String(args?.key)) ?? null;
     }
-    if (command === "user_sessions_get") {
+    if (
+      command === "user_sessions_get" ||
+      command === "user_sessions_manifest_get"
+    ) {
       return sessionSnapshot ?? dbValues.get("milim.sessions") ?? null;
     }
     if (command === "user_state_set") {
@@ -54,7 +57,7 @@ Object.defineProperty(globalThis, "__MILIM_TEST_INVOKE__", {
     }
     if (
       command === "user_sessions_set" ||
-      command === "user_sessions_apply_delta"
+      command === "user_sessions_apply_ops"
     ) {
       if (holdNextSessionSet) await holdNextSessionSet;
       sessionSnapshot =
@@ -280,7 +283,7 @@ equal(
 );
 
 const sessionWriteCountBefore = calls.filter(
-  (call) => call.command === "user_sessions_apply_delta",
+  (call) => call.command === "user_sessions_apply_ops",
 ).length;
 await readUserStateKey("milim.sessions");
 const sessionA =
@@ -306,7 +309,7 @@ assert(
   "session writes should move out of the legacy JSON blob",
 );
 const sessionWriteCountAfter = calls.filter(
-  (call) => call.command === "user_sessions_apply_delta",
+  (call) => call.command === "user_sessions_apply_ops",
 ).length;
 equal(
   sessionWriteCountAfter - sessionWriteCountBefore,
@@ -316,7 +319,7 @@ equal(
 await writeUserStateKey("milim.sessions", sessionB);
 await flushDeferredUserStateWrites("milim.sessions");
 const duplicateSessionWriteCount = calls.filter(
-  (call) => call.command === "user_sessions_apply_delta",
+  (call) => call.command === "user_sessions_apply_ops",
 ).length;
 equal(
   duplicateSessionWriteCount,
@@ -333,11 +336,11 @@ const writeC = writeUserStateKey("milim.sessions", sessionC);
 const flushC = flushDeferredUserStateWrites("milim.sessions");
 await new Promise((resolve) => setTimeout(resolve, 0));
 const inFlightSessionWriteCount = calls.filter(
-  (call) => call.command === "user_sessions_apply_delta",
+  (call) => call.command === "user_sessions_apply_ops",
 ).length;
 await writeUserStateKey("milim.sessions", sessionC);
 const duplicateInFlightSessionWriteCount = calls.filter(
-  (call) => call.command === "user_sessions_apply_delta",
+  (call) => call.command === "user_sessions_apply_ops",
 ).length;
 equal(
   duplicateInFlightSessionWriteCount,
@@ -365,9 +368,9 @@ equal(
     __MILIM_TEST_DEFERRED_WRITE_DELAY_MS__?: number;
     __MILIM_TEST_DEFERRED_WRITE_MAX_LATENCY_MS__?: number;
   }
-).__MILIM_TEST_DEFERRED_WRITE_MAX_LATENCY_MS__ = 35;
+).__MILIM_TEST_DEFERRED_WRITE_MAX_LATENCY_MS__ = 100;
 const maxLatencyWriteCountBefore = calls.filter(
-  (call) => call.command === "user_sessions_apply_delta",
+  (call) => call.command === "user_sessions_apply_ops",
 ).length;
 const maxLatencyWrites: Array<void | Promise<void>> = [];
 for (let i = 0; i < 3; i += 1) {
@@ -377,12 +380,12 @@ for (let i = 0; i < 3; i += 1) {
       `{"state":{"sessions":[{"id":"max-${i}","messages":[]}]},"version":0}`,
     ),
   );
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await new Promise((resolve) => setTimeout(resolve, 5));
 }
-await new Promise((resolve) => setTimeout(resolve, 50));
+await new Promise((resolve) => setTimeout(resolve, 120));
 await Promise.all(maxLatencyWrites);
 equal(
-  calls.filter((call) => call.command === "user_sessions_apply_delta").length,
+  calls.filter((call) => call.command === "user_sessions_apply_ops").length,
   maxLatencyWriteCountBefore + 1,
   "session writes should flush at max latency under sustained writes",
 );
@@ -445,7 +448,7 @@ await writeUserStateKey(
 await flushDeferredUserStateWrites("milim.sessions");
 const deltaCall = calls
   .slice(deltaCallStart)
-  .find((call) => call.command === "user_sessions_apply_delta");
+  .find((call) => call.command === "user_sessions_apply_ops");
 assert(deltaCall, "changed session state should use the delta command");
 const deltaWire = JSON.stringify(deltaCall.args?.delta);
 assert(
@@ -459,6 +462,69 @@ assert(
 assert(
   !deltaWire.includes("server-owned"),
   "session metadata should not persist canonical Worker Runs",
+);
+
+const preservedBody = `preserved-${"z".repeat(4_000)}`;
+await writeUserStateKey(
+  "milim.sessions",
+  JSON.stringify({
+    state: {
+      sessions: [
+        {
+          id: "partial",
+          title: "Before",
+          messages: [{ id: "hidden", role: "user", content: preservedBody }],
+        },
+      ],
+    },
+    version: 0,
+  }),
+);
+await flushDeferredUserStateWrites("milim.sessions");
+const partialCallStart = calls.length;
+await writeUserStateKey(
+  "milim.sessions",
+  JSON.stringify({
+    state: {
+      sessions: [
+        {
+          id: "partial",
+          title: "After",
+          messages: [],
+          messagesHydrated: false,
+          messagesLoadedFrom: 1,
+          persistedMessageCount: 1,
+          messagePreview: "preserved",
+        },
+      ],
+    },
+    version: 0,
+  }),
+);
+await flushDeferredUserStateWrites("milim.sessions");
+const partialDeltaCall = calls
+  .slice(partialCallStart)
+  .find((call) => call.command === "user_sessions_apply_ops");
+assert(partialDeltaCall, "partial metadata edits should use a session delta");
+const partialDelta = partialDeltaCall.args?.delta as {
+  upserts: Array<{ preserveMessages?: boolean; sessionJson?: string }>;
+};
+equal(
+  partialDelta.upserts[0]?.preserveMessages,
+  true,
+  "partial sessions must preserve unseen SQLite message rows",
+);
+assert(
+  !JSON.stringify(partialDelta).includes(preservedBody),
+  "partial deltas should not reserialize unloaded message bodies",
+);
+assert(
+  sessionSnapshot?.includes(preservedBody),
+  "partial metadata changes must not truncate unseen messages",
+);
+assert(
+  !sessionSnapshot?.includes("messagesHydrated"),
+  "manifest hydration markers must remain transient",
 );
 
 export {};

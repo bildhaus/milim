@@ -14,6 +14,14 @@
   opacity: 1;
   transition: opacity 180ms var(--motion-ease-out);
 }
+.main.settings-background-only {
+  opacity: 0;
+  pointer-events: none;
+  visibility: hidden;
+}
+.settings-page.has-theme-background {
+  background: transparent;
+}
 @starting-style {
   .settings-page { opacity: 0; }
 }
@@ -25,6 +33,8 @@
   border-bottom: 1px solid var(--border-primary);
   background: var(--bg-primary);
   user-select: none;
+  backdrop-filter: blur(var(--blur));
+  box-shadow: inset 0 1px 0 var(--glass-edge);
 }
 .settings-page-titlebar-leading {
   position: relative;
@@ -36,6 +46,13 @@
   padding: 0 12px;
   border-right: 1px solid var(--border-primary);
   background: color-mix(in srgb, var(--bg-secondary) 74%, var(--bg-primary));
+  backdrop-filter: blur(var(--blur));
+}
+.settings-page.has-theme-background .settings-page-titlebar {
+  background: color-mix(in srgb, var(--bg-primary) 70%, transparent);
+}
+.settings-page.has-theme-background .settings-page-titlebar-leading {
+  background: color-mix(in srgb, var(--sidebar-bg) 76%, transparent);
 }
 .settings-page-back {
   display: inline-flex;
@@ -155,6 +172,11 @@
   border-right: 1px solid var(--border-primary);
   background: color-mix(in srgb, var(--bg-secondary) 74%, var(--bg-primary));
   overflow: hidden;
+  backdrop-filter: blur(var(--blur));
+  box-shadow: inset 0 1px 0 var(--glass-edge);
+}
+.settings-page.has-theme-background .settings-nav {
+  background: color-mix(in srgb, var(--sidebar-bg) 78%, transparent);
 }
 .settings-nav-search {
   display: grid;
@@ -330,10 +352,12 @@
   background: currentColor;
 }
 .settings-nav-status.warn {
-  gap: 5px;
-  padding: 2px 6px;
-  background: rgba(245, 158, 11, 0.13);
+  min-width: 8px;
+  min-height: 8px;
+  padding: 0;
+  background: transparent;
   color: #f59e0b;
+  font-size: 0;
 }
 .settings-nav-status.neutral {
   gap: 5px;
@@ -341,7 +365,7 @@
   background: var(--chip-hover);
   color: var(--secondary-text);
 }
-.settings-nav-status.warn::before { width: 5px; height: 5px; }
+.settings-nav-status.warn::before { width: 7px; height: 7px; }
 .settings-search-results {
   display: grid;
   align-content: start;
@@ -376,39 +400,70 @@
   font-size: 11px;
 }
 .settings-detail {
+  position: relative;
   min-width: 0;
-  width: min(900px, 100%);
+  width: 100%;
   height: 100%;
   min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  margin: 0 auto;
-  padding: clamp(24px, 4vw, 48px) clamp(24px, 4vw, 48px) 32px;
+  padding: clamp(24px, 4vw, 48px) 0 0;
+}
+.settings-page.has-theme-background .settings-detail {
+  background: transparent;
+  backdrop-filter: none;
+  box-shadow: none;
+}
+.settings-page.has-theme-background .settings-detail::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  left: 50%;
+  width: min(900px, 100%);
+  pointer-events: none;
+  transform: translateX(-50%);
+  background: color-mix(in srgb, var(--bg-primary) 68%, transparent);
+  backdrop-filter: blur(var(--blur));
+  box-shadow: inset 1px 0 0 color-mix(in srgb, var(--glass-edge) 70%, transparent),
+    inset -1px 0 0 color-mix(in srgb, var(--glass-edge) 45%, transparent);
 }
 .settings-detail-head {
+  position: relative;
+  z-index: 1;
   flex: none;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  padding: 0 0 12px;
+  width: min(900px, 100%);
+  margin: 0 auto;
+  padding: 0 clamp(24px, 4vw, 48px) 12px;
   background: transparent;
 }
 .settings-detail-head > div {
   min-width: 0;
 }
-.settings-detail-head h3 { margin: 0 0 4px; font-size: 15px; font-weight: 650; color: var(--primary-text); }
+.settings-detail-head h1 { margin: 0 0 5px; font-size: 20px; line-height: 1.2; font-weight: 680; color: var(--primary-text); }
 .settings-detail-head p { margin: 0; font-size: 12px; line-height: 1.45; color: var(--secondary-text); }
 .settings-content {
+  position: relative;
+  z-index: 1;
   flex: 1;
+  width: 100%;
   min-width: 0;
   min-height: 0;
   max-height: none;
   overflow-y: auto;
-  padding: 1px 6px 2px 0;
+  padding: 1px 0 2px;
   scrollbar-width: thin;
   scrollbar-color: var(--border-secondary) transparent;
+}
+.settings-content-inner {
+  width: min(900px, 100%);
+  min-height: 100%;
+  margin: 0 auto;
+  padding: 0 clamp(24px, 4vw, 48px) 32px;
 }
 .settings-section {
   display: grid;
@@ -495,6 +550,7 @@
   padding: 10px;
 }
 .settings-block-title {
+  margin: 0;
   color: var(--tertiary-text);
   font-size: 10.5px;
   font-weight: 700;
@@ -3134,7 +3190,10 @@
   }
   .settings-content {
     max-height: none;
-    padding-right: 2px;
+  }
+  .settings-content-inner {
+    width: 100%;
+    padding: 0 16px 20px;
   }
   .settings-detail-head {
     align-items: flex-start;
@@ -3142,7 +3201,11 @@
   }
   .settings-detail {
     width: 100%;
-    padding: 16px 16px 20px;
+    padding: 16px 0 0;
+  }
+  .settings-detail-head {
+    width: 100%;
+    padding-inline: 16px;
   }
   .settings-choice-grid.three-up {
     grid-template-columns: 1fr;
@@ -3199,6 +3262,10 @@
   padding: 14px 16px;
   border-bottom: 1px solid var(--border-primary);
   background: var(--bg-primary);
+  backdrop-filter: blur(var(--blur));
+}
+.settings-theme-editor.has-theme-background .editor-header {
+  background: color-mix(in srgb, var(--bg-primary) 68%, transparent);
 }
 .editor-title {
   flex: 1 1 auto;

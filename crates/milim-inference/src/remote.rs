@@ -103,7 +103,11 @@ impl RemoteBackend {
         if let Some(effort) = reasoning_effort.openrouter {
             extra.insert(
                 "reasoning".to_string(),
-                json!({ "effort": effort.as_str() }),
+                if effort == ReasoningEffort::None {
+                    json!({ "effort": effort.as_str(), "exclude": true })
+                } else {
+                    json!({ "effort": effort.as_str() })
+                },
             );
         }
         if let Some(value) = s.top_k {
@@ -1634,7 +1638,13 @@ fn chunk_to_delta(chunk: &ChatCompletionChunk) -> (DeltaEvent, Option<String>, O
             .delta
             .reasoning_content
             .clone()
-            .or_else(|| choice.delta.reasoning.clone());
+            .or_else(|| choice.delta.reasoning.clone())
+            .filter(|reasoning| !reasoning.trim().is_empty());
+        if let (Some(content), Some(reasoning)) = (&delta.content, &delta.reasoning) {
+            if reasoning == content {
+                delta.reasoning = None;
+            }
+        }
         if let Some(tcs) = &choice.delta.tool_calls {
             delta.tool_calls = tcs.clone();
         }
@@ -1724,6 +1734,17 @@ mod tests {
         };
         let (delta, _, _) = chunk_to_delta(&chunk);
         assert_eq!(delta.reasoning.as_deref(), Some("checking options"));
+    }
+
+    #[test]
+    fn drops_duplicate_openrouter_reasoning_channel() {
+        let line = r#"data: {"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"hello","reasoning":"hello"}}]}"#;
+        let LineOutcome::Event(chunk) = parse_sse_line(line) else {
+            panic!("expected event");
+        };
+        let (delta, _, _) = chunk_to_delta(&chunk);
+        assert_eq!(delta.content.as_deref(), Some("hello"));
+        assert_eq!(delta.reasoning, None);
     }
 
     #[test]
@@ -1983,6 +2004,18 @@ mod tests {
         let body = backend.build_body(&req, true);
         assert!(body.reasoning_effort.is_none());
         assert_eq!(body.extra["reasoning"]["effort"], "max");
+        assert!(body.extra["reasoning"].get("exclude").is_none());
+    }
+
+    #[test]
+    fn excludes_openrouter_reasoning_when_effort_is_off() {
+        let backend = RemoteBackend::new("OpenRouter", "https://openrouter.ai/api/v1", None);
+        let mut req = empty_req();
+        req.model = "z-ai/glm-5.3".into();
+        req.reasoning_effort = Some(ReasoningEffort::None);
+        let body = backend.build_body(&req, true);
+        assert_eq!(body.extra["reasoning"]["effort"], "none");
+        assert_eq!(body.extra["reasoning"]["exclude"], true);
     }
 
     #[test]
