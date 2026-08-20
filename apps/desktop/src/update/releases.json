@@ -1,7 +1,7 @@
 {
-  "0.2.47": {
-    "version": "0.2.47",
-    "summary": "Milim 0.2.47 lets threads collaborate, keeps long conversations fast and durable, and makes desktop and mobile chat behavior clearer and more reliable.",
+  "0.2.48": {
+    "version": "0.2.48",
+    "summary": "Milim 0.2.48 lets threads collaborate, keeps long conversations fast and durable, and makes desktop and mobile chat behavior clearer and more reliable.",
     "items": [
       {
         "id": "linked-thread-collaboration",
