@@ -30,6 +30,9 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+      - name: Generated control contract
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo run --manifest-path Cargo.toml -p milim-control-contract --bin generate-control-contract -- --check
       - name: Tauri native credential backend
         if: matrix.os != 'ubuntu-latest'
         run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features
@@ -52,9 +55,7 @@ jobs:
           cache-dependency-path: apps/desktop/pnpm-lock.yaml
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            . -> target
-            apps/desktop/src-tauri -> target
+          workspaces: apps/desktop/src-tauri -> target
       - name: Linux webview deps
         run: |
           sudo apt-get update
@@ -77,7 +78,7 @@ jobs:
         run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
       - name: Tauri Rust tests
         run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
-      - run: pnpm -C apps/desktop verify
+      - run: pnpm -C apps/desktop verify:frontend
 
   mobile-android:
     name: Mobile Android debug

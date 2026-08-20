@@ -126,6 +126,8 @@ pnpm -C apps/site build
 
 Platform release work should also follow the [release guide](https://docs.milim.ai/release). The broader packaged-app and Tauri smoke path is available through `pnpm -C apps/desktop verify:tester-ready`.
 
+Pull-request CI splits complete desktop verification between the Rust matrix and the frontend job. Release runs reuse that protected validation and add the canonical Windows runtime benchmark plus packaged-artifact checks.
+
 ## Documentation
 
 | Topic | Reference |
