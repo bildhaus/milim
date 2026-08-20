@@ -35,6 +35,7 @@
     "test:tauri-webview": "node tests/tauri-webview-e2e.mjs",
     "test:tauri-command-palette": "node tests/tauri-webview-e2e.mjs --command-palette-only",
     "test:tauri-generation-controls": "node tests/tauri-webview-e2e.mjs --generation-controls-only",
+    "test:tauri-harness-hardening": "node tests/tauri-webview-e2e.mjs --harness-hardening-only",
     "test:tauri-inbox-sidebar": "node tests/tauri-webview-e2e.mjs --inbox-sidebar-only",
     "test:tauri-linked-thread-drop": "node tests/tauri-webview-e2e.mjs --linked-thread-drop-only",
     "test:tauri-settings": "node tests/tauri-webview-e2e.mjs --settings-only",

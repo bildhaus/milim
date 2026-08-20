@@ -31,6 +31,7 @@ const chatAffordancesOnly = process.argv.includes("--chat-affordances-only");
 const modelChangeOnly = process.argv.includes("--model-change-only");
 const reasoningEffortOnly = process.argv.includes("--reasoning-effort-only");
 const generationControlsOnly = process.argv.includes("--generation-controls-only");
+const harnessHardeningOnly = process.argv.includes("--harness-hardening-only");
 const mediaOnly = process.argv.includes("--media-only");
 const linkedThreadDropOnly = process.argv.includes("--linked-thread-drop-only");
 const mcpAppKinds = ["chart", "diagram", "form", "dashboard", "viewer"];
@@ -168,6 +169,10 @@ try {
   } else if (generationControlsOnly) {
     const errors = collectErrors(session.page);
     await runGenerationControlsCheck(session.page);
+    consoleErrors.push(...errors.filter((message) => !message.includes("/codex/models")));
+  } else if (harnessHardeningOnly) {
+    const errors = collectErrors(session.page);
+    await runHarnessHardeningUiCheck(session.page);
     consoleErrors.push(...errors.filter((message) => !message.includes("/codex/models")));
   } else if (browserProfileOnly) {
     const errors = collectErrors(session.page);
@@ -5820,14 +5825,17 @@ async function runHarnessHardeningUiCheck(page) {
   await queuedRow.getByRole("button", { name: "Interrupt", exact: true }).waitFor();
   await queuedRow.getByLabel("Remove queued message").waitFor();
   await queuedRow.getByLabel("More queued message actions").waitFor();
-  await composer.fill("Steer with this input");
+  await composer.fill("Steer with the keyboard shortcut");
+  await composer.press(process.platform === "darwin" ? "Meta+Enter" : "Control+Enter");
+  await page.waitForFunction(() => document.body.textContent?.includes("Steering will be applied"));
+  await composer.fill("Steer with the explicit menu action");
   await page.getByLabel("More actions for active run").click();
   await page.getByRole("menuitem", { name: "Steer next step" }).click();
   await page.waitForFunction(() => document.body.textContent?.includes("Steering will be applied"));
-  if (commandBodies.length !== 2 || commandBodies[0].kind !== "turn.send" || commandBodies[1].kind !== "turn.steer") {
-    throw new Error(`Busy composer should queue first and steer only explicitly: ${JSON.stringify(commandBodies)}.`);
+  if (commandBodies.length !== 3 || commandBodies[0].kind !== "turn.send" || commandBodies[1].kind !== "turn.steer" || commandBodies[2].kind !== "turn.steer") {
+    throw new Error(`Busy composer should queue on Enter and steer by modifier Enter or the explicit menu: ${JSON.stringify(commandBodies)}.`);
   }
-  if (commandBodies[1].payload?.run_id !== "e2e-active-provider-run") {
+  if (commandBodies.slice(1).some((body) => body.payload?.run_id !== "e2e-active-provider-run")) {
     throw new Error("Steering should target the exact active run id.");
   }
 
