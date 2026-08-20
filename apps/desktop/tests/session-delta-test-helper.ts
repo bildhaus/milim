@@ -2,6 +2,7 @@ type SessionDelta = {
   id: string;
   sessionJson?: string;
   messageCount: number;
+  preserveMessages?: boolean;
   messages: Array<{ index: number; messageJson: string }>;
 };
 type PersistedSession = {
@@ -33,9 +34,11 @@ export function applySessionDeltaSnapshot(
       ? { ...JSON.parse(change.sessionJson), messages: existing.messages ?? [] }
       : { ...existing };
     const messages = [...(row.messages ?? [])];
-    messages.length = change.messageCount;
-    for (const message of change.messages) {
-      messages[message.index] = JSON.parse(message.messageJson);
+    if (!change.preserveMessages) {
+      messages.length = change.messageCount;
+      for (const message of change.messages) {
+        messages[message.index] = JSON.parse(message.messageJson);
+      }
     }
     sessions.set(change.id, { ...row, messages });
   }

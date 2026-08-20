@@ -12,6 +12,7 @@ import type {
   ControlCommandKindV1 as GeneratedControlCommandKindV1,
   ControlCommandResultV1 as GeneratedControlCommandResultV1,
   ControlCommandV1 as GeneratedControlCommandV1,
+  ControlEventV1 as GeneratedControlEventV1,
   RunEventPageV1,
   RunInspectionV1,
   QueuedTurnV1 as GeneratedControlQueuedTurnV1,
@@ -462,7 +463,7 @@ export interface RunTrace {
 const DEFAULT_BASE = "http://127.0.0.1:7377";
 const BASE = DEFAULT_BASE;
 const STARTUP_PROVIDER_PICKER_TIMEOUT_MS = 900;
-const ACCOUNT_RUNTIME_PICKER_TIMEOUT_MS = 12000;
+const ACCOUNT_RUNTIME_PICKER_TIMEOUT_MS = 8_000;
 const ACCOUNT_RUNTIME_PICKER_RETRY_DELAY_MS = 500;
 const inTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -470,6 +471,14 @@ const inTauri =
 let tokenPromise: Promise<string | null> | null = null;
 let apiBasePromise: Promise<string> | null = null;
 let startupProviderRefreshPromise: Promise<boolean> | null = null;
+let codexRateLimitCache:
+  | { value: unknown; expiresAt: number }
+  | undefined;
+let codexRateLimitInFlight: Promise<unknown> | null = null;
+let accountRuntimeCatalogInFlight = new Map<
+  string,
+  Promise<Record<AccountRuntimeKind, ModelInfo[]>>
+>();
 
 async function localApiToken(): Promise<string | null> {
   if (!inTauri) return null;
@@ -938,6 +947,9 @@ export type ControlCommandV1 = Omit<GeneratedControlCommandV1, "payload"> & {
   payload?: unknown;
 };
 export type ControlCommandResultV1 = GeneratedControlCommandResultV1;
+export type ControlEventV1 = Omit<GeneratedControlEventV1, "data"> & {
+  data: Record<string, unknown>;
+};
 
 export async function getControlBootstrap(): Promise<ControlBootstrapV1> {
   const response = await authFetch(`${BASE}/control/v1/bootstrap`);
@@ -1010,6 +1022,64 @@ export async function sendControlCommand(
     throw new Error(await responseErrorMessage(response, "Control command failed."));
   }
   return response.json() as Promise<ControlCommandResultV1>;
+}
+
+async function openControlEventSocket(
+  signal: AbortSignal,
+  onEvent: (event: ControlEventV1) => void,
+): Promise<void> {
+  const response = await authFetch(`${BASE}/control/v1/socket-ticket`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(
+      await responseErrorMessage(response, "Control socket ticket failed."),
+    );
+  }
+  const { ticket } = (await response.json()) as { ticket: string };
+  const resolved = await resolveApiInput(
+    `${BASE}/control/v1/ws?ticket=${encodeURIComponent(ticket)}`,
+  );
+  const socketUrl = new URL(String(resolved));
+  socketUrl.protocol = socketUrl.protocol === "https:" ? "wss:" : "ws:";
+  await new Promise<void>((resolve) => {
+    const socket = new WebSocket(socketUrl);
+    const abort = () => socket.close(1000, "aborted");
+    signal.addEventListener("abort", abort, { once: true });
+    socket.onmessage = (message) => {
+      if (typeof message.data !== "string") return;
+      try {
+        onEvent(JSON.parse(message.data) as ControlEventV1);
+      } catch {
+        // A malformed event is isolated; the timeline cursor remains the authority.
+      }
+    };
+    socket.onclose = () => {
+      signal.removeEventListener("abort", abort);
+      resolve();
+    };
+    socket.onerror = () => socket.close();
+    if (signal.aborted) abort();
+  });
+}
+
+/** Resumable canonical event transport. Timeline cursors recover every gap. */
+export async function streamControlEvents(
+  signal: AbortSignal,
+  onEvent: (event: ControlEventV1) => void,
+): Promise<void> {
+  let retryMs = 250;
+  while (!signal.aborted) {
+    try {
+      await openControlEventSocket(signal, onEvent);
+      retryMs = 250;
+    } catch {
+      // Reconnect below; callers retain their timeline cursor.
+    }
+    if (signal.aborted) return;
+    await new Promise<void>((resolve) => window.setTimeout(resolve, retryMs));
+    retryMs = Math.min(4_000, retryMs * 2);
+  }
 }
 
 export function createControlCommandId(client = "desktop"): string {
@@ -2054,27 +2124,18 @@ async function listProviderModelsForPicker(
 export async function listModelsDetailed(
   accountRuntimeEnabled: Readonly<AccountRuntimeEnablement> =
     DEFAULT_ACCOUNT_RUNTIME_ENABLEMENT,
+  options: { retry?: boolean } = {},
 ): Promise<ModelInfo[]> {
-  const [providerModels, codexModels, claudeModels, openCodeModels, piModels] =
-    await Promise.all([
-      listProviderModelsForPicker(),
-      accountRuntimeEnabled.codex
-        ? listCodexModelsForPicker()
-        : Promise.resolve([]),
-      accountRuntimeEnabled.claude
-        ? listClaudeModelsForPicker()
-        : Promise.resolve([]),
-      accountRuntimeEnabled.opencode
-        ? listOpenCodeModelsForPicker()
-        : Promise.resolve([]),
-      accountRuntimeEnabled.pi ? listPiModelsForPicker() : Promise.resolve([]),
-    ]);
+  const [providerModels, runtimeModels] = await Promise.all([
+    listProviderModelsForPicker(),
+    accountRuntimeCatalog(accountRuntimeEnabled, options.retry === true),
+  ]);
   return [
     ...providerModels,
-    ...codexModels,
-    ...claudeModels,
-    ...openCodeModels,
-    ...piModels,
+    ...runtimeModels.codex,
+    ...runtimeModels.claude,
+    ...runtimeModels.opencode,
+    ...runtimeModels.pi,
   ];
 }
 
@@ -2123,20 +2184,15 @@ export async function loadStartupModels(
     }
   };
 
-  const runtimeLoads = [
-    accountRuntimeEnabled.codex
-      ? loadLane("codex", listCodexModelsForPicker)
-      : Promise.resolve(),
-    accountRuntimeEnabled.claude
-      ? loadLane("claude", listClaudeModelsForPicker)
-      : Promise.resolve(),
-    accountRuntimeEnabled.opencode
-      ? loadLane("opencode", listOpenCodeModelsForPicker)
-      : Promise.resolve(),
-    accountRuntimeEnabled.pi
-      ? loadLane("pi", listPiModelsForPicker)
-      : Promise.resolve(),
-  ];
+  const runtimeLoad = accountRuntimeCatalog(accountRuntimeEnabled).then(
+    async (runtimeModels) => {
+      await Promise.all(
+        (Object.entries(runtimeModels) as Array<
+          [AccountRuntimeKind, ModelInfo[]]
+        >).map(([lane, models]) => loadLane(lane, () => Promise.resolve(models))),
+      );
+    },
+  );
   if (initialModels.length) emit();
   const cachedProviderModels = await listProviderModelsForPicker(
     STARTUP_PROVIDER_PICKER_TIMEOUT_MS,
@@ -2153,7 +2209,54 @@ export async function loadStartupModels(
     lanes.provider = models;
     emit();
   });
-  await Promise.allSettled([...runtimeLoads, refreshedProviderLoad]);
+  await Promise.allSettled([runtimeLoad, refreshedProviderLoad]);
+}
+
+async function accountRuntimeCatalog(
+  enablement: Readonly<AccountRuntimeEnablement>,
+  retry = false,
+): Promise<Record<AccountRuntimeKind, ModelInfo[]>> {
+  const key = `${Number(enablement.codex)}${Number(enablement.claude)}${Number(enablement.opencode)}${Number(enablement.pi)}:${Number(retry)}`;
+  const existing = accountRuntimeCatalogInFlight.get(key);
+  if (existing) return existing;
+  const promise = (async () => {
+    const result: Record<AccountRuntimeKind, ModelInfo[]> = {
+      codex: [],
+      claude: [],
+      opencode: [],
+      pi: [],
+    };
+    const allTasks: Array<
+      [AccountRuntimeKind, () => Promise<ModelInfo[]>]
+    > = [
+      ["codex", () => listCodexModelsForPicker(retry)],
+      ["claude", () => listClaudeModelsForPicker(retry)],
+      ["opencode", () => listOpenCodeModelsForPicker(retry)],
+      ["pi", () => listPiModelsForPicker(retry)],
+    ];
+    const tasks = allTasks.filter(([runtime]) => enablement[runtime]);
+    let cursor = 0;
+    const workers = Array.from(
+      { length: Math.min(3, tasks.length) },
+      async () => {
+        for (;;) {
+          const task = tasks[cursor];
+          cursor += 1;
+          if (!task) return;
+          const [runtime, load] = task;
+          result[runtime] = await load();
+        }
+      },
+    );
+    await Promise.allSettled(workers);
+    return result;
+  })();
+  accountRuntimeCatalogInFlight.set(key, promise);
+  void promise.then(
+    () => accountRuntimeCatalogInFlight.delete(key),
+    () => accountRuntimeCatalogInFlight.delete(key),
+  );
+  return promise;
 }
 
 function numberOrUndefined(value: unknown): number | undefined {
@@ -2278,7 +2381,7 @@ function normalizeCodexReasoning(
   };
 }
 
-async function listCodexModelsForPicker(): Promise<ModelInfo[]> {
+async function listCodexModelsForPicker(retry = false): Promise<ModelInfo[]> {
   return discoverAccountRuntimeModels(async (signal) => {
     const account = await getCodexAccount(false, signal);
     if (!account.account && account.requiresOpenaiAuth) return [];
@@ -2308,7 +2411,7 @@ async function listCodexModelsForPicker(): Promise<ModelInfo[]> {
       });
     }
     return Array.from(byId.values());
-  });
+  }, retry);
 }
 
 export interface CodexAccountResponse {
@@ -2654,11 +2757,24 @@ export async function logoutCodex(): Promise<void> {
   );
 }
 
-export async function getCodexRateLimits(): Promise<unknown> {
-  return await parseJsonResponse<unknown>(
-    await authFetch(`${BASE}/codex/rate-limits`),
-    "Codex rate limit check failed",
-  );
+export async function getCodexRateLimits(force = false): Promise<unknown> {
+  if (!force && codexRateLimitCache && codexRateLimitCache.expiresAt > Date.now()) {
+    return codexRateLimitCache.value;
+  }
+  if (codexRateLimitInFlight) return codexRateLimitInFlight;
+  codexRateLimitInFlight = (async () =>
+    parseJsonResponse<unknown>(
+      await authFetch(`${BASE}/codex/rate-limits`),
+      "Codex rate limit check failed",
+    ))().then((value) => {
+    codexRateLimitCache = { value, expiresAt: Date.now() + 60_000 };
+    return value;
+  });
+  try {
+    return await codexRateLimitInFlight;
+  } finally {
+    codexRateLimitInFlight = null;
+  }
 }
 
 export async function listCodexThreads(options: {
@@ -2707,7 +2823,7 @@ export async function importClaudeThread(id: string): Promise<ClaudeImportedThre
   );
 }
 
-async function listClaudeModelsForPicker(): Promise<ModelInfo[]> {
+async function listClaudeModelsForPicker(retry = false): Promise<ModelInfo[]> {
   return discoverAccountRuntimeModels(async (signal) => {
     const status = await getClaudeStatus(signal);
     if (!status.available || !status.authenticated) return [];
@@ -2727,10 +2843,10 @@ async function listClaudeModelsForPicker(): Promise<ModelInfo[]> {
           mandatory: false,
         },
       }));
-  });
+  }, retry);
 }
 
-async function listOpenCodeModelsForPicker(): Promise<ModelInfo[]> {
+async function listOpenCodeModelsForPicker(retry = false): Promise<ModelInfo[]> {
   return discoverAccountRuntimeModels(async (signal) => {
     const status = await getOpenCodeStatus(signal);
     if (!status.available || !status.authenticated) return [];
@@ -2761,10 +2877,10 @@ async function listOpenCodeModelsForPicker(): Promise<ModelInfo[]> {
             : undefined,
         };
       });
-  });
+  }, retry);
 }
 
-async function listPiModelsForPicker(): Promise<ModelInfo[]> {
+async function listPiModelsForPicker(retry = false): Promise<ModelInfo[]> {
   return discoverAccountRuntimeModels(async (signal) => {
     const status = await getPiStatus(signal);
     if (!status.available || !status.authenticated) return [];
@@ -2790,13 +2906,15 @@ async function listPiModelsForPicker(): Promise<ModelInfo[]> {
           }
         : undefined,
     }));
-  });
+  }, retry);
 }
 
 async function discoverAccountRuntimeModels(
   discover: (signal: AbortSignal) => Promise<ModelInfo[]>,
+  retry = false,
 ): Promise<ModelInfo[]> {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  const attempts = retry ? 2 : 1;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), ACCOUNT_RUNTIME_PICKER_TIMEOUT_MS);
     try {
@@ -2806,7 +2924,7 @@ async function discoverAccountRuntimeModels(
     } finally {
       clearTimeout(timer);
     }
-    if (attempt === 0) {
+    if (attempt + 1 < attempts) {
       await new Promise((resolve) => setTimeout(resolve, ACCOUNT_RUNTIME_PICKER_RETRY_DELAY_MS));
     }
   }

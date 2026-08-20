@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type HTMLAttributes, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type CSSProperties, type HTMLAttributes, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
 import { createPortal } from "react-dom";
 import {
   SIDEBAR_CHATS_SECTION_ID,
@@ -33,13 +33,17 @@ import { threadLinkDropDecision } from "../lib/threadLinks.js";
 import { chatExportFilename, sessionExportPayload, sessionMarkdownExport } from "../lib/threadExport";
 import { DEFAULT_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, normalizeSidebarWidth, useUiPreferences, type ThreadNavigationPlacement } from "../ui/store";
 import { useTheme } from "../theme/store";
-import { GitPanel, type GitPanelView } from "./GitPanel";
+import type { GitPanelView } from "./GitPanel";
 import { useContextMenu } from "./ContextMenu";
 import { HoverScrollText } from "./HoverScrollText";
 import { PaneResizeHandle } from "./PaneResizeHandle";
 import { SheetDialog } from "./SheetDialog";
 import { ColorField } from "./ui";
 import { Archive, ArrowUp, Bolt, Calendar, Check, ChevronDown, Code, Cube, Download, FileText, Folder, FolderOpen, Gear, GitBranch, GitPullRequest, Globe, Image, Lightbulb, MoreHorizontal, Pin, Plus, Search, Sidebar as PanelIcon, Star, Terminal } from "./icons";
+
+const GitPanel = lazy(() =>
+  import("./GitPanel").then((mod) => ({ default: mod.GitPanel })),
+);
 
 const SIDEBAR_KEYBOARD_STEP = 32;
 const SIDEBAR_COLLAPSE_OVERSHOOT = 96;
@@ -1018,8 +1022,15 @@ export function Sidebar({
     if (!pullRequestTargets.length) return;
     let cancelled = false;
     const refresh = async (openOnly: boolean) => {
-      await Promise.all(
-        pullRequestTargets.map(async (target) => {
+      if (document.visibilityState === "hidden") return;
+      let cursor = 0;
+      const workers = Array.from(
+        { length: Math.min(2, pullRequestTargets.length) },
+        async () => {
+          for (;;) {
+            const target = pullRequestTargets[cursor];
+            cursor += 1;
+            if (!target) return;
           const previous =
             useSessions.getState().pullRequestsBySession[target.sessionId];
           if (
@@ -1051,20 +1062,25 @@ export function Sidebar({
                   : "Couldn't refresh pull request.",
             });
           }
-        }),
+          }
+        },
       );
+      await Promise.all(workers);
     };
     void refresh(false);
     const onFocus = () => void refresh(false);
+    const onVisible = () => void refresh(false);
     const interval = window.setInterval(
       () => void refresh(true),
       GIT_STATUS_REFRESH_INTERVAL_MS,
     );
     window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
       window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [pullRequestTargetsKey, setSessionPullRequest]);
 
@@ -3125,13 +3141,17 @@ export function Sidebar({
           )}
         </div>
 
-        <GitPanel
-          sessionId={activeId}
-          folder={activeFolder}
-          model={activeModel}
-          onDraftAction={onGitAction}
-          onOpenPanel={() => onOpenGitPanel(activeId, "changes")}
-        />
+        {toolsExpanded && (
+          <Suspense fallback={null}>
+            <GitPanel
+              sessionId={activeId}
+              folder={activeFolder}
+              model={activeModel}
+              onDraftAction={onGitAction}
+              onOpenPanel={() => onOpenGitPanel(activeId, "changes")}
+            />
+          </Suspense>
+        )}
 
         {newChatButtonAtBottom && newChatButton}
 

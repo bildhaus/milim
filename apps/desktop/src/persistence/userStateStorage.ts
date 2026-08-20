@@ -5,6 +5,7 @@ import type {
   StorageValue,
 } from "zustand/middleware";
 import { incrementPerfCounter, recordPerfMeasure } from "../lib/perf.js";
+import type { ChatSearchResult } from "../lib/chatSearch.js";
 
 const CANONICAL_USER_STATE_KEYS = [
   "milim.sessions",
@@ -50,7 +51,15 @@ type SessionDelta = {
   id: string;
   sessionJson?: string;
   messageCount: number;
+  preserveMessages?: boolean;
   messages: SessionMessageDelta[];
+};
+export type SessionMessagePage = {
+  session_id: string;
+  first_index: number;
+  total: number;
+  has_older: boolean;
+  messages: unknown[];
 };
 type SessionsDelta = {
   metaJson: string;
@@ -148,6 +157,10 @@ function sessionMetaJson(value: SessionStorageValue): string {
 function sessionRowJson(session: Record<string, unknown>): string {
   const row = { ...session };
   delete row.messages;
+  delete row.messagesHydrated;
+  delete row.persistedMessageCount;
+  delete row.messagesLoadedFrom;
+  delete row.messagePreview;
   return JSON.stringify(row);
 }
 
@@ -185,25 +198,29 @@ function buildSessionsDelta(
     const id = String(session.id);
     const previousSession = previousById.get(id);
     const messages = sessionMessages(session);
-    const previousMessages = previousSession
+    const preserveMessages = session.messagesHydrated === false;
+    const previousWasPartial = previousSession?.messagesHydrated === false;
+    const previousMessages = previousSession && !previousWasPartial
       ? sessionMessages(previousSession)
       : [];
     const changedMessages: SessionMessageDelta[] = [];
-    for (let index = 0; index < messages.length; index += 1) {
-      const message = messages[index];
-      const previousMessage = previousMessages[index];
-      if (message === previousMessage) continue;
-      const messageJson = JSON.stringify(message);
-      if (messageJson === undefined) {
-        throw new Error("Persisted messages must be JSON values");
+    if (!preserveMessages) {
+      for (let index = 0; index < messages.length; index += 1) {
+        const message = messages[index];
+        const previousMessage = previousMessages[index];
+        if (message === previousMessage) continue;
+        const messageJson = JSON.stringify(message);
+        if (messageJson === undefined) {
+          throw new Error("Persisted messages must be JSON values");
+        }
+        if (
+          previousMessage !== undefined &&
+          messageJson === JSON.stringify(previousMessage)
+        ) {
+          continue;
+        }
+        changedMessages.push({ index, messageJson });
       }
-      if (
-        previousMessage !== undefined &&
-        messageJson === JSON.stringify(previousMessage)
-      ) {
-        continue;
-      }
-      changedMessages.push({ index, messageJson });
     }
 
     const rowJson = sessionRowJson(session);
@@ -214,12 +231,15 @@ function buildSessionsDelta(
     if (
       sessionJson !== undefined ||
       changedMessages.length > 0 ||
-      messages.length !== previousMessages.length
+      (!preserveMessages && messages.length !== previousMessages.length)
     ) {
       upserts.push({
         id,
         sessionJson,
-        messageCount: messages.length,
+        messageCount: preserveMessages
+          ? Number(session.persistedMessageCount ?? messages.length)
+          : messages.length,
+        preserveMessages,
         messages: changedMessages,
       });
     }
@@ -386,7 +406,7 @@ async function flushDeferredSessionWrite(): Promise<void> {
             `persist.${SESSIONS_KEY}.bytes`,
             JSON.stringify(delta).length,
           );
-          await invokeUserState<void>("user_sessions_apply_delta", { delta });
+          await invokeUserState<void>("user_sessions_apply_ops", { delta });
         }
       } else {
         const value = JSON.stringify(entry.value);
@@ -527,9 +547,33 @@ function readSessionStorageValue():
   if (deferredSessionWrite) return deferredSessionWrite.value;
   if (inFlightSessionValue) return inFlightSessionValue;
   return importLegacyLocalStorageOnce().then(async () => {
-    const value = await invokeUserState<string | null>("user_sessions_get");
+    const value = await invokeUserState<string | null>(
+      "user_sessions_manifest_get",
+    );
     committedSessionValue = value ? parseSessionStorageValue(value) : null;
     return committedSessionValue;
+  });
+}
+
+export async function loadSessionMessagePage(
+  sessionId: string,
+  beforeIndex?: number,
+  limit = 100,
+): Promise<SessionMessagePage> {
+  return invokeUserState<SessionMessagePage>("user_session_messages_page", {
+    sessionId,
+    beforeIndex,
+    limit,
+  });
+}
+
+export async function searchUserChats(
+  query: string,
+  limit = 20,
+): Promise<ChatSearchResult[]> {
+  return invokeUserState<ChatSearchResult[]>("user_chat_search", {
+    query,
+    limit,
   });
 }
 

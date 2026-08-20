@@ -43,6 +43,8 @@ const CUSTOM_THEMES_STATE_KEY: &str = "milim.customThemes";
 const MAX_APPEARANCE_BACKGROUND_BYTES: usize = 8 * 1024 * 1024;
 const MAX_MODEL_FAVORITES: usize = 256;
 const MAX_MODEL_FAVORITE_ID_CHARS: usize = 512;
+const DELTA_FLUSH_BYTES: usize = 512;
+const DELTA_FLUSH_INTERVAL: Duration = Duration::from_millis(40);
 pub const MODEL_FAVORITES_SETTINGS_KEY: &str = "milim.settings";
 pub const MODEL_FAVORITES_EVENT_TYPE: &str = "model_favorites.updated";
 
@@ -653,9 +655,7 @@ impl RunJournal {
     fn artifact_value(&self, digest: &str) -> Result<Value> {
         let artifact = self
             .store
-            .control_run_artifacts(&self.run_id)?
-            .into_iter()
-            .find(|artifact| artifact.digest == digest)
+            .control_run_artifact(&self.run_id, digest)?
             .ok_or_else(|| Error::Other(format!("run artifact {digest} is missing")))?;
         parse_value(&artifact.data_json)
     }
@@ -678,23 +678,10 @@ impl RunJournal {
             return Ok(None);
         }
         let previous_step_id = format!("step-{}", step - 1);
-        let mut events = Vec::new();
-        let mut after_seq = None;
-        loop {
-            let page = self
-                .store
-                .control_run_events(&self.run_id, after_seq, 500)?;
-            let page_len = page.len();
-            after_seq = page.last().map(|event| event.seq);
-            events.extend(page);
-            if page_len < 500 {
-                break;
-            }
-        }
-        let previous = events
-            .iter()
-            .filter(|event| event.step_id.as_deref() == Some(previous_step_id.as_str()))
-            .collect::<Vec<_>>();
+        let events = self
+            .store
+            .control_run_events_for_step(&self.run_id, &previous_step_id)?;
+        let previous = events.iter().collect::<Vec<_>>();
         let request_event = previous
             .iter()
             .rev()
@@ -1235,7 +1222,7 @@ impl RunManager {
 
     fn backfill_message_timelines(&self) -> Result<usize> {
         let mut seeded = 0;
-        for thread in self.store.control_threads()? {
+        for thread in self.store.control_threads_missing_message_timeline()? {
             let session: Value = serde_json::from_str(&thread.session_json).unwrap_or(Value::Null);
             let base_timestamp = session
                 .get("createdAt")
@@ -1905,6 +1892,12 @@ impl RunManager {
         tail: bool,
         limit: usize,
     ) -> Result<Option<TimelinePageV1>> {
+        // A compatibility import or an incremental renderer write can add a
+        // session after startup backfill has run. Ensure its canonical control
+        // row exists before the query-only timeline reader looks it up.
+        if self.store.control_thread(thread_id)?.is_none() {
+            return Ok(None);
+        }
         self.store
             .control_timeline_page(thread_id, after_seq, before_seq, tail, limit)?
             .map(|page| {
@@ -1934,9 +1927,9 @@ impl RunManager {
         };
         let composition = self
             .store
-            .control_run_artifacts(run_id)?
+            .control_run_artifacts_by_kind(run_id, "run_composition")?
             .into_iter()
-            .find(|artifact| artifact.kind == "run_composition")
+            .next()
             .map(|artifact| {
                 serde_json::from_str::<ResolvedRunCompositionV1>(&artifact.data_json).map_err(
                     |error| Error::Other(format!("stored run composition is invalid: {error}")),
@@ -1964,9 +1957,18 @@ impl RunManager {
                 .control_run_events(run_id, after_seq, limit.saturating_add(1))?;
         let has_more = records.len() > limit;
         records.truncate(limit);
+        let artifact_digests = records
+            .iter()
+            .filter_map(|record| parse_value(&record.data_json).ok())
+            .filter_map(|data| {
+                data.get("artifact_digest")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect::<Vec<_>>();
         let artifacts = self
             .store
-            .control_run_artifacts(run_id)?
+            .control_run_artifacts_by_digests(run_id, &artifact_digests)?
             .into_iter()
             .map(|artifact| (artifact.digest, artifact.data_json))
             .collect::<HashMap<_, _>>();
@@ -3178,6 +3180,10 @@ impl RunManager {
     ) -> Result<RunOutcome> {
         let response = format!("Echo: {}", accepted.text.trim());
         let mut content = String::new();
+        let mut pending_text = String::new();
+        let mut pending_reasoning = String::new();
+        let mut emitted_first_delta = false;
+        let mut last_flush = Instant::now();
         for chunk in response.as_bytes().chunks(4) {
             tokio::select! {
                 changed = stop.changed() => {
@@ -3188,10 +3194,25 @@ impl RunManager {
                 _ = tokio::time::sleep(Duration::from_millis(5)) => {
                     let text = String::from_utf8_lossy(chunk).to_string();
                     content.push_str(&text);
-                    self.persist_and_emit(thread_id, Some(run_id), "assistant_delta", json!({ "text": text }))?;
+                    pending_text.push_str(&text);
+                    if !emitted_first_delta
+                        || pending_text.len() >= DELTA_FLUSH_BYTES
+                        || last_flush.elapsed() >= DELTA_FLUSH_INTERVAL
+                    {
+                        flush_deltas(self, thread_id, run_id, &mut pending_text, &mut pending_reasoning)?;
+                        emitted_first_delta = true;
+                        last_flush = Instant::now();
+                    }
                 }
             }
         }
+        flush_deltas(
+            self,
+            thread_id,
+            run_id,
+            &mut pending_text,
+            &mut pending_reasoning,
+        )?;
         self.complete_assistant_message(thread_id, run_id, content, String::new(), None)?;
         Ok(RunOutcome::Completed)
     }
@@ -3243,6 +3264,7 @@ impl RunManager {
         let mut reasoning = String::new();
         let mut pending_text = String::new();
         let mut pending_reasoning = String::new();
+        let mut emitted_first_delta = false;
         let mut last_flush = Instant::now();
         loop {
             tokio::select! {
@@ -3263,10 +3285,12 @@ impl RunManager {
                                 reasoning.push_str(&text);
                                 pending_reasoning.push_str(&text);
                             }
-                            if pending_text.len() + pending_reasoning.len() >= 256
-                                || last_flush.elapsed() >= Duration::from_millis(250)
+                            if !emitted_first_delta
+                                || pending_text.len() + pending_reasoning.len() >= DELTA_FLUSH_BYTES
+                                || last_flush.elapsed() >= DELTA_FLUSH_INTERVAL
                             {
                                 flush_deltas(self, thread_id, run_id, &mut pending_text, &mut pending_reasoning)?;
+                                emitted_first_delta = true;
                                 last_flush = Instant::now();
                             }
                         }
@@ -3379,6 +3403,7 @@ impl RunManager {
         let mut reasoning = String::new();
         let mut pending_text = String::new();
         let mut pending_reasoning = String::new();
+        let mut emitted_first_delta = false;
         loop {
             let event = tokio::select! {
                 changed = stop.changed() => {
@@ -3388,7 +3413,7 @@ impl RunManager {
                     }
                     None
                 }
-                event = tokio::time::timeout(Duration::from_millis(250), stream.next()) => {
+                event = tokio::time::timeout(DELTA_FLUSH_INTERVAL, stream.next()) => {
                     match event {
                         Ok(event) => event,
                         Err(_) => {
@@ -3425,7 +3450,9 @@ impl RunManager {
                 milim_agents::AgentEvent::Token { text } => {
                     content.push_str(text);
                     pending_text.push_str(text);
-                    if pending_text.len() + pending_reasoning.len() >= 256 {
+                    if !emitted_first_delta
+                        || pending_text.len() + pending_reasoning.len() >= DELTA_FLUSH_BYTES
+                    {
                         flush_deltas(
                             self,
                             thread_id,
@@ -3433,13 +3460,16 @@ impl RunManager {
                             &mut pending_text,
                             &mut pending_reasoning,
                         )?;
+                        emitted_first_delta = true;
                     }
                     continue;
                 }
                 milim_agents::AgentEvent::Reasoning { text } => {
                     reasoning.push_str(text);
                     pending_reasoning.push_str(text);
-                    if pending_text.len() + pending_reasoning.len() >= 256 {
+                    if !emitted_first_delta
+                        || pending_text.len() + pending_reasoning.len() >= DELTA_FLUSH_BYTES
+                    {
                         flush_deltas(
                             self,
                             thread_id,
@@ -3447,6 +3477,7 @@ impl RunManager {
                             &mut pending_text,
                             &mut pending_reasoning,
                         )?;
+                        emitted_first_delta = true;
                     }
                     continue;
                 }
@@ -3664,15 +3695,39 @@ impl RunManager {
         .map_err(|error| error.0)?;
         let mut content = String::new();
         let mut reasoning = String::new();
+        let mut pending_text = String::new();
+        let mut pending_reasoning = String::new();
+        let mut emitted_first_delta = false;
         loop {
             let event = tokio::select! {
                 changed = stop.changed() => {
                     if changed.is_ok() && *stop.borrow() {
+                        flush_deltas(
+                            self,
+                            thread_id,
+                            run_id,
+                            &mut pending_text,
+                            &mut pending_reasoning,
+                        )?;
                         return Ok(RunOutcome::Cancelled);
                     }
                     None
                 }
-                event = stream.next() => event,
+                event = tokio::time::timeout(DELTA_FLUSH_INTERVAL, stream.next()) => {
+                    match event {
+                        Ok(event) => event,
+                        Err(_) => {
+                            flush_deltas(
+                                self,
+                                thread_id,
+                                run_id,
+                                &mut pending_text,
+                                &mut pending_reasoning,
+                            )?;
+                            continue;
+                        }
+                    }
+                },
             };
             let Some(event) = event else {
                 break;
@@ -3683,21 +3738,40 @@ impl RunManager {
                 .get("type")
                 .and_then(Value::as_str)
                 .unwrap_or("runtime_notice");
-            let mut timeline_type = event_type;
-            let mut timeline_value = value.clone();
+            let timeline_type = event_type;
+            let timeline_value = value.clone();
+            let mut is_delta = false;
             match event_type {
                 "text_delta" => {
                     if let Some(text) = value.get("text").and_then(Value::as_str) {
                         content.push_str(text);
-                        timeline_type = "assistant_delta";
-                        timeline_value = json!({ "text": text, "reasoning": "" });
+                        if !pending_reasoning.is_empty() {
+                            flush_deltas(
+                                self,
+                                thread_id,
+                                run_id,
+                                &mut pending_text,
+                                &mut pending_reasoning,
+                            )?;
+                        }
+                        pending_text.push_str(text);
+                        is_delta = true;
                     }
                 }
                 "reasoning_delta" => {
                     if let Some(text) = value.get("text").and_then(Value::as_str) {
                         reasoning.push_str(text);
-                        timeline_type = "assistant_delta";
-                        timeline_value = json!({ "text": "", "reasoning": text });
+                        if !pending_text.is_empty() {
+                            flush_deltas(
+                                self,
+                                thread_id,
+                                run_id,
+                                &mut pending_text,
+                                &mut pending_reasoning,
+                            )?;
+                        }
+                        pending_reasoning.push_str(text);
+                        is_delta = true;
                     }
                 }
                 "approval_requested" => {
@@ -3729,6 +3803,28 @@ impl RunManager {
                 }
                 _ => {}
             }
+            if is_delta {
+                if !emitted_first_delta
+                    || pending_text.len() + pending_reasoning.len() >= DELTA_FLUSH_BYTES
+                {
+                    flush_deltas(
+                        self,
+                        thread_id,
+                        run_id,
+                        &mut pending_text,
+                        &mut pending_reasoning,
+                    )?;
+                    emitted_first_delta = true;
+                }
+                continue;
+            }
+            flush_deltas(
+                self,
+                thread_id,
+                run_id,
+                &mut pending_text,
+                &mut pending_reasoning,
+            )?;
             if matches!(event_type, "approval_requested" | "approval_resolved") {
                 journal.append_event(1, event_type, journal.privacy_processed_value(&value)?)?;
             }
@@ -6049,6 +6145,36 @@ mod tests {
         assert_eq!(page.items[1].data["id"], "assistant-1");
         assert_eq!(page.items[1].data["content"], "welcome back");
         assert_eq!(page.items[1].data["reasoning"], "brief thought");
+    }
+
+    #[test]
+    fn timeline_read_attaches_session_imported_after_startup() {
+        let store = Arc::new(UserDataStore::new(Database::open_in_memory().unwrap()).unwrap());
+        let manager = RunManager::new(store.clone(), "Fixture desktop").unwrap();
+        store
+            .set_sessions_snapshot(
+                &json!({
+                    "state": {
+                        "activeId": "late-thread",
+                        "sessions": [{
+                            "id": "late-thread",
+                            "title": "Imported after startup",
+                            "createdAt": 100,
+                            "updatedAt": 200,
+                            "messages": []
+                        }]
+                    },
+                    "version": 0
+                })
+                .to_string(),
+            )
+            .unwrap();
+
+        let page = manager
+            .timeline_page("late-thread", None, None, true, 100)
+            .unwrap()
+            .expect("late session should acquire a canonical control row");
+        assert!(page.items.is_empty());
     }
 
     #[test]

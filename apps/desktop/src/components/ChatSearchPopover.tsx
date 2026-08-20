@@ -1,17 +1,25 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { wireMessageContent } from "../api";
-import { searchChatSessions, type SearchableChatSession } from "../lib/chatSearch";
+import {
+  searchChatSessions,
+  type ChatSearchResult,
+  type SearchableChatSession,
+} from "../lib/chatSearch";
 import {
   filterCommandPaletteItems,
   type CommandPaletteItem,
 } from "../lib/commandPalette";
 import { sessionRecencyLabel } from "../lib/sessionRecency";
 import { useSessions, type Project } from "../sessions/store";
+import { searchUserChats } from "../persistence/userStateStorage.js";
 import { Search, X } from "./icons";
 
 export interface RuntimeCommand extends CommandPaletteItem {
   run: () => void;
 }
+
+const inTauri =
+  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 export function CommandPalette({
   projects,
@@ -29,6 +37,9 @@ export function CommandPalette({
   const sessions = useSessions((s) => s.sessions);
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [nativeChatResults, setNativeChatResults] = useState<
+    ChatSearchResult[] | null
+  >(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const searchableSessions = useMemo<SearchableChatSession[]>(
     () => sessions.map((session) => ({
@@ -48,10 +59,34 @@ export function CommandPalette({
     () => filterCommandPaletteItems(commands, query),
     [commands, query],
   );
-  const chatResults = useMemo(
+  const localChatResults = useMemo(
     () => searchChatSessions(searchableSessions, projects, query),
     [projects, query, searchableSessions],
   );
+  useEffect(() => {
+    if (!inTauri) return;
+    let cancelled = false;
+    setNativeChatResults(null);
+    const timer = window.setTimeout(() => {
+      void searchUserChats(query, 20)
+        .then((results) => {
+          if (!cancelled) setNativeChatResults(results);
+        })
+        .catch((error) => {
+          if (!cancelled) {
+            console.warn("Native chat search failed:", error);
+            setNativeChatResults(localChatResults);
+          }
+        });
+    }, 120);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [localChatResults, query]);
+  const chatResults = inTauri
+    ? (nativeChatResults ?? localChatResults)
+    : localChatResults;
   const resultCount = commandResults.length + chatResults.length;
   const activeIndex = resultCount ? Math.min(selectedIndex, resultCount - 1) : 0;
 

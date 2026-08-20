@@ -140,7 +140,7 @@ assertEqual(
 );
 assertEqual(
   desktopPackage.scripts["perf:canonical"],
-  "npm run verify:tauri && node tests/tauri-dev-perf.mjs --binary",
+  "npm run perf:release-build && node tests/tauri-dev-perf.mjs --binary",
   "canonical benchmark script",
 );
 assertEqual(desktopPackage.scripts["perf:tauri-dev"], "node tests/tauri-dev-perf.mjs", "Tauri dev benchmark script");

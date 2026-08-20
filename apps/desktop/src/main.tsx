@@ -2,7 +2,10 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "./App";
 import { recordFrontendError } from "./api";
+import { markPerfStage } from "./lib/perf";
 import "./styles.css";
+
+markPerfStage("entry_evaluated");
 
 window.addEventListener("error", (event) => {
   const error = event.error instanceof Error ? event.error : null;

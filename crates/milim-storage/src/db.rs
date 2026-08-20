@@ -5,14 +5,81 @@
 //! history, agents, memory, …) build their schemas as [`Migration`] lists.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{LockResult, Mutex, MutexGuard};
+use std::time::Instant;
 
 use milim_core::{Error, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::crypto::EncryptedStore;
+
+static DB_LOCK_COUNT: AtomicU64 = AtomicU64::new(0);
+static DB_LOCK_WAIT_NS: AtomicU64 = AtomicU64::new(0);
+static TRANSACTION_COUNT: AtomicU64 = AtomicU64::new(0);
+static TRANSACTION_COMMIT_NS: AtomicU64 = AtomicU64::new(0);
+static TIMELINE_WRITES: AtomicU64 = AtomicU64::new(0);
+static ARTIFACT_BYTES_READ: AtomicU64 = AtomicU64::new(0);
+static ARTIFACT_BYTES_WRITTEN: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoragePerformanceSnapshot {
+    pub db_lock_count: u64,
+    pub db_lock_wait_ns: u64,
+    pub transaction_count: u64,
+    pub transaction_commit_ns: u64,
+    pub timeline_writes: u64,
+    pub artifact_bytes_read: u64,
+    pub artifact_bytes_written: u64,
+}
+
+pub fn storage_performance_snapshot() -> StoragePerformanceSnapshot {
+    StoragePerformanceSnapshot {
+        db_lock_count: DB_LOCK_COUNT.load(Ordering::Relaxed),
+        db_lock_wait_ns: DB_LOCK_WAIT_NS.load(Ordering::Relaxed),
+        transaction_count: TRANSACTION_COUNT.load(Ordering::Relaxed),
+        transaction_commit_ns: TRANSACTION_COMMIT_NS.load(Ordering::Relaxed),
+        timeline_writes: TIMELINE_WRITES.load(Ordering::Relaxed),
+        artifact_bytes_read: ARTIFACT_BYTES_READ.load(Ordering::Relaxed),
+        artifact_bytes_written: ARTIFACT_BYTES_WRITTEN.load(Ordering::Relaxed),
+    }
+}
+
+pub fn reset_storage_performance_counters() {
+    for counter in [
+        &DB_LOCK_COUNT,
+        &DB_LOCK_WAIT_NS,
+        &TRANSACTION_COUNT,
+        &TRANSACTION_COMMIT_NS,
+        &TIMELINE_WRITES,
+        &ARTIFACT_BYTES_READ,
+        &ARTIFACT_BYTES_WRITTEN,
+    ] {
+        counter.store(0, Ordering::Relaxed);
+    }
+}
+
+struct TimedDatabaseMutex(Mutex<Database>);
+
+impl TimedDatabaseMutex {
+    fn new(database: Database) -> Self {
+        Self(Mutex::new(database))
+    }
+
+    fn lock(&self) -> LockResult<MutexGuard<'_, Database>> {
+        let started = Instant::now();
+        let result = self.0.lock();
+        DB_LOCK_COUNT.fetch_add(1, Ordering::Relaxed);
+        DB_LOCK_WAIT_NS.fetch_add(
+            u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        result
+    }
+}
 
 /// One forward-only schema migration.
 pub struct Migration {
@@ -43,6 +110,8 @@ impl Default for DatabaseOptions {
 /// A handle to an open SQLite database.
 pub struct Database {
     conn: Connection,
+    path: Option<PathBuf>,
+    options: DatabaseOptions,
 }
 
 impl Database {
@@ -58,14 +127,22 @@ impl Database {
         }
         let conn = Connection::open(path).map_err(sqlite)?;
         Self::configure(&conn, options)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            path: Some(path.to_path_buf()),
+            options,
+        })
     }
 
     /// Open an ephemeral in-memory database (tests).
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().map_err(sqlite)?;
         Self::configure(&conn, DatabaseOptions::default())?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            path: None,
+            options: DatabaseOptions::default(),
+        })
     }
 
     fn configure(conn: &Connection, options: DatabaseOptions) -> Result<()> {
@@ -94,6 +171,18 @@ impl Database {
     /// The underlying connection (for subsystem-specific queries).
     pub fn conn(&self) -> &Connection {
         &self.conn
+    }
+
+    fn open_reader(&self) -> Result<Option<Self>> {
+        let Some(path) = self.path.as_deref() else {
+            return Ok(None);
+        };
+        let reader = Self::open_with_options(path, self.options)?;
+        reader
+            .conn
+            .pragma_update(None, "query_only", "ON")
+            .map_err(sqlite)?;
+        Ok(Some(reader))
     }
 
     /// Apply any migrations whose `version` exceeds the current schema version,
@@ -488,6 +577,83 @@ const USER_DATA_MIGRATIONS: &[Migration] = &[
         CREATE INDEX IF NOT EXISTS idx_user_thread_mailbox_target_run
             ON user_thread_mailbox(target_run_id, status);",
     },
+    Migration {
+        version: 8,
+        name: "compressed_run_artifact_blobs",
+        sql: "CREATE TABLE IF NOT EXISTS user_run_artifact_blobs (
+            digest TEXT PRIMARY KEY,
+            encoding TEXT NOT NULL,
+            base_digest TEXT,
+            payload BLOB NOT NULL,
+            byte_len INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS user_run_artifact_refs (
+            run_id TEXT NOT NULL,
+            digest TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (run_id, digest),
+            FOREIGN KEY (run_id) REFERENCES user_runs(id) ON DELETE CASCADE,
+            FOREIGN KEY (digest) REFERENCES user_run_artifact_blobs(digest)
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_run_artifact_refs_kind
+            ON user_run_artifact_refs(run_id, kind, created_at_ms, digest);
+        CREATE INDEX IF NOT EXISTS idx_user_run_events_step
+            ON user_run_events(run_id, step_id, seq);
+        CREATE TRIGGER IF NOT EXISTS delete_unreferenced_run_artifact_blob
+        AFTER DELETE ON user_run_artifact_refs
+        BEGIN
+            DELETE FROM user_run_artifact_blobs
+            WHERE digest = OLD.digest
+              AND NOT EXISTS (
+                SELECT 1 FROM user_run_artifact_refs WHERE digest = OLD.digest
+              );
+        END;",
+    },
+    Migration {
+        version: 9,
+        name: "session_message_fts",
+        sql: "CREATE VIRTUAL TABLE IF NOT EXISTS user_session_message_fts USING fts5(
+            source_rowid UNINDEXED,
+            session_id UNINDEXED,
+            message_index UNINDEXED,
+            role UNINDEXED,
+            content,
+            tokenize = 'unicode61'
+        );
+        CREATE TRIGGER IF NOT EXISTS user_session_message_fts_insert
+        AFTER INSERT ON user_session_messages
+        BEGIN
+            INSERT INTO user_session_message_fts
+                (source_rowid, session_id, message_index, role, content)
+            VALUES (
+                NEW.rowid,
+                NEW.session_id,
+                NEW.message_index,
+                COALESCE(json_extract(NEW.message_json, '$.role'), ''),
+                COALESCE(json_extract(NEW.message_json, '$.content'), '')
+            );
+        END;
+        CREATE TRIGGER IF NOT EXISTS user_session_message_fts_update
+        AFTER UPDATE ON user_session_messages
+        BEGIN
+            DELETE FROM user_session_message_fts WHERE source_rowid = OLD.rowid;
+            INSERT INTO user_session_message_fts
+                (source_rowid, session_id, message_index, role, content)
+            VALUES (
+                NEW.rowid,
+                NEW.session_id,
+                NEW.message_index,
+                COALESCE(json_extract(NEW.message_json, '$.role'), ''),
+                COALESCE(json_extract(NEW.message_json, '$.content'), '')
+            );
+        END;
+        CREATE TRIGGER IF NOT EXISTS user_session_message_fts_delete
+        AFTER DELETE ON user_session_messages
+        BEGIN
+            DELETE FROM user_session_message_fts WHERE source_rowid = OLD.rowid;
+        END;",
+    },
 ];
 
 /// Encrypted key/value store (API keys, OAuth tokens, agent secrets).
@@ -539,7 +705,9 @@ impl SecretKv<'_> {
 }
 
 pub struct UserDataStore {
-    db: Mutex<Database>,
+    db: TimedDatabaseMutex,
+    read_pool: Vec<TimedDatabaseMutex>,
+    read_cursor: AtomicUsize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -650,6 +818,21 @@ pub struct ControlRunArtifactRecord {
     pub created_at_ms: i64,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunArtifactMigrationProgress {
+    pub migrated: usize,
+    pub raw_bytes: u64,
+    pub remaining: usize,
+}
+
+#[derive(Debug)]
+struct EncodedRunArtifact {
+    encoding: String,
+    base_digest: Option<String>,
+    payload: Vec<u8>,
+    byte_len: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlInboxRecord {
     pub id: String,
@@ -729,6 +912,8 @@ pub struct SessionDelta {
     pub id: String,
     pub session_json: Option<String>,
     pub message_count: usize,
+    #[serde(default)]
+    pub preserve_messages: bool,
     pub messages: Vec<SessionMessageDelta>,
 }
 
@@ -737,6 +922,258 @@ pub struct SessionDelta {
 pub struct SessionMessageDelta {
     pub index: usize,
     pub message_json: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SessionMessagesPage {
+    pub session_id: String,
+    pub first_index: usize,
+    pub total: usize,
+    pub has_older: bool,
+    pub messages: Vec<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserChatSearchResult {
+    pub session_id: String,
+    pub title: String,
+    pub metadata: String,
+    pub snippet: String,
+    pub updated_at: i64,
+    pub score: f64,
+}
+
+const RUN_ARTIFACT_COMPRESSION_THRESHOLD: usize = 1024;
+const RUN_ARTIFACT_CHECKPOINT_INTERVAL: i64 = 25;
+const RUN_ARTIFACT_MAX_DELTA_DEPTH: usize = 32;
+
+fn artifact_digest(data: &[u8]) -> String {
+    format!("sha256:{:x}", Sha256::digest(data))
+}
+
+fn verify_artifact_digest(digest: &str, data: &[u8]) -> Result<()> {
+    if digest.starts_with("sha256:") && artifact_digest(data) != digest {
+        return Err(Error::Other(format!(
+            "run artifact {digest} failed digest verification"
+        )));
+    }
+    Ok(())
+}
+
+fn compress_artifact(data: &[u8]) -> Result<(String, Vec<u8>)> {
+    if data.len() < RUN_ARTIFACT_COMPRESSION_THRESHOLD {
+        return Ok(("json-v1".into(), data.to_vec()));
+    }
+    let compressed = zstd::stream::encode_all(data, 3)
+        .map_err(|error| Error::Other(format!("compress run artifact: {error}")))?;
+    if compressed.len() >= data.len() {
+        Ok(("json-v1".into(), data.to_vec()))
+    } else {
+        Ok(("zstd-json-v1".into(), compressed))
+    }
+}
+
+fn prefix_delta(base: &[u8], next: &[u8]) -> Vec<u8> {
+    let prefix = base
+        .iter()
+        .zip(next)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let max_suffix = base.len().min(next.len()).saturating_sub(prefix);
+    let suffix = base
+        .iter()
+        .rev()
+        .zip(next.iter().rev())
+        .take(max_suffix)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let middle = &next[prefix..next.len().saturating_sub(suffix)];
+    let mut delta = Vec::with_capacity(16 + middle.len());
+    delta.extend_from_slice(&(prefix as u64).to_le_bytes());
+    delta.extend_from_slice(&(suffix as u64).to_le_bytes());
+    delta.extend_from_slice(middle);
+    delta
+}
+
+fn apply_prefix_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>> {
+    if delta.len() < 16 {
+        return Err(Error::Other("run artifact delta is truncated".into()));
+    }
+    let prefix = usize::try_from(u64::from_le_bytes(
+        delta[..8].try_into().expect("eight-byte prefix"),
+    ))
+    .map_err(|_| Error::Other("run artifact delta prefix is too large".into()))?;
+    let suffix = usize::try_from(u64::from_le_bytes(
+        delta[8..16].try_into().expect("eight-byte suffix"),
+    ))
+    .map_err(|_| Error::Other("run artifact delta suffix is too large".into()))?;
+    if prefix + suffix > base.len() {
+        return Err(Error::Other("run artifact delta exceeds its base".into()));
+    }
+    let mut data = Vec::with_capacity(prefix + delta.len().saturating_sub(16) + suffix);
+    data.extend_from_slice(&base[..prefix]);
+    data.extend_from_slice(&delta[16..]);
+    data.extend_from_slice(&base[base.len() - suffix..]);
+    Ok(data)
+}
+
+fn decode_run_artifact_blob_locked(
+    conn: &Connection,
+    digest: &str,
+    depth: usize,
+) -> Result<Vec<u8>> {
+    if depth > RUN_ARTIFACT_MAX_DELTA_DEPTH {
+        return Err(Error::Other(format!(
+            "run artifact {digest} exceeded the delta checkpoint depth"
+        )));
+    }
+    let row = conn
+        .query_row(
+            "SELECT encoding, base_digest, payload, byte_len
+             FROM user_run_artifact_blobs WHERE digest = ?1",
+            params![digest],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(sqlite)?
+        .ok_or_else(|| Error::Other(format!("run artifact blob {digest} is missing")))?;
+    let (encoding, base_digest, payload, byte_len) = row;
+    ARTIFACT_BYTES_READ.fetch_add(
+        u64::try_from(payload.len()).unwrap_or(u64::MAX),
+        Ordering::Relaxed,
+    );
+    let data = match encoding.as_str() {
+        "json-v1" => payload,
+        "zstd-json-v1" => zstd::stream::decode_all(payload.as_slice())
+            .map_err(|error| Error::Other(format!("decompress run artifact: {error}")))?,
+        "prefix-delta-zstd-v1" => {
+            let base_digest = base_digest
+                .ok_or_else(|| Error::Other(format!("run artifact {digest} has no delta base")))?;
+            let base = decode_run_artifact_blob_locked(conn, &base_digest, depth + 1)?;
+            let delta = zstd::stream::decode_all(payload.as_slice())
+                .map_err(|error| Error::Other(format!("decompress run artifact delta: {error}")))?;
+            apply_prefix_delta(&base, &delta)?
+        }
+        _ => {
+            return Err(Error::Other(format!(
+                "run artifact {digest} uses unsupported encoding {encoding}"
+            )))
+        }
+    };
+    let expected_len = usize::try_from(byte_len)
+        .map_err(|_| Error::Other("run artifact byte length is outside usize".into()))?;
+    if data.len() != expected_len {
+        return Err(Error::Other(format!(
+            "run artifact {digest} decoded to {} bytes, expected {expected_len}",
+            data.len()
+        )));
+    }
+    verify_artifact_digest(digest, &data)?;
+    Ok(data)
+}
+
+fn encode_run_artifact_locked(
+    conn: &Connection,
+    artifact: &ControlRunArtifactRecord,
+) -> Result<EncodedRunArtifact> {
+    let data = artifact.data_json.as_bytes();
+    verify_artifact_digest(&artifact.digest, data)?;
+    let (encoding, payload) = compress_artifact(data)?;
+    let mut encoded = EncodedRunArtifact {
+        encoding,
+        base_digest: None,
+        payload,
+        byte_len: u64::try_from(data.len()).unwrap_or(u64::MAX),
+    };
+    if artifact.kind != "provider_request" || data.len() < RUN_ARTIFACT_COMPRESSION_THRESHOLD {
+        return Ok(encoded);
+    }
+    let request_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM user_run_artifact_refs
+             WHERE run_id = ?1 AND kind = 'provider_request'",
+            params![artifact.run_id],
+            |row| row.get(0),
+        )
+        .map_err(sqlite)?;
+    if request_count % RUN_ARTIFACT_CHECKPOINT_INTERVAL == 0 {
+        return Ok(encoded);
+    }
+    let base_digest = conn
+        .query_row(
+            "SELECT digest FROM user_run_artifact_refs
+             WHERE run_id = ?1 AND kind = 'provider_request'
+             ORDER BY created_at_ms DESC, digest DESC LIMIT 1",
+            params![artifact.run_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(sqlite)?;
+    let Some(base_digest) = base_digest else {
+        return Ok(encoded);
+    };
+    let base = decode_run_artifact_blob_locked(conn, &base_digest, 0)?;
+    let delta = prefix_delta(&base, data);
+    let compressed_delta = zstd::stream::encode_all(delta.as_slice(), 3)
+        .map_err(|error| Error::Other(format!("compress run artifact delta: {error}")))?;
+    if compressed_delta.len() + 64 < encoded.payload.len() {
+        encoded.encoding = "prefix-delta-zstd-v1".into();
+        encoded.base_digest = Some(base_digest);
+        encoded.payload = compressed_delta;
+    }
+    Ok(encoded)
+}
+
+fn put_run_artifact_locked(conn: &Connection, artifact: &ControlRunArtifactRecord) -> Result<()> {
+    let exists = conn
+        .query_row(
+            "SELECT 1 FROM user_run_artifact_blobs WHERE digest = ?1",
+            params![artifact.digest],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(sqlite)?
+        .is_some();
+    if !exists {
+        let encoded = encode_run_artifact_locked(conn, artifact)?;
+        ARTIFACT_BYTES_WRITTEN.fetch_add(
+            u64::try_from(encoded.payload.len()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        conn.execute(
+            "INSERT INTO user_run_artifact_blobs
+             (digest, encoding, base_digest, payload, byte_len)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                artifact.digest,
+                encoded.encoding,
+                encoded.base_digest,
+                encoded.payload,
+                u64_to_i64(encoded.byte_len)?,
+            ],
+        )
+        .map_err(sqlite)?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO user_run_artifact_refs
+         (run_id, digest, kind, created_at_ms) VALUES (?1, ?2, ?3, ?4)",
+        params![
+            artifact.run_id,
+            artifact.digest,
+            artifact.kind,
+            artifact.created_at_ms,
+        ],
+    )
+    .map_err(sqlite)?;
+    Ok(())
 }
 
 impl UserDataStore {
@@ -758,7 +1195,25 @@ impl UserDataStore {
             }
         }
         db.migrate_scoped("user_data", USER_DATA_MIGRATIONS)?;
-        Ok(Self { db: Mutex::new(db) })
+        let mut read_pool = Vec::with_capacity(2);
+        for _ in 0..2 {
+            if let Some(reader) = db.open_reader()? {
+                read_pool.push(TimedDatabaseMutex::new(reader));
+            }
+        }
+        Ok(Self {
+            db: TimedDatabaseMutex::new(db),
+            read_pool,
+            read_cursor: AtomicUsize::new(0),
+        })
+    }
+
+    fn read_db(&self) -> LockResult<MutexGuard<'_, Database>> {
+        if self.read_pool.is_empty() {
+            return self.db.lock();
+        }
+        let index = self.read_cursor.fetch_add(1, Ordering::Relaxed) % self.read_pool.len();
+        self.read_pool[index].lock()
     }
 
     pub fn get_json(&self, key: &str) -> Result<Option<String>> {
@@ -809,6 +1264,306 @@ impl UserDataStore {
             .ok_or_else(|| Error::Other("invalid sessions metadata".into()))?;
         state.insert("sessions".to_string(), serde_json::Value::Array(sessions));
         serde_json::to_string(&root).map(Some).map_err(json_error)
+    }
+
+    pub fn get_sessions_manifest_snapshot(&self, tail_limit: usize) -> Result<Option<String>> {
+        let has_legacy = {
+            let db = self
+                .read_db()
+                .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+            get_json_locked(db.conn(), SESSIONS_STATE_KEY)?.is_some()
+        };
+        if has_legacy {
+            let _ = self.get_sessions_snapshot()?;
+        }
+        let db = self
+            .read_db()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        let mut root = get_json_locked(conn, SESSIONS_META_KEY)?
+            .as_deref()
+            .map(parse_json)
+            .transpose()?
+            .unwrap_or_else(|| serde_json::json!({ "state": {}, "version": 0 }));
+        let active_id = root
+            .get("state")
+            .and_then(|state| state.get("activeId"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let mut load_ids = active_id.into_iter().collect::<BTreeSet<_>>();
+        {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT DISTINCT thread_id FROM user_runs
+                     WHERE status IN ('accepted', 'running')",
+                )
+                .map_err(sqlite)?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(sqlite)?;
+            for row in rows {
+                load_ids.insert(row.map_err(sqlite)?);
+            }
+        }
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, session_json,
+                        (SELECT COUNT(*) FROM user_session_messages WHERE session_id = user_sessions.id)
+                 FROM user_sessions ORDER BY sort_order ASC, updated_at_ms DESC",
+            )
+            .map_err(sqlite)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(sqlite)?;
+        let mut sessions = Vec::new();
+        for row in rows {
+            let (id, session_json, count) = row.map_err(sqlite)?;
+            let total = usize::try_from(count)
+                .map_err(|_| Error::Other("session message count is negative".into()))?;
+            let page = if load_ids.contains(&id) {
+                session_messages_page_locked(conn, &id, None, tail_limit)?
+            } else {
+                SessionMessagesPage {
+                    session_id: id.clone(),
+                    first_index: total,
+                    total,
+                    has_older: total > 0,
+                    messages: Vec::new(),
+                }
+            };
+            let mut session = parse_json(&session_json)?;
+            let object = session
+                .as_object_mut()
+                .ok_or_else(|| Error::Other("invalid session row".into()))?;
+            object.insert("messages".into(), serde_json::Value::Array(page.messages));
+            object.insert("persistedMessageCount".into(), page.total.into());
+            object.insert("messagesLoadedFrom".into(), page.first_index.into());
+            object.insert(
+                "messagesHydrated".into(),
+                serde_json::Value::Bool(!page.has_older),
+            );
+            if let Some(preview) = session_message_preview_locked(conn, &id)? {
+                object.insert("messagePreview".into(), preview.into());
+            }
+            sessions.push(session);
+        }
+        let state = root
+            .get_mut("state")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| Error::Other("invalid sessions metadata".into()))?;
+        state.insert("sessions".into(), serde_json::Value::Array(sessions));
+        serde_json::to_string(&root).map(Some).map_err(json_error)
+    }
+
+    pub fn session_messages_page(
+        &self,
+        session_id: &str,
+        before_index: Option<usize>,
+        limit: usize,
+    ) -> Result<SessionMessagesPage> {
+        let session_id = required_control_text(session_id, "session id")?;
+        let db = self
+            .read_db()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        session_messages_page_locked(db.conn(), session_id, before_index, limit)
+    }
+
+    /// Index a bounded number of legacy messages that predate the FTS trigger.
+    /// New and updated rows are indexed synchronously by SQLite triggers.
+    pub fn index_session_messages_batch(&self, limit: usize) -> Result<usize> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        db.conn()
+            .execute(
+                "INSERT INTO user_session_message_fts
+                    (source_rowid, session_id, message_index, role, content)
+                 SELECT m.rowid, m.session_id, m.message_index,
+                        COALESCE(json_extract(m.message_json, '$.role'), ''),
+                        COALESCE(json_extract(m.message_json, '$.content'), '')
+                 FROM user_session_messages m
+                 WHERE NOT EXISTS (
+                    SELECT 1 FROM user_session_message_fts f
+                    WHERE f.source_rowid = m.rowid
+                 )
+                 ORDER BY m.rowid
+                 LIMIT ?1",
+                params![limit.clamp(1, 2_000) as i64],
+            )
+            .map_err(sqlite)
+    }
+
+    pub fn user_chat_search(&self, query: &str, limit: usize) -> Result<Vec<UserChatSearchResult>> {
+        let parsed = parse_chat_search_query(query);
+        let limit = limit.clamp(1, 20);
+        let db = self
+            .read_db()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        let mut sessions = BTreeMap::<String, (String, String, i64, bool)>::new();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, session_json, updated_at_ms
+                 FROM user_sessions ORDER BY updated_at_ms DESC",
+            )
+            .map_err(sqlite)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(sqlite)?;
+        for row in rows {
+            let (id, session_json, updated_at) = row.map_err(sqlite)?;
+            let value = parse_json(&session_json)?;
+            let title = value
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or("Untitled chat")
+                .to_string();
+            let folder = value
+                .pointer("/settings/folder")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let model = value
+                .pointer("/settings/model")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let metadata = [folder_label(folder), model]
+                .into_iter()
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>()
+                .join(" | ");
+            let archived = value
+                .get("archivedAt")
+                .is_some_and(|value| !value.is_null());
+            sessions.insert(id, (title, metadata, updated_at, archived));
+        }
+        let mut matches = BTreeMap::<String, UserChatSearchResult>::new();
+        for (id, (title, metadata, updated_at, archived)) in &sessions {
+            if !parsed.includes_archive(*archived) {
+                continue;
+            }
+            let haystack = format!("{title} {metadata}").to_lowercase();
+            if parsed.terms.is_empty() || parsed.terms.iter().all(|term| haystack.contains(term)) {
+                let title_lower = title.to_lowercase();
+                let score = if parsed.text.is_empty() {
+                    0.0
+                } else if title_lower == parsed.text {
+                    120.0
+                } else if title_lower.starts_with(&parsed.text) {
+                    80.0
+                } else {
+                    36.0 * parsed
+                        .terms
+                        .iter()
+                        .filter(|term| title_lower.contains(term.as_str()))
+                        .count() as f64
+                        + 12.0
+                            * parsed
+                                .terms
+                                .iter()
+                                .filter(|term| metadata.to_lowercase().contains(term.as_str()))
+                                .count() as f64
+                };
+                matches.insert(
+                    id.clone(),
+                    UserChatSearchResult {
+                        session_id: id.clone(),
+                        title: title.clone(),
+                        metadata: metadata.clone(),
+                        snippet: String::new(),
+                        updated_at: *updated_at,
+                        score,
+                    },
+                );
+            }
+        }
+        if !parsed.terms.is_empty() {
+            let fts_query = parsed
+                .terms
+                .iter()
+                .map(|term| format!("\"{term}\""))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            let mut stmt = conn
+                .prepare(
+                    "SELECT session_id, role,
+                            snippet(user_session_message_fts, 4, '', '', '...', 28),
+                            bm25(user_session_message_fts)
+                     FROM user_session_message_fts
+                     WHERE user_session_message_fts MATCH ?1
+                       AND (?2 IS NULL OR role = ?2)
+                     ORDER BY bm25(user_session_message_fts), rowid DESC
+                     LIMIT 100",
+                )
+                .map_err(sqlite)?;
+            let rows = stmt
+                .query_map(params![fts_query, parsed.role], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, f64>(3)?,
+                    ))
+                })
+                .map_err(sqlite)?;
+            for row in rows {
+                let (id, role, snippet, rank) = row.map_err(sqlite)?;
+                let Some((title, metadata, updated_at, archived)) = sessions.get(&id) else {
+                    continue;
+                };
+                if !parsed.includes_archive(*archived) {
+                    continue;
+                }
+                let score = 40.0 - rank;
+                let prefix = match role.as_str() {
+                    "user" => "You: ",
+                    "assistant" => "Assistant: ",
+                    _ => "",
+                };
+                let candidate = UserChatSearchResult {
+                    session_id: id.clone(),
+                    title: title.clone(),
+                    metadata: metadata.clone(),
+                    snippet: format!("{prefix}{snippet}"),
+                    updated_at: *updated_at,
+                    score,
+                };
+                if matches
+                    .get(&id)
+                    .is_none_or(|existing| candidate.score > existing.score)
+                {
+                    matches.insert(id, candidate);
+                }
+            }
+        }
+        let mut matches = matches.into_values().collect::<Vec<_>>();
+        matches.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| right.updated_at.cmp(&left.updated_at))
+        });
+        matches.truncate(limit);
+        for result in &mut matches {
+            if result.snippet.is_empty() {
+                result.snippet = chat_search_preview_locked(conn, &result.session_id, parsed.role)?
+                    .unwrap_or_else(|| "No messages yet".into());
+            }
+        }
+        Ok(matches)
     }
 
     pub fn set_sessions_snapshot(&self, value_json: &str) -> Result<()> {
@@ -1057,6 +1812,43 @@ impl UserDataStore {
                 "SELECT s.id, s.session_json, c.revision, c.epoch, s.updated_at_ms
                  FROM user_sessions s
                  JOIN user_thread_control c ON c.thread_id = s.id
+                 ORDER BY s.sort_order ASC, s.updated_at_ms DESC",
+            )
+            .map_err(sqlite)?;
+        let rows = stmt
+            .query_map([], control_thread_from_row)
+            .map_err(sqlite)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sqlite)
+    }
+
+    /// Legacy threads that still have messages but no canonical timeline.
+    /// This avoids deserializing every message on every desktop launch.
+    pub fn control_threads_missing_message_timeline(&self) -> Result<Vec<ControlThreadRecord>> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        conn.execute(
+            "INSERT OR IGNORE INTO user_thread_control
+             (thread_id, epoch, revision, next_seq, updated_at_ms)
+             SELECT id, lower(hex(randomblob(16))), 0, 1, updated_at_ms
+             FROM user_sessions",
+            [],
+        )
+        .map_err(sqlite)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT s.id, s.session_json, c.revision, c.epoch, s.updated_at_ms
+                 FROM user_sessions s
+                 JOIN user_thread_control c ON c.thread_id = s.id
+                 WHERE EXISTS (
+                    SELECT 1 FROM user_session_messages m WHERE m.session_id = s.id
+                 )
+                   AND NOT EXISTS (
+                    SELECT 1 FROM user_timeline_events t WHERE t.thread_id = s.id
+                 )
                  ORDER BY s.sort_order ASC, s.updated_at_ms DESC",
             )
             .map_err(sqlite)?;
@@ -1383,8 +2175,7 @@ impl UserDataStore {
         let thread_id = required_control_text(thread_id, "thread id")?;
         let epoch = required_control_text(epoch, "thread epoch")?;
         let db = self
-            .db
-            .lock()
+            .read_db()
             .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
         query_timeline_rows(
             db.conn(),
@@ -1896,91 +2687,24 @@ impl UserDataStore {
             ));
         }
         let limit = limit.clamp(1, 500);
+        let page = {
+            let db = self
+                .read_db()
+                .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+            query_control_timeline_page(db.conn(), thread_id, after_seq, before_seq, tail, limit)?
+        };
+        if page.is_some() {
+            return Ok(page);
+        }
+
+        // A pooled reader can briefly retain a pre-commit WAL snapshot when a
+        // session has just been imported or attached. Confirm a miss against
+        // the ordered writer before reporting that the thread does not exist.
         let db = self
             .db
             .lock()
             .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
-        let conn = db.conn();
-        let Some(epoch) = conn
-            .query_row(
-                "SELECT epoch FROM user_thread_control WHERE thread_id = ?1",
-                params![thread_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(sqlite)?
-        else {
-            return Ok(None);
-        };
-        let limit = i64::try_from(limit)
-            .map_err(|_| Error::InvalidRequest("timeline limit is too large".into()))?;
-        let mut items = if let Some(after) = after_seq {
-            query_timeline_rows(
-                conn,
-                "SELECT thread_id, epoch, seq, item_id, run_id, item_type, data_json, created_at_ms
-                 FROM user_timeline_events
-                 WHERE thread_id = ?1 AND epoch = ?2 AND seq > ?3
-                 ORDER BY seq ASC LIMIT ?4",
-                params![thread_id, epoch, u64_to_i64(after)?, limit],
-            )?
-        } else if let Some(before) = before_seq {
-            let mut rows = query_timeline_rows(
-                conn,
-                "SELECT thread_id, epoch, seq, item_id, run_id, item_type, data_json, created_at_ms
-                 FROM user_timeline_events
-                 WHERE thread_id = ?1 AND epoch = ?2 AND seq < ?3
-                 ORDER BY seq DESC LIMIT ?4",
-                params![thread_id, epoch, u64_to_i64(before)?, limit],
-            )?;
-            rows.reverse();
-            rows
-        } else if tail {
-            let mut rows = query_timeline_rows(
-                conn,
-                "SELECT thread_id, epoch, seq, item_id, run_id, item_type, data_json, created_at_ms
-                 FROM user_timeline_events
-                 WHERE thread_id = ?1 AND epoch = ?2
-                 ORDER BY seq DESC LIMIT ?3",
-                params![thread_id, epoch, limit],
-            )?;
-            rows.reverse();
-            rows
-        } else {
-            query_timeline_rows(
-                conn,
-                "SELECT thread_id, epoch, seq, item_id, run_id, item_type, data_json, created_at_ms
-                 FROM user_timeline_events
-                 WHERE thread_id = ?1 AND epoch = ?2
-                 ORDER BY seq ASC LIMIT ?3",
-                params![thread_id, epoch, limit],
-            )?
-        };
-        let bounds: (Option<i64>, Option<i64>) = conn
-            .query_row(
-                "SELECT MIN(seq), MAX(seq) FROM user_timeline_events
-                 WHERE thread_id = ?1 AND epoch = ?2",
-                params![thread_id, epoch],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(sqlite)?;
-        let first_seq = items.first().map(|item| item.seq);
-        let last_seq = items.last().map(|item| item.seq);
-        let has_older = match (bounds.0, first_seq) {
-            (Some(min), Some(first)) => i64_to_u64(min, "timeline bound")? < first,
-            _ => false,
-        };
-        let has_newer = match (bounds.1, last_seq) {
-            (Some(max), Some(last)) => i64_to_u64(max, "timeline bound")? > last,
-            _ => false,
-        };
-        Ok(Some(ControlTimelinePage {
-            epoch,
-            first_seq,
-            last_seq,
-            has_older,
-            has_newer,
-            items: std::mem::take(&mut items),
-        }))
+        query_control_timeline_page(db.conn(), thread_id, after_seq, before_seq, tail, limit)
     }
 
     pub fn control_enqueue_turn(&self, turn: &ControlQueuedTurnRecord) -> Result<()> {
@@ -2200,8 +2924,7 @@ impl UserDataStore {
         let limit = i64::try_from(limit.clamp(1, 500))
             .map_err(|_| Error::InvalidRequest("run event limit is too large".into()))?;
         let db = self
-            .db
-            .lock()
+            .read_db()
             .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
         let mut stmt = db
             .conn()
@@ -2222,48 +2945,325 @@ impl UserDataStore {
             .map_err(sqlite)
     }
 
+    pub fn control_run_events_for_step(
+        &self,
+        run_id: &str,
+        step_id: &str,
+    ) -> Result<Vec<ControlRunEventRecord>> {
+        let run_id = required_control_text(run_id, "run id")?;
+        let step_id = required_control_text(step_id, "step id")?;
+        let db = self
+            .read_db()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let mut stmt = db
+            .conn()
+            .prepare(
+                "SELECT run_id, seq, event_id, step_id, event_type, data_json, created_at_ms
+                 FROM user_run_events
+                 WHERE run_id = ?1 AND step_id = ?2 ORDER BY seq ASC",
+            )
+            .map_err(sqlite)?;
+        let rows = stmt
+            .query_map(params![run_id, step_id], control_run_event_from_row)
+            .map_err(sqlite)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sqlite)
+    }
+
     pub fn control_put_run_artifact(&self, artifact: &ControlRunArtifactRecord) -> Result<()> {
         validate_control_json(&artifact.data_json, "run artifact")?;
         let db = self
             .db
             .lock()
             .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
-        db.conn()
-            .execute(
-                "INSERT OR IGNORE INTO user_run_artifacts
-                 (run_id, digest, kind, data_json, byte_len, created_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    artifact.run_id,
-                    artifact.digest,
-                    artifact.kind,
-                    artifact.data_json,
-                    u64_to_i64(artifact.byte_len)?,
-                    artifact.created_at_ms
-                ],
+        put_run_artifact_locked(db.conn(), artifact)
+    }
+
+    pub fn control_run_artifact(
+        &self,
+        run_id: &str,
+        digest: &str,
+    ) -> Result<Option<ControlRunArtifactRecord>> {
+        let run_id = required_control_text(run_id, "run id")?;
+        let digest = required_control_text(digest, "artifact digest")?;
+        let db = self
+            .read_db()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        let reference = conn
+            .query_row(
+                "SELECT kind, created_at_ms, byte_len
+                 FROM user_run_artifact_refs
+                 JOIN user_run_artifact_blobs USING (digest)
+                 WHERE run_id = ?1 AND digest = ?2",
+                params![run_id, digest],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(sqlite)?;
+        if let Some((kind, created_at_ms, byte_len)) = reference {
+            let data = decode_run_artifact_blob_locked(conn, digest, 0)?;
+            let data_json = String::from_utf8(data)
+                .map_err(|error| Error::Other(format!("decode run artifact JSON: {error}")))?;
+            return Ok(Some(ControlRunArtifactRecord {
+                run_id: run_id.to_string(),
+                digest: digest.to_string(),
+                kind,
+                data_json,
+                byte_len: u64::try_from(byte_len)
+                    .map_err(|_| Error::Other("run artifact byte length is negative".into()))?,
+                created_at_ms,
+            }));
+        }
+        conn.query_row(
+            "SELECT run_id, digest, kind, data_json, byte_len, created_at_ms
+             FROM user_run_artifacts WHERE run_id = ?1 AND digest = ?2",
+            params![run_id, digest],
+            control_run_artifact_from_row,
+        )
+        .optional()
+        .map_err(sqlite)
+    }
+
+    pub fn control_run_artifacts_by_kind(
+        &self,
+        run_id: &str,
+        kind: &str,
+    ) -> Result<Vec<ControlRunArtifactRecord>> {
+        let run_id = required_control_text(run_id, "run id")?;
+        let kind = required_control_text(kind, "artifact kind")?;
+        let db = self
+            .read_db()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        let refs = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT digest, created_at_ms FROM user_run_artifact_refs
+                     WHERE run_id = ?1 AND kind = ?2 ORDER BY created_at_ms, digest",
+                )
+                .map_err(sqlite)?;
+            let rows = stmt
+                .query_map(params![run_id, kind], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .map_err(sqlite)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sqlite)?;
+            rows
+        };
+        let mut artifacts = Vec::with_capacity(refs.len());
+        for (digest, created_at_ms) in &refs {
+            let data = decode_run_artifact_blob_locked(conn, digest, 0)?;
+            artifacts.push(ControlRunArtifactRecord {
+                run_id: run_id.to_string(),
+                digest: digest.clone(),
+                kind: kind.to_string(),
+                byte_len: u64::try_from(data.len()).unwrap_or(u64::MAX),
+                data_json: String::from_utf8(data)
+                    .map_err(|error| Error::Other(format!("decode run artifact JSON: {error}")))?,
+                created_at_ms: *created_at_ms,
+            });
+        }
+        let migrated = refs
+            .into_iter()
+            .map(|(digest, _)| digest)
+            .collect::<BTreeSet<_>>();
+        let mut legacy = conn
+            .prepare(
+                "SELECT run_id, digest, kind, data_json, byte_len, created_at_ms
+                 FROM user_run_artifacts
+                 WHERE run_id = ?1 AND kind = ?2 ORDER BY created_at_ms, digest",
             )
             .map_err(sqlite)?;
-        Ok(())
+        let rows = legacy
+            .query_map(params![run_id, kind], control_run_artifact_from_row)
+            .map_err(sqlite)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sqlite)?;
+        artifacts.extend(
+            rows.into_iter()
+                .filter(|artifact| !migrated.contains(&artifact.digest)),
+        );
+        artifacts.sort_by_key(|artifact| artifact.created_at_ms);
+        Ok(artifacts)
+    }
+
+    pub fn control_run_artifacts_by_digests(
+        &self,
+        run_id: &str,
+        digests: &[String],
+    ) -> Result<Vec<ControlRunArtifactRecord>> {
+        let mut artifacts = Vec::with_capacity(digests.len());
+        for digest in digests {
+            if let Some(artifact) = self.control_run_artifact(run_id, digest)? {
+                artifacts.push(artifact);
+            }
+        }
+        Ok(artifacts)
     }
 
     pub fn control_run_artifacts(&self, run_id: &str) -> Result<Vec<ControlRunArtifactRecord>> {
         let run_id = required_control_text(run_id, "run id")?;
         let db = self
-            .db
-            .lock()
+            .read_db()
             .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
-        let mut stmt = db
-            .conn()
+        let conn = db.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT digest, kind, created_at_ms, byte_len
+                 FROM user_run_artifact_refs
+                 JOIN user_run_artifact_blobs USING (digest)
+                 WHERE run_id = ?1 ORDER BY created_at_ms, digest",
+            )
+            .map_err(sqlite)?;
+        let refs = stmt
+            .query_map(params![run_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(sqlite)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sqlite)?;
+        drop(stmt);
+        let mut artifacts = Vec::with_capacity(refs.len());
+        let mut migrated = BTreeSet::new();
+        for (digest, kind, created_at_ms, byte_len) in refs {
+            let data = decode_run_artifact_blob_locked(conn, &digest, 0)?;
+            let data_json = String::from_utf8(data)
+                .map_err(|error| Error::Other(format!("decode run artifact JSON: {error}")))?;
+            migrated.insert(digest.clone());
+            artifacts.push(ControlRunArtifactRecord {
+                run_id: run_id.to_string(),
+                digest,
+                kind,
+                data_json,
+                byte_len: u64::try_from(byte_len)
+                    .map_err(|_| Error::Other("run artifact byte length is negative".into()))?,
+                created_at_ms,
+            });
+        }
+        let mut legacy = conn
             .prepare(
                 "SELECT run_id, digest, kind, data_json, byte_len, created_at_ms
                  FROM user_run_artifacts WHERE run_id = ?1 ORDER BY created_at_ms, digest",
             )
             .map_err(sqlite)?;
-        let rows = stmt
+        let rows = legacy
             .query_map(params![run_id], control_run_artifact_from_row)
+            .map_err(sqlite)?
+            .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(sqlite)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
+        artifacts.extend(
+            rows.into_iter()
+                .filter(|artifact| !migrated.contains(&artifact.digest)),
+        );
+        artifacts.sort_by(|left, right| {
+            left.created_at_ms
+                .cmp(&right.created_at_ms)
+                .then_with(|| left.digest.cmp(&right.digest))
+        });
+        Ok(artifacts)
+    }
+
+    pub fn control_has_active_runs(&self) -> Result<bool> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        db.conn()
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM user_runs WHERE status IN ('accepted', 'running')
+                 )",
+                [],
+                |row| row.get(0),
+            )
             .map_err(sqlite)
+    }
+
+    pub fn migrate_run_artifacts_batch(
+        &self,
+        max_raw_bytes: usize,
+    ) -> Result<RunArtifactMigrationProgress> {
+        let max_raw_bytes = max_raw_bytes.max(1);
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        let rows = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT legacy.run_id, legacy.digest, legacy.kind, legacy.data_json,
+                            legacy.byte_len, legacy.created_at_ms
+                     FROM user_run_artifacts AS legacy
+                     LEFT JOIN user_run_artifact_refs AS refs
+                       ON refs.run_id = legacy.run_id AND refs.digest = legacy.digest
+                     WHERE refs.digest IS NULL
+                     ORDER BY legacy.run_id, legacy.created_at_ms, legacy.digest
+                     LIMIT 256",
+                )
+                .map_err(sqlite)?;
+            let rows = stmt
+                .query_map([], control_run_artifact_from_row)
+                .map_err(sqlite)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sqlite)?;
+            rows
+        };
+        let mut selected = Vec::new();
+        let mut raw_bytes = 0usize;
+        for artifact in rows {
+            let next = artifact.data_json.len();
+            if !selected.is_empty() && raw_bytes.saturating_add(next) > max_raw_bytes {
+                break;
+            }
+            raw_bytes = raw_bytes.saturating_add(next);
+            selected.push(artifact);
+        }
+        if !selected.is_empty() {
+            conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
+            let result = (|| -> Result<()> {
+                for artifact in &selected {
+                    put_run_artifact_locked(conn, artifact)?;
+                    conn.execute(
+                        "DELETE FROM user_run_artifacts WHERE run_id = ?1 AND digest = ?2",
+                        params![artifact.run_id, artifact.digest],
+                    )
+                    .map_err(sqlite)?;
+                }
+                Ok(())
+            })();
+            finish_control_transaction(conn, result)?;
+        }
+        let remaining = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM user_run_artifacts AS legacy
+                 LEFT JOIN user_run_artifact_refs AS refs
+                   ON refs.run_id = legacy.run_id AND refs.digest = legacy.digest
+                 WHERE refs.digest IS NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(sqlite)?;
+        Ok(RunArtifactMigrationProgress {
+            migrated: selected.len(),
+            raw_bytes: u64::try_from(raw_bytes).unwrap_or(u64::MAX),
+            remaining: usize::try_from(remaining)
+                .map_err(|_| Error::Other("artifact migration count is negative".into()))?,
+        })
     }
 
     pub fn control_put_inbox(&self, item: &ControlInboxRecord) -> Result<()> {
@@ -2887,16 +3887,58 @@ impl UserDataStore {
         let run_artifacts = {
             let mut stmt = conn
                 .prepare(
+                    "SELECT refs.run_id, refs.digest, refs.kind, refs.created_at_ms, blobs.byte_len
+                     FROM user_run_artifact_refs AS refs
+                     JOIN user_run_artifact_blobs AS blobs USING (digest)
+                     ORDER BY refs.run_id, refs.created_at_ms, refs.digest",
+                )
+                .map_err(sqlite)?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                })
+                .map_err(sqlite)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sqlite)?;
+            drop(stmt);
+            let mut artifacts = Vec::with_capacity(rows.len());
+            let mut migrated = BTreeSet::new();
+            for (run_id, digest, kind, created_at_ms, byte_len) in rows {
+                let data = decode_run_artifact_blob_locked(conn, &digest, 0)?;
+                migrated.insert((run_id.clone(), digest.clone()));
+                artifacts.push(ControlRunArtifactRecord {
+                    run_id,
+                    digest,
+                    kind,
+                    data_json: String::from_utf8(data).map_err(|error| {
+                        Error::Other(format!("decode run artifact JSON: {error}"))
+                    })?,
+                    byte_len: u64::try_from(byte_len)
+                        .map_err(|_| Error::Other("run artifact byte length is negative".into()))?,
+                    created_at_ms,
+                });
+            }
+            let mut legacy = conn
+                .prepare(
                     "SELECT run_id, digest, kind, data_json, byte_len, created_at_ms
                      FROM user_run_artifacts ORDER BY run_id, created_at_ms, digest",
                 )
                 .map_err(sqlite)?;
-            let rows = stmt
+            let rows = legacy
                 .query_map([], control_run_artifact_from_row)
                 .map_err(sqlite)?
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(sqlite)?;
-            rows
+            artifacts.extend(rows.into_iter().filter(|artifact| {
+                !migrated.contains(&(artifact.run_id.clone(), artifact.digest.clone()))
+            }));
+            artifacts
         };
         let inbox = {
             let mut stmt = conn
@@ -3009,6 +4051,8 @@ impl UserDataStore {
         let result = (|| -> Result<()> {
             conn.execute_batch(
                 "DELETE FROM user_run_events;
+                 DELETE FROM user_run_artifact_refs;
+                 DELETE FROM user_run_artifact_blobs;
                  DELETE FROM user_run_artifacts;
                  DELETE FROM user_run_inbox;
                  DELETE FROM user_thread_mailbox;
@@ -3197,20 +4241,7 @@ impl UserDataStore {
                 .map_err(sqlite)?;
             }
             for artifact in &backup.run_artifacts {
-                conn.execute(
-                    "INSERT INTO user_run_artifacts
-                     (run_id, digest, kind, data_json, byte_len, created_at_ms)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![
-                        artifact.run_id,
-                        artifact.digest,
-                        artifact.kind,
-                        artifact.data_json,
-                        u64_to_i64(artifact.byte_len)?,
-                        artifact.created_at_ms
-                    ],
-                )
-                .map_err(sqlite)?;
+                put_run_artifact_locked(conn, artifact)?;
             }
             for event in &backup.run_events {
                 conn.execute(
@@ -3322,7 +4353,13 @@ fn i64_to_u64(value: i64, label: &str) -> Result<u64> {
 fn finish_control_transaction<T>(conn: &Connection, result: Result<T>) -> Result<T> {
     match result {
         Ok(value) => {
+            let started = Instant::now();
             conn.execute_batch("COMMIT").map_err(sqlite)?;
+            TRANSACTION_COUNT.fetch_add(1, Ordering::Relaxed);
+            TRANSACTION_COMMIT_NS.fetch_add(
+                u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
             Ok(value)
         }
         Err(error) => {
@@ -3366,6 +4403,7 @@ fn append_control_timeline_locked(
         ],
     )
     .map_err(sqlite)?;
+    TIMELINE_WRITES.fetch_add(1, Ordering::Relaxed);
     conn.execute(
         "UPDATE user_thread_control
          SET next_seq = ?2, revision = revision + 1, updated_at_ms = ?3
@@ -3461,6 +4499,96 @@ fn control_timeline_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Contro
         data_json: row.get(6)?,
         created_at_ms: row.get(7)?,
     })
+}
+
+fn query_control_timeline_page(
+    conn: &Connection,
+    thread_id: &str,
+    after_seq: Option<u64>,
+    before_seq: Option<u64>,
+    tail: bool,
+    limit: usize,
+) -> Result<Option<ControlTimelinePage>> {
+    let Some(epoch) = conn
+        .query_row(
+            "SELECT epoch FROM user_thread_control WHERE thread_id = ?1",
+            params![thread_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(sqlite)?
+    else {
+        return Ok(None);
+    };
+    let limit = i64::try_from(limit)
+        .map_err(|_| Error::InvalidRequest("timeline limit is too large".into()))?;
+    let items = if let Some(after) = after_seq {
+        query_timeline_rows(
+            conn,
+            "SELECT thread_id, epoch, seq, item_id, run_id, item_type, data_json, created_at_ms
+             FROM user_timeline_events
+             WHERE thread_id = ?1 AND epoch = ?2 AND seq > ?3
+             ORDER BY seq ASC LIMIT ?4",
+            params![thread_id, epoch, u64_to_i64(after)?, limit],
+        )?
+    } else if let Some(before) = before_seq {
+        let mut rows = query_timeline_rows(
+            conn,
+            "SELECT thread_id, epoch, seq, item_id, run_id, item_type, data_json, created_at_ms
+             FROM user_timeline_events
+             WHERE thread_id = ?1 AND epoch = ?2 AND seq < ?3
+             ORDER BY seq DESC LIMIT ?4",
+            params![thread_id, epoch, u64_to_i64(before)?, limit],
+        )?;
+        rows.reverse();
+        rows
+    } else if tail {
+        let mut rows = query_timeline_rows(
+            conn,
+            "SELECT thread_id, epoch, seq, item_id, run_id, item_type, data_json, created_at_ms
+             FROM user_timeline_events
+             WHERE thread_id = ?1 AND epoch = ?2
+             ORDER BY seq DESC LIMIT ?3",
+            params![thread_id, epoch, limit],
+        )?;
+        rows.reverse();
+        rows
+    } else {
+        query_timeline_rows(
+            conn,
+            "SELECT thread_id, epoch, seq, item_id, run_id, item_type, data_json, created_at_ms
+             FROM user_timeline_events
+             WHERE thread_id = ?1 AND epoch = ?2
+             ORDER BY seq ASC LIMIT ?3",
+            params![thread_id, epoch, limit],
+        )?
+    };
+    let bounds: (Option<i64>, Option<i64>) = conn
+        .query_row(
+            "SELECT MIN(seq), MAX(seq) FROM user_timeline_events
+             WHERE thread_id = ?1 AND epoch = ?2",
+            params![thread_id, epoch],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(sqlite)?;
+    let first_seq = items.first().map(|item| item.seq);
+    let last_seq = items.last().map(|item| item.seq);
+    let has_older = match (bounds.0, first_seq) {
+        (Some(min), Some(first)) => i64_to_u64(min, "timeline bound")? < first,
+        _ => false,
+    };
+    let has_newer = match (bounds.1, last_seq) {
+        (Some(max), Some(last)) => i64_to_u64(max, "timeline bound")? > last,
+        _ => false,
+    };
+    Ok(Some(ControlTimelinePage {
+        epoch,
+        first_seq,
+        last_seq,
+        has_older,
+        has_newer,
+        items,
+    }))
 }
 
 fn query_timeline_rows<P>(
@@ -3624,6 +4752,172 @@ fn session_rows(conn: &Connection) -> Result<Vec<serde_json::Value>> {
         sessions.push(session);
     }
     Ok(sessions)
+}
+
+fn session_messages_page_locked(
+    conn: &Connection,
+    session_id: &str,
+    before_index: Option<usize>,
+    limit: usize,
+) -> Result<SessionMessagesPage> {
+    let total = conn
+        .query_row(
+            "SELECT COUNT(*) FROM user_session_messages WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(sqlite)?;
+    let total = usize::try_from(total)
+        .map_err(|_| Error::Other("session message count is negative".into()))?;
+    let end = before_index.unwrap_or(total).min(total);
+    let first_index = end.saturating_sub(limit.clamp(1, 500));
+    let mut stmt = conn
+        .prepare(
+            "SELECT message_json FROM user_session_messages
+             WHERE session_id = ?1 AND message_index >= ?2 AND message_index < ?3
+             ORDER BY message_index ASC",
+        )
+        .map_err(sqlite)?;
+    let rows = stmt
+        .query_map(params![session_id, first_index as i64, end as i64], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(sqlite)?;
+    let messages = rows
+        .map(|row| row.map_err(sqlite).and_then(|json| parse_json(&json)))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(SessionMessagesPage {
+        session_id: session_id.to_string(),
+        first_index,
+        total,
+        has_older: first_index > 0,
+        messages,
+    })
+}
+
+fn session_message_preview_locked(conn: &Connection, session_id: &str) -> Result<Option<String>> {
+    let message = conn
+        .query_row(
+            "SELECT message_json FROM user_session_messages
+             WHERE session_id = ?1 ORDER BY message_index DESC LIMIT 1",
+            params![session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(sqlite)?;
+    let Some(message) = message else {
+        return Ok(None);
+    };
+    let value = parse_json(&message)?;
+    let content = value
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if content.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(content.chars().take(180).collect()))
+    }
+}
+
+#[derive(Debug)]
+struct ParsedChatSearchQuery {
+    text: String,
+    terms: Vec<String>,
+    role: Option<&'static str>,
+    archive_mode: &'static str,
+}
+
+impl ParsedChatSearchQuery {
+    fn includes_archive(&self, archived: bool) -> bool {
+        match self.archive_mode {
+            "all" => true,
+            "archived" => archived,
+            _ => !archived,
+        }
+    }
+}
+
+fn parse_chat_search_query(query: &str) -> ParsedChatSearchQuery {
+    let mut role = None;
+    let mut archive_mode = "active";
+    let mut text = Vec::new();
+    let bounded_query = query.trim().chars().take(256).collect::<String>();
+    for part in bounded_query.split_whitespace() {
+        match part.to_ascii_lowercase().as_str() {
+            "from:user" | "role:user" => role = Some("user"),
+            "from:assistant" | "role:assistant" => role = Some("assistant"),
+            "in:all" => archive_mode = "all",
+            "is:archived" | "in:archive" | "in:archived" => archive_mode = "archived",
+            _ => text.push(part),
+        }
+    }
+    let text = text.join(" ").to_lowercase();
+    let allow_single = text.chars().count() == 1;
+    let terms = text
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|term| !term.is_empty() && (allow_single || term.chars().count() > 1))
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    ParsedChatSearchQuery {
+        text,
+        terms,
+        role,
+        archive_mode,
+    }
+}
+
+fn folder_label(folder: &str) -> &str {
+    folder
+        .rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+        .unwrap_or_default()
+}
+
+fn chat_search_preview_locked(
+    conn: &Connection,
+    session_id: &str,
+    role: Option<&str>,
+) -> Result<Option<String>> {
+    let message = conn
+        .query_row(
+            "SELECT message_json FROM user_session_messages
+             WHERE session_id = ?1
+               AND (?2 IS NULL OR json_extract(message_json, '$.role') = ?2)
+             ORDER BY message_index DESC LIMIT 1",
+            params![session_id, role],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(sqlite)?;
+    let Some(message) = message else {
+        return Ok(None);
+    };
+    let value = parse_json(&message)?;
+    let content = value
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if content.is_empty() {
+        return Ok(None);
+    }
+    let prefix = match value.get("role").and_then(serde_json::Value::as_str) {
+        Some("user") => "You: ",
+        Some("assistant") => "Assistant: ",
+        _ => "",
+    };
+    Ok(Some(format!(
+        "{prefix}{}",
+        content.chars().take(180).collect::<String>()
+    )))
 }
 
 fn session_messages_by_id(conn: &Connection) -> Result<BTreeMap<String, Vec<serde_json::Value>>> {
@@ -3861,6 +5155,11 @@ fn apply_sessions_delta_locked(conn: &Connection, delta: SessionsDelta) -> Resul
                 ));
             }
         }
+        if session.preserve_messages && !session.messages.is_empty() {
+            return Err(Error::InvalidRequest(
+                "preserved session deltas cannot include message rows".into(),
+            ));
+        }
         let mut message_indices = BTreeSet::new();
         for message in &session.messages {
             if message.index >= session.message_count || !message_indices.insert(message.index) {
@@ -3932,6 +5231,9 @@ fn apply_sessions_delta_locked(conn: &Connection, delta: SessionsDelta) -> Resul
                 )
                 .map_err(sqlite)?;
             if server_owned_run {
+                continue;
+            }
+            if session.preserve_messages {
                 continue;
             }
 
@@ -4464,6 +5766,7 @@ mod tests {
                     id: "a".into(),
                     session_json: Some(r#"{"id":"a","title":"A2"}"#.into()),
                     message_count: 2,
+                    preserve_messages: false,
                     messages: vec![
                         SessionMessageDelta {
                             index: 0,
@@ -4513,6 +5816,7 @@ mod tests {
                     id: "a".into(),
                     session_json: None,
                     message_count: 1,
+                    preserve_messages: false,
                     messages: Vec::new(),
                 }],
                 deleted_session_ids: vec!["b".into()],
@@ -4544,6 +5848,7 @@ mod tests {
                 id: "a".into(),
                 session_json: Some(r#"{"id":"a","title":"Changed"}"#.into()),
                 message_count: 2,
+                preserve_messages: false,
                 messages: vec![SessionMessageDelta {
                     index: 0,
                     message_json: r#"{"role":"user","content":"changed"}"#.into(),
@@ -4558,6 +5863,97 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&restored).unwrap(),
             serde_json::from_str::<serde_json::Value>(initial).unwrap()
         );
+    }
+
+    #[test]
+    fn partial_session_delta_preserves_unloaded_messages() {
+        let db = Database::open_in_memory().unwrap();
+        let store = UserDataStore::new(db).unwrap();
+        let initial = r#"{"state":{"sessions":[{"id":"a","title":"Before","messages":[{"id":"one","role":"user","content":"one"},{"id":"two","role":"assistant","content":"two"}]}],"activeId":"a"},"version":0}"#;
+        store.set_sessions_snapshot(initial).unwrap();
+
+        store
+            .apply_sessions_delta(SessionsDelta {
+                meta_json: r#"{"state":{"activeId":"a"},"version":0}"#.into(),
+                session_order: vec!["a".into()],
+                upserts: vec![SessionDelta {
+                    id: "a".into(),
+                    session_json: Some(r#"{"id":"a","title":"After"}"#.into()),
+                    message_count: 2,
+                    preserve_messages: true,
+                    messages: Vec::new(),
+                }],
+                deleted_session_ids: Vec::new(),
+            })
+            .unwrap();
+
+        let restored: serde_json::Value =
+            serde_json::from_str(&store.get_sessions_snapshot().unwrap().unwrap()).unwrap();
+        assert_eq!(restored["state"]["sessions"][0]["title"], "After");
+        assert_eq!(
+            restored["state"]["sessions"][0]["messages"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            restored["state"]["sessions"][0]["messages"][1]["content"],
+            "two"
+        );
+    }
+
+    #[test]
+    fn legacy_message_search_indexes_in_idle_batches_and_honors_filters() {
+        let db = Database::open_in_memory().unwrap();
+        db.migrate_scoped("user_data", &USER_DATA_MIGRATIONS[..8])
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO user_sessions (id, session_json, sort_order, updated_at_ms)
+                 VALUES ('active', ?1, 0, 20), ('archived', ?2, 1, 10)",
+                params![
+                    r#"{"id":"active","title":"Active","messages":[]}"#,
+                    r#"{"id":"archived","title":"Archived","archivedAt":1,"messages":[]}"#
+                ],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO user_session_messages (session_id, message_index, message_json)
+                 VALUES ('active', 0, ?1), ('archived', 0, ?2)",
+                params![
+                    r#"{"id":"m1","role":"assistant","content":"hidden search needle"}"#,
+                    r#"{"id":"m2","role":"user","content":"archived search needle"}"#
+                ],
+            )
+            .unwrap();
+        let store = UserDataStore::new(db).unwrap();
+
+        assert!(store
+            .user_chat_search("needle from:assistant", 20)
+            .unwrap()
+            .is_empty());
+        assert_eq!(store.index_session_messages_batch(1).unwrap(), 1);
+        let active = store.user_chat_search("needle from:assistant", 20).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].session_id, "active");
+        assert!(active[0].snippet.contains("Assistant:"));
+        assert!(store
+            .user_chat_search("needle from:user", 20)
+            .unwrap()
+            .is_empty());
+
+        assert_eq!(store.index_session_messages_batch(10).unwrap(), 1);
+        let archived = store
+            .user_chat_search("needle from:user is:archived", 20)
+            .unwrap();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].session_id, "archived");
+        assert!(store
+            .user_chat_search("needle from:user", 20)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -5057,6 +6453,7 @@ mod tests {
                     id: "thread-1".into(),
                     session_json: None,
                     message_count: 1,
+                    preserve_messages: false,
                     messages: vec![SessionMessageDelta {
                         index: 0,
                         message_json: r#"{"id":"renderer-copy","role":"user","content":"stale"}"#
@@ -5340,6 +6737,124 @@ mod tests {
             store.control_run_events("run-1", None, 10).unwrap().len(),
             1
         );
+    }
+
+    #[test]
+    fn run_artifacts_are_compressed_delta_encoded_and_migrated_losslessly() {
+        let store = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        store
+            .control_create_thread(
+                "thread-1",
+                r#"{"id":"thread-1","title":"Fixture"}"#,
+                "epoch-1",
+            )
+            .unwrap();
+        store
+            .control_put_run(&ControlRunRecord {
+                id: "run-1".into(),
+                thread_id: "thread-1".into(),
+                status: "completed".into(),
+                adapter: "provider".into(),
+                request_json: r#"{"text":"hello"}"#.into(),
+                agent_snapshot_json: None,
+                native_session_json: None,
+                created_at_ms: 1,
+                updated_at_ms: 2,
+                completed_at_ms: Some(2),
+                error_json: None,
+            })
+            .unwrap();
+        let history = (0..5_000)
+            .map(|index| format!("token-{index:05}-{:x}", index * 7_919))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let first = serde_json::json!({
+            "messages": [{ "role": "user", "content": history.clone() }],
+            "tools": [{ "name": "read_file" }]
+        })
+        .to_string();
+        let second = serde_json::json!({
+            "messages": [
+                { "role": "user", "content": history },
+                { "role": "assistant", "content": "next" }
+            ],
+            "tools": [{ "name": "read_file" }]
+        })
+        .to_string();
+        let raw_bytes = first.len() + second.len();
+        let first_digest = artifact_digest(first.as_bytes());
+        let second_digest = artifact_digest(second.as_bytes());
+        for (index, (digest, data_json)) in [
+            (first_digest.clone(), first.clone()),
+            (second_digest.clone(), second.clone()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            store
+                .control_put_run_artifact(&ControlRunArtifactRecord {
+                    run_id: "run-1".into(),
+                    digest,
+                    kind: "provider_request".into(),
+                    byte_len: data_json.len() as u64,
+                    data_json,
+                    created_at_ms: index as i64 + 1,
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            store
+                .control_run_artifact("run-1", &second_digest)
+                .unwrap()
+                .unwrap()
+                .data_json,
+            second
+        );
+        {
+            let db = store.db.lock().unwrap();
+            let encoding: String = db
+                .conn()
+                .query_row(
+                    "SELECT encoding FROM user_run_artifact_blobs WHERE digest = ?1",
+                    params![second_digest],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(encoding, "prefix-delta-zstd-v1");
+            let stored_bytes: i64 = db
+                .conn()
+                .query_row(
+                    "SELECT COALESCE(SUM(length(payload)), 0)
+                     FROM user_run_artifact_blobs",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(
+                stored_bytes < (raw_bytes / 4) as i64,
+                "compressed fixture should use less than 25% of raw bytes: {stored_bytes}/{raw_bytes}"
+            );
+            db.conn()
+                .execute(
+                    "INSERT INTO user_run_artifacts
+                     (run_id, digest, kind, data_json, byte_len, created_at_ms)
+                     VALUES ('run-1', 'legacy-digest', 'tool_result', '{\"ok\":true}', 11, 3)",
+                    [],
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            store
+                .control_run_artifact("run-1", "legacy-digest")
+                .unwrap()
+                .unwrap()
+                .data_json,
+            r#"{"ok":true}"#
+        );
+        let progress = store.migrate_run_artifacts_batch(4 * 1024 * 1024).unwrap();
+        assert_eq!(progress.migrated, 1);
+        assert_eq!(progress.remaining, 0);
+        assert_eq!(store.control_run_artifacts("run-1").unwrap().len(), 3);
     }
 
     #[test]

@@ -1,4 +1,5 @@
 import { Fragment, type KeyboardEvent, useEffect, useMemo, useState } from "react";
+import "../settings.css";
 import {
   listModelsDetailed,
   listWorkspaceLaunchers,

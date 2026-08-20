@@ -372,10 +372,9 @@ try {
   assert(chatSource.includes("<ComposerSurface>"), "Chat and Media Studio should share the same composer surface component");
   assert(chatSource.includes("popover"), "Chat should opt into the single-pill media controls");
 
-  const styleSource = readFileSync(
-    resolve(process.cwd(), "src/workspaces.css"),
-    "utf8",
-  );
+  const styleSource = ["src/workspaces.css", "src/media-manager.css"]
+    .map((path) => readFileSync(resolve(process.cwd(), path), "utf8"))
+    .join("\n");
   assert(styleSource.includes(".inline-media-parameter-controls"), "The shared inline media controls should retain compact parameter layout");
   assert(styleSource.includes("grid-template-columns: minmax(360px, 1fr) var(--media-library-width, 280px)"), "Wide Media Studio should give Output the flexible column beside a resizable Library");
   assert(managerSource.includes('data-testid="media-composer-resize-handle"'), "The side composer should expose an accessible resize handle");

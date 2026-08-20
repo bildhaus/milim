@@ -160,6 +160,11 @@ export interface Session {
   id: string;
   title: string;
   messages: ChatMessage[];
+  /** False while only a tail page is resident in the renderer. */
+  messagesHydrated?: boolean;
+  persistedMessageCount?: number;
+  messagesLoadedFrom?: number;
+  messagePreview?: string;
   virtualFiles?: Record<string, SessionVirtualFile>;
   contextPanelOpen?: boolean;
   contextCollapsedSectionIds?: QuickSummarySectionId[];
@@ -1879,6 +1884,12 @@ interface SessionState {
     messages: ChatMessage[],
     options?: { autoTitle?: boolean },
   ) => void;
+  prependMessagePage: (
+    id: string,
+    messages: ChatMessage[],
+    firstIndex: number,
+    total: number,
+  ) => void;
   appendStreamChunks: (
     id: string,
     messageIdOrChunks: string | BufferedStreamChunk[],
@@ -3075,6 +3086,37 @@ export const useSessions = create<SessionState>()(
                   }
                 : s,
             ),
+          })),
+
+        prependMessagePage: (id, pageMessages, firstIndex, total) =>
+          set((st) => ({
+            sessions: st.sessions.map((session) => {
+              if (session.id !== id) return session;
+              const normalizedPage = pageMessages.map((message) =>
+                normalizeMessageArtifacts(message),
+              );
+              const pageIds = new Set(
+                normalizedPage.map((message) => message.id),
+              );
+              const merged = [
+                ...normalizedPage,
+                ...session.messages.filter((message) => !pageIds.has(message.id)),
+              ];
+              const seen = new Set<string>();
+              const messages = merged.filter((message) => {
+                const messageId = String(message.id);
+                if (seen.has(messageId)) return false;
+                seen.add(messageId);
+                return true;
+              });
+              return {
+                ...session,
+                messages,
+                messagesLoadedFrom: firstIndex,
+                persistedMessageCount: total,
+                messagesHydrated: firstIndex === 0,
+              };
+            }),
           })),
 
         appendStreamChunks: (id, messageIdOrChunks, chunksArg) => {

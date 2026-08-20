@@ -24,9 +24,9 @@ import {
   recordFrontendError,
   requestDesktopQuit,
   restartDesktopApp,
+  type ChatMessage,
 } from "./api";
 import { AutoUpdater } from "./components/AutoUpdater";
-import { ChatView } from "./components/ChatView";
 import { ContextMenuProvider, useContextMenu, type ContextMenuItem } from "./components/ContextMenu";
 import type { GitPanelView } from "./components/GitPanel";
 import { FolderOpen, Gear, Globe, Pencil, Plus, Refresh, Sidebar as SidebarIcon, X } from "./components/icons";
@@ -46,6 +46,7 @@ import {
   importLegacyLocalStorageOnce,
   flushDeferredUserStateWrites,
   installUserStateFlushHandlers,
+  loadSessionMessagePage,
 } from "./persistence/userStateStorage.js";
 import {
   hydrateSessionComposerDraftsFromUserState,
@@ -66,10 +67,16 @@ import {
 } from "./lib/nativeNotifications";
 import { useUiPreferences } from "./ui/store";
 import { dataTransferCarriesFiles, WINDOW_ATTACH_FILES_EVENT } from "./lib/windowFileDrop";
+import { markPerfStage } from "./lib/perf";
 
 const SettingsPage = lazy(() =>
   import("./settings/SettingsDialog").then((mod) => ({
     default: mod.SettingsPage,
+  })),
+);
+const ChatView = lazy(() =>
+  import("./components/ChatView").then((mod) => ({
+    default: mod.ChatView,
   })),
 );
 const AgentsManager = lazy(() =>
@@ -88,14 +95,15 @@ const SchedulesManager = lazy(() =>
   })),
 );
 const MediaManager = lazy(() =>
-  import("./components/MediaManager").then((mod) => ({
-    default: mod.MediaManager,
-  })),
+  Promise.all([import("./media-manager.css"), import("./components/MediaManager")]).then(
+    ([, mod]) => ({ default: mod.MediaManager }),
+  ),
 );
 const PullRequestsManager = lazy(() =>
-  import("./components/PullRequestsManager").then((mod) => ({
-    default: mod.PullRequestsManager,
-  })),
+  Promise.all([
+    import("./pull-requests.css"),
+    import("./components/PullRequestsManager"),
+  ]).then(([, mod]) => ({ default: mod.PullRequestsManager })),
 );
 const OnboardingFlow = lazy(() =>
   import("./components/OnboardingFlow").then((mod) => ({
@@ -423,9 +431,52 @@ function AppContent() {
   useEffect(() => {
     if (sessionsHydrated) return;
     return useSessions.persist.onFinishHydration(() =>
-      setSessionsHydrated(true),
+      {
+        markPerfStage("manifest_hydrated");
+        setSessionsHydrated(true);
+      },
     );
   }, [sessionsHydrated]);
+  useEffect(() => {
+    if (!sessionsHydrated) return;
+    markPerfStage("manifest_hydrated");
+    if (activeThread?.messagesHydrated !== false) {
+      markPerfStage("active_tail_loaded");
+    }
+  }, [activeThread?.messagesHydrated, sessionsHydrated]);
+  useEffect(() => {
+    if (
+      !inTauri ||
+      !sessionsHydrated ||
+      !activeThread ||
+      activeThread.messagesHydrated !== false ||
+      activeThread.messages.length > 0
+    ) {
+      return;
+    }
+    let cancelled = false;
+    void loadSessionMessagePage(activeThread.id, undefined, 100)
+      .then((page) => {
+        if (cancelled) return;
+        useSessions.getState().prependMessagePage(
+          activeThread.id,
+          page.messages as ChatMessage[],
+          page.first_index,
+          page.total,
+        );
+        markPerfStage("active_tail_loaded");
+      })
+      .catch((error) =>
+        console.warn("Failed to hydrate active thread messages:", error),
+      );
+    return () => {
+      cancelled = true;
+    };
+  }, [activeThread, sessionsHydrated]);
+  useEffect(() => {
+    if (!sessionsHydrated || !uiHydrated) return;
+    requestAnimationFrame(() => markPerfStage("shell_painted"));
+  }, [sessionsHydrated, uiHydrated]);
   useEffect(() => {
     if (uiHydrated) return;
     return useUiPreferences.persist.onFinishHydration(() => setUiHydrated(true));

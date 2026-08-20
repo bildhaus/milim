@@ -34,11 +34,11 @@ const onboarding = readFileSync(
 );
 const picker =
   api.match(
-    /async function listCodexModelsForPicker\(\): Promise<ModelInfo\[]> \{[\s\S]*?\n\}\n\nexport interface CodexAccountResponse/,
+    /async function listCodexModelsForPicker\(retry = false\): Promise<ModelInfo\[]> \{[\s\S]*?\n\}\n\nexport interface CodexAccountResponse/,
   )?.[0] ?? "";
 const claudePicker =
   api.match(
-    /async function listClaudeModelsForPicker\(\): Promise<ModelInfo\[]> \{[\s\S]*?\n\}\n\nexport async function getClaudeStatus/,
+    /async function listClaudeModelsForPicker\(retry = false\): Promise<ModelInfo\[]> \{[\s\S]*?\n\}\n\nexport async function getClaudeStatus/,
   )?.[0] ?? "";
 const harnessRun =
   api.match(
@@ -49,7 +49,7 @@ const providerRun =
     /export async function streamChat\([\s\S]*?\n\): Promise<void> \{[\s\S]*?\n\}\n\nfunction reasoningEffortBody/,
   )?.[0] ?? "";
 
-assert.match(api, /const ACCOUNT_RUNTIME_PICKER_TIMEOUT_MS = 12000;/);
+assert.match(api, /const ACCOUNT_RUNTIME_PICKER_TIMEOUT_MS = 8_000;/);
 assert.match(api, /const ACCOUNT_RUNTIME_PICKER_RETRY_DELAY_MS = 500;/);
 assert.ok(picker, "Codex picker function should exist");
 assert.match(picker, /discoverAccountRuntimeModels\(async \(signal\) =>/);
@@ -75,15 +75,14 @@ assert.equal(
 );
 assert.match(
   api,
-  /for \(let attempt = 0; attempt < 2; attempt \+= 1\)[\s\S]*new AbortController\(\)[\s\S]*ACCOUNT_RUNTIME_PICKER_TIMEOUT_MS[\s\S]*ACCOUNT_RUNTIME_PICKER_RETRY_DELAY_MS/,
+  /const attempts = retry \? 2 : 1;[\s\S]*new AbortController\(\)[\s\S]*ACCOUNT_RUNTIME_PICKER_TIMEOUT_MS[\s\S]*ACCOUNT_RUNTIME_PICKER_RETRY_DELAY_MS/,
 );
 assert.match(
   api,
-  /accountRuntimeEnabled\.codex\s*\?\s*listCodexModelsForPicker\(\)/,
+  /accountRuntimeCatalogInFlight/,
 );
-assert.match(api, /accountRuntimeEnabled\.claude\s*\?\s*listClaudeModelsForPicker\(\)/);
-assert.match(api, /accountRuntimeEnabled\.opencode\s*\?\s*listOpenCodeModelsForPicker\(\)/);
-assert.match(api, /accountRuntimeEnabled\.pi\s*\?\s*listPiModelsForPicker\(\)/);
+assert.match(api, /length: Math\.min\(3, tasks\.length\)/);
+assert.match(api, /options: \{ retry\?: boolean \} = \{\}/);
 assert.match(api, /export const PI_MODEL_PREFIX = "pi:";/);
 assert.match(api, /export async function getPiStatus/);
 assert.match(api, /export async function streamHarnessRun/);
@@ -139,7 +138,7 @@ assert.match(
   api,
   /const cachedProviderModels = await listProviderModelsForPicker\(\s*STARTUP_PROVIDER_PICKER_TIMEOUT_MS/,
 );
-assert.match(api, /await Promise\.allSettled\(\[\.\.\.runtimeLoads, refreshedProviderLoad\]\)/);
+assert.match(api, /await Promise\.allSettled\(\[runtimeLoad, refreshedProviderLoad\]\)/);
 assert.match(api, /if \(initialModels\.length\) emit\(\)/);
 assert.match(app, /loadStartupModels\(\s*\(models\) =>/);
 assert.match(chatCatalogController, /loadStartupModels\(\s*\(nextModels\) =>/);

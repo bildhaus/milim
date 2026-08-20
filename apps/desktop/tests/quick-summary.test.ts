@@ -211,6 +211,16 @@ const server = await createServer({
   root: process.cwd(),
   appType: "custom",
   logLevel: "silent",
+  plugins: [{
+    name: "quick-summary-css-stub",
+    enforce: "pre",
+    resolveId(id) {
+      return id.endsWith(".css") ? "\0quick-summary-css-stub" : null;
+    },
+    load(id) {
+      return id === "\0quick-summary-css-stub" ? "export default undefined;" : null;
+    },
+  }],
   server: { middlewareMode: true },
 });
 

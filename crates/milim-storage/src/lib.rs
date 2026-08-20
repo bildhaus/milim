@@ -11,10 +11,12 @@ mod private_file;
 
 pub use crypto::EncryptedStore;
 pub use db::{
-    ControlApprovalRecord, ControlBackupState, ControlCommandReceiptRecord, ControlHostRecord,
-    ControlInboxRecord, ControlMailboxRecord, ControlQueuedTurnRecord, ControlRunArtifactRecord,
-    ControlRunEventRecord, ControlRunRecord, ControlThreadLinkRecord, ControlThreadRecord,
-    ControlTimelinePage, ControlTimelineRecord, Database, DatabaseOptions, JournalMode, Migration,
-    SecretKv, SessionsDelta, UserDataStore, SECRETS_MIGRATIONS,
+    reset_storage_performance_counters, storage_performance_snapshot, ControlApprovalRecord,
+    ControlBackupState, ControlCommandReceiptRecord, ControlHostRecord, ControlInboxRecord,
+    ControlMailboxRecord, ControlQueuedTurnRecord, ControlRunArtifactRecord, ControlRunEventRecord,
+    ControlRunRecord, ControlThreadLinkRecord, ControlThreadRecord, ControlTimelinePage,
+    ControlTimelineRecord, Database, DatabaseOptions, JournalMode, Migration,
+    RunArtifactMigrationProgress, SecretKv, SessionMessagesPage, SessionsDelta,
+    StoragePerformanceSnapshot, UserChatSearchResult, UserDataStore, SECRETS_MIGRATIONS,
 };
 pub use private_file::create_private_file;

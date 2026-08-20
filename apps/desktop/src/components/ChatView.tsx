@@ -67,6 +67,7 @@ import {
   stopChildThread,
   stopWorkerRun,
   stopWorker,
+  streamControlEvents,
   streamAgentRun,
   streamChat,
   streamChildThreadEvents,
@@ -114,6 +115,7 @@ import {
   type Worker,
   type WorkerRunRecord,
 } from "../api";
+import { loadSessionMessagePage } from "../persistence/userStateStorage.js";
 import {
   DEFAULT_THREAD_SETTINGS,
   getSessionComposerDraft,
@@ -241,7 +243,7 @@ import {
   summarizeMilimUsage,
   summarizeThreadMetricsBreakdown,
 } from "../lib/usageMetrics";
-import { markPerfRender } from "../lib/perf";
+import { markPerfRender, markPerfStage } from "../lib/perf";
 import {
   previewControlActivityFromDebugUrl,
   previewControlActivityFromStreamParts,
@@ -342,18 +344,11 @@ import {
   X,
 } from "./icons";
 import { InlineMediaControls } from "./InlineMediaControls";
-import { WorkersInspector, WorkersSummary } from "./WorkersInspector";
 import { ToolApprovalPrompt } from "./ToolApprovalPrompt";
 import { CommandPalette, type RuntimeCommand } from "./ChatSearchPopover";
 import { useContextMenu } from "./ContextMenu";
-import {
-  GitWorkspacePanel,
-  type GitPanelDiffRequest,
-  type GitPanelView,
-} from "./GitPanel";
-import { PreviewPanel } from "./PreviewPanel";
+import type { GitPanelDiffRequest, GitPanelView } from "./GitPanel";
 import { PaneResizeHandle } from "./PaneResizeHandle";
-import { QuickSummaryPanel } from "./QuickSummaryPanel";
 import {
   turnReviewFromDiff,
   type TurnReviewState,
@@ -389,8 +384,37 @@ const McpManager = lazy(() =>
 const MemoryManager = lazy(() =>
   import("./MemoryManager").then((mod) => ({ default: mod.MemoryManager })),
 );
+const GitWorkspacePanel = lazy(() =>
+  Promise.all([import("../inspector.css"), import("./GitPanel")]).then(
+    ([, mod]) => ({ default: mod.GitWorkspacePanel }),
+  ),
+);
+const PreviewPanel = lazy(() =>
+  Promise.all([import("../inspector.css"), import("./PreviewPanel")]).then(
+    ([, mod]) => ({ default: mod.PreviewPanel }),
+  ),
+);
+const QuickSummaryPanel = lazy(() =>
+  Promise.all([import("../inspector.css"), import("./QuickSummaryPanel")]).then(
+    ([, mod]) => ({ default: mod.QuickSummaryPanel }),
+  ),
+);
+const WorkersInspector = lazy(() =>
+  Promise.all([import("../inspector.css"), import("./WorkersInspector")]).then(
+    ([, mod]) => ({ default: mod.WorkersInspector }),
+  ),
+);
+const WorkersSummary = lazy(() =>
+  Promise.all([import("../inspector.css"), import("./WorkersInspector")]).then(
+    ([, mod]) => ({ default: mod.WorkersSummary }),
+  ),
+);
 const inTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+const MAX_MOUNTED_MESSAGE_ROWS = 200;
+const MESSAGE_WINDOW_SHIFT = 100;
+const DEFAULT_MESSAGE_ROW_HEIGHT = 180;
+const SCHEDULE_RUN_COMPLETED_EVENT = "milim://schedule-run-completed";
 const EMPTY: ChatMessage[] = [];
 const EMPTY_QUEUE: QueuedMessage[] = [];
 
@@ -1335,6 +1359,9 @@ export function ChatView({
   skillsRevision?: number;
 }) {
   markPerfRender("ChatView");
+  useEffect(() => {
+    requestAnimationFrame(() => markPerfStage("transcript_interactive"));
+  }, []);
   const { openContextMenu } = useContextMenu();
   const messageRowActionsRef = useRef<MessageRowActions | null>(null);
   const [input, setInputState] = useState(() =>
@@ -1491,6 +1518,22 @@ export function ChatView({
   const messages = useSessions(
     (s) => s.sessions.find((x) => x.id === s.activeId)?.messages ?? EMPTY,
   );
+  const [messageWindow, setMessageWindow] = useState({
+    threadId: activeId,
+    start: Math.max(0, messages.length - MAX_MOUNTED_MESSAGE_ROWS),
+  });
+  const maximumMessageWindowStart = Math.max(
+    0,
+    messages.length - MAX_MOUNTED_MESSAGE_ROWS,
+  );
+  const messageWindowStart =
+    messageWindow.threadId === activeId
+      ? Math.min(messageWindow.start, maximumMessageWindowStart)
+      : maximumMessageWindowStart;
+  const messageWindowEnd = Math.min(
+    messages.length,
+    messageWindowStart + MAX_MOUNTED_MESSAGE_ROWS,
+  );
   const pendingApprovals = useMemo(
     () => pendingToolApprovals(messages),
     [messages],
@@ -1598,6 +1641,7 @@ export function ChatView({
       : session?.previewRuntime;
   });
   const setMessages = useSessions((s) => s.setMessages);
+  const prependMessagePage = useSessions((s) => s.prependMessagePage);
   const markArtifactSaved = useSessions((s) => s.markArtifactSaved);
   const upsertVirtualFiles = useSessions((s) => s.upsertVirtualFiles);
   const commitResponseMetrics = useSessions((s) => s.commitResponseMetrics);
@@ -1719,6 +1763,7 @@ export function ChatView({
     activeId,
     folder,
     sessionsHydrated,
+    visible: inspectorOpen && (inspectorTab === "preview" || inspectorTab === "code"),
     onNotice: setChatNotice,
   });
   const goalComposerMode = Boolean(goalComposerSessions[activeId]);
@@ -2137,6 +2182,14 @@ export function ChatView({
   const contextLauncherRef = useRef<HTMLButtonElement>(null);
   const emptyDockTopRef = useRef<number | null>(null);
   const stickToBottomRef = useRef(true);
+  const olderMessagePageRef = useRef<string | null>(null);
+  const messageRowHeightsRef = useRef(new Map<string, number>());
+  const messageRowHeightStatsRef = useRef({ total: 0, count: 0 });
+  const messageRowElementsRef = useRef(new Map<string, HTMLDivElement>());
+  const messageRowRefCallbacksRef = useRef(
+    new Map<string, (node: HTMLDivElement | null) => void>(),
+  );
+  const messageRowObserverRef = useRef<ResizeObserver | null>(null);
   const lastAnimatedThreadIdRef = useRef<string | null>(null);
   const [enteringMessageIds, setEnteringMessageIds] = useState<string[]>([]);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
@@ -2149,6 +2202,58 @@ export function ChatView({
     workerRunEventControllersRef,
     workerRunReconcileRetriesRef,
   } = useChatWorkerController();
+
+  function messageRowRef(messageId: string) {
+    const existing = messageRowRefCallbacksRef.current.get(messageId);
+    if (existing) return existing;
+    const callback = (node: HTMLDivElement | null) => {
+      const previous = messageRowElementsRef.current.get(messageId);
+      if (previous && previous !== node) {
+        messageRowObserverRef.current?.unobserve(previous);
+        messageRowElementsRef.current.delete(messageId);
+      }
+      if (!node) return;
+      if (!messageRowObserverRef.current) {
+        messageRowObserverRef.current = new ResizeObserver((entries) => {
+          for (const entry of entries) {
+            const id = (entry.target as HTMLElement).dataset.messageWindowId;
+            if (!id) continue;
+            const height = entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height;
+            if (!Number.isFinite(height) || height <= 0) continue;
+            const previousHeight = messageRowHeightsRef.current.get(id);
+            if (previousHeight === height) continue;
+            const stats = messageRowHeightStatsRef.current;
+            if (previousHeight === undefined) stats.count += 1;
+            else stats.total -= previousHeight;
+            stats.total += height;
+            messageRowHeightsRef.current.set(id, height);
+          }
+        });
+      }
+      messageRowElementsRef.current.set(messageId, node);
+      messageRowObserverRef.current.observe(node);
+    };
+    messageRowRefCallbacksRef.current.set(messageId, callback);
+    return callback;
+  }
+
+  useEffect(() => {
+    return () => messageRowObserverRef.current?.disconnect();
+  }, []);
+
+  useLayoutEffect(() => {
+    const nextStart = Math.max(
+      0,
+      messages.length - MAX_MOUNTED_MESSAGE_ROWS,
+    );
+    if (messageWindow.threadId !== activeId) {
+      setMessageWindow({ threadId: activeId, start: nextStart });
+      return;
+    }
+    if (stickToBottomRef.current && messageWindow.start !== nextStart) {
+      setMessageWindow({ threadId: activeId, start: nextStart });
+    }
+  }, [activeId, messageWindow.start, messageWindow.threadId, messages.length]);
   const previewResizeStartRef = useRef<{
     clientX: number;
     width: number;
@@ -2589,7 +2694,16 @@ export function ChatView({
     let disposed = false;
     let controller: AbortController | null = null;
     let retryTimer: number | null = null;
+    let syncPending = false;
+    let wakeRequested = false;
     const syncActiveRun = async () => {
+      if (disposed) return;
+      if (syncPending) {
+        wakeRequested = true;
+        return;
+      }
+      syncPending = true;
+      wakeRequested = false;
       try {
         const bootstrap = await getControlBootstrap();
         if (disposed) return;
@@ -2603,25 +2717,56 @@ export function ChatView({
         useSessions.getState().setHostBusySessionIds(
           hostBusySessionIdsFromBootstrap(bootstrap),
         );
-        if (controlThread) {
-          const timeline = await getControlTimeline(activeId, { tail: 500 });
-          if (disposed) return;
-          const mailboxMessages = mailboxMessagesFromTimeline(timeline.items);
-          if (mailboxMessages.length) {
-            setMessages(
-              activeId,
-              mergeMailboxMessages(sessionMessages(activeId), mailboxMessages),
-              { autoTitle: false },
-            );
+        // A newly created renderer session can become active a few milliseconds
+        // before its deferred persistence creates the canonical control row.
+        // Bootstrap is the authority for whether a timeline is addressable.
+        if (!controlThread) return;
+        const timeline = await getControlTimeline(activeId, { tail: 500 });
+        if (disposed) return;
+        let reconciledMessages = sessionMessages(activeId);
+        let timelineChanged = false;
+        const timelineRunIds = new Set(
+          timeline.items
+            .map((item) => item.run_id)
+            .filter((runId): runId is string => Boolean(runId)),
+        );
+        for (const runId of timelineRunIds) {
+          const projected = projectControlRunMessages(timeline.items, runId);
+          if (!projected.length) continue;
+          const currentRunMessages = reconciledMessages.filter(
+            (message) => message.runId === runId,
+          );
+          if (JSON.stringify(currentRunMessages) === JSON.stringify(projected)) {
+            continue;
           }
-          const modelChanges = modelChangeMessagesFromTimeline(timeline.items);
-          if (modelChanges.length) {
-            setMessages(
-              activeId,
-              mergeModelChangeMessages(sessionMessages(activeId), modelChanges),
-              { autoTitle: false },
-            );
+          reconciledMessages = mergeControlRunMessages(
+            reconciledMessages,
+            runId,
+            projected,
+          );
+          timelineChanged = true;
+        }
+        const mailboxMessages = mailboxMessagesFromTimeline(timeline.items);
+        if (mailboxMessages.length) {
+          reconciledMessages = mergeMailboxMessages(
+            reconciledMessages,
+            mailboxMessages,
+          );
+          timelineChanged = true;
+        }
+        const modelChanges = modelChangeMessagesFromTimeline(timeline.items);
+        if (modelChanges.length) {
+          const withModelChanges = mergeModelChangeMessages(
+            reconciledMessages,
+            modelChanges,
+          );
+          if (JSON.stringify(withModelChanges) !== JSON.stringify(reconciledMessages)) {
+            reconciledMessages = withModelChanges;
+            timelineChanged = true;
           }
+        }
+        if (timelineChanged) {
+          setMessages(activeId, reconciledMessages, { autoTitle: false });
         }
         const alreadyAttached =
           canonicalRunIdsRef.current.has(activeId) ||
@@ -2637,17 +2782,20 @@ export function ChatView({
         if (!controller) return;
         canonicalRunIdsRef.current.set(activeId, run.id);
         canonicalSteeringRef.current.set(activeId, run.capabilities.steering);
+        socketController?.abort();
+        socketController = null;
         await pollControlRun(activeId, run.id, controller.signal, (items) => {
           if (disposed) return;
           const projected = projectControlRunMessages(items, run.id);
           if (!projected.length) return;
           const current = sessionMessages(activeId);
+          const reconciled = mergeModelChangeMessages(
+            mergeControlRunMessages(current, run.id, projected),
+            modelChangeMessagesFromTimeline(items),
+          );
           setMessages(
             activeId,
-            mergeModelChangeMessages(
-              mergeControlRunMessages(current, run.id, projected),
-              modelChangeMessagesFromTimeline(items),
-            ),
+            reconciled,
             { autoTitle: projected.some((message) => message.mailboxOrigin) ? false : autoTitleChats },
           );
         });
@@ -2667,20 +2815,137 @@ export function ChatView({
         }
         canonicalSteeringRef.current.delete(activeId);
         controller = null;
-        if (!disposed) retryTimer = window.setTimeout(syncActiveRun, 500);
+        syncPending = false;
+        startControlSocket();
+        if (!disposed && document.visibilityState !== "hidden") {
+          const retryDelay = wakeRequested ? 0 : 1_500;
+          wakeRequested = false;
+          retryTimer = window.setTimeout(() => {
+            retryTimer = null;
+            void syncActiveRun();
+          }, retryDelay);
+        }
       }
     };
+    const onVisible = () => {
+      if (
+        document.visibilityState === "visible" &&
+        retryTimer === null &&
+        !syncPending
+      ) {
+        void syncActiveRun();
+      }
+    };
+    let socketController: AbortController | null = null;
+    const startControlSocket = () => {
+      if (disposed || socketController) return;
+      const nextController = new AbortController();
+      socketController = nextController;
+      void streamControlEvents(nextController.signal, (event) => {
+        if (
+          event.type !== "sync.required" &&
+          event.thread_id &&
+          event.thread_id !== activeId
+        ) {
+          return;
+        }
+        wakeRequested = true;
+        if (document.visibilityState === "hidden" || syncPending) return;
+        if (retryTimer !== null) window.clearTimeout(retryTimer);
+        retryTimer = window.setTimeout(() => {
+          retryTimer = null;
+          void syncActiveRun();
+        }, 0);
+      });
+    };
+    startControlSocket();
+    document.addEventListener("visibilitychange", onVisible);
     void syncActiveRun();
     return () => {
       disposed = true;
       if (retryTimer !== null) window.clearTimeout(retryTimer);
+      document.removeEventListener("visibilitychange", onVisible);
+      socketController?.abort();
+      socketController = null;
       controller?.abort();
     };
   }, [activeId, autoTitleChats, sessionsHydrated, setMessages]);
 
+  async function loadOlderMessages(el: HTMLDivElement) {
+    const beforeIndex = activeSession?.messagesLoadedFrom ?? 0;
+    if (
+      !inTauri ||
+      !activeSession ||
+      activeSession.messagesHydrated !== false ||
+      beforeIndex <= 0 ||
+      olderMessagePageRef.current === activeSession.id
+    ) {
+      return;
+    }
+    olderMessagePageRef.current = activeSession.id;
+    const previousHeight = el.scrollHeight;
+    const previousTop = el.scrollTop;
+    try {
+      const page = await loadSessionMessagePage(
+        activeSession.id,
+        beforeIndex,
+        100,
+      );
+      prependMessagePage(
+        activeSession.id,
+        page.messages as ChatMessage[],
+        page.first_index,
+        page.total,
+      );
+      window.requestAnimationFrame(() =>
+        window.requestAnimationFrame(() => {
+          if (chatScrollRef.current !== el) return;
+          el.scrollTop = previousTop + (el.scrollHeight - previousHeight);
+        }),
+      );
+    } finally {
+      if (olderMessagePageRef.current === activeSession.id) {
+        olderMessagePageRef.current = null;
+      }
+    }
+  }
+
+  function estimatedMessageRowHeight() {
+    const stats = messageRowHeightStatsRef.current;
+    return stats.count > 0
+      ? Math.min(1_000, Math.max(64, stats.total / stats.count))
+      : DEFAULT_MESSAGE_ROW_HEIGHT;
+  }
+
   function updateAutoScrollCoupling() {
     const el = chatScrollRef.current;
     if (!el) return;
+    const estimate = estimatedMessageRowHeight();
+    const topSpacerHeight = messageWindowStart * estimate;
+    const bottomSpacerHeight =
+      (messages.length - messageWindowEnd) * estimate;
+    if (el.scrollTop <= topSpacerHeight + 600) {
+      if (messageWindowStart > 0) {
+        setMessageWindow({
+          threadId: activeId,
+          start: Math.max(0, messageWindowStart - MESSAGE_WINDOW_SHIFT),
+        });
+      } else {
+        void loadOlderMessages(el);
+      }
+    } else if (
+      messageWindowEnd < messages.length &&
+      el.scrollTop + el.clientHeight >=
+        el.scrollHeight - bottomSpacerHeight - 600
+    ) {
+      setMessageWindow({
+        threadId: activeId,
+        start: Math.min(
+          maximumMessageWindowStart,
+          messageWindowStart + MESSAGE_WINDOW_SHIFT,
+        ),
+      });
+    }
     const following = isNearScrollBottom(el);
     stickToBottomRef.current = following;
     setShowJumpToLatest(!following);
@@ -7336,14 +7601,23 @@ export function ChatView({
       }
     }
     void pollScheduleRuns();
-    const timer = window.setInterval(() => void pollScheduleRuns(), 5000);
+    let dispose: (() => void) | undefined;
     const onVisible = () => {
       if (documentVisible()) void pollScheduleRuns();
     };
     document.addEventListener("visibilitychange", onVisible);
+    if (inTauri) {
+      void import("@tauri-apps/api/event").then(async ({ listen }) => {
+        const unlisten = await listen(SCHEDULE_RUN_COMPLETED_EVENT, () => {
+          void pollScheduleRuns();
+        });
+        if (cancelled) unlisten();
+        else dispose = unlisten;
+      });
+    }
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      dispose?.();
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, []);
@@ -7522,6 +7796,14 @@ export function ChatView({
     handleOpenArtifact,
     onOpenSchedules,
   };
+  const estimatedRowHeight = estimatedMessageRowHeight();
+  const transcriptTopSpacer = messageWindowStart * estimatedRowHeight;
+  const transcriptBottomSpacer =
+    (messages.length - messageWindowEnd) * estimatedRowHeight;
+  const mountedMessages = messages.slice(
+    messageWindowStart,
+    messageWindowEnd,
+  );
 
   return (
     <div
@@ -7575,7 +7857,15 @@ export function ChatView({
             >
               {!emptyThread && (
                 <div className="messages">
-                  {messages.map((m, i) => {
+                  {transcriptTopSpacer > 0 && (
+                    <div
+                      aria-hidden="true"
+                      data-testid="transcript-top-spacer"
+                      style={{ height: transcriptTopSpacer }}
+                    />
+                  )}
+                  {mountedMessages.map((m, offset) => {
+                    const i = messageWindowStart + offset;
                     if (workerRunSynthesisId(m)) return null;
                     const messageIsCompaction = isCompactionCheckpoint(m);
                     const isApprovalMessage = Boolean(m.approval);
@@ -7587,41 +7877,55 @@ export function ChatView({
                     const messageTurnChangesKey = m.workspaceCheckpoint
                       ? `${activeId}:${m.id ?? i}:${m.workspaceCheckpoint.ref}`
                       : "";
+                    const rowId = m.id ?? `${activeId}:${i}`;
                     return (
-                      <MessageRow
-                        key={m.id ?? i}
-                        activeId={activeId}
-                        appSessionId={APP_SESSION_ID}
-                        message={m}
-                        index={i}
-                        isEditing={editing === i}
-                        isLastAssistant={isLastAssistant}
-                        assistantStreaming={busy && isLastAssistant}
-                        busy={busy}
-                        activeMediaTargetPresent={Boolean(activeMediaTarget)}
-                        folderIsEmpty={!folder.trim()}
-                        workspaceFolder={folder}
-                        activeRun={activeRun}
-                        previewArtifacts={previewArtifactsForMessage(m)}
-                        previewAppBusy={previewAppBusy}
-                        previewAppStatus={activePreviewAppStatus}
-                        toolApproval={toolApproval}
-                        turnReview={
-                          isLastAssistant &&
-                          turnReview?.key === messageTurnChangesKey
-                            ? turnReview
-                            : null
-                        }
-                        actionsRef={messageRowActionsRef}
-                        entering={Boolean(
-                          lastAnimatedThreadIdRef.current === activeId &&
-                            m.id &&
-                            enteringMessageIds.includes(m.id),
-                        )}
-                        onEntered={markMessageEntered}
-                      />
+                      <div
+                        key={rowId}
+                        ref={messageRowRef(rowId)}
+                        className="transcript-window-row"
+                        data-message-window-id={rowId}
+                      >
+                        <MessageRow
+                          activeId={activeId}
+                          appSessionId={APP_SESSION_ID}
+                          message={m}
+                          index={i}
+                          isEditing={editing === i}
+                          isLastAssistant={isLastAssistant}
+                          assistantStreaming={busy && isLastAssistant}
+                          busy={busy}
+                          activeMediaTargetPresent={Boolean(activeMediaTarget)}
+                          folderIsEmpty={!folder.trim()}
+                          workspaceFolder={folder}
+                          activeRun={activeRun}
+                          previewArtifacts={previewArtifactsForMessage(m)}
+                          previewAppBusy={previewAppBusy}
+                          previewAppStatus={activePreviewAppStatus}
+                          toolApproval={toolApproval}
+                          turnReview={
+                            isLastAssistant &&
+                            turnReview?.key === messageTurnChangesKey
+                              ? turnReview
+                              : null
+                          }
+                          actionsRef={messageRowActionsRef}
+                          entering={Boolean(
+                            lastAnimatedThreadIdRef.current === activeId &&
+                              m.id &&
+                              enteringMessageIds.includes(m.id),
+                          )}
+                          onEntered={markMessageEntered}
+                        />
+                      </div>
                     );
                   })}
+                  {transcriptBottomSpacer > 0 && (
+                    <div
+                      aria-hidden="true"
+                      data-testid="transcript-bottom-spacer"
+                      style={{ height: transcriptBottomSpacer }}
+                    />
+                  )}
                 </div>
               )}
             </div>
@@ -7912,32 +8216,36 @@ export function ChatView({
               />
             )}
           </div>
-          <QuickSummaryPanel
-            summary={quickSummary}
-            open={contextPanelOpen}
-            workerPanel={(
-              <WorkersSummary
-                records={activeWorkerRuns}
-                policy={delegationPolicy}
-                workerModel={workerModel}
-                agents={agents}
-                models={pickerModels.filter(
-                  (item) => !item.capabilities?.imageOutput && !item.capabilities?.videoOutput && !item.capabilities?.musicOutput,
+          {contextPanelOpen && (
+            <Suspense fallback={null}>
+              <QuickSummaryPanel
+                summary={quickSummary}
+                open
+                workerPanel={(
+                  <WorkersSummary
+                    records={activeWorkerRuns}
+                    policy={delegationPolicy}
+                    workerModel={workerModel}
+                    agents={agents}
+                    models={pickerModels.filter(
+                      (item) => !item.capabilities?.imageOutput && !item.capabilities?.videoOutput && !item.capabilities?.musicOutput,
+                    )}
+                    onOpen={() => openWorkersInspector()}
+                    onOpenSettings={() => openWorkersInspector(undefined, true)}
+                  />
                 )}
-                onOpen={() => openWorkersInspector()}
-                onOpenSettings={() => openWorkersInspector(undefined, true)}
+                collapsedSections={contextCollapsedSectionIds}
+                canOpenGit={canOpenGitPanel}
+                onOpenChange={(open) => open ? openContextPanel() : closeContextPanel()}
+                onSectionCollapsedChange={(sectionId, collapsed) =>
+                  setSessionContextSectionCollapsed(activeId, sectionId, collapsed)
+                }
+                onOpenGit={openGitPanel}
+                onOpenGoal={() => openGoalPanel()}
+                onOpenSource={openQuickSummarySource}
               />
-            )}
-            collapsedSections={contextCollapsedSectionIds}
-            canOpenGit={canOpenGitPanel}
-            onOpenChange={(open) => open ? openContextPanel() : closeContextPanel()}
-            onSectionCollapsedChange={(sectionId, collapsed) =>
-              setSessionContextSectionCollapsed(activeId, sectionId, collapsed)
-            }
-            onOpenGit={openGitPanel}
-            onOpenGoal={() => openGoalPanel()}
-            onOpenSource={openQuickSummarySource}
-          />
+            </Suspense>
+          )}
         </div>
         {sidePanelVisible && (
           <>
@@ -7976,6 +8284,7 @@ export function ChatView({
               role={inspectorTab === "git" ? "tabpanel" : undefined}
               aria-labelledby={inspectorTab === "git" ? "inspector-tab-git" : undefined}
             >
+            <Suspense fallback={null}>
             {inspectorTab === "workers" ? (
               <WorkersInspector
                 records={activeWorkerRuns}
@@ -8101,6 +8410,7 @@ export function ChatView({
                 />
               )
             )}
+            </Suspense>
             </div>
           </>
         )}
@@ -8178,6 +8488,7 @@ export function ChatView({
               setProvidersOpen(false);
               listModelsDetailed(
                 useSettings.getState().accountRuntimeEnabled,
+                { retry: true },
               ).then(setModels);
               listProviders().then(setProviders);
             }}

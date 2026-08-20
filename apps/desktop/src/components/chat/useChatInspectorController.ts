@@ -98,11 +98,13 @@ export function useChatInspectorController({
   activeId,
   folder,
   sessionsHydrated,
+  visible,
   onNotice,
 }: {
   activeId: string;
   folder: string;
   sessionsHydrated: boolean;
+  visible: boolean;
   onNotice: (notice: InspectorNotice) => void;
 }) {
   const [activePreviewSurface, setActivePreviewSurface] =
@@ -252,6 +254,7 @@ export function useChatInspectorController({
   }, [activeId, activePreviewRuntimeKey, folder, sessionsHydrated]);
 
   useEffect(() => {
+    if (!visible) return;
     let cancelled = false;
     async function pollPreviewApp() {
       if (!documentVisible()) return;
@@ -296,6 +299,7 @@ export function useChatInspectorController({
     activeId,
     activePreviewRuntimeKey,
     folder,
+    visible,
     setPreviewRuntimeByKey,
     setSessionPreviewRuntime,
   ]);

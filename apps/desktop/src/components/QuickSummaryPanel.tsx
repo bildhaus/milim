@@ -238,6 +238,7 @@ export function QuickSummaryPanel({
     }
     let cancelled = false;
     const refresh = async () => {
+      if (document.visibilityState === "hidden") return;
       try {
         const value = formatProviderLimits(codexLimitsFromRateLimitPayload(await getCodexRateLimits()));
         if (!cancelled) setLiveQuota(value ?? "");
@@ -247,9 +248,12 @@ export function QuickSummaryPanel({
     };
     void refresh();
     const timer = setInterval(() => void refresh(), 60_000);
+    const onVisible = () => void refresh();
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       cancelled = true;
       clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [model, open]);
 

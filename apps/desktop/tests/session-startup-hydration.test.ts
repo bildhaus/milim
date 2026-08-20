@@ -128,7 +128,7 @@ Object.defineProperty(globalThis, "__MILIM_TEST_INVOKE__", {
   value: async (command: string, args?: Record<string, unknown>) => {
     calls.push({ command, args });
     if (command === "user_state_import_legacy") return null;
-    if (command === "user_sessions_get") {
+    if (command === "user_sessions_get" || command === "user_sessions_manifest_get") {
       await sessionGetGate;
       return dbValues.get("milim.sessions") ?? null;
     }
@@ -136,7 +136,7 @@ Object.defineProperty(globalThis, "__MILIM_TEST_INVOKE__", {
       dbValues.set("milim.sessions", String(args?.value));
       return null;
     }
-    if (command === "user_sessions_apply_delta") {
+    if (command === "user_sessions_apply_ops") {
       dbValues.set(
         "milim.sessions",
         applySessionDeltaSnapshot(
@@ -183,7 +183,7 @@ assert(
   !calls.some(
     (call) =>
       call.command === "user_sessions_set" ||
-      call.command === "user_sessions_apply_delta",
+      call.command === "user_sessions_apply_ops",
   ),
   "startup mutations should not write sessions before hydration",
 );

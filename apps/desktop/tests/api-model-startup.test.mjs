@@ -110,9 +110,9 @@ try {
 
   assert.equal(refreshCalls, 1);
   assert.equal(modelReads, 2);
-  assert.equal(codexReads, 2);
+  assert.equal(codexReads, 1);
   assert.ok(
-    performance.now() - startedAt >= 12_000,
+    performance.now() - startedAt >= 8_000,
     "The account probe should remain isolated while its full configured timeout elapses.",
   );
   assert.ok(

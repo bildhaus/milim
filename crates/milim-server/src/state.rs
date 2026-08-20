@@ -40,9 +40,19 @@ pub struct ScheduleRunEvent {
     pub ran_at: i64,
 }
 
-#[derive(Default)]
 pub struct ScheduleRunQueue {
     events: Mutex<VecDeque<ScheduleRunEvent>>,
+    subscribers: tokio::sync::broadcast::Sender<ScheduleRunEvent>,
+}
+
+impl Default for ScheduleRunQueue {
+    fn default() -> Self {
+        let (subscribers, _) = tokio::sync::broadcast::channel(64);
+        Self {
+            events: Mutex::new(VecDeque::new()),
+            subscribers,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -104,6 +114,7 @@ impl McpAppViewStore {
 
 impl ScheduleRunQueue {
     pub fn push(&self, event: ScheduleRunEvent) {
+        let _ = self.subscribers.send(event.clone());
         let mut events = self.events.lock().expect("schedule run queue poisoned");
         events.push_back(event);
         while events.len() > 100 {
@@ -114,6 +125,10 @@ impl ScheduleRunQueue {
     pub fn take(&self) -> Vec<ScheduleRunEvent> {
         let mut events = self.events.lock().expect("schedule run queue poisoned");
         events.drain(..).collect()
+    }
+
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<ScheduleRunEvent> {
+        self.subscribers.subscribe()
     }
 }
 

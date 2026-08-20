@@ -1,5 +1,6 @@
 import {
   getControlTimeline,
+  streamControlEvents,
   type ChatAttachment,
   type ChatMessage,
   type ChatStreamPart,
@@ -436,6 +437,18 @@ export async function pollControlRun(
 ): Promise<{ status: string; error?: string }> {
   let afterSeq: number | undefined;
   const items: ControlTimelineItemV1[] = [];
+  let wake: (() => void) | null = null;
+  let socketAvailable = false;
+  void streamControlEvents(signal, (event) => {
+    if (
+      event.type === "sync.required" ||
+      !event.thread_id ||
+      event.thread_id === threadId
+    ) {
+      socketAvailable = true;
+      wake?.();
+    }
+  });
   for (;;) {
     if (signal.aborted) return { status: "aborted" };
     const page = await getControlTimeline(
@@ -464,6 +477,28 @@ export async function pollControlRun(
             : undefined,
       };
     }
-    await new Promise<void>((resolve) => window.setTimeout(resolve, 120));
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      let timer: number | undefined;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        wake = null;
+        if (timer !== undefined) window.clearTimeout(timer);
+        signal.removeEventListener("abort", finish);
+        document.removeEventListener("visibilitychange", visibilityChanged);
+        resolve();
+      };
+      const visibilityChanged = () => {
+        if (document.visibilityState === "visible") finish();
+      };
+      wake = finish;
+      signal.addEventListener("abort", finish, { once: true });
+      document.addEventListener("visibilitychange", visibilityChanged);
+      if (document.visibilityState !== "hidden") {
+        timer = window.setTimeout(finish, socketAvailable ? 1_500 : 500);
+      }
+      if (signal.aborted) finish();
+    });
   }
 }

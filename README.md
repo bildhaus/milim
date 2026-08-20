@@ -97,6 +97,8 @@ The desktop and mobile clients are replicas of Rust-owned canonical state. Favor
 
 External files can be dropped anywhere in the desktop window and attach once to the active chat's composer. Dragging a canonical root chat from Sidebar, Top, or Bottom navigation over another active chat creates a durable directional link. Linked chats receive bounded read/list/send tools according to the selected Agent and approval mode; mailbox replies return visibly without starting a new run in the origin chat.
 
+Desktop history is loaded lazily: startup hydrates thread summaries and the latest 100 messages of the active or running chats, then pages older messages without moving the reader's scroll position. Long transcripts keep at most 200 message rows mounted. The lossless run ledger deduplicates artifacts by SHA-256, compresses large JSON, and stores repeated provider requests as verified deltas with periodic checkpoints; legacy rows migrate in small idle-only batches.
+
 ## Development
 
 Use the smallest relevant check for the area changed:
@@ -108,6 +110,12 @@ cargo clippy --workspace --all-targets
 
 # Desktop
 pnpm -C apps/desktop verify
+
+# Release-runtime performance proof (Windows WebView2)
+pnpm -C apps/desktop perf:canonical
+
+# Seven fresh canonical processes with median/p95 reporting
+pnpm -C apps/desktop perf:suite
 
 # Native mobile
 pnpm -C apps/mobile verify

@@ -54,16 +54,23 @@ const sidebar = readFileSync(
   join(root, "src", "components", "Sidebar.tsx"),
   "utf8",
 );
-const styleFiles = [
+const globalStyleFiles = [
   "foundation.css",
+  "shell-overlays.css",
   "shell.css",
   "chat.css",
-  "settings.css",
   "workspaces.css",
+];
+const styleFiles = [
+  ...globalStyleFiles,
+  "settings.css",
+  "inspector.css",
+  "media-manager.css",
+  "pull-requests.css",
 ];
 const styleEntry = readFileSync(join(root, "src", "styles.css"), "utf8");
 const expectedStyleEntry =
-  styleFiles.map((file) => `@import "./${file}";`).join("\n") + "\n";
+  globalStyleFiles.map((file) => `@import "./${file}";`).join("\n") + "\n";
 if (styleEntry !== expectedStyleEntry) {
   throw new Error("styles.css must preserve the ordered desktop CSS imports");
 }
@@ -397,7 +404,7 @@ for (const needle of [
   "TrayIconBuilder::with_id",
   ".show_menu_on_left_click(false)",
   "TRAY_OPEN_ID => show_main_window(app)",
-  "TRAY_QUIT_ID => {",
+  "TRAY_QUIT_ID =>",
   "request_workspace_editor_leave(app, WorkspaceEditorLeaveAction::Quit)",
   "TrayIconEvent::Click",
   "WindowEvent::CloseRequested",

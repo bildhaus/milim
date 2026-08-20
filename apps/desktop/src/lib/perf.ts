@@ -92,3 +92,11 @@ export function startPerfMeasure(name: string): () => void {
 export function markPerfRender(name: string): void {
   incrementPerfCounter(`render.${name}`);
 }
+
+export function markPerfStage(name: string): void {
+  if (typeof performance === "undefined") return;
+  const mark = `milim.${name}`;
+  if (performance.getEntriesByName(mark, "mark").length === 0) {
+    performance.mark(mark);
+  }
+}
