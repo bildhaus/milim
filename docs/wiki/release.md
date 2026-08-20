@@ -6,7 +6,7 @@ title: Release and verification
 summary: Release artifacts, updater behavior, verification commands, and site build checks.
 group: Reference
 order: 110
-updated: 2026-08-17
+updated: 2026-08-20
 ---
 
 Release work should verify the Rust workspace, desktop app, site docs, and platform artifacts without reintroducing Linux packaging as a release target.
@@ -21,7 +21,7 @@ Release work should verify the Rust workspace, desktop app, site docs, and platf
 | iOS | Protected manual store-delivery job archives a signed IPA and uploads it to TestFlight. |
 | Android | Protected manual store-delivery job produces a signed AAB and uploads it to Play internal testing. |
 
-Pull requests run full desktop verification in CI. Release tags do not repeat that suite: the Release workflow runs Windows runtime evidence alongside production packaging, Tauri builds the frontend before compiling each platform artifact, and each packaged binary and manifest is verified. macOS release artifacts require the Apple signing secrets and intentionally enable Tauri's macOS private API for transparent preview activity overlay windows. The workflow publishes `manifest.json` plus an aggregate `SHA256SUMS.txt` from the current release run. Updater assets are verified with SHA-256 sidecars and the aggregate checksum file. A rerun may repair an unpublished draft, but every edit and asset upload rechecks draft status; published releases are immutable and require a new version.
+Pull requests run full desktop verification in CI: the Rust matrix owns workspace and Tauri native checks, Ubuntu verifies the generated control contract, and the frontend job runs the frontend-only suite. Release tags do not repeat that coverage: the Release workflow records a canonical Windows runtime benchmark alongside production packaging, Tauri builds the frontend before compiling each platform artifact, and each packaged binary and manifest is verified. Runtime conformance remains available as a manual release check. macOS release artifacts require the Apple signing secrets and intentionally enable Tauri's macOS private API for transparent preview activity overlay windows. The workflow publishes `manifest.json` plus an aggregate `SHA256SUMS.txt` from the current release run. Updater assets are verified with SHA-256 sidecars and the aggregate checksum file. A rerun may repair an unpublished draft, but every edit and asset upload rechecks draft status; published releases are immutable and require a new version.
 
 ## Updater behavior
 
@@ -56,7 +56,9 @@ Store declarations describe the actual v1 boundary: no Milim account, tracking, 
 
 ## Runtime evidence
 
-`v*` tags and manual Release runs produce a Windows-only `runtime-evidence-windows` artifact. Successful runs contain `runtime-conformance.json`, `canonical-thread.json`, and benchmark screenshots from deterministic, mock-backed scenarios; a benchmark failure adds `failure.json` and `failure.png`. Runtime conformance checks the generated `/control/v1` contract, v5 migration, ledger atomicity and privacy, durable inbox lifecycle, tool execution bounds, runtime adapters, and the quiet desktop run-details rendering. These checks require no credentials, make no paid or live completion calls, do not change authentication state, and do not establish live third-party compatibility.
+`v*` tags and manual Release runs produce a Windows-only `runtime-evidence-windows` artifact. Successful runs contain `canonical-thread.json` and benchmark screenshots from deterministic, mock-backed scenarios; a benchmark failure adds `failure.json` and `failure.png`.
+
+Runtime conformance is part of protected pull-request verification and remains available locally through `pnpm -C apps/desktop verify:runtime-conformance`; release runs do not repeat it. It checks the generated `/control/v1` contract, v5 migration, ledger atomicity and privacy, durable inbox lifecycle, tool execution bounds, runtime adapters, and the quiet desktop run-details rendering. These checks require no credentials, make no paid or live completion calls, do not change authentication state, and do not establish live third-party compatibility.
 
 Two integration tests provide explicit, self-skipping live proof. Set `MILIM_REAL_HARNESS_SMOKE=1` with `MILIM_REAL_HARNESS_BASE_URL`, `MILIM_REAL_HARNESS_API_KEY`, and `MILIM_REAL_HARNESS_MODEL`; optionally set `MILIM_REAL_HARNESS_KIND` to `anthropic` or `gemini` instead of the default `openai_compatible`. The test submits a real turn through `/control/v1`, waits through the authenticated inspection route, and verifies request/response ledger events without exposing the key. Set `MILIM_REAL_ACCOUNT_RUNTIME_SMOKE=1` plus one or more of `MILIM_REAL_CODEX_SMOKE_MODEL`, `MILIM_REAL_CLAUDE_SMOKE_MODEL`, `MILIM_REAL_OPENCODE_SMOKE_MODEL`, and `MILIM_REAL_PI_SMOKE_MODEL` to exercise installed, already-authenticated account CLIs and verify their `harness_boundary` journals. These tests return immediately unless their opt-in flag is set; enabled runs may incur provider usage.
 

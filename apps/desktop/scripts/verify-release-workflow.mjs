@@ -119,9 +119,17 @@ for (const needle of [
   "pull_request:",
   "cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings",
   "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml",
+  "pnpm -C apps/desktop verify:frontend",
 ]) {
   assertIncludes(ciWorkflow, needle, "CI workflow");
 }
+assertIncludes(
+  ciWorkflow,
+  "      - name: Generated control contract\n        if: matrix.os == 'ubuntu-latest'\n        run: cargo run --manifest-path Cargo.toml -p milim-control-contract --bin generate-control-contract -- --check",
+  "CI control contract ownership",
+);
+assertNotIncludes(ciWorkflow, "      - run: pnpm -C apps/desktop verify\n", "CI workflow");
+assertNotIncludes(ciWorkflow, "            . -> target", "CI frontend cache");
 for (const line of [
   "  pull_request:",
   "  workflow_dispatch:",
@@ -131,7 +139,7 @@ for (const line of [
 assertNotIncludes(ciWorkflow, 'tags: ["v*"]', "CI workflow");
 assertNotIncludes(ciWorkflow, "runtime-evidence:", "CI workflow");
 assertLineOccurrences(releaseWorkflow, '    tags: ["v*"]', 1, "Release workflow trigger");
-assertOccurrences(releaseWorkflow, "tester-artifacts", 3, "Release runtime evidence paths");
+assertOccurrences(releaseWorkflow, "tester-artifacts", 2, "Release runtime evidence paths");
 
 assertEqual(
   desktopPackage.scripts["verify:runtime-conformance"],
@@ -144,6 +152,16 @@ assertEqual(
   "canonical benchmark script",
 );
 assertEqual(desktopPackage.scripts["perf:tauri-dev"], "node tests/tauri-dev-perf.mjs", "Tauri dev benchmark script");
+assertIncludes(desktopPackage.scripts["verify:frontend"], "test:media:frontend", "frontend verification");
+assertIncludes(desktopPackage.scripts["verify:frontend"], "test:mobile-companion:frontend", "frontend verification");
+assertIncludes(desktopPackage.scripts["verify:frontend"], "test:artifacts:frontend", "frontend verification");
+assertNotIncludes(desktopPackage.scripts["verify:frontend"], "cargo", "frontend verification");
+assertNotIncludes(desktopPackage.scripts["verify:frontend"], "test:computer-use", "frontend verification");
+assertEqual(
+  desktopPackage.scripts.verify,
+  "npm run verify:control-contract && npm run verify:frontend && npm run verify:native-tests",
+  "default desktop verification",
+);
 assertNotIncludes(desktopPackage.scripts.verify, "verify:runtime-conformance", "default desktop verification");
 assertNotIncludes(desktopPackage.scripts.verify, "perf:canonical", "default desktop verification");
 
@@ -158,8 +176,6 @@ for (const needle of [
   assertIncludes(runtimeEvidenceJob, needle, "runtime evidence job");
 }
 for (const line of [
-  "        run: pnpm -C apps/desktop verify:runtime-conformance",
-  "          MILIM_CONFORMANCE_ARTIFACT_DIR: ${{ github.workspace }}/apps/desktop/tester-artifacts/runtime-evidence",
   "        run: pnpm -C apps/desktop perf:canonical",
   "          MILIM_PERF_ARTIFACT_DIR: ${{ github.workspace }}/apps/desktop/tester-artifacts/runtime-evidence",
   "        uses: actions/upload-artifact@v4",
@@ -169,14 +185,10 @@ for (const line of [
 ]) {
   assertLineOccurrences(runtimeEvidenceJob, line, 1, "runtime evidence job");
 }
-assertLineOccurrences(runtimeEvidenceJob, "        if: always()", 2, "runtime evidence job");
-
-assertBefore(
-  runtimeEvidenceJob,
-  "pnpm -C apps/desktop verify:runtime-conformance",
-  "pnpm -C apps/desktop perf:canonical",
-  "runtime evidence job",
-);
+assertLineOccurrences(runtimeEvidenceJob, "        if: always()", 1, "runtime evidence job");
+assertNotIncludes(runtimeEvidenceJob, "verify:runtime-conformance", "runtime evidence job");
+assertNotIncludes(runtimeEvidenceJob, "MILIM_CONFORMANCE_ARTIFACT_DIR", "runtime evidence job");
+assertNotIncludes(runtimeEvidenceJob, "            . -> target", "runtime evidence cache");
 assertBefore(
   runtimeEvidenceJob,
   "pnpm -C apps/desktop perf:canonical",

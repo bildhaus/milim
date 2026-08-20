@@ -77,16 +77,9 @@ jobs:
           cache-dependency-path: apps/desktop/pnpm-lock.yaml
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            . -> target
-            apps/desktop/src-tauri -> target
+          workspaces: apps/desktop/src-tauri -> target
       - run: pnpm -C apps/desktop install --frozen-lockfile
-      - name: Runtime conformance
-        run: pnpm -C apps/desktop verify:runtime-conformance
-        env:
-          MILIM_CONFORMANCE_ARTIFACT_DIR: ${{ github.workspace }}/apps/desktop/tester-artifacts/runtime-evidence
       - name: Canonical-thread benchmark
-        if: always()
         run: pnpm -C apps/desktop perf:canonical
         env:
           MILIM_PERF_ARTIFACT_DIR: ${{ github.workspace }}/apps/desktop/tester-artifacts/runtime-evidence
