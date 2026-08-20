@@ -18,8 +18,8 @@ use milim_core::{Error, Result};
 use milim_inference::{CompletionRequest, SamplingParams, StreamEvent};
 use milim_storage::{
     ControlApprovalRecord, ControlCommandReceiptRecord, ControlHostRecord, ControlInboxRecord,
-    ControlQueuedTurnRecord, ControlRunArtifactRecord, ControlRunRecord, ControlThreadRecord,
-    ControlTimelineRecord, UserDataStore,
+    ControlMailboxRecord, ControlQueuedTurnRecord, ControlRunArtifactRecord, ControlRunRecord,
+    ControlThreadRecord, ControlTimelineRecord, UserDataStore,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -565,6 +565,10 @@ struct AcceptedTurnV1 {
     config: FrozenRunConfigV1,
     #[serde(default = "control_default_true")]
     append_user: bool,
+    #[serde(default)]
+    mailbox_origin: Option<MailboxOriginV1>,
+    #[serde(default)]
+    mailbox_context: Vec<String>,
 }
 
 struct ActiveRun {
@@ -1225,6 +1229,7 @@ impl RunManager {
             events,
         });
         manager.backfill_message_timelines()?;
+        manager.reconcile_mailbox_projections()?;
         Ok(manager)
     }
 
@@ -1251,6 +1256,386 @@ impl RunManager {
                 .control_seed_message_timeline_if_empty(&thread.id, &messages)?;
         }
         Ok(seeded)
+    }
+
+    fn freeze_linked_thread_grants(
+        &self,
+        owner_thread_id: &str,
+    ) -> Result<Vec<FrozenLinkedThreadGrantV1>> {
+        Ok(self
+            .store
+            .control_thread_links(Some(owner_thread_id))?
+            .into_iter()
+            .map(|link| -> Result<Option<FrozenLinkedThreadGrantV1>> {
+                let Some(target) = self.store.control_thread(&link.target_thread_id)? else {
+                    return Ok(None);
+                };
+                let (epoch, max_timeline_seq) = self
+                    .store
+                    .control_timeline_max_seq(&target.id)?
+                    .unwrap_or_else(|| (target.epoch.clone(), 0));
+                let summary = thread_summary(&target, false, 0)?;
+                Ok(Some(FrozenLinkedThreadGrantV1 {
+                    target_thread_id: target.id,
+                    title: summary.title,
+                    workspace: summary.workspace.clone(),
+                    project: summary.workspace.as_deref().and_then(project_label),
+                    model: summary
+                        .model
+                        .as_deref()
+                        .map(runtime_model)
+                        .map(str::to_string),
+                    runtime: runtime_adapter(summary.model.as_deref().unwrap_or_default())
+                        .to_string(),
+                    revision: target.revision,
+                    epoch,
+                    max_timeline_seq,
+                }))
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect())
+    }
+
+    pub(crate) fn linked_thread_list(
+        &self,
+        origin_thread_id: &str,
+        grants: &[FrozenLinkedThreadGrantV1],
+    ) -> Result<Value> {
+        let mailbox = self
+            .store
+            .control_mailbox_for_origin(origin_thread_id)?
+            .into_iter()
+            .map(|exchange| {
+                json!({
+                    "exchange_id": exchange.id,
+                    "target_thread_id": exchange.target_thread_id,
+                    "status": exchange.status,
+                    "created_at_ms": exchange.created_at_ms,
+                    "updated_at_ms": exchange.updated_at_ms,
+                    "consumed": exchange.consumed_at_ms.is_some(),
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({ "linked_threads": grants, "mailbox": mailbox }))
+    }
+
+    fn enrich_linked_thread_send_approval(
+        &self,
+        accepted: &AcceptedTurnV1,
+        mut request: Value,
+    ) -> Result<Value> {
+        let Some(object) = request.as_object_mut() else {
+            return Ok(request);
+        };
+        if object.get("name").and_then(Value::as_str) != Some("linked_thread_send") {
+            return Ok(request);
+        }
+        let arguments = match object.get("arguments") {
+            Some(Value::String(arguments)) => serde_json::from_str::<Value>(arguments).ok(),
+            Some(arguments @ Value::Object(_)) => Some(arguments.clone()),
+            _ => None,
+        };
+        let Some(arguments) = arguments else {
+            return Ok(request);
+        };
+        let Some(target_thread_id) = arguments.get("target_thread_id").and_then(Value::as_str)
+        else {
+            return Ok(request);
+        };
+        let Some(grant) = accepted
+            .config
+            .linked_thread_grants
+            .iter()
+            .find(|grant| grant.target_thread_id == target_thread_id)
+        else {
+            return Ok(request);
+        };
+        let current = self
+            .store
+            .control_thread(target_thread_id)?
+            .map(|thread| thread_summary(&thread, false, 0))
+            .transpose()?;
+        let queued_turns = self
+            .store
+            .control_queued_turns(Some(target_thread_id))?
+            .len();
+        let busy = self
+            .active
+            .lock()
+            .expect("control active run store poisoned")
+            .contains_key(target_thread_id);
+        let current_model = current
+            .as_ref()
+            .and_then(|thread| thread.model.as_deref())
+            .map(runtime_model)
+            .map(str::to_string)
+            .or_else(|| grant.model.clone());
+        let current_runtime = current
+            .as_ref()
+            .and_then(|thread| thread.model.as_deref())
+            .map(runtime_adapter)
+            .map(str::to_string)
+            .unwrap_or_else(|| grant.runtime.clone());
+        object.insert(
+            "linked_thread_send".into(),
+            json!({
+                "destination_thread_id": target_thread_id,
+                "destination_title": current.as_ref().map(|thread| thread.title.as_str()).unwrap_or(&grant.title),
+                "destination_project": current.as_ref().and_then(|thread| thread.workspace.as_deref()).and_then(project_label).or_else(|| grant.project.clone()),
+                "destination_workspace": current.as_ref().and_then(|thread| thread.workspace.clone()).or_else(|| grant.workspace.clone()),
+                "destination_model": current_model,
+                "destination_runtime": current_runtime,
+                "message": arguments.get("message").cloned().unwrap_or(Value::Null),
+                "delivery": if busy || queued_turns > 0 { "queue" } else { "start" },
+                "model_work_notice": if busy || queued_turns > 0 {
+                    "Approval queues model work in the destination and may use its provider or account subscription."
+                } else {
+                    "Approval starts model work in the destination and may use its provider or account subscription."
+                },
+            }),
+        );
+        Ok(request)
+    }
+
+    pub(crate) fn linked_thread_read(
+        &self,
+        grants: &[FrozenLinkedThreadGrantV1],
+        target_thread_id: &str,
+        after_seq: Option<u64>,
+        limit: usize,
+    ) -> Result<Value> {
+        let grant = grants
+            .iter()
+            .find(|grant| grant.target_thread_id == target_thread_id)
+            .ok_or_else(|| {
+                Error::InvalidRequest(format!(
+                    "thread {target_thread_id} is not granted to this run"
+                ))
+            })?;
+        let limit = limit.clamp(1, 50);
+        let records = self.store.control_visible_timeline_messages(
+            target_thread_id,
+            &grant.epoch,
+            grant.max_timeline_seq,
+            after_seq,
+            500,
+        )?;
+        let mut messages = Vec::new();
+        let mut next_after_seq = after_seq;
+        let mut has_more = false;
+        for record in records {
+            let value = parse_value(&record.data_json)?;
+            let Some(role) = value.get("role").and_then(Value::as_str) else {
+                continue;
+            };
+            if !matches!(role, "user" | "assistant") {
+                continue;
+            }
+            if messages.len() >= limit {
+                has_more = true;
+                break;
+            }
+            let attachments = value
+                .get("attachments")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|attachment| {
+                    json!({
+                        "id": attachment.get("id").cloned().unwrap_or(Value::Null),
+                        "name": attachment.get("name").cloned().unwrap_or(Value::Null),
+                        "mime": attachment.get("mime").cloned().unwrap_or(Value::Null),
+                        "size": attachment.get("size").cloned().unwrap_or(Value::Null),
+                        "truncated": attachment.get("truncated").cloned().unwrap_or(Value::Bool(false)),
+                    })
+                })
+                .collect::<Vec<_>>();
+            let (content, content_truncated) = truncate_linked_content(
+                value
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                48 * 1024,
+            );
+            let message = json!({
+                "id": value.get("id").cloned().unwrap_or_else(|| Value::String(record.item_id.clone())),
+                "seq": record.seq,
+                "role": role,
+                "content": content,
+                "content_truncated": content_truncated,
+                "attachments": attachments,
+                "mailbox_origin": value.get("mailboxOrigin").cloned().unwrap_or(Value::Null),
+            });
+            let mut candidate = messages.clone();
+            candidate.push(message.clone());
+            let envelope = json!({
+                "thread": grant,
+                "messages": candidate,
+                "next_after_seq": record.seq,
+                "has_more": true,
+            });
+            if serde_json::to_vec(&envelope)
+                .map_err(|error| Error::Other(format!("serialize linked transcript: {error}")))?
+                .len()
+                > 64 * 1024
+            {
+                has_more = true;
+                break;
+            }
+            messages.push(message);
+            next_after_seq = Some(record.seq);
+        }
+        Ok(json!({
+            "thread": grant,
+            "messages": messages,
+            "next_after_seq": next_after_seq,
+            "has_more": has_more,
+        }))
+    }
+
+    pub(crate) async fn linked_thread_send(
+        self: &Arc<Self>,
+        state: AppState,
+        origin_thread_id: &str,
+        origin_run_id: Option<&str>,
+        grants: &[FrozenLinkedThreadGrantV1],
+        target_thread_id: &str,
+        message: &str,
+    ) -> Result<Value> {
+        let message = message.trim();
+        if message.is_empty() {
+            return Err(Error::InvalidRequest(
+                "linked_thread_send requires a message".into(),
+            ));
+        }
+        let grant = grants
+            .iter()
+            .find(|grant| grant.target_thread_id == target_thread_id)
+            .ok_or_else(|| {
+                Error::InvalidRequest(format!(
+                    "thread {target_thread_id} is not granted to this run"
+                ))
+            })?;
+        let origin = self
+            .store
+            .control_thread(origin_thread_id)?
+            .ok_or_else(|| Error::NotFound(format!("thread {origin_thread_id}")))?;
+        let target = self
+            .store
+            .control_thread(target_thread_id)?
+            .ok_or_else(|| Error::NotFound(format!("thread {target_thread_id}")))?;
+        let target_summary = thread_summary(&target, false, 0)?;
+        if target_summary.archived_at_ms.is_some() {
+            return Err(Error::InvalidRequest(format!(
+                "linked thread {} is archived",
+                target_summary.title
+            )));
+        }
+        let origin_summary = thread_summary(&origin, false, 0)?;
+        let exchange_id = Uuid::new_v4().to_string();
+        let mailbox_origin = MailboxOriginV1 {
+            exchange_id: exchange_id.clone(),
+            origin_thread_id: origin_thread_id.to_string(),
+            origin_title: origin_summary.title.clone(),
+            origin_workspace: origin_summary.workspace.clone(),
+            origin_project: origin_summary.workspace.as_deref().and_then(project_label),
+        };
+        let mut config = resolve_frozen_config(&state, &target, Vec::new())?;
+        config.linked_thread_grants = self.freeze_linked_thread_grants(target_thread_id)?;
+        let accepted = AcceptedTurnV1 {
+            text: format!(
+                "Linked-thread mailbox message from \"{}\" (thread {}):\n{}",
+                origin_summary.title, origin_thread_id, message
+            ),
+            display_text: Some(message.to_string()),
+            config,
+            append_user: true,
+            mailbox_origin: Some(mailbox_origin.clone()),
+            mailbox_context: Vec::new(),
+        };
+        let busy = self
+            .active
+            .lock()
+            .expect("control active run store poisoned")
+            .contains_key(target_thread_id);
+        let now = now_ms();
+        let mut exchange = ControlMailboxRecord {
+            id: exchange_id.clone(),
+            origin_thread_id: origin_thread_id.to_string(),
+            target_thread_id: target_thread_id.to_string(),
+            origin_run_id: origin_run_id.map(str::to_string),
+            target_run_id: None,
+            status: if busy { "queued" } else { "running" }.into(),
+            request_json: json!({
+                "message": message,
+                "origin": mailbox_origin,
+                "target": grant,
+            })
+            .to_string(),
+            reply_json: None,
+            created_at_ms: now,
+            updated_at_ms: now,
+            consumed_at_ms: None,
+            projected_at_ms: None,
+        };
+        self.store.control_put_mailbox(&exchange)?;
+        if busy {
+            let queue_id = format!("mailbox-{exchange_id}");
+            if let Err(error) = self.store.control_enqueue_turn(&ControlQueuedTurnRecord {
+                id: queue_id.clone(),
+                thread_id: target_thread_id.to_string(),
+                command_id: format!("mailbox-{exchange_id}"),
+                request_json: serde_json::to_string(&accepted)
+                    .map_err(|error| Error::Other(format!("serialize mailbox turn: {error}")))?,
+                accepted_at_ms: now,
+            }) {
+                let _ = self.store.control_delete_mailbox(&exchange_id);
+                return Err(error);
+            }
+            self.persist_and_emit(
+                origin_thread_id,
+                origin_run_id,
+                "mailbox_queued",
+                json!({
+                    "exchange_id": exchange_id,
+                    "target_thread_id": target_thread_id,
+                    "target_title": target_summary.title,
+                    "status": "queued",
+                }),
+            )?;
+            self.emit(
+                "mailbox.queued",
+                Some(target_thread_id),
+                Some(&target.epoch),
+                None,
+                json!({ "exchange_id": exchange_id, "queue_id": queue_id }),
+            );
+            Ok(json!({
+                "exchange_id": exchange_id,
+                "status": "queued",
+                "queue_id": queue_id,
+                "target": grant,
+            }))
+        } else {
+            let run_id = match self.start_turn(state, target_thread_id.to_string(), accepted) {
+                Ok(run_id) => run_id,
+                Err(error) => {
+                    let _ = self.store.control_delete_mailbox(&exchange_id);
+                    return Err(error);
+                }
+            };
+            exchange.target_run_id = Some(run_id.clone());
+            exchange.updated_at_ms = now_ms();
+            self.store.control_put_mailbox(&exchange)?;
+            Ok(json!({
+                "exchange_id": exchange_id,
+                "status": "running",
+                "run_id": run_id,
+                "target": grant,
+            }))
+        }
     }
 
     pub fn host(&self) -> ControlHostRecord {
@@ -1388,7 +1773,7 @@ impl RunManager {
                 *map.entry(item.thread_id.clone()).or_default() += 1;
                 map
             });
-        let thread_summaries = {
+        let mut thread_summaries = {
             let active = self
                 .active
                 .lock()
@@ -1404,6 +1789,41 @@ impl RunManager {
                 })
                 .collect::<Result<Vec<_>>>()?
         };
+        let links = self.store.control_thread_links(None)?;
+        let summary_by_id = thread_summaries
+            .iter()
+            .map(|thread| (thread.id.clone(), thread.clone()))
+            .collect::<HashMap<_, _>>();
+        let mut links_by_owner = HashMap::<String, Vec<ThreadLinkV1>>::new();
+        for link in links {
+            let Some(target) = summary_by_id.get(&link.target_thread_id) else {
+                continue;
+            };
+            let selected_model = target.model.as_deref().unwrap_or_default();
+            links_by_owner
+                .entry(link.owner_thread_id.clone())
+                .or_default()
+                .push(ThreadLinkV1 {
+                    owner_thread_id: link.owner_thread_id,
+                    target_thread_id: target.id.clone(),
+                    target_title: target.title.clone(),
+                    target_workspace: target.workspace.clone(),
+                    target_project: target.workspace.as_deref().and_then(project_label),
+                    target_model: target
+                        .model
+                        .as_deref()
+                        .map(runtime_model)
+                        .map(str::to_string),
+                    target_runtime: runtime_adapter(selected_model).to_string(),
+                    target_archived_at_ms: target.archived_at_ms,
+                    target_busy: target.busy,
+                    target_queued_turns: target.queued_turns,
+                    created_at_ms: link.created_at_ms,
+                });
+        }
+        for thread in &mut thread_summaries {
+            thread.linked_threads = links_by_owner.remove(&thread.id).unwrap_or_default();
+        }
         // A temporarily unavailable provider must not prevent a controller
         // from opening existing threads, stopping work, or resolving an
         // approval. Model discovery can recover on the next bootstrap.
@@ -1606,6 +2026,8 @@ impl RunManager {
         let thread_lock = if matches!(
             command.kind,
             ControlCommandKindV1::TurnSend
+                | ControlCommandKindV1::ThreadLinkAdd
+                | ControlCommandKindV1::ThreadLinkRemove
                 | ControlCommandKindV1::TurnSteer
                 | ControlCommandKindV1::ContextInject
                 | ControlCommandKindV1::TurnInboxDelete
@@ -1659,6 +2081,8 @@ impl RunManager {
             ControlCommandKindV1::ThreadDelete => self.delete_thread(&command),
             ControlCommandKindV1::ThreadSetModel => self.patch_thread(&command, ThreadPatch::Model),
             ControlCommandKindV1::ThreadSetAgent => self.patch_thread(&command, ThreadPatch::Agent),
+            ControlCommandKindV1::ThreadLinkAdd => self.link_thread(&command, true),
+            ControlCommandKindV1::ThreadLinkRemove => self.link_thread(&command, false),
             ControlCommandKindV1::MessageDelete => self.delete_message(&command),
             ControlCommandKindV1::ModelFavoritesSet => self.set_model_favorites(&command),
             ControlCommandKindV1::TurnSend => self.accept_turn(state, &command).await,
@@ -1948,6 +2372,82 @@ impl RunManager {
         })
     }
 
+    fn link_thread(&self, command: &ControlCommandV1, add: bool) -> Result<ControlCommandResultV1> {
+        let owner_thread_id = required_thread_id(command)?;
+        let target_thread_id = required_payload_string(&command.payload, "target_thread_id")?;
+        if owner_thread_id == target_thread_id {
+            return Err(Error::InvalidRequest(
+                "a thread cannot link to itself".into(),
+            ));
+        }
+        let owner = self
+            .store
+            .control_thread(owner_thread_id)?
+            .ok_or_else(|| Error::NotFound(format!("thread {owner_thread_id}")))?;
+        if let Some(expected) = command.expected_revision {
+            if expected != owner.revision {
+                return Err(Error::InvalidRequest(format!(
+                    "thread revision conflict: expected {expected}, current {}",
+                    owner.revision
+                )));
+            }
+        }
+        let target = self.store.control_thread(&target_thread_id)?;
+        if add && target.is_none() {
+            return Err(Error::NotFound(format!("thread {target_thread_id}")));
+        }
+        let timeline = if add {
+            self.store.control_add_thread_link(
+                owner_thread_id,
+                &target_thread_id,
+                &Uuid::new_v4().to_string(),
+            )?
+        } else {
+            self.store.control_remove_thread_link(
+                owner_thread_id,
+                &target_thread_id,
+                &Uuid::new_v4().to_string(),
+            )?
+        };
+        let current = self
+            .store
+            .control_thread(owner_thread_id)?
+            .ok_or_else(|| Error::NotFound(format!("thread {owner_thread_id}")))?;
+        let event_type = if add {
+            "thread.link.added"
+        } else {
+            "thread.link.removed"
+        };
+        if let Some(timeline) = timeline {
+            self.emit(
+                event_type,
+                Some(owner_thread_id),
+                Some(&timeline.epoch),
+                Some(timeline.seq),
+                json!({
+                    "owner_thread_id": owner_thread_id,
+                    "target_thread_id": target_thread_id,
+                    "target_title": target.as_ref().map(thread_title).unwrap_or_else(|| "Unavailable chat".into()),
+                }),
+            );
+        }
+        Ok(ControlCommandResultV1 {
+            command_id: command.command_id.clone(),
+            status: ControlCommandStatusV1::Applied,
+            thread_id: Some(owner_thread_id.to_string()),
+            revision: Some(current.revision),
+            run_id: None,
+            queue_id: None,
+            confirmation_token: None,
+            message: None,
+            data: json!({
+                "target_thread_id": target_thread_id,
+                "target_title": target.as_ref().map(thread_title).unwrap_or_else(|| "Unavailable chat".into()),
+                "linked": add,
+            }),
+        })
+    }
+
     fn delete_message(&self, command: &ControlCommandV1) -> Result<ControlCommandResultV1> {
         let thread_id = required_thread_id(command)?;
         if self
@@ -2014,7 +2514,8 @@ impl RunManager {
                 )));
             }
         }
-        let config = resolve_frozen_config(&state, &thread, payload.attachments)?;
+        let mut config = resolve_frozen_config(&state, &thread, payload.attachments)?;
+        config.linked_thread_grants = self.freeze_linked_thread_grants(&thread_id)?;
         let bound_agent_id = thread_agent_id(&thread);
         if config.agent.is_none() {
             if let Some(agent_id) = bound_agent_id {
@@ -2028,6 +2529,8 @@ impl RunManager {
             display_text: payload.display_text,
             config,
             append_user: true,
+            mailbox_origin: None,
+            mailbox_context: Vec::new(),
         };
         let busy = self
             .active
@@ -2132,6 +2635,8 @@ impl RunManager {
             display_text: payload.display_text,
             config: resolve_frozen_config(state, &thread, payload.attachments)?,
             append_user: true,
+            mailbox_origin: None,
+            mailbox_context: Vec::new(),
         };
         let inbox_id = Uuid::new_v4().to_string();
         self.store.control_put_inbox(&ControlInboxRecord {
@@ -2317,6 +2822,7 @@ impl RunManager {
             }
         }
         let mut config = resolve_frozen_config(&state, &thread, attachments)?;
+        config.linked_thread_grants = self.freeze_linked_thread_grants(&thread_id)?;
         if let Some(policy) = delegation_policy {
             config.delegation_policy = policy.to_string();
         }
@@ -2332,6 +2838,8 @@ impl RunManager {
             display_text,
             config,
             append_user: false,
+            mailbox_origin: None,
+            mailbox_context: Vec::new(),
         };
         let run_id = self.start_turn(state, thread_id.clone(), accepted)?;
         Ok(ControlCommandResultV1 {
@@ -2354,8 +2862,23 @@ impl RunManager {
         self: &Arc<Self>,
         state: AppState,
         thread_id: String,
-        accepted: AcceptedTurnV1,
+        mut accepted: AcceptedTurnV1,
     ) -> Result<String> {
+        if let Some(origin) = accepted.mailbox_origin.as_ref() {
+            let target = self
+                .store
+                .control_thread(&thread_id)?
+                .ok_or_else(|| Error::NotFound(format!("thread {thread_id}")))?;
+            if thread_summary(&target, false, 0)?.archived_at_ms.is_some() {
+                self.fail_mailbox_exchange_by_id(
+                    &origin.exchange_id,
+                    "The linked destination was archived before its queued turn could start.",
+                )?;
+                return Err(Error::InvalidRequest(
+                    "linked destination is archived".into(),
+                ));
+            }
+        }
         let run_id = Uuid::new_v4().to_string();
         let (stop, stop_rx) = watch::channel(false);
         {
@@ -2378,6 +2901,25 @@ impl RunManager {
                 },
             );
         }
+        let claimed_mail = match self
+            .store
+            .control_claim_mailbox_replies(&thread_id, &run_id, 20)
+        {
+            Ok(items) => items,
+            Err(error) => {
+                self.active
+                    .lock()
+                    .expect("control active run store poisoned")
+                    .remove(&thread_id);
+                return Err(error);
+            }
+        };
+        accepted.config.claimed_mailbox_ids =
+            claimed_mail.iter().map(|item| item.id.clone()).collect();
+        accepted.mailbox_context = claimed_mail
+            .iter()
+            .filter_map(mailbox_context_from_record)
+            .collect();
         let now = now_ms();
         let mut run_record = ControlRunRecord {
             id: run_id.clone(),
@@ -2404,6 +2946,44 @@ impl RunManager {
             error_json: None,
         };
         self.store.control_put_run(&run_record)?;
+        if let Some(origin) = accepted.mailbox_origin.as_ref() {
+            if let Some(mut exchange) = self.store.control_mailbox(&origin.exchange_id)? {
+                exchange.status = "running".into();
+                exchange.target_run_id = Some(run_id.clone());
+                exchange.updated_at_ms = now_ms();
+                self.store.control_put_mailbox(&exchange)?;
+                let _ = self.persist_and_emit(
+                    &exchange.origin_thread_id,
+                    exchange.origin_run_id.as_deref(),
+                    "mailbox_running",
+                    json!({
+                        "exchange_id": exchange.id,
+                        "target_thread_id": exchange.target_thread_id,
+                        "target_run_id": run_id,
+                        "status": "running",
+                    }),
+                );
+                self.emit(
+                    "mailbox.running",
+                    Some(&thread_id),
+                    None,
+                    None,
+                    json!({ "exchange_id": origin.exchange_id, "run_id": run_id }),
+                );
+            }
+        }
+        for exchange in &claimed_mail {
+            let _ = self.persist_and_emit(
+                &thread_id,
+                Some(&run_id),
+                "mailbox_reply_consumed",
+                json!({
+                    "exchange_id": exchange.id,
+                    "target_thread_id": exchange.target_thread_id,
+                    "status": exchange.status,
+                }),
+            );
+        }
         let journal = RunJournal {
             store: self.store.clone(),
             privacy: state.privacy.clone(),
@@ -2433,6 +3013,7 @@ impl RunManager {
                 "promptContent": accepted.text,
                 "attachments": accepted.config.attachments,
                 "runId": run_id,
+                "mailboxOrigin": accepted.mailbox_origin.clone(),
             });
             self.persist_message_and_event(
                 &thread_id,
@@ -2528,6 +3109,18 @@ impl RunManager {
             "run_status",
             json!({ "run_id": run_id, "status": status, "error": error }),
         );
+        if status != "completed" {
+            let failure = error
+                .as_ref()
+                .and_then(|value| value.get("message"))
+                .and_then(Value::as_str)
+                .unwrap_or(if status == "cancelled" {
+                    "The linked thread run was cancelled."
+                } else {
+                    "The linked thread run failed."
+                });
+            let _ = self.complete_mailbox_exchange(&run_id, None, Some(failure));
+        }
         let _ = self.store.control_retarget_pending_steers(&run_id);
         self.active
             .lock()
@@ -2573,7 +3166,10 @@ impl RunManager {
         accepted: &AcceptedTurnV1,
         stop: &mut watch::Receiver<bool>,
     ) -> Result<RunOutcome> {
-        let messages = control_chat_messages(&self.store, thread_id)?;
+        let mut messages = control_chat_messages(&self.store, thread_id)?;
+        if let Some(context) = linked_run_context(&accepted.config, &accepted.mailbox_context) {
+            messages.insert(0, ChatMessage::text("system", context));
+        }
         let context = RunContext::from_control(
             state,
             accepted.config.workspace.as_deref(),
@@ -2704,7 +3300,10 @@ impl RunManager {
                 enabled_skills: accepted.config.enabled_skills.clone(),
                 avatar: "sparkles".into(),
             });
-        let messages = control_chat_messages(&self.store, thread_id)?;
+        let mut messages = control_chat_messages(&self.store, thread_id)?;
+        if let Some(context) = linked_run_context(&accepted.config, &accepted.mailbox_context) {
+            messages.insert(0, ChatMessage::text("system", context));
+        }
         let reasoning_effort = accepted
             .config
             .reasoning_effort
@@ -2733,6 +3332,7 @@ impl RunManager {
             &accepted.config.worker_model,
             thread_id,
             run_id,
+            accepted.config.linked_thread_grants.clone(),
             reasoning_effort,
             sampling_from_generation(&accepted.config.generation),
             journal.clone(),
@@ -2827,12 +3427,9 @@ impl RunManager {
                         &mut pending_text,
                         &mut pending_reasoning,
                     )?;
-                    self.store.control_put_approval(&ControlApprovalRecord {
-                        id: approval_id.clone(),
-                        run_id: run_id.to_string(),
-                        thread_id: thread_id.to_string(),
-                        kind: "command".into(),
-                        request_json: json!({
+                    let approval_request = self.enrich_linked_thread_send_approval(
+                        accepted,
+                        json!({
                             "approval_id": approval_id,
                             "name": name,
                             "arguments": arguments,
@@ -2844,8 +3441,14 @@ impl RunManager {
                             ).then_some(
                                 "This host tool inherits your user environment; developer credentials may be accessible."
                             ),
-                        })
-                        .to_string(),
+                        }),
+                    )?;
+                    self.store.control_put_approval(&ControlApprovalRecord {
+                        id: approval_id.clone(),
+                        run_id: run_id.to_string(),
+                        thread_id: thread_id.to_string(),
+                        kind: "command".into(),
+                        request_json: approval_request.to_string(),
                         status: "pending".into(),
                         decision_json: None,
                         created_at_ms: now_ms(),
@@ -2922,6 +3525,13 @@ impl RunManager {
         } else {
             transcript_prompt
         };
+        let prompt = if let Some(context) =
+            linked_run_context(&accepted.config, &accepted.mailbox_context)
+        {
+            format!("{context}\n\n{prompt}")
+        } else {
+            prompt
+        };
         let prompt = if accepted.config.instructions.trim().is_empty() {
             prompt
         } else {
@@ -2968,6 +3578,7 @@ impl RunManager {
                     "memory_enabled": accepted.config.memory,
                     "thread_id": thread_id,
                     "project_locator": accepted.config.workspace,
+                    "linked_thread_grants": accepted.config.linked_thread_grants,
                 },
                 "tool_mode": accepted.config.tool_mode,
                 "enabled_tools": accepted.config.enabled_tools,
@@ -3064,6 +3675,7 @@ impl RunManager {
                             .filter(|request| !request.is_null())
                             .cloned()
                             .unwrap_or_else(|| value.clone());
+                        let request = self.enrich_linked_thread_send_approval(accepted, request)?;
                         self.store.control_put_approval(&ControlApprovalRecord {
                             id: id.to_string(),
                             run_id: run_id.to_string(),
@@ -3123,6 +3735,7 @@ impl RunManager {
         reasoning: String,
         metrics: Option<Value>,
     ) -> Result<()> {
+        let mailbox_content = content.clone();
         let message = json!({
             "id": Uuid::new_v4().to_string(),
             "role": "assistant",
@@ -3140,7 +3753,136 @@ impl RunManager {
             "assistant_message_projected",
             json!({"ledger_version": 1}),
         )?;
+        self.complete_mailbox_exchange(run_id, Some(&mailbox_content), None)?;
         Ok(())
+    }
+
+    fn complete_mailbox_exchange(
+        &self,
+        target_run_id: &str,
+        content: Option<&str>,
+        failure: Option<&str>,
+    ) -> Result<()> {
+        let Some(mut exchange) = self.store.control_mailbox_for_target_run(target_run_id)? else {
+            return Ok(());
+        };
+        if matches!(exchange.status.as_str(), "replied" | "failed" | "discarded") {
+            return Ok(());
+        }
+        let target = self.store.control_thread(&exchange.target_thread_id)?;
+        let target_title = target
+            .as_ref()
+            .map(thread_title)
+            .unwrap_or_else(|| "Deleted linked thread".into());
+        let target_summary = target
+            .as_ref()
+            .map(|thread| thread_summary(thread, false, 0))
+            .transpose()?;
+        exchange.status = if failure.is_some() {
+            "failed"
+        } else {
+            "replied"
+        }
+        .into();
+        exchange.updated_at_ms = now_ms();
+        exchange.reply_json = Some(
+            json!({
+                "target_title": target_title,
+                "target_workspace": target_summary.as_ref().and_then(|summary| summary.workspace.clone()),
+                "target_project": target_summary.as_ref().and_then(|summary| summary.workspace.as_deref().and_then(project_label)),
+                "target_model": target_summary.as_ref().and_then(|summary| summary.model.clone()),
+                "target_runtime": target_summary.as_ref().map(|summary| runtime_adapter(summary.model.as_deref().unwrap_or_default())),
+                "content": content.unwrap_or_default(),
+                "error": failure,
+            })
+            .to_string(),
+        );
+        self.store.control_put_mailbox(&exchange)?;
+        self.project_mailbox_reply(&exchange)
+    }
+
+    fn fail_mailbox_exchange_by_id(&self, exchange_id: &str, failure: &str) -> Result<()> {
+        let Some(mut exchange) = self.store.control_mailbox(exchange_id)? else {
+            return Ok(());
+        };
+        if matches!(exchange.status.as_str(), "replied" | "failed" | "discarded") {
+            return Ok(());
+        }
+        let target_title = self
+            .store
+            .control_thread(&exchange.target_thread_id)?
+            .as_ref()
+            .map(thread_title)
+            .unwrap_or_else(|| "Unavailable linked thread".into());
+        exchange.status = "failed".into();
+        exchange.updated_at_ms = now_ms();
+        exchange.reply_json = Some(
+            json!({
+                "target_title": target_title,
+                "content": "",
+                "error": failure,
+            })
+            .to_string(),
+        );
+        self.store.control_put_mailbox(&exchange)?;
+        self.project_mailbox_reply(&exchange)
+    }
+
+    fn project_mailbox_reply(&self, exchange: &ControlMailboxRecord) -> Result<()> {
+        if exchange.projected_at_ms.is_some() {
+            return Ok(());
+        }
+        let Some(_) = self.store.control_thread(&exchange.origin_thread_id)? else {
+            return Ok(());
+        };
+        let reply = exchange
+            .reply_json
+            .as_deref()
+            .map(parse_value)
+            .transpose()?
+            .unwrap_or(Value::Null);
+        self.persist_and_emit(
+            &exchange.origin_thread_id,
+            exchange.origin_run_id.as_deref(),
+            "mailbox_reply",
+            json!({
+                "exchange_id": exchange.id,
+                "target_thread_id": exchange.target_thread_id,
+                "status": exchange.status,
+                "reply": reply,
+            }),
+        )?;
+        self.store.control_mark_mailbox_projected(&exchange.id)?;
+        self.emit(
+            if exchange.status == "replied" {
+                "mailbox.replied"
+            } else {
+                "mailbox.failed"
+            },
+            Some(&exchange.origin_thread_id),
+            None,
+            None,
+            json!({
+                "exchange_id": exchange.id,
+                "target_thread_id": exchange.target_thread_id,
+            }),
+        );
+        Ok(())
+    }
+
+    fn reconcile_mailbox_projections(&self) -> Result<usize> {
+        let mut projected = 0;
+        for thread in self.store.control_threads()? {
+            for exchange in self.store.control_mailbox_for_origin(&thread.id)? {
+                if matches!(exchange.status.as_str(), "replied" | "failed")
+                    && exchange.projected_at_ms.is_none()
+                {
+                    self.project_mailbox_reply(&exchange)?;
+                    projected += 1;
+                }
+            }
+        }
+        Ok(projected)
     }
 
     fn stop_turn(&self, command: &ControlCommandV1) -> Result<ControlCommandResultV1> {
@@ -3197,10 +3939,13 @@ impl RunManager {
         if !self.store.control_remove_queued_turn(&queue_id)? {
             return Err(Error::NotFound(format!("queued turn {queue_id}")));
         }
+        let is_mailbox = accepted.mailbox_origin.is_some();
         let run_id = match self.start_turn(state, thread_id.clone(), accepted) {
             Ok(run_id) => run_id,
             Err(error) => {
-                let _ = self.store.control_enqueue_turn(&queued);
+                if !is_mailbox {
+                    let _ = self.store.control_enqueue_turn(&queued);
+                }
                 return Err(error);
             }
         };
@@ -3518,9 +4263,11 @@ impl RunManager {
             .store
             .control_remove_queued_turn(&next.id)
             .unwrap_or(false)
-            && self.start_turn(state, thread_id, accepted).is_err()
         {
-            let _ = self.store.control_enqueue_turn(&next);
+            let is_mailbox = accepted.mailbox_origin.is_some();
+            if self.start_turn(state, thread_id, accepted).is_err() && !is_mailbox {
+                let _ = self.store.control_enqueue_turn(&next);
+            }
         }
     }
 
@@ -3925,6 +4672,8 @@ fn resolve_frozen_config(
         reasoning_effort,
         generation,
         adapter,
+        linked_thread_grants: Vec::new(),
+        claimed_mailbox_ids: Vec::new(),
     })
 }
 
@@ -4040,6 +4789,94 @@ fn runtime_model(model: &str) -> &str {
     }
 }
 
+fn project_label(workspace: &str) -> Option<String> {
+    std::path::Path::new(workspace)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.is_empty())
+}
+
+fn mailbox_context_from_record(exchange: &ControlMailboxRecord) -> Option<String> {
+    let reply = exchange
+        .reply_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())?;
+    let source_title = reply
+        .get("target_title")
+        .and_then(Value::as_str)
+        .unwrap_or("linked thread");
+    let body = reply
+        .get("content")
+        .or_else(|| reply.get("error"))
+        .and_then(Value::as_str)
+        .unwrap_or("The linked thread ended without a reply.");
+    Some(format!(
+        "Mailbox reply {} from {} (thread {}), status {}:\n{}",
+        exchange.id, source_title, exchange.target_thread_id, exchange.status, body
+    ))
+}
+
+fn truncate_linked_content(content: &str, max_bytes: usize) -> (String, bool) {
+    if content.len() <= max_bytes {
+        return (content.to_string(), false);
+    }
+    let mut end = max_bytes.min(content.len());
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    (content[..end].to_string(), true)
+}
+
+fn linked_run_context(config: &FrozenRunConfigV1, mailbox_context: &[String]) -> Option<String> {
+    if config.linked_thread_grants.is_empty() && mailbox_context.is_empty() {
+        return None;
+    }
+    let mut sections = Vec::new();
+    if !config.linked_thread_grants.is_empty() {
+        let links = config
+            .linked_thread_grants
+            .iter()
+            .map(|grant| {
+                format!(
+                    "- {} (id: {}, project: {}, model/runtime: {}/{}, frozen revision/epoch/seq: {}/{}/{})",
+                    grant.title,
+                    grant.target_thread_id,
+                    grant.project.as_deref().unwrap_or("unknown"),
+                    grant.model.as_deref().unwrap_or("unknown"),
+                    grant.runtime,
+                    grant.revision,
+                    grant.epoch,
+                    grant.max_timeline_seq
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        sections.push(format!(
+            "Linked-thread grants for this run (use linked_thread_* tools; transcripts are not injected automatically):\n{links}"
+        ));
+    }
+    if !mailbox_context.is_empty() {
+        sections.push(format!(
+            "Mailbox replies claimed when this run started:\n{}",
+            mailbox_context.join("\n\n")
+        ));
+    }
+    Some(sections.join("\n\n"))
+}
+
+fn thread_title(thread: &ControlThreadRecord) -> String {
+    serde_json::from_str::<Value>(&thread.session_json)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("title")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| "New chat".into())
+}
+
 fn thread_summary(
     thread: &ControlThreadRecord,
     busy: bool,
@@ -4089,6 +4926,7 @@ fn thread_summary(
             .map(str::to_string),
         busy,
         queued_turns,
+        linked_threads: Vec::new(),
     })
 }
 
@@ -4141,6 +4979,7 @@ fn queued_turn(turn: ControlQueuedTurnRecord) -> Result<QueuedTurnV1> {
         accepted_at_ms: turn.accepted_at_ms,
         display_text: accepted.display_text.unwrap_or(accepted.text),
         attachments: accepted.config.attachments,
+        mailbox_origin: accepted.mailbox_origin,
     })
 }
 
@@ -5612,6 +6451,8 @@ mod tests {
                     )
                     .unwrap(),
                     append_user: true,
+                    mailbox_origin: None,
+                    mailbox_context: Vec::new(),
                 })
                 .unwrap(),
                 agent_snapshot_json: None,
@@ -5674,5 +6515,312 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].kind, "steer");
         assert_eq!(pending[0].target_run_id.as_deref(), Some("run-active"));
+    }
+
+    #[tokio::test]
+    async fn linked_threads_freeze_reads_and_deliver_non_waking_mailbox_replies() {
+        let (manager, state) = manager_and_state();
+        for (id, title) in [("origin", "Origin"), ("target", "Target")] {
+            let created = manager
+                .command(
+                    state.clone(),
+                    None,
+                    ControlCommandV1 {
+                        command_id: format!("create-{id}"),
+                        kind: ControlCommandKindV1::ThreadCreate,
+                        thread_id: None,
+                        expected_revision: None,
+                        payload: json!({
+                            "id": id,
+                            "title": title,
+                            "settings": {
+                                "model": "mock-echo",
+                                "folder": format!("C:/projects/{id}"),
+                                "privacy": "off",
+                                "toolApproval": "open"
+                            }
+                        }),
+                        confirmation_token: None,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(created.status, ControlCommandStatusV1::Applied);
+        }
+        for (id, role, content) in [
+            ("target-user", "user", "visible question"),
+            ("target-assistant", "assistant", "visible answer"),
+        ] {
+            manager
+                .store
+                .control_append_timeline(
+                    "target",
+                    id,
+                    None,
+                    "message",
+                    &json!({
+                        "id": id,
+                        "role": role,
+                        "content": content,
+                        "promptContent": "hidden prompt",
+                        "reasoning": "hidden reasoning",
+                        "attachments": [{
+                            "id": "attachment",
+                            "name": "note.txt",
+                            "mime": "text/plain",
+                            "size": 5,
+                            "content": "secret",
+                            "data_url": "data:text/plain;base64,c2VjcmV0"
+                        }]
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+        }
+        manager
+            .store
+            .control_append_timeline(
+                "target",
+                "target-large",
+                None,
+                "message",
+                &json!({
+                    "id": "target-large",
+                    "role": "assistant",
+                    "content": "x".repeat(80 * 1024),
+                })
+                .to_string(),
+            )
+            .unwrap();
+        let linked = manager
+            .command(
+                state.clone(),
+                None,
+                ControlCommandV1 {
+                    command_id: "link-origin-target".into(),
+                    kind: ControlCommandKindV1::ThreadLinkAdd,
+                    thread_id: Some("origin".into()),
+                    expected_revision: None,
+                    payload: json!({ "target_thread_id": "target" }),
+                    confirmation_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(linked.status, ControlCommandStatusV1::Applied);
+        let grants = manager.freeze_linked_thread_grants("origin").unwrap();
+        assert_eq!(grants.len(), 1);
+        let mut approval_config = resolve_frozen_config(
+            &state,
+            &manager.store.control_thread("origin").unwrap().unwrap(),
+            vec![],
+        )
+        .unwrap();
+        approval_config.linked_thread_grants = grants.clone();
+        let approval = manager
+            .enrich_linked_thread_send_approval(
+                &AcceptedTurnV1 {
+                    text: "origin turn".into(),
+                    display_text: None,
+                    config: approval_config,
+                    append_user: true,
+                    mailbox_origin: None,
+                    mailbox_context: Vec::new(),
+                },
+                json!({
+                    "name": "linked_thread_send",
+                    "arguments": r#"{"target_thread_id":"target","message":"Please answer"}"#,
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            approval["linked_thread_send"]["destination_title"],
+            "Target"
+        );
+        assert_eq!(
+            approval["linked_thread_send"]["destination_project"],
+            "target"
+        );
+        assert_eq!(approval["linked_thread_send"]["delivery"], "start");
+        assert!(approval["linked_thread_send"]["model_work_notice"]
+            .as_str()
+            .unwrap()
+            .contains("provider or account subscription"));
+        manager
+            .store
+            .control_append_timeline(
+                "target",
+                "late-message",
+                None,
+                "message",
+                &json!({ "id": "late", "role": "assistant", "content": "too late" }).to_string(),
+            )
+            .unwrap();
+        let first_page = manager
+            .linked_thread_read(&grants, "target", None, 1)
+            .unwrap();
+        assert_eq!(first_page["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(first_page["has_more"], true);
+        let second_page = manager
+            .linked_thread_read(&grants, "target", first_page["next_after_seq"].as_u64(), 1)
+            .unwrap();
+        assert_eq!(second_page["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(second_page["messages"][0]["content"], "visible answer");
+        let third_page = manager
+            .linked_thread_read(&grants, "target", second_page["next_after_seq"].as_u64(), 1)
+            .unwrap();
+        assert_eq!(third_page["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(third_page["messages"][0]["content_truncated"], true);
+        assert!(serde_json::to_vec(&third_page).unwrap().len() <= 64 * 1024);
+        let read = manager
+            .linked_thread_read(&grants, "target", None, 20)
+            .unwrap();
+        assert!(serde_json::to_vec(&read).unwrap().len() <= 64 * 1024);
+        assert_eq!(read["messages"].as_array().unwrap().len(), 3);
+        let raw = read.to_string();
+        assert!(!raw.contains("hidden prompt"));
+        assert!(!raw.contains("hidden reasoning"));
+        assert!(!raw.contains("data:text"));
+        assert!(!raw.contains("too late"));
+        assert!(raw.contains("note.txt"));
+
+        let sent = manager
+            .linked_thread_send(
+                state.clone(),
+                "origin",
+                None,
+                &grants,
+                "target",
+                "Please answer asynchronously",
+            )
+            .await
+            .unwrap();
+        assert_eq!(sent["status"], "running");
+        let exchange_id = sent["exchange_id"].as_str().unwrap().to_string();
+        for _ in 0..100 {
+            if manager
+                .store
+                .control_mailbox(&exchange_id)
+                .unwrap()
+                .is_some_and(|exchange| exchange.status == "replied")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let exchange = manager
+            .store
+            .control_mailbox(&exchange_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(exchange.status, "replied");
+        assert!(exchange.projected_at_ms.is_some());
+        assert!(!manager.active.lock().unwrap().contains_key("origin"));
+        assert!(manager
+            .store
+            .control_timeline_page("origin", None, None, true, 100)
+            .unwrap()
+            .unwrap()
+            .items
+            .iter()
+            .any(|item| item.item_type == "mailbox_reply"));
+
+        let (busy_stop, _busy_stop_rx) = watch::channel(false);
+        manager.active.lock().unwrap().insert(
+            "target".into(),
+            ActiveRun {
+                run_id: "already-running".into(),
+                steering: false,
+                stop: busy_stop,
+            },
+        );
+        let queued_send = manager
+            .linked_thread_send(
+                state.clone(),
+                "origin",
+                None,
+                &grants,
+                "target",
+                "Wait behind current work",
+            )
+            .await
+            .unwrap();
+        assert_eq!(queued_send["status"], "queued");
+        let queued_turns = manager.store.control_queued_turns(Some("target")).unwrap();
+        assert_eq!(queued_turns.len(), 1);
+        let queued_accepted: AcceptedTurnV1 =
+            serde_json::from_str(&queued_turns[0].request_json).unwrap();
+        assert_eq!(
+            queued_accepted
+                .mailbox_origin
+                .as_ref()
+                .map(|origin| origin.origin_thread_id.as_str()),
+            Some("origin")
+        );
+        manager.active.lock().unwrap().remove("target");
+
+        let origin_turn = manager
+            .command(
+                state.clone(),
+                None,
+                ControlCommandV1 {
+                    command_id: "origin-consumes-reply".into(),
+                    kind: ControlCommandKindV1::TurnSend,
+                    thread_id: Some("origin".into()),
+                    expected_revision: None,
+                    payload: json!({ "text": "Continue" }),
+                    confirmation_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        let run = manager
+            .store
+            .control_run(origin_turn.run_id.as_deref().unwrap())
+            .unwrap()
+            .unwrap();
+        let accepted: AcceptedTurnV1 = serde_json::from_str(&run.request_json).unwrap();
+        assert_eq!(accepted.config.claimed_mailbox_ids, vec![exchange_id]);
+        assert_eq!(accepted.mailbox_context.len(), 1);
+
+        let mailbox_count = manager
+            .store
+            .control_mailbox_for_origin("origin")
+            .unwrap()
+            .len();
+        manager
+            .command(
+                state.clone(),
+                None,
+                ControlCommandV1 {
+                    command_id: "archive-linked-target".into(),
+                    kind: ControlCommandKindV1::ThreadArchive,
+                    thread_id: Some("target".into()),
+                    expected_revision: None,
+                    payload: json!({ "archived": true }),
+                    confirmation_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(manager
+            .linked_thread_send(
+                state,
+                "origin",
+                None,
+                &grants,
+                "target",
+                "This must be rejected",
+            )
+            .await
+            .is_err());
+        assert_eq!(
+            manager
+                .store
+                .control_mailbox_for_origin("origin")
+                .unwrap()
+                .len(),
+            mailbox_count
+        );
     }
 }

@@ -117,7 +117,7 @@ if (config.app?.windows?.[0]?.title !== "milim") {
 }
 
 if (config.app?.windows?.[0]?.dragDropEnabled !== false) {
-  throw new Error("Tauri native drag/drop must stay disabled so the composer receives HTML5 file drops");
+  throw new Error("Tauri native drag/drop must stay disabled so the Milim window receives HTML5 file drops");
 }
 
 if (String(config.identifier).endsWith(".app")) {

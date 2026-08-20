@@ -54,6 +54,8 @@ fn generated_fixture() -> String {
         ControlCommandKindV1::ThreadDelete,
         ControlCommandKindV1::ThreadSetModel,
         ControlCommandKindV1::ThreadSetAgent,
+        ControlCommandKindV1::ThreadLinkAdd,
+        ControlCommandKindV1::ThreadLinkRemove,
         ControlCommandKindV1::MessageDelete,
         ControlCommandKindV1::ModelFavoritesSet,
         ControlCommandKindV1::TurnSend,
@@ -112,6 +114,9 @@ fn generated_contract() -> String {
     decls!(
         ControlProtocolRangeV1,
         ControlCapabilitiesV1,
+        ThreadLinkV1,
+        FrozenLinkedThreadGrantV1,
+        MailboxOriginV1,
         ThreadSummaryV1,
         AgentSummaryV1,
         AgentSnapshotV1,

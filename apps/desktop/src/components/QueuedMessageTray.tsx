@@ -234,6 +234,9 @@ export function QueuedMessageTray({
                 title={text || queuedAttachmentLabel(attachmentCount)}
               >
                 {text || "Attached files"}
+                {item.mailboxOrigin && (
+                  <small>From {item.mailboxOrigin.origin_title}</small>
+                )}
               </span>
               {attachmentCount > 0 && (
                 <span className="queued-meta">

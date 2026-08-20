@@ -31,6 +31,7 @@ const chatAffordancesOnly = process.argv.includes("--chat-affordances-only");
 const reasoningEffortOnly = process.argv.includes("--reasoning-effort-only");
 const generationControlsOnly = process.argv.includes("--generation-controls-only");
 const mediaOnly = process.argv.includes("--media-only");
+const linkedThreadDropOnly = process.argv.includes("--linked-thread-drop-only");
 const mcpAppKinds = ["chart", "diagram", "form", "dashboard", "viewer"];
 const screenshots = {
   avatars: join(tmpdir(), "milim-tauri-webview-agent-avatars.png"),
@@ -67,6 +68,7 @@ const screenshots = {
   workspaceCode: join(tmpdir(), "milim-tauri-webview-workspace-code.png"),
   reasoningEffort: join(tmpdir(), "milim-tauri-webview-reasoning-effort.png"),
   failure: join(tmpdir(), "milim-tauri-webview-failure.png"),
+  linkedThreadDrop: join(tmpdir(), "milim-tauri-webview-linked-thread-drop.png"),
 };
 
 const profiles = [
@@ -139,6 +141,11 @@ try {
           !message.includes("/codex/models"),
       ),
     );
+  } else if (linkedThreadDropOnly) {
+    const errors = collectErrors(session.page);
+    await runLinkedThreadDropCheck(session.page);
+    await session.page.screenshot({ path: screenshots.linkedThreadDrop, fullPage: false });
+    consoleErrors.push(...errors.filter((message) => !message.includes("/codex/models")));
   } else if (turnChangesOnly) {
     const errors = collectErrors(session.page);
     turnChangesRepo = createTurnChangesRepo();
@@ -3776,6 +3783,118 @@ async function resetFrontendStorage(page) {
   await page.waitForTimeout(350);
 }
 
+async function runLinkedThreadDropCheck(page) {
+  await page.getByTestId("chat-shell").waitFor();
+  await dismissOnboardingIfPresent(page);
+
+  const targetId = "e2e-linked-target";
+  const originId = "e2e-linked-origin";
+  await page.evaluate(async ({ targetId: target, originId: origin }) => {
+    const invoke = window.__TAURI_INTERNALS__.invoke;
+    const [base, token] = await Promise.all([invoke("api_base_url"), invoke("api_token")]);
+    for (const [id, title] of [[target, "Linked target"], [origin, "Linked origin"]]) {
+      const response = await fetch(`${base}/control/v1/commands`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          command_id: `e2e-create-${id}`,
+          kind: "thread.create",
+          thread_id: id,
+          payload: { id, title, settings: {} },
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok || result.status !== "applied") {
+        throw new Error(`Canonical fixture create failed: ${JSON.stringify({ id, result })}`);
+      }
+    }
+  }, { targetId, originId });
+  await page.reload();
+  await page.getByTestId("chat-shell").waitFor();
+  await page.locator(`[data-sidebar-session-id="${originId}"]:visible`).first().click();
+  await page.locator(`[data-sidebar-session-id="${originId}"].active`).waitFor();
+
+  const fileTargets = [
+    ["sidebar", ".sidebar"],
+    ["top bar", ".topbar"],
+    ["transcript", ".chat-scroll"],
+    ["composer", '[data-testid="composer"]'],
+  ];
+  for (let index = 0; index < fileTargets.length; index += 1) {
+    const [label, selector] = fileTargets[index];
+    const before = await page.locator(".attachment-pill").count();
+    const result = await page.evaluate(({ selector: targetSelector, index: targetIndex }) => {
+      const target = document.querySelector(targetSelector);
+      if (!(target instanceof HTMLElement)) return { found: false };
+      const binary = atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
+      const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([bytes], `native-drop-${targetIndex}.png`, { type: "image/png" }));
+      target.dispatchEvent(new DragEvent("dragenter", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+      return { found: true };
+    }, { selector, index });
+    if (!result.found) throw new Error(`Native file-drop target was missing: ${label}.`);
+    await page.getByTestId("window-file-drop-overlay").waitFor();
+    await page.evaluate(({ selector: targetSelector, index: targetIndex }) => {
+      const target = document.querySelector(targetSelector);
+      const binary = atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
+      const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([bytes], `native-drop-${targetIndex}.png`, { type: "image/png" }));
+      target?.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+    }, { selector, index });
+    await page.waitForFunction((expected) => document.querySelectorAll(".attachment-pill").length === expected, before + 1);
+  }
+
+  await page.getByTestId("open-artifact-browser").click();
+  const inspector = page.getByTestId("inspector-shell");
+  await inspector.waitFor();
+  const beforeInspector = await page.locator(".attachment-pill").count();
+  await inspector.evaluate((target, targetIndex) => {
+    const binary = atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([bytes], `native-drop-${targetIndex}.png`, { type: "image/png" }));
+    target.dispatchEvent(new DragEvent("dragenter", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+    target.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+  }, fileTargets.length);
+  await page.waitForFunction((expected) => document.querySelectorAll(".attachment-pill").length === expected, beforeInspector + 1);
+
+  const beforeTextDrop = await page.locator(".attachment-pill").count();
+  await page.locator(".chat-scroll").evaluate((target) => {
+    const transfer = new DataTransfer();
+    transfer.setData("text/plain", "not a file");
+    target.dispatchEvent(new DragEvent("dragenter", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+    target.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+  });
+  if (await page.getByTestId("window-file-drop-overlay").count()) {
+    throw new Error("A non-file drag activated the native full-window attachment affordance.");
+  }
+  if (await page.locator(".attachment-pill").count() !== beforeTextDrop) {
+    throw new Error("A non-file drag changed native composer attachments.");
+  }
+
+  const source = page.locator(`[data-sidebar-session-id="${targetId}"]:visible`).first();
+  const destination = page.locator(`[data-thread-link-drop-target="${originId}"]`);
+  const sourceBox = await source.boundingBox();
+  const destinationBox = await destination.boundingBox();
+  if (!sourceBox || !destinationBox) throw new Error("Native linked-chat drag endpoints were not visible.");
+  await page.mouse.move(sourceBox.x + sourceBox.width / 2, sourceBox.y + sourceBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(destinationBox.x + destinationBox.width / 2, destinationBox.y + destinationBox.height / 2, { steps: 6 });
+  await page.waitForFunction(() => document.body.classList.contains("thread-link-target-active"));
+  const prompt = await destination.getAttribute("data-thread-link-prompt");
+  if (!prompt?.startsWith("Link ")) {
+    await page.mouse.up();
+    throw new Error(`Native linked-chat affordance was not populated: ${String(prompt)}.`);
+  }
+  await page.mouse.up();
+  const pill = page.getByTestId(`linked-thread-pill-${targetId}`);
+  await pill.waitFor();
+  await pill.getByRole("button", { name: /^Unlink / }).click();
+  await pill.waitFor({ state: "detached" });
+}
+
 async function runWorkersInspectorCheck(page, milimHome) {
   await seedWorkerFixture(page, milimHome, "proposed");
   const inspector = page.getByTestId("workers-inspector");
@@ -6154,6 +6273,7 @@ function printEvidencePaths(milimHome) {
   console.log(`chatSourcesScreenshot=${screenshots.chatSources}`);
   console.log(`chatLatestScreenshot=${screenshots.chatLatest}`);
   console.log(`reasoningEffortScreenshot=${screenshots.reasoningEffort}`);
+  console.log(`linkedThreadDropScreenshot=${screenshots.linkedThreadDrop}`);
   for (const theme of ["light", "dark"]) {
     for (const kind of mcpAppKinds) console.log(`mcpApp${kind}Screenshot(${theme})=${mcpAppViewScreenshot(kind, theme)}`);
   }

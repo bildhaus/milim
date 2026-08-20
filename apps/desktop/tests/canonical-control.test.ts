@@ -2,6 +2,8 @@ import { strict as assert } from "node:assert";
 import {
   controlQueuedMessage,
   hostBusySessionIdsFromBootstrap,
+  mailboxMessagesFromTimeline,
+  mergeMailboxMessages,
   mergeControlRunMessages,
   projectControlRunMessages,
   shouldQueueCanonicalFollowup,
@@ -268,5 +270,43 @@ const queued = controlQueuedMessage({
 assert.equal(queued.content, "Queued content");
 assert.equal(queued.createdAt, 42);
 assert.equal(queued.attachments?.[0].content, "note");
+
+const mailbox = mailboxMessagesFromTimeline([{
+  ...item(30, "mailbox_reply", {
+    exchange_id: "exchange-1",
+    target_thread_id: "thread-2",
+    status: "replied",
+    reply: {
+      target_title: "Research",
+      target_project: "milim",
+      content: "The result is ready.",
+    },
+  }),
+  run_id: null,
+}]);
+assert.equal(mailbox[0].content, "The result is ready.");
+assert.equal(mailbox[0].mailboxReply?.targetTitle, "Research");
+assert.deepEqual(
+  mergeMailboxMessages(
+    [{ id: "mailbox-exchange-1", role: "assistant", content: "stale" }, { id: "later", role: "user", content: "later" }],
+    mailbox,
+  ).map((message) => message.id),
+  ["mailbox-exchange-1", "later"],
+  "mailbox refreshes should update in place instead of moving replies to the transcript tail",
+);
+
+const provenance = projectControlRunMessages([
+  item(31, "message", {
+    id: "mail-user",
+    role: "user",
+    content: "Question",
+    mailboxOrigin: {
+      exchange_id: "exchange-1",
+      origin_thread_id: "thread-1",
+      origin_title: "Origin",
+    },
+  }),
+], "run-1")[0];
+assert.equal(provenance.mailboxOrigin?.origin_title, "Origin");
 
 console.log("canonical control projection tests passed");

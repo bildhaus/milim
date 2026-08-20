@@ -7071,17 +7071,89 @@ span.provider-brand-icon {
 .composer.compact .composer-queue-actions.split .composer-busy-toggle {
   height: 28px;
 }
-.composer.drag-over {
-  border-radius: 8px;
-  outline: 1px solid var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
-}
 .attachment-tray {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
   margin-bottom: 8px;
 }
+.linked-thread-tray {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 8px;
+}
+.linked-thread-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: min(100%, 320px);
+  padding: 5px 6px 5px 9px;
+  border: 1px solid var(--border-primary);
+  border-radius: 999px;
+  background: var(--bg-secondary);
+  color: var(--primary-text);
+}
+.linked-thread-pill.archived { opacity: 0.65; }
+.linked-thread-pill-copy {
+  display: grid;
+  min-width: 0;
+  line-height: 1.15;
+}
+.linked-thread-pill-copy strong,
+.linked-thread-pill-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.linked-thread-pill-copy strong { font-size: 11px; font-weight: 600; }
+.linked-thread-pill-copy small { color: var(--secondary-text); font-size: 9px; }
+.linked-thread-pill button {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--secondary-text);
+}
+.linked-thread-pill button:hover { background: var(--bg-tertiary); color: var(--primary-text); }
+.mailbox-provenance {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: fit-content;
+  margin-bottom: 7px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-primary);
+  border-radius: 999px;
+  background: var(--bg-secondary);
+  color: var(--secondary-text);
+  font-size: 10px;
+}
+.mailbox-provenance span { color: var(--primary-text); font-weight: 600; }
+.mailbox-provenance.failed { border-color: color-mix(in srgb, var(--error) 50%, var(--border-primary)); }
+
+body.thread-link-target-active [data-thread-link-drop-target]::after {
+  content: attr(data-thread-link-prompt);
+  position: absolute;
+  inset: 12px;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  border: 1px dashed var(--accent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--bg-primary) 76%, transparent);
+  color: var(--primary-text);
+  font-size: 14px;
+  font-weight: 600;
+  pointer-events: none;
+  backdrop-filter: blur(7px);
+}
+.chat-main { position: relative; }
 .attachment-pill {
   display: inline-flex;
   align-items: center;

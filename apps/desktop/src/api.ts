@@ -17,6 +17,7 @@ import type {
   QueuedTurnV1 as GeneratedControlQueuedTurnV1,
   RunSnapshotV1 as GeneratedControlRunSnapshotV1,
   ThreadSummaryV1 as GeneratedControlThreadSummaryV1,
+  ThreadLinkV1 as GeneratedThreadLinkV1,
   TimelineItemV1 as GeneratedControlTimelineItemV1,
   TimelinePageV1 as GeneratedControlTimelinePageV1,
 } from "./generated/control-v1.js";
@@ -299,6 +300,22 @@ export interface ChatMessage {
   workspaceCheckpoint?: WorkspaceCheckpoint;
   /** UI-only link to the delegation batch represented by this turn. */
   workerRunId?: string;
+  /** Provenance for a canonical input delivered by a linked-thread mailbox. */
+  mailboxOrigin?: {
+    exchange_id: string;
+    origin_thread_id: string;
+    origin_title: string;
+    origin_workspace?: string | null;
+    origin_project?: string | null;
+  };
+  /** A non-waking reply projected from a linked thread. */
+  mailboxReply?: {
+    exchangeId: string;
+    targetThreadId: string;
+    targetTitle: string;
+    targetProject?: string;
+    status: "replied" | "failed";
+  };
 }
 
 export interface ProviderLimitInfo {
@@ -897,6 +914,7 @@ export interface MobileCompanionPairing {
 // ----- Canonical desktop/mobile control protocol v1 -----
 
 export type ControlThreadSummaryV1 = GeneratedControlThreadSummaryV1;
+export type ThreadLinkV1 = GeneratedThreadLinkV1;
 export type ControlRunSnapshotV1 = GeneratedControlRunSnapshotV1;
 export type ControlQueuedTurnV1 = GeneratedControlQueuedTurnV1;
 export type ControlBootstrapV1 = Omit<GeneratedControlBootstrapV1, "appearance"> & {

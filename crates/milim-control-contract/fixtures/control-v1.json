@@ -13,6 +13,7 @@
     "run_inspection": true,
     "run_ledger": true,
     "steering": true,
+    "thread_links": true,
     "timeline_sync": true,
     "websocket_tickets": true,
     "workers": true
@@ -24,6 +25,8 @@
     "thread.delete",
     "thread.set_model",
     "thread.set_agent",
+    "thread.link.add",
+    "thread.link.remove",
     "message.delete",
     "model_favorites.set",
     "turn.send",

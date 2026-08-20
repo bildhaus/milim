@@ -24,6 +24,7 @@ pub(crate) struct AgentMemoryContext {
     delegation_policy: milim_agents::DelegationPolicy,
     worker_model: Option<String>,
     worker_context: Option<String>,
+    linked_thread_grants: Vec<crate::control::FrozenLinkedThreadGrantV1>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -76,6 +77,8 @@ struct AccountRuntimeMemoryContext {
     project_locator: Option<String>,
     project_label: Option<String>,
     message_id: Option<String>,
+    #[serde(default)]
+    linked_thread_grants: Vec<crate::control::FrozenLinkedThreadGrantV1>,
 }
 
 fn default_tool_mode() -> String {
@@ -134,6 +137,7 @@ pub(crate) fn account_runtime_tool_endpoint(
         },
         worker_model: context.tool_context.worker_model.clone(),
         worker_context: Some(prompt.chars().take(32_000).collect()),
+        linked_thread_grants: context.memory_context.linked_thread_grants.clone(),
     };
     let mut registry = agent_registry_for_mode_with_context(
         st,
@@ -385,7 +389,13 @@ const CHILD_THREAD_READ_ONLY_TOOL_NAMES: &[&str] = &[
     "current_time",
     "echo",
 ];
-const PLAN_MODE_READ_ONLY_TOOL_NAMES: &[&str] = &["read_file", "list_dir", "list_agents"];
+const PLAN_MODE_READ_ONLY_TOOL_NAMES: &[&str] = &[
+    "read_file",
+    "list_dir",
+    "list_agents",
+    "linked_thread_list",
+    "linked_thread_read",
+];
 const MAX_CHILD_THREAD_WAIT_MS: u64 = 300_000;
 const WORKSPACE_UNAVAILABLE_SYSTEM_PROMPT: &str = concat!(
     "No working folder is selected in Milim. Host filesystem and host shell tools are unavailable. ",
@@ -626,6 +636,7 @@ pub(crate) fn service_for_run(
 mod run_context_tests {
     use super::*;
     use milim_inference::test_backend::TestBackend;
+    use milim_storage::{Database, UserDataStore};
 
     struct WorkspaceProbe;
 
@@ -1003,6 +1014,135 @@ mod run_context_tests {
     }
 
     #[test]
+    fn linked_thread_tools_follow_plan_guarded_review_open_and_custom_modes() {
+        let store = Arc::new(UserDataStore::new(Database::open_in_memory().unwrap()).unwrap());
+        let control = crate::control::RunManager::new(store, "Tool fixture").unwrap();
+        let state = AppState::new(
+            Arc::new(TestBackend::new()),
+            milim_core::config::ServerConfiguration::default(),
+        )
+        .with_control(control);
+        let run_context = RunContext {
+            workspace: None,
+            privacy_mode: crate::privacy::PrivacyMode::Off,
+        };
+        let memory = AgentMemoryContext {
+            thread_id: Some("origin".into()),
+            message_id: Some("run-origin".into()),
+            linked_thread_grants: vec![crate::control::FrozenLinkedThreadGrantV1 {
+                target_thread_id: "target".into(),
+                title: "Target".into(),
+                workspace: Some("C:/projects/target".into()),
+                project: Some("target".into()),
+                model: Some("mock-echo".into()),
+                runtime: "mock".into(),
+                revision: 4,
+                epoch: "epoch-target".into(),
+                max_timeline_seq: 8,
+            }],
+            ..Default::default()
+        };
+
+        let plan = agent_base_registry_with_memory(
+            &state,
+            Some(memory.clone()),
+            &ToolRunPolicy {
+                plan_mode: true,
+                ..Default::default()
+            },
+            &run_context,
+        );
+        assert!(plan.contains("linked_thread_list"));
+        assert!(plan.contains("linked_thread_read"));
+        assert!(!plan.contains("linked_thread_send"));
+
+        let guarded = agent_base_registry_with_memory(
+            &state,
+            Some(memory.clone()),
+            &ToolRunPolicy::default(),
+            &run_context,
+        );
+        assert!(guarded.contains("linked_thread_list"));
+        assert!(guarded.contains("linked_thread_read"));
+        assert!(!guarded.contains("linked_thread_send"));
+
+        let review = agent_base_registry_with_memory(
+            &state,
+            Some(memory.clone()),
+            &ToolRunPolicy {
+                approval: ToolApprovalPolicy::Review,
+                interactive_approval: true,
+                ..Default::default()
+            },
+            &run_context,
+        );
+        assert!(review.contains("linked_thread_send"));
+
+        let open = ToolRunPolicy {
+            approval: ToolApprovalPolicy::Open,
+            ..Default::default()
+        };
+        let open_registry =
+            agent_base_registry_with_memory(&state, Some(memory.clone()), &open, &run_context);
+        assert!(open_registry.contains("linked_thread_send"));
+        let custom = agent_registry_for_mode_with_context(
+            &state,
+            "custom",
+            &["linked_thread_read".into()],
+            Some(memory),
+            &open,
+            &run_context,
+        );
+        assert!(custom.contains("linked_thread_read"));
+        assert!(!custom.contains("linked_thread_list"));
+        assert!(!custom.contains("linked_thread_send"));
+
+        let account_context: AccountRuntimeMilimContext = serde_json::from_value(json!({
+            "tool_context": {
+                "tool_approval_policy": "open",
+                "privacy_mode": "off"
+            },
+            "memory_context": {
+                "thread_id": "origin",
+                "message_id": "run-origin",
+                "linked_thread_grants": [{
+                    "target_thread_id": "target",
+                    "title": "Target",
+                    "workspace": "C:/projects/target",
+                    "project": "target",
+                    "model": "mock-echo",
+                    "runtime": "mock",
+                    "revision": 4,
+                    "epoch": "epoch-target",
+                    "max_timeline_seq": 8
+                }]
+            }
+        }))
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "127.0.0.1:7377".parse().unwrap());
+        let endpoint = account_runtime_tool_endpoint(
+            &state,
+            &headers,
+            Some(&account_context),
+            &run_context,
+            "mock-echo",
+            "fixture",
+        )
+        .map_err(|error| error.0)
+        .unwrap()
+        .unwrap();
+        let names = endpoint
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"linked_thread_list"));
+        assert!(names.contains(&"linked_thread_read"));
+        assert!(names.contains(&"linked_thread_send"));
+    }
+
+    #[test]
     fn account_runtime_context_prefers_explicit_fields_and_captures_legacy_cwd() {
         let root = temp_workspace_root();
         let legacy = root.join("legacy");
@@ -1345,6 +1485,7 @@ fn memory_context_from_request(req: &ChatCompletionRequest, model: String) -> Ag
         },
         worker_model: string_extra(req, "worker_model"),
         worker_context: worker_context_from_request(req),
+        linked_thread_grants: Vec::new(),
     }
 }
 
@@ -1481,6 +1622,11 @@ fn agent_base_registry_with_memory(
         reg.register(Arc::new(ListAgentsTool {
             store: store.clone(),
         }));
+    }
+    if let (Some(memory), Some(control)) = (memory.clone(), st.control.as_ref()) {
+        if memory.thread_id.is_some() && !memory.linked_thread_grants.is_empty() {
+            register_linked_thread_tools(&mut reg, st.clone(), control.clone(), memory, policy);
+        }
     }
     let workspace_unavailable =
         desktop_workspace_unavailable_for(st, run_context.workspace.as_deref());
@@ -1764,6 +1910,224 @@ pub(crate) fn scheduled_agent_registry(
     );
     register_skill_tools(&mut registry, st, &agent.skill_mode, &agent.enabled_skills);
     registry
+}
+
+fn register_linked_thread_tools(
+    registry: &mut ToolRegistry,
+    state: AppState,
+    control: Arc<crate::control::RunManager>,
+    context: AgentMemoryContext,
+    policy: &ToolRunPolicy,
+) {
+    let Some(origin_thread_id) = context.thread_id.clone() else {
+        return;
+    };
+    let grants = context.linked_thread_grants.clone();
+    registry.register(Arc::new(LinkedThreadListTool {
+        control: control.clone(),
+        origin_thread_id: origin_thread_id.clone(),
+        grants: grants.clone(),
+    }));
+    registry.register(Arc::new(LinkedThreadReadTool {
+        control: control.clone(),
+        grants: grants.clone(),
+    }));
+    if !policy.plan_mode && policy.approval != ToolApprovalPolicy::Guarded {
+        let destinations = grants
+            .iter()
+            .map(|grant| {
+                format!(
+                    "{} [{}] in {} using {}/{}",
+                    grant.title,
+                    grant.target_thread_id,
+                    grant.project.as_deref().unwrap_or("unknown project"),
+                    grant.model.as_deref().unwrap_or("unknown model"),
+                    grant.runtime
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        registry.register(Arc::new(LinkedThreadSendTool {
+            state,
+            control,
+            origin_thread_id,
+            origin_run_id: context.message_id,
+            grants,
+            description: format!(
+                "Send a message to a granted Milim thread. This starts or queues paid/model work with the destination's own settings and returns asynchronously through the mailbox. Destinations: {destinations}"
+            ),
+        }));
+    }
+}
+
+struct LinkedThreadListTool {
+    control: Arc<crate::control::RunManager>,
+    origin_thread_id: String,
+    grants: Vec<crate::control::FrozenLinkedThreadGrantV1>,
+}
+
+#[async_trait]
+impl Tool for LinkedThreadListTool {
+    fn name(&self) -> &str {
+        "linked_thread_list"
+    }
+
+    fn description(&self) -> &str {
+        "List the linked-thread grants frozen for this run and the origin thread's mailbox states."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({ "type": "object", "properties": {}, "additionalProperties": false })
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
+    }
+
+    fn concurrency(&self) -> milim_tools::ToolConcurrency {
+        milim_tools::ToolConcurrency::Parallel
+    }
+
+    fn environment_policy(&self) -> milim_tools::ProcessEnvironmentPolicy {
+        milim_tools::ProcessEnvironmentPolicy::ConfiguredIntegrationSanitized
+    }
+
+    async fn invoke(&self, _args: Value) -> milim_core::Result<Value> {
+        self.control
+            .linked_thread_list(&self.origin_thread_id, &self.grants)
+    }
+}
+
+struct LinkedThreadReadTool {
+    control: Arc<crate::control::RunManager>,
+    grants: Vec<crate::control::FrozenLinkedThreadGrantV1>,
+}
+
+#[derive(Deserialize)]
+struct LinkedThreadReadArgs {
+    target_thread_id: String,
+    #[serde(default)]
+    after_seq: Option<u64>,
+    #[serde(default = "default_linked_thread_read_limit")]
+    limit: usize,
+}
+
+fn default_linked_thread_read_limit() -> usize {
+    20
+}
+
+#[async_trait]
+impl Tool for LinkedThreadReadTool {
+    fn name(&self) -> &str {
+        "linked_thread_read"
+    }
+
+    fn description(&self) -> &str {
+        "Read canonical visible user/assistant messages from a linked thread up to this run's frozen sequence. Hidden prompts, reasoning, tool ledgers, and account-runtime history are excluded."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "target_thread_id": { "type": "string" },
+                "after_seq": { "type": "integer", "minimum": 0 },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 20 }
+            },
+            "required": ["target_thread_id"],
+            "additionalProperties": false
+        })
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
+    }
+
+    fn concurrency(&self) -> milim_tools::ToolConcurrency {
+        milim_tools::ToolConcurrency::Parallel
+    }
+
+    fn environment_policy(&self) -> milim_tools::ProcessEnvironmentPolicy {
+        milim_tools::ProcessEnvironmentPolicy::ConfiguredIntegrationSanitized
+    }
+
+    async fn invoke(&self, args: Value) -> milim_core::Result<Value> {
+        let args: LinkedThreadReadArgs = serde_json::from_value(args).map_err(|error| {
+            Error::InvalidRequest(format!("invalid linked_thread_read arguments: {error}"))
+        })?;
+        self.control.linked_thread_read(
+            &self.grants,
+            args.target_thread_id.trim(),
+            args.after_seq,
+            args.limit,
+        )
+    }
+}
+
+struct LinkedThreadSendTool {
+    state: AppState,
+    control: Arc<crate::control::RunManager>,
+    origin_thread_id: String,
+    origin_run_id: Option<String>,
+    grants: Vec<crate::control::FrozenLinkedThreadGrantV1>,
+    description: String,
+}
+
+#[derive(Deserialize)]
+struct LinkedThreadSendArgs {
+    target_thread_id: String,
+    message: String,
+}
+
+#[async_trait]
+impl Tool for LinkedThreadSendTool {
+    fn name(&self) -> &str {
+        "linked_thread_send"
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "target_thread_id": { "type": "string" },
+                "message": { "type": "string", "minLength": 1 }
+            },
+            "required": ["target_thread_id", "message"],
+            "additionalProperties": false
+        })
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::Mutating
+    }
+
+    fn concurrency(&self) -> milim_tools::ToolConcurrency {
+        milim_tools::ToolConcurrency::Exclusive
+    }
+
+    fn environment_policy(&self) -> milim_tools::ProcessEnvironmentPolicy {
+        milim_tools::ProcessEnvironmentPolicy::ConfiguredIntegrationSanitized
+    }
+
+    async fn invoke(&self, args: Value) -> milim_core::Result<Value> {
+        let args: LinkedThreadSendArgs = serde_json::from_value(args).map_err(|error| {
+            Error::InvalidRequest(format!("invalid linked_thread_send arguments: {error}"))
+        })?;
+        self.control
+            .linked_thread_send(
+                self.state.clone(),
+                &self.origin_thread_id,
+                self.origin_run_id.as_deref(),
+                &self.grants,
+                args.target_thread_id.trim(),
+                &args.message,
+            )
+            .await
+    }
 }
 
 pub(crate) struct MemoryRegisterTool {
@@ -3029,6 +3393,7 @@ pub(crate) fn control_agent_stream(
     worker_model: &str,
     thread_id: &str,
     message_id: &str,
+    linked_thread_grants: Vec<crate::control::FrozenLinkedThreadGrantV1>,
     reasoning_effort: Option<ReasoningEffort>,
     sampling: SamplingParams,
     step_hook: Arc<dyn milim_agents::AgentStepHook>,
@@ -3091,6 +3456,7 @@ pub(crate) fn control_agent_stream(
         },
         worker_model: (!worker_model.trim().is_empty()).then(|| worker_model.to_string()),
         worker_context: Some(query),
+        linked_thread_grants,
     };
     let mut registry = agent_registry_for_mode_with_context(
         st,

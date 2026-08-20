@@ -554,6 +554,27 @@ body.sidebar-pointer-dragging .session-item,
 body.sidebar-pointer-dragging .session-section-title {
   cursor: grabbing;
 }
+.thread-drag-ghost {
+  position: fixed;
+  z-index: 10001;
+  max-width: 260px;
+  padding: 7px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 9px;
+  background: var(--bg-secondary);
+  box-shadow: 0 10px 28px color-mix(in srgb, var(--bg-primary) 68%, transparent);
+  color: var(--primary-text);
+  font-size: 11px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.thread-drag-ghost.invalid {
+  border-color: var(--error);
+  opacity: 0.8;
+}
 
 :root {
   --titlebar-height: 44px;

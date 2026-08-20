@@ -187,7 +187,6 @@ export function Composer({
   const [slashDismissedValue, setSlashDismissedValue] = useState("");
   const [cursor, setCursor] = useState(0);
   const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceFileSuggestion[]>([]);
-  const [dragOver, setDragOver] = useState(false);
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
   const [historyNotice, setHistoryNotice] = useState<string | null>(null);
   const [ghostCompletion, setGhostCompletion] = useState("");
@@ -675,19 +674,8 @@ export function Composer({
 
   return (
     <div
-      className={`composer ${composerDensity === "compact" ? "compact" : "comfortable"}${dragOver ? " drag-over" : ""}`}
-      data-testid="composer-drop-zone"
-      onDragOver={(e) => {
-        e.preventDefault();
-        setDragOver(true);
-      }}
-      onDragLeave={() => setDragOver(false)}
-      onDrop={(e) => {
-        e.preventDefault();
-        setDragOver(false);
-        const files = Array.from(e.dataTransfer.files ?? []);
-        if (files.length) onAttachFiles(files);
-      }}
+      className={`composer ${composerDensity === "compact" ? "compact" : "comfortable"}`}
+      data-testid="composer"
     >
       <input
         ref={fileRef}

@@ -338,6 +338,7 @@ export interface QueuedMessage {
   content: string;
   attachments?: ChatAttachment[];
   createdAt: number;
+  mailboxOrigin?: ChatMessage["mailboxOrigin"];
 }
 
 export const DEFAULT_THREAD_SETTINGS: ThreadSettings = {

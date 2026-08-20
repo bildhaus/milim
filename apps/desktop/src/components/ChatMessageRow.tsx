@@ -494,6 +494,13 @@ function MessageRowView({
       <div className="msg-content" dir="auto">
         {m.role === "assistant" ? (
           <>
+            {m.mailboxReply && (
+              <div className={`mailbox-provenance ${m.mailboxReply.status}`} data-testid="mailbox-reply">
+                <span>Reply from {m.mailboxReply.targetTitle}</span>
+                {m.mailboxReply.targetProject && <small>{m.mailboxReply.targetProject}</small>}
+                {m.mailboxReply.status === "failed" && <small>Failed</small>}
+              </div>
+            )}
             {m.run && m.run !== activeRun && <RunTimeline run={m.run} />}
             {!hasStreamTranscript && (
               <MemoryBreadcrumbs memories={m.memories} />
@@ -635,6 +642,12 @@ function MessageRowView({
           </>
         ) : (
           <>
+            {m.mailboxOrigin && (
+              <div className="mailbox-provenance incoming" data-testid="mailbox-origin">
+                <span>From {m.mailboxOrigin.origin_title}</span>
+                {m.mailboxOrigin.origin_project && <small>{m.mailboxOrigin.origin_project}</small>}
+              </div>
+            )}
             {m.content && (
               <Suspense fallback={<span>{m.content}</span>}>
                 <Markdown

@@ -46,6 +46,10 @@ pub struct ControlCapabilitiesV1 {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub model_favorites: Option<bool>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub thread_links: Option<bool>,
 }
 
 impl Default for ControlCapabilitiesV1 {
@@ -67,8 +71,46 @@ impl Default for ControlCapabilitiesV1 {
             steering: Some(true),
             context_injection: Some(true),
             model_favorites: Some(true),
+            thread_links: Some(true),
         }
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, TS)]
+pub struct ThreadLinkV1 {
+    pub owner_thread_id: String,
+    pub target_thread_id: String,
+    pub target_title: String,
+    pub target_workspace: Option<String>,
+    pub target_project: Option<String>,
+    pub target_model: Option<String>,
+    pub target_runtime: String,
+    pub target_archived_at_ms: Option<i64>,
+    pub target_busy: bool,
+    pub target_queued_turns: usize,
+    pub created_at_ms: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, TS)]
+pub struct FrozenLinkedThreadGrantV1 {
+    pub target_thread_id: String,
+    pub title: String,
+    pub workspace: Option<String>,
+    pub project: Option<String>,
+    pub model: Option<String>,
+    pub runtime: String,
+    pub revision: u64,
+    pub epoch: String,
+    pub max_timeline_seq: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, TS)]
+pub struct MailboxOriginV1 {
+    pub exchange_id: String,
+    pub origin_thread_id: String,
+    pub origin_title: String,
+    pub origin_workspace: Option<String>,
+    pub origin_project: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
@@ -86,6 +128,8 @@ pub struct ThreadSummaryV1 {
     pub workspace: Option<String>,
     pub busy: bool,
     pub queued_turns: usize,
+    #[serde(default)]
+    pub linked_threads: Vec<ThreadLinkV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
@@ -176,6 +220,10 @@ pub struct FrozenRunConfigV1 {
     #[serde(default)]
     pub generation: GenerationSettingsV1,
     pub adapter: String,
+    #[serde(default)]
+    pub linked_thread_grants: Vec<FrozenLinkedThreadGrantV1>,
+    #[serde(default)]
+    pub claimed_mailbox_ids: Vec<String>,
 }
 
 fn default_control_tool_mode() -> String {
@@ -228,6 +276,10 @@ pub struct QueuedTurnV1 {
     pub accepted_at_ms: i64,
     pub display_text: String,
     pub attachments: Vec<ControlAttachmentV1>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mailbox_origin: Option<MailboxOriginV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
@@ -491,6 +543,12 @@ pub enum ControlCommandKindV1 {
     #[serde(rename = "thread.set_agent")]
     #[ts(rename = "thread.set_agent")]
     ThreadSetAgent,
+    #[serde(rename = "thread.link.add")]
+    #[ts(rename = "thread.link.add")]
+    ThreadLinkAdd,
+    #[serde(rename = "thread.link.remove")]
+    #[ts(rename = "thread.link.remove")]
+    ThreadLinkRemove,
     #[serde(rename = "message.delete")]
     #[ts(rename = "message.delete")]
     MessageDelete,
@@ -547,6 +605,8 @@ impl ControlCommandKindV1 {
             Self::ThreadDelete => "thread.delete",
             Self::ThreadSetModel => "thread.set_model",
             Self::ThreadSetAgent => "thread.set_agent",
+            Self::ThreadLinkAdd => "thread.link.add",
+            Self::ThreadLinkRemove => "thread.link.remove",
             Self::MessageDelete => "message.delete",
             Self::ModelFavoritesSet => "model_favorites.set",
             Self::TurnSend => "turn.send",

@@ -1967,6 +1967,7 @@ function TranscriptItemView({
   }
   return (
     <View style={[styles.message, item.role === 'user' ? styles.userMessage : styles.assistantMessage]}>
+      {item.mailboxLabel ? <Text style={styles.messageRole}>{item.mailboxLabel}</Text> : null}
       {item.role === 'system' ? <Text style={styles.messageRole}>SYSTEM</Text> : null}
       {item.reasoning ? <ReasoningBlock text={item.reasoning} /> : null}
       <Markdown markdownit={mobileMarkdownParser} style={markdownStyles} rules={mobileMarkdownRules}>

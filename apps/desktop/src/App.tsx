@@ -10,6 +10,7 @@ import {
   useRef,
   useState,
   type ErrorInfo,
+  type DragEvent as ReactDragEvent,
   type MouseEvent,
   type ReactNode,
 } from "react";
@@ -64,6 +65,7 @@ import {
   setMilimUnreadBadge,
 } from "./lib/nativeNotifications";
 import { useUiPreferences } from "./ui/store";
+import { dataTransferCarriesFiles, WINDOW_ATTACH_FILES_EVENT } from "./lib/windowFileDrop";
 
 const SettingsPage = lazy(() =>
   import("./settings/SettingsDialog").then((mod) => ({
@@ -404,6 +406,9 @@ function AppContent() {
     s.sessions.map((session) => session.id).join("\0"),
   );
   const nativeBadgeCount = useSessions(nativeBadgeThreadCount);
+  const activeThread = useSessions((state) =>
+    state.sessions.find((session) => session.id === state.activeId),
+  );
   const lastSessionIdsRef = useRef<Set<string> | null>(null);
   const [sessionsHydrated, setSessionsHydrated] = useState(() =>
     useSessions.persist.hasHydrated(),
@@ -512,6 +517,8 @@ function AppContent() {
     id: number;
     text: string;
   } | null>(null);
+  const [windowFileDragActive, setWindowFileDragActive] = useState(false);
+  const fileDragDepthRef = useRef(0);
   const [gitPanelRequest, setGitPanelRequest] = useState<{
     id: number;
     sessionId?: string;
@@ -543,6 +550,37 @@ function AppContent() {
     `bg-fit-${backgroundFit}`,
     `bg-treatment-${backgroundTreatment}`,
   ].join(" ");
+
+  const carriesFiles = useCallback((event: ReactDragEvent<HTMLElement>) =>
+    dataTransferCarriesFiles(Array.from(event.dataTransfer.types ?? [])), []);
+  const handleWindowFileDragEnter = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (!carriesFiles(event)) return;
+    event.preventDefault();
+    fileDragDepthRef.current += 1;
+    setWindowFileDragActive(true);
+  }, [carriesFiles]);
+  const handleWindowFileDragOver = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (!carriesFiles(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setWindowFileDragActive(true);
+  }, [carriesFiles]);
+  const handleWindowFileDragLeave = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (fileDragDepthRef.current === 0 && !carriesFiles(event)) return;
+    event.preventDefault();
+    fileDragDepthRef.current = Math.max(0, fileDragDepthRef.current - 1);
+    if (fileDragDepthRef.current === 0) setWindowFileDragActive(false);
+  }, [carriesFiles]);
+  const handleWindowFileDrop = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (!carriesFiles(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    fileDragDepthRef.current = 0;
+    setWindowFileDragActive(false);
+    const files = Array.from(event.dataTransfer.files ?? []);
+    if (!files.length) return;
+    window.dispatchEvent(new CustomEvent<File[]>(WINDOW_ATTACH_FILES_EVENT, { detail: files }));
+  }, [carriesFiles]);
 
   useEffect(() => setInterfaceSoundsEnabled(interfaceSounds), [interfaceSounds]);
   useLayoutEffect(() => {
@@ -762,8 +800,24 @@ function AppContent() {
   );
 
   return (
-    <div className={appClassName} onContextMenu={openAppContextMenu}>
+    <div
+      className={appClassName}
+      onContextMenu={openAppContextMenu}
+      onDragEnter={handleWindowFileDragEnter}
+      onDragOver={handleWindowFileDragOver}
+      onDragLeave={handleWindowFileDragLeave}
+      onDrop={handleWindowFileDrop}
+    >
       <BackgroundLayer />
+      {windowFileDragActive && (
+        <div className="window-file-drop-overlay" data-testid="window-file-drop-overlay" aria-hidden="true">
+          <div className="window-file-drop-card">
+            <FolderOpen size={22} />
+            <strong>Attach to {activeThread?.title?.trim() || "New chat"}</strong>
+            <span>Drop files anywhere in Milim</span>
+          </div>
+        </div>
+      )}
       <div
         ref={mainRef}
         className={`main${settingsOpen ? " settings-background-only" : ""}`}

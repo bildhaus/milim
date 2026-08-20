@@ -50,6 +50,7 @@ export function controlQueuedMessage(turn: ControlQueuedTurnV1): QueuedMessage {
       ...attachment,
       dataUrl: data_url,
     })),
+    mailboxOrigin: turn.mailbox_origin,
   };
 }
 
@@ -223,6 +224,9 @@ export function projectControlRunMessages(
         content: typeof data.content === "string" ? data.content : "",
         runId,
         ledgerVersion: typeof data.ledgerVersion === "number" ? data.ledgerVersion : undefined,
+        mailboxOrigin: data.mailboxOrigin && typeof data.mailboxOrigin === "object"
+          ? data.mailboxOrigin as CanonicalMessage["mailboxOrigin"]
+          : undefined,
       };
       if (Array.isArray(data.attachments)) {
         message.attachments = data.attachments.map((raw) => {
@@ -278,6 +282,54 @@ export function projectControlRunMessages(
         : "unknown";
   }
   return [user, assistant].filter((message): message is CanonicalMessage => message !== null);
+}
+
+export function mailboxMessagesFromTimeline(
+  items: ControlTimelineItemV1[],
+): ChatMessage[] {
+  return items.flatMap((item) => {
+    if (item.type !== "mailbox_reply") return [];
+    const exchangeId = typeof item.data.exchange_id === "string"
+      ? item.data.exchange_id
+      : item.id;
+    const targetThreadId = typeof item.data.target_thread_id === "string"
+      ? item.data.target_thread_id
+      : "";
+    const status = item.data.status === "failed" ? "failed" : "replied";
+    const reply = item.data.reply && typeof item.data.reply === "object"
+      ? item.data.reply as Record<string, unknown>
+      : {};
+    const targetTitle = typeof reply.target_title === "string"
+      ? reply.target_title
+      : "Linked thread";
+    const content = status === "failed"
+      ? (typeof reply.error === "string" ? reply.error : "The linked thread failed.")
+      : (typeof reply.content === "string" ? reply.content : "");
+    return [{
+      id: `mailbox-${exchangeId}`,
+      role: "assistant",
+      content,
+      mailboxReply: {
+        exchangeId,
+        targetThreadId,
+        targetTitle,
+        targetProject: typeof reply.target_project === "string" ? reply.target_project : undefined,
+        status,
+      },
+    }];
+  });
+}
+
+export function mergeMailboxMessages(
+  current: ChatMessage[],
+  mailbox: ChatMessage[],
+): ChatMessage[] {
+  if (!mailbox.length) return current;
+  const byId = new Map(mailbox.map((message) => [message.id, message]));
+  const merged = current.map((message) => byId.get(message.id) ?? message);
+  const existingIds = new Set(current.map((message) => message.id));
+  merged.push(...mailbox.filter((message) => !existingIds.has(message.id)));
+  return merged;
 }
 
 export function mergeControlRunMessages(

@@ -29,6 +29,7 @@ import {
   type PullRequestSnapshot,
 } from "../lib/pullRequests";
 import { sessionRecencyLabel } from "../lib/sessionRecency.js";
+import { threadLinkDropDecision } from "../lib/threadLinks.js";
 import { chatExportFilename, sessionExportPayload, sessionMarkdownExport } from "../lib/threadExport";
 import { DEFAULT_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, normalizeSidebarWidth, useUiPreferences, type ThreadNavigationPlacement } from "../ui/store";
 import { useTheme } from "../theme/store";
@@ -99,6 +100,12 @@ type SidebarPointerDrag = {
   active: boolean;
   source: HTMLElement;
   captureTarget: HTMLElement;
+};
+type ThreadLinkDragTarget = {
+  element: HTMLElement;
+  targetThreadId: string;
+  valid: boolean;
+  prompt: string;
 };
 type SidebarSessionSettings = {
   folder?: string;
@@ -761,6 +768,7 @@ export function Sidebar({
   } | null>(null);
   const sidebarResizeCleanupRef = useRef<(() => void) | null>(null);
   const pointerDragRef = useRef<SidebarPointerDrag | null>(null);
+  const dragGhostRef = useRef<HTMLDivElement | null>(null);
   const dragOverRef = useRef<SidebarDragTarget | null>(null);
   const suppressNextClickRef = useRef(false);
   const [sidebarResizing, setSidebarResizing] = useState(false);
@@ -1459,6 +1467,55 @@ export function Sidebar({
     window.removeEventListener("pointerup", endSidebarPointerDrag);
     window.removeEventListener("pointercancel", cancelSidebarPointerDrag);
     document.body.classList.remove("sidebar-pointer-dragging");
+    document.body.classList.remove("thread-link-target-active");
+    document.querySelectorAll<HTMLElement>("[data-thread-link-drop-target]").forEach((element) => {
+      delete element.dataset.threadLinkPrompt;
+    });
+    dragGhostRef.current?.remove();
+    dragGhostRef.current = null;
+  }
+
+  function threadLinkDropTargetFromPoint(
+    clientX: number,
+    clientY: number,
+    item: SidebarDragItem,
+  ): ThreadLinkDragTarget | null {
+    if (item.type !== "session") return null;
+    const element = document
+      .elementFromPoint(clientX, clientY)
+      ?.closest<HTMLElement>("[data-thread-link-drop-target]");
+    const targetThreadId = element?.dataset.threadLinkDropTarget;
+    if (!element || !targetThreadId) return null;
+    const source = sessions.find((session) => session.id === item.id);
+    const target = sessions.find((session) => session.id === targetThreadId);
+    const linkedIds = new Set((element.dataset.linkedThreadIds ?? "").split(/\s+/).filter(Boolean));
+    const decision = threadLinkDropDecision({
+      sourceThreadId: item.id,
+      targetThreadId,
+      linkedThreadIds: [...linkedIds],
+      sourceIsChild: Boolean(source?.parentId),
+    });
+    return {
+      element,
+      targetThreadId,
+      valid: Boolean(source && decision === "valid"),
+      prompt: decision === "self"
+        ? "A chat cannot link to itself"
+        : decision === "duplicate"
+          ? `${source?.title ?? "Chat"} is already linked here`
+          : decision === "child"
+            ? "Worker chats cannot be linked"
+          : `Link ${source?.title ?? "chat"} to ${target?.title ?? "this chat"}`,
+    };
+  }
+
+  function updateThreadLinkAffordance(target: ThreadLinkDragTarget | null) {
+    document.body.classList.toggle("thread-link-target-active", Boolean(target));
+    document.querySelectorAll<HTMLElement>("[data-thread-link-drop-target]").forEach((element) => {
+      if (element === target?.element) element.dataset.threadLinkPrompt = target.prompt;
+      else delete element.dataset.threadLinkPrompt;
+    });
+    dragGhostRef.current?.classList.toggle("invalid", Boolean(target && !target.valid));
   }
 
   function startPointerDrag(event: ReactPointerEvent<HTMLElement>, item: SidebarDragItem, axis: "x" | "y" = "y") {
@@ -1497,23 +1554,42 @@ export function Sidebar({
       drag.source.style.willChange = "translate";
       document.body.classList.add("sidebar-pointer-dragging");
       setDragging(drag.item);
+      if (drag.item.type === "session") {
+        const source = sessions.find((session) => session.id === drag.item.id);
+        const ghost = document.createElement("div");
+        ghost.className = "thread-drag-ghost";
+        ghost.textContent = source?.title ?? "Chat";
+        document.body.appendChild(ghost);
+        dragGhostRef.current = ghost;
+      }
     }
     event.preventDefault();
     drag.source.style.translate = drag.axis === "x"
       ? `${event.clientX - drag.startX}px 0`
       : `0 ${event.clientY - drag.startY}px`;
+    if (dragGhostRef.current) {
+      dragGhostRef.current.style.left = `${event.clientX + 14}px`;
+      dragGhostRef.current.style.top = `${event.clientY + 14}px`;
+    }
     if (threadBarProjectsRef.current) {
       const rect = threadBarProjectsRef.current.getBoundingClientRect();
       const nearStrip = event.clientY >= rect.top - 32 && event.clientY <= rect.bottom + 32;
       if (nearStrip && event.clientX < rect.left + 32) threadBarProjectsRef.current.scrollLeft -= 12;
       else if (nearStrip && event.clientX > rect.right - 32) threadBarProjectsRef.current.scrollLeft += 12;
     }
-    setSidebarDragOver(sidebarDropTargetFromPoint(event.clientX, event.clientY, drag.item));
+    const linkTarget = threadLinkDropTargetFromPoint(event.clientX, event.clientY, drag.item);
+    updateThreadLinkAffordance(linkTarget);
+    setSidebarDragOver(
+      linkTarget ? null : sidebarDropTargetFromPoint(event.clientX, event.clientY, drag.item),
+    );
   }
 
   function endSidebarPointerDrag(event: PointerEvent) {
     const drag = pointerDragRef.current;
     if (!drag || event.pointerId !== drag.pointerId) return;
+    const linkTarget = drag.active
+      ? threadLinkDropTargetFromPoint(event.clientX, event.clientY, drag.item)
+      : null;
     cleanupPointerDragListeners();
     if (drag.active) {
       event.preventDefault();
@@ -1521,7 +1597,18 @@ export function Sidebar({
       window.setTimeout(() => {
         suppressNextClickRef.current = false;
       }, 120);
-      applySidebarDrop(drag.item, sidebarDropTargetFromPoint(event.clientX, event.clientY, drag.item) ?? dragOverRef.current);
+      if (linkTarget) {
+        if (linkTarget.valid && drag.item.type === "session") {
+          window.dispatchEvent(new CustomEvent("milim:link-thread", {
+            detail: {
+              sourceThreadId: drag.item.id,
+              targetThreadId: linkTarget.targetThreadId,
+            },
+          }));
+        }
+      } else {
+        applySidebarDrop(drag.item, sidebarDropTargetFromPoint(event.clientX, event.clientY, drag.item) ?? dragOverRef.current);
+      }
     }
     endSidebarDrag();
   }

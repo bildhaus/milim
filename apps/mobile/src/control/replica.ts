@@ -129,6 +129,8 @@ export interface ProjectedMessage {
   runId: string | null;
   ledgerVersion?: number;
   seq: number;
+  mailboxLabel?: string;
+  mailboxStatus?: 'incoming' | 'replied' | 'failed';
 }
 
 export type ActivityStatus =
@@ -567,6 +569,29 @@ export function projectTranscript(
         runId: item.run_id,
         ledgerVersion: typeof data.ledgerVersion === 'number' ? data.ledgerVersion : undefined,
         seq: item.seq,
+        mailboxLabel: asRecord(data.mailboxOrigin)
+          ? `From ${stringField(asRecord(data.mailboxOrigin)!, 'origin_title') || 'linked thread'}`
+          : undefined,
+        mailboxStatus: asRecord(data.mailboxOrigin) ? 'incoming' : undefined,
+      });
+      continue;
+    }
+    if (item.type === 'mailbox_reply') {
+      const reply = asRecord(data.reply) ?? {};
+      const failed = stringField(data, 'status') === 'failed';
+      const targetTitle = stringField(reply, 'target_title') || 'Linked thread';
+      messages.push({
+        kind: 'message',
+        id: `mailbox-${stringField(data, 'exchange_id') || item.id}`,
+        role: 'assistant',
+        content: failed
+          ? stringField(reply, 'error') || 'The linked thread failed.'
+          : stringField(reply, 'content'),
+        reasoning: '',
+        runId: null,
+        seq: item.seq,
+        mailboxLabel: `${failed ? 'Failure' : 'Reply'} from ${targetTitle}`,
+        mailboxStatus: failed ? 'failed' : 'replied',
       });
       continue;
     }

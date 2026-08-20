@@ -4,9 +4,15 @@ export type JsonValue = null | boolean | number | string | JsonValue[] | { [key:
 
 export type ControlProtocolRangeV1 = { min: number, max: number, };
 
-export type ControlCapabilitiesV1 = { timeline_sync: boolean, queued_turns: boolean, approvals: boolean, agents: boolean, workers: boolean, attachments: boolean, websocket_tickets: boolean, lan_discovery: boolean, push_notifications: boolean, inline_branches: boolean, appearance_assets: boolean, run_ledger?: boolean, run_inspection?: boolean, steering?: boolean, context_injection?: boolean, model_favorites?: boolean, };
+export type ControlCapabilitiesV1 = { timeline_sync: boolean, queued_turns: boolean, approvals: boolean, agents: boolean, workers: boolean, attachments: boolean, websocket_tickets: boolean, lan_discovery: boolean, push_notifications: boolean, inline_branches: boolean, appearance_assets: boolean, run_ledger?: boolean, run_inspection?: boolean, steering?: boolean, context_injection?: boolean, model_favorites?: boolean, thread_links?: boolean, };
 
-export type ThreadSummaryV1 = { id: string, title: string, revision: number, epoch: string, updated_at_ms: number, archived_at_ms: number | null, model: string | null, reasoning_effort_overrides: { [key in string]?: string }, agent_id: string | null, workspace: string | null, busy: boolean, queued_turns: number, };
+export type ThreadLinkV1 = { owner_thread_id: string, target_thread_id: string, target_title: string, target_workspace: string | null, target_project: string | null, target_model: string | null, target_runtime: string, target_archived_at_ms: number | null, target_busy: boolean, target_queued_turns: number, created_at_ms: number, };
+
+export type FrozenLinkedThreadGrantV1 = { target_thread_id: string, title: string, workspace: string | null, project: string | null, model: string | null, runtime: string, revision: number, epoch: string, max_timeline_seq: number, };
+
+export type MailboxOriginV1 = { exchange_id: string, origin_thread_id: string, origin_title: string, origin_workspace: string | null, origin_project: string | null, };
+
+export type ThreadSummaryV1 = { id: string, title: string, revision: number, epoch: string, updated_at_ms: number, archived_at_ms: number | null, model: string | null, reasoning_effort_overrides: { [key in string]?: string }, agent_id: string | null, workspace: string | null, busy: boolean, queued_turns: number, linked_threads: Array<ThreadLinkV1>, };
 
 export type AgentSummaryV1 = { id: string, name: string, description: string, avatar: string, tool_mode: string, enabled_tool_count: number, skill_mode: string, enabled_skill_count: number, };
 
@@ -16,7 +22,7 @@ export type ControlAttachmentV1 = { id: string, name: string, mime: string, size
 
 export type GenerationSettingsV1 = { max_tokens: number | null, temperature: number | null, top_p: number | null, seed: number | null, stop: Array<string>, frequency_penalty: number | null, presence_penalty: number | null, top_k: number | null, min_p: number | null, repetition_penalty: number | null, thinking_token_budget: number | null, };
 
-export type FrozenRunConfigV1 = { model: string, instructions: string, workspace: string | null, privacy: string, approval_mode: string, plan_mode: boolean, sandbox: boolean, computer_use: boolean, memory: boolean, delegation_policy: string, worker_model: string, agent: AgentSnapshotV1 | null, tool_mode: string, enabled_tools: Array<string>, skill_mode: string, enabled_skills: Array<string>, attachments: Array<ControlAttachmentV1>, native_session_id: string | null, reasoning_effort: string | null, generation: GenerationSettingsV1, adapter: string, };
+export type FrozenRunConfigV1 = { model: string, instructions: string, workspace: string | null, privacy: string, approval_mode: string, plan_mode: boolean, sandbox: boolean, computer_use: boolean, memory: boolean, delegation_policy: string, worker_model: string, agent: AgentSnapshotV1 | null, tool_mode: string, enabled_tools: Array<string>, skill_mode: string, enabled_skills: Array<string>, attachments: Array<ControlAttachmentV1>, native_session_id: string | null, reasoning_effort: string | null, generation: GenerationSettingsV1, adapter: string, linked_thread_grants: Array<FrozenLinkedThreadGrantV1>, claimed_mailbox_ids: Array<string>, };
 
 export type RunCapabilitiesV1 = { ledger: boolean, inspectable: boolean, steering: boolean, visibility: string, };
 
@@ -24,7 +30,7 @@ export type RunSnapshotV1 = { id: string, thread_id: string, status: string, ada
 
 export type PendingApprovalV1 = { id: string, run_id: string, thread_id: string, kind: string, request: JsonValue, status: string, created_at_ms: number, };
 
-export type QueuedTurnV1 = { id: string, thread_id: string, command_id: string, accepted_at_ms: number, display_text: string, attachments: Array<ControlAttachmentV1>, };
+export type QueuedTurnV1 = { id: string, thread_id: string, command_id: string, accepted_at_ms: number, display_text: string, attachments: Array<ControlAttachmentV1>, mailbox_origin?: MailboxOriginV1, };
 
 export type PendingInputV1 = { id: string, thread_id: string, target_run_id: string | null, kind: string, state: string, created_at_ms: number, };
 
@@ -50,7 +56,7 @@ export type ControlEventV1 = { event_id: string, host_id: string, thread_id?: st
 
 export type ControlCommandStatusV1 = "applied" | "accepted" | "queued" | "needs_confirmation" | "conflict" | "failed";
 
-export type ControlCommandKindV1 = "thread.create" | "thread.rename" | "thread.archive" | "thread.delete" | "thread.set_model" | "thread.set_agent" | "message.delete" | "model_favorites.set" | "turn.send" | "turn.steer" | "context.inject" | "turn.inbox_delete" | "turn.stop" | "turn.regenerate" | "turn.queue_resume" | "turn.queue_move" | "turn.queue_delete" | "approval.resolve" | "worker.start" | "worker.continue_solo" | "worker.stop";
+export type ControlCommandKindV1 = "thread.create" | "thread.rename" | "thread.archive" | "thread.delete" | "thread.set_model" | "thread.set_agent" | "thread.link.add" | "thread.link.remove" | "message.delete" | "model_favorites.set" | "turn.send" | "turn.steer" | "context.inject" | "turn.inbox_delete" | "turn.stop" | "turn.regenerate" | "turn.queue_resume" | "turn.queue_move" | "turn.queue_delete" | "approval.resolve" | "worker.start" | "worker.continue_solo" | "worker.stop";
 
 export type ControlCommandV1 = { command_id: string, kind: ControlCommandKindV1, thread_id?: string, expected_revision?: number, payload: JsonValue, confirmation_token?: string, };
 

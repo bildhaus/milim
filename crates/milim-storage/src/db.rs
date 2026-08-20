@@ -452,6 +452,42 @@ const USER_DATA_MIGRATIONS: &[Migration] = &[
         CREATE INDEX IF NOT EXISTS idx_user_run_inbox_queue_order
             ON user_run_inbox(thread_id, state, sort_key, created_at_ms, id);",
     },
+    Migration {
+        version: 7,
+        name: "user_thread_links_and_mailbox",
+        sql: "CREATE TABLE IF NOT EXISTS user_thread_links (
+            owner_thread_id TEXT NOT NULL,
+            target_thread_id TEXT NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (owner_thread_id, target_thread_id),
+            CHECK (owner_thread_id <> target_thread_id),
+            FOREIGN KEY (owner_thread_id) REFERENCES user_sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY (target_thread_id) REFERENCES user_sessions(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_thread_links_target
+            ON user_thread_links(target_thread_id, owner_thread_id);
+        CREATE TABLE IF NOT EXISTS user_thread_mailbox (
+            id TEXT PRIMARY KEY,
+            origin_thread_id TEXT NOT NULL,
+            target_thread_id TEXT NOT NULL,
+            origin_run_id TEXT,
+            target_run_id TEXT,
+            status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'replied', 'failed', 'discarded')),
+            request_json TEXT NOT NULL,
+            reply_json TEXT,
+            created_at_ms INTEGER NOT NULL,
+            updated_at_ms INTEGER NOT NULL,
+            consumed_at_ms INTEGER,
+            projected_at_ms INTEGER,
+            FOREIGN KEY (origin_thread_id) REFERENCES user_sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY (target_thread_id) REFERENCES user_sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY (target_run_id) REFERENCES user_runs(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_thread_mailbox_origin
+            ON user_thread_mailbox(origin_thread_id, status, consumed_at_ms, created_at_ms, id);
+        CREATE INDEX IF NOT EXISTS idx_user_thread_mailbox_target_run
+            ON user_thread_mailbox(target_run_id, status);",
+    },
 ];
 
 /// Encrypted key/value store (API keys, OAuth tokens, agent secrets).
@@ -628,6 +664,29 @@ pub struct ControlInboxRecord {
     pub resolved_at_ms: Option<i64>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlThreadLinkRecord {
+    pub owner_thread_id: String,
+    pub target_thread_id: String,
+    pub created_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlMailboxRecord {
+    pub id: String,
+    pub origin_thread_id: String,
+    pub target_thread_id: String,
+    pub origin_run_id: Option<String>,
+    pub target_run_id: Option<String>,
+    pub status: String,
+    pub request_json: String,
+    pub reply_json: Option<String>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub consumed_at_ms: Option<i64>,
+    pub projected_at_ms: Option<i64>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlBackupState {
     #[serde(default = "default_control_backup_version")]
@@ -645,6 +704,10 @@ pub struct ControlBackupState {
     pub run_artifacts: Vec<ControlRunArtifactRecord>,
     #[serde(default)]
     pub inbox: Vec<ControlInboxRecord>,
+    #[serde(default)]
+    pub thread_links: Vec<ControlThreadLinkRecord>,
+    #[serde(default)]
+    pub mailbox: Vec<ControlMailboxRecord>,
 }
 
 fn default_control_backup_version() -> u32 {
@@ -1148,6 +1211,180 @@ impl UserDataStore {
             )
             .map(|changed| changed > 0)
             .map_err(sqlite)
+    }
+
+    pub fn control_thread_links(
+        &self,
+        owner_thread_id: Option<&str>,
+    ) -> Result<Vec<ControlThreadLinkRecord>> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let (sql, owner_thread_id) = match owner_thread_id {
+            Some(owner_thread_id) => (
+                "SELECT owner_thread_id, target_thread_id, created_at_ms
+                 FROM user_thread_links WHERE owner_thread_id = ?1
+                 ORDER BY created_at_ms, target_thread_id",
+                Some(required_control_text(owner_thread_id, "owner thread id")?),
+            ),
+            None => (
+                "SELECT owner_thread_id, target_thread_id, created_at_ms
+                 FROM user_thread_links ORDER BY owner_thread_id, created_at_ms, target_thread_id",
+                None,
+            ),
+        };
+        let mut stmt = db.conn().prepare(sql).map_err(sqlite)?;
+        let rows = match owner_thread_id {
+            Some(owner_thread_id) => stmt
+                .query_map(params![owner_thread_id], control_thread_link_from_row)
+                .map_err(sqlite)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sqlite)?,
+            None => stmt
+                .query_map([], control_thread_link_from_row)
+                .map_err(sqlite)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sqlite)?,
+        };
+        Ok(rows)
+    }
+
+    pub fn control_add_thread_link(
+        &self,
+        owner_thread_id: &str,
+        target_thread_id: &str,
+        item_id: &str,
+    ) -> Result<Option<ControlTimelineRecord>> {
+        let owner_thread_id = required_control_text(owner_thread_id, "owner thread id")?;
+        let target_thread_id = required_control_text(target_thread_id, "target thread id")?;
+        let item_id = required_control_text(item_id, "timeline item id")?;
+        if owner_thread_id == target_thread_id {
+            return Err(Error::InvalidRequest(
+                "a thread cannot link to itself".into(),
+            ));
+        }
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
+        let result = (|| -> Result<Option<ControlTimelineRecord>> {
+            let now = now_ms();
+            let changed = conn
+                .execute(
+                    "INSERT OR IGNORE INTO user_thread_links
+                     (owner_thread_id, target_thread_id, created_at_ms) VALUES (?1, ?2, ?3)",
+                    params![owner_thread_id, target_thread_id, now],
+                )
+                .map_err(sqlite)?;
+            if changed == 0 {
+                return Ok(None);
+            }
+            append_control_timeline_locked(
+                conn,
+                owner_thread_id,
+                item_id,
+                None,
+                "thread_link_added",
+                &serde_json::json!({ "target_thread_id": target_thread_id }).to_string(),
+                now,
+            )
+            .map(Some)
+        })();
+        finish_control_transaction(conn, result)
+    }
+
+    pub fn control_remove_thread_link(
+        &self,
+        owner_thread_id: &str,
+        target_thread_id: &str,
+        item_id: &str,
+    ) -> Result<Option<ControlTimelineRecord>> {
+        let owner_thread_id = required_control_text(owner_thread_id, "owner thread id")?;
+        let target_thread_id = required_control_text(target_thread_id, "target thread id")?;
+        let item_id = required_control_text(item_id, "timeline item id")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
+        let result = (|| -> Result<Option<ControlTimelineRecord>> {
+            let changed = conn
+                .execute(
+                    "DELETE FROM user_thread_links
+                     WHERE owner_thread_id = ?1 AND target_thread_id = ?2",
+                    params![owner_thread_id, target_thread_id],
+                )
+                .map_err(sqlite)?;
+            if changed == 0 {
+                return Ok(None);
+            }
+            let now = now_ms();
+            append_control_timeline_locked(
+                conn,
+                owner_thread_id,
+                item_id,
+                None,
+                "thread_link_removed",
+                &serde_json::json!({ "target_thread_id": target_thread_id }).to_string(),
+                now,
+            )
+            .map(Some)
+        })();
+        finish_control_transaction(conn, result)
+    }
+
+    pub fn control_timeline_max_seq(&self, thread_id: &str) -> Result<Option<(String, u64)>> {
+        let thread_id = required_control_text(thread_id, "thread id")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        db.conn()
+            .query_row(
+                "SELECT epoch, MAX(next_seq - 1, 0) FROM user_thread_control WHERE thread_id = ?1",
+                params![thread_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()
+            .map_err(sqlite)?
+            .map(|(epoch, seq)| Ok((epoch, i64_to_u64(seq, "timeline sequence")?)))
+            .transpose()
+    }
+
+    pub fn control_visible_timeline_messages(
+        &self,
+        thread_id: &str,
+        epoch: &str,
+        max_seq: u64,
+        after_seq: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<ControlTimelineRecord>> {
+        let thread_id = required_control_text(thread_id, "thread id")?;
+        let epoch = required_control_text(epoch, "thread epoch")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        query_timeline_rows(
+            db.conn(),
+            "SELECT thread_id, epoch, seq, item_id, run_id, item_type, data_json, created_at_ms
+             FROM user_timeline_events
+             WHERE thread_id = ?1 AND epoch = ?2 AND item_type = 'message'
+               AND seq <= ?3 AND seq > ?4
+             ORDER BY seq ASC LIMIT ?5",
+            params![
+                thread_id,
+                epoch,
+                u64_to_i64(max_seq)?,
+                u64_to_i64(after_seq.unwrap_or_default())?,
+                i64::try_from(limit.clamp(1, 500))
+                    .map_err(|_| Error::InvalidRequest("message limit is too large".into()))?
+            ],
+        )
     }
 
     pub fn control_append_message(&self, thread_id: &str, message_json: &str) -> Result<usize> {
@@ -2190,6 +2427,209 @@ impl UserDataStore {
             .map_err(sqlite)
     }
 
+    pub fn control_put_mailbox(&self, item: &ControlMailboxRecord) -> Result<()> {
+        if !matches!(
+            item.status.as_str(),
+            "queued" | "running" | "replied" | "failed" | "discarded"
+        ) {
+            return Err(Error::InvalidRequest("invalid mailbox status".into()));
+        }
+        validate_control_json(&item.request_json, "mailbox request")?;
+        validate_optional_control_json(item.reply_json.as_deref(), "mailbox reply")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        db.conn()
+            .execute(
+                "INSERT INTO user_thread_mailbox
+                 (id, origin_thread_id, target_thread_id, origin_run_id, target_run_id,
+                  status, request_json, reply_json, created_at_ms, updated_at_ms, consumed_at_ms,
+                  projected_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                 ON CONFLICT(id) DO UPDATE SET
+                    origin_run_id = COALESCE(excluded.origin_run_id, user_thread_mailbox.origin_run_id),
+                    target_run_id = COALESCE(excluded.target_run_id, user_thread_mailbox.target_run_id),
+                    status = excluded.status,
+                    reply_json = excluded.reply_json,
+                    updated_at_ms = excluded.updated_at_ms,
+                    consumed_at_ms = excluded.consumed_at_ms,
+                    projected_at_ms = excluded.projected_at_ms",
+                params![
+                    item.id,
+                    item.origin_thread_id,
+                    item.target_thread_id,
+                    item.origin_run_id,
+                    item.target_run_id,
+                    item.status,
+                    item.request_json,
+                    item.reply_json,
+                    item.created_at_ms,
+                    item.updated_at_ms,
+                    item.consumed_at_ms,
+                    item.projected_at_ms
+                ],
+            )
+            .map_err(sqlite)?;
+        Ok(())
+    }
+
+    pub fn control_mailbox(&self, id: &str) -> Result<Option<ControlMailboxRecord>> {
+        let id = required_control_text(id, "mailbox id")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        db.conn()
+            .query_row(
+                "SELECT id, origin_thread_id, target_thread_id, origin_run_id, target_run_id,
+                        status, request_json, reply_json, created_at_ms, updated_at_ms, consumed_at_ms,
+                        projected_at_ms
+                 FROM user_thread_mailbox WHERE id = ?1",
+                params![id],
+                control_mailbox_from_row,
+            )
+            .optional()
+            .map_err(sqlite)
+    }
+
+    pub fn control_mailbox_for_origin(
+        &self,
+        origin_thread_id: &str,
+    ) -> Result<Vec<ControlMailboxRecord>> {
+        let origin_thread_id = required_control_text(origin_thread_id, "origin thread id")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let mut stmt = db
+            .conn()
+            .prepare(
+                "SELECT id, origin_thread_id, target_thread_id, origin_run_id, target_run_id,
+                        status, request_json, reply_json, created_at_ms, updated_at_ms, consumed_at_ms,
+                        projected_at_ms
+                 FROM user_thread_mailbox WHERE origin_thread_id = ?1
+                 ORDER BY created_at_ms, id",
+            )
+            .map_err(sqlite)?;
+        let rows = stmt
+            .query_map(params![origin_thread_id], control_mailbox_from_row)
+            .map_err(sqlite)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sqlite)
+    }
+
+    pub fn control_mailbox_for_target_run(
+        &self,
+        target_run_id: &str,
+    ) -> Result<Option<ControlMailboxRecord>> {
+        let target_run_id = required_control_text(target_run_id, "target run id")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        db.conn()
+            .query_row(
+                "SELECT id, origin_thread_id, target_thread_id, origin_run_id, target_run_id,
+                        status, request_json, reply_json, created_at_ms, updated_at_ms, consumed_at_ms,
+                        projected_at_ms
+                 FROM user_thread_mailbox WHERE target_run_id = ?1",
+                params![target_run_id],
+                control_mailbox_from_row,
+            )
+            .optional()
+            .map_err(sqlite)
+    }
+
+    pub fn control_delete_mailbox(&self, id: &str) -> Result<bool> {
+        let id = required_control_text(id, "mailbox id")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        db.conn()
+            .execute("DELETE FROM user_thread_mailbox WHERE id = ?1", params![id])
+            .map(|changed| changed > 0)
+            .map_err(sqlite)
+    }
+
+    pub fn control_mark_mailbox_projected(&self, id: &str) -> Result<bool> {
+        let id = required_control_text(id, "mailbox id")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        db.conn()
+            .execute(
+                "UPDATE user_thread_mailbox
+                 SET projected_at_ms = COALESCE(projected_at_ms, ?2), updated_at_ms = ?2
+                 WHERE id = ?1 AND status IN ('replied', 'failed')",
+                params![id, now_ms()],
+            )
+            .map(|changed| changed > 0)
+            .map_err(sqlite)
+    }
+
+    pub fn control_claim_mailbox_replies(
+        &self,
+        origin_thread_id: &str,
+        origin_run_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ControlMailboxRecord>> {
+        let origin_thread_id = required_control_text(origin_thread_id, "origin thread id")?;
+        let origin_run_id = required_control_text(origin_run_id, "origin run id")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
+        let result = (|| -> Result<Vec<ControlMailboxRecord>> {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, origin_thread_id, target_thread_id, origin_run_id, target_run_id,
+                            status, request_json, reply_json, created_at_ms, updated_at_ms, consumed_at_ms,
+                            projected_at_ms
+                     FROM user_thread_mailbox
+                     WHERE origin_thread_id = ?1 AND status IN ('replied', 'failed')
+                       AND consumed_at_ms IS NULL
+                     ORDER BY created_at_ms, id LIMIT ?2",
+                )
+                .map_err(sqlite)?;
+            let mut items = stmt
+                .query_map(
+                    params![
+                        origin_thread_id,
+                        i64::try_from(limit.clamp(1, 50)).map_err(|_| {
+                            Error::InvalidRequest("mailbox claim limit is too large".into())
+                        })?
+                    ],
+                    control_mailbox_from_row,
+                )
+                .map_err(sqlite)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sqlite)?;
+            drop(stmt);
+            let now = now_ms();
+            for item in &items {
+                conn.execute(
+                    "UPDATE user_thread_mailbox
+                     SET consumed_at_ms = ?2, origin_run_id = ?3, updated_at_ms = ?2
+                     WHERE id = ?1 AND consumed_at_ms IS NULL",
+                    params![item.id, now, origin_run_id],
+                )
+                .map_err(sqlite)?;
+            }
+            for item in &mut items {
+                item.consumed_at_ms = Some(now);
+                item.origin_run_id = Some(origin_run_id.to_string());
+                item.updated_at_ms = now;
+            }
+            Ok(items)
+        })();
+        finish_control_transaction(conn, result)
+    }
+
     pub fn control_command_receipt(
         &self,
         command_id: &str,
@@ -2456,8 +2896,38 @@ impl UserDataStore {
                 .map_err(sqlite)?;
             rows
         };
+        let thread_links = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT owner_thread_id, target_thread_id, created_at_ms
+                     FROM user_thread_links ORDER BY owner_thread_id, created_at_ms, target_thread_id",
+                )
+                .map_err(sqlite)?;
+            let rows = stmt
+                .query_map([], control_thread_link_from_row)
+                .map_err(sqlite)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sqlite)?;
+            rows
+        };
+        let mailbox = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, origin_thread_id, target_thread_id, origin_run_id, target_run_id,
+                            status, request_json, reply_json, created_at_ms, updated_at_ms, consumed_at_ms,
+                            projected_at_ms
+                     FROM user_thread_mailbox ORDER BY created_at_ms, id",
+                )
+                .map_err(sqlite)?;
+            let rows = stmt
+                .query_map([], control_mailbox_from_row)
+                .map_err(sqlite)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sqlite)?;
+            rows
+        };
         Ok(ControlBackupState {
-            schema_version: 2,
+            schema_version: 3,
             host,
             threads,
             runs,
@@ -2468,11 +2938,13 @@ impl UserDataStore {
             run_events,
             run_artifacts,
             inbox,
+            thread_links,
+            mailbox,
         })
     }
 
     pub fn replace_control_backup_state(&self, backup: &ControlBackupState) -> Result<()> {
-        if !matches!(backup.schema_version, 1 | 2) {
+        if !matches!(backup.schema_version, 1..=3) {
             return Err(Error::InvalidRequest(format!(
                 "unsupported control backup version {}",
                 backup.schema_version
@@ -2507,6 +2979,10 @@ impl UserDataStore {
         for item in &backup.inbox {
             validate_control_json(&item.payload_json, "inbox payload")?;
         }
+        for item in &backup.mailbox {
+            validate_control_json(&item.request_json, "mailbox request")?;
+            validate_optional_control_json(item.reply_json.as_deref(), "mailbox reply")?;
+        }
         let db = self
             .db
             .lock()
@@ -2518,6 +2994,8 @@ impl UserDataStore {
                 "DELETE FROM user_run_events;
                  DELETE FROM user_run_artifacts;
                  DELETE FROM user_run_inbox;
+                 DELETE FROM user_thread_mailbox;
+                 DELETE FROM user_thread_links;
                  DELETE FROM user_pending_approvals;
                  DELETE FROM user_timeline_events;
                  DELETE FROM user_command_receipts;
@@ -2634,6 +3112,42 @@ impl UserDataStore {
                 )
                 .map_err(sqlite)?;
             }
+            for item in &backup.thread_links {
+                conn.execute(
+                    "INSERT INTO user_thread_links
+                     (owner_thread_id, target_thread_id, created_at_ms) VALUES (?1, ?2, ?3)",
+                    params![
+                        item.owner_thread_id,
+                        item.target_thread_id,
+                        item.created_at_ms
+                    ],
+                )
+                .map_err(sqlite)?;
+            }
+            for item in &backup.mailbox {
+                conn.execute(
+                    "INSERT INTO user_thread_mailbox
+                     (id, origin_thread_id, target_thread_id, origin_run_id, target_run_id,
+                      status, request_json, reply_json, created_at_ms, updated_at_ms, consumed_at_ms,
+                      projected_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    params![
+                        item.id,
+                        item.origin_thread_id,
+                        item.target_thread_id,
+                        item.origin_run_id,
+                        item.target_run_id,
+                        item.status,
+                        item.request_json,
+                        item.reply_json,
+                        item.created_at_ms,
+                        item.updated_at_ms,
+                        item.consumed_at_ms,
+                        item.projected_at_ms
+                    ],
+                )
+                .map_err(sqlite)?;
+            }
             for receipt in &backup.command_receipts {
                 conn.execute(
                     "INSERT INTO user_command_receipts
@@ -2742,6 +3256,19 @@ impl UserDataStore {
                 [],
             )
             .map_err(sqlite)?;
+            conn.execute(
+                "UPDATE user_thread_mailbox
+                 SET status = 'failed', updated_at_ms = ?1,
+                     reply_json = COALESCE(reply_json, json_object(
+                        'content', '',
+                        'error', 'Milim stopped before the linked thread completed.',
+                        'code', 'process_restarted'
+                     ))
+                 WHERE status = 'running' AND target_run_id IN
+                    (SELECT id FROM user_runs WHERE status = 'interrupted')",
+                params![now],
+            )
+            .map_err(sqlite)?;
             Ok((runs, approvals))
         })();
         finish_control_transaction(conn, result)
@@ -2788,6 +3315,64 @@ fn finish_control_transaction<T>(conn: &Connection, result: Result<T>) -> Result
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn append_control_timeline_locked(
+    conn: &Connection,
+    thread_id: &str,
+    item_id: &str,
+    run_id: Option<&str>,
+    item_type: &str,
+    data_json: &str,
+    created_at_ms: i64,
+) -> Result<ControlTimelineRecord> {
+    validate_control_json(data_json, "timeline data")?;
+    let (epoch, seq): (String, i64) = conn
+        .query_row(
+            "SELECT epoch, next_seq FROM user_thread_control WHERE thread_id = ?1",
+            params![thread_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(sqlite)?;
+    conn.execute(
+        "INSERT INTO user_timeline_events
+         (thread_id, epoch, seq, item_id, run_id, item_type, data_json, created_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            thread_id,
+            epoch,
+            seq,
+            item_id,
+            run_id,
+            item_type,
+            data_json,
+            created_at_ms
+        ],
+    )
+    .map_err(sqlite)?;
+    conn.execute(
+        "UPDATE user_thread_control
+         SET next_seq = ?2, revision = revision + 1, updated_at_ms = ?3
+         WHERE thread_id = ?1",
+        params![thread_id, seq.saturating_add(1), created_at_ms],
+    )
+    .map_err(sqlite)?;
+    conn.execute(
+        "UPDATE user_sessions SET updated_at_ms = ?2 WHERE id = ?1",
+        params![thread_id, created_at_ms],
+    )
+    .map_err(sqlite)?;
+    Ok(ControlTimelineRecord {
+        thread_id: thread_id.to_string(),
+        epoch,
+        seq: i64_to_u64(seq, "timeline sequence")?,
+        item_id: item_id.to_string(),
+        run_id: run_id.map(str::to_string),
+        item_type: item_type.to_string(),
+        data_json: data_json.to_string(),
+        created_at_ms,
+    })
+}
+
 fn bump_thread_revision_locked(conn: &Connection, thread_id: &str) -> Result<()> {
     let now = now_ms();
     let changed = conn
@@ -2818,6 +3403,16 @@ fn control_thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ControlT
         revision: revision.max(0) as u64,
         epoch: row.get(3)?,
         updated_at_ms: row.get(4)?,
+    })
+}
+
+fn control_thread_link_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ControlThreadLinkRecord> {
+    Ok(ControlThreadLinkRecord {
+        owner_thread_id: row.get(0)?,
+        target_thread_id: row.get(1)?,
+        created_at_ms: row.get(2)?,
     })
 }
 
@@ -2919,6 +3514,23 @@ fn control_inbox_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ControlIn
         created_at_ms: row.get(7)?,
         claimed_at_ms: row.get(8)?,
         resolved_at_ms: row.get(9)?,
+    })
+}
+
+fn control_mailbox_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ControlMailboxRecord> {
+    Ok(ControlMailboxRecord {
+        id: row.get(0)?,
+        origin_thread_id: row.get(1)?,
+        target_thread_id: row.get(2)?,
+        origin_run_id: row.get(3)?,
+        target_run_id: row.get(4)?,
+        status: row.get(5)?,
+        request_json: row.get(6)?,
+        reply_json: row.get(7)?,
+        created_at_ms: row.get(8)?,
+        updated_at_ms: row.get(9)?,
+        consumed_at_ms: row.get(10)?,
+        projected_at_ms: row.get(11)?,
     })
 }
 
@@ -4767,7 +5379,7 @@ mod tests {
             })
             .unwrap();
         let v2 = source.control_backup_state().unwrap();
-        assert_eq!(v2.schema_version, 2);
+        assert_eq!(v2.schema_version, 3);
 
         let target_v2 = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
         target_v2
@@ -4873,5 +5485,159 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn thread_links_and_mailbox_are_durable_idempotent_and_cascading() {
+        let source = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        for (id, epoch) in [("origin", "epoch-origin"), ("target", "epoch-target")] {
+            source
+                .control_create_thread(
+                    id,
+                    &serde_json::json!({ "id": id, "title": id }).to_string(),
+                    epoch,
+                )
+                .unwrap();
+        }
+        let before = source.control_thread("origin").unwrap().unwrap().revision;
+        let added = source
+            .control_add_thread_link("origin", "target", "link-event")
+            .unwrap()
+            .unwrap();
+        assert_eq!(added.item_type, "thread_link_added");
+        let linked_revision = source.control_thread("origin").unwrap().unwrap().revision;
+        assert_eq!(linked_revision, before + 1);
+        assert!(source
+            .control_add_thread_link("origin", "target", "duplicate-event")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            source.control_thread("origin").unwrap().unwrap().revision,
+            linked_revision
+        );
+
+        source
+            .control_put_mailbox(&ControlMailboxRecord {
+                id: "exchange-1".into(),
+                origin_thread_id: "origin".into(),
+                target_thread_id: "target".into(),
+                origin_run_id: None,
+                target_run_id: None,
+                status: "replied".into(),
+                request_json: r#"{"message":"hello"}"#.into(),
+                reply_json: Some(r#"{"content":"world"}"#.into()),
+                created_at_ms: 1,
+                updated_at_ms: 2,
+                consumed_at_ms: None,
+                projected_at_ms: None,
+            })
+            .unwrap();
+        let claimed = source
+            .control_claim_mailbox_replies("origin", "origin-run", 20)
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].origin_run_id.as_deref(), Some("origin-run"));
+        assert!(source
+            .control_claim_mailbox_replies("origin", "later-run", 20)
+            .unwrap()
+            .is_empty());
+
+        let backup = source.control_backup_state().unwrap();
+        assert_eq!(backup.schema_version, 3);
+        assert_eq!(backup.thread_links.len(), 1);
+        assert_eq!(backup.mailbox.len(), 1);
+        assert!(source.control_delete_thread("origin").unwrap());
+        assert!(source.control_thread("target").unwrap().is_some());
+        assert!(source
+            .control_mailbox_for_origin("origin")
+            .unwrap()
+            .is_empty());
+        let target_store = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        target_store
+            .set_sessions_snapshot(
+                r#"{"state":{"sessions":[{"id":"origin","messages":[]},{"id":"target","messages":[]}]},"version":0}"#,
+            )
+            .unwrap();
+        target_store.replace_control_backup_state(&backup).unwrap();
+        assert_eq!(
+            target_store
+                .control_thread_links(Some("origin"))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            target_store
+                .control_mailbox_for_origin("origin")
+                .unwrap()
+                .len(),
+            1
+        );
+
+        assert!(target_store.control_delete_thread("target").unwrap());
+        assert!(target_store
+            .control_thread_links(Some("origin"))
+            .unwrap()
+            .is_empty());
+        assert!(target_store
+            .control_mailbox_for_origin("origin")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn running_mailbox_delivers_a_restart_failure_receipt() {
+        let store = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        for id in ["origin", "target"] {
+            store
+                .control_create_thread(
+                    id,
+                    &serde_json::json!({ "id": id, "title": id }).to_string(),
+                    &format!("epoch-{id}"),
+                )
+                .unwrap();
+        }
+        store
+            .control_put_run(&ControlRunRecord {
+                id: "target-run".into(),
+                thread_id: "target".into(),
+                status: "running".into(),
+                adapter: "provider".into(),
+                request_json: r#"{"text":"mailbox work"}"#.into(),
+                agent_snapshot_json: None,
+                native_session_json: None,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                completed_at_ms: None,
+                error_json: None,
+            })
+            .unwrap();
+        store
+            .control_put_mailbox(&ControlMailboxRecord {
+                id: "exchange-restart".into(),
+                origin_thread_id: "origin".into(),
+                target_thread_id: "target".into(),
+                origin_run_id: None,
+                target_run_id: Some("target-run".into()),
+                status: "running".into(),
+                request_json: r#"{"message":"continue"}"#.into(),
+                reply_json: None,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                consumed_at_ms: None,
+                projected_at_ms: None,
+            })
+            .unwrap();
+
+        assert_eq!(store.reconcile_control_startup().unwrap(), (1, 0));
+        let run = store.control_run("target-run").unwrap().unwrap();
+        assert_eq!(run.status, "interrupted");
+        let exchange = store.control_mailbox("exchange-restart").unwrap().unwrap();
+        assert_eq!(exchange.status, "failed");
+        assert!(exchange
+            .reply_json
+            .as_deref()
+            .unwrap()
+            .contains("process_restarted"));
     }
 }

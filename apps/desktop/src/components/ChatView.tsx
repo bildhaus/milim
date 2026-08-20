@@ -25,6 +25,7 @@ import {
   inferAttachmentMime,
   createControlCommandId,
   getControlBootstrap,
+  getControlTimeline,
   getClaudeStatus,
   getOpenCodeStatus,
   getPiStatus,
@@ -87,6 +88,7 @@ import {
   type ChatMessage,
   type ChatStreamPart,
   type ControlQueuedTurnV1,
+  type ThreadLinkV1,
   type ChildThreadInfo,
   type DelegationPolicy,
   type CodexLoginEvent,
@@ -301,6 +303,8 @@ import {
   controlAttachments,
   controlQueuedMessage,
   hostBusySessionIdsFromBootstrap,
+  mailboxMessagesFromTimeline,
+  mergeMailboxMessages,
   mergeControlRunMessages,
   pollControlRun,
   projectControlRunMessages,
@@ -309,6 +313,7 @@ import {
 import { createChatMessageId } from "../lib/messageIds.js";
 import { flushDeferredUserStateWrites } from "../persistence/userStateStorage";
 import { useSettings } from "../settings/store";
+import { WINDOW_ATTACH_FILES_EVENT } from "../lib/windowFileDrop";
 import { shortcutLabel, shortcutMatchesEvent } from "../ui/shortcuts";
 import { sendMilimNotification } from "../lib/nativeNotifications";
 import { createInteractiveChat } from "../lib/newChatCoordinator";
@@ -1382,10 +1387,77 @@ export function ChatView({
   const [canonicalQueuedTurns, setCanonicalQueuedTurns] = useState<
     ControlQueuedTurnV1[]
   >([]);
+  const [linkedThreads, setLinkedThreads] = useState<ThreadLinkV1[]>([]);
   const [sessionsHydrated, setSessionsHydrated] = useState(() =>
     useSessions.persist.hasHydrated(),
   );
   const activeId = useSessions((s) => s.activeId);
+  useEffect(() => {
+    const linkThread = (event: Event) => {
+      const detail = (event as CustomEvent<{ sourceThreadId?: string; targetThreadId?: string }>).detail;
+      const sourceThreadId = detail?.sourceThreadId?.trim();
+      const targetThreadId = detail?.targetThreadId?.trim();
+      if (!sourceThreadId || !targetThreadId || targetThreadId !== activeId) return;
+      const source = useSessions.getState().sessions.find((session) => session.id === sourceThreadId);
+      if (!source || source.parentId) {
+        setChatNotice({ tone: "error", message: "Only root chats can be linked." });
+        return;
+      }
+      if (sourceThreadId === targetThreadId) {
+        setChatNotice({ tone: "warning", message: "A chat cannot link to itself." });
+        return;
+      }
+      if (linkedThreads.some((link) => link.target_thread_id === sourceThreadId)) {
+        setChatNotice({ tone: "warning", message: `${source.title} is already linked here.` });
+        return;
+      }
+      void (async () => {
+        const result = await sendControlCommand({
+          command_id: createControlCommandId("desktop-link"),
+          kind: "thread.link.add",
+          thread_id: targetThreadId,
+          payload: { target_thread_id: sourceThreadId },
+        });
+        if (result.status !== "applied") {
+          throw new Error(result.message || `Thread link ${result.status}.`);
+        }
+        const bootstrap = await getControlBootstrap();
+        setLinkedThreads(
+          bootstrap.threads.find((thread) => thread.id === activeId)?.linked_threads ?? [],
+        );
+        setChatNotice({ tone: "info", message: `Linked ${source.title} to this chat.` });
+      })().catch((error) => {
+        setChatNotice({
+          tone: "error",
+          message: `Could not link chat: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      });
+    };
+    window.addEventListener("milim:link-thread", linkThread);
+    return () => window.removeEventListener("milim:link-thread", linkThread);
+  }, [activeId, linkedThreads]);
+
+  async function unlinkThread(targetThreadId: string) {
+    try {
+      const result = await sendControlCommand({
+        command_id: createControlCommandId("desktop-unlink"),
+        kind: "thread.link.remove",
+        thread_id: activeId,
+        payload: { target_thread_id: targetThreadId },
+      });
+      if (result.status !== "applied") {
+        throw new Error(result.message || `Thread unlink ${result.status}.`);
+      }
+      setLinkedThreads((current) =>
+        current.filter((link) => link.target_thread_id !== targetThreadId),
+      );
+    } catch (error) {
+      setChatNotice({
+        tone: "error",
+        message: `Could not unlink chat: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+  }
   const pendingReviewComments = reviewCommentsBySession[activeId] ?? [];
   const setPendingReviewComments = useCallback((next: ReviewComment[] | ((current: ReviewComment[]) => ReviewComment[])) => {
     setReviewCommentsBySession((current) => ({
@@ -2520,9 +2592,27 @@ export function ChatView({
         const bootstrap = await getControlBootstrap();
         if (disposed) return;
         setCanonicalQueuedTurns(bootstrap.queued_turns);
+        const controlThread = bootstrap.threads.find(
+          (thread) => thread.id === activeId,
+        );
+        setLinkedThreads(
+          controlThread?.linked_threads ?? [],
+        );
         useSessions.getState().setHostBusySessionIds(
           hostBusySessionIdsFromBootstrap(bootstrap),
         );
+        if (controlThread) {
+          const timeline = await getControlTimeline(activeId, { tail: 500 });
+          if (disposed) return;
+          const mailboxMessages = mailboxMessagesFromTimeline(timeline.items);
+          if (mailboxMessages.length) {
+            setMessages(
+              activeId,
+              mergeMailboxMessages(sessionMessages(activeId), mailboxMessages),
+              { autoTitle: false },
+            );
+          }
+        }
         const alreadyAttached =
           canonicalRunIdsRef.current.has(activeId) ||
           generationControllersRef.current.has(activeId);
@@ -2545,7 +2635,7 @@ export function ChatView({
           setMessages(
             activeId,
             mergeControlRunMessages(current, run.id, projected),
-            { autoTitle: autoTitleChats },
+            { autoTitle: projected.some((message) => message.mailboxOrigin) ? false : autoTitleChats },
           );
         });
       } catch {
@@ -5163,8 +5253,18 @@ export function ChatView({
           ...attachment,
         }));
       }
-      if (next.length)
+      if (next.length) {
+        const available = Math.max(0, 12 - pendingAttachments.length);
+        if (next.length > available) {
+          setChatNotice({
+            tone: "warning",
+            message: available > 0
+              ? `Attached ${available} files. A message can include up to 12 attachments.`
+              : "A message can include up to 12 attachments.",
+          });
+        }
         setPendingAttachments((current) => [...current, ...next].slice(0, 12));
+      }
     } catch (e) {
       setChatNotice({
         tone: "error",
@@ -5172,6 +5272,15 @@ export function ChatView({
       });
     }
   }
+
+  useEffect(() => {
+    const attach = (event: Event) => {
+      const files = (event as CustomEvent<File[]>).detail;
+      if (Array.isArray(files) && files.length) void handleAttachFiles(files);
+    };
+    window.addEventListener(WINDOW_ATTACH_FILES_EVENT, attach);
+    return () => window.removeEventListener(WINDOW_ATTACH_FILES_EVENT, attach);
+  });
 
   async function handleAttachWorkspaceFile(
     file: WorkspaceFileSuggestion,
@@ -5748,7 +5857,7 @@ export function ChatView({
           setMessages(
             sessionId,
             mergeControlRunMessages(sessionMessages(sessionId, convo), runId, projected),
-            { autoTitle: autoTitleChats },
+            { autoTitle: projected.some((message) => message.mailboxOrigin) ? false : autoTitleChats },
           );
         },
       );
@@ -7386,7 +7495,11 @@ export function ChatView({
         className={`chat-body${panelsStacked ? " inspector-stacked" : ""}${previewPanelOverlay && !panelsStacked ? " inspector-overlay" : ""}`}
         style={previewPanelStyle}
       >
-        <div className={`chat-main${contextPanelOpen ? " context-open" : ""}`}>
+        <div
+          className={`chat-main${contextPanelOpen ? " context-open" : ""}`}
+          data-thread-link-drop-target={activeId}
+          data-linked-thread-ids={linkedThreads.map((link) => link.target_thread_id).join(" ")}
+        >
           <div className="chat-main-actions">
             {folder.trim() && <WorkspaceLauncherButton folder={folder} />}
             {!contextPanelOpen && (
@@ -7539,6 +7652,41 @@ export function ChatView({
                   }}
                 />
               ))}
+              {linkedThreads.length > 0 && (
+                <div className="linked-thread-tray" data-testid="linked-thread-tray" aria-label="Linked chats">
+                  {linkedThreads.map((link) => {
+                    const status = link.target_archived_at_ms != null
+                      ? "Archived"
+                      : link.target_busy
+                        ? "Working"
+                        : link.target_queued_turns > 0
+                          ? `${link.target_queued_turns} queued`
+                          : "Ready";
+                    const provenance = link.target_project || link.target_workspace || "No project";
+                    return (
+                      <span
+                        key={link.target_thread_id}
+                        className={`linked-thread-pill${link.target_archived_at_ms != null ? " archived" : ""}`}
+                        data-testid={`linked-thread-pill-${link.target_thread_id}`}
+                        title={`${link.target_title} / ${provenance} / ${link.target_model || link.target_runtime}`}
+                      >
+                        <span className="linked-thread-pill-copy">
+                          <strong>{link.target_title}</strong>
+                          <small>{provenance} · {status}</small>
+                        </span>
+                        <button
+                          type="button"
+                          title={`Unlink ${link.target_title}`}
+                          aria-label={`Unlink ${link.target_title}`}
+                          onClick={() => void unlinkThread(link.target_thread_id)}
+                        >
+                          <X size={11} />
+                        </button>
+                      </span>
+                    );
+                  })}
+                </div>
+              )}
               <ControlBar
                 models={pickerModels}
                 model={model}
