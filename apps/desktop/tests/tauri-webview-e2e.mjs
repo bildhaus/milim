@@ -4174,6 +4174,37 @@ async function runSettingsLayoutCheck(page) {
     await ridgeline.waitFor();
   }
   await openSettings(page);
+  await page.setViewportSize({ width: 1440, height: 720 });
+  await page.waitForTimeout(120);
+  const wideSettingsLayout = await page.getByTestId("settings-page").evaluate((element) => {
+    const detail = element.querySelector(".settings-detail");
+    const content = element.querySelector(".settings-content");
+    const inner = element.querySelector(".settings-content-inner");
+    const detailRect = detail?.getBoundingClientRect();
+    const contentRect = content?.getBoundingClientRect();
+    const innerRect = inner?.getBoundingClientRect();
+    return {
+      detailRight: detailRect?.right,
+      contentRight: contentRect?.right,
+      innerLeft: innerRect?.left,
+      innerRight: innerRect?.right,
+      innerWidth: innerRect?.width,
+    };
+  });
+  if (
+    wideSettingsLayout.detailRight === undefined ||
+    wideSettingsLayout.contentRight === undefined ||
+    wideSettingsLayout.innerLeft === undefined ||
+    wideSettingsLayout.innerRight === undefined ||
+    wideSettingsLayout.innerWidth === undefined ||
+    Math.abs(wideSettingsLayout.contentRight - wideSettingsLayout.detailRight) > 1 ||
+    wideSettingsLayout.innerWidth > 901 ||
+    wideSettingsLayout.contentRight - wideSettingsLayout.innerRight < 100
+  ) {
+    throw new Error(`Settings scrollbar should stay at the pane edge while content remains centered: ${JSON.stringify(wideSettingsLayout)}.`);
+  }
+  await page.setViewportSize({ width: 1000, height: 720 });
+  await page.waitForTimeout(120);
   await page.getByTestId("settings-section-chat").click();
   await page.getByTestId("new-thread-behavior-configured").click();
   const openApprovalDefault = page.getByTestId("default-approval-open");

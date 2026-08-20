@@ -61,6 +61,10 @@ export function sidebarSectionNextRevealCount(totalSessions: number, visibleLimi
   return Math.max(0, sidebarSectionShownCount(totalSessions, nextLimit, activeIndex) - currentCount);
 }
 
+export function sidebarSectionUsesPagination(sectionId: string, inbox: boolean | undefined, searchActive: boolean): boolean {
+  return !searchActive && !inbox && sectionId !== SIDEBAR_CHATS_SECTION_ID;
+}
+
 export function runningWorkerParentThreadIdsKey(records: readonly { run: { parent_thread_id: string; status: string } }[]): string {
   return [...new Set(
     records
@@ -2372,9 +2376,10 @@ export function Sidebar({
                 : null;
               const searchActive = Boolean(query.trim());
               const totalSessions = group.sessions.length;
-              const visibleLimit = searchActive || group.inbox
-                ? totalSessions
-                : Math.min(sectionVisibleLimits[group.id] ?? SIDEBAR_SECTION_PREVIEW_LIMIT, totalSessions);
+              const sectionUsesPagination = sidebarSectionUsesPagination(group.id, group.inbox, searchActive);
+              const visibleLimit = sectionUsesPagination
+                ? Math.min(sectionVisibleLimits[group.id] ?? SIDEBAR_SECTION_PREVIEW_LIMIT, totalSessions)
+                : totalSessions;
               const baseVisibleSessions = group.sessions.slice(0, visibleLimit);
               const activeIndex = group.sessions.findIndex((session) => session.id === activeId);
               const visibleSessions = !searchActive && activeIndex >= visibleLimit
@@ -2382,8 +2387,8 @@ export function Sidebar({
                 : baseVisibleSessions;
               const currentShownCount = visibleSessions.length;
               const nextRevealCount = sidebarSectionNextRevealCount(totalSessions, visibleLimit, activeIndex);
-              const canShowMore = !searchActive && !group.inbox && nextRevealCount > 0;
-              const canShowLess = !searchActive && !group.inbox && visibleLimit > SIDEBAR_SECTION_PREVIEW_LIMIT;
+              const canShowMore = sectionUsesPagination && nextRevealCount > 0;
+              const canShowLess = sectionUsesPagination && visibleLimit > SIDEBAR_SECTION_PREVIEW_LIMIT;
               const sectionManuallyExpanded = visibleLimit > SIDEBAR_SECTION_PREVIEW_LIMIT;
               const shownCountLabel = `${currentShownCount} of ${totalSessions} shown`;
               const showMoreLabel = `Show ${nextRevealCount} more ${nextRevealCount === 1 ? "thread" : "threads"} in ${group.label}, ${shownCountLabel}`;

@@ -80,6 +80,7 @@ try {
     sidebarInboxPullRequestOwner,
     sidebarProjectPullRequestOwner,
     sidebarSectionNextRevealCount,
+    sidebarSectionUsesPagination,
     sidebarThreadPullRequestOwner,
     workingSessionIdsFromSignals,
   } = await server.ssrLoadModule("/src/components/Sidebar.tsx") as {
@@ -105,6 +106,7 @@ try {
       }>,
     ) => { session: SidebarSession; pullRequest: { number: number } } | undefined;
     sidebarSectionNextRevealCount: (totalSessions: number, visibleLimit: number, activeIndex: number) => number;
+    sidebarSectionUsesPagination: (sectionId: string, inbox: boolean | undefined, searchActive: boolean) => boolean;
     workingSessionIdsFromSignals: (signals: {
       generatingSessionIds?: string[];
       hostBusySessionIds?: string[];
@@ -440,6 +442,14 @@ try {
   assert(sidebarSectionNextRevealCount(12, 5, -1) === 5, "expanded sidebar sections should reveal a full next batch");
   assert(sidebarSectionNextRevealCount(7, 5, -1) === 2, "expanded sidebar sections should reveal only the remaining threads");
   assert(sidebarSectionNextRevealCount(12, 5, 8) === 4, "active overflow thread should not be counted as newly revealed");
+  assert(
+    !sidebarSectionUsesPagination(SIDEBAR_CHATS_SECTION_ID, false, false),
+    "the ungrouped Chats section should always show every thread",
+  );
+  assert(
+    sidebarSectionUsesPagination(projectSectionId(folder), false, false),
+    "project sections should retain five-at-a-time pagination",
+  );
 
   const runningWorkerParents = runningWorkerParentThreadIdsKey(
     ["proposed", "running", "done", "partial", "stopped", "error"].map((status) => ({

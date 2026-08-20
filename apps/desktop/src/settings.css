@@ -400,29 +400,45 @@
   font-size: 11px;
 }
 .settings-detail {
+  position: relative;
   min-width: 0;
-  width: min(900px, 100%);
+  width: 100%;
   height: 100%;
   min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  margin: 0 auto;
-  padding: clamp(24px, 4vw, 48px) clamp(24px, 4vw, 48px) 32px;
+  padding: clamp(24px, 4vw, 48px) 0 0;
 }
 .settings-page.has-theme-background .settings-detail {
+  background: transparent;
+  backdrop-filter: none;
+  box-shadow: none;
+}
+.settings-page.has-theme-background .settings-detail::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  left: 50%;
+  width: min(900px, 100%);
+  pointer-events: none;
+  transform: translateX(-50%);
   background: color-mix(in srgb, var(--bg-primary) 68%, transparent);
   backdrop-filter: blur(var(--blur));
   box-shadow: inset 1px 0 0 color-mix(in srgb, var(--glass-edge) 70%, transparent),
     inset -1px 0 0 color-mix(in srgb, var(--glass-edge) 45%, transparent);
 }
 .settings-detail-head {
+  position: relative;
+  z-index: 1;
   flex: none;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  padding: 0 0 12px;
+  width: min(900px, 100%);
+  margin: 0 auto;
+  padding: 0 clamp(24px, 4vw, 48px) 12px;
   background: transparent;
 }
 .settings-detail-head > div {
@@ -431,14 +447,23 @@
 .settings-detail-head h1 { margin: 0 0 5px; font-size: 20px; line-height: 1.2; font-weight: 680; color: var(--primary-text); }
 .settings-detail-head p { margin: 0; font-size: 12px; line-height: 1.45; color: var(--secondary-text); }
 .settings-content {
+  position: relative;
+  z-index: 1;
   flex: 1;
+  width: 100%;
   min-width: 0;
   min-height: 0;
   max-height: none;
   overflow-y: auto;
-  padding: 1px 6px 2px 0;
+  padding: 1px 0 2px;
   scrollbar-width: thin;
   scrollbar-color: var(--border-secondary) transparent;
+}
+.settings-content-inner {
+  width: min(900px, 100%);
+  min-height: 100%;
+  margin: 0 auto;
+  padding: 0 clamp(24px, 4vw, 48px) 32px;
 }
 .settings-section {
   display: grid;
@@ -3165,7 +3190,10 @@
   }
   .settings-content {
     max-height: none;
-    padding-right: 2px;
+  }
+  .settings-content-inner {
+    width: 100%;
+    padding: 0 16px 20px;
   }
   .settings-detail-head {
     align-items: flex-start;
@@ -3173,7 +3201,11 @@
   }
   .settings-detail {
     width: 100%;
-    padding: 16px 16px 20px;
+    padding: 16px 0 0;
+  }
+  .settings-detail-head {
+    width: 100%;
+    padding-inline: 16px;
   }
   .settings-choice-grid.three-up {
     grid-template-columns: 1fr;

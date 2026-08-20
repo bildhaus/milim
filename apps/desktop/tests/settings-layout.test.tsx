@@ -14,6 +14,7 @@ function equal<T>(actual: T, expected: T, message: string): void {
 
 const source = readFileSync(resolve(process.cwd(), "src/settings/SettingsDialog.tsx"), "utf8");
 const surfaceSource = readFileSync(resolve(process.cwd(), "src/settings/SettingsSurface.tsx"), "utf8");
+const stylesSource = readFileSync(resolve(process.cwd(), "src/settings.css"), "utf8");
 assert(source.includes("export function SettingsPage({ onClose }"), "Settings should expose the full-window page contract");
 assert(source.includes('testId="settings-page"'), "Settings should expose the page test identifier");
 assert(source.includes('backLabel="Back to app"'), "Settings should provide dedicated back navigation");
@@ -24,6 +25,9 @@ assert(surfaceSource.includes("startWindowDrag"), "The settings title bar should
 assert(surfaceSource.includes('event.key !== "Escape"'), "The settings page should close with Escape");
 assert(surfaceSource.includes('hasBackground ? " has-theme-background"'), "The shared settings surface should expose themed background styling");
 assert(source.includes('hasBackground={Boolean(activeBackgroundImage)}'), "Settings should reveal the active custom theme background");
+assert(source.includes('className="settings-content-inner"'), "Settings should separate the centered content column from its scroll viewport");
+assert(/\.settings-content\s*\{[^}]*width: 100%;[^}]*overflow-y: auto;/s.test(stylesSource), "Settings should scroll at the full detail-pane width");
+assert(/\.settings-content-inner\s*\{[^}]*width: min\(900px, 100%\);/s.test(stylesSource), "Settings should preserve the existing centered content measure");
 assert(source.includes('{ label: "Preferences", sections: ["app", "chat", "appearance", "notifications"] }'), "Settings should group preferences");
 assert(source.includes('{ label: "Workflows", sections: ["models", "workspace"] }'), "Settings should group workflow defaults");
 assert(source.includes('{ label: "Connections", sections: ["google", "mobile"] }'), "Settings should group external connections");

@@ -988,6 +988,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
             </div>
 
             <div className="settings-content">
+              <div className="settings-content-inner">
             {activeSection === "app" && (
         <section className="settings-section" id="settings-panel-app" role="tabpanel" aria-labelledby="settings-tab-app" tabIndex={-1}>
           <SettingsPanel>
@@ -2150,6 +2151,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
           </SettingsPanel>
         </section>
             )}
+              </div>
           </div>
           </div>
         </div>
