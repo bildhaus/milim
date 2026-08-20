@@ -4,6 +4,7 @@ import {
   modelDevProfile,
   modelDevCapabilities,
   modelDisplayName,
+  modelImageInputSupport,
   mergeModelListsForPicker,
   isModelPickerGroupCollapsed,
   modelPickerGroups,
@@ -41,6 +42,28 @@ equal(
   modelDevCapabilities({ id: "codex:gpt-5.4", owned_by: "Codex" }).includes("vision"),
   false,
   "missing Codex modality metadata stays unknown instead of claiming vision",
+);
+equal(
+  modelImageInputSupport({
+    id: "text-only",
+    owned_by: "OpenRouter",
+    capabilities: { imageInput: false },
+  }),
+  "unsupported",
+  "explicit catalog metadata should prevent image attachment entry",
+);
+equal(
+  modelImageInputSupport({
+    id: "vision-model",
+    owned_by: "OpenRouter",
+    capabilities: { imageInput: true },
+  }),
+  "supported",
+);
+equal(
+  modelImageInputSupport({ id: "codex:future-model", owned_by: "Codex" }),
+  "unknown",
+  "missing modality metadata must stay permissive instead of creating a false-negative UX block",
 );
 equal(
   modelDevCapabilities({

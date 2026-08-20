@@ -58,6 +58,9 @@ struct PreviewWebviewNewTabPayload {
 enum PreviewWebviewShortcutAction {
     NewTab,
     CloseTab,
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
 }
 
 #[derive(Clone, Serialize)]
@@ -143,7 +146,9 @@ pub async fn preview_webview_create(
         .incognito(native_incognito_for_mode(storage_mode))
         .data_directory(profile_directory.clone())
         .data_store_identifier(BROWSER_DATA_STORE_IDENTIFIER)
-        .zoom_hotkeys_enabled(true)
+        // Route zoom shortcuts through the main UI so their value can be persisted
+        // and restored when this child webview is recreated.
+        .zoom_hotkeys_enabled(false)
         .initialization_script(preview_shortcut_script(shortcut_token))
         .on_document_title_changed(|webview, title| {
             if let Some(main) = webview.get_webview("main") {
@@ -404,6 +409,9 @@ fn preview_shortcut_action(url: &Url, token: u64) -> Option<PreviewWebviewShortc
     match url.path() {
         "/new-tab" => Some(PreviewWebviewShortcutAction::NewTab),
         "/close-tab" => Some(PreviewWebviewShortcutAction::CloseTab),
+        "/zoom-in" => Some(PreviewWebviewShortcutAction::ZoomIn),
+        "/zoom-out" => Some(PreviewWebviewShortcutAction::ZoomOut),
+        "/zoom-reset" => Some(PreviewWebviewShortcutAction::ZoomReset),
         _ => None,
     }
 }
@@ -414,19 +422,40 @@ fn preview_shortcut_script(token: u64) -> String {
     } else {
         "event.ctrlKey && !event.metaKey"
     };
+    let wheel_modifier = if cfg!(target_os = "macos") {
+        "event.metaKey || event.ctrlKey"
+    } else {
+        "event.ctrlKey && !event.metaKey"
+    };
     format!(
         r#"
 (() => {{
   const openShortcut = window.open.bind(window);
+  const sendShortcut = (action) => openShortcut("{PREVIEW_SHORTCUT_SCHEME}://{token}/" + action, "_blank");
   window.addEventListener("keydown", (event) => {{
-    if (!event.isTrusted || event.repeat || event.altKey || event.shiftKey || !({modifier})) return;
+    if (!event.isTrusted || event.repeat || event.altKey || !({modifier})) return;
     const key = event.key.toLowerCase();
-    const action = key === "t" ? "new-tab" : key === "w" ? "close-tab" : null;
+    const action = !event.shiftKey && key === "t" ? "new-tab"
+      : !event.shiftKey && key === "w" ? "close-tab"
+      : key === "+" || key === "=" ? "zoom-in"
+      : key === "-" || key === "_" ? "zoom-out"
+      : !event.shiftKey && key === "0" ? "zoom-reset"
+      : null;
     if (!action) return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    openShortcut("{PREVIEW_SHORTCUT_SCHEME}://{token}/" + action, "_blank");
+    sendShortcut(action);
   }}, true);
+  let wheelDelta = 0;
+  window.addEventListener("wheel", (event) => {{
+    if (!event.isTrusted || event.altKey || event.shiftKey || !({wheel_modifier})) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    wheelDelta += event.deltaY;
+    if (Math.abs(wheelDelta) < 50) return;
+    sendShortcut(wheelDelta < 0 ? "zoom-in" : "zoom-out");
+    wheelDelta = 0;
+  }}, {{ capture: true, passive: false }});
 }})();
 "#
     )
@@ -529,6 +558,31 @@ mod tests {
             ),
             Some(PreviewWebviewShortcutAction::CloseTab)
         );
+        assert_eq!(
+            preview_shortcut_action(
+                &Url::parse("milim-browser-shortcut://42/zoom-in").unwrap(),
+                42
+            ),
+            Some(PreviewWebviewShortcutAction::ZoomIn)
+        );
+        assert_eq!(
+            preview_shortcut_action(
+                &Url::parse("milim-browser-shortcut://42/zoom-out").unwrap(),
+                42
+            ),
+            Some(PreviewWebviewShortcutAction::ZoomOut)
+        );
+        assert_eq!(
+            preview_shortcut_action(
+                &Url::parse("milim-browser-shortcut://42/zoom-reset").unwrap(),
+                42
+            ),
+            Some(PreviewWebviewShortcutAction::ZoomReset)
+        );
+        let shortcut_script = preview_shortcut_script(42);
+        assert!(shortcut_script.contains("milim-browser-shortcut://42/"));
+        assert!(shortcut_script.contains("zoom-reset"));
+        assert!(shortcut_script.contains("addEventListener(\"wheel\""));
         assert!(preview_shortcut_action(
             &Url::parse("milim-browser-shortcut://41/close-tab").unwrap(),
             42

@@ -50,6 +50,7 @@ const {
   DEFAULT_MEDIA_LIBRARY_WIDTH,
   DEFAULT_MEDIA_STUDIO_HEIGHT,
   DEFAULT_MEDIA_STUDIO_WIDTH,
+  DEFAULT_PREVIEW_BROWSER_ZOOM,
   DEFAULT_SIDEBAR_WIDTH,
   DEFAULT_UI_SIZE,
   MAX_SIDEBAR_WIDTH,
@@ -58,6 +59,7 @@ const {
   MIN_MEDIA_STUDIO_WIDTH,
   MIN_SIDEBAR_WIDTH,
   MIN_UI_SIZE,
+  nextPreviewBrowserZoom,
   UI_SIZE_STEP,
   useUiPreferences,
 } = await import("../src/ui/store.js");
@@ -71,6 +73,8 @@ equal(useUiPreferences.getState().mediaComposerPlacement, "bottom", "media compo
 equal(useUiPreferences.getState().mediaComposerWidth, DEFAULT_MEDIA_COMPOSER_WIDTH, "media composer should have a default width");
 equal(useUiPreferences.getState().mediaLibraryWidth, DEFAULT_MEDIA_LIBRARY_WIDTH, "media library should have a default width");
 equal(useUiPreferences.getState().uiSize, DEFAULT_UI_SIZE, "UI size should default to 100%");
+equal(useUiPreferences.getState().previewBrowserZoom.app, DEFAULT_PREVIEW_BROWSER_ZOOM.app, "App preview zoom should default to 100%");
+equal(useUiPreferences.getState().previewBrowserZoom.url, DEFAULT_PREVIEW_BROWSER_ZOOM.url, "URL preview zoom should default to 100%");
 equal(useUiPreferences.getState().showAccountUsageInTitleBar, true, "title-bar account usage should default on");
 equal(useUiPreferences.getState().windowAlwaysOnTop, false, "window always-on-top should default off");
 equal(useUiPreferences.getState().interfaceSounds, false, "interface sounds should default off");
@@ -178,6 +182,18 @@ equal(useUiPreferences.getState().uiSize, MAX_UI_SIZE, "UI size should be capped
 
 useUiPreferences.getState().setUiSize(1);
 equal(useUiPreferences.getState().uiSize, MIN_UI_SIZE, "UI size should have a floor");
+
+useUiPreferences.getState().setPreviewBrowserZoom("app", 125);
+useUiPreferences.getState().setPreviewBrowserZoom("url", 87);
+equal(useUiPreferences.getState().previewBrowserZoom.app, 125, "App preview zoom should update independently");
+equal(useUiPreferences.getState().previewBrowserZoom.url, 90, "URL preview zoom should snap to a supported level");
+equal((persistedUiState().previewBrowserZoom as { app: number }).app, 125, "App preview zoom should be persisted");
+equal((persistedUiState().previewBrowserZoom as { url: number }).url, 90, "URL preview zoom should be persisted");
+equal(nextPreviewBrowserZoom(100, 1), 110, "Preview zoom-in should use the next browser level");
+equal(nextPreviewBrowserZoom(100, -1), 90, "Preview zoom-out should use the previous browser level");
+equal(nextPreviewBrowserZoom(500, 1), 500, "Preview zoom should clamp at its maximum");
+equal(nextPreviewBrowserZoom(25, -1), 25, "Preview zoom should clamp at its minimum");
+equal(nextPreviewBrowserZoom(175, 0), 100, "Preview zoom reset should restore 100%");
 
 useUiPreferences.getState().setShowAccountUsageInTitleBar(false);
 equal(useUiPreferences.getState().showAccountUsageInTitleBar, false, "title-bar account usage should update");

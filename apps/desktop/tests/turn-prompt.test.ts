@@ -57,6 +57,7 @@ const plain = buildTurnPromptContext({
   sessionId: "s1",
   threadTitle: "Thread",
   folder: "",
+  globalInstructions: " Always write focused tests. ",
   instructions: " Be terse. ",
   planMode: false,
   memory: false,
@@ -72,11 +73,13 @@ const plain = buildTurnPromptContext({
   experimentalHashlinePatch: false,
 });
 assert.deepEqual(plain.instructionMessages, [{ role: "system", content: "Be terse." }]);
+assert.deepEqual(plain.globalInstructionMessages, [{ role: "system", content: "Always write focused tests." }]);
 assert.equal(plain.artifactMessages.length, 1, "no-folder artifact guidance should stay in turn context");
 assert.equal(plain.useTools, false);
 assert.equal(plain.accountRuntimeMayUseTools, false);
-assert.equal(contextMessagesForTurn(plain, "model")[0].content, "Be terse.");
+assert.deepEqual(contextMessagesForTurn(plain, "model").slice(0, 2).map((message) => message.content), ["Always write focused tests.", "Be terse."]);
 assert.equal(contextMessagesForTurn(plain, "agent").some((message) => message.content === "Be terse."), false);
+assert.equal(contextMessagesForTurn(plain, "agent")[0].content, "Always write focused tests.", "global instructions should remain active for named agents");
 
 const explicitMcp = buildTurnPromptContext({
   sessionId: "s-mcp",

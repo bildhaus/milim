@@ -22,6 +22,7 @@ export type MemoryHit = {
 };
 
 export type TurnPromptContext = {
+  globalInstructionMessages: ChatMessage[];
   instructionMessages: ChatMessage[];
   planMessages: ChatMessage[];
   goalMessages: ChatMessage[];
@@ -85,6 +86,7 @@ export function buildTurnPromptContext({
   sessionId,
   threadTitle,
   folder,
+  globalInstructions = "",
   instructions,
   planMode,
   memory,
@@ -120,6 +122,7 @@ export function buildTurnPromptContext({
   sessionId: string;
   threadTitle: string;
   folder: string;
+  globalInstructions?: string;
   instructions: string;
   planMode: boolean;
   memory: boolean;
@@ -171,6 +174,9 @@ export function buildTurnPromptContext({
         memoryContextBlock(memoryHits),
       ].filter(Boolean).join("\n\n")
     : "";
+  const globalInstructionMessages: ChatMessage[] = globalInstructions.trim()
+    ? [{ role: "system", content: globalInstructions.trim() }]
+    : [];
   const instructionMessages: ChatMessage[] = instructions.trim()
     ? [{ role: "system", content: instructions.trim() }]
     : [];
@@ -227,6 +233,7 @@ export function buildTurnPromptContext({
     }))),
   }] : [];
   return {
+    globalInstructionMessages,
     instructionMessages,
     planMessages,
     goalMessages,
@@ -274,6 +281,7 @@ export async function prepareTurnPromptContext({
   sessionId,
   threadTitle,
   folder,
+  globalInstructions = "",
   instructions,
   planMode,
   memory,
@@ -306,6 +314,7 @@ export async function prepareTurnPromptContext({
   sessionId: string;
   threadTitle: string;
   folder: string;
+  globalInstructions?: string;
   instructions: string;
   planMode: boolean;
   memory: boolean;
@@ -368,6 +377,7 @@ export async function prepareTurnPromptContext({
     sessionId,
     threadTitle,
     folder,
+    globalInstructions,
     instructions,
     planMode,
     memory,
@@ -410,6 +420,7 @@ export function contextMessagesForTurn(context: TurnPromptContext, mode: TurnCon
   const instructions = mode === "agent" ? [] : context.instructionMessages;
   const schedules = mode === "model" ? [] : context.scheduleMessages;
   return [
+    ...context.globalInstructionMessages,
     ...instructions,
     ...context.planMessages,
     ...context.goalMessages,

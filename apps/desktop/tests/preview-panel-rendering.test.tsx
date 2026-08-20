@@ -574,6 +574,9 @@ try {
   const workspaceCodeEditorSource = readFileSync("src/components/WorkspaceCodeEditor.tsx", "utf8");
   assert(!previewPanelSource.includes("window.prompt"), "Preview review comments should use the themed dialog instead of a native prompt");
   assert(previewPanelSource.includes('data-testid="review-comment-dialog"'), "Preview review comments should keep a testable themed dialog");
+  assert(previewPanelSource.includes("webview.setZoom(zoomPercentRef.current / 100)"), "Native previews should restore saved zoom when their webview is created");
+  assert(previewPanelSource.includes("webview.setZoom(zoomPercent / 100)"), "Native previews should apply zoom changes without recreating the webview");
+  assert(previewPanelSource.includes('shortcut.action === "zoom_in"'), "Native preview shortcuts should update the persisted zoom preference");
   assert(workspaceCodePanelSource.includes('data-testid="workspace-code-rail-resizer"'), "Workspace Code should expose a keyboard-resizable file rail");
   assert(workspaceCodePanelSource.includes('aria-label="Collapse file rail"'), "Workspace Code should expose a collapsible file rail");
   assert(workspaceCodePanelSource.includes("listWorkspaceFiles(workspace, query, 50)"), "Workspace Code search should use recursive native search");

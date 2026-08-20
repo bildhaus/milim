@@ -182,6 +182,21 @@ export function modelDevCapabilities(model: ModelInfo): ModelDevCapability[] {
   return out;
 }
 
+export type ModelImageInputSupport = "supported" | "unsupported" | "unknown";
+
+/**
+ * Report image-input support without turning missing catalog metadata into a
+ * false-negative composer block. Explicit provider metadata remains authoritative.
+ */
+export function modelImageInputSupport(
+  model: ModelInfo | undefined,
+): ModelImageInputSupport {
+  if (model?.capabilities?.imageInput === true) return "supported";
+  if (model?.capabilities?.imageInput === false) return "unsupported";
+  if (model && modelDevCapabilities(model).includes("vision")) return "supported";
+  return "unknown";
+}
+
 export function modelDevProfile(
   model: ModelInfo | undefined,
   selectedId: string,

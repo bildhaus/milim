@@ -13,6 +13,51 @@ import type { QueuedMessage } from "../sessions/store.js";
 
 type CanonicalMessage = ChatMessage;
 
+function projectedResponseMetrics(value: unknown): ChatMessage["metrics"] | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const metrics = value as Record<string, unknown>;
+  if (
+    typeof metrics.startedAt !== "number"
+    || !Number.isFinite(metrics.startedAt)
+    || typeof metrics.model !== "string"
+  ) {
+    return undefined;
+  }
+  const usageValue = metrics.usage;
+  const usage = usageValue && typeof usageValue === "object" && !Array.isArray(usageValue)
+    ? usageValue as Record<string, unknown>
+    : null;
+  const parsedUsage = usage
+    && typeof usage.prompt_tokens === "number"
+    && typeof usage.completion_tokens === "number"
+    && typeof usage.total_tokens === "number"
+    ? {
+        prompt_tokens: usage.prompt_tokens,
+        completion_tokens: usage.completion_tokens,
+        total_tokens: usage.total_tokens,
+      }
+    : undefined;
+  const costUsd = typeof metrics.costUsd === "number"
+    && Number.isFinite(metrics.costUsd)
+    && metrics.costUsd >= 0
+    ? metrics.costUsd
+    : undefined;
+  const costSource = costUsd != null
+    && (metrics.costSource === "provider" || metrics.costSource === "estimate")
+    ? metrics.costSource
+    : undefined;
+  return {
+    startedAt: metrics.startedAt,
+    endedAt: typeof metrics.endedAt === "number" ? metrics.endedAt : undefined,
+    durationMs: typeof metrics.durationMs === "number" ? metrics.durationMs : undefined,
+    model: metrics.model,
+    provider: typeof metrics.provider === "string" ? metrics.provider : undefined,
+    usage: parsedUsage,
+    costUsd,
+    costSource,
+  };
+}
+
 export function controlAttachments(attachments?: ChatAttachment[]) {
   return (attachments ?? []).map(({ dataUrl, sourcePath: _sourcePath, ...attachment }) => ({
     ...attachment,
@@ -201,6 +246,24 @@ export function projectControlRunMessages(
   items: ControlTimelineItemV1[],
   runId: string,
 ): CanonicalMessage[] {
+  const deletedIds = new Set(
+    items.flatMap((item) =>
+      item.type === "message_deleted" && typeof item.data.message_id === "string"
+        ? [item.data.message_id]
+        : [],
+    ),
+  );
+  const deletedRoles = new Set(
+    items.flatMap((item) =>
+      item.run_id === runId
+      && item.type === "message"
+      && typeof item.data.id === "string"
+      && deletedIds.has(item.data.id)
+      && typeof item.data.role === "string"
+        ? [item.data.role]
+        : [],
+    ),
+  );
   let user: CanonicalMessage | null = null;
   let assistant: CanonicalMessage | null = null;
   let streamingText = "";
@@ -219,8 +282,10 @@ export function projectControlRunMessages(
       continue;
     }
     if (item.type === "message" && typeof data.id === "string") {
+      if (deletedIds.has(data.id)) continue;
       const message: CanonicalMessage = {
         id: data.id,
+        canonicalId: data.id,
         role: typeof data.role === "string" ? data.role : "assistant",
         content: typeof data.content === "string" ? data.content : "",
         runId,
@@ -246,6 +311,7 @@ export function projectControlRunMessages(
       }
       if (message.role === "user") user = message;
       if (message.role === "assistant") {
+        message.metrics = projectedResponseMetrics(data.metrics);
         const reasoning = typeof data.reasoning === "string" ? data.reasoning : streamingReasoning;
         message.streamParts = message.content === streamingText && reasoning === streamingReasoning
           ? streamParts
@@ -261,7 +327,11 @@ export function projectControlRunMessages(
     const part = eventPart(item);
     if (part) appendStreamEvent(streamParts, part);
   }
-  if (!assistant && (streamingText || streamingReasoning || streamParts.length)) {
+  if (
+    !assistant
+    && !deletedRoles.has("assistant")
+    && (streamingText || streamingReasoning || streamParts.length)
+  ) {
     const firstStreamSeq = items.find(
       (item) => item.run_id === runId && item.type === "assistant_delta",
     )?.seq;
@@ -288,6 +358,22 @@ export function projectControlRunMessages(
         : "unknown";
   }
   return [user, assistant].filter((message): message is CanonicalMessage => message !== null);
+}
+
+export function shouldReconcileControlRunProjection(
+  items: ControlTimelineItemV1[],
+  runId: string,
+  hasCurrentProjection: boolean,
+  attachedRunId?: string,
+): boolean {
+  if (attachedRunId === runId) return false;
+  if (!hasCurrentProjection) return true;
+  return items.some(
+    (item) =>
+      item.run_id === runId &&
+      (item.type === "start" ||
+        (item.type === "message" && item.data.role === "user")),
+  );
 }
 
 export function mailboxMessagesFromTimeline(

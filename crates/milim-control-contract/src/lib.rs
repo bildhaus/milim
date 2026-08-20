@@ -197,6 +197,8 @@ pub struct GenerationSettingsV1 {
 pub struct FrozenRunConfigV1 {
     pub model: String,
     #[serde(default)]
+    pub global_instructions: String,
+    #[serde(default)]
     pub instructions: String,
     pub workspace: Option<String>,
     pub privacy: String,

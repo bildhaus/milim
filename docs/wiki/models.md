@@ -6,7 +6,7 @@ title: Models and providers
 summary: Model-agnostic dev chat routing across provider APIs, local runtimes, Codex, Claude, OpenCode, and Pi bridges.
 group: Core
 order: 40
-updated: 2026-08-20
+updated: 2026-08-21
 ---
 
 Model routing is provider-agnostic and centered on the active dev thread. The provider registry stores enabled remotes and their model metadata, then the desktop model picker merges local API runtime models, provider models, account runtime models, and media-capable models. Duplicate provider model ids stay provider-scoped in the picker and route back to the selected provider; provider sections with fewer visible models appear first.
@@ -42,6 +42,8 @@ OpenCode model rows use the CLI's verbose catalog for context, output, image, to
 | Account runtimes | Installed Codex, Claude, OpenCode, and Pi CLIs, not saved provider API keys | Resumable agent-style turns with real image input, visible tool events, active Milim browser context, Milim-owned tools, and Milim approval modes. |
 
 Requests to OpenRouter include its app-attribution headers with `https://milim.ai/` as the identifier and `milim` as the display title.
+
+OpenRouter's provider-reported billed cost is read from the final streamed usage event, accumulated across every completed model request in a tool-agent turn, and persisted with canonical response metrics. Per-response, thread, and app-wide activity totals prefer that exact amount. If a completed call does not report cost, Milim falls back to the cached prompt/completion pricing for that model and labels the result as an estimate; failed calls without usage do not invent token or cost data.
 
 Local detection probes Ollama on `localhost:11434`, LM Studio on `localhost:1234`, and vLLM on `localhost:8000`. It also reads published TCP ports from running Docker containers whose image or name contains `vllm`; it never inspects container arguments or environment. A vLLM candidate is marked reachable only when its unauthenticated `/v1/models` response identifies at least one model with `owned_by: "vllm"`. Containers without a published host port, authenticated vLLM servers, and setups where Milim itself runs inside Docker must be added manually with a URL reachable from Milim's network.
 

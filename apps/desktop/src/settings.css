@@ -1951,7 +1951,8 @@
 .settings-content .ui-switch.on .ui-switch-knob {
   left: 20px;
 }
-.setting-field input {
+.setting-field input,
+.setting-field textarea {
   width: 100%;
   min-width: 0;
   min-height: 34px;
@@ -1962,7 +1963,14 @@
   color: var(--primary-text);
   outline: none;
 }
-.setting-field input:focus { border-color: var(--focus-border); }
+.setting-field textarea {
+  resize: vertical;
+  min-height: 132px;
+  line-height: 1.5;
+  font: inherit;
+}
+.setting-field input:focus,
+.setting-field textarea:focus { border-color: var(--focus-border); }
 .setting-field input:disabled {
   opacity: 0.62;
   cursor: not-allowed;

@@ -1138,7 +1138,7 @@ async function runInboxSidebarCheck(page) {
       {
         id: "inbox-branch",
         title: "Flattened branch",
-        messages: [],
+        messages: [{ id: "inbox-branch-message", role: "user", content: "Branch fixture" }],
         settings: { folder: projectA },
         parentId: "inbox-active-new",
         threadWorkspace: {
@@ -1152,7 +1152,7 @@ async function runInboxSidebarCheck(page) {
       {
         id: "inbox-active-old",
         title: "Cross-project older",
-        messages: [],
+        messages: [{ id: "inbox-active-old-message", role: "user", content: "Older fixture" }],
         settings: { folder: projectB },
         createdAt: now,
         updatedAt: now - 60_000,
@@ -1160,7 +1160,7 @@ async function runInboxSidebarCheck(page) {
       {
         id: "inbox-settled-a",
         title: "Settled Alpha",
-        messages: [],
+        messages: [{ id: "inbox-settled-a-message", role: "user", content: "Settled fixture" }],
         settings: { folder: projectB },
         settledAt: now - 1_000,
         createdAt: now,
@@ -1169,7 +1169,7 @@ async function runInboxSidebarCheck(page) {
       {
         id: "inbox-settled-b",
         title: "Settled Beta",
-        messages: [],
+        messages: [{ id: "inbox-settled-b-message", role: "user", content: "Settled fixture" }],
         settings: { folder: "" },
         settledAt: now - 2_000,
         createdAt: now,
@@ -1178,7 +1178,7 @@ async function runInboxSidebarCheck(page) {
       {
         id: "thread-bar-drag-one",
         title: "Drag thread one",
-        messages: [],
+        messages: [{ id: "thread-bar-drag-one-message", role: "user", content: "Drag fixture" }],
         settings: { folder: projectC },
         createdAt: now,
         updatedAt: now - 240_000,
@@ -1186,7 +1186,7 @@ async function runInboxSidebarCheck(page) {
       {
         id: "thread-bar-drag-two",
         title: "Drag thread two",
-        messages: [],
+        messages: [{ id: "thread-bar-drag-two-message", role: "user", content: "Drag fixture" }],
         settings: { folder: projectC },
         createdAt: now,
         updatedAt: now - 250_000,
@@ -1694,6 +1694,27 @@ async function runSidebarSectionMotionCheck(page, splitOnly = false) {
     if (!response.ok() || command.kind !== "thread.create" || result.status !== "applied") {
       throw new Error(`New chat did not provision canonical state first: ${JSON.stringify({ command, result })}.`);
     }
+    const createdThreadId = command.payload?.id;
+    if (!createdThreadId) throw new Error(`New chat command omitted its thread ID: ${JSON.stringify(command)}.`);
+    await page.waitForTimeout(250);
+    await page.waitForFunction(async (threadId) => {
+      const raw = await window.__TAURI_INTERNALS__.invoke("user_state_get", { key: "milim.sessions" });
+      return Boolean(raw && JSON.parse(raw).state?.sessions?.some((session) => session.id === threadId));
+    }, createdThreadId);
+    if (await page.locator(`[data-sidebar-session-id="${createdThreadId}"]`).count()) {
+      throw new Error("An empty new chat appeared in desktop thread navigation.");
+    }
+    await page.evaluate(async (threadId) => {
+      const invoke = window.__TAURI_INTERNALS__.invoke;
+      const raw = await invoke("user_state_get", { key: "milim.sessions" });
+      const parsed = JSON.parse(raw);
+      const session = parsed.state.sessions.find((item) => item.id === threadId);
+      session.messages = [{ id: `${threadId}-first-message`, role: "user", content: "First message" }];
+      await invoke("user_state_set", { key: "milim.sessions", value: JSON.stringify(parsed) });
+    }, createdThreadId);
+    await page.reload();
+    await page.getByTestId("chat-shell").waitFor();
+    await page.locator(`[data-sidebar-session-id="${createdThreadId}"]:visible`).waitFor();
   }
   const project = await page.evaluate(async ({ folder }) => {
     const key = "milim.sessions";
@@ -3911,6 +3932,20 @@ async function runLinkedThreadDropCheck(page) {
         throw new Error(`Canonical fixture create failed: ${JSON.stringify({ id, result })}`);
       }
     }
+    const raw = await invoke("user_state_get", { key: "milim.sessions" });
+    const parsed = raw ? JSON.parse(raw) : { state: {} };
+    const state = parsed.state && typeof parsed.state === "object" ? parsed.state : {};
+    const now = Date.now();
+    state.sessions = [
+      ...(Array.isArray(state.sessions)
+        ? state.sessions.filter((session) => session?.id !== target && session?.id !== origin)
+        : []),
+      { id: target, title: "Linked target", messages: [{ id: `${target}-message`, role: "user", content: "Target fixture" }], createdAt: now, updatedAt: now },
+      { id: origin, title: "Linked origin", messages: [{ id: `${origin}-message`, role: "user", content: "Origin fixture" }], createdAt: now, updatedAt: now },
+    ];
+    state.activeId = origin;
+    parsed.state = state;
+    await invoke("user_state_set", { key: "milim.sessions", value: JSON.stringify(parsed) });
   }, { targetId, originId });
   await page.reload();
   await page.getByTestId("chat-shell").waitFor();
@@ -5840,7 +5875,7 @@ async function seedChatSearchFixture(page, withQueuedMessages = false) {
     sessions.push({
       id: "e2e-motion-fixture",
       title: "Motion Fixture With A Deliberately Long Sidebar Thread Title",
-      messages: [],
+      messages: [{ id: "e2e-motion-fixture-message", role: "user", content: "Motion fixture" }],
       createdAt: now - 6 * 24 * 60 * 60 * 1000,
       updatedAt: now - 1,
     });

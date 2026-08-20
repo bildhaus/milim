@@ -33,6 +33,7 @@ export const DEFAULT_MEDIA_SETTINGS: MediaSettings = {
 export type NewThreadBehavior = "inherit" | "configured";
 export type UnavailableModelPolicy = "ask" | "favorite" | "blocked";
 export type BrowserStorageMode = PreviewBrowserStorageMode;
+export const MAX_GLOBAL_INSTRUCTIONS_CHARS = 32 * 1024;
 
 export interface ConfiguredThreadDefaults {
   model: string;
@@ -66,6 +67,7 @@ interface SettingsState {
   collapsedModelGroups: string[];
   accountRuntimeEnabled: AccountRuntimeEnablement;
   reasoningEffortByModel: Record<string, ReasoningEffort>;
+  globalInstructions: string;
   media: MediaSettings;
   newThreadBehavior: NewThreadBehavior;
   configuredThreadDefaults: ConfiguredThreadDefaults;
@@ -78,6 +80,7 @@ interface SettingsState {
   setModelGroupCollapsed: (group: string, collapsed: boolean) => void;
   setAccountRuntimeEnabled: (kind: AccountRuntimeKind, enabled: boolean) => void;
   setModelReasoningEffort: (model: string, effort: ReasoningEffort) => void;
+  setGlobalInstructions: (instructions: string) => void;
   setMediaSettings: (settings: Partial<MediaSettings>) => void;
   setNewThreadBehavior: (behavior: NewThreadBehavior) => void;
   setConfiguredThreadDefaults: (settings: Partial<ConfiguredThreadDefaults>) => void;
@@ -103,6 +106,12 @@ function normalizeStringRecord(value: unknown): Record<string, string> {
     Object.entries(record)
       .filter((entry): entry is [string, string] => typeof entry[1] === "string"),
   );
+}
+
+function normalizeGlobalInstructions(value: unknown): string {
+  return typeof value === "string"
+    ? value.slice(0, MAX_GLOBAL_INSTRUCTIONS_CHARS)
+    : "";
 }
 
 function normalizeAccountRuntimeEnablement(
@@ -197,6 +206,7 @@ export const useSettings = create<SettingsState>()(
       collapsedModelGroups: [],
       accountRuntimeEnabled: { ...DEFAULT_ACCOUNT_RUNTIME_ENABLEMENT },
       reasoningEffortByModel: {},
+      globalInstructions: "",
       media: DEFAULT_MEDIA_SETTINGS,
       newThreadBehavior: "inherit",
       configuredThreadDefaults: DEFAULT_CONFIGURED_THREAD_DEFAULTS,
@@ -231,6 +241,9 @@ export const useSettings = create<SettingsState>()(
         set((s) => ({
           reasoningEffortByModel: reasoningEffortByModelWithSelection(s.reasoningEffortByModel, model, effort),
         })),
+      setGlobalInstructions: (globalInstructions) => set({
+        globalInstructions: normalizeGlobalInstructions(globalInstructions),
+      }),
       setMediaSettings: (settings) =>
         set((s) => ({
           media: normalizeMediaSettings({ ...s.media, ...settings }),
@@ -261,6 +274,7 @@ export const useSettings = create<SettingsState>()(
           collapsedModelGroups: normalizeStringArray(saved?.collapsedModelGroups),
           accountRuntimeEnabled: normalizeAccountRuntimeEnablement(saved?.accountRuntimeEnabled),
           reasoningEffortByModel: normalizeReasoningEffortByModel(saved?.reasoningEffortByModel),
+          globalInstructions: normalizeGlobalInstructions(saved?.globalInstructions),
           media: normalizeMediaSettings(saved?.media),
           newThreadBehavior: saved?.newThreadBehavior === "configured" ? "configured" : "inherit",
           configuredThreadDefaults: normalizeConfiguredThreadDefaults(saved?.configuredThreadDefaults),
@@ -275,6 +289,7 @@ export const useSettings = create<SettingsState>()(
         collapsedModelGroups: s.collapsedModelGroups,
         accountRuntimeEnabled: normalizeAccountRuntimeEnablement(s.accountRuntimeEnabled),
         reasoningEffortByModel: s.reasoningEffortByModel,
+        globalInstructions: normalizeGlobalInstructions(s.globalInstructions),
         media: s.media,
         newThreadBehavior: s.newThreadBehavior,
         configuredThreadDefaults: normalizeConfiguredThreadDefaults(s.configuredThreadDefaults),

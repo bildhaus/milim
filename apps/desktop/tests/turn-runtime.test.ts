@@ -184,6 +184,32 @@ assert.deepEqual(
   ["requests:1", "tokens:99"],
 );
 
+const accumulatedProviderMetrics = createTurnMetricsCapture();
+accumulatedProviderMetrics.captureUsageDelta({
+  prompt_tokens: 10,
+  completion_tokens: 2,
+  total_tokens: 12,
+  cost_usd: 0.12,
+});
+accumulatedProviderMetrics.captureUsageDelta({
+  prompt_tokens: 3,
+  completion_tokens: 1,
+  total_tokens: 4,
+  cost_usd: 0.03,
+});
+assert.equal(accumulatedProviderMetrics.state.costUsd, 0.15);
+assert.equal(accumulatedProviderMetrics.state.costSource, "provider");
+accumulatedProviderMetrics.captureUsageDelta({
+  prompt_tokens: 2,
+  completion_tokens: 1,
+  total_tokens: 3,
+});
+assert.equal(
+  accumulatedProviderMetrics.state.costUsd,
+  undefined,
+  "a partially reported multi-call run must fall back to a whole-run estimate",
+);
+
 const committedRuns: RunTrace[] = [];
 const traceState = createTurnRunTraceState((committed) =>
   committedRuns.push(committed),

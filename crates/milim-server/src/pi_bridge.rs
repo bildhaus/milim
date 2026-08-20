@@ -583,6 +583,7 @@ fn usage_from_message(message: &Value) -> Option<Usage> {
         prompt_tokens: prompt_tokens as u32,
         completion_tokens: completion_tokens as u32,
         total_tokens: total_tokens as u32,
+        cost_usd: None,
     })
 }
 

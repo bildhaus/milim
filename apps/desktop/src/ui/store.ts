@@ -35,6 +35,8 @@ export type ThreadExportFormat = "json" | "markdown";
 export type NewProjectChatWorkspace = "current" | "ask" | "worktree";
 export type WorkspaceLauncherPreference = "remember" | WorkspaceLauncherId;
 export type ComposerCompletionMode = "off" | "local" | "current";
+export type PreviewBrowserZoomSource = "app" | "url";
+export type PreviewBrowserZoom = Record<PreviewBrowserZoomSource, number>;
 export type AutocompleteSource = "commands" | "files" | "skills" | "mcp";
 export type AutocompleteSources = Record<AutocompleteSource, boolean>;
 
@@ -77,6 +79,7 @@ interface UiPreferencesState {
   pullRequestsHeight: number;
   pullRequestsListWidth: number;
   uiSize: number;
+  previewBrowserZoom: PreviewBrowserZoom;
   showAccountUsageInTitleBar: boolean;
   windowAlwaysOnTop: boolean;
   interfaceSounds: boolean;
@@ -139,6 +142,7 @@ interface UiPreferencesState {
   setPullRequestsSize: (width: number, height: number) => void;
   setPullRequestsListWidth: (width: number) => void;
   setUiSize: (uiSize: number) => void;
+  setPreviewBrowserZoom: (source: PreviewBrowserZoomSource, zoom: number) => void;
   setShowAccountUsageInTitleBar: (showAccountUsageInTitleBar: boolean) => void;
   setWindowAlwaysOnTop: (windowAlwaysOnTop: boolean) => void;
   setInterfaceSounds: (interfaceSounds: boolean) => void;
@@ -218,6 +222,10 @@ export const DEFAULT_UI_SIZE = 100;
 export const MIN_UI_SIZE = 80;
 export const MAX_UI_SIZE = 140;
 export const UI_SIZE_STEP = 10;
+export const PREVIEW_BROWSER_ZOOM_LEVELS = [
+  25, 33, 50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300, 400, 500,
+] as const;
+export const DEFAULT_PREVIEW_BROWSER_ZOOM: PreviewBrowserZoom = { app: 100, url: 100 };
 
 export function normalizeSidebarWidth(width: number): number {
   if (!Number.isFinite(width)) return DEFAULT_SIDEBAR_WIDTH;
@@ -245,6 +253,36 @@ export function normalizeUiSize(size: number): number {
   if (!Number.isFinite(size)) return DEFAULT_UI_SIZE;
   const stepped = Math.round(size / UI_SIZE_STEP) * UI_SIZE_STEP;
   return Math.min(Math.max(stepped, MIN_UI_SIZE), MAX_UI_SIZE);
+}
+
+export function normalizePreviewBrowserZoom(zoom: number): number {
+  if (!Number.isFinite(zoom)) return 100;
+  return PREVIEW_BROWSER_ZOOM_LEVELS.reduce((closest, level) =>
+    Math.abs(level - zoom) < Math.abs(closest - zoom) ? level : closest,
+  );
+}
+
+export function nextPreviewBrowserZoom(zoom: number, direction: -1 | 0 | 1): number {
+  if (direction === 0) return 100;
+  const normalized = normalizePreviewBrowserZoom(zoom);
+  const index = PREVIEW_BROWSER_ZOOM_LEVELS.indexOf(
+    normalized as (typeof PREVIEW_BROWSER_ZOOM_LEVELS)[number],
+  );
+  const nextIndex = Math.min(
+    Math.max(index + direction, 0),
+    PREVIEW_BROWSER_ZOOM_LEVELS.length - 1,
+  );
+  return PREVIEW_BROWSER_ZOOM_LEVELS[nextIndex];
+}
+
+function normalizePreviewBrowserZoomBySource(value: unknown): PreviewBrowserZoom {
+  const saved = value && typeof value === "object"
+    ? value as Partial<Record<PreviewBrowserZoomSource, unknown>>
+    : {};
+  return {
+    app: normalizePreviewBrowserZoom(typeof saved.app === "number" ? saved.app : 100),
+    url: normalizePreviewBrowserZoom(typeof saved.url === "number" ? saved.url : 100),
+  };
 }
 
 function normalizeComposerSendShortcut(value: unknown): ComposerSendShortcut {
@@ -404,6 +442,7 @@ export const useUiPreferences = create<UiPreferencesState>()(
       pullRequestsHeight: DEFAULT_MEDIA_STUDIO_HEIGHT,
       pullRequestsListWidth: DEFAULT_PULL_REQUESTS_LIST_WIDTH,
       uiSize: DEFAULT_UI_SIZE,
+      previewBrowserZoom: { ...DEFAULT_PREVIEW_BROWSER_ZOOM },
       showAccountUsageInTitleBar: true,
       windowAlwaysOnTop: false,
       interfaceSounds: false,
@@ -473,6 +512,12 @@ export const useUiPreferences = create<UiPreferencesState>()(
       setPullRequestsListWidth: (width) =>
         set({ pullRequestsListWidth: normalizePullRequestsListWidth(width) }),
       setUiSize: (uiSize) => set({ uiSize: normalizeUiSize(uiSize) }),
+      setPreviewBrowserZoom: (source, zoom) => set((state) => ({
+        previewBrowserZoom: {
+          ...state.previewBrowserZoom,
+          [source]: normalizePreviewBrowserZoom(zoom),
+        },
+      })),
       setShowAccountUsageInTitleBar: (showAccountUsageInTitleBar) => set({ showAccountUsageInTitleBar }),
       setWindowAlwaysOnTop: (windowAlwaysOnTop) => {
         persistWindowAlwaysOnTop(windowAlwaysOnTop);
@@ -641,6 +686,7 @@ export const useUiPreferences = create<UiPreferencesState>()(
             saved?.pullRequestsListWidth ?? current.pullRequestsListWidth,
           ),
           uiSize: normalizeUiSize(saved?.uiSize ?? current.uiSize),
+          previewBrowserZoom: normalizePreviewBrowserZoomBySource(saved?.previewBrowserZoom),
           showAccountUsageInTitleBar: typeof saved?.showAccountUsageInTitleBar === "boolean" ? saved.showAccountUsageInTitleBar : current.showAccountUsageInTitleBar,
           windowAlwaysOnTop: typeof saved?.windowAlwaysOnTop === "boolean" ? saved.windowAlwaysOnTop : current.windowAlwaysOnTop,
           interfaceSounds: typeof saved?.interfaceSounds === "boolean" ? saved.interfaceSounds : false,
@@ -713,6 +759,7 @@ export const useUiPreferences = create<UiPreferencesState>()(
         pullRequestsHeight: normalizeMediaStudioSize(state.pullRequestsWidth, state.pullRequestsHeight).height,
         pullRequestsListWidth: normalizePullRequestsListWidth(state.pullRequestsListWidth),
         uiSize: normalizeUiSize(state.uiSize),
+        previewBrowserZoom: normalizePreviewBrowserZoomBySource(state.previewBrowserZoom),
         showAccountUsageInTitleBar: state.showAccountUsageInTitleBar,
         windowAlwaysOnTop: state.windowAlwaysOnTop,
         interfaceSounds: state.interfaceSounds,

@@ -116,6 +116,8 @@ export function Composer({
   tokens,
   contextBudgetTokens,
   busy,
+  imageAttachmentsBlocked = false,
+  sendBlocked = false,
   canSteer = false,
   hasReviewComments = false,
 }: {
@@ -151,6 +153,8 @@ export function Composer({
   tokens: number;
   contextBudgetTokens?: number;
   busy: boolean;
+  imageAttachmentsBlocked?: boolean;
+  sendBlocked?: boolean;
   canSteer?: boolean;
   hasReviewComments?: boolean;
 }) {
@@ -272,7 +276,7 @@ export function Composer({
   const orderedSuggestions = useMemo(() => suggestionGroups.flatMap((group) => group.items), [suggestionGroups]);
   const autoSlashMenuOpen = autocompleteMode === "automatic" && Boolean(activeTrigger) && orderedSuggestions.length > 0 && value !== slashDismissedValue;
   const showSlashMenu = autocompleteMode !== "off" && (slashOpen || autoSlashMenuOpen);
-  const canSend = Boolean(value.trim() || attachments.length || hasReviewComments);
+  const canSend = !sendBlocked && Boolean(value.trim() || attachments.length || hasReviewComments);
   const sendShortcutLabel = composerSendShortcut === "modEnter" ? shortcutLabel("Mod+Enter") : "Enter";
   const sentHistoryKey = useMemo(() => sentHistory.join("\0"), [sentHistory]);
   const placeholder = mediaActive
@@ -908,10 +912,11 @@ export function Composer({
           onPaste={(e) => {
             const files = clipboardFiles(e.clipboardData);
             if (files.length) {
-              e.preventDefault();
               const decision = isDuplicateClipboardPaste(files, lastClipboardPasteRef.current);
               lastClipboardPasteRef.current = decision.stamp;
               if (!decision.duplicate) onAttachFiles(files);
+              if (imageAttachmentsBlocked && e.clipboardData.getData("text/plain")) return;
+              e.preventDefault();
               return;
             }
             const selection = rawSelection(e.currentTarget);

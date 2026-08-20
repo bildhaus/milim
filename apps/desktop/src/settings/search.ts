@@ -24,7 +24,7 @@ export const SETTINGS_SEARCH_ENTRIES: SettingSearchEntry[] = [
   { id: "appearance-code-blocks", label: "Code blocks", section: "appearance", aliases: ["theme", "syntax"] },
   { id: "appearance-interface-sounds", label: "Interface sounds", section: "notifications", aliases: ["sound", "audio", "feedback", "cuelume", "finished", "completion", "attention", "approval", "alert"] },
   { id: "appearance-background", label: "Background", section: "appearance", aliases: ["image", "gradient", "glass", "fit", "treatment"] },
-  { id: "models-defaults", label: "Model and agent defaults", section: "models", aliases: ["chat model", "worker model", "agent", "favorite", "fallback", "unavailable"] },
+  { id: "models-defaults", label: "Model and agent defaults", section: "models", aliases: ["custom instructions", "global instructions", "system prompt", "chat model", "worker model", "agent", "favorite", "fallback", "unavailable"] },
   { id: "workspace-opener", label: "Workspace opener", section: "workspace", aliases: ["launcher", "vscode", "zed", "terminal", "remember per project"] },
   { id: "workspace-new-chat", label: "New project-chat workspace", section: "workspace", aliases: ["checkout", "ask", "isolated worktree"] },
   { id: "history-retention", label: "Archive retention", section: "history", aliases: ["delete", "purge", "7 days", "14 days", "30 days"] },

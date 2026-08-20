@@ -43,6 +43,7 @@ function assert(condition: unknown, message: string): asserts condition {
 type SidebarSession = {
   id: string;
   title: string;
+  hasMessages?: boolean;
   settings?: { folder?: string };
   retryWorkspace?: { originalFolder: string };
   threadWorkspace?: {
@@ -74,18 +75,23 @@ const server = await createServer({
 
 try {
   const {
+    createSidebarSessionsSelector,
     groupSessionsByProjects,
     nextInboxSessionIdAfterSettle,
+    reconcileWorkingSessionActivityAt,
     runningWorkerParentThreadIdsKey,
     sidebarInboxPullRequestOwner,
     sidebarProjectPullRequestOwner,
     sidebarSectionNextRevealCount,
     sidebarSectionUsesPagination,
+    sidebarSessionHasMessages,
     sidebarThreadPullRequestOwner,
     workingSessionIdsFromSignals,
   } = await server.ssrLoadModule("/src/components/Sidebar.tsx") as {
-    groupSessionsByProjects: (sessions: SidebarSession[], projects: Project[], sidebar: SessionSidebarState, query: string, settledThreadsEnabled?: boolean) => SessionGroup[];
-    nextInboxSessionIdAfterSettle: (groups: SessionGroup[], currentId: string) => string | undefined;
+    createSidebarSessionsSelector: () => (state: unknown) => Array<SidebarSession & { hasMessages: boolean }>;
+    groupSessionsByProjects: (sessions: SidebarSession[], projects: Project[], sidebar: SessionSidebarState, query: string, settledThreadsEnabled?: boolean, activityAtBySession?: ReadonlyMap<string, number>) => SessionGroup[];
+    nextInboxSessionIdAfterSettle: (groups: SessionGroup[], currentId: string, activityAtBySession?: ReadonlyMap<string, number>) => string | undefined;
+    reconcileWorkingSessionActivityAt: (previous: ReadonlyMap<string, number>, sessions: SidebarSession[], workingSessionIds: ReadonlySet<string>) => ReadonlyMap<string, number>;
     runningWorkerParentThreadIdsKey: (records: Array<{ run: { parent_thread_id: string; status: string } }>) => string;
     sidebarInboxPullRequestOwner: (
       session: SidebarSession,
@@ -107,6 +113,7 @@ try {
     ) => { session: SidebarSession; pullRequest: { number: number } } | undefined;
     sidebarSectionNextRevealCount: (totalSessions: number, visibleLimit: number, activeIndex: number) => number;
     sidebarSectionUsesPagination: (sectionId: string, inbox: boolean | undefined, searchActive: boolean) => boolean;
+    sidebarSessionHasMessages: (session: { messages: unknown[]; messagesHydrated?: boolean; persistedMessageCount?: number }) => boolean;
     workingSessionIdsFromSignals: (signals: {
       generatingSessionIds?: string[];
       hostBusySessionIds?: string[];
@@ -123,9 +130,15 @@ try {
       }>,
     ) => { session: SidebarSession; pullRequest: { number: number } } | undefined;
   };
-  const { SIDEBAR_CHATS_SECTION_ID, projectSectionId } = await server.ssrLoadModule("/src/sessions/store.ts") as {
+  const { SIDEBAR_CHATS_SECTION_ID, projectSectionId, useSessions } = await server.ssrLoadModule("/src/sessions/store.ts") as {
     SIDEBAR_CHATS_SECTION_ID: string;
     projectSectionId: (folder?: string) => string;
+    useSessions: {
+      getState: () => {
+        newChat: (settings?: Record<string, unknown>, id?: string) => string;
+        setMessages: (id: string, messages: Array<{ role: string; content: string }>, options?: { autoTitle?: boolean }) => void;
+      } & Record<string, unknown>;
+    };
   };
 
   const folder = "C:\\workspace-a";
@@ -180,6 +193,35 @@ try {
 
   const filteredGroups = groupSessionsByProjects([], [], { ...sidebar, projectFolders: [] }, "missing");
   assert(filteredGroups.length === 0, "filtered empty sidebar should still show no result groups");
+
+  const draftVisibilityGroups = groupSessionsByProjects(
+    [
+      { id: "draft", title: "New chat", hasMessages: false, createdAt: now, updatedAt: now },
+      { id: "sent", title: "Sent chat", hasMessages: true, createdAt: now, updatedAt: now },
+    ],
+    [],
+    { ...sidebar, projectFolders: [] },
+    "",
+  );
+  const draftVisibilityIds = draftVisibilityGroups.flatMap((group) => group.sessions.map((session) => session.id));
+  assert(!draftVisibilityIds.includes("draft"), "empty new chats should stay out of thread navigation");
+  assert(draftVisibilityIds.includes("sent"), "a chat should enter thread navigation after its first message");
+
+  assert(
+    sidebarSessionHasMessages({ messages: [], messagesHydrated: false, persistedMessageCount: 2 }),
+    "lazy thread summaries should remain visible when their persisted transcript is not resident",
+  );
+  const sidebarSelector = createSidebarSessionsSelector();
+  const draftId = useSessions.getState().newChat(undefined, "selector-draft");
+  assert(
+    sidebarSelector(useSessions.getState()).find((session) => session.id === draftId)?.hasMessages === false,
+    "the sidebar selector should mark a new chat as empty",
+  );
+  useSessions.getState().setMessages(draftId, [{ role: "user", content: "first message" }], { autoTitle: false });
+  assert(
+    sidebarSelector(useSessions.getState()).find((session) => session.id === draftId)?.hasMessages === true,
+    "the sidebar selector should react when the first message is sent",
+  );
 
   const sharedOld: SidebarSession = {
     id: "shared-old",
@@ -380,6 +422,56 @@ try {
       ),
     ) === JSON.stringify(["active-child", "other-project-active"]),
     "Inbox mode should flatten branches and sort active threads across projects by activity",
+  );
+  const concurrentWorkingSessions: SidebarSession[] = [
+    { id: "working-a", title: "Working A", createdAt: now, updatedAt: 20 },
+    { id: "working-b", title: "Working B", createdAt: now, updatedAt: 10 },
+  ];
+  const concurrentWorkingIds = new Set(["working-a", "working-b"]);
+  let workingActivityAt = reconcileWorkingSessionActivityAt(
+    new Map(),
+    concurrentWorkingSessions,
+    concurrentWorkingIds,
+  );
+  const afterInterleavedEvents = concurrentWorkingSessions.map((session) => ({
+    ...session,
+    updatedAt: session.id === "working-a" ? 40 : 50,
+  }));
+  workingActivityAt = reconcileWorkingSessionActivityAt(
+    workingActivityAt,
+    afterInterleavedEvents,
+    concurrentWorkingIds,
+  );
+  const stableWorkingGroups = groupSessionsByProjects(
+    afterInterleavedEvents,
+    [],
+    { ...sidebar, pinnedSessionIds: [], projectFolders: [] },
+    "",
+    true,
+    workingActivityAt,
+  );
+  assert(
+    JSON.stringify(stableWorkingGroups[0]?.sessions.map((session) => session.id)) ===
+      JSON.stringify(["working-a", "working-b"]),
+    "interleaved progress events should not reorder concurrent working threads",
+  );
+  workingActivityAt = reconcileWorkingSessionActivityAt(
+    workingActivityAt,
+    afterInterleavedEvents,
+    new Set(["working-a"]),
+  );
+  const completedWorkingGroups = groupSessionsByProjects(
+    afterInterleavedEvents,
+    [],
+    { ...sidebar, pinnedSessionIds: [], projectFolders: [] },
+    "",
+    true,
+    workingActivityAt,
+  );
+  assert(
+    JSON.stringify(completedWorkingGroups[0]?.sessions.map((session) => session.id)) ===
+      JSON.stringify(["working-b", "working-a"]),
+    "a completed thread should rejoin normal recency ordering once",
   );
   assert(
     !inboxGroups.some(
