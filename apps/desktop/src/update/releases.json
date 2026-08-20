@@ -1,4 +1,49 @@
 {
+  "0.2.47": {
+    "version": "0.2.47",
+    "summary": "Milim 0.2.47 lets threads collaborate, keeps long conversations fast and durable, and makes desktop and mobile chat behavior clearer and more reliable.",
+    "items": [
+      {
+        "id": "linked-thread-collaboration",
+        "eyebrow": "Thread collaboration",
+        "title": "Let threads work together",
+        "description": "Link one root chat to another so agents can read a bounded transcript and exchange asynchronous mailbox messages without merging either conversation.",
+        "details": [
+          "Drag a root chat onto another active chat to create a durable directional link",
+          "Freeze linked transcript reads at the turn boundary while keeping hidden prompts, reasoning, and tool ledgers private",
+          "Show mailbox inputs, replies, failures, and provenance across desktop and mobile"
+        ],
+        "accent": "var(--accent)",
+        "icon": "plug"
+      },
+      {
+        "id": "durable-long-threads",
+        "eyebrow": "History and performance",
+        "title": "Keep long threads fast and durable",
+        "description": "Milim loads and mounts only the history you need while compacting the lossless run ledger behind the scenes.",
+        "details": [
+          "Start with the latest 100 messages and page older history without moving your reading position",
+          "Keep at most 200 message rows mounted in long transcripts",
+          "Deduplicate artifacts, compress large JSON, and store repeated provider requests as verified deltas with checkpoints"
+        ],
+        "accent": "var(--accent)",
+        "icon": "file-text"
+      },
+      {
+        "id": "conversation-reliability",
+        "eyebrow": "Conversation workflow",
+        "title": "Move through chats with less friction",
+        "description": "Conversation state, Settings, mobile reconnects, and provider-specific output now behave more predictably.",
+        "details": [
+          "Land sent messages immediately with subtle scroll-safe motion and collapse duplicate screenshot pastes",
+          "Keep model switches, completed turns, OpenRouter reasoning, and per-turn costs coherent",
+          "Refine full-window Settings and restore saved mobile discovery and Tailscale access after desktop restart"
+        ],
+        "accent": "var(--accent)",
+        "icon": "file-text"
+      }
+    ]
+  },
   "0.2.46": {
     "version": "0.2.46",
     "summary": "Milim 0.2.46 lets threads collaborate, keeps long conversations fast and durable, and makes desktop and mobile chat behavior clearer and more reliable.",
