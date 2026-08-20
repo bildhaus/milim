@@ -61,7 +61,11 @@ import {
   useMilimController,
   type NearbyPairingStage,
 } from './src/controller/useMilimController';
-import {discoverMilimHosts, type DiscoveredHost} from './src/discovery';
+import {
+  discoverMilimHosts,
+  filterPairableMilimHosts,
+  type DiscoveredHost,
+} from './src/discovery';
 import {
   DEFAULT_MODEL_PICKER_PREFERENCES,
   modelPickerFavoriteIds,
@@ -340,6 +344,10 @@ function App(): React.JSX.Element {
   const [threadDrawerVisible, setThreadDrawerVisible] = useState(false);
   const [pairingVisible, setPairingVisible] = useState(false);
   const [pairingClaim, setPairingClaim] = useState('');
+  const pairedHostIds = useMemo(
+    () => controller.hosts.map(host => host.hostId),
+    [controller.hosts],
+  );
   const openThreads = useCallback(() => setThreadDrawerVisible(true), []);
   const threadDrawerEdgeGesture = useMemo(() => PanResponder.create({
     onMoveShouldSetPanResponderCapture: (_event, gestureState) => (
@@ -378,11 +386,12 @@ function App(): React.JSX.Element {
       <AppThemeContext.Provider value={theme}>
         <SafeAreaProvider>
           <StatusBar barStyle={theme.isDark ? 'light-content' : 'dark-content'} />
-          <Onboarding
+          <PairingScreen
             claim={pairingClaim}
             setClaim={setPairingClaim}
             onPair={controller.pair}
             onPairNearby={controller.pairNearby}
+            pairedHostIds={pairedHostIds}
           />
         </SafeAreaProvider>
       </AppThemeContext.Provider>
@@ -499,6 +508,11 @@ function App(): React.JSX.Element {
             await controller.pair(claim, name);
             setPairingVisible(false);
           }}
+          onPairNearby={async (host, name, signal, onStage) => {
+            await controller.pairNearby(host, name, signal, onStage);
+            setPairingVisible(false);
+          }}
+          pairedHostIds={pairedHostIds}
         />
       </SafeAreaProvider>
     </AppThemeContext.Provider>
@@ -535,11 +549,14 @@ function ConnectionPill({
   );
 }
 
-function Onboarding({
+function PairingScreen({
   claim,
   setClaim,
   onPair,
   onPairNearby,
+  pairedHostIds,
+  additional = false,
+  onClose,
 }: {
   claim: string;
   setClaim: (value: string) => void;
@@ -550,6 +567,9 @@ function Onboarding({
     signal: AbortSignal,
     onStage: (stage: NearbyPairingStage) => void,
   ) => Promise<unknown>;
+  pairedHostIds: readonly string[];
+  additional?: boolean;
+  onClose?: () => void;
 }) {
   const {palette, styles} = useAppTheme();
   const [deviceName, setDeviceName] = useState(`${Platform.OS === 'ios' ? 'iPhone' : 'Android'} controller`);
@@ -574,7 +594,10 @@ function Onboarding({
     setDiscovering(true);
     setDiscoveryError(null);
     try {
-      const hosts = await discoverMilimHosts();
+      const hosts = filterPairableMilimHosts(
+        await discoverMilimHosts(),
+        pairedHostIds,
+      );
       if (version === discoveryVersion.current) setNearbyHosts(hosts);
     } catch (reason) {
       if (version === discoveryVersion.current) {
@@ -586,7 +609,7 @@ function Onboarding({
         setDiscovering(false);
       }
     }
-  }, []);
+  }, [pairedHostIds]);
   useEffect(() => {
     void refreshNearbyHosts();
     const timer = setInterval(() => void refreshNearbyHosts(), 15_000);
@@ -648,16 +671,24 @@ function Onboarding({
           <Image source={milimLogo} style={styles.onboardingMark} />
           <Text style={styles.onboardingWordmark}>milim</Text>
         </View>
-        <Text style={styles.mobileLabel}>MOBILE</Text>
+        {onClose ? (
+          <IconButton icon="x" label="Close pairing" onPress={onClose} />
+        ) : (
+          <Text style={styles.mobileLabel}>MOBILE</Text>
+        )}
       </View>
       <ScrollView
         contentContainerStyle={styles.onboardingContent}
         keyboardShouldPersistTaps="handled">
         <View style={styles.onboardingIntro}>
-          <Text style={styles.eyebrow}>PAIR A DESKTOP</Text>
-          <Text style={styles.heroTitle}>Your milim workbench, in your pocket.</Text>
+          <Text style={styles.eyebrow}>{additional ? 'PAIR ANOTHER DESKTOP' : 'PAIR A DESKTOP'}</Text>
+          <Text style={styles.heroTitle}>
+            {additional ? 'Connect another milim workbench.' : 'Your milim workbench, in your pocket.'}
+          </Text>
           <Text style={styles.heroCopy}>
-            Control the same threads, runs, queues, and approvals. Your desktop stays authoritative.
+            {additional
+              ? 'Choose a nearby desktop, then approve the request there. Each desktop stays authoritative.'
+              : 'Control the same threads, runs, queues, and approvals. Your desktop stays authoritative.'}
           </Text>
         </View>
         <View style={styles.nearbyPanel}>
@@ -669,7 +700,7 @@ function Onboarding({
                   ? 'Searching your trusted network…'
                   : nearbyHosts.length
                     ? `${nearbyHosts.length} ready to pair`
-                    : 'No desktops detected'}
+                    : additional ? 'No new desktops detected' : 'No desktops detected'}
               </Text>
             </View>
             <MotionPressable
@@ -808,49 +839,35 @@ function PairingModal({
   setClaim,
   onClose,
   onPair,
+  onPairNearby,
+  pairedHostIds,
 }: {
   visible: boolean;
   claim: string;
   setClaim: (value: string) => void;
   onClose: () => void;
-  onPair: (claim: string, deviceName: string) => Promise<void>;
+  onPair: (claim: string, deviceName: string) => Promise<unknown>;
+  onPairNearby: (
+    host: DiscoveredHost,
+    deviceName: string,
+    signal: AbortSignal,
+    onStage: (stage: NearbyPairingStage) => void,
+  ) => Promise<unknown>;
+  pairedHostIds: readonly string[];
 }) {
-  const {palette, styles} = useAppTheme();
-  const [scanner, setScanner] = useState(false);
-  const [busy, setBusy] = useState(false);
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
-      <SafeAreaView style={styles.sheet}>
-        <Text style={styles.sheetTitle}>Pair another desktop</Text>
-        <Text style={styles.help}>Scan the QR from Settings → Mobile, or paste its pairing link.</Text>
-        <TextInput
-          style={[styles.input, styles.claimInput]}
-          value={claim}
-          onChangeText={setClaim}
-          placeholder="Pairing link"
-          placeholderTextColor={palette.placeholder}
-          autoCapitalize="none"
-          multiline
+      {visible ? (
+        <PairingScreen
+          claim={claim}
+          setClaim={setClaim}
+          onPair={onPair}
+          onPairNearby={onPairNearby}
+          pairedHostIds={pairedHostIds}
+          additional
+          onClose={onClose}
         />
-        <View style={styles.actionRow}>
-          <Button label="Cancel" tone="quiet" onPress={onClose} />
-          <Button label="Scan QR" icon="scan" tone="quiet" onPress={() => setScanner(true)} />
-          <Button
-            label={busy ? 'Pairing…' : 'Pair'}
-            disabled={busy || !claim.trim()}
-            onPress={() => {
-              setBusy(true);
-              void onPair(claim, `${Platform.OS === 'ios' ? 'iPhone' : 'Android'} controller`)
-                .catch(error => Alert.alert('Could not pair', String(error)))
-                .finally(() => setBusy(false));
-            }}
-          />
-        </View>
-      </SafeAreaView>
-      <Scanner visible={scanner} onClose={() => setScanner(false)} onRead={value => {
-        setClaim(value);
-        setScanner(false);
-      }} />
+      ) : null}
     </Modal>
   );
 }
@@ -3157,8 +3174,6 @@ function createStyles(theme: MobileTheme) {
   directNoteText: {flex: 1, color: palette.muted, fontSize: 11.5, lineHeight: 17},
   claimInput: {minHeight: 78, textAlignVertical: 'top'},
   formError: {color: palette.danger, fontSize: 13, lineHeight: 18},
-  sheet: {flex: 1, backgroundColor: palette.bg, padding: 20, gap: 14},
-  sheetTitle: {color: palette.text, fontSize: 25, fontWeight: '700', letterSpacing: -0.8},
   scanner: {flex: 1, backgroundColor: '#000'},
   scannerOverlay: {flex: 1, justifyContent: 'space-between', alignItems: 'center', padding: 24},
   scannerTitle: {color: '#fff', fontSize: 19, fontWeight: '700', textShadowColor: '#000', textShadowRadius: 8},

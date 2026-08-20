@@ -188,4 +188,17 @@ describe('milim desktop discovery', () => {
     expect(simulatorHostEndpoint('ios')).toBe('http://127.0.0.1:7378');
     expect(simulatorHostEndpoint('windows')).toBeNull();
   });
+
+  test('hides already paired desktops when discovering another host', () => {
+    const {filterPairableMilimHosts} = discoveryModule();
+
+    expect(filterPairableMilimHosts([
+      {name: 'Current desktop', hostId: 'host-current', endpoint: 'http://192.168.1.10:7378'},
+      {name: 'New desktop', hostId: 'host-new', endpoint: 'http://192.168.1.20:7378'},
+      {name: 'Legacy desktop', hostId: null, endpoint: 'http://192.168.1.30:7378'},
+    ], ['host-current'])).toEqual([
+      {name: 'New desktop', hostId: 'host-new', endpoint: 'http://192.168.1.20:7378'},
+      {name: 'Legacy desktop', hostId: null, endpoint: 'http://192.168.1.30:7378'},
+    ]);
+  });
 });

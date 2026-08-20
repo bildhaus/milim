@@ -18,7 +18,7 @@ Release artifacts target Windows and macOS. Linux packaging is not a primary rel
 - **Explicit local boundaries.** Workspace selection, model routing, outbound privacy, and approval mode remain visible and under your control.
 - **Execution you can inspect.** Consequential tool calls can pause for review. Git diffs, checkpoints, previews, run details, and recovery actions stay beside the conversation.
 - **A workbench when you need it.** Agents, Workers, skills, schedules, MCP servers and Apps, memory, media generation, Google Workspace, and previews extend the core thread through the **Tools** launcher.
-- **Direct mobile control.** The native iOS and Android companion connects to paired desktops over Tailscale, trusted LAN discovery, or a manual URL. milim operates no relay, account service, or cloud transcript store for this path.
+- **Direct mobile control.** The native iOS and Android companion connects to paired desktops over Tailscale, trusted LAN discovery, or a manual URL. Enabled desktop transports restore automatically after milim restarts. milim operates no relay, account service, or cloud transcript store for this path.
 
 Provider-backed chat and installed account runtimes remain distinct. Provider models use milim's tool-agent loop; account runtimes retain their own sessions and tools behind the same visible approval policy.
 

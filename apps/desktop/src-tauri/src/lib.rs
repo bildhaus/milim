@@ -338,6 +338,9 @@ fn complete_workspace_editor_leave(
 const TAILSCALE_SERVE_PORT: u16 = 10000;
 const MOBILE_LAN_PREFERRED_PORT: u16 = 7378;
 const TAILSCALE_COMMAND_TIMEOUT_SECS: u64 = 12;
+const TAILSCALE_STARTUP_READY_ATTEMPTS: usize = 8;
+const TAILSCALE_STARTUP_CONFIG_ATTEMPTS: usize = 3;
+const TAILSCALE_STARTUP_RETRY_DELAY: Duration = Duration::from_secs(2);
 const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_OPEN_ID: &str = "open";
 const TRAY_QUIT_ID: &str = "quit";
@@ -1175,6 +1178,22 @@ fn secret_env_key(key: &str) -> bool {
 mod tailscale_tests {
     use super::*;
 
+    fn tailscale_status(
+        installed: bool,
+        logged_in: bool,
+        serve_configured: bool,
+        public_url: Option<&str>,
+    ) -> MobileTailscaleStatus {
+        MobileTailscaleStatus {
+            installed,
+            logged_in,
+            serve_configured,
+            public_url: public_url.map(str::to_string),
+            local_target: "http://127.0.0.1:12345".to_string(),
+            message: None,
+        }
+    }
+
     #[test]
     fn tailscale_status_json_reports_dns_url() {
         let raw = r#"{"BackendState":"Running","Self":{"DNSName":"milim-box.tailnet.ts.net."}}"#;
@@ -1241,6 +1260,56 @@ mod tailscale_tests {
         assert!(!status.logged_in);
         assert_eq!(status.local_target, "http://127.0.0.1:12345");
         assert!(status.message.unwrap().contains("Tailscale CLI not found"));
+    }
+
+    #[test]
+    fn macos_tailscale_bundle_is_forced_into_cli_mode() {
+        assert_eq!(
+            tailscale_cli_environment("macos"),
+            Some(("TAILSCALE_BE_CLI", "1"))
+        );
+        assert_eq!(tailscale_cli_environment("windows"), None);
+        assert_eq!(tailscale_cli_environment("linux"), None);
+    }
+
+    #[test]
+    fn tailscale_startup_retry_is_bounded_by_failure_stage() {
+        let starting = tailscale_status(true, false, false, None);
+        assert_eq!(
+            mobile_tailscale_startup_retry_delay(1, &starting),
+            Some(TAILSCALE_STARTUP_RETRY_DELAY)
+        );
+        assert_eq!(
+            mobile_tailscale_startup_retry_delay(TAILSCALE_STARTUP_READY_ATTEMPTS, &starting),
+            None
+        );
+
+        let configuring = tailscale_status(
+            true,
+            true,
+            false,
+            Some("https://milim-box.tailnet.ts.net:10000"),
+        );
+        assert_eq!(
+            mobile_tailscale_startup_retry_delay(2, &configuring),
+            Some(TAILSCALE_STARTUP_RETRY_DELAY)
+        );
+        assert_eq!(
+            mobile_tailscale_startup_retry_delay(TAILSCALE_STARTUP_CONFIG_ATTEMPTS, &configuring),
+            None
+        );
+
+        let ready = tailscale_status(
+            true,
+            true,
+            true,
+            Some("https://milim-box.tailnet.ts.net:10000"),
+        );
+        assert_eq!(mobile_tailscale_startup_retry_delay(1, &ready), None);
+        assert_eq!(
+            mobile_tailscale_startup_retry_delay(1, &tailscale_status(false, false, false, None)),
+            None
+        );
     }
 }
 
@@ -2494,6 +2563,63 @@ fn disable_mobile_tailscale_blocking(local_target: String) -> MobileTailscaleSta
     mobile_tailscale_status_blocking(local_target)
 }
 
+fn mobile_tailscale_startup_retry_delay(
+    attempt: usize,
+    status: &MobileTailscaleStatus,
+) -> Option<Duration> {
+    if status.serve_configured || !status.installed {
+        return None;
+    }
+    let attempts = if status.logged_in && status.public_url.is_some() {
+        TAILSCALE_STARTUP_CONFIG_ATTEMPTS
+    } else {
+        TAILSCALE_STARTUP_READY_ATTEMPTS
+    };
+    (attempt < attempts).then_some(TAILSCALE_STARTUP_RETRY_DELAY)
+}
+
+async fn restore_mobile_tailscale_startup(local_target: String) {
+    for attempt in 1..=TAILSCALE_STARTUP_READY_ATTEMPTS {
+        let target = local_target.clone();
+        let status =
+            tokio::task::spawn_blocking(move || configure_mobile_tailscale_blocking(target)).await;
+        match status {
+            Ok(status) if status.serve_configured => {
+                tracing::info!(
+                    target: "milim_desktop::server",
+                    attempt,
+                    "mobile control Tailscale restored on startup"
+                );
+                return;
+            }
+            Ok(status) => {
+                if let Some(delay) = mobile_tailscale_startup_retry_delay(attempt, &status) {
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                let message = status
+                    .message
+                    .as_deref()
+                    .unwrap_or("Tailscale Serve did not become ready.");
+                tracing::warn!(
+                    target: "milim_desktop::server",
+                    attempt,
+                    "mobile control Tailscale startup unavailable: {message}"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "milim_desktop::server",
+                    attempt,
+                    "mobile control Tailscale startup task failed: {error}"
+                );
+                return;
+            }
+        }
+    }
+}
+
 fn find_tailscale_command() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("TAILSCALE_CLI").map(PathBuf::from) {
         if path.exists() {
@@ -2532,9 +2658,16 @@ fn tailscale_command_candidates() -> Vec<PathBuf> {
     paths
 }
 
+fn tailscale_cli_environment(target_os: &str) -> Option<(&'static str, &'static str)> {
+    (target_os == "macos").then_some(("TAILSCALE_BE_CLI", "1"))
+}
+
 fn run_tailscale(command: &Path, args: &[&str]) -> io::Result<Output> {
     let mut cmd = Command::new(command);
     cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    if let Some((key, value)) = tailscale_cli_environment(std::env::consts::OS) {
+        cmd.env(key, value);
+    }
     let mut child = milim_core::proc::hide_console(&mut cmd).spawn()?;
     let deadline = Instant::now() + Duration::from_secs(TAILSCALE_COMMAND_TIMEOUT_SECS);
     loop {
@@ -4677,23 +4810,7 @@ pub fn run() {
             if let Some(companion) = mobile_startup_companion {
                 tauri::async_runtime::spawn(async move {
                     if companion.status(milim_server::now_unix()).enabled {
-                        let status = tokio::task::spawn_blocking(move || {
-                            configure_mobile_tailscale_blocking(mobile_startup_target)
-                        })
-                        .await;
-                        match status {
-                            Ok(status) if status.serve_configured => {}
-                            Ok(status) => {
-                                if let Some(message) = status.message {
-                                    tracing::warn!(
-                                        "mobile control Tailscale startup unavailable: {message}"
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!("mobile control Tailscale startup task failed: {e}")
-                            }
-                        }
+                        restore_mobile_tailscale_startup(mobile_startup_target).await;
                     }
                 });
             }
