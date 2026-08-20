@@ -3,6 +3,7 @@ import {
   type ChatAttachment,
   type ChatMessage,
   type ChatStreamPart,
+  type ControlBootstrapV1,
   type ControlQueuedTurnV1,
   type ControlTimelineItemV1,
 } from "../api.js";
@@ -17,6 +18,27 @@ export function controlAttachments(attachments?: ChatAttachment[]) {
     data_url: dataUrl,
     truncated: Boolean(attachment.truncated),
   }));
+}
+
+export function hostBusySessionIdsFromBootstrap(
+  bootstrap: Pick<ControlBootstrapV1, "threads" | "active_runs" | "queued_turns">,
+): string[] {
+  const ids = new Set<string>();
+  for (const thread of bootstrap.threads) {
+    if (thread.busy) ids.add(thread.id);
+  }
+  for (const run of bootstrap.active_runs) {
+    if (run.thread_id) ids.add(run.thread_id);
+  }
+  return [...ids].sort();
+}
+
+export function shouldQueueCanonicalFollowup(
+  threadId: string,
+  hostBusySessionIds: readonly string[],
+  canonicalRunId?: string,
+): boolean {
+  return Boolean(canonicalRunId) || hostBusySessionIds.includes(threadId);
 }
 
 export function controlQueuedMessage(turn: ControlQueuedTurnV1): QueuedMessage {
@@ -241,6 +263,19 @@ export function projectControlRunMessages(
       runId,
       streamParts,
     };
+  }
+  if (assistant) {
+    const terminalStatus = [...items]
+      .reverse()
+      .find((item) => item.run_id === runId && item.type === "run_status")
+      ?.data.status;
+    assistant.streamTerminalOutcome = terminalStatus === "completed"
+      ? "completed"
+      : typeof terminalStatus === "string" &&
+          terminalStatus !== "accepted" &&
+          terminalStatus !== "running"
+        ? "interrupted"
+        : "unknown";
   }
   return [user, assistant].filter((message): message is CanonicalMessage => message !== null);
 }

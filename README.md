@@ -86,13 +86,13 @@ OpenAI-compatible clients can use `http://127.0.0.1:7377/v1`. milim does not shi
 
 | Part | Responsibility |
 |---|---|
-| Desktop app | Tauri 2 with Vite, React, and TypeScript. Presents canonical thread state plus desktop-only workspace, preview, Git review, and a dedicated full-window Settings surface that leaves the active workspace mounted. |
+| Desktop app | Tauri 2 with Vite, React, and TypeScript. Presents canonical thread state plus desktop-only workspace, preview, Git review, and a dedicated theme-aware full-window Settings surface that leaves the active workspace mounted. |
 | Native mobile app | Bare React Native with TypeScript and Metro. Acts as a bounded, multi-host controller and cache for paired desktops. |
 | Embedded server | In-process Axum server and Rust `RunManager`. Owns active turns, queues, approvals, normalized events, and runtime adapters. |
 | Local data | Desktop SQLite is authoritative for threads, runs, timelines, queues, approvals, and favorite model IDs. Mobile SQLite is a host-partitioned cache for timelines, drafts, and client-only picker layout. |
 | Model sources | Hosted providers, local OpenAI-compatible servers, and separately installed account-runtime CLIs connect through explicit routing and privacy boundaries. |
 
-The desktop and mobile clients are replicas of Rust-owned canonical state. Favorite model changes made in either picker update the desktop-owned list and propagate live to the other client. Desktop model and reasoning changes are committed to canonical thread state before the next turn starts. When an older thread contains a provider route that no longer exists, opening it repairs an unambiguous replacement or asks for a new model selection. Hiding or reloading the desktop renderer does not pause accepted work; explicit quit or restart cancels active runs and records unfinished work as interrupted.
+The desktop and mobile clients are replicas of Rust-owned canonical state. Favorite model changes made in either picker update the desktop-owned list and propagate live to the other client. New desktop chats are created in canonical Rust state before their local replica becomes visible, and desktop model and reasoning changes are committed there before the next turn starts. When an older thread contains a provider route that no longer exists, opening it repairs an unambiguous replacement or asks for a new model selection. Hiding or reloading the desktop renderer does not pause accepted work; explicit quit or restart cancels active runs and records unfinished work as interrupted.
 
 ## Development
 

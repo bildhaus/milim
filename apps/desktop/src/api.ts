@@ -289,6 +289,8 @@ export interface ChatMessage {
   memories?: MemoryNotice[];
   /** UI-only ordered stream transcript of assistant text, reasoning, and events. */
   streamParts?: ChatStreamPart[];
+  /** UI-only terminal outcome for canonical stream projection when no RunTrace is present. */
+  streamTerminalOutcome?: "completed" | "interrupted" | "unknown";
   /** UI-only structured trace of an agent/tool run (never sent to the server). */
   run?: RunTrace;
   /** UI-only response timing, token usage, and optional cost snapshot. */

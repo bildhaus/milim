@@ -1670,6 +1670,17 @@ async function runSidebarSectionMotionCheck(page, splitOnly = false) {
     if (standaloneLayout.wrapped || standaloneLayout.border !== "1px" || standaloneLayout.radius !== "8px") {
       throw new Error(`Gitless new chat button has unexpected geometry: ${JSON.stringify(standaloneLayout)}.`);
     }
+    const createResponse = page.waitForResponse((response) =>
+      response.url().includes("/control/v1/commands") &&
+      response.request().method() === "POST",
+    );
+    await standaloneNewChat.click();
+    const response = await createResponse;
+    const command = response.request().postDataJSON();
+    const result = await response.json();
+    if (!response.ok() || command.kind !== "thread.create" || result.status !== "applied") {
+      throw new Error(`New chat did not provision canonical state first: ${JSON.stringify({ command, result })}.`);
+    }
   }
   const project = await page.evaluate(async ({ folder }) => {
     const key = "milim.sessions";
@@ -3762,6 +3773,7 @@ async function resetFrontendStorage(page) {
   await page.reload();
   await page.getByTestId("chat-shell").waitFor();
   await dismissOnboardingIfPresent(page);
+  await page.waitForTimeout(350);
 }
 
 async function runWorkersInspectorCheck(page, milimHome) {
@@ -4023,8 +4035,9 @@ async function openSettings(page) {
     inert: element.inert,
     ariaHidden: element.getAttribute("aria-hidden"),
     chatMounted: Boolean(element.querySelector('[data-testid="chat-shell"]')),
+    opacity: getComputedStyle(element).opacity,
   }));
-  if (!workspace.inert || workspace.ariaHidden !== "true" || !workspace.chatMounted) {
+  if (!workspace.inert || workspace.ariaHidden !== "true" || !workspace.chatMounted || workspace.opacity !== "0") {
     throw new Error(`Settings should inert but preserve the mounted workspace: ${JSON.stringify(workspace)}.`);
   }
   const usageToggle = page.getByTestId("general-titlebar-account-usage-toggle");
@@ -4085,6 +4098,16 @@ async function runSettingsLayoutCheck(page) {
   }
   await themeEditor.getByText("Back to Appearance", { exact: true }).waitFor();
   await page.waitForTimeout(220);
+  const backgroundCss = "linear-gradient(135deg, #3b1d75 0%, #0b4a67 52%, #07111e 100%)";
+  await page.getByRole("textbox", { name: "Image or gradient CSS" }).fill(backgroundCss);
+  const editorThemeSurface = await themeEditor.evaluate((element) => ({
+    hasBackgroundClass: element.classList.contains("has-theme-background"),
+    surfaceBackground: getComputedStyle(element).backgroundColor,
+    workspaceOpacity: getComputedStyle(document.querySelector(".main")).opacity,
+  }));
+  if (!editorThemeSurface.hasBackgroundClass || editorThemeSurface.surfaceBackground !== "rgba(0, 0, 0, 0)" || editorThemeSurface.workspaceOpacity !== "0") {
+    throw new Error(`Theme editor should expose the live custom background without workspace bleed-through: ${JSON.stringify(editorThemeSurface)}.`);
+  }
   await page.screenshot({ path: screenshots.settingsThemeEditor, fullPage: false });
   await setThemeEditorColor(page, "Background", "#ff00ff");
   const previewSurfaceColor = await page.evaluate(() =>
@@ -4121,8 +4144,16 @@ async function runSettingsLayoutCheck(page) {
   await page.getByTestId("theme-customize").click();
   await page.getByTestId("theme-editor").waitFor();
   await page.getByRole("textbox", { name: "Theme name" }).fill(customThemeName);
+  await page.getByRole("textbox", { name: "Image or gradient CSS" }).fill(backgroundCss);
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await page.getByTestId("settings-page").waitFor();
+  const settingsThemeSurface = await page.getByTestId("settings-page").evaluate((element) => ({
+    hasBackgroundClass: element.classList.contains("has-theme-background"),
+    surfaceBackground: getComputedStyle(element).backgroundColor,
+  }));
+  if (!settingsThemeSurface.hasBackgroundClass || settingsThemeSurface.surfaceBackground !== "rgba(0, 0, 0, 0)") {
+    throw new Error(`Settings should retain a saved custom background: ${JSON.stringify(settingsThemeSurface)}.`);
+  }
   const savedTheme = page.locator(".theme-card").filter({ hasText: customThemeName });
   await savedTheme.waitFor();
   await page.getByRole("button", { name: `Edit ${customThemeName}` }).click();

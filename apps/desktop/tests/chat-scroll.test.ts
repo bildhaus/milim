@@ -2,7 +2,6 @@ import {
   CHAT_SCROLL_BOTTOM_THRESHOLD,
   followScrollTop,
   isNearScrollBottom,
-  nextEnteringMessageIds,
   peekEnteringMessageIds,
 } from "../src/lib/scroll.js";
 
@@ -47,27 +46,6 @@ assert(
   followScrollTop({ scrollHeight: 820, clientHeight: 500 }) === 320,
   "follow target should update when the thread grows",
 );
-
-const seeded = new Set<string>();
-assert(
-  nextEnteringMessageIds(seeded, ["a", "b"], false).length === 0,
-  "restored thread ids should be remembered without animating",
-);
-assert(seeded.has("a") && seeded.has("b"), "restored thread ids should be marked seen");
-
-assert(
-  JSON.stringify(nextEnteringMessageIds(seeded, ["a", "b", "c"], true)) === JSON.stringify(["c"]),
-  "only newly appended ids should enter while following",
-);
-assert(
-  nextEnteringMessageIds(seeded, ["a", "b", "c"], true).length === 0,
-  "already seen ids should not re-enter",
-);
-assert(
-  nextEnteringMessageIds(seeded, ["c", undefined, "d"], false).length === 0,
-  "uncoupled or restored updates should still record ids without animating",
-);
-assert(seeded.has("d"), "uncoupled ids should still be remembered");
 
 const peekSeen = new Set(["a"]);
 assert(

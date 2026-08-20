@@ -27,15 +27,3 @@ export function peekEnteringMessageIds(
   }
   return entering;
 }
-
-export function nextEnteringMessageIds(
-  seenIds: Set<string>,
-  messageIds: readonly (string | undefined | null)[],
-  shouldAnimate: boolean,
-): string[] {
-  const entering = peekEnteringMessageIds(seenIds, messageIds, shouldAnimate);
-  for (const id of messageIds) {
-    if (id) seenIds.add(id);
-  }
-  return entering;
-}

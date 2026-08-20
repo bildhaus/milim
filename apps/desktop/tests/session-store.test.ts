@@ -1195,6 +1195,28 @@ equal(
   undefined,
   "unknown pricing should not estimate cost",
 );
+const freeProviders = [{
+  ...pricedProviders[0],
+  models: ["openrouter/free"],
+  pricing: { "openrouter/free": { prompt: "0", completion: "0" } },
+}];
+equal(
+  estimateResponseCostUsd("openrouter/free", usage, freeProviders),
+  0,
+  "known free-model pricing should remain a complete zero-cost estimate",
+);
+const freeMetrics = responseMetricsForTurn({
+  startedAt: 10,
+  endedAt: 40,
+  model: "openrouter/free",
+  providers: freeProviders,
+  usage,
+});
+equal(freeMetrics.costUsd, 0, "free-model response metrics should retain zero cost");
+equal(freeMetrics.costSource, "estimate", "free-model response metrics should retain pricing provenance");
+const freeSummary = summarizeResponseMetrics([{ role: "assistant", content: "free", metrics: freeMetrics }]);
+equal(freeSummary.costUsd, 0, "free turns should contribute a zero-dollar total");
+equal(freeSummary.costPartial, undefined, "known free turns should not mark spend as incomplete");
 deepEqual(
   responseMetricsForTurn({
     startedAt: 10,

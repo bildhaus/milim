@@ -223,7 +223,7 @@ import {
   type GoalDecision,
   type GoalSettings,
 } from "../lib/goals";
-import { followScrollTop, isNearScrollBottom } from "../lib/scroll";
+import { followScrollTop, isNearScrollBottom, peekEnteringMessageIds } from "../lib/scroll";
 import {
   mergeModelListsForPicker,
   providerOwnsModel,
@@ -300,9 +300,11 @@ import { checkpointWorkspaceBeforeTurn } from "../lib/turnWorkspace";
 import {
   controlAttachments,
   controlQueuedMessage,
+  hostBusySessionIdsFromBootstrap,
   mergeControlRunMessages,
   pollControlRun,
   projectControlRunMessages,
+  shouldQueueCanonicalFollowup,
 } from "../lib/canonicalControl.js";
 import { createChatMessageId } from "../lib/messageIds.js";
 import { flushDeferredUserStateWrites } from "../persistence/userStateStorage";
@@ -1481,6 +1483,7 @@ export function ChatView({
   }, [activeTitle, attentionKey]);
   const projects = useSessions((s) => s.projects);
   const generatingSessionIds = useSessions((s) => s.generatingSessionIds);
+  const hostBusySessionIds = useSessions((s) => s.hostBusySessionIds);
   const liveWorkerSessionIdsKey = useSessions((s) =>
     s.sessions
       .filter(
@@ -1916,7 +1919,10 @@ export function ChatView({
     activeWorker?.status === "queued" ||
     activeWorker?.status === "running" ||
     activeWorkerRun?.run.status === "running";
-  const busy = generatingSessionIds.includes(activeId) || activeWorkerRunning;
+  const busy =
+    generatingSessionIds.includes(activeId) ||
+    hostBusySessionIds.includes(activeId) ||
+    activeWorkerRunning;
   useEffect(() => {
     const selected = effectiveModel.trim();
     if (!sessionsHydrated || !modelsSettled || busy || !selected) return;
@@ -2510,19 +2516,18 @@ export function ChatView({
     let controller: AbortController | null = null;
     let retryTimer: number | null = null;
     const syncActiveRun = async () => {
-      if (
-        disposed ||
-        canonicalRunIdsRef.current.has(activeId) ||
-        generationControllersRef.current.has(activeId)
-      ) {
-        if (!disposed) retryTimer = window.setTimeout(syncActiveRun, 500);
-        return;
-      }
       try {
         const bootstrap = await getControlBootstrap();
+        if (disposed) return;
         setCanonicalQueuedTurns(bootstrap.queued_turns);
+        useSessions.getState().setHostBusySessionIds(
+          hostBusySessionIdsFromBootstrap(bootstrap),
+        );
+        const alreadyAttached =
+          canonicalRunIdsRef.current.has(activeId) ||
+          generationControllersRef.current.has(activeId);
         const run = bootstrap.active_runs.find((item) => item.thread_id === activeId);
-        if (!run || disposed || generationControllersRef.current.has(activeId)) return;
+        if (!run || alreadyAttached) return;
         const store = useSessions.getState();
         controller = claimTurnGeneration({
           sessionId: activeId,
@@ -4078,15 +4083,24 @@ export function ChatView({
     if (current?.signature === signature) return current.promise;
     const previous = current?.promise.catch(() => undefined) ?? Promise.resolve();
     const promise = previous.then(async () => {
-      const result = await sendControlCommand({
-        command_id: createControlCommandId(),
-        kind: "thread.set_model",
-        thread_id: sessionId,
-        payload: {
-          model,
-          ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
-        },
-      });
+      await flushDeferredUserStateWrites("milim.sessions");
+      const apply = () => sendControlCommand({
+          command_id: createControlCommandId(),
+          kind: "thread.set_model",
+          thread_id: sessionId,
+          payload: {
+            model,
+            ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+          },
+        });
+      let result = await apply();
+      if (
+        result.status === "failed" &&
+        /(?:model )?not found: thread\b/i.test(result.message ?? "")
+      ) {
+        await flushDeferredUserStateWrites("milim.sessions");
+        result = await apply();
+      }
       if (result.status !== "applied") {
         throw new Error(result.message || `Model synchronization ${result.status}.`);
       }
@@ -4171,6 +4185,7 @@ export function ChatView({
       (message) => message.role === "assistant" && message.content.trim(),
     );
     if (!firstUser || !firstAssistant) return;
+    store.setSessionActivityBusy(sessionId, true);
     let rawTitle: string;
     try {
       rawTitle = await completeChat(
@@ -4196,6 +4211,8 @@ export function ChatView({
         `AI thread naming failed: ${error instanceof Error ? error.message : String(error)}`,
       );
       return;
+    } finally {
+      useSessions.getState().setSessionActivityBusy(sessionId, false);
     }
     const title = sanitizeAiThreadTitle(rawTitle);
     if (!title) {
@@ -4533,6 +4550,7 @@ export function ChatView({
       return;
     }
     compactionInFlightRef.current = true;
+    useSessions.getState().setSessionActivityBusy(targetSessionId, true);
     setChatNotice({ tone: "info", message: "Compacting thread context..." });
     try {
       const reasoningEffort = reasoningEffortForThread(
@@ -4579,6 +4597,7 @@ export function ChatView({
       });
     } finally {
       compactionInFlightRef.current = false;
+      useSessions.getState().setSessionActivityBusy(targetSessionId, false);
     }
   }
 
@@ -5647,6 +5666,8 @@ export function ChatView({
         error: "A canonical turn must end with a user message.",
       };
     }
+    const baseMessages =
+      options.canonicalAction === "regenerate" ? convo : convo.slice(0, -1);
     try {
       if (canonicalThreadModelsRef.current.get(sessionId) !== selectedModel.trim()) {
         await writeCanonicalThreadModel(sessionId, selectedModel);
@@ -5656,6 +5677,9 @@ export function ChatView({
       await flushDeferredUserStateWrites("milim.sessions");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (options.canonicalAction !== "regenerate") {
+        setMessages(sessionId, baseMessages, { autoTitle: false });
+      }
       setChatNotice({ tone: "error", message });
       return { status: "error", messages: sessionMessages(sessionId, convo), error: message };
     }
@@ -5671,8 +5695,7 @@ export function ChatView({
         error: "A turn is already running.",
       };
     }
-    const baseMessages =
-      options.canonicalAction === "regenerate" ? convo : convo.slice(0, -1);
+    store.setSessionHostBusy(sessionId, true);
     let accepted = false;
     if (options.canonicalAction !== "regenerate") {
       setMessages(sessionId, convo, { autoTitle: autoTitleChats });
@@ -5695,6 +5718,7 @@ export function ChatView({
               },
       });
       if (command.status === "queued") {
+        store.setSessionHostBusy(sessionId, true);
         setChatNotice({
           tone: "info",
           message: "Message queued by the Milim runtime and safe to close or reload.",
@@ -6411,7 +6435,13 @@ export function ChatView({
         });
         return;
       }
-      if (canonicalRunIdsRef.current.has(activeId)) {
+      if (
+        shouldQueueCanonicalFollowup(
+          activeId,
+          hostBusySessionIds,
+          canonicalRunIdsRef.current.get(activeId),
+        )
+      ) {
         void queueCanonicalFollowup(text, pendingAttachments);
         return;
       }
@@ -6479,9 +6509,14 @@ export function ChatView({
     stickToBottomRef.current = true;
     setShowJumpToLatest(false);
     const sentId = conversation[conversation.length - 1]?.id;
-    if (sentId) {
+    const enteringIds = peekEnteringMessageIds(
+      new Set(messages.map((message) => message.id).filter((id): id is string => Boolean(id))),
+      [sentId],
+      !prefersReducedMotion(),
+    );
+    if (enteringIds.length) {
       setEnteringMessageIds((current) =>
-        current.includes(sentId) ? current : [...current, sentId],
+        [...new Set([...current, ...enteringIds])],
       );
     }
     setMessages(activeId, conversation, { autoTitle: autoTitleChats });

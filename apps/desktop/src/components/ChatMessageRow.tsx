@@ -539,6 +539,16 @@ function MessageRowView({
                 toolApproval={toolApproval}
                 workspaceFolder={workspaceFolder}
                 runDetailsRunId={m.ledgerVersion === 1 ? m.runId : undefined}
+                terminalOutcome={
+                  m.streamTerminalOutcome ??
+                    (m.run?.status === "stopped" ||
+                    m.run?.status === "aborted" ||
+                    m.run?.status === "error"
+                      ? "interrupted"
+                      : m.run?.status === "running"
+                        ? "unknown"
+                        : "completed")
+                }
               />
             )}
             {renderMessageMedia(m.mediaResults)}

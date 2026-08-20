@@ -100,4 +100,13 @@ equal(configured.activeAgentId, "agent-1", "configured mode should use its agent
 equal(configured.toolApproval, "open", "configured mode should allow an explicit Open approval default");
 equal(configured.computerUse, false, "configured mode should still reset Computer Use");
 
+useSessions.getState().setMessages(configuredId, [{ role: "user", content: "occupied" }], { autoTitle: false });
+const sessionCountBeforePreview = useSessions.getState().sessions.length;
+const preview = useSessions.getState().getNewUserChatSettings({ activeAgentId: "agent-2" });
+equal(preview.activeAgentId, "agent-2", "canonical creation should be able to resolve final settings before insertion");
+equal(useSessions.getState().sessions.length, sessionCountBeforePreview, "resolving new-chat settings must not expose a local session");
+const canonicalId = useSessions.getState().newUserChat({ activeAgentId: "agent-2" }, "canonical-thread-id");
+equal(canonicalId, "canonical-thread-id", "canonical creation should commit the host-owned thread id locally");
+equal(useSessions.getState().getSettings(canonicalId).activeAgentId, "agent-2", "canonical-id insertion should retain resolved settings");
+
 export {};

@@ -36,6 +36,11 @@ const namedFiles = clipboardFiles({
 assert.equal(namedFiles.length, 2, "distinct named files should still attach together");
 assert.deepEqual(namedFiles.map((entry) => entry.name).sort(), ["README.md", "notes.md"]);
 
+const sameSizeNamedFiles = clipboardFiles({
+  files: [file("alpha.txt", "text/plain", 5, "one"), file("beta.txt", "text/plain", 6, "two")],
+});
+assert.equal(sameSizeNamedFiles.length, 2, "same-size files with distinct names should not be treated as clipboard twins");
+
 const twoFolderImages = clipboardFiles({
   files: [file("image.png", "image/png", 1, "one"), file("image.jpg", "image/jpeg", 2, "two-bytes")],
 });

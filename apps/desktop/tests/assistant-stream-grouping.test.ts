@@ -85,6 +85,18 @@ if (grouped[0].kind === "workGroup") {
 }
 assert(grouped[1].kind === "text" && grouped[1].content === "after", "the final response should stay outside the drawer");
 
+const interrupted = groupCompletedStreamActivity([tool("shell", "running")], false, "interrupted");
+assert(interrupted[0].kind === "workGroup", "interrupted tool activity should stay in the work drawer");
+if (interrupted[0].kind === "workGroup") {
+  const interruptedTool = interrupted[0].parts[0];
+  assert(
+    interruptedTool.kind === "event" &&
+      interruptedTool.status === "error" &&
+      interruptedTool.label === "shell interrupted",
+    "an aborted turn must not render an unmatched tool start as successful",
+  );
+}
+
 const failedThenSuccessful = groupCompletedStreamActivity([
   tool("shell", "error"),
   tool("shell"),

@@ -125,7 +125,7 @@ export function estimateResponseCostUsd(
   if (promptRate == null || completionRate == null) return undefined;
   const cost =
     usage.prompt_tokens * promptRate + usage.completion_tokens * completionRate;
-  return Number.isFinite(cost) && cost > 0 ? cost : undefined;
+  return Number.isFinite(cost) && cost >= 0 ? cost : undefined;
 }
 
 export function costSnapshotForAmount(
@@ -822,7 +822,7 @@ export function combineCostSources(
 }
 
 function normalizeCostUsd(value: number | undefined): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) && value > 0
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
     ? value
     : undefined;
 }

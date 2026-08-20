@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
-const api = readFileSync(join(root, "src", "api.ts"), "utf8");
+const api = readFileSync(join(root, "src", "api.ts"), "utf8").replace(/\r\n/g, "\n");
 const app = readFileSync(join(root, "src", "App.tsx"), "utf8");
 const chatView = readFileSync(
   join(root, "src", "components", "ChatView.tsx"),

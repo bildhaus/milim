@@ -58,7 +58,7 @@ import {
   setInterfaceSoundsEnabled,
 } from "./ui/sounds";
 import { shortcutLabel } from "./ui/shortcuts";
-import { createInteractiveChat } from "./lib/newChatCoordinator";
+import { createCanonicalChat, createInteractiveChat } from "./lib/newChatCoordinator";
 import {
   nativeBadgeThreadCount,
   setMilimUnreadBadge,
@@ -461,7 +461,7 @@ function AppContent() {
     startupAppliedRef.current = true;
     const preferences = useUiPreferences.getState();
     const sessions = useSessions.getState();
-    if (preferences.startupBehavior === "new-chat") sessions.newUserChat();
+    if (preferences.startupBehavior === "new-chat") void createCanonicalChat();
     if (!preferences.restoreOpenPanels) {
       const activeId = useSessions.getState().activeId;
       sessions.setContextPanelOpen(activeId, false);
@@ -766,7 +766,7 @@ function AppContent() {
       <BackgroundLayer />
       <div
         ref={mainRef}
-        className="main"
+        className={`main${settingsOpen ? " settings-background-only" : ""}`}
         aria-hidden={settingsOpen || undefined}
       >
         {threadNavigationPlacement === "sidebar" && threadNavigation}

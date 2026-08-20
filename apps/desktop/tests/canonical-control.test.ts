@@ -1,8 +1,10 @@
 import { strict as assert } from "node:assert";
 import {
   controlQueuedMessage,
+  hostBusySessionIdsFromBootstrap,
   mergeControlRunMessages,
   projectControlRunMessages,
+  shouldQueueCanonicalFollowup,
 } from "../src/lib/canonicalControl.js";
 import type { ControlQueuedTurnV1, ControlTimelineItemV1 } from "../src/api.js";
 
@@ -20,6 +22,27 @@ const item = (
   data,
   created_at_ms: seq,
 });
+
+assert.equal(
+  shouldQueueCanonicalFollowup("thread-1", ["thread-1"]),
+  true,
+  "a Rust-owned busy thread should queue canonically before the local run id reattaches",
+);
+assert.equal(
+  shouldQueueCanonicalFollowup("thread-1", [], "run-1"),
+  true,
+  "an attached canonical run should queue canonically",
+);
+assert.equal(shouldQueueCanonicalFollowup("thread-1", []), false);
+assert.deepEqual(
+  hostBusySessionIdsFromBootstrap({
+    threads: [{ id: "thread-1", busy: false, queued_turns: 1 }],
+    active_runs: [],
+    queued_turns: [{ thread_id: "thread-1" }],
+  } as never),
+  [],
+  "a preserved queue without an active run must not keep the composer in stop mode",
+);
 
 const streaming = projectControlRunMessages(
   [
@@ -165,6 +188,19 @@ assert.deepEqual(
   mismatchedToolIds.streamParts?.map((part) => part.kind === "event" ? [part.callId, part.status] : null),
   [["call-left", "running"], ["call-right", "done"]],
   "a present call id should never fall back to a different same-name start",
+);
+
+const interruptedCanonicalTool = projectControlRunMessages(
+  [
+    item(1, "tool_call", { call_id: "call-interrupted", name: "shell" }),
+    item(2, "run_status", { status: "aborted" }),
+  ],
+  "run-1",
+)[0];
+assert.equal(
+  interruptedCanonicalTool.streamTerminalOutcome,
+  "interrupted",
+  "canonical aborted turns should not let the renderer synthesize a successful tool result",
 );
 
 const approval = projectControlRunMessages(

@@ -68,6 +68,25 @@ export function runningWorkerParentThreadIdsKey(records: readonly { run: { paren
   )].sort().join("\0");
 }
 
+export function workingSessionIdsFromSignals({
+  generatingSessionIds,
+  hostBusySessionIds,
+  activityBusySessionIds,
+  runningWorkerParentIds,
+}: {
+  generatingSessionIds?: readonly string[];
+  hostBusySessionIds?: readonly string[];
+  activityBusySessionIds?: readonly string[];
+  runningWorkerParentIds?: readonly string[];
+} = {}): string[] {
+  return [...new Set([
+    ...(generatingSessionIds ?? []),
+    ...(hostBusySessionIds ?? []),
+    ...(activityBusySessionIds ?? []),
+    ...(runningWorkerParentIds ?? []),
+  ])].sort();
+}
+
 type SidebarDragItem = { type: "session" | "section"; id: string };
 type SidebarDropPosition = "before" | "after" | "inside";
 type SidebarDragTarget = { type: "session"; id: string; sectionId: string; position: Exclude<SidebarDropPosition, "inside"> } | { type: "section"; id: string; position: SidebarDropPosition };
@@ -690,6 +709,8 @@ export function Sidebar({
   const previewRuntimesByKey = useSessions((s) => s.previewRuntimesByKey);
   const activeId = useSessions((s) => s.activeId);
   const generatingSessionIds = useSessions((s) => s.generatingSessionIds);
+  const hostBusySessionIds = useSessions((s) => s.hostBusySessionIds);
+  const activityBusySessionIds = useSessions((s) => s.activityBusySessionIds);
   const runningWorkerParentIdsKey = useSessions((s) => runningWorkerParentThreadIdsKey(s.workerRuns));
   const unreadSessionIds = useSessions((s) => s.unreadSessionIds);
   const pullRequestsBySession = useSessions((s) => s.pullRequestsBySession);
@@ -920,8 +941,13 @@ export function Sidebar({
     [runningWorkerParentIdsKey],
   );
   const generatingSessions = useMemo(
-    () => new Set([...generatingSessionIds, ...runningWorkerParentThreads]),
-    [generatingSessionIds, runningWorkerParentThreads],
+    () => new Set(workingSessionIdsFromSignals({
+      generatingSessionIds,
+      hostBusySessionIds,
+      activityBusySessionIds,
+      runningWorkerParentIds: [...runningWorkerParentThreads],
+    })),
+    [activityBusySessionIds, generatingSessionIds, hostBusySessionIds, runningWorkerParentThreads],
   );
   const unreadSessions = useMemo(() => new Set(unreadSessionIds), [unreadSessionIds]);
   const archivedProjectFoldersForStatus = useMemo(
@@ -1954,7 +1980,11 @@ export function Sidebar({
                 : undefined;
               const style = projectColor ? { "--project-color": projectColor } as CSSProperties : undefined;
               const active = group.sessions.some((session) => session.id === activeId);
-              const working = group.sessions.some((session) => generatingSessions.has(session.id));
+              const working = group.sessions.some((session) =>
+                generatingSessions.has(session.id) ||
+                session.worker?.status === "queued" ||
+                session.worker?.status === "running",
+              );
               const unread = !working && group.sessions.some((session) => unreadSessions.has(session.id));
               const projectPullRequestOwner = !group.inbox
                 ? sidebarProjectPullRequestOwner(group, pullRequestsBySession)

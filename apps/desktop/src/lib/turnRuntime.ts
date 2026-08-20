@@ -230,7 +230,7 @@ export function createTurnMetricsCapture(): TurnMetricsCapture {
     },
     captureRuntimeMetrics(event) {
       if (event.usage) state.usage = event.usage;
-      if (typeof event.cost_usd === "number" && event.cost_usd > 0) {
+      if (typeof event.cost_usd === "number" && event.cost_usd >= 0) {
         state.costUsd = event.cost_usd;
         state.costSource = "provider";
       }

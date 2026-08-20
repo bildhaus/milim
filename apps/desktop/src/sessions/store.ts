@@ -150,7 +150,7 @@ export interface ThreadWorkspace {
   createdAt: number;
 }
 
-type ThreadSettingsPatch = Partial<Omit<ThreadSettings, "goal">> & {
+export type ThreadSettingsPatch = Partial<Omit<ThreadSettings, "goal">> & {
   goal?: Partial<GoalSettings>;
   reasoningEffort?: ReasoningEffort;
   reasoningEffortByModel?: Record<string, ReasoningEffort>;
@@ -1036,11 +1036,11 @@ function normalizeSidebarState(
   };
 }
 
-function freshSession(settings?: ThreadSettingsPatch): Session {
+function freshSession(settings?: ThreadSettingsPatch, id = uid()): Session {
   const t = Date.now();
   const normalizedSettings = normalizeSettings(settings);
   return {
-    id: uid(),
+    id,
     title: "New chat",
     messages: [],
     settings: { ...normalizedSettings, goal: DEFAULT_GOAL_SETTINGS },
@@ -1803,11 +1803,14 @@ interface SessionState {
   activeId: string;
   archiveRetentionDays: ArchiveRetentionDays;
   generatingSessionIds: string[];
+  hostBusySessionIds: string[];
+  activityBusySessionIds: string[];
   unreadSessionIds: string[];
   queuedMessagesBySession: Record<string, QueuedMessage[]>;
   sidebar: SessionSidebarState;
-  newChat: (settings?: ThreadSettingsPatch) => string;
-  newUserChat: (settings?: ThreadSettingsPatch) => string;
+  newChat: (settings?: ThreadSettingsPatch, id?: string) => string;
+  getNewUserChatSettings: (settings?: ThreadSettingsPatch) => ThreadSettings;
+  newUserChat: (settings?: ThreadSettingsPatch, id?: string) => string;
   forkSession: (id: string, throughMessageIndex?: number) => string | null;
   importSession: (
     session: Partial<Omit<Session, "settings">> & {
@@ -1831,6 +1834,9 @@ interface SessionState {
   purgeExpiredArchives: (now?: number) => void;
   setArchiveRetentionDays: (days: ArchiveRetentionDays) => void;
   setSessionGenerating: (id: string, generating: boolean) => void;
+  setHostBusySessionIds: (ids: readonly string[]) => void;
+  setSessionHostBusy: (id: string, busy: boolean) => void;
+  setSessionActivityBusy: (id: string, busy: boolean) => void;
   setSessionUnread: (id: string, unread: boolean) => void;
   enqueueQueuedMessage: (
     id: string,
@@ -1980,26 +1986,36 @@ export const useSessions = create<SessionState>()(
         activeId: first.id,
         archiveRetentionDays: DEFAULT_ARCHIVE_RETENTION_DAYS,
         generatingSessionIds: [],
+        hostBusySessionIds: [],
+        activityBusySessionIds: [],
         unreadSessionIds: [],
         queuedMessagesBySession: {},
         sidebar: normalizeSidebarState(DEFAULT_SIDEBAR_STATE, [first]),
 
-        newChat: (settings) => {
+        newChat: (settings, id) => {
           const cur = get().sessions.find((s) => s.id === get().activeId);
+          const existing = id
+            ? get().sessions.find((session) => session.id === id)
+            : undefined;
           const normalizedSettings = normalizeSettings(
             settings ?? cur?.settings,
           );
-          const nextSettings = cur
+          const settingsAnchor = existing ?? cur;
+          const nextSettings = settingsAnchor
             ? resetApprovalForFolderChange(
-                cur.settings?.folder,
+                settingsAnchor.settings?.folder,
                 normalizedSettings,
               )
             : normalizedSettings;
-          if (cur && cur.messages.length === 0) {
-            if (settings) get().updateSettings(cur.id, nextSettings);
-            return cur.id;
+          const reusable = existing ?? (!id && cur?.messages.length === 0 ? cur : undefined);
+          if (reusable) {
+            if (settings && reusable.messages.length === 0) {
+              get().updateSettings(reusable.id, nextSettings);
+            }
+            if (reusable.id !== get().activeId) get().switchTo(reusable.id);
+            return reusable.id;
           }
-          const s = freshSession(nextSettings);
+          const s = freshSession(nextSettings, id);
           set((st) => ({
             sessions: [s, ...st.sessions],
             projects: upsertProject(st.projects, nextSettings.folder),
@@ -2018,7 +2034,7 @@ export const useSessions = create<SessionState>()(
           return s.id;
         },
 
-        newUserChat: (settings) => {
+        getNewUserChatSettings: (settings) => {
           const current = get().sessions.find((session) => session.id === get().activeId);
           const preferences = useSettings.getState();
           const base: ThreadSettingsPatch = preferences.newThreadBehavior === "configured"
@@ -2031,14 +2047,18 @@ export const useSessions = create<SessionState>()(
           const newThreadBase = { ...base };
           delete newThreadBase.reasoningEffortOverrides;
           delete newThreadBase.generationOverrides;
-          return get().newChat({
+          return resetApprovalForFolderChange(current?.settings?.folder, normalizeSettings({
             ...newThreadBase,
             ...settings,
             instructions: "",
             computerUse: false,
             planMode: false,
             goal: DEFAULT_GOAL_SETTINGS,
-          });
+          }));
+        },
+
+        newUserChat: (settings, id) => {
+          return get().newChat(get().getNewUserChatSettings(settings), id);
         },
 
         forkSession: (id, throughMessageIndex) => {
@@ -2164,6 +2184,8 @@ export const useSessions = create<SessionState>()(
                 projects: st.projects,
                 activeId: s.id,
                 generatingSessionIds: [],
+                hostBusySessionIds: [],
+                activityBusySessionIds: [],
                 unreadSessionIds: [],
                 queuedMessagesBySession: {},
                 sidebar: normalizeSidebarState(DEFAULT_SIDEBAR_STATE, [s]),
@@ -2179,6 +2201,16 @@ export const useSessions = create<SessionState>()(
               sessions: active.sessions,
               activeId,
               generatingSessionIds: st.generatingSessionIds.filter(
+                (runningId) =>
+                  !removed.has(runningId) &&
+                  active.sessions.some((s) => s.id === runningId),
+              ),
+              hostBusySessionIds: st.hostBusySessionIds.filter(
+                (runningId) =>
+                  !removed.has(runningId) &&
+                  active.sessions.some((s) => s.id === runningId),
+              ),
+              activityBusySessionIds: st.activityBusySessionIds.filter(
                 (runningId) =>
                   !removed.has(runningId) &&
                   active.sessions.some((s) => s.id === runningId),
@@ -2268,6 +2300,12 @@ export const useSessions = create<SessionState>()(
               generatingSessionIds: st.generatingSessionIds.filter(
                 (runningId) => !archived.has(runningId),
               ),
+              hostBusySessionIds: st.hostBusySessionIds.filter(
+                (runningId) => !archived.has(runningId),
+              ),
+              activityBusySessionIds: st.activityBusySessionIds.filter(
+                (runningId) => !archived.has(runningId),
+              ),
               unreadSessionIds: st.unreadSessionIds.filter(
                 (unreadId) => !archived.has(unreadId),
               ),
@@ -2347,6 +2385,12 @@ export const useSessions = create<SessionState>()(
               projects,
               activeId: active.activeId,
               generatingSessionIds: st.generatingSessionIds.filter(
+                (runningId) => !hidden.has(runningId),
+              ),
+              hostBusySessionIds: st.hostBusySessionIds.filter(
+                (runningId) => !hidden.has(runningId),
+              ),
+              activityBusySessionIds: st.activityBusySessionIds.filter(
                 (runningId) => !hidden.has(runningId),
               ),
               unreadSessionIds: st.unreadSessionIds.filter(
@@ -2451,6 +2495,12 @@ export const useSessions = create<SessionState>()(
               generatingSessionIds: st.generatingSessionIds.filter(
                 (runningId) => !removed.has(runningId),
               ),
+              hostBusySessionIds: st.hostBusySessionIds.filter(
+                (runningId) => !removed.has(runningId),
+              ),
+              activityBusySessionIds: st.activityBusySessionIds.filter(
+                (runningId) => !removed.has(runningId),
+              ),
               unreadSessionIds: st.unreadSessionIds.filter(
                 (unreadId) => !removed.has(unreadId),
               ),
@@ -2533,6 +2583,12 @@ export const useSessions = create<SessionState>()(
               generatingSessionIds: st.generatingSessionIds.filter(
                 (runningId) => !removed.has(runningId),
               ),
+              hostBusySessionIds: st.hostBusySessionIds.filter(
+                (runningId) => !removed.has(runningId),
+              ),
+              activityBusySessionIds: st.activityBusySessionIds.filter(
+                (runningId) => !removed.has(runningId),
+              ),
               unreadSessionIds: st.unreadSessionIds.filter(
                 (unreadId) => !removed.has(unreadId),
               ),
@@ -2585,6 +2641,79 @@ export const useSessions = create<SessionState>()(
               ),
               generatingSessionIds: Array.from(running),
               unreadSessionIds: generating
+                ? st.unreadSessionIds.filter((unreadId) => unreadId !== id)
+                : st.unreadSessionIds,
+            };
+          }),
+
+        setHostBusySessionIds: (ids) =>
+          set((st) => {
+            const next = [...new Set(ids)].sort();
+            if (
+              next.length === st.hostBusySessionIds.length &&
+              next.every((id, index) => id === st.hostBusySessionIds[index])
+            ) {
+              return {};
+            }
+            const busy = new Set(next);
+            return {
+              sessions: st.sessions.map((session) =>
+                busy.has(session.id) && session.settledAt
+                  ? { ...session, settledAt: undefined }
+                  : session,
+              ),
+              hostBusySessionIds: next,
+              unreadSessionIds: st.unreadSessionIds.filter(
+                (unreadId) => !busy.has(unreadId),
+              ),
+            };
+          }),
+
+        setSessionHostBusy: (id, busy) =>
+          set((st) => {
+            const running = new Set(st.hostBusySessionIds);
+            if (busy) running.add(id);
+            else running.delete(id);
+            const next = Array.from(running).sort();
+            if (
+              next.length === st.hostBusySessionIds.length &&
+              next.every((value, index) => value === st.hostBusySessionIds[index])
+            ) {
+              return {};
+            }
+            return {
+              sessions: st.sessions.map((session) =>
+                session.id === id && busy && session.settledAt
+                  ? { ...session, settledAt: undefined }
+                  : session,
+              ),
+              hostBusySessionIds: next,
+              unreadSessionIds: busy
+                ? st.unreadSessionIds.filter((unreadId) => unreadId !== id)
+                : st.unreadSessionIds,
+            };
+          }),
+
+        setSessionActivityBusy: (id, busy) =>
+          set((st) => {
+            const running = new Set(st.activityBusySessionIds);
+            if (busy) running.add(id);
+            else running.delete(id);
+            const next = Array.from(running).sort();
+            if (
+              next.length === st.activityBusySessionIds.length &&
+              next.every((value, index) => value === st.activityBusySessionIds[index])
+            ) {
+              return {};
+            }
+            return {
+              sessions: st.sessions.map((session) =>
+                session.id === id && busy && session.settledAt
+                  ? { ...session, settledAt: undefined }
+                  : session,
+              ),
+              activityBusySessionIds: next,
+              unreadSessionIds: busy
                 ? st.unreadSessionIds.filter((unreadId) => unreadId !== id)
                 : st.unreadSessionIds,
             };
@@ -3730,6 +3859,8 @@ export const useSessions = create<SessionState>()(
           activeId: active.activeId,
           archiveRetentionDays,
           generatingSessionIds: [],
+          hostBusySessionIds: [],
+          activityBusySessionIds: [],
           unreadSessionIds: [],
           queuedMessagesBySession: normalizeQueuedMessagesBySession(
             state.queuedMessagesBySession,

@@ -17,6 +17,7 @@ import {
   groupCompletedStreamActivity,
   liveWorkGroupSummary,
   type ChatStreamWorkGroup,
+  type StreamTerminalOutcome,
 } from "../lib/streamParts";
 import { formatDuration } from "../lib/usageMetrics";
 import { Calendar, Code, Copy, Eye, FileText, Lightbulb, Pencil, X } from "./icons";
@@ -50,6 +51,7 @@ type AssistantMessageProps = {
   toolApproval?: ToolApprovalMode;
   workspaceFolder?: string;
   runDetailsRunId?: string;
+  terminalOutcome?: StreamTerminalOutcome;
 };
 
 function escapeRegExp(value: string): string {
@@ -757,12 +759,13 @@ function AssistantMessageView({
   toolApproval = "guarded",
   workspaceFolder,
   runDetailsRunId,
+  terminalOutcome = "completed",
 }: AssistantMessageProps) {
   markPerfRender("AssistantMessage");
   if (streaming) markPerfRender("StreamingAssistantMessage");
   const fallback = fallbackParts(content);
   const parts = streamParts?.length ? streamParts : fallback.parts;
-  const displayParts = groupCompletedStreamActivity(parts, streaming);
+  const displayParts = groupCompletedStreamActivity(parts, streaming, terminalOutcome);
   const workGroupCount = displayParts.filter(
     (part) => part.kind === "workGroup",
   ).length;

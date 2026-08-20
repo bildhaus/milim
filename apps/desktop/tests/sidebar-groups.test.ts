@@ -81,6 +81,7 @@ try {
     sidebarProjectPullRequestOwner,
     sidebarSectionNextRevealCount,
     sidebarThreadPullRequestOwner,
+    workingSessionIdsFromSignals,
   } = await server.ssrLoadModule("/src/components/Sidebar.tsx") as {
     groupSessionsByProjects: (sessions: SidebarSession[], projects: Project[], sidebar: SessionSidebarState, query: string, settledThreadsEnabled?: boolean) => SessionGroup[];
     nextInboxSessionIdAfterSettle: (groups: SessionGroup[], currentId: string) => string | undefined;
@@ -104,6 +105,12 @@ try {
       }>,
     ) => { session: SidebarSession; pullRequest: { number: number } } | undefined;
     sidebarSectionNextRevealCount: (totalSessions: number, visibleLimit: number, activeIndex: number) => number;
+    workingSessionIdsFromSignals: (signals: {
+      generatingSessionIds?: string[];
+      hostBusySessionIds?: string[];
+      activityBusySessionIds?: string[];
+      runningWorkerParentIds?: string[];
+    }) => string[];
     sidebarThreadPullRequestOwner: (
       session: SidebarSession,
       snapshots: Record<string, {
@@ -440,6 +447,15 @@ try {
     })).concat([{ run: { parent_thread_id: "thread-running", status: "running" } }]),
   );
   assert(runningWorkerParents === "thread-running", "only running Worker Runs should activate their parent thread");
+  assert(
+    JSON.stringify(workingSessionIdsFromSignals({
+      generatingSessionIds: ["generation", "shared"],
+      hostBusySessionIds: ["host"],
+      activityBusySessionIds: ["title", "shared"],
+      runningWorkerParentIds: ["worker"],
+    })) === JSON.stringify(["generation", "host", "shared", "title", "worker"]),
+    "sidebar working state should union generation, host, background activity, and worker signals",
+  );
 } finally {
   await server.close();
 }

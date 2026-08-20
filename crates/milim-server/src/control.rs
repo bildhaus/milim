@@ -18,8 +18,8 @@ use milim_core::{Error, Result};
 use milim_inference::{CompletionRequest, SamplingParams, StreamEvent};
 use milim_storage::{
     ControlApprovalRecord, ControlCommandReceiptRecord, ControlHostRecord, ControlInboxRecord,
-    ControlQueuedTurnRecord, ControlRunArtifactRecord, ControlRunRecord, ControlThreadRecord,
-    ControlTimelineRecord, UserDataStore,
+    ControlMailboxRecord, ControlQueuedTurnRecord, ControlRunArtifactRecord, ControlRunRecord,
+    ControlThreadRecord, ControlThreadLinkRecord, ControlTimelineRecord, UserDataStore,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -565,6 +565,8 @@ struct AcceptedTurnV1 {
     config: FrozenRunConfigV1,
     #[serde(default = "control_default_true")]
     append_user: bool,
+    #[serde(default)]
+    mailbox_origin: Option<MailboxOriginV1>,
 }
 
 struct ActiveRun {
@@ -1707,6 +1709,19 @@ impl RunManager {
             .filter(|value| !value.trim().is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| Uuid::new_v4().to_string());
+        if let Some(thread) = self.store.control_thread(&id)? {
+            return Ok(ControlCommandResultV1 {
+                command_id: command.command_id.clone(),
+                status: ControlCommandStatusV1::Applied,
+                thread_id: Some(thread.id),
+                revision: Some(thread.revision),
+                run_id: None,
+                queue_id: None,
+                confirmation_token: None,
+                message: None,
+                data: Value::Null,
+            });
+        }
         let title = command
             .payload
             .get("title")
@@ -1795,7 +1810,7 @@ impl RunManager {
         let current = self
             .store
             .control_thread(id)?
-            .ok_or_else(|| Error::ModelNotFound(format!("thread {id}")))?;
+            .ok_or_else(|| Error::NotFound(format!("thread {id}")))?;
         if let Some(expected) = command.expected_revision {
             if expected != current.revision {
                 return Err(Error::InvalidRequest(format!(
@@ -1885,7 +1900,7 @@ impl RunManager {
         let updated = self
             .store
             .control_update_thread(id, &value.to_string(), command.expected_revision)?
-            .ok_or_else(|| Error::ModelNotFound(format!("thread {id}")))?;
+            .ok_or_else(|| Error::NotFound(format!("thread {id}")))?;
         self.emit_thread_changed(&updated, "thread.updated");
         Ok(ControlCommandResultV1 {
             command_id: command.command_id.clone(),
@@ -1913,7 +1928,7 @@ impl RunManager {
             ));
         }
         if !self.store.control_delete_thread(id)? {
-            return Err(Error::ModelNotFound(format!("thread {id}")));
+            return Err(Error::NotFound(format!("thread {id}")));
         }
         self.emit(
             "thread.deleted",
@@ -1949,7 +1964,7 @@ impl RunManager {
         }
         let message_id = required_payload_string(&command.payload, "message_id")?;
         if !self.store.control_delete_message(thread_id, &message_id)? {
-            return Err(Error::ModelNotFound(format!("message {message_id}")));
+            return Err(Error::NotFound(format!("message {message_id}")));
         }
         self.persist_and_emit(
             thread_id,
@@ -1992,7 +2007,7 @@ impl RunManager {
         let thread = self
             .store
             .control_thread(&thread_id)?
-            .ok_or_else(|| Error::ModelNotFound(format!("thread {thread_id}")))?;
+            .ok_or_else(|| Error::NotFound(format!("thread {thread_id}")))?;
         if let Some(expected) = command.expected_revision {
             if expected != thread.revision {
                 return Err(Error::InvalidRequest(format!(
@@ -2015,6 +2030,7 @@ impl RunManager {
             display_text: payload.display_text,
             config,
             append_user: true,
+            mailbox_origin: None,
         };
         let busy = self
             .active
@@ -2113,12 +2129,13 @@ impl RunManager {
         let thread = self
             .store
             .control_thread(&thread_id)?
-            .ok_or_else(|| Error::ModelNotFound(format!("thread {thread_id}")))?;
+            .ok_or_else(|| Error::NotFound(format!("thread {thread_id}")))?;
         let accepted = AcceptedTurnV1 {
             text: payload.text,
             display_text: payload.display_text,
             config: resolve_frozen_config(state, &thread, payload.attachments)?,
             append_user: true,
+            mailbox_origin: None,
         };
         let inbox_id = Uuid::new_v4().to_string();
         self.store.control_put_inbox(&ControlInboxRecord {
@@ -2160,7 +2177,7 @@ impl RunManager {
         let thread = self
             .store
             .control_thread(&thread_id)?
-            .ok_or_else(|| Error::ModelNotFound(format!("thread {thread_id}")))?;
+            .ok_or_else(|| Error::NotFound(format!("thread {thread_id}")))?;
         let inbox_id = Uuid::new_v4().to_string();
         self.store.control_put_inbox(&ControlInboxRecord {
             id: inbox_id.clone(),
@@ -2247,7 +2264,7 @@ impl RunManager {
         let thread = self
             .store
             .control_thread(&thread_id)?
-            .ok_or_else(|| Error::ModelNotFound(format!("thread {thread_id}")))?;
+            .ok_or_else(|| Error::NotFound(format!("thread {thread_id}")))?;
         if let Some(expected) = command.expected_revision {
             if expected != thread.revision {
                 return Err(Error::InvalidRequest(format!(
@@ -2319,6 +2336,7 @@ impl RunManager {
             display_text,
             config,
             append_user: false,
+            mailbox_origin: None,
         };
         let run_id = self.start_turn(state, thread_id.clone(), accepted)?;
         Ok(ControlCommandResultV1 {
@@ -3178,11 +3196,11 @@ impl RunManager {
             .control_queued_turns(Some(&thread_id))?
             .into_iter()
             .find(|turn| turn.id == queue_id)
-            .ok_or_else(|| Error::ModelNotFound(format!("queued turn {queue_id}")))?;
+            .ok_or_else(|| Error::NotFound(format!("queued turn {queue_id}")))?;
         let accepted = serde_json::from_str::<AcceptedTurnV1>(&queued.request_json)
             .map_err(|error| Error::Other(format!("stored queued turn is invalid: {error}")))?;
         if !self.store.control_remove_queued_turn(&queue_id)? {
-            return Err(Error::ModelNotFound(format!("queued turn {queue_id}")));
+            return Err(Error::NotFound(format!("queued turn {queue_id}")));
         }
         let run_id = match self.start_turn(state, thread_id.clone(), accepted) {
             Ok(run_id) => run_id,
@@ -3223,7 +3241,7 @@ impl RunManager {
             .iter()
             .any(|turn| turn.id == queue_id);
         if !belongs_to_thread || !self.store.control_cancel_inbox(&queue_id)? {
-            return Err(Error::ModelNotFound(format!("queued turn {queue_id}")));
+            return Err(Error::NotFound(format!("queued turn {queue_id}")));
         }
         self.emit(
             "turn.queue_deleted",
@@ -3266,7 +3284,7 @@ impl RunManager {
             .store
             .control_move_queued_turn(&thread_id, &queue_id, &target_id, after)?
         {
-            return Err(Error::ModelNotFound(format!(
+            return Err(Error::NotFound(format!(
                 "queued turn {queue_id} or target {target_id}"
             )));
         }
@@ -3311,7 +3329,7 @@ impl RunManager {
         };
         let response = command.payload.get("response").cloned();
         let Some(mut durable) = self.store.control_approval(&approval_id)? else {
-            return Err(Error::ModelNotFound(format!("approval {approval_id}")));
+            return Err(Error::NotFound(format!("approval {approval_id}")));
         };
         let resolved = state
             .tool_approvals
@@ -3341,7 +3359,7 @@ impl RunManager {
             .tool_approvals
             .wait_for_delivery(&approval_id, milim_agents::APPROVAL_DELIVERY_TIMEOUT)
             .await
-            .ok_or_else(|| Error::ModelNotFound(format!("approval {approval_id}")))?;
+            .ok_or_else(|| Error::NotFound(format!("approval {approval_id}")))?;
         if !matches!(
             snapshot.state,
             milim_agents::ApprovalState::Delivered | milim_agents::ApprovalState::Acknowledged
@@ -3912,6 +3930,8 @@ fn resolve_frozen_config(
         reasoning_effort,
         generation,
         adapter,
+        linked_thread_grants: Vec::new(),
+        claimed_mailbox_ids: Vec::new(),
     })
 }
 
@@ -4076,6 +4096,7 @@ fn thread_summary(
             .map(str::to_string),
         busy,
         queued_turns,
+        linked_threads: Vec::new(),
     })
 }
 
@@ -4128,6 +4149,7 @@ fn queued_turn(turn: ControlQueuedTurnRecord) -> Result<QueuedTurnV1> {
         accepted_at_ms: turn.accepted_at_ms,
         display_text: accepted.display_text.unwrap_or(accepted.text),
         attachments: accepted.config.attachments,
+        mailbox_origin: accepted.mailbox_origin,
     })
 }
 
@@ -4606,6 +4628,34 @@ mod tests {
             serde_json::from_str(include_str!("../../../contracts/control-v1/pairing.json"))
                 .unwrap();
         assert_eq!(pairing["host_id"], "host-fixture");
+    }
+
+    #[tokio::test]
+    async fn thread_create_is_idempotent_by_thread_id() {
+        let (manager, state) = manager_and_state();
+        let first = manager
+            .command(
+                state.clone(),
+                None,
+                create_command("create-first", "openai:gpt-5"),
+            )
+            .await
+            .unwrap();
+        let second = manager
+            .command(
+                state.clone(),
+                None,
+                create_command("create-retry", "openrouter:other-model"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(first.status, ControlCommandStatusV1::Applied);
+        assert_eq!(second.status, ControlCommandStatusV1::Applied);
+        assert_eq!(second.revision, first.revision);
+        let bootstrap = manager.bootstrap(&state).await.unwrap();
+        assert_eq!(bootstrap.threads.len(), 1);
+        assert_eq!(bootstrap.threads[0].model.as_deref(), Some("openai:gpt-5"));
     }
 
     #[tokio::test]
