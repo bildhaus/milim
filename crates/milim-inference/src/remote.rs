@@ -1170,6 +1170,7 @@ fn native_chat_usage(value: &Value) -> Usage {
         prompt_tokens: prompt,
         completion_tokens: completion,
         total_tokens: prompt + completion,
+        cost_usd: None,
     }
 }
 
@@ -1295,6 +1296,10 @@ fn completion_usage(value: &Value) -> Option<Usage> {
             .get("total_tokens")
             .and_then(Value::as_u64)
             .unwrap_or_default() as u32,
+        cost_usd: usage
+            .get("cost_usd")
+            .or_else(|| usage.get("cost"))
+            .and_then(Value::as_f64),
     })
 }
 
@@ -1588,6 +1593,10 @@ fn response_usage(value: &Value) -> Usage {
         prompt_tokens: prompt,
         completion_tokens: completion,
         total_tokens: total,
+        cost_usd: usage
+            .get("cost_usd")
+            .or_else(|| usage.get("cost"))
+            .and_then(Value::as_f64),
     }
 }
 
@@ -1716,14 +1725,16 @@ mod tests {
 
     #[test]
     fn extracts_content_and_finish_from_chunk() {
-        let line = r#"data: {"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}"#;
+        let line = r#"data: {"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4,"cost":0.1745104}}"#;
         let LineOutcome::Event(chunk) = parse_sse_line(line) else {
             panic!("expected event");
         };
         let (delta, finish, usage) = chunk_to_delta(&chunk);
         assert_eq!(delta.content.as_deref(), Some("hi"));
         assert_eq!(finish.as_deref(), Some("stop"));
-        assert_eq!(usage.unwrap().total_tokens, 4);
+        let usage = usage.unwrap();
+        assert_eq!(usage.total_tokens, 4);
+        assert_eq!(usage.cost_usd, Some(0.1745104));
     }
 
     #[test]

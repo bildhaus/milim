@@ -10,6 +10,7 @@ import { googleWorkspaceUrl } from "../lib/googleWorkspace";
 import type { SessionBrowserSession, SessionBrowserTab } from "../sessions/store";
 import { closePreviewWebview, createPreviewWebview, listenForPreviewWebviewNavigation, listenForPreviewWebviewNewTab, listenForPreviewWebviewShortcut, listenForPreviewWebviewTitle, movePreviewWebviewHistory, navigatePreviewWebview, reloadPreviewWebview, type PreviewBrowserStorageMode, type PreviewWebviewLoadState, type PreviewWebviewShortcut } from "../lib/previewWebview";
 import { useSettings } from "../settings/store";
+import { nextPreviewBrowserZoom, useUiPreferences } from "../ui/store";
 import { shortcutLabel, shortcutMatchesEvent } from "../ui/shortcuts";
 import { requestWorkspaceEditorLeave } from "../lib/workspaceEditorGuard";
 import { useContextMenu } from "./ContextMenu";
@@ -34,6 +35,7 @@ type NativeWebviewHandle = {
   once: <T>(event: string, handler: (event: { payload: T }) => void) => Promise<() => void>;
   setPosition: (position: unknown) => Promise<void>;
   setSize: (size: unknown) => Promise<void>;
+  setZoom: (scaleFactor: number) => Promise<void>;
 };
 type NativeOverlayWindowHandle = NativeWebviewHandle & {
   setIgnoreCursorEvents: (ignore: boolean) => Promise<void>;
@@ -253,6 +255,10 @@ export function PreviewPanel({
   const errorLogs = visibleLogs.filter((log) => log.level === "error");
   const fixLogs = visibleLogs.filter((log) => log.level === "error" || log.label === "stderr");
   const selectedPreviewSource = controlledPreviewSource ?? (isUrlPreview ? "url" : "artifact");
+  const previewBrowserZoom = useUiPreferences((state) => state.previewBrowserZoom);
+  const setPreviewBrowserZoom = useUiPreferences((state) => state.setPreviewBrowserZoom);
+  const previewBrowserZoomSource = selectedPreviewSource === "app" ? "app" : "url";
+  const previewBrowserZoomPercent = previewBrowserZoom[previewBrowserZoomSource];
   const browserRecentEnabled = selectedPreviewSource === "url" && browserStorageMode === "persistent";
   const filteredBrowserRecentVisits = useMemo(() => {
     const query = browserRecentEditing ? browserInput.trim().toLowerCase() : "";
@@ -1405,6 +1411,7 @@ export function PreviewPanel({
                         storageMode={selectedPreviewSource === "url" ? browserStorageMode : "private"}
                         surfaceReady={selectedPreviewSource === "app" ? Boolean(runtimeStatus?.ready) : undefined}
                         surfaceError={selectedPreviewSource === "app" ? runtimeError : null}
+                        zoomPercent={previewBrowserZoomPercent}
                         onNativeLabelChange={(label) => {
                           if (label) nativeBrowserLabelsRef.current.set(tab.id, label);
                           else nativeBrowserLabelsRef.current.delete(tab.id);
@@ -1414,7 +1421,14 @@ export function PreviewPanel({
                         onNewTab={openRequestedBrowserTab}
                         onShortcut={(shortcut) => {
                           if (shortcut.action === "new_tab") blankBrowser();
-                          else closeBrowserTab(tab.id);
+                          else if (shortcut.action === "close_tab") closeBrowserTab(tab.id);
+                          else setPreviewBrowserZoom(
+                            previewBrowserZoomSource,
+                            nextPreviewBrowserZoom(
+                              previewBrowserZoomPercent,
+                              shortcut.action === "zoom_in" ? 1 : shortcut.action === "zoom_out" ? -1 : 0,
+                            ),
+                          );
                         }}
                         onTitle={(nextTitle) => syncNativeTitle(tab.id, nextTitle)}
                         onSurfaceChange={active ? onSurfaceChange : undefined}
@@ -1759,6 +1773,7 @@ function NativeArtifactBrowser({
   storageMode,
   surfaceReady,
   surfaceError,
+  zoomPercent,
   onNativeLabelChange,
   onNavigation,
   onNavigationError,
@@ -1778,6 +1793,7 @@ function NativeArtifactBrowser({
   storageMode: PreviewBrowserStorageMode;
   surfaceReady?: boolean;
   surfaceError?: string | null;
+  zoomPercent: number;
   onNativeLabelChange?: (label: string | null) => void;
   onNavigation?: (url: string, state: PreviewWebviewLoadState) => void;
   onNavigationError?: (message: string) => void;
@@ -1802,6 +1818,7 @@ function NativeArtifactBrowser({
   const titleCallbackRef = useRef(onTitle);
   const labelCallbackRef = useRef(onNativeLabelChange);
   const visibleRef = useRef(visible);
+  const zoomPercentRef = useRef(zoomPercent);
   const currentNativeUrlRef = useRef(url);
   const previousFrameKeyRef = useRef(frameKey);
   const [nativeError, setNativeError] = useState<string | null>(null);
@@ -1818,6 +1835,7 @@ function NativeArtifactBrowser({
   titleCallbackRef.current = onTitle;
   labelCallbackRef.current = onNativeLabelChange;
   visibleRef.current = visible;
+  zoomPercentRef.current = zoomPercent;
 
   function clearOverlayCloseTimer() {
     if (overlayCloseTimerRef.current === null) return;
@@ -1982,6 +2000,7 @@ function NativeArtifactBrowser({
         await closeWebview();
         return;
       }
+      await webview.setZoom(zoomPercentRef.current / 100);
       await syncBounds(webview);
       appUiObserver = new MutationObserver(() => void syncAppUiVisibility());
       appUiObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-native-preview-blocker", "open"] });
@@ -2024,6 +2043,15 @@ function NativeArtifactBrowser({
       void closeWebview();
     };
   }, [mounted, profileId, storageMode, surfaceKind]);
+
+  useEffect(() => {
+    if (!IS_TAURI) return;
+    const webview = webviewRef.current;
+    if (!webview) return;
+    void webview.setZoom(zoomPercent / 100).catch((error) => {
+      console.error("Could not update native preview zoom.", error);
+    });
+  }, [zoomPercent]);
 
   useEffect(() => {
     if (!IS_TAURI) return;

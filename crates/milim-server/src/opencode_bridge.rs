@@ -388,6 +388,7 @@ fn usage_from_update(update: &Value) -> Option<Usage> {
             prompt_tokens: used,
             completion_tokens: 0,
             total_tokens: used,
+            cost_usd: None,
         });
     }
     let usage = usage?;
@@ -407,6 +408,7 @@ fn usage_from_update(update: &Value) -> Option<Usage> {
             .or_else(|| usage.get("total_tokens"))
             .and_then(Value::as_u64)
             .unwrap_or(0) as u32,
+        cost_usd: None,
     })
 }
 

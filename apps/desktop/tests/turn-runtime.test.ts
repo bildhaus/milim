@@ -184,6 +184,32 @@ assert.deepEqual(
   ["requests:1", "tokens:99"],
 );
 
+const accumulatedProviderMetrics = createTurnMetricsCapture();
+accumulatedProviderMetrics.captureUsageDelta({
+  prompt_tokens: 10,
+  completion_tokens: 2,
+  total_tokens: 12,
+  cost_usd: 0.12,
+});
+accumulatedProviderMetrics.captureUsageDelta({
+  prompt_tokens: 3,
+  completion_tokens: 1,
+  total_tokens: 4,
+  cost_usd: 0.03,
+});
+assert.equal(accumulatedProviderMetrics.state.costUsd, 0.15);
+assert.equal(accumulatedProviderMetrics.state.costSource, "provider");
+accumulatedProviderMetrics.captureUsageDelta({
+  prompt_tokens: 2,
+  completion_tokens: 1,
+  total_tokens: 3,
+});
+assert.equal(
+  accumulatedProviderMetrics.state.costUsd,
+  undefined,
+  "a partially reported multi-call run must fall back to a whole-run estimate",
+);
+
 const committedRuns: RunTrace[] = [];
 const traceState = createTurnRunTraceState((committed) =>
   committedRuns.push(committed),
@@ -470,6 +496,7 @@ let streamedModelSignal: AbortSignal | undefined;
 let streamedToolContext: AgentToolContext | undefined;
 await runModelChatTurn({
   promptContext: {
+    globalInstructionMessages: [],
     instructionMessages: [{ role: "system", content: "Be terse." }],
     planMessages: [],
     goalMessages: [],
@@ -546,6 +573,7 @@ let compactionAbortBegan = false;
 try {
   await runModelChatTurn({
     promptContext: {
+      globalInstructionMessages: [],
       instructionMessages: [],
       planMessages: [],
       goalMessages: [],
@@ -598,6 +626,7 @@ assert.equal(compactionAbortBegan, true);
 assert.equal(compactionAbortStreamed, false);
 
 const accountPromptContext = {
+  globalInstructionMessages: [],
   instructionMessages: [{ role: "system", content: "System rule" }],
   planMessages: [],
   goalMessages: [],
@@ -1114,6 +1143,7 @@ let toolPreparedSignal: AbortSignal | undefined;
 let toolStreamSignal: AbortSignal | undefined;
 await runToolAgentTurn({
   promptContext: {
+    globalInstructionMessages: [],
     instructionMessages: [{ role: "system", content: "Root instruction" }],
     planMessages: [],
     goalMessages: [],
@@ -1212,6 +1242,7 @@ assert(toolSnapshots >= 3);
 let failingRun: RunTrace | null = null;
 const failing = await runToolAgentTurn({
   promptContext: {
+    globalInstructionMessages: [],
     instructionMessages: [],
     planMessages: [],
     goalMessages: [],

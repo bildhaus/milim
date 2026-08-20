@@ -29,7 +29,7 @@ import {
   googleWorkspaceFileUrl,
 } from "../lib/googleWorkspace";
 import { useAgents } from "../agents/store";
-import { useSettings, type ConfiguredThreadDefaults } from "./store";
+import { MAX_GLOBAL_INSTRUCTIONS_CHARS, useSettings, type ConfiguredThreadDefaults } from "./store";
 import { BUILTIN_QUICK_ACTIONS } from "../lib/emptyStarterSuggestions";
 import { ensureNativeNotificationPermission } from "../lib/nativeNotifications";
 import { isThreadNamingModel } from "../lib/threadTitles";
@@ -364,11 +364,13 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
   const agents = useAgents((s) => s.agents);
   const newThreadBehavior = useSettings((s) => s.newThreadBehavior);
   const configuredThreadDefaults = useSettings((s) => s.configuredThreadDefaults);
+  const globalInstructions = useSettings((s) => s.globalInstructions);
   const unavailableModelPolicy = useSettings((s) => s.unavailableModelPolicy);
   const browserStorageMode = useSettings((s) => s.browserStorageMode);
   const accountRuntimeEnabled = useSettings((s) => s.accountRuntimeEnabled);
   const setNewThreadBehavior = useSettings((s) => s.setNewThreadBehavior);
   const setConfiguredThreadDefaults = useSettings((s) => s.setConfiguredThreadDefaults);
+  const setGlobalInstructions = useSettings((s) => s.setGlobalInstructions);
   const setUnavailableModelPolicy = useSettings((s) => s.setUnavailableModelPolicy);
   const setBrowserStorageMode = useSettings((s) => s.setBrowserStorageMode);
   const sessions = useSessions((s) => s.sessions);
@@ -1232,8 +1234,8 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                     onChange={setComposerSendShortcut}
                     testIdPrefix="chat-send-shortcut"
                     options={[
-                      { value: "enter", label: "Enter", detail: "Enter sends. Shift+Enter adds a line." },
-                      { value: "modEnter", label: "Ctrl / Cmd+Enter", detail: "Enter adds lines. Modifier sends." },
+                      { value: "enter", label: "Enter", detail: "Enter sends or queues. Ctrl/Cmd+Enter steers supported active runs." },
+                      { value: "modEnter", label: "Ctrl / Cmd+Enter", detail: "Enter adds lines. Modifier sends, or steers supported active runs." },
                     ]}
                   />
                 </div>
@@ -1407,6 +1409,22 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
           <SettingsPanel>
             <SettingsBlock data-setting-id="models-defaults" className={settingHighlightClass("models-defaults").trim()}>
               <div className="setting-stack">
+                <div className="setting-field">
+                  <label className="setting-mini-title" htmlFor="global-custom-instructions">Custom instructions</label>
+                  <textarea
+                    id="global-custom-instructions"
+                    data-testid="global-custom-instructions"
+                    className="settings-textarea"
+                    value={globalInstructions}
+                    maxLength={MAX_GLOBAL_INSTRUCTIONS_CHARS}
+                    rows={8}
+                    placeholder="Add preferences, conventions, or context Milim should follow in every chat."
+                    onChange={(event) => setGlobalInstructions(event.currentTarget.value)}
+                  />
+                  <p className="setting-field-note">
+                    Applied to every chat run by this Milim desktop, including paired mobile sends. Workspace AGENTS.md and CLAUDE.md instructions are loaded separately. {globalInstructions.length.toLocaleString()} / {MAX_GLOBAL_INSTRUCTIONS_CHARS.toLocaleString()} characters.
+                  </p>
+                </div>
                 <div className="setting-field"><span className="setting-mini-title">Default chat model</span><Select value={configuredThreadDefaults.model} options={modelOptions} onChange={(model) => updateConfiguredDefaults({ model })} /></div>
                 <div className="setting-field"><span className="setting-mini-title">Default agent</span><Select value={configuredThreadDefaults.activeAgentId ?? ""} options={agentOptions} onChange={(activeAgentId) => updateConfiguredDefaults({ activeAgentId: activeAgentId || null })} /></div>
                 <div className="setting-field"><span className="setting-mini-title">Default worker model</span><Select value={configuredThreadDefaults.workerModel} options={modelOptions} onChange={(workerModel) => updateConfiguredDefaults({ workerModel })} /></div>

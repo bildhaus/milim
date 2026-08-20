@@ -279,6 +279,7 @@ fn parse_sse_line(line: &str, state: &mut GeminiStreamState) -> GeminiLine {
                 opt_u32(usage, "promptTokenCount").unwrap_or(0)
                     + opt_u32(usage, "candidatesTokenCount").unwrap_or(0)
             }),
+            cost_usd: None,
         };
     }
 

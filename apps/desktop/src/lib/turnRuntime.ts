@@ -68,7 +68,8 @@ function fixedContextCategories(
   });
   const included = (messages: ChatMessage[]) => messages.filter((message) => contextMessages.includes(message));
   return [
-    category("saved_instructions", "Saved instructions", included(context.instructionMessages)),
+    category("global_instructions", "Global instructions", included(context.globalInstructionMessages)),
+    category("thread_instructions", "Thread instructions", included(context.instructionMessages)),
     category("repository_rules", "Repository rules", reservedRules),
     category("plan_goal", "Plan / Goal", included([...context.planMessages, ...context.goalMessages])),
     category("skills", "Skills", included(context.skillMessages)),
@@ -221,15 +222,33 @@ export function createTurnMetricsCapture(): TurnMetricsCapture {
   return {
     state,
     captureUsage(usage) {
-      if (usage) state.usage = usage;
+      if (!usage) return;
+      state.usage = usage;
+      if (typeof usage.cost_usd === "number" && usage.cost_usd >= 0) {
+        state.costUsd = usage.cost_usd;
+        state.costSource = "provider";
+      }
     },
     captureUsageDelta(usage) {
       if (!usage) return state.usage;
       state.usage = addTokenUsage(state.usage, usage);
+      if (typeof state.usage.cost_usd === "number") {
+        state.costUsd = state.usage.cost_usd;
+        state.costSource = "provider";
+      } else {
+        state.costUsd = undefined;
+        state.costSource = undefined;
+      }
       return state.usage;
     },
     captureRuntimeMetrics(event) {
-      if (event.usage) state.usage = event.usage;
+      if (event.usage) {
+        state.usage = event.usage;
+        if (typeof event.usage.cost_usd === "number" && event.usage.cost_usd >= 0) {
+          state.costUsd = event.usage.cost_usd;
+          state.costSource = "provider";
+        }
+      }
       if (typeof event.cost_usd === "number" && event.cost_usd >= 0) {
         state.costUsd = event.cost_usd;
         state.costSource = "provider";
@@ -252,11 +271,23 @@ function addTokenUsage(
   total: TokenUsage | undefined,
   usage: TokenUsage,
 ): TokenUsage {
+  const hasTotal = total && (
+    total.prompt_tokens > 0
+    || total.completion_tokens > 0
+    || total.total_tokens > 0
+    || total.cost_usd != null
+  );
+  const costUsd = hasTotal
+    ? typeof total.cost_usd === "number" && typeof usage.cost_usd === "number"
+      ? total.cost_usd + usage.cost_usd
+      : undefined
+    : usage.cost_usd;
   return {
     prompt_tokens: (total?.prompt_tokens ?? 0) + usage.prompt_tokens,
     completion_tokens:
       (total?.completion_tokens ?? 0) + usage.completion_tokens,
     total_tokens: (total?.total_tokens ?? 0) + usage.total_tokens,
+    ...(costUsd != null ? { cost_usd: costUsd } : {}),
   };
 }
 

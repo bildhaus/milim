@@ -1,5 +1,6 @@
 import {
   APP_SHORTCUT_LABELS,
+  composerEnterAction,
   DEFAULT_APP_SHORTCUTS,
   globalAcceleratorToShortcut,
   normalizeAppShortcuts,
@@ -72,6 +73,71 @@ equal(uiSizeShortcutDelta({ key: "=", metaKey: true }, true), 1, "Cmd+= should z
 equal(uiSizeShortcutDelta({ key: "-", metaKey: true }, true), -1, "Cmd+- should zoom UI out on Mac");
 equal(uiSizeShortcutDelta({ key: "=", ctrlKey: true }, true), 0, "Ctrl+= should not act as Cmd+= on Mac");
 equal(uiSizeShortcutDelta({ key: "=", ctrlKey: true, altKey: true }, false), 0, "Alt should not be part of UI size shortcuts");
+
+equal(
+  composerEnterAction(
+    { key: "Enter" },
+    { sendShortcut: "enter", busy: true, canSteer: true, mac: false },
+  ),
+  "send",
+  "plain Enter should keep queueing while a steer-capable run is busy",
+);
+equal(
+  composerEnterAction(
+    { key: "Enter", ctrlKey: true },
+    { sendShortcut: "enter", busy: true, canSteer: true, mac: false },
+  ),
+  "steer",
+  "Ctrl+Enter should steer a busy steer-capable run on Windows",
+);
+equal(
+  composerEnterAction(
+    { key: "Enter", metaKey: true },
+    { sendShortcut: "enter", busy: true, canSteer: true, mac: true },
+  ),
+  "steer",
+  "Cmd+Enter should steer a busy steer-capable run on macOS",
+);
+equal(
+  composerEnterAction(
+    { key: "Enter", ctrlKey: true },
+    { sendShortcut: "enter", busy: true, canSteer: false, mac: false },
+  ),
+  "send",
+  "modifier Enter should keep queueing when the active runtime cannot steer",
+);
+equal(
+  composerEnterAction(
+    { key: "Enter", ctrlKey: true },
+    { sendShortcut: "enter", busy: false, canSteer: true, mac: false },
+  ),
+  "send",
+  "modifier Enter should send normally while idle",
+);
+equal(
+  composerEnterAction(
+    { key: "Enter", ctrlKey: true },
+    { sendShortcut: "modEnter", busy: true, canSteer: true, mac: false },
+  ),
+  "steer",
+  "the modifier-send preference should still steer during a capable active run",
+);
+equal(
+  composerEnterAction(
+    { key: "Enter" },
+    { sendShortcut: "modEnter", busy: true, canSteer: true, mac: false },
+  ),
+  "none",
+  "plain Enter should remain a newline with the modifier-send preference",
+);
+equal(
+  composerEnterAction(
+    { key: "Enter", ctrlKey: true, shiftKey: true },
+    { sendShortcut: "enter", busy: true, canSteer: true, mac: false },
+  ),
+  "none",
+  "Shift+modifier+Enter should remain a newline",
+);
 
 const normalized = normalizeAppShortcuts({
   newChat: "Mod+Shift+N",

@@ -72,6 +72,8 @@ const ridgelineMarkup = renderToStaticMarkup(createElement(MilimUsageRidgeline, 
     threadCount: 12,
     projectCount: 1,
     activeDayCount: 12,
+    responseCount: 0,
+    tokenCount: 0,
     hasUsage: true,
   },
 }));

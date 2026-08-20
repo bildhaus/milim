@@ -2679,6 +2679,7 @@ g.native-chart-mark:focus-visible .native-chart-point {
 .usage-empty-metrics {
   display: flex;
   align-items: baseline;
+  flex-wrap: wrap;
   gap: 16px;
   min-width: 0;
 }

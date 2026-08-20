@@ -103,6 +103,11 @@ export interface MilimUsageSummary {
   threadCount: number;
   projectCount: number;
   activeDayCount: number;
+  responseCount: number;
+  tokenCount: number;
+  costUsd?: number;
+  costSource?: CostAggregation;
+  costPartial?: boolean;
   hasUsage: boolean;
 }
 
@@ -162,7 +167,10 @@ export function responseMetricsForTurn({
   limits?: ProviderLimitInfo[];
 }): ResponseMetrics {
   const runtimeProvider = runtimeProviderName(model, { codexModel, claudeModel });
-  const provided = costSnapshotForAmount(costUsd, costSource ?? "provider");
+  const provided = costSnapshotForAmount(
+    costUsd ?? usage?.cost_usd,
+    costSource ?? "provider",
+  );
   const estimated =
     !provided && !runtimeProvider
       ? costSnapshotForAmount(
@@ -346,6 +354,32 @@ export function summarizeMilimUsage(
   const projectCount = projects.filter(
     (project) => !project.archivedAt && normalizeFolder(project.folder),
   ).length;
+  const accumulated: ThreadMetricsSummary = {
+    responseCount: 0,
+    durationMs: 0,
+    usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+  };
+  for (const session of visibleSessions) {
+    const summary = summarizeThreadMetricsBreakdown(session.messages).lifetime;
+    accumulated.responseCount += summary.responseCount;
+    accumulated.durationMs += summary.durationMs;
+    accumulated.usage.prompt_tokens += summary.usage.prompt_tokens;
+    accumulated.usage.completion_tokens += summary.usage.completion_tokens;
+    accumulated.usage.total_tokens += summary.usage.total_tokens;
+    if (summary.costUsd != null) {
+      accumulated.costUsd = (accumulated.costUsd ?? 0) + summary.costUsd;
+      accumulated.costSource = combineCostSources(
+        accumulated.costSource,
+        summary.costSource ?? "estimate",
+      );
+    }
+    accumulated.costPartial ||= Boolean(summary.costPartial);
+  }
+  const spend = formatCostLabel(
+    accumulated.costUsd,
+    accumulated.costSource,
+    accumulated.costPartial,
+  ) ?? "-";
 
   return {
     months,
@@ -353,10 +387,17 @@ export function summarizeMilimUsage(
       { label: "Threads", value: formatCompactCount(threadCount) },
       { label: "Projects", value: formatCompactCount(projectCount) },
       { label: "Active days", value: formatCompactCount(activeDayCount) },
+      { label: "Tokens", value: formatCompactCount(accumulated.usage.total_tokens) },
+      { label: "Spend", value: spend },
     ],
     threadCount,
     projectCount,
     activeDayCount,
+    responseCount: accumulated.responseCount,
+    tokenCount: accumulated.usage.total_tokens,
+    costUsd: accumulated.costUsd,
+    costSource: accumulated.costSource,
+    costPartial: accumulated.costPartial || undefined,
     hasUsage: activeDayCount > 0,
   };
 }

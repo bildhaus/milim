@@ -1,11 +1,11 @@
-import { type ClipboardEvent, type KeyboardEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { type ClipboardEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { openExternalUrl, type Agent, type ChatAttachment, type MediaKind, type SkillInfo, type ToolInfo } from "../api";
 import type { WorkspaceFileSuggestion } from "../api";
 import { composerAutocompleteTriggerAt, composerCommandRunsOnSelection, composerSuggestionMatchScore, mcpToolTagCompletion, replaceComposerAutocompleteTrigger, skillTagCompletion } from "../lib/composerAutocomplete";
 import { canNavigateComposerHistory, moveComposerHistory, type ComposerHistoryDirection } from "../lib/composerHistory";
 import { clipboardFiles, isDuplicateClipboardPaste, type ClipboardPasteStamp } from "../lib/clipboardFiles";
 import { composerDisplayForText, composerLinkClickAction, composerTokensForText, pasteComposerUrl, type ComposerToken } from "../lib/composerTokens";
-import { shortcutLabel, shortcutMatchesEvent } from "../ui/shortcuts";
+import { composerEnterAction, shortcutLabel } from "../ui/shortcuts";
 import { useUiPreferences } from "../ui/store";
 import { AgentAvatar } from "./AgentAvatar";
 import { ArrowUp, ChevronDown, Folder, FolderOpen, GitHub, Paperclip, PlusSquare, Square, UserRound, X } from "./icons";
@@ -116,6 +116,8 @@ export function Composer({
   tokens,
   contextBudgetTokens,
   busy,
+  imageAttachmentsBlocked = false,
+  sendBlocked = false,
   canSteer = false,
   hasReviewComments = false,
 }: {
@@ -151,6 +153,8 @@ export function Composer({
   tokens: number;
   contextBudgetTokens?: number;
   busy: boolean;
+  imageAttachmentsBlocked?: boolean;
+  sendBlocked?: boolean;
   canSteer?: boolean;
   hasReviewComments?: boolean;
 }) {
@@ -272,8 +276,11 @@ export function Composer({
   const orderedSuggestions = useMemo(() => suggestionGroups.flatMap((group) => group.items), [suggestionGroups]);
   const autoSlashMenuOpen = autocompleteMode === "automatic" && Boolean(activeTrigger) && orderedSuggestions.length > 0 && value !== slashDismissedValue;
   const showSlashMenu = autocompleteMode !== "off" && (slashOpen || autoSlashMenuOpen);
-  const canSend = Boolean(value.trim() || attachments.length || hasReviewComments);
+  const canSend = !sendBlocked && Boolean(value.trim() || attachments.length || hasReviewComments);
   const sendShortcutLabel = composerSendShortcut === "modEnter" ? shortcutLabel("Mod+Enter") : "Enter";
+  const queueShortcutLabel = canSteer && onSteer && composerSendShortcut === "modEnter"
+    ? null
+    : sendShortcutLabel;
   const sentHistoryKey = useMemo(() => sentHistory.join("\0"), [sentHistory]);
   const placeholder = mediaActive
     ? `Describe the ${mediaKind} to generate...`
@@ -666,12 +673,6 @@ export function Composer({
     onPickWorkspaceFolder();
   }
 
-  function shouldSubmitFromEnter(event: KeyboardEvent<HTMLTextAreaElement>): boolean {
-    if (event.key !== "Enter" || event.shiftKey) return false;
-    if (composerSendShortcut === "enter") return true;
-    return shortcutMatchesEvent("Mod+Enter", event);
-  }
-
   return (
     <div
       className={`composer ${composerDensity === "compact" ? "compact" : "comfortable"}`}
@@ -900,18 +901,25 @@ export function Composer({
                 return;
               }
             }
-            if (shouldSubmitFromEnter(e)) {
+            const enterAction = composerEnterAction(e, {
+              sendShortcut: composerSendShortcut,
+              busy,
+              canSteer: Boolean(canSteer && onSteer),
+            });
+            if (enterAction !== "none") {
               e.preventDefault();
-              submitComposer();
+              if (enterAction === "steer") onSteer?.();
+              else submitComposer();
             }
           }}
           onPaste={(e) => {
             const files = clipboardFiles(e.clipboardData);
             if (files.length) {
-              e.preventDefault();
               const decision = isDuplicateClipboardPaste(files, lastClipboardPasteRef.current);
               lastClipboardPasteRef.current = decision.stamp;
               if (!decision.duplicate) onAttachFiles(files);
+              if (imageAttachmentsBlocked && e.clipboardData.getData("text/plain")) return;
+              e.preventDefault();
               return;
             }
             const selection = rawSelection(e.currentTarget);
@@ -1200,7 +1208,7 @@ export function Composer({
           {busy ? (
             <>
               <div className={`composer-queue-actions${canSteer && onSteer ? " split" : ""}`}>
-                <button className="send-btn" data-testid="composer-send" onClick={submitComposer} disabled={!canSend} title={`Queue (${sendShortcutLabel})`} aria-label="Queue message">
+                <button className="send-btn" data-testid="composer-send" onClick={submitComposer} disabled={!canSend} title={queueShortcutLabel ? `Queue (${queueShortcutLabel})` : "Queue"} aria-label="Queue message">
                   <ArrowUp size={18} />
                 </button>
                 {canSteer && onSteer ? (
@@ -1233,7 +1241,7 @@ export function Composer({
                           onSteer();
                         }}
                       >
-                        Steer next step
+                        Steer next step · {shortcutLabel("Mod+Enter")}
                       </button>
                     </div>
                   </div>

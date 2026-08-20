@@ -8,6 +8,7 @@ import {
   mergeControlRunMessages,
   modelChangeMessagesFromTimeline,
   projectControlRunMessages,
+  shouldReconcileControlRunProjection,
   shouldQueueCanonicalFollowup,
 } from "../src/lib/canonicalControl.js";
 import type { ControlQueuedTurnV1, ControlTimelineItemV1 } from "../src/api.js";
@@ -101,6 +102,116 @@ const completed = projectControlRunMessages(
   "run-1",
 );
 assert.equal(completed[1].id, "assistant-1");
+
+const completedWithProviderCost = projectControlRunMessages(
+  [
+    item(1, "message", {
+      id: "assistant-cost",
+      role: "assistant",
+      content: "priced",
+      metrics: {
+        startedAt: 10,
+        endedAt: 30,
+        durationMs: 20,
+        model: "provider:openrouter:openai/gpt-5",
+        provider: "OpenRouter",
+        usage: {
+          prompt_tokens: 120_000,
+          completion_tokens: 656,
+          total_tokens: 120_656,
+          cost_usd: 0.1745104,
+        },
+        costUsd: 0.1745104,
+        costSource: "provider",
+      },
+    }),
+  ],
+  "run-1",
+)[0];
+assert.deepEqual(completedWithProviderCost.metrics, {
+  startedAt: 10,
+  endedAt: 30,
+  durationMs: 20,
+  model: "provider:openrouter:openai/gpt-5",
+  provider: "OpenRouter",
+  usage: {
+    prompt_tokens: 120_000,
+    completion_tokens: 656,
+    total_tokens: 120_656,
+  },
+  costUsd: 0.1745104,
+  costSource: "provider",
+});
+
+const longRunTimeline = [
+  item(1, "start", {}),
+  item(2, "message", { id: "user-long", role: "user", content: "long run" }),
+  ...Array.from({ length: 600 }, (_, index) =>
+    item(index + 3, "assistant_delta", { text: "", reasoning: `step-${index}` }),
+  ),
+  item(603, "message", {
+    id: "assistant-long",
+    role: "assistant",
+    content: "done",
+    reasoning: "complete reasoning",
+  }),
+];
+const longRunTail = longRunTimeline.slice(-500);
+assert.equal(
+  shouldReconcileControlRunProjection(longRunTimeline, "run-1", true),
+  true,
+  "a complete timeline may refresh an existing run projection",
+);
+assert.equal(
+  shouldReconcileControlRunProjection(longRunTail, "run-1", true),
+  false,
+  "an incomplete tail must not replace an existing full run projection",
+);
+assert.equal(
+  shouldReconcileControlRunProjection(longRunTail, "run-1", false),
+  true,
+  "an incomplete tail may recover a run that has no renderer projection",
+);
+assert.equal(
+  shouldReconcileControlRunProjection(longRunTimeline, "run-1", true, "run-1"),
+  false,
+  "background reconciliation must not compete with an attached run poller",
+);
+
+const afterUserDeletion = projectControlRunMessages(
+  [
+    item(1, "message", { id: "user-deleted", role: "user", content: "remove me" }),
+    item(2, "message", { id: "assistant-kept", role: "assistant", content: "still here" }),
+    {
+      ...item(3, "message_deleted", { message_id: "user-deleted" }),
+      run_id: null,
+    },
+  ],
+  "run-1",
+);
+assert.deepEqual(
+  afterUserDeletion.map((message) => message.id),
+  ["assistant-kept"],
+  "a canonical deletion tombstone must remove the projected message even though the tombstone is not run-scoped",
+);
+
+const afterAssistantDeletion = projectControlRunMessages(
+  [
+    item(1, "message", { id: "user-kept", role: "user", content: "keep me" }),
+    item(2, "assistant_delta", { text: "temporary", reasoning: "" }),
+    item(3, "message", { id: "assistant-deleted", role: "assistant", content: "temporary" }),
+    {
+      ...item(4, "message_deleted", { message_id: "assistant-deleted" }),
+      run_id: null,
+    },
+  ],
+  "run-1",
+);
+assert.deepEqual(
+  afterAssistantDeletion.map((message) => message.id),
+  ["user-kept"],
+  "deleting a completed assistant message must not resurrect its streamed placeholder",
+);
 
 const completedWithOrderedWork = projectControlRunMessages(
   [
@@ -252,6 +363,15 @@ assert.deepEqual(
   ).map((message) => message.id),
   ["old", "local-user", "assistant-1"],
   "the echoed user turn should reuse the optimistic message id",
+);
+assert.equal(
+  mergeControlRunMessages(
+    [{ id: "old", role: "user", content: "old" }, optimisticUser],
+    "run-1",
+    completed,
+  )[1].canonicalId,
+  "user-1",
+  "the optimistic row must retain the canonical ID used by durable message actions",
 );
 
 const queued = controlQueuedMessage({

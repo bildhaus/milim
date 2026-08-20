@@ -195,6 +195,8 @@ export interface TokenUsage {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  /** Provider-reported billed cost normalized from fields such as OpenRouter's `usage.cost`. */
+  cost_usd?: number;
 }
 
 export type CostSource = "provider" | "estimate";
@@ -274,6 +276,8 @@ export interface ReviewComment {
 
 export interface ChatMessage {
   id?: string;
+  /** Stable Rust-owned message ID used by canonical mutations when the UI keeps an optimistic ID. */
+  canonicalId?: string;
   role: string;
   content: string;
   /** Canonical control run owning this message, when present. */
@@ -1930,10 +1934,15 @@ function parseTokenUsage(value: unknown): TokenUsage | null {
     typeof total !== "number"
   )
     return null;
+  const rawCost = usage.cost_usd ?? usage.cost;
+  const costUsd = typeof rawCost === "number" && Number.isFinite(rawCost) && rawCost >= 0
+    ? rawCost
+    : undefined;
   return {
     prompt_tokens: prompt,
     completion_tokens: completion,
     total_tokens: total,
+    ...(costUsd != null ? { cost_usd: costUsd } : {}),
   };
 }
 

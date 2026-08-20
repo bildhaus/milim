@@ -13,7 +13,7 @@ use base64::Engine as _;
 use futures::StreamExt;
 use milim_agents::AgentStepHook as _;
 pub use milim_control_contract::*;
-use milim_core::api::openai::{ChatMessage, ReasoningEffort, ToolCall, Usage};
+use milim_core::api::openai::{ChatMessage, ModelPricing, ReasoningEffort, ToolCall, Usage};
 use milim_core::{Error, Result};
 use milim_inference::{CompletionRequest, SamplingParams, StreamEvent};
 use milim_storage::{
@@ -43,6 +43,7 @@ const CUSTOM_THEMES_STATE_KEY: &str = "milim.customThemes";
 const MAX_APPEARANCE_BACKGROUND_BYTES: usize = 8 * 1024 * 1024;
 const MAX_MODEL_FAVORITES: usize = 256;
 const MAX_MODEL_FAVORITE_ID_CHARS: usize = 512;
+const MAX_GLOBAL_INSTRUCTIONS_CHARS: usize = 32 * 1024;
 const DELTA_FLUSH_BYTES: usize = 512;
 const DELTA_FLUSH_INTERVAL: Duration = Duration::from_millis(40);
 pub const MODEL_FAVORITES_SETTINGS_KEY: &str = "milim.settings";
@@ -139,6 +140,8 @@ mod legacy_control_contract {
     #[derive(Clone, Debug, Serialize, Deserialize)]
     pub struct FrozenRunConfigV1 {
         pub model: String,
+        #[serde(default)]
+        pub global_instructions: String,
         #[serde(default)]
         pub instructions: String,
         pub workspace: Option<String>,
@@ -918,7 +921,12 @@ impl RunJournal {
             "explicit_environment_grants": [],
             "prompt_sections": [
                 {
-                    "kind": "instructions",
+                    "kind": "global_instructions",
+                    "provenance": "frozen_run_config",
+                    "content": self.privacy_processed_text(&accepted.config.global_instructions)?,
+                },
+                {
+                    "kind": "thread_instructions",
                     "provenance": "frozen_run_config",
                     "content": self.privacy_processed_text(&accepted.config.instructions)?,
                 },
@@ -1529,7 +1537,7 @@ impl RunManager {
             origin_workspace: origin_summary.workspace.clone(),
             origin_project: origin_summary.workspace.as_deref().and_then(project_label),
         };
-        let mut config = resolve_frozen_config(&state, &target, Vec::new())?;
+        let mut config = resolve_frozen_config(&state, &self.store, &target, Vec::new())?;
         config.linked_thread_grants = self.freeze_linked_thread_grants(target_thread_id)?;
         let accepted = AcceptedTurnV1 {
             text: format!(
@@ -2554,7 +2562,7 @@ impl RunManager {
                 )));
             }
         }
-        let mut config = resolve_frozen_config(&state, &thread, payload.attachments)?;
+        let mut config = resolve_frozen_config(&state, &self.store, &thread, payload.attachments)?;
         config.linked_thread_grants = self.freeze_linked_thread_grants(&thread_id)?;
         let bound_agent_id = thread_agent_id(&thread);
         if config.agent.is_none() {
@@ -2673,7 +2681,7 @@ impl RunManager {
         let accepted = AcceptedTurnV1 {
             text: payload.text,
             display_text: payload.display_text,
-            config: resolve_frozen_config(state, &thread, payload.attachments)?,
+            config: resolve_frozen_config(state, &self.store, &thread, payload.attachments)?,
             append_user: true,
             mailbox_origin: None,
             mailbox_context: Vec::new(),
@@ -2861,7 +2869,7 @@ impl RunManager {
                 )?;
             }
         }
-        let mut config = resolve_frozen_config(&state, &thread, attachments)?;
+        let mut config = resolve_frozen_config(&state, &self.store, &thread, attachments)?;
         config.linked_thread_grants = self.freeze_linked_thread_grants(&thread_id)?;
         if let Some(policy) = delegation_policy {
             config.delegation_policy = policy.to_string();
@@ -3306,12 +3314,21 @@ impl RunManager {
                                     usage,
                                 )
                                 .await?;
+                            let metrics = response_metrics_value(
+                                state,
+                                &self.store,
+                                run_id,
+                                &accepted.config.model,
+                                Some(usage),
+                                None,
+                            )
+                            .await?;
                             self.complete_assistant_message(
                                 thread_id,
                                 run_id,
                                 content,
                                 reasoning,
-                                Some(json!({ "finish_reason": finish_reason, "usage": usage })),
+                                Some(metrics),
                             )?;
                             return Ok(RunOutcome::Completed);
                         }
@@ -3342,7 +3359,12 @@ impl RunManager {
                 id: snapshot.id.clone(),
                 name: snapshot.name.clone(),
                 description: snapshot.description.clone(),
-                system_prompt: snapshot.system_prompt.clone(),
+                system_prompt: compose_labeled_instructions(
+                    "Milim global instructions",
+                    &accepted.config.global_instructions,
+                    "Agent instructions",
+                    &snapshot.system_prompt,
+                ),
                 model: String::new(),
                 tool_mode: snapshot.tool_mode.clone(),
                 enabled_tools: snapshot.enabled_tools.clone(),
@@ -3354,7 +3376,7 @@ impl RunManager {
                 id: "control-default".into(),
                 name: "Milim".into(),
                 description: "Canonical provider chat".into(),
-                system_prompt: accepted.config.instructions.clone(),
+                system_prompt: frozen_run_instructions(&accepted.config),
                 model: String::new(),
                 tool_mode: accepted.config.tool_mode.clone(),
                 enabled_tools: accepted.config.enabled_tools.clone(),
@@ -3524,7 +3546,7 @@ impl RunManager {
                         resolved_at_ms: None,
                     })?;
                 }
-                milim_agents::AgentEvent::Done { .. } => {
+                milim_agents::AgentEvent::Done { usage, .. } => {
                     flush_deltas(
                         self,
                         thread_id,
@@ -3533,7 +3555,22 @@ impl RunManager {
                         &mut pending_reasoning,
                     )?;
                     self.persist_and_emit(thread_id, Some(run_id), &event_type, value)?;
-                    self.complete_assistant_message(thread_id, run_id, content, reasoning, None)?;
+                    let metrics = response_metrics_value(
+                        state,
+                        &self.store,
+                        run_id,
+                        &accepted.config.model,
+                        Some(*usage),
+                        None,
+                    )
+                    .await?;
+                    self.complete_assistant_message(
+                        thread_id,
+                        run_id,
+                        content,
+                        reasoning,
+                        Some(metrics),
+                    )?;
                     return Ok(RunOutcome::Completed);
                 }
                 milim_agents::AgentEvent::Error { message } => {
@@ -3601,14 +3638,11 @@ impl RunManager {
         } else {
             prompt
         };
-        let prompt = if accepted.config.instructions.trim().is_empty() {
+        let instructions = frozen_run_instructions(&accepted.config);
+        let prompt = if instructions.is_empty() {
             prompt
         } else {
-            format!(
-                "System instructions:\n{}\n\n{}",
-                accepted.config.instructions.trim(),
-                prompt
-            )
+            format!("System instructions:\n{instructions}\n\n{prompt}")
         };
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -3698,6 +3732,8 @@ impl RunManager {
         let mut pending_text = String::new();
         let mut pending_reasoning = String::new();
         let mut emitted_first_delta = false;
+        let mut final_usage: Option<Usage> = None;
+        let mut reported_cost_usd: Option<f64> = None;
         loop {
             let event = tokio::select! {
                 changed = stop.changed() => {
@@ -3734,6 +3770,20 @@ impl RunManager {
             };
             let value = serde_json::to_value(&event)
                 .map_err(|error| Error::Other(format!("serialize harness event: {error}")))?;
+            if let Some(usage) = value
+                .get("usage")
+                .filter(|usage| !usage.is_null())
+                .and_then(|usage| serde_json::from_value::<Usage>(usage.clone()).ok())
+            {
+                final_usage = Some(usage);
+            }
+            if let Some(cost) = value
+                .get("cost_usd")
+                .and_then(Value::as_f64)
+                .filter(|cost| cost.is_finite() && *cost >= 0.0)
+            {
+                reported_cost_usd = Some(cost);
+            }
             let event_type = value
                 .get("type")
                 .and_then(Value::as_str)
@@ -3831,6 +3881,7 @@ impl RunManager {
             self.persist_and_emit(thread_id, Some(run_id), timeline_type, timeline_value)?;
             if event.is_terminal() {
                 if event_type == "turn_completed" {
+                    let committed_usage = final_usage.unwrap_or_default();
                     journal
                         .commit_model_response(
                             1,
@@ -3838,10 +3889,25 @@ impl RunManager {
                             &reasoning,
                             &[],
                             "stop",
-                            Usage::default(),
+                            committed_usage,
                         )
                         .await?;
-                    self.complete_assistant_message(thread_id, run_id, content, reasoning, None)?;
+                    let metrics = response_metrics_value(
+                        state,
+                        &self.store,
+                        run_id,
+                        &accepted.config.model,
+                        final_usage,
+                        reported_cost_usd,
+                    )
+                    .await?;
+                    self.complete_assistant_message(
+                        thread_id,
+                        run_id,
+                        content,
+                        reasoning,
+                        Some(metrics),
+                    )?;
                     return Ok(RunOutcome::Completed);
                 }
                 if event_type == "turn_cancelled" {
@@ -4577,6 +4643,98 @@ impl RunManager {
     }
 }
 
+async fn response_metrics_value(
+    state: &AppState,
+    store: &UserDataStore,
+    run_id: &str,
+    model: &str,
+    usage: Option<Usage>,
+    reported_cost_usd: Option<f64>,
+) -> Result<Value> {
+    let ended_at = now_ms();
+    let started_at = store
+        .control_run(run_id)?
+        .map(|run| run.created_at_ms)
+        .unwrap_or(ended_at);
+    let reported_cost_usd = reported_cost_usd
+        .or_else(|| usage.and_then(|usage| usage.cost_usd))
+        .filter(|cost| cost.is_finite() && *cost >= 0.0);
+    let mut provider_name = None;
+    let mut estimated_cost_usd = None;
+
+    if let Some(registry) = state.providers.as_ref() {
+        let providers = registry.list().await;
+        let routed = crate::providers::provider_model_route(model);
+        let provider = routed
+            .as_ref()
+            .and_then(|(provider_id, _)| {
+                providers
+                    .iter()
+                    .find(|provider| provider.id == *provider_id)
+            })
+            .or_else(|| {
+                providers
+                    .iter()
+                    .find(|provider| provider.models.iter().any(|candidate| candidate == model))
+            });
+        if let Some(provider) = provider {
+            provider_name = Some(provider.name.clone());
+            if reported_cost_usd.is_none() {
+                let raw_model = routed
+                    .as_ref()
+                    .map(|(_, raw_model)| raw_model.as_str())
+                    .unwrap_or(model);
+                estimated_cost_usd = usage.and_then(|usage| {
+                    provider
+                        .pricing
+                        .get(raw_model)
+                        .and_then(|pricing| estimate_usage_cost_usd(pricing, usage))
+                });
+            }
+        }
+    }
+
+    let (cost_usd, cost_source) = if let Some(cost) = reported_cost_usd {
+        (Some(cost), Some("provider"))
+    } else if let Some(cost) = estimated_cost_usd {
+        (Some(cost), Some("estimate"))
+    } else {
+        (None, None)
+    };
+    let mut metrics = Map::new();
+    metrics.insert("startedAt".into(), json!(started_at));
+    metrics.insert("endedAt".into(), json!(ended_at));
+    metrics.insert(
+        "durationMs".into(),
+        json!(ended_at.saturating_sub(started_at)),
+    );
+    metrics.insert("model".into(), json!(model));
+    if let Some(provider) = provider_name {
+        metrics.insert("provider".into(), json!(provider));
+    }
+    if let Some(usage) = usage {
+        metrics.insert("usage".into(), json!(usage));
+    }
+    if let Some(cost) = cost_usd {
+        metrics.insert("costUsd".into(), json!(cost));
+    }
+    if let Some(source) = cost_source {
+        metrics.insert("costSource".into(), json!(source));
+    }
+    Ok(Value::Object(metrics))
+}
+
+fn estimate_usage_cost_usd(pricing: &ModelPricing, usage: Usage) -> Option<f64> {
+    let prompt = pricing.prompt.as_deref()?.trim().parse::<f64>().ok()?;
+    let completion = pricing.completion.as_deref()?.trim().parse::<f64>().ok()?;
+    if !prompt.is_finite() || prompt < 0.0 || !completion.is_finite() || completion < 0.0 {
+        return None;
+    }
+    let cost =
+        f64::from(usage.prompt_tokens) * prompt + f64::from(usage.completion_tokens) * completion;
+    (cost.is_finite() && cost >= 0.0).then_some(cost)
+}
+
 fn validate_control_attachments(attachments: &[ControlAttachmentV1]) -> Result<()> {
     if attachments.len() > MAX_CONTROL_ATTACHMENTS {
         return Err(Error::InvalidRequest(format!(
@@ -4667,6 +4825,7 @@ fn flush_deltas(
 
 fn resolve_frozen_config(
     state: &AppState,
+    store: &UserDataStore,
     thread: &ControlThreadRecord,
     attachments: Vec<ControlAttachmentV1>,
 ) -> Result<FrozenRunConfigV1> {
@@ -4786,6 +4945,7 @@ fn resolve_frozen_config(
         .unwrap_or_else(default_control_skill_mode);
     Ok(FrozenRunConfigV1 {
         model,
+        global_instructions: global_instructions(store),
         instructions,
         workspace,
         privacy,
@@ -4809,6 +4969,45 @@ fn resolve_frozen_config(
         linked_thread_grants: Vec::new(),
         claimed_mailbox_ids: Vec::new(),
     })
+}
+
+fn global_instructions(store: &UserDataStore) -> String {
+    store
+        .get_json(MODEL_FAVORITES_SETTINGS_KEY)
+        .ok()
+        .flatten()
+        .and_then(|value| serde_json::from_str::<Value>(&value).ok())
+        .and_then(|value| value.get("state")?.get("globalInstructions").cloned())
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_default()
+        .chars()
+        .take(MAX_GLOBAL_INSTRUCTIONS_CHARS)
+        .collect()
+}
+
+fn frozen_run_instructions(config: &FrozenRunConfigV1) -> String {
+    compose_labeled_instructions(
+        "Milim global instructions",
+        &config.global_instructions,
+        "Thread instructions",
+        &config.instructions,
+    )
+}
+
+fn compose_labeled_instructions(
+    first_label: &str,
+    first: &str,
+    second_label: &str,
+    second: &str,
+) -> String {
+    let first = first.trim();
+    let second = second.trim();
+    match (first.is_empty(), second.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => first.to_string(),
+        (true, false) => second.to_string(),
+        (false, false) => format!("{first_label}:\n{first}\n\n{second_label}:\n{second}"),
+    }
 }
 
 fn normalize_generation_settings(value: &Value) -> GenerationSettingsV1 {
@@ -5506,6 +5705,36 @@ mod tests {
     use milim_inference::test_backend::TestBackend;
     use milim_storage::Database;
 
+    #[test]
+    fn catalog_cost_estimate_uses_cached_per_token_pricing() {
+        let pricing = ModelPricing {
+            prompt: Some("0.000001".into()),
+            completion: Some("0.000002".into()),
+        };
+        let estimated = estimate_usage_cost_usd(&pricing, Usage::new(100, 25)).unwrap();
+        assert!((estimated - 0.00015).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn canonical_metrics_preserve_provider_reported_zero_cost() {
+        let (manager, state) = manager_and_state();
+        let metrics = response_metrics_value(
+            &state,
+            &manager.store,
+            "missing-run",
+            "provider:openrouter:openrouter/free",
+            Some(Usage {
+                cost_usd: Some(0.0),
+                ..Usage::new(10, 2)
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(metrics["costUsd"], 0.0);
+        assert_eq!(metrics["costSource"], "provider");
+    }
+
     fn manager_and_state() -> (Arc<RunManager>, AppState) {
         let store = Arc::new(UserDataStore::new(Database::open_in_memory().unwrap()).unwrap());
         let manager = RunManager::new(store, "Fixture desktop").unwrap();
@@ -5528,6 +5757,55 @@ mod tests {
             }),
             confirmation_token: None,
         }
+    }
+
+    #[tokio::test]
+    async fn app_global_instructions_are_frozen_separately_from_thread_instructions() {
+        let (manager, state) = manager_and_state();
+        manager
+            .store
+            .set_json(
+                MODEL_FAVORITES_SETTINGS_KEY,
+                r#"{"state":{"globalInstructions":"Always write focused tests."},"version":0}"#,
+            )
+            .unwrap();
+        let mut command = create_command("create-instructions", "provider:model");
+        command.payload["settings"]["instructions"] = json!("Be terse.");
+        manager.command(state.clone(), None, command).await.unwrap();
+        let thread = manager
+            .store
+            .control_thread("thread-fixture")
+            .unwrap()
+            .unwrap();
+        let frozen = resolve_frozen_config(&state, &manager.store, &thread, vec![]).unwrap();
+
+        assert_eq!(frozen.global_instructions, "Always write focused tests.");
+        assert_eq!(frozen.instructions, "Be terse.");
+        assert_eq!(
+            frozen_run_instructions(&frozen),
+            "Milim global instructions:\nAlways write focused tests.\n\nThread instructions:\nBe terse."
+        );
+
+        manager
+            .store
+            .set_json(
+                MODEL_FAVORITES_SETTINGS_KEY,
+                r#"{"state":{"globalInstructions":"Changed later."},"version":0}"#,
+            )
+            .unwrap();
+        assert_eq!(
+            frozen.global_instructions, "Always write focused tests.",
+            "accepted runs must retain their frozen global instructions"
+        );
+        assert_eq!(
+            compose_labeled_instructions(
+                "Milim global instructions",
+                &frozen.global_instructions,
+                "Agent instructions",
+                "Review carefully.",
+            ),
+            "Milim global instructions:\nAlways write focused tests.\n\nAgent instructions:\nReview carefully."
+        );
     }
 
     fn journal_fixture(mode: crate::privacy::PrivacyMode) -> (Arc<UserDataStore>, RunJournal) {
@@ -5623,6 +5901,73 @@ mod tests {
         let bootstrap = manager.bootstrap(&state).await.unwrap();
         assert_eq!(bootstrap.threads.len(), 1);
         assert_eq!(bootstrap.threads[0].model.as_deref(), Some("openai:gpt-5"));
+    }
+
+    #[tokio::test]
+    async fn message_delete_removes_projection_and_records_tombstone() {
+        let (manager, state) = manager_and_state();
+        manager
+            .command(
+                state.clone(),
+                None,
+                create_command("create-delete", "mock-echo"),
+            )
+            .await
+            .unwrap();
+        let projected_message = json!({
+            "id": "message-delete-fixture",
+            "role": "user",
+            "content": "remove me"
+        });
+        let renderer_message = json!({
+            "id": "optimistic-renderer-id",
+            "canonicalId": "message-delete-fixture",
+            "role": "user",
+            "content": "remove me"
+        });
+        manager
+            .store
+            .control_append_message("thread-fixture", &renderer_message.to_string())
+            .unwrap();
+        manager
+            .persist_and_emit("thread-fixture", None, "message", projected_message)
+            .unwrap();
+
+        let mut command = ControlCommandV1 {
+            command_id: "delete-message".into(),
+            kind: ControlCommandKindV1::MessageDelete,
+            thread_id: Some("thread-fixture".into()),
+            expected_revision: None,
+            payload: json!({ "message_id": "message-delete-fixture" }),
+            confirmation_token: None,
+        };
+        let challenge = manager
+            .command(state.clone(), None, command.clone())
+            .await
+            .unwrap();
+        assert_eq!(challenge.status, ControlCommandStatusV1::NeedsConfirmation);
+        command.confirmation_token = challenge.confirmation_token;
+        let result = manager.command(state, None, command).await.unwrap();
+
+        assert_eq!(result.status, ControlCommandStatusV1::Applied);
+        assert!(manager
+            .store
+            .control_messages("thread-fixture")
+            .unwrap()
+            .is_empty());
+        assert!(manager
+            .store
+            .control_projected_messages("thread-fixture")
+            .unwrap()
+            .is_empty());
+        let page = manager
+            .timeline_page("thread-fixture", None, None, true, 20)
+            .unwrap()
+            .unwrap();
+        assert!(page.items.iter().any(|item| {
+            item.item_type == "message_deleted"
+                && item.data["message_id"] == "message-delete-fixture"
+        }));
     }
 
     #[tokio::test]
@@ -5885,7 +6230,7 @@ mod tests {
             .control_thread("thread-fixture")
             .unwrap()
             .unwrap();
-        let frozen = resolve_frozen_config(&state, &thread, vec![]).unwrap();
+        let frozen = resolve_frozen_config(&state, &manager.store, &thread, vec![]).unwrap();
         assert_eq!(frozen.model, "gpt-5");
         assert_eq!(frozen.reasoning_effort.as_deref(), Some("high"));
 
@@ -5942,7 +6287,7 @@ mod tests {
             .control_thread("thread-fixture")
             .unwrap()
             .unwrap();
-        assert!(resolve_frozen_config(&state, &thread, vec![]).is_err());
+        assert!(resolve_frozen_config(&state, &manager.store, &thread, vec![]).is_err());
     }
 
     #[tokio::test]
@@ -6058,7 +6403,7 @@ mod tests {
             )
             .unwrap();
 
-        let frozen = resolve_frozen_config(&state, &thread, vec![]).unwrap();
+        let frozen = resolve_frozen_config(&state, &manager.store, &thread, vec![]).unwrap();
         assert_eq!(frozen.model, "provider:current:new-model");
     }
 
@@ -6705,6 +7050,7 @@ mod tests {
                     display_text: None,
                     config: resolve_frozen_config(
                         &state,
+                        &manager.store,
                         &manager
                             .store
                             .control_thread("thread-fixture")
@@ -6875,6 +7221,7 @@ mod tests {
         assert_eq!(grants.len(), 1);
         let mut approval_config = resolve_frozen_config(
             &state,
+            &manager.store,
             &manager.store.control_thread("origin").unwrap().unwrap(),
             vec![],
         )

@@ -1116,6 +1116,18 @@ async fn stream_with_initial_retry(
 }
 
 fn add_usage(total: &mut Usage, usage: Usage) {
+    let had_usage = total.prompt_tokens > 0
+        || total.completion_tokens > 0
+        || total.total_tokens > 0
+        || total.cost_usd.is_some();
+    total.cost_usd = if had_usage {
+        match (total.cost_usd, usage.cost_usd) {
+            (Some(current), Some(next)) => Some(current + next),
+            _ => None,
+        }
+    } else {
+        usage.cost_usd
+    };
     total.prompt_tokens += usage.prompt_tokens;
     total.completion_tokens += usage.completion_tokens;
     total.total_tokens += usage.total_tokens;
@@ -1988,6 +2000,32 @@ mod tests {
         assert_eq!(summed.prompt_tokens, usage.prompt_tokens);
         assert_eq!(summed.completion_tokens, usage.completion_tokens);
         assert_eq!(summed.total_tokens, usage.total_tokens);
+    }
+
+    #[test]
+    fn sums_provider_cost_only_when_every_model_turn_reports_it() {
+        let mut total = Usage::default();
+        add_usage(
+            &mut total,
+            Usage {
+                cost_usd: Some(0.12),
+                ..Usage::new(10, 2)
+            },
+        );
+        add_usage(
+            &mut total,
+            Usage {
+                cost_usd: Some(0.03),
+                ..Usage::new(3, 1)
+            },
+        );
+        assert!((total.cost_usd.unwrap() - 0.15).abs() < f64::EPSILON);
+
+        add_usage(&mut total, Usage::new(2, 1));
+        assert_eq!(
+            total.cost_usd, None,
+            "a missing billed-cost event must force catalog estimation for the whole run",
+        );
     }
 
     #[test]

@@ -52,7 +52,22 @@ export function useChatCatalogController(
   }, []);
 
   useEffect(() => {
-    void listSkills().then(setSkills);
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    const load = (attempt: number) => {
+      void listSkills().then((next) => {
+        if (cancelled) return;
+        setSkills(next);
+        if (next.length === 0 && attempt < 2) {
+          retryTimer = setTimeout(() => load(attempt + 1), 250 * (attempt + 1));
+        }
+      });
+    };
+    load(0);
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+    };
   }, [skillsRevision]);
 
   useEffect(() => {

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState, type CSSProperties, type HTMLAttributes, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type HTMLAttributes, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
 import { createPortal } from "react-dom";
 import {
   SIDEBAR_CHATS_SECTION_ID,
@@ -126,6 +126,7 @@ type SidebarSessionSettings = {
 export type SidebarSessionLike = {
   id: string;
   title: string;
+  hasMessages?: boolean;
   settings?: SidebarSessionSettings;
   previewRuntime?: SessionPreviewRuntime;
   parentId?: string;
@@ -141,7 +142,26 @@ export type SidebarSessionLike = {
   worker?: Session["worker"];
 };
 
-type SidebarSession = Omit<Session, "messages">;
+export function reconcileWorkingSessionActivityAt<
+  T extends Pick<SidebarSessionLike, "id" | "updatedAt">,
+>(
+  previous: ReadonlyMap<string, number>,
+  sessions: readonly T[],
+  workingSessionIds: ReadonlySet<string>,
+): ReadonlyMap<string, number> {
+  const sessionsById = new Map(sessions.map((session) => [session.id, session]));
+  const next = new Map<string, number>();
+  for (const id of workingSessionIds) {
+    const session = sessionsById.get(id);
+    if (session) next.set(id, previous.get(id) ?? session.updatedAt);
+  }
+  return next.size === previous.size &&
+    [...next].every(([id, updatedAt]) => previous.get(id) === updatedAt)
+    ? previous
+    : next;
+}
+
+type SidebarSession = Omit<Session, "messages"> & { hasMessages: boolean };
 
 type SessionGroup<T extends SidebarSessionLike = SidebarSession> = {
   id: string;
@@ -251,8 +271,12 @@ function sortBySidebarOrder<T extends SidebarSessionLike>(sessions: T[], sidebar
   });
 }
 
-function sortByRecentActivity<T extends SidebarSessionLike>(sessions: T[]): T[] {
-  return sessions.slice().sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
+function sortByRecentActivity<T extends SidebarSessionLike>(
+  sessions: T[],
+  activityAtBySession?: ReadonlyMap<string, number>,
+): T[] {
+  const activityAt = (session: T) => activityAtBySession?.get(session.id) ?? session.updatedAt;
+  return sessions.slice().sort((a, b) => activityAt(b) - activityAt(a) || a.id.localeCompare(b.id));
 }
 
 function sortBySettledActivity<T extends SidebarSessionLike>(sessions: T[]): T[] {
@@ -267,12 +291,14 @@ function sortBySettledActivity<T extends SidebarSessionLike>(sessions: T[]): T[]
 export function nextInboxSessionIdAfterSettle<T extends SidebarSessionLike>(
   groups: Array<SessionGroup<T>>,
   currentId: string,
+  activityAtBySession?: ReadonlyMap<string, number>,
 ): string | undefined {
   return sortByRecentActivity(
     groups
       .filter((group) => group.inbox && !group.settled)
       .flatMap((group) => group.sessions)
       .filter((session) => session.id !== currentId),
+    activityAtBySession,
   )[0]?.id;
 }
 
@@ -282,6 +308,7 @@ export function groupSessionsByProjects<T extends SidebarSessionLike>(
   sidebar: SessionSidebarState,
   query: string,
   settledThreadsEnabled = false,
+  activityAtBySession?: ReadonlyMap<string, number>,
 ): Array<SessionGroup<T>> {
   const needle = query.trim().toLowerCase();
   const pinnedSessions = new Set(sidebar.pinnedSessionIds);
@@ -308,7 +335,7 @@ export function groupSessionsByProjects<T extends SidebarSessionLike>(
   };
 
   const isVisibleSession = (session: SidebarSessionLike) => {
-    if (session.archivedAt || session.worker) return false;
+    if (session.archivedAt || session.worker || session.hasMessages === false) return false;
     const folder = projectFolderForSession(session);
     return !folder || !archivedProjectFolders.has(folder);
   };
@@ -318,9 +345,11 @@ export function groupSessionsByProjects<T extends SidebarSessionLike>(
     const activeSessions = visibleSessions.filter((session) => !session.settledAt);
     const pinned = sortByRecentActivity(
       activeSessions.filter((session) => pinnedSessions.has(session.id)),
+      activityAtBySession,
     );
     const inbox = sortByRecentActivity(
       activeSessions.filter((session) => !pinnedSessions.has(session.id)),
+      activityAtBySession,
     );
     const settled = sortBySettledActivity(
       visibleSessions.filter((session) => session.settledAt),
@@ -657,6 +686,13 @@ function sessionPreviewRuntimeForSidebar(state: ReturnType<typeof useSessions.ge
   return folder ? state.previewRuntimesByKey[previewRuntimeKeyForThread(session.id, folder)] : session.previewRuntime;
 }
 
+export function sidebarSessionHasMessages(
+  session: Pick<Session, "messages" | "messagesHydrated" | "persistedMessageCount">,
+): boolean {
+  return session.messages.length > 0 ||
+    (session.messagesHydrated === false && (session.persistedMessageCount ?? 0) > 0);
+}
+
 function sameSidebarSession(a: Session, b: SidebarSession, previewRuntime?: SessionPreviewRuntime): boolean {
   return a.id === b.id &&
     a.title === b.title &&
@@ -668,10 +704,11 @@ function sameSidebarSession(a: Session, b: SidebarSession, previewRuntime?: Sess
     a.createdAt === b.createdAt &&
     a.updatedAt === b.updatedAt &&
     a.settledAt === b.settledAt &&
-    a.archivedAt === b.archivedAt;
+    a.archivedAt === b.archivedAt &&
+    sidebarSessionHasMessages(a) === b.hasMessages;
 }
 
-function createSidebarSessionsSelector() {
+export function createSidebarSessionsSelector() {
   let previous: SidebarSession[] = [];
   return (state: ReturnType<typeof useSessions.getState>): SidebarSession[] => {
     let changed = previous.length !== state.sessions.length;
@@ -681,7 +718,7 @@ function createSidebarSessionsSelector() {
       if (cached && sameSidebarSession(session, cached, previewRuntime)) return cached;
       changed = true;
       const { messages: _messages, ...summary } = session;
-      return { ...summary, previewRuntime };
+      return { ...summary, previewRuntime, hasMessages: sidebarSessionHasMessages(session) };
     });
     if (!changed) return previous;
     previous = next;
@@ -853,6 +890,25 @@ export function Sidebar({
     ));
   }
 
+  const runningWorkerParentThreads = useMemo(
+    () => new Set(runningWorkerParentIdsKey ? runningWorkerParentIdsKey.split("\0") : []),
+    [runningWorkerParentIdsKey],
+  );
+  const generatingSessions = useMemo(
+    () => new Set(workingSessionIdsFromSignals({
+      generatingSessionIds,
+      hostBusySessionIds,
+      activityBusySessionIds,
+      runningWorkerParentIds: [...runningWorkerParentThreads],
+    })),
+    [activityBusySessionIds, generatingSessionIds, hostBusySessionIds, runningWorkerParentThreads],
+  );
+  const [inboxActivityAtBySession, setInboxActivityAtBySession] = useState<ReadonlyMap<string, number>>(new Map());
+  useLayoutEffect(() => {
+    setInboxActivityAtBySession((previous) =>
+      reconcileWorkingSessionActivityAt(previous, sessions, generatingSessions),
+    );
+  }, [generatingSessions, sessions]);
   const groupedSessions = useMemo(
     () =>
       groupSessionsByProjects(
@@ -861,8 +917,9 @@ export function Sidebar({
         sidebarState,
         query,
         settledThreadsEnabled,
+        inboxActivityAtBySession,
       ),
-    [projects, query, sessions, settledThreadsEnabled, sidebarState],
+    [inboxActivityAtBySession, projects, query, sessions, settledThreadsEnabled, sidebarState],
   );
   const threadBarGroup = threadBarGroupId
     ? groupedSessions.find((group) => group.id === threadBarGroupId) ?? null
@@ -952,19 +1009,6 @@ export function Sidebar({
   const customizingProject = customizingProjectId
     ? projects.find((project) => project.id === customizingProjectId) ?? null
     : null;
-  const runningWorkerParentThreads = useMemo(
-    () => new Set(runningWorkerParentIdsKey ? runningWorkerParentIdsKey.split("\0") : []),
-    [runningWorkerParentIdsKey],
-  );
-  const generatingSessions = useMemo(
-    () => new Set(workingSessionIdsFromSignals({
-      generatingSessionIds,
-      hostBusySessionIds,
-      activityBusySessionIds,
-      runningWorkerParentIds: [...runningWorkerParentThreads],
-    })),
-    [activityBusySessionIds, generatingSessionIds, hostBusySessionIds, runningWorkerParentThreads],
-  );
   const unreadSessions = useMemo(() => new Set(unreadSessionIds), [unreadSessionIds]);
   const archivedProjectFoldersForStatus = useMemo(
     () => new Set(projects.filter((project) => project.archivedAt).map((project) => project.folder)),
@@ -1243,11 +1287,16 @@ export function Sidebar({
           sidebarState,
           "",
           true,
+          inboxActivityAtBySession,
         )
       : groupedSessions;
     const nextId =
       settledThreadsEnabled && id === activeId
-        ? nextInboxSessionIdAfterSettle(allInboxGroups, id)
+        ? nextInboxSessionIdAfterSettle(
+            allInboxGroups,
+            id,
+            inboxActivityAtBySession,
+          )
         : undefined;
     if (nextId && !(await requestWorkspaceEditorLeave("navigate"))) return;
     settleSession(id);

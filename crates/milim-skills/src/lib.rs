@@ -346,7 +346,9 @@ impl SkillStore {
             .filter(|s| s.enabled && allowed_ids.is_none_or(|ids| ids.iter().any(|id| id == &s.id)))
             .map(|s| {
                 let hay = format!("{} {} {}", s.name, s.description, s.instructions).to_lowercase();
-                let score = terms.iter().filter(|t| hay.contains(t.as_str())).count();
+                let explicit_tag = contains_explicit_skill_tag(query, &s.name);
+                let score = terms.iter().filter(|t| hay.contains(t.as_str())).count()
+                    + usize::from(explicit_tag) * 1_000;
                 (score, s)
             })
             .filter(|(score, _)| *score > 0)
@@ -354,6 +356,48 @@ impl SkillStore {
         scored.sort_by_key(|(score, _)| Reverse(*score));
         Ok(scored.into_iter().take(limit).map(|(_, s)| s).collect())
     }
+}
+
+fn contains_explicit_skill_tag(query: &str, name: &str) -> bool {
+    let query = query.to_lowercase();
+    let name = name.trim().to_lowercase();
+    if name.is_empty() {
+        return false;
+    }
+    [format!("@{name}"), format!("/{name}")]
+        .into_iter()
+        .any(|needle| {
+            query.match_indices(&needle).any(|(start, _)| {
+                let start_ok = start == 0
+                    || query[..start]
+                        .chars()
+                        .next_back()
+                        .is_some_and(|c| c.is_whitespace() || matches!(c, '(' | '[' | '{'));
+                let end = start + needle.len();
+                let end_ok = end == query.len()
+                    || query[end..].chars().next().is_some_and(|c| {
+                        c.is_whitespace()
+                            || matches!(
+                                c,
+                                ',' | '.'
+                                    | ';'
+                                    | ':'
+                                    | '!'
+                                    | '?'
+                                    | '('
+                                    | ')'
+                                    | '['
+                                    | ']'
+                                    | '{'
+                                    | '}'
+                                    | '"'
+                                    | '\''
+                                    | '`'
+                            )
+                    });
+                start_ok && end_ok
+            })
+        })
 }
 
 pub fn default_global_skill_dirs() -> Vec<PathBuf> {
@@ -440,6 +484,24 @@ mod tests {
         let hits = s.select("how do I use git for version control", 5).unwrap();
         assert!(!hits.is_empty());
         assert_eq!(hits[0].name, "Git Helper");
+    }
+
+    #[test]
+    fn explicit_tag_selects_the_named_skill() {
+        let s = store();
+        s.create_from_md(
+            "---\nname: kata-workbench-creator\ndescription: Build workbenches\n---\nCreate a KATA workbench.",
+        )
+        .unwrap();
+        s.create_from_md(
+            "---\nname: Agent Helper\ndescription: Use agent profiles\n---\nManage agents.",
+        )
+        .unwrap();
+
+        let hits = s
+            .select("Use @kata-workbench-creator for this task.", 10)
+            .unwrap();
+        assert_eq!(hits[0].name, "kata-workbench-creator");
     }
 
     #[test]

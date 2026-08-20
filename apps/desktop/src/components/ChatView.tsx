@@ -168,6 +168,7 @@ import {
   composerNoticeIsDismissible,
   modelComposerBlocker,
   prioritizeComposerNotice,
+  type ComposerBlocker,
   type ComposerBlockerAction,
 } from "../lib/composerBlocker";
 import {
@@ -230,6 +231,8 @@ import {
 import { followScrollTop, isNearScrollBottom, peekEnteringMessageIds } from "../lib/scroll";
 import {
   mergeModelListsForPicker,
+  modelDisplayName,
+  modelImageInputSupport,
   providerOwnsModel,
   reconcileStoredThreadModel,
 } from "../lib/modelPicker";
@@ -312,6 +315,7 @@ import {
   modelChangeMessagesFromTimeline,
   pollControlRun,
   projectControlRunMessages,
+  shouldReconcileControlRunProjection,
   shouldQueueCanonicalFollowup,
 } from "../lib/canonicalControl.js";
 import { createChatMessageId } from "../lib/messageIds.js";
@@ -502,7 +506,7 @@ async function collectHarnessUtilityRun(
         event.type === "turn_completed"
       ) {
         if (event.usage) usage = event.usage;
-        if (typeof event.cost_usd === "number" && event.cost_usd > 0) {
+        if (typeof event.cost_usd === "number" && event.cost_usd >= 0) {
           costUsd = event.cost_usd;
           costSource = "provider";
         }
@@ -1675,6 +1679,7 @@ export function ChatView({
   const favoriteModels = useSettings((s) => s.favorites);
   const accountRuntimeEnabled = useSettings((s) => s.accountRuntimeEnabled);
   const reasoningEffortByModel = useSettings((s) => s.reasoningEffortByModel);
+  const globalInstructions = useSettings((s) => s.globalInstructions);
   const configuredNewThreads = useSettings((s) => s.newThreadBehavior === "configured");
   const unavailableModelPolicy = useSettings((s) => s.unavailableModelPolicy);
   const setMediaSettings = useSettings((s) => s.setMediaSettings);
@@ -1863,6 +1868,7 @@ export function ChatView({
   const canonicalSteeringRef = useRef<Map<string, boolean>>(new Map());
   const canonicalModelWritesRef = useRef<Map<string, CanonicalModelWrite>>(new Map());
   const canonicalThreadModelsRef = useRef(new Map<string, string>());
+  const deletingMessageIdsRef = useRef(new Set<string>());
   const handledUnavailableModelRoutesRef = useRef(new Set<string>());
   const canonicalQueuedMessages = useMemo(
     () =>
@@ -1973,7 +1979,27 @@ export function ChatView({
     () => mergeModelListsForPicker(models, mediaModelEntries),
     [models, mediaModelEntries],
   );
-  const proactiveModelBlocker = useMemo(
+  function unsupportedImageInputMessage(modelId: string): string | null {
+    const selected = pickerModels.find((item) => item.id === modelId);
+    if (modelImageInputSupport(selected) !== "unsupported") return null;
+    const label = selected ? modelDisplayName(selected) : modelId;
+    return `${label} does not support image input. Remove the image or choose a vision model.`;
+  }
+
+  function rejectUnsupportedImageAttachments(
+    attachments: readonly ChatAttachment[],
+    modelId = effectiveModel,
+  ): boolean {
+    if (!attachments.some((attachment) => attachment.mime.toLowerCase().startsWith("image/"))) {
+      return false;
+    }
+    const message = unsupportedImageInputMessage(modelId);
+    if (!message) return false;
+    setChatNotice({ tone: "error", message });
+    return true;
+  }
+
+  const modelRouteBlocker = useMemo(
     () => modelComposerBlocker({
       modelsLoaded,
       selectedModel: effectiveModel,
@@ -1983,6 +2009,19 @@ export function ChatView({
     }),
     [accountRuntimeEnabled, effectiveModel, modelsLoaded, pickerModels, providers],
   );
+  const imageAttachmentBlocker = useMemo<ComposerBlocker | null>(() => {
+    if (!pendingAttachments.some((attachment) => attachment.mime.toLowerCase().startsWith("image/"))) {
+      return null;
+    }
+    const selected = pickerModels.find((item) => item.id === effectiveModel);
+    if (modelImageInputSupport(selected) !== "unsupported") return null;
+    return {
+      tone: "error",
+      message: `${modelDisplayName(selected!)} does not support image input. Remove the image or choose a vision model.`,
+      action: "manage_models",
+    };
+  }, [effectiveModel, pendingAttachments, pickerModels]);
+  const proactiveModelBlocker = modelRouteBlocker ?? imageAttachmentBlocker;
   const composerNotice = prioritizeComposerNotice(chatNotice, proactiveModelBlocker);
   const composerAction: ComposerBlockerAction | null = composerNotice
     ? composerNotice === proactiveModelBlocker
@@ -2721,6 +2760,11 @@ export function ChatView({
         // before its deferred persistence creates the canonical control row.
         // Bootstrap is the authority for whether a timeline is addressable.
         if (!controlThread) return;
+        const run = bootstrap.active_runs.find((item) => item.thread_id === activeId);
+        const alreadyAttached =
+          canonicalRunIdsRef.current.has(activeId) ||
+          generationControllersRef.current.has(activeId);
+        const attachedRunId = alreadyAttached ? run?.id : undefined;
         const timeline = await getControlTimeline(activeId, { tail: 500 });
         if (disposed) return;
         let reconciledMessages = sessionMessages(activeId);
@@ -2731,11 +2775,21 @@ export function ChatView({
             .filter((runId): runId is string => Boolean(runId)),
         );
         for (const runId of timelineRunIds) {
-          const projected = projectControlRunMessages(timeline.items, runId);
-          if (!projected.length) continue;
           const currentRunMessages = reconciledMessages.filter(
             (message) => message.runId === runId,
           );
+          if (
+            !shouldReconcileControlRunProjection(
+              timeline.items,
+              runId,
+              currentRunMessages.length > 0,
+              attachedRunId,
+            )
+          ) {
+            continue;
+          }
+          const projected = projectControlRunMessages(timeline.items, runId);
+          if (!projected.length) continue;
           if (JSON.stringify(currentRunMessages) === JSON.stringify(projected)) {
             continue;
           }
@@ -2768,10 +2822,6 @@ export function ChatView({
         if (timelineChanged) {
           setMessages(activeId, reconciledMessages, { autoTitle: false });
         }
-        const alreadyAttached =
-          canonicalRunIdsRef.current.has(activeId) ||
-          generationControllersRef.current.has(activeId);
-        const run = bootstrap.active_runs.find((item) => item.thread_id === activeId);
         if (!run || alreadyAttached) return;
         const store = useSessions.getState();
         controller = claimTurnGeneration({
@@ -3169,16 +3219,17 @@ export function ChatView({
   }
 
   const tokens = useMemo(() => {
-    const fixed: ChatMessage[] = instructions.trim()
-      ? [{ role: "system", content: instructions.trim() }]
-      : [];
+    const fixed: ChatMessage[] = [globalInstructions, instructions]
+      .map((content) => content.trim())
+      .filter(Boolean)
+      .map((content): ChatMessage => ({ role: "system", content }));
     const draft: ChatMessage[] = input.trim() || pendingAttachments.length
       ? [{ role: "user", content: input, attachments: pendingAttachments }]
       : [];
     return estimateMessagesTokens(
       messagesForModelContext(fixed, [...messages, ...draft]),
     );
-  }, [messages, input, instructions, pendingAttachments]);
+  }, [messages, input, globalInstructions, instructions, pendingAttachments]);
   const activeContextBudget = useMemo(
     () => modelContextBudget(effectiveModel.trim(), pickerModels),
     [effectiveModel, pickerModels],
@@ -5540,13 +5591,30 @@ export function ChatView({
   async function handleAttachFiles(files?: File[]) {
     try {
       let next: ChatAttachment[] = [];
+      const unsupportedMessage = unsupportedImageInputMessage(effectiveModel);
+      let rejectedImageCount = 0;
       if (files?.length) {
-        next = await Promise.all(files.map(browserFileAttachment));
+        const acceptedFiles = unsupportedMessage
+          ? files.filter((file) => {
+              const mime = file.type || inferAttachmentMime(file.name);
+              const image = mime.toLowerCase().startsWith("image/");
+              if (image) rejectedImageCount += 1;
+              return !image;
+            })
+          : files;
+        next = await Promise.all(acceptedFiles.map(browserFileAttachment));
       } else if (inTauri) {
         next = (await pickAttachmentFiles()).map((attachment) => ({
           id: attachmentId(),
           ...attachment,
         }));
+      }
+      const rejectedImages = unsupportedMessage
+        ? next.filter((attachment) => attachment.mime.toLowerCase().startsWith("image/"))
+        : [];
+      if (rejectedImages.length) {
+        rejectedImageCount += rejectedImages.length;
+        next = next.filter((attachment) => !attachment.mime.toLowerCase().startsWith("image/"));
       }
       if (next.length) {
         const available = Math.max(0, 12 - pendingAttachments.length);
@@ -5559,6 +5627,9 @@ export function ChatView({
           });
         }
         setPendingAttachments((current) => [...current, ...next].slice(0, 12));
+      }
+      if (rejectedImageCount && unsupportedMessage) {
+        setChatNotice({ tone: "error", message: unsupportedMessage });
       }
     } catch (e) {
       setChatNotice({
@@ -5585,6 +5656,7 @@ export function ChatView({
         id: attachmentId(),
         ...(await readWorkspaceAttachmentFile(folder, file.path)),
       };
+      if (rejectUnsupportedImageAttachments([next])) return false;
       setPendingAttachments((current) => [...current, next].slice(0, 12));
       return true;
     } catch (e) {
@@ -5672,18 +5744,63 @@ export function ChatView({
     focusComposer();
   }
 
-  function deleteMessageAt(messageIndex: number) {
+  async function deleteMessageAt(messageIndex: number) {
     if (busy) return;
     const latest = sessionMessages(activeId);
     if (messageIndex < 0 || messageIndex >= latest.length) return;
-    setEditing(null);
-    setMessages(
-      activeId,
-      latest.filter((_, index) => index !== messageIndex),
-      { autoTitle: false },
-    );
-    useSessions.getState().clearAccountRuntime(activeId);
-    setChatNotice({ tone: "info", message: "Message deleted." });
+    const message = latest[messageIndex];
+    const canonicalId = message.canonicalId?.trim() || message.id?.trim();
+    if (!canonicalId) {
+      setChatNotice({
+        tone: "error",
+        message: "This legacy message has no stable ID, so Milim cannot delete it safely.",
+      });
+      return;
+    }
+    if (deletingMessageIdsRef.current.has(canonicalId)) return;
+    deletingMessageIdsRef.current.add(canonicalId);
+    try {
+      const commandId = createControlCommandId();
+      const command = {
+        command_id: commandId,
+        kind: "message.delete",
+        thread_id: activeId,
+        payload: { message_id: canonicalId },
+      } as const;
+      let result = await sendControlCommand(command);
+      if (result.status === "needs_confirmation") {
+        if (!result.confirmation_token) {
+          throw new Error("The delete confirmation challenge did not include a token.");
+        }
+        if (!window.confirm("Delete this message?\n\nIt will be removed from this chat and future model context.")) {
+          return;
+        }
+        result = await sendControlCommand({
+          ...command,
+          confirmation_token: result.confirmation_token,
+        });
+      }
+      if (result.status !== "applied") {
+        throw new Error(result.message || `Control command ${result.status}.`);
+      }
+      setEditing(null);
+      setMessages(
+        activeId,
+        sessionMessages(activeId).filter((candidate) =>
+          (candidate.canonicalId?.trim() || candidate.id?.trim()) !== canonicalId,
+        ),
+        { autoTitle: false },
+      );
+      useSessions.getState().clearAccountRuntime(activeId);
+      setChatNotice({ tone: "info", message: "Message deleted." });
+    } catch (error) {
+      setChatNotice({
+        tone: "error",
+        message: `Could not delete message: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    } finally {
+      deletingMessageIdsRef.current.delete(canonicalId);
+    }
   }
 
   async function restoreWorkspaceCheckpoint(checkpoint: WorkspaceCheckpoint) {
@@ -5783,6 +5900,7 @@ export function ChatView({
         }
         const selectedModel = requireChatModel();
         if (!selectedModel) return true;
+        if (rejectUnsupportedImageAttachments(pendingAttachments, selectedModel)) return true;
         updateThreadSettings(activeId, { planMode: true });
         const attachments = pendingAttachments;
         setPendingAttachments([]);
@@ -6078,7 +6196,7 @@ export function ChatView({
       } else {
         await canonicalModelWritesRef.current.get(sessionId)?.promise;
       }
-      await flushDeferredUserStateWrites("milim.sessions");
+      await flushDeferredUserStateWrites();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (options.canonicalAction !== "regenerate") {
@@ -6238,6 +6356,23 @@ export function ChatView({
     const turnSettings = turnSetup.settings;
     const turnActiveAgent = turnSetup.activeAgent;
     const turnModel = turnSetup.model;
+    const latestUserAttachments = [...convo]
+      .reverse()
+      .find((message) => message.role === "user")
+      ?.attachments ?? [];
+    const imageInputError = latestUserAttachments.some((attachment) =>
+      attachment.mime.toLowerCase().startsWith("image/"),
+    )
+      ? unsupportedImageInputMessage(turnModel)
+      : null;
+    if (imageInputError) {
+      setChatNotice({ tone: "error", message: imageInputError });
+      return {
+        status: "error",
+        messages: sessionMessages(id, convo),
+        error: imageInputError,
+      };
+    }
     const turnInstructions = turnSettings.instructions;
     const turnFolder = turnSettings.folder;
     const turnSandbox = turnSettings.sandbox;
@@ -6375,6 +6510,7 @@ export function ChatView({
         sessionId: id,
         threadTitle: turnTitle,
         folder: turnFolder,
+        globalInstructions: useSettings.getState().globalInstructions,
         instructions: turnInstructions,
         planMode: turnPlanMode,
         memory: turnMemory,
@@ -6820,6 +6956,7 @@ export function ChatView({
   function send() {
     const text = input.trim();
     if (!text && pendingAttachments.length === 0 && pendingReviewComments.length === 0) return;
+    if (rejectUnsupportedImageAttachments(pendingAttachments)) return;
     if (compactionInFlightRef.current) {
       setChatNotice({
         tone: "info",
@@ -6984,6 +7121,7 @@ export function ChatView({
     const text = input.trim();
     const attachments = pendingAttachments;
     if (!runId || (!text && attachments.length === 0)) return;
+    if (rejectUnsupportedImageAttachments(attachments)) return;
     try {
       const result = await sendControlCommand({
         command_id: createControlCommandId(),
@@ -8199,6 +8337,8 @@ export function ChatView({
                 tokens={tokens}
                 contextBudgetTokens={activeContextBudget?.promptBudget}
                 busy={busy}
+                imageAttachmentsBlocked={Boolean(unsupportedImageInputMessage(effectiveModel))}
+                sendBlocked={Boolean(imageAttachmentBlocker)}
                 canSteer={Boolean(
                   canonicalRunIdsRef.current.get(activeId)
                   && canonicalSteeringRef.current.get(activeId)

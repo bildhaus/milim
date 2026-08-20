@@ -2419,7 +2419,12 @@ not json
         assert!(matches!(
             events.last(),
             Some(ClaudeStreamEvent::Done {
-                usage: Some(Usage { prompt_tokens: 15, completion_tokens: 4, total_tokens: 19 }),
+                usage: Some(Usage {
+                    prompt_tokens: 15,
+                    completion_tokens: 4,
+                    total_tokens: 19,
+                    cost_usd: None,
+                }),
                 cost_usd: Some(cost),
                 ..
             }) if (*cost - 0.01).abs() < f64::EPSILON

@@ -22,6 +22,7 @@ export type MemoryHit = {
 };
 
 export type TurnPromptContext = {
+  globalInstructionMessages: ChatMessage[];
   instructionMessages: ChatMessage[];
   planMessages: ChatMessage[];
   goalMessages: ChatMessage[];
@@ -85,6 +86,7 @@ export function buildTurnPromptContext({
   sessionId,
   threadTitle,
   folder,
+  globalInstructions = "",
   instructions,
   planMode,
   memory,
@@ -120,6 +122,7 @@ export function buildTurnPromptContext({
   sessionId: string;
   threadTitle: string;
   folder: string;
+  globalInstructions?: string;
   instructions: string;
   planMode: boolean;
   memory: boolean;
@@ -171,6 +174,9 @@ export function buildTurnPromptContext({
         memoryContextBlock(memoryHits),
       ].filter(Boolean).join("\n\n")
     : "";
+  const globalInstructionMessages: ChatMessage[] = globalInstructions.trim()
+    ? [{ role: "system", content: globalInstructions.trim() }]
+    : [];
   const instructionMessages: ChatMessage[] = instructions.trim()
     ? [{ role: "system", content: instructions.trim() }]
     : [];
@@ -227,6 +233,7 @@ export function buildTurnPromptContext({
     }))),
   }] : [];
   return {
+    globalInstructionMessages,
     instructionMessages,
     planMessages,
     goalMessages,
@@ -274,6 +281,7 @@ export async function prepareTurnPromptContext({
   sessionId,
   threadTitle,
   folder,
+  globalInstructions = "",
   instructions,
   planMode,
   memory,
@@ -306,6 +314,7 @@ export async function prepareTurnPromptContext({
   sessionId: string;
   threadTitle: string;
   folder: string;
+  globalInstructions?: string;
   instructions: string;
   planMode: boolean;
   memory: boolean;
@@ -368,6 +377,7 @@ export async function prepareTurnPromptContext({
     sessionId,
     threadTitle,
     folder,
+    globalInstructions,
     instructions,
     planMode,
     memory,
@@ -410,6 +420,7 @@ export function contextMessagesForTurn(context: TurnPromptContext, mode: TurnCon
   const instructions = mode === "agent" ? [] : context.instructionMessages;
   const schedules = mode === "model" ? [] : context.scheduleMessages;
   return [
+    ...context.globalInstructionMessages,
     ...instructions,
     ...context.planMessages,
     ...context.goalMessages,
@@ -480,7 +491,14 @@ async function skillsForTurn(
   selectSkills: (query: string, limit: number, ids?: string[]) => Promise<SkillInfo[]>,
 ): Promise<{ skills: SkillInfo[]; explicitIds: string[] }> {
   if (!lastUserText) return { skills: [], explicitIds: [] };
-  const tagged = taggedSkillsForText(lastUserText, skills);
+  const catalogTagged = taggedSkillsForText(lastUserText, skills);
+  const fallbackCandidates = catalogTagged.length === 0 && hasPotentialSkillTag(lastUserText)
+    ? await selectSkills(lastUserText, 10)
+    : [];
+  const tagged = mergeSkills(
+    catalogTagged,
+    taggedSkillsForText(lastUserText, fallbackCandidates),
+  );
   const explicitIds = tagged.map((skill) => skill.id);
   if (agent?.skill_mode === "none") return { skills: tagged, explicitIds };
   if (agent?.skill_mode === "custom") {
@@ -491,9 +509,23 @@ async function skillsForTurn(
     return { skills: mergeSkills(tagged, selected), explicitIds };
   }
   return {
-    skills: mergeSkills(tagged, await selectSkills(lastUserText, 3)),
+    skills: mergeSkills(
+      tagged,
+      fallbackCandidates.length > 0
+        ? fallbackCandidates.slice(0, 3)
+        : await selectSkills(lastUserText, 3),
+    ),
     explicitIds,
   };
+}
+
+function hasPotentialSkillTag(text: string): boolean {
+  for (let i = 0; i < text.length; i += 1) {
+    if ((text[i] === "@" || text[i] === "/") && isSkillTagStartBoundary(text, i)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function taggedSkillsForText(text: string, skills: SkillInfo[]): SkillInfo[] {

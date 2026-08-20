@@ -32,7 +32,7 @@ export interface PreviewWebviewNewTab {
 
 export interface PreviewWebviewShortcut {
   label: string;
-  action: "new_tab" | "close_tab";
+  action: "new_tab" | "close_tab" | "zoom_in" | "zoom_out" | "zoom_reset";
 }
 
 export interface PreviewWebviewTitle {

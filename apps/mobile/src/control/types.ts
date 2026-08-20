@@ -108,6 +108,7 @@ export interface ControlAttachmentV1 {
 
 export interface FrozenRunConfigV1 {
   model: string;
+  global_instructions: string;
   instructions: string;
   workspace: string | null;
   privacy: string;

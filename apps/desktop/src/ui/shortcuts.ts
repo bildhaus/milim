@@ -178,6 +178,24 @@ export function shortcutMatchesEvent(shortcut: string, event: KeyboardLike, mac 
     parsed.shift === Boolean(event.shiftKey);
 }
 
+export type ComposerEnterAction = "none" | "send" | "steer";
+
+export function composerEnterAction(
+  event: KeyboardLike,
+  options: {
+    sendShortcut: "enter" | "modEnter";
+    busy: boolean;
+    canSteer: boolean;
+    mac?: boolean;
+  },
+): ComposerEnterAction {
+  if (normalizeKey(event.key) !== "Enter" || event.shiftKey || event.repeat) return "none";
+  const modifierEnter = shortcutMatchesEvent("Mod+Enter", event, options.mac ?? isMacPlatform());
+  if (options.busy && options.canSteer && modifierEnter) return "steer";
+  if (options.sendShortcut === "enter") return "send";
+  return modifierEnter ? "send" : "none";
+}
+
 export function uiSizeShortcutDelta(event: KeyboardLike, mac = isMacPlatform()): -1 | 0 | 1 {
   const modPressed = mac ? Boolean(event.metaKey) : Boolean(event.ctrlKey);
   const extraModPressed = mac ? Boolean(event.ctrlKey) : Boolean(event.metaKey);

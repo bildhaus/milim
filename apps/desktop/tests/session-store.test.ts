@@ -1277,6 +1277,26 @@ deepEqual(
   responseMetricsForTurn({
     startedAt: 10,
     endedAt: 40,
+    model: "openrouter/test",
+    providers: pricedProviders,
+    usage: { ...usage, cost_usd: 0.1745104 },
+  }),
+  {
+    startedAt: 10,
+    endedAt: 40,
+    durationMs: 30,
+    model: "openrouter/test",
+    provider: "OpenRouter",
+    usage: { ...usage, cost_usd: 0.1745104 },
+    costUsd: 0.1745104,
+    costSource: "provider",
+  },
+  "provider-reported usage cost should override the catalog estimate",
+);
+deepEqual(
+  responseMetricsForTurn({
+    startedAt: 10,
+    endedAt: 40,
     model: "codex:gpt-5",
     providers: pricedProviders,
     codexModel: "gpt-5",
@@ -1411,12 +1431,40 @@ equal(
 const usageSummary = summarizeMilimUsage(
   [
     {
-      messages: [{ role: "user", content: "one" }],
+      messages: [
+        { role: "user", content: "one" },
+        {
+          role: "assistant",
+          content: "priced exactly",
+          metrics: {
+            startedAt: 1,
+            endedAt: 2,
+            model: "openrouter/test",
+            usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+            costUsd: 0.2,
+            costSource: "provider",
+          },
+        },
+      ],
       updatedAt: new Date(2026, 5, 1, 9).getTime(),
       settings: { folder: "C:\\active-project" },
     },
     {
-      messages: [{ role: "user", content: "two" }],
+      messages: [
+        { role: "user", content: "two" },
+        {
+          role: "assistant",
+          content: "estimated",
+          metrics: {
+            startedAt: 3,
+            endedAt: 4,
+            model: "openrouter/test",
+            usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+            costUsd: 0.1,
+            costSource: "estimate",
+          },
+        },
+      ],
       updatedAt: new Date(2026, 5, 1, 10).getTime(),
       settings: { folder: "" },
     },
@@ -1479,9 +1527,15 @@ deepEqual(
     { label: "Threads", value: "3" },
     { label: "Projects", value: "1" },
     { label: "Active days", value: "2" },
+    { label: "Tokens", value: "30" },
+    { label: "Spend", value: "est. $0.30" },
   ],
   "Milim usage metrics should format compactly",
 );
+equal(usageSummary.responseCount, 2, "Milim usage should count assistant responses with metrics");
+equal(usageSummary.tokenCount, 30, "Milim usage should total response tokens");
+equal(usageSummary.costUsd, 0.30000000000000004, "Milim usage should total response cost");
+equal(usageSummary.costSource, "mixed", "Milim usage should preserve mixed cost provenance");
 const emptyUsageSummary = summarizeMilimUsage(
   [],
   [],
@@ -1498,6 +1552,8 @@ deepEqual(
     { label: "Threads", value: "0" },
     { label: "Projects", value: "0" },
     { label: "Active days", value: "0" },
+    { label: "Tokens", value: "0" },
+    { label: "Spend", value: "-" },
   ],
   "empty Milim usage should render zero metrics",
 );

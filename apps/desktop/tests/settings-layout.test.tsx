@@ -38,6 +38,9 @@ assert(source.includes('label: "Data & privacy"'), "History should expose its pr
 assert(source.includes('label: "About & updates"'), "Update policy and application details should stay together");
 assert(source.includes('label: "Google Workspace"'), "Google Workspace should have a dedicated section");
 assert(source.includes('label: "Model & agent defaults"'), "The workflow label should match the defaults it contains");
+assert(source.includes('data-testid="global-custom-instructions"'), "Model and agent defaults should expose app-wide custom instructions");
+assert(source.includes("Applied to every chat run by this Milim desktop, including paired mobile sends."), "Custom instructions should explain their global scope");
+assert(source.includes("Workspace AGENTS.md and CLAUDE.md instructions are loaded separately."), "Custom instructions should distinguish workspace rules");
 assert(source.includes('title="Browser data"'), "Data settings should expose browser profile controls");
 assert(source.includes('activeSection === "google"'), "Google Workspace controls should render in their dedicated section");
 assert(source.includes("chooseGoogleFilesFromSettings"), "Google Workspace settings should start the system-browser Picker");
@@ -136,6 +139,7 @@ equal(matchingSettingsEntries("settled")[0]?.id, "app-thread-navigation", "Searc
 equal(matchingSettingsEntries("top bar")[0]?.id, "app-thread-navigation", "Search should find horizontal navigation placement");
 equal(matchingSettingsEntries("sidebar organization")[0]?.id, "app-thread-navigation", "Search should find the structural sidebar choice");
 equal(matchingSettingsEntries("thread colors")[0]?.id, "appearance-sidebar-colors", "Search should find automatic project thread colors");
+equal(matchingSettingsEntries("custom instructions")[0]?.id, "models-defaults", "Search should find global custom instructions");
 equal(matchingSettingsEntries("cookies")[0]?.id, "browser-data", "Search should find browser data controls");
 equal(matchingSettingsEntries("sheets")[0]?.id, "google-workspace", "Search should find Google Workspace controls");
 equal(matchingSettingsEntries("keychain")[0]?.id, "system-secret-storage", "Search should find credential storage");

@@ -33,6 +33,7 @@ Object.defineProperty(globalThis, "localStorage", {
 
 const {
   DEFAULT_MEDIA_SETTINGS,
+  MAX_GLOBAL_INSTRUCTIONS_CHARS,
   useSettings,
 } = await import("../src/settings/store.js");
 
@@ -67,6 +68,7 @@ equal(useSettings.getState().unavailableModelPolicy, "ask", "unavailable default
 equal(useSettings.getState().configuredThreadDefaults.toolApproval, "review", "configured approval should default review");
 equal(useSettings.getState().browserStorageMode, "persistent", "sidepanel browser should remember sign-ins by default");
 equal(useSettings.getState().browserSetupSeen, false, "browser persistence disclosure should start unseen");
+equal(useSettings.getState().globalInstructions, "", "global instructions should default empty");
 assert(!("modelPresets" in useSettings.getState()), "obsolete model presets should not be exposed");
 assert(!("presetsOnly" in useSettings.getState()), "obsolete presets-only state should not be exposed");
 
@@ -157,12 +159,19 @@ assert(localStorage.getItem("milim.settings")?.includes("openrouter/deepseek-r1"
 useSettings.getState().setModelReasoningEffort("openrouter/deepseek-r1", "auto");
 deepEqual(useSettings.getState().reasoningEffortByModel, {}, "auto should remove the global model reasoning override");
 
+useSettings.getState().setGlobalInstructions("Always write focused tests.");
+equal(useSettings.getState().globalInstructions, "Always write focused tests.", "global instructions should update");
+assert(localStorage.getItem("milim.settings")?.includes("Always write focused tests."), "global instructions should persist in synced settings");
+useSettings.getState().setGlobalInstructions("x".repeat(MAX_GLOBAL_INSTRUCTIONS_CHARS + 8));
+equal(useSettings.getState().globalInstructions.length, MAX_GLOBAL_INSTRUCTIONS_CHARS, "global instructions should stay within the prompt limit");
+
 localStorage.setItem("milim.settings", JSON.stringify({
   state: {
     collapsedModelGroups: [" OpenAI ", "OpenAI", "", 42, "Codex"],
     accountRuntimeEnabled: { codex: false, claude: "no", pi: false },
     browserStorageMode: "shared",
     browserSetupSeen: 0,
+    globalInstructions: 42,
   },
   version: 0,
 }));
@@ -175,6 +184,7 @@ deepEqual(
 );
 equal(useSettings.getState().browserStorageMode, "persistent", "malformed browser storage should normalize to persistent");
 equal(useSettings.getState().browserSetupSeen, false, "malformed browser disclosure state should normalize to unseen");
+equal(useSettings.getState().globalInstructions, "", "malformed global instructions should normalize to empty");
 
 useSettings.getState().setNewThreadBehavior("configured");
 useSettings.getState().setConfiguredThreadDefaults({ model: "provider:model", toolApproval: "review", privacy: "redact" });

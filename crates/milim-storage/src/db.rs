@@ -2292,8 +2292,8 @@ impl UserDataStore {
         Ok(messages.into_iter().map(|(_, json)| json).collect())
     }
 
-    /// Delete one canonical user-session message by its stable JSON `id` and
-    /// compact the positional indices used by the legacy desktop snapshot.
+    /// Delete one canonical user-session message by its stable JSON `id` (or
+    /// a replica's retained `canonicalId`) and compact legacy positional indices.
     pub fn control_delete_message(&self, thread_id: &str, message_id: &str) -> Result<bool> {
         let thread_id = required_control_text(thread_id, "thread id")?;
         let message_id = required_control_text(message_id, "message id")?;
@@ -2323,7 +2323,8 @@ impl UserDataStore {
                     .ok()
                     .and_then(|value| {
                         value
-                            .get("id")
+                            .get("canonicalId")
+                            .or_else(|| value.get("id"))
                             .and_then(|id| id.as_str())
                             .map(str::to_owned)
                     })

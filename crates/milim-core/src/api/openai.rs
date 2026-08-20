@@ -270,6 +270,10 @@ pub struct Usage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    /// Provider-reported billed cost in USD. OpenRouter sends this as
+    /// `usage.cost`; Milim normalizes it to `cost_usd` everywhere else.
+    #[serde(default, alias = "cost", skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
 }
 
 impl Usage {
@@ -278,6 +282,7 @@ impl Usage {
             prompt_tokens: prompt,
             completion_tokens: completion,
             total_tokens: prompt + completion,
+            cost_usd: None,
         }
     }
 }
