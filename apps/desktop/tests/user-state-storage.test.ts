@@ -450,6 +450,15 @@ const deltaCall = calls
   .slice(deltaCallStart)
   .find((call) => call.command === "user_sessions_apply_ops");
 assert(deltaCall, "changed session state should use the delta command");
+const changedDelta = deltaCall.args?.delta as {
+  upserts: Array<{ id: string; baseMessageCount: number }>;
+};
+equal(
+  changedDelta.upserts.find((upsert) => upsert.id === "changing")
+    ?.baseMessageCount,
+  1,
+  "session deltas should identify the acknowledged message-count base",
+);
 const deltaWire = JSON.stringify(deltaCall.args?.delta);
 assert(
   !deltaWire.includes(largeUnchangedPayload),
@@ -507,8 +516,17 @@ const partialDeltaCall = calls
   .find((call) => call.command === "user_sessions_apply_ops");
 assert(partialDeltaCall, "partial metadata edits should use a session delta");
 const partialDelta = partialDeltaCall.args?.delta as {
-  upserts: Array<{ preserveMessages?: boolean; sessionJson?: string }>;
+  upserts: Array<{
+    baseMessageCount: number;
+    preserveMessages?: boolean;
+    sessionJson?: string;
+  }>;
 };
+equal(
+  partialDelta.upserts[0]?.baseMessageCount,
+  1,
+  "partial session deltas should use the persisted message count as their base",
+);
 equal(
   partialDelta.upserts[0]?.preserveMessages,
   true,

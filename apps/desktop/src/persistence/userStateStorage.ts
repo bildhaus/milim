@@ -50,6 +50,7 @@ type SessionMessageDelta = { index: number; messageJson: string };
 type SessionDelta = {
   id: string;
   sessionJson?: string;
+  baseMessageCount: number;
   messageCount: number;
   preserveMessages?: boolean;
   messages: SessionMessageDelta[];
@@ -203,6 +204,9 @@ function buildSessionsDelta(
     const previousMessages = previousSession && !previousWasPartial
       ? sessionMessages(previousSession)
       : [];
+    const baseMessageCount = previousWasPartial
+      ? Number(previousSession?.persistedMessageCount ?? previousMessages.length)
+      : previousMessages.length;
     const changedMessages: SessionMessageDelta[] = [];
     if (!preserveMessages) {
       for (let index = 0; index < messages.length; index += 1) {
@@ -236,6 +240,7 @@ function buildSessionsDelta(
       upserts.push({
         id,
         sessionJson,
+        baseMessageCount,
         messageCount: preserveMessages
           ? Number(session.persistedMessageCount ?? messages.length)
           : messages.length,

@@ -911,6 +911,7 @@ pub struct SessionsDelta {
 pub struct SessionDelta {
     pub id: String,
     pub session_json: Option<String>,
+    pub base_message_count: usize,
     pub message_count: usize,
     #[serde(default)]
     pub preserve_messages: bool,
@@ -5260,6 +5261,13 @@ fn apply_sessions_delta_locked(conn: &Connection, delta: SessionsDelta) -> Resul
                 .map_err(sqlite)?
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(sqlite)?;
+            // Renderer deltas are positional and are computed from the last
+            // acknowledged replica. Canonical Rust mutations can change the
+            // transcript before a deferred renderer write arrives; in that
+            // case keep the authoritative rows and still accept safe metadata.
+            if current_message_indices.len() != session.base_message_count {
+                continue;
+            }
             let mut current_index_by_id = BTreeMap::new();
             for (index, message_json) in current_message_indices {
                 let message = parse_json(&message_json)?;
@@ -5857,6 +5865,7 @@ mod tests {
                 upserts: vec![SessionDelta {
                     id: "a".into(),
                     session_json: Some(r#"{"id":"a","title":"A2"}"#.into()),
+                    base_message_count: 1,
                     message_count: 2,
                     preserve_messages: false,
                     messages: vec![
@@ -5907,6 +5916,7 @@ mod tests {
                 upserts: vec![SessionDelta {
                     id: "a".into(),
                     session_json: None,
+                    base_message_count: 2,
                     message_count: 1,
                     preserve_messages: false,
                     messages: Vec::new(),
@@ -5939,6 +5949,7 @@ mod tests {
             upserts: vec![SessionDelta {
                 id: "a".into(),
                 session_json: Some(r#"{"id":"a","title":"Changed"}"#.into()),
+                base_message_count: 1,
                 message_count: 2,
                 preserve_messages: false,
                 messages: vec![SessionMessageDelta {
@@ -5971,6 +5982,7 @@ mod tests {
                 upserts: vec![SessionDelta {
                     id: "a".into(),
                     session_json: Some(r#"{"id":"a","title":"After"}"#.into()),
+                    base_message_count: 2,
                     message_count: 2,
                     preserve_messages: true,
                     messages: Vec::new(),
@@ -6544,6 +6556,7 @@ mod tests {
                 upserts: vec![SessionDelta {
                     id: "thread-1".into(),
                     session_json: None,
+                    base_message_count: 1,
                     message_count: 1,
                     preserve_messages: false,
                     messages: vec![SessionMessageDelta {
@@ -6599,6 +6612,7 @@ mod tests {
                 upserts: vec![SessionDelta {
                     id: "thread-1".into(),
                     session_json: None,
+                    base_message_count: 1,
                     message_count: 2,
                     preserve_messages: false,
                     messages: vec![SessionMessageDelta {
@@ -6619,6 +6633,57 @@ mod tests {
     }
 
     #[test]
+    fn renderer_message_delta_rebases_after_canonical_message_deletion() {
+        let store = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        store
+            .control_create_thread(
+                "thread-1",
+                r#"{"id":"thread-1","title":"Before"}"#,
+                "epoch-1",
+            )
+            .unwrap();
+        for message in [
+            r#"{"id":"user-1","role":"user","content":"one"}"#,
+            r#"{"id":"assistant-1","role":"assistant","content":"two"}"#,
+            r#"{"id":"user-2","role":"user","content":"three"}"#,
+        ] {
+            store.control_append_message("thread-1", message).unwrap();
+        }
+        assert!(store
+            .control_delete_message("thread-1", "assistant-1")
+            .unwrap());
+
+        store
+            .apply_sessions_delta(SessionsDelta {
+                meta_json: r#"{"state":{"activeId":"thread-1"},"version":0}"#.into(),
+                session_order: vec!["thread-1".into()],
+                upserts: vec![SessionDelta {
+                    id: "thread-1".into(),
+                    session_json: Some(r#"{"id":"thread-1","title":"After"}"#.into()),
+                    base_message_count: 3,
+                    message_count: 3,
+                    preserve_messages: false,
+                    messages: Vec::new(),
+                }],
+                deleted_session_ids: Vec::new(),
+            })
+            .unwrap();
+
+        let thread = store.control_thread("thread-1").unwrap().unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&thread.session_json).unwrap()["title"],
+            "After"
+        );
+        let messages = store.control_messages("thread-1").unwrap();
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].contains("user-1"));
+        assert!(messages[1].contains("user-2"));
+        assert!(!messages
+            .iter()
+            .any(|message| message.contains("assistant-1")));
+    }
+
+    #[test]
     fn renderer_message_delta_rejects_duplicate_stable_ids() {
         let store = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
         store
@@ -6636,6 +6701,7 @@ mod tests {
                 upserts: vec![SessionDelta {
                     id: "thread-1".into(),
                     session_json: None,
+                    base_message_count: 0,
                     message_count: 2,
                     preserve_messages: false,
                     messages: vec![

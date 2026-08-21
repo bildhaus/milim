@@ -1517,6 +1517,14 @@ async function writeLargeTranscriptFixture(
       const previousIds = new Set(
         (state.sessions ?? []).map((session) => session.id),
       );
+      const previousMessageCounts = new Map(
+        (state.sessions ?? []).map((session) => [
+          session.id,
+          session.messagesHydrated === false
+            ? (session.persistedMessageCount ?? session.messages?.length ?? 0)
+            : (session.messages?.length ?? 0),
+        ]),
+      );
       const canonical = state.sessions?.find(
         (session) => session.id === activeId,
       );
@@ -1582,6 +1590,7 @@ async function writeLargeTranscriptFixture(
             return {
               id: session.id,
               sessionJson: JSON.stringify(sessionMeta),
+              baseMessageCount: previousMessageCounts.get(session.id) ?? 0,
               messageCount: messages.length,
               messages: messages.map((message, index) => ({
                 index,
