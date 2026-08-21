@@ -26,7 +26,11 @@ import {
   type WorkspaceCheckpoint,
   type WorkspaceGitActionResult,
 } from "../api";
-import { useSessions, type HotSwapAction } from "../sessions/store";
+import {
+  useSessions,
+  type HotSwapAction,
+  type SessionWorkerRunRecord,
+} from "../sessions/store";
 import {
   hasPreviewPackageJson,
   isPreviewableArtifact,
@@ -242,6 +246,36 @@ type MessageRowProps = {
   entering?: boolean;
   onEntered?: (id: string) => void;
 };
+
+export function WorkerRunEvent({
+  record,
+  onOpen,
+}: {
+  record: SessionWorkerRunRecord;
+  onOpen: () => void;
+}) {
+  return (
+    <button
+      className={`worker-run-event ${record.run.status}`}
+      type="button"
+      data-testid="worker-run-event"
+      onClick={onOpen}
+    >
+      <UserRound size={13} aria-hidden="true" />
+      <span>
+        {record.run.status === "proposed"
+          ? "Worker plan ready"
+          : record.run.status === "running"
+            ? "Workers running"
+            : `Worker run ${record.run.status}`}
+      </span>
+      <small>
+        {record.run.tasks.length} task{record.run.tasks.length === 1 ? "" : "s"}
+      </small>
+      <ArrowRight size={12} aria-hidden="true" />
+    </button>
+  );
+}
 
 function MessageRowView({
   activeId,
@@ -539,26 +573,11 @@ function MessageRowView({
                 onDeny={() => actions?.denyToolApproval(i, m)}
               />
             )}
-            {linkedWorkerRun && (
-              <button
-                className={`worker-run-event ${linkedWorkerRun.run.status}`}
-                type="button"
-                data-testid="worker-run-event"
-                onClick={() => actions?.openWorkers(linkedWorkerRun.run.id)}
-              >
-                <UserRound size={13} />
-                <span>
-                  {linkedWorkerRun.run.status === "proposed"
-                    ? "Worker plan ready"
-                    : linkedWorkerRun.run.status === "running"
-                      ? "Workers running"
-                      : `Worker run ${linkedWorkerRun.run.status}`}
-                </span>
-                <small>
-                  {linkedWorkerRun.run.tasks.length} task{linkedWorkerRun.run.tasks.length === 1 ? "" : "s"}
-                </small>
-                <ArrowRight size={12} />
-              </button>
+            {linkedWorkerRun && linkedWorkerRun.run.status !== "running" && (
+              <WorkerRunEvent
+                record={linkedWorkerRun}
+                onOpen={() => actions?.openWorkers(linkedWorkerRun.run.id)}
+              />
             )}
             {(hasAssistantOutput || assistantStreaming) && (
               <AssistantMessage

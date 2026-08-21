@@ -56,6 +56,21 @@ assert.match(chatView, /"Open Preview: App"/);
 assert.match(chatView, /"Open Workers"/);
 assert.match(chatView, /id="inspector-tab-workers"/);
 assert.match(chatMessageRow, /openWorkers\(linkedWorkerRun\.run\.id\)/);
+assert.match(
+  chatView,
+  /const runningWorkerRuns = useMemo\([\s\S]*?record\.run\.status === "running"/,
+  "running Worker Runs should have a stable transcript-footer projection",
+);
+assert.match(
+  chatView,
+  /data-testid="transcript-worker-runs"[\s\S]*?runningWorkerRuns\.map\(\(record\) => \([\s\S]*?<WorkerRunEvent/,
+  "running Worker Runs should render after the transcript rows",
+);
+assert.match(
+  chatMessageRow,
+  /linkedWorkerRun && linkedWorkerRun\.run\.status !== "running"/,
+  "running Worker Runs should not also render inside a mutable message row",
+);
 assert.match(chatView, /inspectorTab === "workers"[\s\S]*?\? true/);
 assert.ok(chatView.includes('[data-testid="open-artifact-browser"]'));
 

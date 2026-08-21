@@ -360,7 +360,11 @@ import {
 import { SheetDialog } from "./SheetDialog";
 import { WorkspaceLauncherButton } from "./WorkspaceLauncher";
 import { BatonTargetSheet, HotSwapPreflightSheet } from "./HotSwapDialogs";
-import { MessageRow, type MessageRowActions } from "./ChatMessageRow";
+import {
+  MessageRow,
+  WorkerRunEvent,
+  type MessageRowActions,
+} from "./ChatMessageRow";
 import {
   QueuedMessageTray,
   type QueuedMessageTrayItem,
@@ -1575,6 +1579,11 @@ export function ChatView({
     () =>
       workerRuns.filter((record) => record.run.parent_thread_id === activeId),
     [activeId, workerRuns],
+  );
+  const runningWorkerRuns = useMemo(
+    () =>
+      activeWorkerRuns.filter((record) => record.run.status === "running"),
+    [activeWorkerRuns],
   );
   const activeWorkerRun = activeWorkerRuns[0];
   const announcedAttentionKeysRef = useRef(new Set<string>());
@@ -8064,6 +8073,20 @@ export function ChatView({
                       style={{ height: transcriptBottomSpacer }}
                     />
                   )}
+                </div>
+              )}
+              {!emptyThread && runningWorkerRuns.length > 0 && (
+                <div
+                  className="transcript-worker-runs"
+                  data-testid="transcript-worker-runs"
+                >
+                  {runningWorkerRuns.map((record) => (
+                    <WorkerRunEvent
+                      key={record.run.id}
+                      record={record}
+                      onOpen={() => openWorkersInspector(record.run.id)}
+                    />
+                  ))}
                 </div>
               )}
             </div>
