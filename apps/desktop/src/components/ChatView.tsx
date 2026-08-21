@@ -3861,26 +3861,7 @@ export function ChatView({
     );
   }
 
-  function openQuickSummarySource(source: QuickSummarySource) {
-    if (source.kind === "artifact") {
-      const revision = artifactRevisionChoice(
-        source.messageIndex,
-        source.artifactIndex,
-      )?.revision;
-      openPreviewArtifact(
-        revision?.artifact ?? source.artifact,
-        revision?.artifacts ?? source.artifacts,
-        false,
-        revision,
-      );
-      return;
-    }
-    if (source.kind === "memory") {
-      setMemoryTarget(source.memory);
-      setMemoryOpen(true);
-      return;
-    }
-    const attachment = source.attachment;
+  function openAttachment(attachment: ChatAttachment) {
     if (attachment.sourcePath) {
       void openArtifactLocation(attachment.sourcePath).catch((error) =>
         setChatNotice({
@@ -3909,6 +3890,28 @@ export function ChatView({
       return;
     }
     setChatNotice({ tone: "error", message: "Attachment content is unavailable." });
+  }
+
+  function openQuickSummarySource(source: QuickSummarySource) {
+    if (source.kind === "artifact") {
+      const revision = artifactRevisionChoice(
+        source.messageIndex,
+        source.artifactIndex,
+      )?.revision;
+      openPreviewArtifact(
+        revision?.artifact ?? source.artifact,
+        revision?.artifacts ?? source.artifacts,
+        false,
+        revision,
+      );
+      return;
+    }
+    if (source.kind === "memory") {
+      setMemoryTarget(source.memory);
+      setMemoryOpen(true);
+      return;
+    }
+    openAttachment(source.attachment);
   }
 
   function selectPreviewSource(source: InspectorPreviewSource) {
@@ -8117,6 +8120,7 @@ export function ChatView({
     handlePreviewArtifact,
     handleCheckArtifact,
     handleOpenArtifact,
+    openAttachment,
     onOpenSchedules,
   };
   // Draft changes rerender ChatView; keep virtual spacers stable while typing.

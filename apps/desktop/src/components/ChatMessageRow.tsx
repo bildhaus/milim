@@ -51,6 +51,7 @@ import { AgentAvatar } from "./AgentAvatar";
 import { AssistantMessage } from "./AssistantMessage";
 import { ArtifactList } from "./ArtifactList";
 import { GeneratedMedia } from "./GeneratedMedia";
+import { MessageAttachments } from "./MessageAttachments";
 import { RunTimeline } from "./RunTimeline";
 import {
   TurnChangesCard,
@@ -82,33 +83,6 @@ function transcriptModelLabel(model: string): string {
   return modelDisplayName({ id: rawModelId(model), display_id: undefined });
 }
 
-function renderMessageAttachments(attachments?: ChatAttachment[]) {
-  if (!attachments?.length) return null;
-  return (
-    <div className="message-attachments">
-      {attachments.map((attachment) => (
-        <div
-          key={attachment.id}
-          className="message-attachment"
-          data-testid={`message-attachment-${attachment.id}`}
-        >
-          {attachment.dataUrl && (
-            <img
-              className="message-attachment-thumb"
-              src={attachment.dataUrl}
-              alt={`Attachment preview: ${attachment.name}`}
-            />
-          )}
-          <span className="message-attachment-name">{attachment.name}</span>
-          <span className="message-attachment-meta">
-            {attachment.mime}
-            {attachment.truncated ? " clipped" : ""}
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-}
 function renderMessageMedia(results?: MediaGenerationResult[]) {
   if (!results?.length) return null;
   return (
@@ -221,6 +195,7 @@ export type MessageRowActions = {
     saved: SavedArtifactFile,
     target: ArtifactOpenTarget,
   ) => Promise<void>;
+  openAttachment: (attachment: ChatAttachment) => void;
   onOpenSchedules: () => void;
 };
 
@@ -703,7 +678,10 @@ function MessageRowView({
                 />
               </Suspense>
             )}
-            {renderMessageAttachments(m.attachments)}
+            <MessageAttachments
+              attachments={m.attachments}
+              onOpen={(attachment) => actions?.openAttachment(attachment)}
+            />
             {m.reviewComments?.length ? (
               <div className="message-review-count">
                 {m.reviewComments.length} review comment{m.reviewComments.length === 1 ? "" : "s"}
