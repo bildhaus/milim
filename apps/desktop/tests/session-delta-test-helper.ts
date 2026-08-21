@@ -1,6 +1,7 @@
 type SessionDelta = {
   id: string;
   sessionJson?: string;
+  baseMessageCount: number;
   messageCount: number;
   preserveMessages?: boolean;
   messages: Array<{ index: number; messageJson: string }>;

@@ -280,6 +280,43 @@ pub fn preview_webview_reload(app: tauri::AppHandle, label: String) -> Result<()
     }
 }
 
+#[tauri::command]
+pub fn preview_webview_set_muted(
+    app: tauri::AppHandle,
+    label: String,
+    muted: bool,
+) -> Result<(), String> {
+    set_preview_webview_muted(&preview_webview(&app, &label)?, muted)
+}
+
+#[cfg(windows)]
+fn set_preview_webview_muted(webview: &Webview, muted: bool) -> Result<(), String> {
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_8;
+    use windows_core::Interface;
+
+    webview
+        .with_webview(move |platform_webview| {
+            let controller = platform_webview.controller();
+            let result = unsafe {
+                (|| -> windows_core::Result<()> {
+                    let core = controller.CoreWebView2()?;
+                    core.cast::<ICoreWebView2_8>()?.SetIsMuted(muted)
+                })()
+            };
+            if let Err(error) = result {
+                tracing::warn!("preview audio mute update failed: {error}");
+            }
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(windows))]
+fn set_preview_webview_muted(webview: &Webview, muted: bool) -> Result<(), String> {
+    webview
+        .eval(preview_audio_mute_script(muted))
+        .map_err(|error| error.to_string())
+}
+
 #[cfg(windows)]
 fn reload_without_cache(webview: &Webview) -> Result<(), String> {
     use webview2_com::{CallDevToolsProtocolMethodCompletedHandler, CoTaskMemPWSTR};
@@ -461,6 +498,45 @@ fn preview_shortcut_script(token: u64) -> String {
     )
 }
 
+#[cfg(any(not(windows), test))]
+fn preview_audio_mute_script(muted: bool) -> String {
+    format!(
+        r#"
+(() => {{
+  const key = "__milimPreviewAudioMute";
+  const state = window[key] ||= {{ previous: new WeakMap(), observer: null }};
+  const muted = {muted};
+  const apply = (root) => {{
+    const media = [];
+    if (root instanceof HTMLMediaElement) media.push(root);
+    if (root?.querySelectorAll) media.push(...root.querySelectorAll("audio,video"));
+    for (const element of media) {{
+      if (muted) {{
+        if (!state.previous.has(element)) state.previous.set(element, element.muted);
+        if (!element.muted) element.muted = true;
+      }} else if (state.previous.has(element)) {{
+        element.muted = state.previous.get(element);
+        state.previous.delete(element);
+      }}
+    }}
+  }};
+  state.observer?.disconnect();
+  state.observer = null;
+  apply(document);
+  if (muted) {{
+    state.observer = new MutationObserver((records) => {{
+      for (const record of records) {{
+        apply(record.target);
+        for (const node of record.addedNodes || []) apply(node);
+      }}
+    }});
+    state.observer.observe(document, {{ childList: true, subtree: true, attributes: true, attributeFilter: ["muted"] }});
+  }}
+}})();
+"#
+    )
+}
+
 fn preview_url_allowed(url: &Url) -> bool {
     url.scheme() == "https"
         || (url.scheme() == "http" && is_loopback_host(url.host_str().unwrap_or_default()))
@@ -583,6 +659,10 @@ mod tests {
         assert!(shortcut_script.contains("milim-browser-shortcut://42/"));
         assert!(shortcut_script.contains("zoom-reset"));
         assert!(shortcut_script.contains("addEventListener(\"wheel\""));
+        let mute_script = preview_audio_mute_script(true);
+        assert!(mute_script.contains("const muted = true"));
+        assert!(mute_script.contains("audio,video"));
+        assert!(mute_script.contains("MutationObserver"));
         assert!(preview_shortcut_action(
             &Url::parse("milim-browser-shortcut://41/close-tab").unwrap(),
             42

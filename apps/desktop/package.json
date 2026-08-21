@@ -1,7 +1,7 @@
 {
   "name": "milim-desktop",
   "private": true,
-  "version": "0.2.49",
+  "version": "0.2.50",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -14,7 +14,7 @@
     "test:selectors": "node tests/zustand-selector-lint.test.mjs",
     "test:store": "node tests/run-ts-test.mjs tests/session-store.test.ts tests/session-startup-hydration.test.ts tests/new-thread-preferences.test.ts tests/new-chat-coordinator.test.ts tests/thread-titles.test.ts tests/sidebar-groups.test.ts tests/thread-link-drop.test.ts tests/project-colors.test.ts tests/thread-export.test.ts tests/preview-runtime-keys.test.ts",
     "test:settings": "node tests/run-ts-test.mjs tests/settings-store.test.ts tests/settings-appearance-rendering.test.tsx tests/settings-layout.test.tsx tests/agent-avatar.test.tsx tests/worker-retry.test.tsx tests/worker-run-lifecycle.test.ts && node tests/agent-schedule-models.test.mjs",
-    "test:assistant-stream": "node tests/run-ts-test.mjs tests/assistant-stream-grouping.test.ts tests/assistant-stream-summary.test.ts tests/attachment-input.test.ts tests/attachment-wire.test.ts tests/window-file-drop.test.ts tests/canonical-control.test.ts tests/codex-runtime.test.ts tests/codex-runtime-rendering.test.tsx tests/request-body.test.ts tests/hot-swap.test.ts tests/mcp-apps.test.ts tests/preview-activity.test.ts tests/turn-events.test.ts tests/turn-queue.test.ts tests/turn-prompt.test.ts tests/turn-runtime.test.ts tests/turn-stream.test.ts",
+    "test:assistant-stream": "node tests/run-ts-test.mjs tests/assistant-stream-grouping.test.ts tests/assistant-stream-summary.test.ts tests/attachment-input.test.ts tests/attachment-wire.test.ts tests/message-attachments-rendering.test.tsx tests/window-file-drop.test.ts tests/canonical-control.test.ts tests/codex-runtime.test.ts tests/codex-runtime-rendering.test.tsx tests/request-body.test.ts tests/hot-swap.test.ts tests/mcp-apps.test.ts tests/preview-activity.test.ts tests/turn-events.test.ts tests/turn-queue.test.ts tests/turn-prompt.test.ts tests/turn-runtime.test.ts tests/turn-stream.test.ts",
     "test:context-compaction": "node tests/run-ts-test.mjs tests/context-compaction.test.ts tests/turn-context.test.ts",
     "test:reasoning": "node tests/run-ts-test.mjs tests/reasoning-effort.test.ts tests/generation-settings.test.ts tests/model-picker.test.ts tests/model-picker-rendering.test.tsx tests/composer-blocker.test.ts",
     "test:ui-preferences": "node tests/run-ts-test.mjs tests/ui-preferences-store.test.ts tests/interface-sounds.test.ts tests/shortcuts.test.ts tests/composer-autocomplete.test.ts tests/composer-tokens.test.ts tests/clipboard-files.test.ts tests/composer-history.test.ts tests/chat-scroll.test.ts tests/chat-search.test.ts tests/command-palette.test.ts tests/context-menu.test.ts tests/recent-threads.test.ts tests/sidebar-recency.test.ts tests/quick-summary.test.ts tests/workspace-launcher.test.ts tests/pane-resize-handles.test.ts",
@@ -41,6 +41,7 @@
     "test:tauri-settings": "node tests/tauri-webview-e2e.mjs --settings-only",
     "test:tauri-turn-changes": "node tests/tauri-webview-e2e.mjs --turn-changes-only",
     "test:tauri-resize-handles": "node tests/tauri-webview-e2e.mjs --resize-handles-only",
+    "test:tauri-worker-preview": "node tests/tauri-webview-e2e.mjs --worker-preview-tab-only",
     "test:tauri-mcp-apps": "node tests/tauri-webview-e2e.mjs --mcp-apps-only",
     "perf:tauri-dev": "node tests/tauri-dev-perf.mjs",
     "perf:release-build": "npm run tauri -- build --no-bundle --features perf-diagnostics",
@@ -61,7 +62,7 @@
     "verify:native-tests": "cargo test --manifest-path ../../Cargo.toml -p milim-server media_ && cargo test --manifest-path ../../Cargo.toml -p milim-server mobile_companion && node tests/run-tauri-rust-test.mjs artifact_ && npm run test:computer-use",
     "verify": "npm run verify:control-contract && npm run verify:frontend && npm run verify:native-tests",
     "verify:tauri": "node tests/run-tauri-smoke.mjs",
-    "verify:tauri-webview": "npm run verify:tauri && npm run test:tauri-webview",
+    "verify:tauri-webview": "npm run verify:tauri && npm run test:tauri-webview && npm run test:tauri-worker-preview",
     "verify:tester-ready": "npm run verify && npm run verify:release && npm run verify:tauri-webview"
   },
   "dependencies": {

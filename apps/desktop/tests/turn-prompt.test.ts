@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import type { ChatMessage, PreviewSurfaceTarget } from "../src/api.js";
 import { estimateTextTokens } from "../src/lib/contextCompaction.js";
+import { managedPreviewRuntimeForTurn } from "../src/lib/managedPreviewRuntime.js";
 import { previewRuntimeKeyForThread } from "../src/lib/previewRuntimeKeys.js";
 import { buildTurnPromptContext, contextMessagesForTurn, folderLabel, memoryScopes, prepareTurnPromptContext, resolveTurnToolApproval, workspaceRuleMessagesForRuntime, type MemoryHit } from "../src/lib/turnPrompt.js";
 
@@ -200,6 +201,98 @@ assert.equal(blankPreview.toolContext.preview_tools_enabled, false);
 assert.deepEqual(blankPreview.toolContext.preview_surface, blankPreviewSurface);
 assert.match(contextMessagesForTurn(blankPreview, "model").at(-1)?.content ?? "", /untrusted UI metadata/);
 assert.match(contextMessagesForTurn(blankPreview, "agent").at(-1)?.content ?? "", /\"kind\":\"blank\"/);
+
+const managedRuntime = managedPreviewRuntimeForTurn({
+  kind: "app",
+  status: "running",
+  url: "http://127.0.0.1:5173/dashboard",
+  active: true,
+  ready: true,
+});
+assert.deepEqual(managedRuntime, {
+  kind: "app",
+  status: "running",
+  active: true,
+  ready: true,
+  url: "http://127.0.0.1:5173/dashboard",
+});
+const hiddenManagedRuntime = buildTurnPromptContext({
+  sessionId: "s-preview-runtime",
+  threadTitle: "App preview",
+  folder: "",
+  instructions: "",
+  planMode: false,
+  memory: false,
+  conversation: [user("is the app still running?")],
+  memoryHits: [],
+  selectedSkills: [],
+  turnId: "turn-preview-runtime",
+  sandbox: false,
+  computerUse: false,
+  managedPreviewRuntime: managedRuntime,
+  previewSurface: null,
+  activeAgentId: null,
+  toolApproval: "guarded",
+  toolApprovalGrant: false,
+  experimentalHashlinePatch: false,
+});
+assert.equal(hiddenManagedRuntime.useTools, false, "runtime awareness alone must not enable preview tools");
+assert.equal(hiddenManagedRuntime.toolContext.preview_tools_enabled, false);
+assert.match(hiddenManagedRuntime.previewRuntimeMessages[0].content, /127\.0\.0\.1:5173/);
+assert.match(hiddenManagedRuntime.previewRuntimeMessages[0].content, /independently of the inspector/);
+assert.match(contextMessagesForTurn(hiddenManagedRuntime, "model").at(-1)?.content ?? "", /\"ready\":true/);
+assert.match(contextMessagesForTurn(hiddenManagedRuntime, "agent").at(-1)?.content ?? "", /runtime metadata only/);
+
+const visibleManagedRuntime = buildTurnPromptContext({
+  sessionId: "s-preview-runtime-visible",
+  threadTitle: "App preview",
+  folder: "",
+  instructions: "",
+  planMode: false,
+  memory: false,
+  conversation: [user("inspect the app")],
+  memoryHits: [],
+  selectedSkills: [],
+  turnId: "turn-preview-runtime-visible",
+  sandbox: false,
+  computerUse: false,
+  managedPreviewRuntime: managedRuntime,
+  previewSurface: {
+    kind: "runtime_browser",
+    title: "App",
+    url: "http://127.0.0.1:5173/dashboard",
+    native: true,
+    status: "ready",
+    capabilities: ["dom_snapshot"],
+  },
+  activeAgentId: null,
+  toolApproval: "guarded",
+  toolApprovalGrant: false,
+  experimentalHashlinePatch: false,
+});
+assert.equal(visibleManagedRuntime.useTools, true);
+assert.equal(visibleManagedRuntime.toolContext.preview_tools_enabled, true);
+assert.equal(visibleManagedRuntime.previewRuntimeMessages.length, 1);
+assert.equal(visibleManagedRuntime.browserMessages.length, 1);
+
+assert.equal(managedPreviewRuntimeForTurn({
+  kind: "app",
+  status: "stopped",
+  url: "http://127.0.0.1:5173",
+  active: false,
+  ready: false,
+}), null, "stopped runtimes must not leak stale awareness into later turns");
+assert.deepEqual(managedPreviewRuntimeForTurn({
+  kind: "app",
+  status: "starting",
+  active: true,
+  ready: false,
+}), {
+  kind: "app",
+  status: "starting",
+  active: true,
+  ready: false,
+}, "active but unhealthy runtimes should still be visible to the agent without tools");
 
 const googlePreview = buildTurnPromptContext({
   sessionId: "s-preview-google",

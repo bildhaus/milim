@@ -60,6 +60,9 @@ export const Smartphone = (p: P) => (
 export const Volume2 = (p: P) => (
   <Svg {...p}><path d="M11 5 6 9H3v6h3l5 4Z" /><path d="M16 8.5a5 5 0 0 1 0 7M19 5a9 9 0 0 1 0 14" /></Svg>
 );
+export const VolumeX = (p: P) => (
+  <Svg {...p}><path d="M11 5 6 9H3v6h3l5 4Z" /><path d="m17 9 4 4M21 9l-4 4" /></Svg>
+);
 export const Shield = (p: P) => (
   <Svg {...p}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z" /><path d="m9 12 2 2 4-5" /></Svg>
 );

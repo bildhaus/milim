@@ -576,6 +576,8 @@ try {
   assert(previewPanelSource.includes('data-testid="review-comment-dialog"'), "Preview review comments should keep a testable themed dialog");
   assert(previewPanelSource.includes("webview.setZoom(zoomPercentRef.current / 100)"), "Native previews should restore saved zoom when their webview is created");
   assert(previewPanelSource.includes("webview.setZoom(zoomPercent / 100)"), "Native previews should apply zoom changes without recreating the webview");
+  assert(previewPanelSource.includes("setPreviewWebviewMuted(label, mutedRef.current)"), "Native previews should restore persisted tab mute when their webview is created");
+  assert(previewPanelSource.includes('label: tab.muted ? "Unmute tab" : "Mute tab"'), "Preview tab menus should toggle audio mute");
   assert(previewPanelSource.includes('shortcut.action === "zoom_in"'), "Native preview shortcuts should update the persisted zoom preference");
   assert(workspaceCodePanelSource.includes('data-testid="workspace-code-rail-resizer"'), "Workspace Code should expose a keyboard-resizable file rail");
   assert(workspaceCodePanelSource.includes('aria-label="Collapse file rail"'), "Workspace Code should expose a collapsible file rail");
@@ -640,12 +642,14 @@ try {
       activeTabId: "second",
       tabs: [
         { id: "first", url: "https://example.com/", input: "https://example.com/", history: ["https://example.com/"], historyIndex: 0 },
-        { id: "second", url: "https://sheets.google.com/", input: "https://sheets.google.com/", history: ["https://sheets.google.com/"], historyIndex: 0 },
+        { id: "second", url: "https://sheets.google.com/", input: "https://sheets.google.com/", history: ["https://sheets.google.com/"], historyIndex: 0, muted: true },
       ],
     },
   });
   assert(tabbedUrlMarkup.includes("example.com") && tabbedUrlMarkup.includes("sheets.google.com"), "Browser sessions should render every tab");
   assert(tabbedUrlMarkup.includes('aria-selected="true"'), "Browser sessions should identify the active tab");
+  assert(tabbedUrlMarkup.includes('data-testid="preview-browser-tab-muted"'), "Muted browser tabs should expose a visible muted indicator");
+  assert(tabbedUrlMarkup.includes('aria-label="sheets.google.com, muted"'), "Muted browser tabs should expose their state accessibly");
 
   const googleMarkup = renderPreviewPanel({ artifact: googleSheetArtifact, onClose: () => {} });
   assert(googleMarkup.includes("Choose this file with Google"), "Unauthorized Google files should offer the Picker flow");

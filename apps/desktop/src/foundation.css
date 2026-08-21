@@ -60,6 +60,8 @@ textarea,
 .worker-run-event.proposed { border-color: color-mix(in srgb, var(--accent) 30%, var(--border-primary)); }
 .worker-run-event span { overflow: hidden; font-size: 11.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .worker-run-event small { color: var(--tertiary-text); font-size: 9.5px; }
+.transcript-worker-runs { width: 100%; max-width: var(--chat-content-width); display: flex; flex-direction: column; gap: 8px; margin: 8px auto 4px; padding: 0 2px; }
+.transcript-worker-runs .worker-run-event { margin: 0; }
 .workers-summary {
   min-height: 58px;
   display: flex;

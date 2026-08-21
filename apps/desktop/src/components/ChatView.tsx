@@ -88,6 +88,7 @@ import {
   type ChatApprovalRequest,
   type ChatMessage,
   type ChatStreamPart,
+  type ControlPendingInputV1,
   type ControlQueuedTurnV1,
   type ThreadLinkV1,
   type ChildThreadInfo,
@@ -188,6 +189,7 @@ import {
   shouldRefreshGitStatus,
 } from "../lib/gitRefresh";
 import { reasoningEffortForThread, reasoningEffortOverridesWithSelection } from "../lib/reasoningEffort";
+import { managedPreviewRuntimeForTurn, type ManagedPreviewRuntimeContext } from "../lib/managedPreviewRuntime";
 import {
   generationOverridesWithSelection,
   generationSettingsForModel,
@@ -228,7 +230,12 @@ import {
   type GoalDecision,
   type GoalSettings,
 } from "../lib/goals";
-import { followScrollTop, isNearScrollBottom, peekEnteringMessageIds } from "../lib/scroll";
+import {
+  followScrollTop,
+  isNearScrollBottom,
+  peekEnteringMessageIds,
+  scrollTopAfterLayoutChange,
+} from "../lib/scroll";
 import {
   mergeModelListsForPicker,
   modelDisplayName,
@@ -360,7 +367,11 @@ import {
 import { SheetDialog } from "./SheetDialog";
 import { WorkspaceLauncherButton } from "./WorkspaceLauncher";
 import { BatonTargetSheet, HotSwapPreflightSheet } from "./HotSwapDialogs";
-import { MessageRow, type MessageRowActions } from "./ChatMessageRow";
+import {
+  MessageRow,
+  WorkerRunEvent,
+  type MessageRowActions,
+} from "./ChatMessageRow";
 import {
   QueuedMessageTray,
   type QueuedMessageTrayItem,
@@ -796,6 +807,47 @@ function emptyBrowserSession(): InspectorBrowserSession {
   };
 }
 
+function appBrowserSessionAtUrl(
+  current: InspectorBrowserSession | undefined,
+  url: string,
+): InspectorBrowserSession {
+  if (!current) {
+    const tab = emptyBrowserTab(url);
+    return {
+      profileId: `app-${Math.random().toString(36).slice(2)}`,
+      tabs: [tab],
+      activeTabId: tab.id,
+    };
+  }
+  const activeTab =
+    current.tabs.find((tab) => tab.id === current.activeTabId) ??
+    current.tabs[0];
+  if (!activeTab) {
+    const tab = emptyBrowserTab(url);
+    return { ...current, tabs: [tab], activeTabId: tab.id };
+  }
+  if (activeTab.url === url) return current;
+  const history = activeTab.history.slice(0, activeTab.historyIndex + 1);
+  if (history[history.length - 1] !== url) history.push(url);
+  return {
+    ...current,
+    tabs: current.tabs.map((tab) =>
+      tab.id === activeTab.id
+        ? {
+            ...tab,
+            url,
+            input: url,
+            history,
+            historyIndex: history.length - 1,
+            title: undefined,
+            faviconUrl: undefined,
+          }
+        : tab,
+    ),
+    activeTabId: activeTab.id,
+  };
+}
+
 function emptyBrowserTab(url: string | null = null): InspectorBrowserTab {
   return {
     id: `tab-${Math.random().toString(36).slice(2)}`,
@@ -925,6 +977,18 @@ function previewSelectionFromRuntime(
   if (!url) return null;
   const artifact = localhostPreviewArtifact(url);
   return { artifact, artifacts: [artifact], previewDeferred: false };
+}
+
+function managedPreviewRuntimeForSession(
+  state: Pick<ReturnType<typeof useSessions.getState>, "sessions" | "previewRuntimesByKey">,
+  sessionId: string,
+): ManagedPreviewRuntimeContext | null {
+  const session = state.sessions.find((item) => item.id === sessionId);
+  const folder = session?.settings?.folder ?? "";
+  const runtime = folder.trim()
+    ? state.previewRuntimesByKey[previewRuntimeKeyForThread(sessionId, folder)]
+    : session?.previewRuntime;
+  return managedPreviewRuntimeForTurn(runtime);
 }
 
 function extensionOf(filename: string): string {
@@ -1420,6 +1484,12 @@ export function ChatView({
   const [canonicalQueuedTurns, setCanonicalQueuedTurns] = useState<
     ControlQueuedTurnV1[]
   >([]);
+  const [canonicalPendingInputs, setCanonicalPendingInputs] = useState<
+    ControlPendingInputV1[]
+  >([]);
+  const [canonicalActiveRuns, setCanonicalActiveRuns] = useState<
+    Record<string, { id: string; steering: boolean }>
+  >({});
   const [linkedThreads, setLinkedThreads] = useState<ThreadLinkV1[]>([]);
   const [sessionsHydrated, setSessionsHydrated] = useState(() =>
     useSessions.persist.hasHydrated(),
@@ -1576,6 +1646,11 @@ export function ChatView({
       workerRuns.filter((record) => record.run.parent_thread_id === activeId),
     [activeId, workerRuns],
   );
+  const runningWorkerRuns = useMemo(
+    () =>
+      activeWorkerRuns.filter((record) => record.run.status === "running"),
+    [activeWorkerRuns],
+  );
   const activeWorkerRun = activeWorkerRuns[0];
   const announcedAttentionKeysRef = useRef(new Set<string>());
   const attentionKey = useMemo(
@@ -1656,6 +1731,9 @@ export function ChatView({
   const setSessionInspectorOpen = useSessions((s) => s.setInspectorOpen);
   const setSessionInspectorTab = useSessions((s) => s.setInspectorTab);
   const setSessionBrowserSession = useSessions((s) => s.setBrowserSession);
+  const setPreviewBrowserSessionByKey = useSessions(
+    (s) => s.setPreviewBrowserSessionByKey,
+  );
   const updateThreadSettings = useSessions((s) => s.updateSettings);
   const switchToSession = useSessions((s) => s.switchTo);
   const enqueueQueuedMessage = useSessions((s) => s.enqueueQueuedMessage);
@@ -1865,11 +1943,33 @@ export function ChatView({
   });
   const persistingTurnIdsRef = useRef<Set<string>>(new Set());
   const canonicalRunIdsRef = useRef<Map<string, string>>(new Map());
-  const canonicalSteeringRef = useRef<Map<string, boolean>>(new Map());
   const canonicalModelWritesRef = useRef<Map<string, CanonicalModelWrite>>(new Map());
   const canonicalThreadModelsRef = useRef(new Map<string, string>());
   const deletingMessageIdsRef = useRef(new Set<string>());
   const handledUnavailableModelRoutesRef = useRef(new Set<string>());
+  const updateCanonicalActiveRun = useCallback((
+    sessionId: string,
+    run: { id: string; steering: boolean } | null,
+    expectedRunId?: string,
+  ) => {
+    setCanonicalActiveRuns((current) => {
+      const existing = current[sessionId];
+      if (!run && expectedRunId && existing?.id !== expectedRunId) return current;
+      if (run && existing?.id === run.id && existing.steering === run.steering) return current;
+      if (!run && !existing) return current;
+      const next = { ...current };
+      if (run) next[sessionId] = run;
+      else delete next[sessionId];
+      return next;
+    });
+  }, []);
+  const canonicalActiveRun = canonicalActiveRuns[activeId];
+  const pendingSteerCount = canonicalPendingInputs.filter(
+    (item) =>
+      item.thread_id === activeId
+      && item.kind === "steer"
+      && item.state === "pending",
+  ).length;
   const canonicalQueuedMessages = useMemo(
     () =>
       canonicalQueuedTurns
@@ -2410,6 +2510,17 @@ export function ChatView({
     el.scrollTo({ top: followScrollTop(el), behavior: "auto" });
   }
 
+  useLayoutEffect(() => {
+    const el = chatScrollRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      const nextTop = scrollTopAfterLayoutChange(el, stickToBottomRef.current);
+      if (nextTop !== el.scrollTop) el.scrollTop = nextTop;
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [activeId]);
+
   const markMessageEntered = useCallback((id: string) => {
     setEnteringMessageIds((current) => {
       if (!current.includes(id)) return current;
@@ -2732,6 +2843,7 @@ export function ChatView({
     if (!sessionsHydrated) return;
     let disposed = false;
     let controller: AbortController | null = null;
+    let ownedRunId: string | null = null;
     let retryTimer: number | null = null;
     let syncPending = false;
     let wakeRequested = false;
@@ -2747,6 +2859,7 @@ export function ChatView({
         const bootstrap = await getControlBootstrap();
         if (disposed) return;
         setCanonicalQueuedTurns(bootstrap.queued_turns);
+        setCanonicalPendingInputs(bootstrap.pending_inputs);
         const controlThread = bootstrap.threads.find(
           (thread) => thread.id === activeId,
         );
@@ -2756,11 +2869,15 @@ export function ChatView({
         useSessions.getState().setHostBusySessionIds(
           hostBusySessionIdsFromBootstrap(bootstrap),
         );
+        const run = bootstrap.active_runs.find((item) => item.thread_id === activeId);
+        updateCanonicalActiveRun(
+          activeId,
+          run ? { id: run.id, steering: run.capabilities.steering } : null,
+        );
         // A newly created renderer session can become active a few milliseconds
         // before its deferred persistence creates the canonical control row.
         // Bootstrap is the authority for whether a timeline is addressable.
         if (!controlThread) return;
-        const run = bootstrap.active_runs.find((item) => item.thread_id === activeId);
         const alreadyAttached =
           canonicalRunIdsRef.current.has(activeId) ||
           generationControllersRef.current.has(activeId);
@@ -2831,7 +2948,7 @@ export function ChatView({
         });
         if (!controller) return;
         canonicalRunIdsRef.current.set(activeId, run.id);
-        canonicalSteeringRef.current.set(activeId, run.capabilities.steering);
+        ownedRunId = run.id;
         socketController?.abort();
         socketController = null;
         await pollControlRun(activeId, run.id, controller.signal, (items) => {
@@ -2860,10 +2977,13 @@ export function ChatView({
             generationControllersRef,
           });
         }
-        if (canonicalRunIdsRef.current.get(activeId)) {
+        if (
+          ownedRunId
+          && canonicalRunIdsRef.current.get(activeId) === ownedRunId
+        ) {
           canonicalRunIdsRef.current.delete(activeId);
+          updateCanonicalActiveRun(activeId, null, ownedRunId);
         }
-        canonicalSteeringRef.current.delete(activeId);
         controller = null;
         syncPending = false;
         startControlSocket();
@@ -2919,7 +3039,7 @@ export function ChatView({
       socketController = null;
       controller?.abort();
     };
-  }, [activeId, autoTitleChats, sessionsHydrated, setMessages]);
+  }, [activeId, autoTitleChats, sessionsHydrated, setMessages, updateCanonicalActiveRun]);
 
   async function loadOlderMessages(el: HTMLDivElement) {
     const beforeIndex = activeSession?.messagesLoadedFrom ?? 0;
@@ -3335,6 +3455,24 @@ export function ChatView({
         : "url");
   const activeInspectorBrowserSession =
     activeSession?.browserSession ?? emptyBrowserSession();
+  const activeInspectorAppBrowserSession = useSessions(
+    (state) => state.previewBrowserSessionsByKey[activePreviewRuntimeKey],
+  );
+
+  useEffect(() => {
+    const url = previewRuntimeBrowserUrl(matchingPreviewRuntime);
+    if (!sessionsHydrated || !url || activeInspectorAppBrowserSession) return;
+    setPreviewBrowserSessionByKey(
+      activePreviewRuntimeKey,
+      appBrowserSessionAtUrl(undefined, url),
+    );
+  }, [
+    activeInspectorAppBrowserSession,
+    activePreviewRuntimeKey,
+    matchingPreviewRuntime,
+    sessionsHydrated,
+    setPreviewBrowserSessionByKey,
+  ]);
 
   useEffect(() => {
     const restoreKey = `${activeId}:${sessionsHydrated ? "hydrated" : "initial"}`;
@@ -3723,26 +3861,7 @@ export function ChatView({
     );
   }
 
-  function openQuickSummarySource(source: QuickSummarySource) {
-    if (source.kind === "artifact") {
-      const revision = artifactRevisionChoice(
-        source.messageIndex,
-        source.artifactIndex,
-      )?.revision;
-      openPreviewArtifact(
-        revision?.artifact ?? source.artifact,
-        revision?.artifacts ?? source.artifacts,
-        false,
-        revision,
-      );
-      return;
-    }
-    if (source.kind === "memory") {
-      setMemoryTarget(source.memory);
-      setMemoryOpen(true);
-      return;
-    }
-    const attachment = source.attachment;
+  function openAttachment(attachment: ChatAttachment) {
     if (attachment.sourcePath) {
       void openArtifactLocation(attachment.sourcePath).catch((error) =>
         setChatNotice({
@@ -3773,6 +3892,28 @@ export function ChatView({
     setChatNotice({ tone: "error", message: "Attachment content is unavailable." });
   }
 
+  function openQuickSummarySource(source: QuickSummarySource) {
+    if (source.kind === "artifact") {
+      const revision = artifactRevisionChoice(
+        source.messageIndex,
+        source.artifactIndex,
+      )?.revision;
+      openPreviewArtifact(
+        revision?.artifact ?? source.artifact,
+        revision?.artifacts ?? source.artifacts,
+        false,
+        revision,
+      );
+      return;
+    }
+    if (source.kind === "memory") {
+      setMemoryTarget(source.memory);
+      setMemoryOpen(true);
+      return;
+    }
+    openAttachment(source.attachment);
+  }
+
   function selectPreviewSource(source: InspectorPreviewSource) {
     previewSourcesByThreadRef.current.set(activeId, source);
     setPreviewSource(source);
@@ -3780,6 +3921,21 @@ export function ChatView({
 
   function updateBrowserSession(session: InspectorBrowserSession) {
     setSessionBrowserSession(activeId, session);
+  }
+
+  function updateAppBrowserSession(session: InspectorBrowserSession) {
+    setPreviewBrowserSessionByKey(activePreviewRuntimeKey, session);
+  }
+
+  function syncAppBrowserSession(url: string | null | undefined) {
+    const normalizedUrl = normalizeArtifactBrowserUrl(url ?? "");
+    if (!normalizedUrl) return;
+    const current = useSessions.getState().previewBrowserSessionsByKey[
+      activePreviewRuntimeKey
+    ];
+    const next = appBrowserSessionAtUrl(current, normalizedUrl);
+    if (next !== current)
+      setPreviewBrowserSessionByKey(activePreviewRuntimeKey, next);
   }
 
   function managedPreviewFiles(
@@ -3850,6 +4006,7 @@ export function ChatView({
       entry_path: path,
     });
     if (!status) return;
+    syncAppBrowserSession(status.url);
     selectPreviewSource("app");
     setSessionInspectorTab(activeId, "preview");
   }
@@ -3859,6 +4016,7 @@ export function ChatView({
     if (!options) return;
     const status = await startRuntime(options);
     if (!status) return;
+    syncAppBrowserSession(status.url);
     if (!folder.trim() && options.files?.length)
       upsertVirtualFiles(activeId, options.files);
     selectPreviewSource("app");
@@ -3873,6 +4031,7 @@ export function ChatView({
     const options = previewRuntimeRunOptions();
     if (!options) return;
     const status = await restartRuntime(options);
+    if (status) syncAppBrowserSession(status.url);
     if (status && !folder.trim() && options.files?.length)
       upsertVirtualFiles(activeId, options.files);
   }
@@ -4271,13 +4430,14 @@ export function ChatView({
     resizePreviewPanelDuringDrag(start.intentWidth);
   }, [chatBodyWidth, reservedContextWidth]);
 
+  const liveWorkerRunId =
+    activeWorkerRun?.run.status === "proposed" ||
+    activeWorkerRun?.run.status === "running"
+      ? activeWorkerRun.run.id
+      : null;
   useEffect(() => {
-    if (
-      (activeWorkerRun?.run.status === "proposed" ||
-        activeWorkerRun?.run.status === "running") &&
-      (!sidePanelVisible || inspectorTab !== "workers")
-    ) openWorkersInspector(activeWorkerRun.run.id);
-  }, [activeWorkerRun?.run.id, activeWorkerRun?.run.status, inspectorTab, sidePanelVisible]);
+    if (liveWorkerRunId) openWorkersInspector(liveWorkerRunId);
+  }, [activeId, liveWorkerRunId]);
 
   useEffect(() => {
     if (
@@ -6180,6 +6340,7 @@ export function ChatView({
     selectedModel: string,
   ): Promise<RunTurnResult> {
     const store = useSessions.getState();
+    const managedPreviewRuntime = managedPreviewRuntimeForSession(store, sessionId);
     const last = convo[convo.length - 1];
     if (!last || last.role !== "user") {
       return {
@@ -6219,6 +6380,7 @@ export function ChatView({
     }
     store.setSessionHostBusy(sessionId, true);
     let accepted = false;
+    let activeRunId: string | null = null;
     if (options.canonicalAction !== "regenerate") {
       setMessages(sessionId, convo, { autoTitle: autoTitleChats });
     }
@@ -6232,11 +6394,14 @@ export function ChatView({
         thread_id: sessionId,
         payload:
           options.canonicalAction === "regenerate"
-            ? {}
+            ? {
+                ...(managedPreviewRuntime ? { preview_runtime: managedPreviewRuntime } : {}),
+              }
             : {
                 text: wireMessageContent(last),
                 display_text: last.content,
                 attachments: controlAttachments(last.attachments),
+                ...(managedPreviewRuntime ? { preview_runtime: managedPreviewRuntime } : {}),
               },
       });
       if (command.status === "queued") {
@@ -6252,14 +6417,20 @@ export function ChatView({
       }
       accepted = true;
       const runId = command.run_id;
+      activeRunId = runId;
       canonicalRunIdsRef.current.set(sessionId, runId);
       const capabilities = command.data && typeof command.data === "object" && !Array.isArray(command.data)
         ? command.data.capabilities
         : null;
-      canonicalSteeringRef.current.set(
-        sessionId,
-        Boolean(capabilities && typeof capabilities === "object" && !Array.isArray(capabilities) && capabilities.steering),
-      );
+      updateCanonicalActiveRun(sessionId, {
+        id: runId,
+        steering: Boolean(
+          capabilities
+          && typeof capabilities === "object"
+          && !Array.isArray(capabilities)
+          && capabilities.steering
+        ),
+      });
       const terminal = await pollControlRun(
         sessionId,
         runId,
@@ -6302,8 +6473,10 @@ export function ChatView({
       setChatNotice({ tone: "error", message });
       return { status: "error", messages: sessionMessages(sessionId), error: message };
     } finally {
-      canonicalRunIdsRef.current.delete(sessionId);
-      canonicalSteeringRef.current.delete(sessionId);
+      if (activeRunId && canonicalRunIdsRef.current.get(sessionId) === activeRunId) {
+        canonicalRunIdsRef.current.delete(sessionId);
+        updateCanonicalActiveRun(sessionId, null, activeRunId);
+      }
       releaseTurnGeneration({
         sessionId,
         store,
@@ -6534,6 +6707,7 @@ export function ChatView({
         sandbox: turnSandbox,
         computerUse: turnComputerUse,
         privacy: turnPrivacy,
+        managedPreviewRuntime: managedPreviewRuntimeForSession(store, id),
         previewSurface:
           sidePanelVisible &&
           (inspectorTab === "preview" || inspectorTab === "code")
@@ -7082,6 +7256,7 @@ export function ChatView({
   async function queueCanonicalFollowup(text: string, attachments: ChatAttachment[]) {
     try {
       const commandId = createControlCommandId();
+      const managedPreviewRuntime = managedPreviewRuntimeForSession(useSessions.getState(), activeId);
       const result = await sendControlCommand({
         command_id: commandId,
         kind: "turn.send",
@@ -7090,6 +7265,7 @@ export function ChatView({
           text: wireMessageContent({ role: "user", content: text, attachments }),
           display_text: text,
           attachments: controlAttachments(attachments),
+          ...(managedPreviewRuntime ? { preview_runtime: managedPreviewRuntime } : {}),
         },
       });
       if (result.status !== "queued") throw new Error(result.message || `Control command ${result.status}.`);
@@ -7117,12 +7293,17 @@ export function ChatView({
   }
 
   async function steerCanonicalRun() {
-    const runId = canonicalRunIdsRef.current.get(activeId);
+    const runId = canonicalActiveRun?.id;
     const text = input.trim();
     const attachments = pendingAttachments;
-    if (!runId || (!text && attachments.length === 0)) return;
+    if (!runId) {
+      setChatNotice({ tone: "warning", message: "The active run is still syncing. Try steering again." });
+      return;
+    }
+    if (!text && attachments.length === 0) return;
     if (rejectUnsupportedImageAttachments(attachments)) return;
     try {
+      const managedPreviewRuntime = managedPreviewRuntimeForSession(useSessions.getState(), activeId);
       const result = await sendControlCommand({
         command_id: createControlCommandId(),
         kind: "turn.steer",
@@ -7132,13 +7313,33 @@ export function ChatView({
           text: wireMessageContent({ role: "user", content: text, attachments }),
           display_text: text,
           attachments: controlAttachments(attachments),
+          ...(managedPreviewRuntime ? { preview_runtime: managedPreviewRuntime } : {}),
         },
       });
       if (result.status !== "accepted") throw new Error(result.message || `Control command ${result.status}.`);
+      const inboxId = result.data
+        && typeof result.data === "object"
+        && !Array.isArray(result.data)
+        && typeof result.data.inbox_id === "string"
+        ? result.data.inbox_id
+        : null;
+      if (inboxId) {
+        setCanonicalPendingInputs((current) => [
+          ...current.filter((item) => item.id !== inboxId),
+          {
+            id: inboxId,
+            thread_id: activeId,
+            target_run_id: runId,
+            kind: "steer",
+            state: "pending",
+            created_at_ms: Date.now(),
+          },
+        ]);
+      }
       if (text) recordGlobalPrompt(text);
       setInput("");
       setPendingAttachments([]);
-      setChatNotice({ tone: "info", message: "Steering will be applied at the next model step." });
+      setChatNotice(null);
     } catch (error) {
       setChatNotice({ tone: "error", message: error instanceof Error ? error.message : String(error) });
     }
@@ -7577,29 +7778,16 @@ export function ChatView({
 
   async function activateCanonicalQueuedMessage(item: QueuedMessageTrayItem) {
     if (queueInterrupts[activeId]) return;
+    const interrupting = busy;
     try {
-      if (busy) {
+      if (interrupting) {
         setQueueInterrupts((current) => ({ ...current, [activeId]: item.id }));
-        const first = canonicalQueuedMessages[0]?.id;
-        if (first && first !== item.id) {
-          await moveCanonicalQueuedMessage(item.id, first, "before");
-        }
-        await stopSessionRun(activeId);
-        const deadline = Date.now() + 5_000;
-        while (Date.now() < deadline) {
-          const bootstrap = await getControlBootstrap();
-          setCanonicalQueuedTurns(bootstrap.queued_turns);
-          if (!bootstrap.active_runs.some((run) => run.thread_id === activeId)) {
-            break;
-          }
-          await new Promise((resolve) => window.setTimeout(resolve, 100));
-        }
       }
       const result = await sendControlCommand({
         command_id: createControlCommandId(),
         kind: "turn.queue_resume",
         thread_id: activeId,
-        payload: { queue_id: item.id },
+        payload: { queue_id: item.id, interrupt_active: interrupting },
       });
       if (result.status !== "accepted") {
         throw new Error(result.message || "The queued message could not be started.");
@@ -7614,8 +7802,8 @@ export function ChatView({
       });
       setChatNotice({
         tone: "info",
-        message: busy
-          ? "Current response interrupted; running the selected message."
+        message: interrupting
+          ? "Interrupting the current response; the selected message will run next."
           : "Running the selected queued message.",
       });
     } catch (error) {
@@ -7932,9 +8120,14 @@ export function ChatView({
     handlePreviewArtifact,
     handleCheckArtifact,
     handleOpenArtifact,
+    openAttachment,
     onOpenSchedules,
   };
-  const estimatedRowHeight = estimatedMessageRowHeight();
+  // Draft changes rerender ChatView; keep virtual spacers stable while typing.
+  const estimatedRowHeight = useMemo(
+    () => estimatedMessageRowHeight(),
+    [activeId, messageWindowStart, messages.length],
+  );
   const transcriptTopSpacer = messageWindowStart * estimatedRowHeight;
   const transcriptBottomSpacer =
     (messages.length - messageWindowEnd) * estimatedRowHeight;
@@ -8064,6 +8257,20 @@ export function ChatView({
                       style={{ height: transcriptBottomSpacer }}
                     />
                   )}
+                </div>
+              )}
+              {!emptyThread && runningWorkerRuns.length > 0 && (
+                <div
+                  className="transcript-worker-runs"
+                  data-testid="transcript-worker-runs"
+                >
+                  {runningWorkerRuns.map((record) => (
+                    <WorkerRunEvent
+                      key={record.run.id}
+                      record={record}
+                      onOpen={() => openWorkersInspector(record.run.id)}
+                    />
+                  ))}
                 </div>
               )}
             </div>
@@ -8262,6 +8469,18 @@ export function ChatView({
                 onMove={moveQueuedMessageFromTray}
                 onRemove={removeQueuedMessageFromTray}
               />
+              {pendingSteerCount > 0 ? (
+                <div
+                  className="review-comment-tray pending-steer-tray"
+                  data-testid="pending-steer"
+                  role="status"
+                  aria-live="polite"
+                >
+                  {pendingSteerCount === 1
+                    ? "Steering will be applied at the next model step."
+                    : `${pendingSteerCount} steering messages will be applied at the next model step.`}
+                </div>
+              ) : null}
               {pendingReviewComments.length ? (
                 <div className="review-comment-tray" aria-label="Pending review comments">
                   <span>{pendingReviewComments.length} review comment{pendingReviewComments.length === 1 ? "" : "s"}</span>
@@ -8339,10 +8558,7 @@ export function ChatView({
                 busy={busy}
                 imageAttachmentsBlocked={Boolean(unsupportedImageInputMessage(effectiveModel))}
                 sendBlocked={Boolean(imageAttachmentBlocker)}
-                canSteer={Boolean(
-                  canonicalRunIdsRef.current.get(activeId)
-                  && canonicalSteeringRef.current.get(activeId)
-                )}
+                canSteer={Boolean(canonicalActiveRun?.steering)}
                 hasReviewComments={pendingReviewComments.length > 0}
               />
             </ComposerSurface>
@@ -8524,9 +8740,19 @@ export function ChatView({
                     selectPreviewSource(source);
                     setSessionInspectorTab(activeId, "preview");
                   }}
-                  browserSession={activeInspectorPreviewSource === "url" ? activeInspectorBrowserSession : undefined}
+                  browserSession={
+                    activeInspectorPreviewSource === "url"
+                      ? activeInspectorBrowserSession
+                      : activeInspectorPreviewSource === "app"
+                        ? activeInspectorAppBrowserSession
+                        : undefined
+                  }
                   onBrowserSessionChange={
-                    activeInspectorPreviewSource === "url" ? updateBrowserSession : undefined
+                    activeInspectorPreviewSource === "url"
+                      ? updateBrowserSession
+                      : activeInspectorPreviewSource === "app"
+                        ? updateAppBrowserSession
+                        : undefined
                   }
                   runtimeStatus={
                     activeInspectorPreviewSource === "app"

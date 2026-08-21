@@ -218,6 +218,7 @@ export interface SessionBrowserTab {
   historyIndex: number;
   title?: string;
   faviconUrl?: string;
+  muted?: boolean;
 }
 
 export interface SessionBrowserSession {
@@ -1426,6 +1427,7 @@ function normalizeBrowserSession(
       faviconUrl: typeof tab.faviconUrl === "string"
         ? normalizeArtifactBrowserUrl(tab.faviconUrl) ?? undefined
         : undefined,
+      muted: tab.muted === true ? true : undefined,
     });
   }
   if (!tabs.length) return undefined;
@@ -1439,6 +1441,21 @@ function normalizeBrowserSession(
     ? raw.activeTabId
     : tabs[0].id;
   return { profileId, tabs, activeTabId };
+}
+
+function normalizePreviewBrowserSessionsByKey(
+  value: unknown,
+): Record<string, SessionBrowserSession> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const sessions: Record<string, SessionBrowserSession> = {};
+  for (const [key, rawSession] of Object.entries(
+    value as Record<string, unknown>,
+  )) {
+    if (!/^[A-Za-z0-9_.-]+$/.test(key)) continue;
+    const session = normalizeBrowserSession(rawSession, `${key}-app`);
+    if (session) sessions[key] = session;
+  }
+  return sessions;
 }
 
 function legacyWorkerRunFromSession(
@@ -1830,6 +1847,7 @@ interface SessionState {
   workerRuns: SessionWorkerRunRecord[];
   projects: Project[];
   previewRuntimesByKey: Record<string, SessionPreviewRuntime>;
+  previewBrowserSessionsByKey: Record<string, SessionBrowserSession>;
   inspectorByKey: Record<string, SessionInspectorState>;
   pullRequestsBySession: Record<string, PullRequestSnapshot>;
   activeId: string;
@@ -1982,6 +2000,10 @@ interface SessionState {
   setInspectorOpen: (id: string, open: boolean) => void;
   setInspectorTab: (id: string, tab: SessionInspectorTab) => void;
   setBrowserSession: (id: string, session: SessionBrowserSession) => void;
+  setPreviewBrowserSessionByKey: (
+    key: string,
+    session: SessionBrowserSession,
+  ) => void;
   setPreviewRuntime: (
     id: string,
     runtime: SessionPreviewRuntime | undefined,
@@ -2019,6 +2041,7 @@ export const useSessions = create<SessionState>()(
         workerRuns: [],
         projects: [],
         previewRuntimesByKey: {},
+        previewBrowserSessionsByKey: {},
         inspectorByKey: {},
         pullRequestsBySession: {},
         activeId: first.id,
@@ -3397,8 +3420,13 @@ export const useSessions = create<SessionState>()(
               (item) => item.run.id === record.run.id,
             );
             const next = mergeWorkerRunRecord(existing, record);
-            const shouldReveal =
+            const live =
               next.run.status === "proposed" || next.run.status === "running";
+            const wasLive =
+              existing?.run.status === "proposed" ||
+              existing?.run.status === "running";
+            const shouldReveal =
+              live && !wasLive && next.run.parent_thread_id === st.activeId;
             const parent = st.sessions.find(
               (session) => session.id === next.run.parent_thread_id,
             );
@@ -3622,6 +3650,22 @@ export const useSessions = create<SessionState>()(
                 : session,
             ),
           })),
+
+        setPreviewBrowserSessionByKey: (key, browserSession) =>
+          set((st) => {
+            if (!/^[A-Za-z0-9_.-]+$/.test(key)) return {};
+            const normalized = normalizeBrowserSession(
+              browserSession,
+              `${key}-app`,
+            );
+            if (!normalized) return {};
+            return {
+              previewBrowserSessionsByKey: {
+                ...st.previewBrowserSessionsByKey,
+                [key]: normalized,
+              },
+            };
+          }),
 
         setPreviewRuntime: (id, runtime) =>
           set((st) => ({
@@ -3878,6 +3922,10 @@ export const useSessions = create<SessionState>()(
         const previewRuntimesByKey = normalizePreviewRuntimesByKey(
           state.previewRuntimesByKey,
         );
+        const previewBrowserSessionsByKey =
+          normalizePreviewBrowserSessionsByKey(
+            state.previewBrowserSessionsByKey,
+          );
         for (const session of sessions) {
           const folder = normalizeProjectFolder(sessionProjectFolder(session));
           if (folder && session.previewRuntime) {
@@ -3925,6 +3973,7 @@ export const useSessions = create<SessionState>()(
           workerRuns,
           projects: liveProjects,
           previewRuntimesByKey,
+          previewBrowserSessionsByKey,
           inspectorByKey,
           pullRequestsBySession: {},
           activeId: active.activeId,
@@ -3947,6 +3996,7 @@ export const useSessions = create<SessionState>()(
         ),
         projects: state.projects,
         previewRuntimesByKey: state.previewRuntimesByKey,
+        previewBrowserSessionsByKey: state.previewBrowserSessionsByKey,
         inspectorByKey: state.inspectorByKey,
         activeId: state.activeId,
         archiveRetentionDays: state.archiveRetentionDays,
