@@ -1,4 +1,9 @@
 {
+  "0.2.50": {
+    "version": "0.2.50",
+    "summary": "Milim 0.2.50 keeps active conversations steady, makes previews more dependable, and turns pasted images into compact message galleries.",
+    "items": []
+  },
   "0.2.49": {
     "version": "0.2.49",
     "summary": "Milim 0.2.49 lets threads collaborate, keeps long conversations fast and durable, and makes desktop and mobile chat behavior clearer and more reliable.",
