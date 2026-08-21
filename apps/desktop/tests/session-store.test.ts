@@ -1687,6 +1687,22 @@ useSessions.getState().setBrowserSession(first, {
       history: ["https://docs.google.com/presentation/d/slides-1/edit"],
       historyIndex: 0,
       title: "Deck",
+      muted: true,
+    },
+  ],
+});
+const appPreviewKey = "preview-runtime-app";
+useSessions.getState().setPreviewBrowserSessionByKey(appPreviewKey, {
+  profileId: "app-preview",
+  activeTabId: "app-main",
+  tabs: [
+    {
+      id: "app-main",
+      url: "http://127.0.0.1:4173/",
+      input: "http://127.0.0.1:4173/",
+      history: ["http://127.0.0.1:4173/"],
+      historyIndex: 0,
+      muted: true,
     },
   ],
 });
@@ -1697,6 +1713,19 @@ equal(
   "browser tabs should persist per thread",
 );
 equal(
+  useSessions.getState().sessions.find((session) => session.id === first)
+    ?.browserSession?.tabs.find((tab) => tab.id === "slides")?.muted,
+  true,
+  "browser tab mute should persist with that tab",
+);
+equal(
+  useSessions.getState().previewBrowserSessionsByKey[appPreviewKey]?.tabs.find(
+    (tab) => tab.id === "app-main",
+  )?.muted,
+  true,
+  "app preview tab mute should persist with that tab",
+);
+equal(
   useSessions.getState().sessions.find((session) => session.id === second)
     ?.browserSession,
   undefined,
@@ -1705,6 +1734,10 @@ equal(
 assert(
   localStorage.getItem("milim.sessions")?.includes('"activeTabId":"slides"'),
   "browser tabs should persist in session storage",
+);
+assert(
+  localStorage.getItem("milim.sessions")?.includes('"muted":true'),
+  "muted browser tabs should persist in session storage",
 );
 useSessions.getState().setInspectorOpen(first, false);
 equal(
@@ -1730,6 +1763,7 @@ equal(
 );
 useSessions.getState().setInspectorTab(first, "preview");
 useSessions.getState().setContextPanelOpen(first, false);
+useSessions.getState().switchTo(first);
 useSessions.getState().upsertWorkerRun({
   run: {
     id: "context-worker-run",
@@ -1752,6 +1786,44 @@ equal(
   inspectorFor(second).tab,
   "workers",
   "proposed Worker Runs should select the shared Workers inspector",
+);
+useSessions.getState().setInspectorTab(first, "preview");
+useSessions.getState().upsertWorkerRun({
+  run: {
+    id: "context-worker-run",
+    parent_thread_id: first,
+    policy: "ask",
+    runtime: "managed",
+    status: "running",
+    tasks: [],
+    created_at: "2026-07-13T00:00:00Z",
+    updated_at: "2026-07-13T00:01:00Z",
+  },
+  workers: [],
+});
+equal(
+  inspectorFor(first).tab,
+  "preview",
+  "live Worker updates should preserve a manual Preview selection",
+);
+useSessions.getState().switchTo(second);
+useSessions.getState().upsertWorkerRun({
+  run: {
+    id: "background-worker-run",
+    parent_thread_id: first,
+    policy: "auto",
+    runtime: "managed",
+    status: "running",
+    tasks: [],
+    created_at: "2026-07-13T00:02:00Z",
+    updated_at: "2026-07-13T00:02:00Z",
+  },
+  workers: [],
+});
+equal(
+  inspectorFor(second).tab,
+  "preview",
+  "background Worker Runs should not change a sibling thread's shared inspector tab",
 );
 useSessions.getState().updateSettings(second, { folder: "" });
 useSessions.getState().setContextPanelOpen(first, false);

@@ -806,6 +806,47 @@ function emptyBrowserSession(): InspectorBrowserSession {
   };
 }
 
+function appBrowserSessionAtUrl(
+  current: InspectorBrowserSession | undefined,
+  url: string,
+): InspectorBrowserSession {
+  if (!current) {
+    const tab = emptyBrowserTab(url);
+    return {
+      profileId: `app-${Math.random().toString(36).slice(2)}`,
+      tabs: [tab],
+      activeTabId: tab.id,
+    };
+  }
+  const activeTab =
+    current.tabs.find((tab) => tab.id === current.activeTabId) ??
+    current.tabs[0];
+  if (!activeTab) {
+    const tab = emptyBrowserTab(url);
+    return { ...current, tabs: [tab], activeTabId: tab.id };
+  }
+  if (activeTab.url === url) return current;
+  const history = activeTab.history.slice(0, activeTab.historyIndex + 1);
+  if (history[history.length - 1] !== url) history.push(url);
+  return {
+    ...current,
+    tabs: current.tabs.map((tab) =>
+      tab.id === activeTab.id
+        ? {
+            ...tab,
+            url,
+            input: url,
+            history,
+            historyIndex: history.length - 1,
+            title: undefined,
+            faviconUrl: undefined,
+          }
+        : tab,
+    ),
+    activeTabId: activeTab.id,
+  };
+}
+
 function emptyBrowserTab(url: string | null = null): InspectorBrowserTab {
   return {
     id: `tab-${Math.random().toString(36).slice(2)}`,
@@ -1677,6 +1718,9 @@ export function ChatView({
   const setSessionInspectorOpen = useSessions((s) => s.setInspectorOpen);
   const setSessionInspectorTab = useSessions((s) => s.setInspectorTab);
   const setSessionBrowserSession = useSessions((s) => s.setBrowserSession);
+  const setPreviewBrowserSessionByKey = useSessions(
+    (s) => s.setPreviewBrowserSessionByKey,
+  );
   const updateThreadSettings = useSessions((s) => s.updateSettings);
   const switchToSession = useSessions((s) => s.switchTo);
   const enqueueQueuedMessage = useSessions((s) => s.enqueueQueuedMessage);
@@ -3398,6 +3442,24 @@ export function ChatView({
         : "url");
   const activeInspectorBrowserSession =
     activeSession?.browserSession ?? emptyBrowserSession();
+  const activeInspectorAppBrowserSession = useSessions(
+    (state) => state.previewBrowserSessionsByKey[activePreviewRuntimeKey],
+  );
+
+  useEffect(() => {
+    const url = previewRuntimeBrowserUrl(matchingPreviewRuntime);
+    if (!sessionsHydrated || !url || activeInspectorAppBrowserSession) return;
+    setPreviewBrowserSessionByKey(
+      activePreviewRuntimeKey,
+      appBrowserSessionAtUrl(undefined, url),
+    );
+  }, [
+    activeInspectorAppBrowserSession,
+    activePreviewRuntimeKey,
+    matchingPreviewRuntime,
+    sessionsHydrated,
+    setPreviewBrowserSessionByKey,
+  ]);
 
   useEffect(() => {
     const restoreKey = `${activeId}:${sessionsHydrated ? "hydrated" : "initial"}`;
@@ -3845,6 +3907,21 @@ export function ChatView({
     setSessionBrowserSession(activeId, session);
   }
 
+  function updateAppBrowserSession(session: InspectorBrowserSession) {
+    setPreviewBrowserSessionByKey(activePreviewRuntimeKey, session);
+  }
+
+  function syncAppBrowserSession(url: string | null | undefined) {
+    const normalizedUrl = normalizeArtifactBrowserUrl(url ?? "");
+    if (!normalizedUrl) return;
+    const current = useSessions.getState().previewBrowserSessionsByKey[
+      activePreviewRuntimeKey
+    ];
+    const next = appBrowserSessionAtUrl(current, normalizedUrl);
+    if (next !== current)
+      setPreviewBrowserSessionByKey(activePreviewRuntimeKey, next);
+  }
+
   function managedPreviewFiles(
     artifacts?: readonly ChatArtifact[],
   ): PreviewAppFile[] {
@@ -3913,6 +3990,7 @@ export function ChatView({
       entry_path: path,
     });
     if (!status) return;
+    syncAppBrowserSession(status.url);
     selectPreviewSource("app");
     setSessionInspectorTab(activeId, "preview");
   }
@@ -3922,6 +4000,7 @@ export function ChatView({
     if (!options) return;
     const status = await startRuntime(options);
     if (!status) return;
+    syncAppBrowserSession(status.url);
     if (!folder.trim() && options.files?.length)
       upsertVirtualFiles(activeId, options.files);
     selectPreviewSource("app");
@@ -3936,6 +4015,7 @@ export function ChatView({
     const options = previewRuntimeRunOptions();
     if (!options) return;
     const status = await restartRuntime(options);
+    if (status) syncAppBrowserSession(status.url);
     if (status && !folder.trim() && options.files?.length)
       upsertVirtualFiles(activeId, options.files);
   }
@@ -4334,13 +4414,14 @@ export function ChatView({
     resizePreviewPanelDuringDrag(start.intentWidth);
   }, [chatBodyWidth, reservedContextWidth]);
 
+  const liveWorkerRunId =
+    activeWorkerRun?.run.status === "proposed" ||
+    activeWorkerRun?.run.status === "running"
+      ? activeWorkerRun.run.id
+      : null;
   useEffect(() => {
-    if (
-      (activeWorkerRun?.run.status === "proposed" ||
-        activeWorkerRun?.run.status === "running") &&
-      (!sidePanelVisible || inspectorTab !== "workers")
-    ) openWorkersInspector(activeWorkerRun.run.id);
-  }, [activeWorkerRun?.run.id, activeWorkerRun?.run.status, inspectorTab, sidePanelVisible]);
+    if (liveWorkerRunId) openWorkersInspector(liveWorkerRunId);
+  }, [activeId, liveWorkerRunId]);
 
   useEffect(() => {
     if (
@@ -8633,9 +8714,19 @@ export function ChatView({
                     selectPreviewSource(source);
                     setSessionInspectorTab(activeId, "preview");
                   }}
-                  browserSession={activeInspectorPreviewSource === "url" ? activeInspectorBrowserSession : undefined}
+                  browserSession={
+                    activeInspectorPreviewSource === "url"
+                      ? activeInspectorBrowserSession
+                      : activeInspectorPreviewSource === "app"
+                        ? activeInspectorAppBrowserSession
+                        : undefined
+                  }
                   onBrowserSessionChange={
-                    activeInspectorPreviewSource === "url" ? updateBrowserSession : undefined
+                    activeInspectorPreviewSource === "url"
+                      ? updateBrowserSession
+                      : activeInspectorPreviewSource === "app"
+                        ? updateAppBrowserSession
+                        : undefined
                   }
                   runtimeStatus={
                     activeInspectorPreviewSource === "app"

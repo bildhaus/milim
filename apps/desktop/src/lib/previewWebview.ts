@@ -90,6 +90,14 @@ export async function reloadPreviewWebview(label: string): Promise<void> {
   await invoke("preview_webview_reload", { label });
 }
 
+export async function setPreviewWebviewMuted(
+  label: string,
+  muted: boolean,
+): Promise<void> {
+  if (!IS_TAURI) return;
+  await invoke("preview_webview_set_muted", { label, muted });
+}
+
 export async function movePreviewWebviewHistory(
   label: string,
   delta: -1 | 1,

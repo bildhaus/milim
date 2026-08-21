@@ -19,6 +19,7 @@ const zoomOnly = process.argv.includes("--zoom-only");
 const microUiOnly = process.argv.includes("--micro-ui-only");
 const resizeHandlesOnly = process.argv.includes("--resize-handles-only");
 const workersOnly = process.argv.includes("--workers-only");
+const workerPreviewTabOnly = process.argv.includes("--worker-preview-tab-only");
 const mcpAppsOnly = process.argv.includes("--mcp-apps-only");
 const sidebarMotionOnly = process.argv.includes("--sidebar-motion-only");
 const inboxSidebarOnly = process.argv.includes("--inbox-sidebar-only");
@@ -198,6 +199,10 @@ try {
     await session.page.getByTestId("chat-shell").waitFor();
     await dismissOnboardingIfPresent(session.page);
     await runMcpAppsCheck(session.page);
+  } else if (workerPreviewTabOnly) {
+    const errors = collectErrors(session.page);
+    await runWorkerPreviewTabCheck(session.page, milimHome);
+    consoleErrors.push(...errors.filter((message) => !message.includes("/worker-runs/e2e-workers-run/events")));
   } else if (workersOnly) {
     const errors = collectErrors(session.page);
     await runWorkersInspectorCheck(session.page, milimHome);
@@ -2403,11 +2408,26 @@ async function runStaticWorkspacePreviewCheck(page, pid) {
     await page.getByRole("button", { name: "Reload page", exact: true }).click();
     await page.locator(".preview-browser-tab.active > button").getByText("Static Fixture Updated", { exact: true }).waitFor({ timeout: 10_000 });
 
+    const activeBrowserTab = page.locator(".preview-browser-tab.active");
+    await activeBrowserTab.click({ button: "right" });
+    const tabMenu = page.getByTestId("app-context-menu");
+    await tabMenu.getByRole("menuitem", { name: "Mute tab", exact: true }).click();
+    await activeBrowserTab.getByTestId("preview-browser-tab-muted").waitFor();
+    await waitForPersistedBrowserTabMute(page, true);
+
     await page.getByRole("tab", { name: "Code", exact: true }).click();
+    await waitForPersistedBrowserTabMute(page, true);
     await page.getByRole("button", { name: "index.html", exact: true }).click();
+    await waitForPersistedBrowserTabMute(page, true);
     await page.getByTestId("workspace-html-preview").waitFor();
     await page.getByTestId("workspace-html-preview").click();
     await page.getByRole("tab", { name: "Preview", exact: true, selected: true }).waitFor();
+    const restoredBrowserTab = page.locator(".preview-browser-tab.active");
+    await restoredBrowserTab.getByTestId("preview-browser-tab-muted").waitFor();
+    await restoredBrowserTab.click({ button: "right" });
+    await tabMenu.getByRole("menuitem", { name: "Unmute tab", exact: true }).click();
+    await page.getByTestId("preview-browser-tab-muted").waitFor({ state: "hidden" });
+    await waitForPersistedBrowserTabMute(page, false);
     const reusedUrl = await page.getByTestId("preview-browser-url").inputValue();
     if (new URL(reusedUrl).port !== new URL(status.url).port) throw new Error(`Static preview should reuse its loopback server: ${status.url} -> ${reusedUrl}`);
 
@@ -4039,10 +4059,9 @@ async function runLinkedThreadDropCheck(page) {
 }
 
 async function runWorkersInspectorCheck(page, milimHome) {
-  await seedWorkerFixture(page, milimHome, "proposed");
-  const inspector = page.getByTestId("workers-inspector");
+  const { inspector, workersTab } = await runWorkerPreviewTabCheck(page, milimHome);
+  await workersTab.click();
   await inspector.waitFor();
-  await assertHidden(page.getByRole("tab", { name: "Workers" }), "Workers inspector tab");
   await page.getByTestId("workers-plan").waitFor();
   await page.screenshot({ path: screenshots.workersPlan, fullPage: false });
 
@@ -4091,6 +4110,21 @@ async function runWorkersInspectorCheck(page, milimHome) {
   await page.getByTestId("quick-summary-section-sources").click();
   await page.locator(".quick-summary-more").waitFor();
   await page.screenshot({ path: screenshots.workersNarrow, fullPage: false });
+}
+
+async function runWorkerPreviewTabCheck(page, milimHome) {
+  await seedWorkerFixture(page, milimHome, "proposed");
+  const inspector = page.getByTestId("workers-inspector");
+  await inspector.waitFor();
+  const previewTab = page.getByRole("tab", { name: "Preview" });
+  const workersTab = page.getByRole("tab", { name: "Workers" });
+  await assertAttribute(workersTab, "aria-selected", "true");
+  await previewTab.click();
+  await page.waitForTimeout(250);
+  await assertAttribute(previewTab, "aria-selected", "true");
+  await assertAttribute(workersTab, "aria-selected", "false");
+  await page.getByTestId("preview-header").waitFor();
+  return { inspector, workersTab };
 }
 
 async function seedWorkerFixture(page, milimHome, status) {
@@ -6162,6 +6196,20 @@ async function waitForPersistedUserStateText(page, key, text, timeoutMs = 10_000
     await delay(100);
   }
   throw new Error(`Timed out waiting for persisted ${key} to include ${text}.`);
+}
+
+async function waitForPersistedBrowserTabMute(page, muted, timeoutMs = 10_000) {
+  await page.waitForFunction(async (expected) => {
+    const invoke = window.__TAURI_INTERNALS__?.invoke;
+    const value = invoke
+      ? await invoke("user_sessions_get")
+      : window.localStorage.getItem("milim.sessions");
+    if (typeof value !== "string") return false;
+    const state = JSON.parse(value).state ?? {};
+    const browserSession = Object.values(state.previewBrowserSessionsByKey ?? {})[0];
+    const tab = browserSession?.tabs?.find((item) => item.id === browserSession.activeTabId);
+    return tab != null && Boolean(tab.muted) === expected;
+  }, muted, { timeout: timeoutMs });
 }
 
 async function assertHidden(locator, label) {

@@ -41,6 +41,7 @@
     "test:tauri-settings": "node tests/tauri-webview-e2e.mjs --settings-only",
     "test:tauri-turn-changes": "node tests/tauri-webview-e2e.mjs --turn-changes-only",
     "test:tauri-resize-handles": "node tests/tauri-webview-e2e.mjs --resize-handles-only",
+    "test:tauri-worker-preview": "node tests/tauri-webview-e2e.mjs --worker-preview-tab-only",
     "test:tauri-mcp-apps": "node tests/tauri-webview-e2e.mjs --mcp-apps-only",
     "perf:tauri-dev": "node tests/tauri-dev-perf.mjs",
     "perf:release-build": "npm run tauri -- build --no-bundle --features perf-diagnostics",
@@ -61,7 +62,7 @@
     "verify:native-tests": "cargo test --manifest-path ../../Cargo.toml -p milim-server media_ && cargo test --manifest-path ../../Cargo.toml -p milim-server mobile_companion && node tests/run-tauri-rust-test.mjs artifact_ && npm run test:computer-use",
     "verify": "npm run verify:control-contract && npm run verify:frontend && npm run verify:native-tests",
     "verify:tauri": "node tests/run-tauri-smoke.mjs",
-    "verify:tauri-webview": "npm run verify:tauri && npm run test:tauri-webview",
+    "verify:tauri-webview": "npm run verify:tauri && npm run test:tauri-webview && npm run test:tauri-worker-preview",
     "verify:tester-ready": "npm run verify && npm run verify:release && npm run verify:tauri-webview"
   },
   "dependencies": {

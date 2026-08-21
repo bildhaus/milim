@@ -5070,6 +5070,7 @@ pub fn run() {
             preview_tools::preview_picker_cancel,
             preview_webview::preview_webview_navigate,
             preview_webview::preview_webview_reload,
+            preview_webview::preview_webview_set_muted,
             preview_webview::preview_webview_history,
             preview_webview::preview_webview_url,
             preview_webview::preview_webview_create,

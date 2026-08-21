@@ -71,6 +71,16 @@ assert.match(
   /linkedWorkerRun && linkedWorkerRun\.run\.status !== "running"/,
   "running Worker Runs should not also render inside a mutable message row",
 );
+assert.match(
+  chatView,
+  /const liveWorkerRunId =[\s\S]*?if \(liveWorkerRunId\) openWorkersInspector\(liveWorkerRunId\);[\s\S]*?\[activeId, liveWorkerRunId\]/,
+  "live Workers should auto-open once without reacting to manual inspector tab changes",
+);
+assert.doesNotMatch(
+  chatView,
+  /\[activeWorkerRun\?\.run\.id, activeWorkerRun\?\.run\.status, inspectorTab, sidePanelVisible\]/,
+  "manual inspector tab changes should not retrigger the Worker auto-open effect",
+);
 assert.match(chatView, /inspectorTab === "workers"[\s\S]*?\? true/);
 assert.ok(chatView.includes('[data-testid="open-artifact-browser"]'));
 

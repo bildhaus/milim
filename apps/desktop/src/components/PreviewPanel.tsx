@@ -8,13 +8,13 @@ import { useBrowserRecentVisits, type BrowserRecentVisit } from "../browser/rece
 import type { PreviewControlActivity } from "../lib/previewActivity";
 import { googleWorkspaceUrl } from "../lib/googleWorkspace";
 import type { SessionBrowserSession, SessionBrowserTab } from "../sessions/store";
-import { closePreviewWebview, createPreviewWebview, listenForPreviewWebviewNavigation, listenForPreviewWebviewNewTab, listenForPreviewWebviewShortcut, listenForPreviewWebviewTitle, movePreviewWebviewHistory, navigatePreviewWebview, reloadPreviewWebview, type PreviewBrowserStorageMode, type PreviewWebviewLoadState, type PreviewWebviewShortcut } from "../lib/previewWebview";
+import { closePreviewWebview, createPreviewWebview, listenForPreviewWebviewNavigation, listenForPreviewWebviewNewTab, listenForPreviewWebviewShortcut, listenForPreviewWebviewTitle, movePreviewWebviewHistory, navigatePreviewWebview, reloadPreviewWebview, setPreviewWebviewMuted, type PreviewBrowserStorageMode, type PreviewWebviewLoadState, type PreviewWebviewShortcut } from "../lib/previewWebview";
 import { useSettings } from "../settings/store";
 import { nextPreviewBrowserZoom, useUiPreferences } from "../ui/store";
 import { shortcutLabel, shortcutMatchesEvent } from "../ui/shortcuts";
 import { requestWorkspaceEditorLeave } from "../lib/workspaceEditorGuard";
 import { useContextMenu } from "./ContextMenu";
-import { ArrowLeft, ArrowRight, Bolt, Code, Copy, Download, ExternalLink, Eye, Globe, MoreHorizontal, Plus, Refresh, Sidebar, Square, Terminal, X } from "./icons";
+import { ArrowLeft, ArrowRight, Bolt, Code, Copy, Download, ExternalLink, Eye, Globe, MoreHorizontal, Plus, Refresh, Sidebar, Square, Terminal, VolumeX, X } from "./icons";
 import { GoogleWorkspacePreview } from "./GoogleWorkspacePreview";
 import { Logo } from "./Logo";
 import { PaneResizeHandle } from "./PaneResizeHandle";
@@ -792,6 +792,10 @@ export function PreviewPanel({
     setFrameKey((key) => key + 1);
   }
 
+  function toggleBrowserTabMuted(tab: PreviewBrowserPage) {
+    updateBrowserPage({ ...tab, muted: tab.muted ? undefined : true });
+  }
+
   function openBrowserUrlExternal(url = browserUrl) {
     if (!url) return;
     void openExternalUrl(url).catch((error) => console.warn("failed to open URL", error));
@@ -818,6 +822,12 @@ export function PreviewPanel({
         icon: <Refresh size={13} />,
         disabled: !tab.url,
         action: () => reloadBrowserTab(tab),
+      },
+      {
+        id: "toggle-browser-tab-muted",
+        label: tab.muted ? "Unmute tab" : "Mute tab",
+        icon: <VolumeX size={13} />,
+        action: () => toggleBrowserTabMuted(tab),
       },
       {
         id: "open-browser-tab-external",
@@ -1228,14 +1238,20 @@ export function PreviewPanel({
                         type="button"
                         role="tab"
                         aria-selected={tab.id === browserSession.activeTabId}
-                        title={tab.url ?? "New tab"}
+                        aria-label={`${browserTabLabel(tab)}${tab.muted ? ", muted" : ""}`}
+                        title={`${tab.url ?? "New tab"}${tab.muted ? " · Muted" : ""}`}
                         onClick={() => selectBrowserTab(tab.id)}
                       >
                         <span className="preview-browser-tab-icon" aria-hidden="true">
                           {tab.faviconUrl && <img key={tab.faviconUrl} src={tab.faviconUrl} alt="" onError={(event) => { event.currentTarget.hidden = true; }} />}
                           <Globe size={12} />
                         </span>
-                        <span>{browserTabLabel(tab)}</span>
+                        <span className="preview-browser-tab-label">{browserTabLabel(tab)}</span>
+                        {tab.muted && (
+                          <span className="preview-browser-tab-muted" data-testid="preview-browser-tab-muted" title="Tab muted" aria-hidden="true">
+                            <VolumeX size={11} />
+                          </span>
+                        )}
                       </button>
                       <button type="button" className="preview-browser-tab-close" aria-label={`Close ${browserTabLabel(tab)}`} onClick={() => closeBrowserTab(tab.id)}>
                         <X size={11} />
@@ -1409,6 +1425,7 @@ export function PreviewPanel({
                         profileId={browserSession.profileId}
                         surfaceKind={selectedPreviewSource === "app" ? "runtime_browser" : "native_browser"}
                         storageMode={selectedPreviewSource === "url" ? browserStorageMode : "private"}
+                        muted={tab.muted === true}
                         surfaceReady={selectedPreviewSource === "app" ? Boolean(runtimeStatus?.ready) : undefined}
                         surfaceError={selectedPreviewSource === "app" ? runtimeError : null}
                         zoomPercent={previewBrowserZoomPercent}
@@ -1771,6 +1788,7 @@ function NativeArtifactBrowser({
   profileId,
   surfaceKind,
   storageMode,
+  muted,
   surfaceReady,
   surfaceError,
   zoomPercent,
@@ -1791,6 +1809,7 @@ function NativeArtifactBrowser({
   profileId: string;
   surfaceKind: PreviewSurfaceKind;
   storageMode: PreviewBrowserStorageMode;
+  muted: boolean;
   surfaceReady?: boolean;
   surfaceError?: string | null;
   zoomPercent: number;
@@ -1819,6 +1838,7 @@ function NativeArtifactBrowser({
   const labelCallbackRef = useRef(onNativeLabelChange);
   const visibleRef = useRef(visible);
   const zoomPercentRef = useRef(zoomPercent);
+  const mutedRef = useRef(muted);
   const currentNativeUrlRef = useRef(url);
   const previousFrameKeyRef = useRef(frameKey);
   const [nativeError, setNativeError] = useState<string | null>(null);
@@ -1836,6 +1856,7 @@ function NativeArtifactBrowser({
   labelCallbackRef.current = onNativeLabelChange;
   visibleRef.current = visible;
   zoomPercentRef.current = zoomPercent;
+  mutedRef.current = muted;
 
   function clearOverlayCloseTimer() {
     if (overlayCloseTimerRef.current === null) return;
@@ -2001,6 +2022,7 @@ function NativeArtifactBrowser({
         return;
       }
       await webview.setZoom(zoomPercentRef.current / 100);
+      await setPreviewWebviewMuted(label, mutedRef.current);
       await syncBounds(webview);
       appUiObserver = new MutationObserver(() => void syncAppUiVisibility());
       appUiObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-native-preview-blocker", "open"] });
@@ -2052,6 +2074,16 @@ function NativeArtifactBrowser({
       console.error("Could not update native preview zoom.", error);
     });
   }, [zoomPercent]);
+
+  useEffect(() => {
+    if (!IS_TAURI) return;
+    const webview = webviewRef.current;
+    const label = nativeNavigation.label;
+    if (!webview || !label || webview.label !== label) return;
+    void setPreviewWebviewMuted(label, muted).catch((error) => {
+      console.error("Could not update native preview audio mute.", error);
+    });
+  }, [muted, nativeNavigation.label, nativeNavigation.state]);
 
   useEffect(() => {
     if (!IS_TAURI) return;

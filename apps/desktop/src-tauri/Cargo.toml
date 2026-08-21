@@ -69,6 +69,7 @@ objc2-web-kit = { version = "0.3", default-features = false, features = ["WKWebV
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38"
+windows-core = "0.61"
 
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = "2"

@@ -2333,11 +2333,21 @@ html[data-dark="true"] .preview-control-cursor {
   color: inherit;
   cursor: pointer;
 }
-.preview-browser-tab > button:first-child span {
+.preview-browser-tab-label {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 11px;
+}
+.preview-browser-tab-muted {
+  display: grid;
+  flex: 0 0 12px;
+  width: 12px;
+  height: 12px;
+  place-items: center;
+  color: var(--secondary-text);
 }
 .preview-browser-tab-icon {
   position: relative;
