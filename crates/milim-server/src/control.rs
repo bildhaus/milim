@@ -1200,6 +1200,7 @@ pub struct RunManager {
     store: Arc<UserDataStore>,
     host: RwLock<ControlHostRecord>,
     active: Mutex<HashMap<String, ActiveRun>>,
+    queue_interrupts: Mutex<HashMap<String, String>>,
     command_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     thread_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     confirmations: Mutex<HashMap<String, ConfirmationGrant>>,
@@ -1217,6 +1218,7 @@ impl RunManager {
             store,
             host: RwLock::new(host),
             active: Mutex::new(HashMap::new()),
+            queue_interrupts: Mutex::new(HashMap::new()),
             command_locks: Mutex::new(HashMap::new()),
             thread_locks: Mutex::new(HashMap::new()),
             confirmations: Mutex::new(HashMap::new()),
@@ -2890,6 +2892,12 @@ impl RunManager {
             mailbox_context: Vec::new(),
         };
         let run_id = self.start_turn(state, thread_id.clone(), accepted)?;
+        let run_capabilities = self
+            .store
+            .control_run(&run_id)?
+            .map(run_snapshot)
+            .transpose()?
+            .map(|run| run.capabilities);
         Ok(ControlCommandResultV1 {
             command_id: command.command_id.clone(),
             status: ControlCommandStatusV1::Accepted,
@@ -2902,7 +2910,10 @@ impl RunManager {
             queue_id: None,
             confirmation_token: None,
             message: None,
-            data: json!({ "regenerated": true }),
+            data: json!({
+                "regenerated": true,
+                "capabilities": run_capabilities,
+            }),
         })
     }
 
@@ -3174,7 +3185,14 @@ impl RunManager {
             .lock()
             .expect("control active run store poisoned")
             .remove(&thread_id);
-        if status != "cancelled" {
+        let interrupt_queue_id = self
+            .queue_interrupts
+            .lock()
+            .expect("control queue interrupt store poisoned")
+            .remove(&thread_id);
+        if let Some(queue_id) = interrupt_queue_id {
+            let _ = self.start_queued_turn(state, thread_id, &queue_id, true);
+        } else if status != "cancelled" {
             self.drain_queue(state, thread_id);
         }
     }
@@ -4091,10 +4109,10 @@ impl RunManager {
             .active
             .lock()
             .expect("control active run store poisoned");
-        let Some(run) = active.get(thread_id) else {
-            return Err(Error::InvalidRequest("thread has no active turn".into()));
-        };
-        let _ = run.stop.send(true);
+        let run = active.get(thread_id);
+        if let Some(run) = run {
+            let _ = run.stop.send(true);
+        }
         Ok(ControlCommandResultV1 {
             command_id: command.command_id.clone(),
             status: ControlCommandStatusV1::Applied,
@@ -4103,11 +4121,14 @@ impl RunManager {
                 .store
                 .control_thread(thread_id)?
                 .map(|thread| thread.revision),
-            run_id: Some(run.run_id.clone()),
+            run_id: run.map(|run| run.run_id.clone()),
             queue_id: None,
             confirmation_token: None,
             message: None,
-            data: json!({ "queued_turns_preserved": true }),
+            data: json!({
+                "queued_turns_preserved": true,
+                "already_stopped": run.is_none(),
+            }),
         })
     }
 
@@ -4117,48 +4138,59 @@ impl RunManager {
         command: &ControlCommandV1,
     ) -> Result<ControlCommandResultV1> {
         let thread_id = required_thread_id(command)?.to_string();
-        if self
-            .active
-            .lock()
-            .expect("control active run store poisoned")
-            .contains_key(&thread_id)
-        {
-            return Err(Error::InvalidRequest(
-                "stop the active turn before resuming a queued turn".into(),
-            ));
-        }
         let queue_id = required_payload_string(&command.payload, "queue_id")?;
-        let queued = self
-            .store
-            .control_queued_turns(Some(&thread_id))?
-            .into_iter()
-            .find(|turn| turn.id == queue_id)
-            .ok_or_else(|| Error::NotFound(format!("queued turn {queue_id}")))?;
-        let accepted = serde_json::from_str::<AcceptedTurnV1>(&queued.request_json)
-            .map_err(|error| Error::Other(format!("stored queued turn is invalid: {error}")))?;
-        if !self.store.control_remove_queued_turn(&queue_id)? {
-            return Err(Error::NotFound(format!("queued turn {queue_id}")));
-        }
-        let is_mailbox = accepted.mailbox_origin.is_some();
-        let run_id = match self.start_turn(state, thread_id.clone(), accepted) {
-            Ok(run_id) => run_id,
-            Err(error) => {
-                if !is_mailbox {
-                    let _ = self.store.control_enqueue_turn(&queued);
+        let interrupt_active = command
+            .payload
+            .get("interrupt_active")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        {
+            let active = self
+                .active
+                .lock()
+                .expect("control active run store poisoned");
+            if let Some(run) = active.get(&thread_id) {
+                if !interrupt_active {
+                    return Err(Error::InvalidRequest(
+                        "stop the active turn before resuming a queued turn".into(),
+                    ));
                 }
-                return Err(error);
+                if !self
+                    .store
+                    .control_queued_turns(Some(&thread_id))?
+                    .iter()
+                    .any(|turn| turn.id == queue_id)
+                {
+                    return Err(Error::NotFound(format!("queued turn {queue_id}")));
+                }
+                let mut interrupts = self
+                    .queue_interrupts
+                    .lock()
+                    .expect("control queue interrupt store poisoned");
+                if let Some(pending) = interrupts.get(&thread_id) {
+                    if pending != &queue_id {
+                        return Err(Error::InvalidRequest(
+                            "another queued turn is already interrupting this thread".into(),
+                        ));
+                    }
+                } else {
+                    interrupts.insert(thread_id.clone(), queue_id.clone());
+                }
+                let _ = run.stop.send(true);
+                return Ok(ControlCommandResultV1 {
+                    command_id: command.command_id.clone(),
+                    status: ControlCommandStatusV1::Accepted,
+                    thread_id: Some(thread_id),
+                    revision: None,
+                    run_id: Some(run.run_id.clone()),
+                    queue_id: Some(queue_id),
+                    confirmation_token: None,
+                    message: None,
+                    data: json!({ "interrupting": true }),
+                });
             }
-        };
-        self.emit(
-            "turn.queue_resumed",
-            Some(&thread_id),
-            self.store
-                .control_thread(&thread_id)?
-                .as_ref()
-                .map(|thread| thread.epoch.as_str()),
-            None,
-            json!({ "queue_id": queue_id, "run_id": run_id }),
-        );
+        }
+        let run_id = self.start_queued_turn(state, thread_id.clone(), &queue_id, true)?;
         Ok(ControlCommandResultV1 {
             command_id: command.command_id.clone(),
             status: ControlCommandStatusV1::Accepted,
@@ -4168,7 +4200,7 @@ impl RunManager {
             queue_id: Some(queue_id),
             confirmation_token: None,
             message: None,
-            data: Value::Null,
+            data: json!({ "interrupting": false }),
         })
     }
 
@@ -4446,6 +4478,49 @@ impl RunManager {
         Ok(resumed)
     }
 
+    fn start_queued_turn(
+        self: &Arc<Self>,
+        state: AppState,
+        thread_id: String,
+        queue_id: &str,
+        emit_resumed: bool,
+    ) -> Result<String> {
+        let queued = self
+            .store
+            .control_queued_turns(Some(&thread_id))?
+            .into_iter()
+            .find(|turn| turn.id == queue_id)
+            .ok_or_else(|| Error::NotFound(format!("queued turn {queue_id}")))?;
+        let accepted = serde_json::from_str::<AcceptedTurnV1>(&queued.request_json)
+            .map_err(|error| Error::Other(format!("stored queued turn is invalid: {error}")))?;
+        if !self.store.control_remove_queued_turn(queue_id)? {
+            return Err(Error::NotFound(format!("queued turn {queue_id}")));
+        }
+        let is_mailbox = accepted.mailbox_origin.is_some();
+        let run_id = match self.start_turn(state, thread_id.clone(), accepted) {
+            Ok(run_id) => run_id,
+            Err(error) => {
+                if !is_mailbox {
+                    let _ = self.store.control_enqueue_turn(&queued);
+                }
+                return Err(error);
+            }
+        };
+        if emit_resumed {
+            self.emit(
+                "turn.queue_resumed",
+                Some(&thread_id),
+                self.store
+                    .control_thread(&thread_id)?
+                    .as_ref()
+                    .map(|thread| thread.epoch.as_str()),
+                None,
+                json!({ "queue_id": queue_id, "run_id": run_id }),
+            );
+        }
+        Ok(run_id)
+    }
+
     fn drain_queue(self: &Arc<Self>, state: AppState, thread_id: String) {
         let Some(next) = self
             .store
@@ -4455,23 +4530,14 @@ impl RunManager {
         else {
             return;
         };
-        let Ok(accepted) = serde_json::from_str::<AcceptedTurnV1>(&next.request_json) else {
-            let _ = self.store.control_discard_inbox(&next.id);
-            return;
-        };
-        if self
-            .store
-            .control_remove_queued_turn(&next.id)
-            .unwrap_or(false)
-        {
-            let is_mailbox = accepted.mailbox_origin.is_some();
-            if self.start_turn(state, thread_id, accepted).is_err() && !is_mailbox {
-                let _ = self.store.control_enqueue_turn(&next);
-            }
-        }
+        let _ = self.start_queued_turn(state, thread_id, &next.id, false);
     }
 
     pub async fn shutdown(&self, timeout: Duration) {
+        self.queue_interrupts
+            .lock()
+            .expect("control queue interrupt store poisoned")
+            .clear();
         {
             let active = self
                 .active
@@ -6950,6 +7016,109 @@ mod tests {
             .control_queued_turns(Some("thread-fixture"))
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn queue_resume_can_interrupt_and_start_the_selected_turn_atomically() {
+        let (manager, state) = manager_and_state();
+        let created = manager
+            .command(
+                state.clone(),
+                None,
+                create_command("create-interrupt", "mock-echo"),
+            )
+            .await
+            .unwrap();
+        let first = manager
+            .command(
+                state.clone(),
+                None,
+                ControlCommandV1 {
+                    command_id: "send-long-running".into(),
+                    kind: ControlCommandKindV1::TurnSend,
+                    thread_id: Some("thread-fixture".into()),
+                    expected_revision: created.revision,
+                    payload: json!({
+                        "text": "first ".repeat(400),
+                        "display_text": "first",
+                        "attachments": []
+                    }),
+                    confirmation_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status, ControlCommandStatusV1::Accepted);
+        let queued = manager
+            .command(
+                state.clone(),
+                None,
+                ControlCommandV1 {
+                    command_id: "queue-selected".into(),
+                    kind: ControlCommandKindV1::TurnSend,
+                    thread_id: Some("thread-fixture".into()),
+                    expected_revision: None,
+                    payload: json!({ "text": "selected", "attachments": [] }),
+                    confirmation_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(queued.status, ControlCommandStatusV1::Queued);
+
+        let interrupted = manager
+            .command(
+                state,
+                None,
+                ControlCommandV1 {
+                    command_id: "interrupt-and-resume".into(),
+                    kind: ControlCommandKindV1::TurnQueueResume,
+                    thread_id: Some("thread-fixture".into()),
+                    expected_revision: None,
+                    payload: json!({
+                        "queue_id": queued.queue_id,
+                        "interrupt_active": true
+                    }),
+                    confirmation_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(interrupted.status, ControlCommandStatusV1::Accepted);
+        assert_eq!(interrupted.data["interrupting"], true);
+
+        for _ in 0..400 {
+            if manager.store.control_runs(true).unwrap().is_empty()
+                && manager
+                    .store
+                    .control_queued_turns(Some("thread-fixture"))
+                    .unwrap()
+                    .is_empty()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(manager.store.control_runs(true).unwrap().is_empty());
+        assert!(manager
+            .store
+            .control_queued_turns(Some("thread-fixture"))
+            .unwrap()
+            .is_empty());
+        let user_messages = manager
+            .store
+            .control_messages("thread-fixture")
+            .unwrap()
+            .into_iter()
+            .filter_map(|message| serde_json::from_str::<Value>(&message).ok())
+            .filter(|message| message["role"] == "user")
+            .collect::<Vec<_>>();
+        assert_eq!(user_messages.len(), 2);
+        assert_eq!(user_messages[1]["content"], "selected");
+        let runs = manager.store.control_runs(false).unwrap();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].status, "cancelled");
+        assert_eq!(runs[1].status, "completed");
     }
 
     #[tokio::test]

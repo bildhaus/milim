@@ -14,6 +14,10 @@ export function followScrollTop(metrics: Pick<ScrollMetrics, "scrollHeight" | "c
   return Math.max(0, metrics.scrollHeight - metrics.clientHeight);
 }
 
+export function scrollTopAfterLayoutChange(metrics: ScrollMetrics, following: boolean): number {
+  return following ? followScrollTop(metrics) : metrics.scrollTop;
+}
+
 export function peekEnteringMessageIds(
   seenIds: ReadonlySet<string>,
   messageIds: readonly (string | undefined | null)[],

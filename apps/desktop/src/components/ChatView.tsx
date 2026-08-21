@@ -88,6 +88,7 @@ import {
   type ChatApprovalRequest,
   type ChatMessage,
   type ChatStreamPart,
+  type ControlPendingInputV1,
   type ControlQueuedTurnV1,
   type ThreadLinkV1,
   type ChildThreadInfo,
@@ -228,7 +229,12 @@ import {
   type GoalDecision,
   type GoalSettings,
 } from "../lib/goals";
-import { followScrollTop, isNearScrollBottom, peekEnteringMessageIds } from "../lib/scroll";
+import {
+  followScrollTop,
+  isNearScrollBottom,
+  peekEnteringMessageIds,
+  scrollTopAfterLayoutChange,
+} from "../lib/scroll";
 import {
   mergeModelListsForPicker,
   modelDisplayName,
@@ -1424,6 +1430,12 @@ export function ChatView({
   const [canonicalQueuedTurns, setCanonicalQueuedTurns] = useState<
     ControlQueuedTurnV1[]
   >([]);
+  const [canonicalPendingInputs, setCanonicalPendingInputs] = useState<
+    ControlPendingInputV1[]
+  >([]);
+  const [canonicalActiveRuns, setCanonicalActiveRuns] = useState<
+    Record<string, { id: string; steering: boolean }>
+  >({});
   const [linkedThreads, setLinkedThreads] = useState<ThreadLinkV1[]>([]);
   const [sessionsHydrated, setSessionsHydrated] = useState(() =>
     useSessions.persist.hasHydrated(),
@@ -1874,11 +1886,33 @@ export function ChatView({
   });
   const persistingTurnIdsRef = useRef<Set<string>>(new Set());
   const canonicalRunIdsRef = useRef<Map<string, string>>(new Map());
-  const canonicalSteeringRef = useRef<Map<string, boolean>>(new Map());
   const canonicalModelWritesRef = useRef<Map<string, CanonicalModelWrite>>(new Map());
   const canonicalThreadModelsRef = useRef(new Map<string, string>());
   const deletingMessageIdsRef = useRef(new Set<string>());
   const handledUnavailableModelRoutesRef = useRef(new Set<string>());
+  const updateCanonicalActiveRun = useCallback((
+    sessionId: string,
+    run: { id: string; steering: boolean } | null,
+    expectedRunId?: string,
+  ) => {
+    setCanonicalActiveRuns((current) => {
+      const existing = current[sessionId];
+      if (!run && expectedRunId && existing?.id !== expectedRunId) return current;
+      if (run && existing?.id === run.id && existing.steering === run.steering) return current;
+      if (!run && !existing) return current;
+      const next = { ...current };
+      if (run) next[sessionId] = run;
+      else delete next[sessionId];
+      return next;
+    });
+  }, []);
+  const canonicalActiveRun = canonicalActiveRuns[activeId];
+  const pendingSteerCount = canonicalPendingInputs.filter(
+    (item) =>
+      item.thread_id === activeId
+      && item.kind === "steer"
+      && item.state === "pending",
+  ).length;
   const canonicalQueuedMessages = useMemo(
     () =>
       canonicalQueuedTurns
@@ -2419,6 +2453,17 @@ export function ChatView({
     el.scrollTo({ top: followScrollTop(el), behavior: "auto" });
   }
 
+  useLayoutEffect(() => {
+    const el = chatScrollRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      const nextTop = scrollTopAfterLayoutChange(el, stickToBottomRef.current);
+      if (nextTop !== el.scrollTop) el.scrollTop = nextTop;
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [activeId]);
+
   const markMessageEntered = useCallback((id: string) => {
     setEnteringMessageIds((current) => {
       if (!current.includes(id)) return current;
@@ -2741,6 +2786,7 @@ export function ChatView({
     if (!sessionsHydrated) return;
     let disposed = false;
     let controller: AbortController | null = null;
+    let ownedRunId: string | null = null;
     let retryTimer: number | null = null;
     let syncPending = false;
     let wakeRequested = false;
@@ -2756,6 +2802,7 @@ export function ChatView({
         const bootstrap = await getControlBootstrap();
         if (disposed) return;
         setCanonicalQueuedTurns(bootstrap.queued_turns);
+        setCanonicalPendingInputs(bootstrap.pending_inputs);
         const controlThread = bootstrap.threads.find(
           (thread) => thread.id === activeId,
         );
@@ -2765,11 +2812,15 @@ export function ChatView({
         useSessions.getState().setHostBusySessionIds(
           hostBusySessionIdsFromBootstrap(bootstrap),
         );
+        const run = bootstrap.active_runs.find((item) => item.thread_id === activeId);
+        updateCanonicalActiveRun(
+          activeId,
+          run ? { id: run.id, steering: run.capabilities.steering } : null,
+        );
         // A newly created renderer session can become active a few milliseconds
         // before its deferred persistence creates the canonical control row.
         // Bootstrap is the authority for whether a timeline is addressable.
         if (!controlThread) return;
-        const run = bootstrap.active_runs.find((item) => item.thread_id === activeId);
         const alreadyAttached =
           canonicalRunIdsRef.current.has(activeId) ||
           generationControllersRef.current.has(activeId);
@@ -2840,7 +2891,7 @@ export function ChatView({
         });
         if (!controller) return;
         canonicalRunIdsRef.current.set(activeId, run.id);
-        canonicalSteeringRef.current.set(activeId, run.capabilities.steering);
+        ownedRunId = run.id;
         socketController?.abort();
         socketController = null;
         await pollControlRun(activeId, run.id, controller.signal, (items) => {
@@ -2869,10 +2920,13 @@ export function ChatView({
             generationControllersRef,
           });
         }
-        if (canonicalRunIdsRef.current.get(activeId)) {
+        if (
+          ownedRunId
+          && canonicalRunIdsRef.current.get(activeId) === ownedRunId
+        ) {
           canonicalRunIdsRef.current.delete(activeId);
+          updateCanonicalActiveRun(activeId, null, ownedRunId);
         }
-        canonicalSteeringRef.current.delete(activeId);
         controller = null;
         syncPending = false;
         startControlSocket();
@@ -2928,7 +2982,7 @@ export function ChatView({
       socketController = null;
       controller?.abort();
     };
-  }, [activeId, autoTitleChats, sessionsHydrated, setMessages]);
+  }, [activeId, autoTitleChats, sessionsHydrated, setMessages, updateCanonicalActiveRun]);
 
   async function loadOlderMessages(el: HTMLDivElement) {
     const beforeIndex = activeSession?.messagesLoadedFrom ?? 0;
@@ -6228,6 +6282,7 @@ export function ChatView({
     }
     store.setSessionHostBusy(sessionId, true);
     let accepted = false;
+    let activeRunId: string | null = null;
     if (options.canonicalAction !== "regenerate") {
       setMessages(sessionId, convo, { autoTitle: autoTitleChats });
     }
@@ -6261,14 +6316,20 @@ export function ChatView({
       }
       accepted = true;
       const runId = command.run_id;
+      activeRunId = runId;
       canonicalRunIdsRef.current.set(sessionId, runId);
       const capabilities = command.data && typeof command.data === "object" && !Array.isArray(command.data)
         ? command.data.capabilities
         : null;
-      canonicalSteeringRef.current.set(
-        sessionId,
-        Boolean(capabilities && typeof capabilities === "object" && !Array.isArray(capabilities) && capabilities.steering),
-      );
+      updateCanonicalActiveRun(sessionId, {
+        id: runId,
+        steering: Boolean(
+          capabilities
+          && typeof capabilities === "object"
+          && !Array.isArray(capabilities)
+          && capabilities.steering
+        ),
+      });
       const terminal = await pollControlRun(
         sessionId,
         runId,
@@ -6311,8 +6372,10 @@ export function ChatView({
       setChatNotice({ tone: "error", message });
       return { status: "error", messages: sessionMessages(sessionId), error: message };
     } finally {
-      canonicalRunIdsRef.current.delete(sessionId);
-      canonicalSteeringRef.current.delete(sessionId);
+      if (activeRunId && canonicalRunIdsRef.current.get(sessionId) === activeRunId) {
+        canonicalRunIdsRef.current.delete(sessionId);
+        updateCanonicalActiveRun(sessionId, null, activeRunId);
+      }
       releaseTurnGeneration({
         sessionId,
         store,
@@ -7126,10 +7189,14 @@ export function ChatView({
   }
 
   async function steerCanonicalRun() {
-    const runId = canonicalRunIdsRef.current.get(activeId);
+    const runId = canonicalActiveRun?.id;
     const text = input.trim();
     const attachments = pendingAttachments;
-    if (!runId || (!text && attachments.length === 0)) return;
+    if (!runId) {
+      setChatNotice({ tone: "warning", message: "The active run is still syncing. Try steering again." });
+      return;
+    }
+    if (!text && attachments.length === 0) return;
     if (rejectUnsupportedImageAttachments(attachments)) return;
     try {
       const result = await sendControlCommand({
@@ -7144,10 +7211,29 @@ export function ChatView({
         },
       });
       if (result.status !== "accepted") throw new Error(result.message || `Control command ${result.status}.`);
+      const inboxId = result.data
+        && typeof result.data === "object"
+        && !Array.isArray(result.data)
+        && typeof result.data.inbox_id === "string"
+        ? result.data.inbox_id
+        : null;
+      if (inboxId) {
+        setCanonicalPendingInputs((current) => [
+          ...current.filter((item) => item.id !== inboxId),
+          {
+            id: inboxId,
+            thread_id: activeId,
+            target_run_id: runId,
+            kind: "steer",
+            state: "pending",
+            created_at_ms: Date.now(),
+          },
+        ]);
+      }
       if (text) recordGlobalPrompt(text);
       setInput("");
       setPendingAttachments([]);
-      setChatNotice({ tone: "info", message: "Steering will be applied at the next model step." });
+      setChatNotice(null);
     } catch (error) {
       setChatNotice({ tone: "error", message: error instanceof Error ? error.message : String(error) });
     }
@@ -7586,29 +7672,16 @@ export function ChatView({
 
   async function activateCanonicalQueuedMessage(item: QueuedMessageTrayItem) {
     if (queueInterrupts[activeId]) return;
+    const interrupting = busy;
     try {
-      if (busy) {
+      if (interrupting) {
         setQueueInterrupts((current) => ({ ...current, [activeId]: item.id }));
-        const first = canonicalQueuedMessages[0]?.id;
-        if (first && first !== item.id) {
-          await moveCanonicalQueuedMessage(item.id, first, "before");
-        }
-        await stopSessionRun(activeId);
-        const deadline = Date.now() + 5_000;
-        while (Date.now() < deadline) {
-          const bootstrap = await getControlBootstrap();
-          setCanonicalQueuedTurns(bootstrap.queued_turns);
-          if (!bootstrap.active_runs.some((run) => run.thread_id === activeId)) {
-            break;
-          }
-          await new Promise((resolve) => window.setTimeout(resolve, 100));
-        }
       }
       const result = await sendControlCommand({
         command_id: createControlCommandId(),
         kind: "turn.queue_resume",
         thread_id: activeId,
-        payload: { queue_id: item.id },
+        payload: { queue_id: item.id, interrupt_active: interrupting },
       });
       if (result.status !== "accepted") {
         throw new Error(result.message || "The queued message could not be started.");
@@ -7623,8 +7696,8 @@ export function ChatView({
       });
       setChatNotice({
         tone: "info",
-        message: busy
-          ? "Current response interrupted; running the selected message."
+        message: interrupting
+          ? "Interrupting the current response; the selected message will run next."
           : "Running the selected queued message.",
       });
     } catch (error) {
@@ -7943,7 +8016,11 @@ export function ChatView({
     handleOpenArtifact,
     onOpenSchedules,
   };
-  const estimatedRowHeight = estimatedMessageRowHeight();
+  // Draft changes rerender ChatView; keep virtual spacers stable while typing.
+  const estimatedRowHeight = useMemo(
+    () => estimatedMessageRowHeight(),
+    [activeId, messageWindowStart, messages.length],
+  );
   const transcriptTopSpacer = messageWindowStart * estimatedRowHeight;
   const transcriptBottomSpacer =
     (messages.length - messageWindowEnd) * estimatedRowHeight;
@@ -8285,6 +8362,18 @@ export function ChatView({
                 onMove={moveQueuedMessageFromTray}
                 onRemove={removeQueuedMessageFromTray}
               />
+              {pendingSteerCount > 0 ? (
+                <div
+                  className="review-comment-tray pending-steer-tray"
+                  data-testid="pending-steer"
+                  role="status"
+                  aria-live="polite"
+                >
+                  {pendingSteerCount === 1
+                    ? "Steering will be applied at the next model step."
+                    : `${pendingSteerCount} steering messages will be applied at the next model step.`}
+                </div>
+              ) : null}
               {pendingReviewComments.length ? (
                 <div className="review-comment-tray" aria-label="Pending review comments">
                   <span>{pendingReviewComments.length} review comment{pendingReviewComments.length === 1 ? "" : "s"}</span>
@@ -8362,10 +8451,7 @@ export function ChatView({
                 busy={busy}
                 imageAttachmentsBlocked={Boolean(unsupportedImageInputMessage(effectiveModel))}
                 sendBlocked={Boolean(imageAttachmentBlocker)}
-                canSteer={Boolean(
-                  canonicalRunIdsRef.current.get(activeId)
-                  && canonicalSteeringRef.current.get(activeId)
-                )}
+                canSteer={Boolean(canonicalActiveRun?.steering)}
                 hasReviewComments={pendingReviewComments.length > 0}
               />
             </ComposerSurface>

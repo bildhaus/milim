@@ -5788,6 +5788,18 @@ async function runHarnessHardeningUiCheck(page) {
         attachments: body.payload?.attachments ?? [],
       }];
       bootstrap.threads[0].queued_turns = 1;
+    } else if (body.kind === "turn.steer") {
+      bootstrap.pending_inputs.push({
+        id: `e2e-steer-${bootstrap.pending_inputs.length + 1}`,
+        thread_id: body.thread_id,
+        target_run_id: body.payload?.run_id ?? null,
+        kind: "steer",
+        state: "pending",
+        created_at_ms: Date.now(),
+      });
+    } else if (body.kind === "turn.queue_resume") {
+      bootstrap.queued_turns = bootstrap.queued_turns.filter((turn) => turn.id !== body.payload?.queue_id);
+      bootstrap.threads[0].queued_turns = bootstrap.queued_turns.length;
     } else if (body.kind === "turn.queue_delete") {
       bootstrap.queued_turns = bootstrap.queued_turns.filter((turn) => turn.id !== body.payload?.queue_id);
       bootstrap.threads[0].queued_turns = bootstrap.queued_turns.length;
@@ -5809,7 +5821,11 @@ async function runHarnessHardeningUiCheck(page) {
         queue_id: body.kind === "turn.send" ? "e2e-followup" : null,
         confirmation_token: null,
         message: null,
-        data: body.kind === "turn.steer" ? { inbox_id: "e2e-steer" } : null,
+        data: body.kind === "turn.steer"
+          ? { inbox_id: `e2e-steer-${bootstrap.pending_inputs.length}` }
+          : body.kind === "turn.queue_resume"
+            ? { interrupting: Boolean(body.payload?.interrupt_active) }
+            : null,
       }),
     });
   });
@@ -5825,6 +5841,7 @@ async function runHarnessHardeningUiCheck(page) {
   await queuedRow.getByRole("button", { name: "Interrupt", exact: true }).waitFor();
   await queuedRow.getByLabel("Remove queued message").waitFor();
   await queuedRow.getByLabel("More queued message actions").waitFor();
+  await page.waitForTimeout(1_750);
   await composer.fill("Steer with the keyboard shortcut");
   await composer.press(process.platform === "darwin" ? "Meta+Enter" : "Control+Enter");
   await page.waitForFunction(() => document.body.textContent?.includes("Steering will be applied"));
@@ -5860,6 +5877,23 @@ async function runHarnessHardeningUiCheck(page) {
     throw new Error(`Editing a canonical queued message should delete it durably first: ${JSON.stringify(commandBodies)}.`);
   }
   await runComposerAutocompleteDismissalCheck(page, composer);
+  await composer.fill("Interrupt with one command");
+  await page.getByLabel("Queue message").click();
+  const interruptRow = page.getByTestId("queued-message").filter({ hasText: "Interrupt with one command" });
+  await interruptRow.waitFor();
+  await interruptRow.getByRole("button", { name: "Interrupt", exact: true }).click();
+  await page.waitForFunction(() => document.body.textContent?.includes("Interrupting the current response"));
+  const interruptCommand = commandBodies.at(-1);
+  if (
+    interruptCommand?.kind !== "turn.queue_resume"
+    || interruptCommand.payload?.queue_id !== "e2e-followup"
+    || interruptCommand.payload?.interrupt_active !== true
+  ) {
+    throw new Error(`Interrupt should use one atomic queue-resume command: ${JSON.stringify(commandBodies)}.`);
+  }
+  if (commandBodies.some((body) => body.kind === "turn.stop")) {
+    throw new Error(`Queued-message Interrupt should not race a separate turn.stop command: ${JSON.stringify(commandBodies)}.`);
+  }
 }
 
 async function seedChatSearchFixture(page, withQueuedMessages = false) {

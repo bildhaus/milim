@@ -3,6 +3,7 @@ import {
   followScrollTop,
   isNearScrollBottom,
   peekEnteringMessageIds,
+  scrollTopAfterLayoutChange,
 } from "../src/lib/scroll.js";
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -45,6 +46,22 @@ assert(
 assert(
   followScrollTop({ scrollHeight: 820, clientHeight: 500 }) === 320,
   "follow target should update when the thread grows",
+);
+
+assert(
+  scrollTopAfterLayoutChange(
+    { scrollTop: 500, scrollHeight: 1_000, clientHeight: 420 },
+    true,
+  ) === 580,
+  "a coupled transcript should stay pinned when the composer shrinks its viewport",
+);
+
+assert(
+  scrollTopAfterLayoutChange(
+    { scrollTop: 240, scrollHeight: 1_000, clientHeight: 420 },
+    false,
+  ) === 240,
+  "a decoupled transcript should preserve the reader's position across layout changes",
 );
 
 const peekSeen = new Set(["a"]);

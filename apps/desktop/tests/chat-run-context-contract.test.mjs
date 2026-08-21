@@ -169,3 +169,23 @@ const workerResume = section(
 );
 assert.match(workerResume, /appendWorkerRunSynthesisOnce/);
 assert.match(workerResume, /if \(!nextMessages\)/);
+
+assert.match(
+  chatView,
+  /canSteer=\{Boolean\(canonicalActiveRun\?\.steering\)\}/,
+  "steering availability must render from reactive canonical run state",
+);
+assert.match(
+  chatView,
+  /data-testid="pending-steer"/,
+  "accepted steering must remain visible until the canonical inbox claims it",
+);
+
+const canonicalQueueActivation = section(
+  chatView,
+  "async function activateCanonicalQueuedMessage(",
+  "function activateQueuedMessage(",
+);
+assert.match(canonicalQueueActivation, /kind: "turn\.queue_resume"/);
+assert.match(canonicalQueueActivation, /interrupt_active: interrupting/);
+assert.doesNotMatch(canonicalQueueActivation, /stopSessionRun|getControlBootstrap|setTimeout/);

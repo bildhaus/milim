@@ -99,7 +99,7 @@ External files can be dropped anywhere in the desktop window and attach once to 
 
 Desktop history is loaded lazily: startup hydrates thread summaries and the latest 100 messages of the active or running chats, then pages older messages without moving the reader's scroll position. Long transcripts keep at most 200 message rows mounted. Live Worker Run activity stays in a stable slot at the transcript tail until the run finishes. Stable message IDs keep concurrent renderer and canonical completion projections from duplicating a terminal reply. The lossless run ledger deduplicates artifacts by SHA-256, compresses large JSON, and stores repeated provider requests as verified deltas with periodic checkpoints; legacy rows migrate in small idle-only batches.
 
-While a steer-capable provider run is active, Ctrl/Cmd+Enter sends the composer input to the next model step. The primary busy Send action remains Queue; runtimes without steering keep modifier-Enter as queue submission and never substitute cancellation.
+While a steer-capable provider run is active, Ctrl/Cmd+Enter sends the composer input to the next model step and keeps that pending steer visible above the composer until it is claimed. The primary busy Send action remains Queue; runtimes without steering keep modifier-Enter as queue submission and never substitute cancellation. Interrupting with a queued message is one server-owned handoff: the current response stops, then the selected durable queue item starts without a client-side stop/resume race.
 
 ## Development
 
