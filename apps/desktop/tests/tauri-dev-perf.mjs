@@ -598,6 +598,15 @@ async function runCanonicalBinaryBenchmark() {
     await session.page.screenshot({ path: paths.persisted, fullPage: false });
     assertNoCanonicalErrors("settled reload");
 
+    await waitForControlBootstrap(
+      session.page,
+      (bootstrap) =>
+        bootstrap.active_runs?.some((run) => run.thread_id === activeId)
+          ? null
+          : true,
+      "terminal canonical run cleanup before fixture injection",
+    );
+
     console.log("[canonical] verify 10 x 100 persisted-message fixture");
     await writeLargeTranscriptFixture(session.page, activeId, {
       threadCount: report.fixture.threadCount,
