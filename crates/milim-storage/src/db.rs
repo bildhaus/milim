@@ -5372,20 +5372,30 @@ fn apply_sessions_delta_locked(conn: &Connection, delta: SessionsDelta) -> Resul
             }
         }
 
-        let current_ids = conn
-            .prepare("SELECT id FROM user_sessions")
+        let current_order = conn
+            .prepare(
+                "SELECT id FROM user_sessions
+                 ORDER BY sort_order ASC, updated_at_ms DESC",
+            )
             .map_err(sqlite)?
             .query_map([], |row| row.get::<_, String>(0))
             .map_err(sqlite)?
-            .collect::<std::result::Result<BTreeSet<_>, _>>()
+            .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(sqlite)?;
+        let current_ids = current_order.iter().cloned().collect::<BTreeSet<_>>();
         let expected_ids = delta.session_order.iter().cloned().collect::<BTreeSet<_>>();
-        if current_ids != expected_ids {
+        if !expected_ids.is_subset(&current_ids) {
             return Err(Error::InvalidRequest(
                 "session order does not match stored sessions".into(),
             ));
         }
-        for (sort_order, id) in delta.session_order.iter().enumerate() {
+        // A canonical mutation can add threads after the renderer's last
+        // acknowledged replica. Apply the renderer's relative order, then
+        // retain canonical-only rows in their existing relative order.
+        let canonical_only = current_order
+            .iter()
+            .filter(|id| !expected_ids.contains(id.as_str()));
+        for (sort_order, id) in delta.session_order.iter().chain(canonical_only).enumerate() {
             conn.execute(
                 "UPDATE user_sessions SET sort_order = ?1 WHERE id = ?2",
                 params![sort_order as i64, id],
@@ -6681,6 +6691,72 @@ mod tests {
         assert!(!messages
             .iter()
             .any(|message| message.contains("assistant-1")));
+    }
+
+    #[test]
+    fn renderer_session_delta_preserves_canonical_additions() {
+        let store = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        store
+            .control_create_thread(
+                "renderer-thread-1",
+                r#"{"id":"renderer-thread-1","title":"Before"}"#,
+                "epoch-renderer-1",
+            )
+            .unwrap();
+        store
+            .control_create_thread(
+                "renderer-thread-2",
+                r#"{"id":"renderer-thread-2","title":"Second"}"#,
+                "epoch-renderer-2",
+            )
+            .unwrap();
+        store
+            .control_create_thread(
+                "canonical-thread-1",
+                r#"{"id":"canonical-thread-1","title":"Canonical 1"}"#,
+                "epoch-canonical-1",
+            )
+            .unwrap();
+        store
+            .control_create_thread(
+                "canonical-thread-2",
+                r#"{"id":"canonical-thread-2","title":"Canonical 2"}"#,
+                "epoch-canonical-2",
+            )
+            .unwrap();
+
+        store
+            .apply_sessions_delta(SessionsDelta {
+                meta_json: r#"{"state":{"activeId":"renderer-thread-1"},"version":0}"#.into(),
+                session_order: vec!["renderer-thread-2".into(), "renderer-thread-1".into()],
+                upserts: vec![SessionDelta {
+                    id: "renderer-thread-1".into(),
+                    session_json: Some(r#"{"id":"renderer-thread-1","title":"After"}"#.into()),
+                    base_message_count: 0,
+                    message_count: 0,
+                    preserve_messages: false,
+                    messages: Vec::new(),
+                }],
+                deleted_session_ids: Vec::new(),
+            })
+            .unwrap();
+
+        let restored: serde_json::Value =
+            serde_json::from_str(&store.get_sessions_snapshot().unwrap().unwrap()).unwrap();
+        let sessions = restored["state"]["sessions"].as_array().unwrap();
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|session| session["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "renderer-thread-2",
+                "renderer-thread-1",
+                "canonical-thread-1",
+                "canonical-thread-2"
+            ]
+        );
+        assert_eq!(sessions[1]["title"], "After");
     }
 
     #[test]
