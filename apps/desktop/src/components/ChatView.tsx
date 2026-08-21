@@ -189,6 +189,7 @@ import {
   shouldRefreshGitStatus,
 } from "../lib/gitRefresh";
 import { reasoningEffortForThread, reasoningEffortOverridesWithSelection } from "../lib/reasoningEffort";
+import { managedPreviewRuntimeForTurn, type ManagedPreviewRuntimeContext } from "../lib/managedPreviewRuntime";
 import {
   generationOverridesWithSelection,
   generationSettingsForModel,
@@ -976,6 +977,18 @@ function previewSelectionFromRuntime(
   if (!url) return null;
   const artifact = localhostPreviewArtifact(url);
   return { artifact, artifacts: [artifact], previewDeferred: false };
+}
+
+function managedPreviewRuntimeForSession(
+  state: Pick<ReturnType<typeof useSessions.getState>, "sessions" | "previewRuntimesByKey">,
+  sessionId: string,
+): ManagedPreviewRuntimeContext | null {
+  const session = state.sessions.find((item) => item.id === sessionId);
+  const folder = session?.settings?.folder ?? "";
+  const runtime = folder.trim()
+    ? state.previewRuntimesByKey[previewRuntimeKeyForThread(sessionId, folder)]
+    : session?.previewRuntime;
+  return managedPreviewRuntimeForTurn(runtime);
 }
 
 function extensionOf(filename: string): string {
@@ -6324,6 +6337,7 @@ export function ChatView({
     selectedModel: string,
   ): Promise<RunTurnResult> {
     const store = useSessions.getState();
+    const managedPreviewRuntime = managedPreviewRuntimeForSession(store, sessionId);
     const last = convo[convo.length - 1];
     if (!last || last.role !== "user") {
       return {
@@ -6377,11 +6391,14 @@ export function ChatView({
         thread_id: sessionId,
         payload:
           options.canonicalAction === "regenerate"
-            ? {}
+            ? {
+                ...(managedPreviewRuntime ? { preview_runtime: managedPreviewRuntime } : {}),
+              }
             : {
                 text: wireMessageContent(last),
                 display_text: last.content,
                 attachments: controlAttachments(last.attachments),
+                ...(managedPreviewRuntime ? { preview_runtime: managedPreviewRuntime } : {}),
               },
       });
       if (command.status === "queued") {
@@ -6687,6 +6704,7 @@ export function ChatView({
         sandbox: turnSandbox,
         computerUse: turnComputerUse,
         privacy: turnPrivacy,
+        managedPreviewRuntime: managedPreviewRuntimeForSession(store, id),
         previewSurface:
           sidePanelVisible &&
           (inspectorTab === "preview" || inspectorTab === "code")
@@ -7235,6 +7253,7 @@ export function ChatView({
   async function queueCanonicalFollowup(text: string, attachments: ChatAttachment[]) {
     try {
       const commandId = createControlCommandId();
+      const managedPreviewRuntime = managedPreviewRuntimeForSession(useSessions.getState(), activeId);
       const result = await sendControlCommand({
         command_id: commandId,
         kind: "turn.send",
@@ -7243,6 +7262,7 @@ export function ChatView({
           text: wireMessageContent({ role: "user", content: text, attachments }),
           display_text: text,
           attachments: controlAttachments(attachments),
+          ...(managedPreviewRuntime ? { preview_runtime: managedPreviewRuntime } : {}),
         },
       });
       if (result.status !== "queued") throw new Error(result.message || `Control command ${result.status}.`);
@@ -7280,6 +7300,7 @@ export function ChatView({
     if (!text && attachments.length === 0) return;
     if (rejectUnsupportedImageAttachments(attachments)) return;
     try {
+      const managedPreviewRuntime = managedPreviewRuntimeForSession(useSessions.getState(), activeId);
       const result = await sendControlCommand({
         command_id: createControlCommandId(),
         kind: "turn.steer",
@@ -7289,6 +7310,7 @@ export function ChatView({
           text: wireMessageContent({ role: "user", content: text, attachments }),
           display_text: text,
           attachments: controlAttachments(attachments),
+          ...(managedPreviewRuntime ? { preview_runtime: managedPreviewRuntime } : {}),
         },
       });
       if (result.status !== "accepted") throw new Error(result.message || `Control command ${result.status}.`);

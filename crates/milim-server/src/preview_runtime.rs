@@ -367,7 +367,13 @@ impl PreviewRuntimeManager {
         let (package, install_required, source_fingerprint) =
             inspect_preview_source(&target, &request.files)?;
         validate_preview_package(&package)?;
-        let port = free_port()?;
+        let port = match package.explicit_port {
+            Some(port) => port,
+            None => free_port()?,
+        };
+        if package.explicit_port.is_some() && !port_is_available(port) {
+            return Err(configured_preview_port_in_use_error(port));
+        }
         let cwd = target.dir.to_string_lossy().to_string();
         let preflight = PreviewAppPreflight {
             thread_id: thread_id.clone(),
@@ -450,10 +456,14 @@ impl PreviewRuntimeManager {
             return Err(stale_preflight_error());
         }
         if !port_is_available(expected.port) {
-            return Err(Error::InvalidRequest(
-                "preview app preflight port is no longer available; run preflight again"
-                    .to_string(),
-            ));
+            return Err(if inspected_package.explicit_port.is_some() {
+                configured_preview_port_in_use_error(expected.port)
+            } else {
+                Error::InvalidRequest(
+                    "preview app preflight port is no longer available; run preflight again"
+                        .to_string(),
+                )
+            });
         }
 
         let dir = target.dir;
@@ -1479,6 +1489,7 @@ struct PreviewPackage {
     manager: PackageManager,
     has_dev_script: bool,
     dev_script: String,
+    explicit_port: Option<u16>,
 }
 
 impl PackageManager {
@@ -1505,8 +1516,12 @@ impl PreviewPackage {
 
     fn dev_args(&self, port: u16) -> Vec<String> {
         let port = port.to_string();
-        let server_args = if self.is_next_dev() {
+        let server_args = if self.is_next_dev() && self.explicit_port.is_some() {
+            vec!["--hostname", "127.0.0.1"]
+        } else if self.is_next_dev() {
             vec!["--hostname", "127.0.0.1", "--port", &port]
+        } else if self.explicit_port.is_some() {
+            vec!["--host", "127.0.0.1"]
         } else {
             vec!["--host", "127.0.0.1", "--port", &port]
         };
@@ -1559,10 +1574,12 @@ fn preview_package(dir: &Path) -> Result<PreviewPackage> {
         .unwrap_or_default()
         .trim()
         .to_string();
+    let explicit_port = explicit_dev_script_port(&dev_script)?;
     Ok(PreviewPackage {
         manager: package_manager_for(dir, &package),
         has_dev_script: !dev_script.is_empty(),
         dev_script,
+        explicit_port,
     })
 }
 
@@ -1609,11 +1626,59 @@ fn preview_package_from_files(files: &[PreviewAppFile]) -> Result<PreviewPackage
                 .then_some(PackageManager::Bun)
         })
         .unwrap_or(PackageManager::Npm);
+    let explicit_port = explicit_dev_script_port(&dev_script)?;
     Ok(PreviewPackage {
         manager,
         has_dev_script: !dev_script.is_empty(),
         dev_script,
+        explicit_port,
     })
+}
+
+fn explicit_dev_script_port(dev_script: &str) -> Result<Option<u16>> {
+    let parts = dev_script.split_whitespace().collect::<Vec<_>>();
+    let is_next = parts.iter().any(|part| {
+        let part = part.trim_matches(['\'', '"']);
+        part == "next" || part.ends_with("/next")
+    });
+    let mut explicit_port = None;
+    let mut index = 0;
+    while index < parts.len() {
+        let part = parts[index].trim_matches(['\'', '"']);
+        let value = if part == "--port" || is_next && part == "-p" {
+            index += 1;
+            Some(parts.get(index).copied().ok_or_else(|| {
+                Error::InvalidRequest(
+                    "preview app scripts.dev has a port flag without a value".to_string(),
+                )
+            })?)
+        } else if let Some(value) = part.strip_prefix("--port=") {
+            Some(value)
+        } else if is_next {
+            part.strip_prefix("-p=")
+        } else {
+            None
+        };
+        let value = value.or_else(|| part.strip_prefix("PORT="));
+        if let Some(value) = value {
+            explicit_port = Some(parse_explicit_dev_port(value)?);
+        }
+        index += 1;
+    }
+    Ok(explicit_port)
+}
+
+fn parse_explicit_dev_port(value: &str) -> Result<u16> {
+    value
+        .trim_matches(['\'', '"'])
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port != 0)
+        .ok_or_else(|| {
+            Error::InvalidRequest(format!(
+                "preview app scripts.dev has invalid explicit port {value}"
+            ))
+        })
 }
 
 fn validate_preview_package(package: &PreviewPackage) -> Result<()> {
@@ -2144,6 +2209,12 @@ fn port_is_available(port: u16) -> bool {
         std::thread::sleep(Duration::from_millis(10));
     }
     false
+}
+
+fn configured_preview_port_in_use_error(port: u16) -> Error {
+    Error::InvalidRequest(format!(
+        "preview app configured port {port} from package.json scripts.dev is already in use; stop the process using it or change scripts.dev"
+    ))
 }
 
 fn ensure_vite_setup(dir: &Path, package: &PreviewPackage) -> Result<Vec<String>> {
@@ -2833,6 +2904,67 @@ mod tests {
     }
 
     #[test]
+    fn preview_app_preflight_honors_explicit_dev_script_port() {
+        let root = test_root();
+        std::fs::create_dir_all(&root).unwrap();
+        let port = free_port().unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            format!(r#"{{"private":true,"scripts":{{"dev":"vite --port {port}"}}}}"#),
+        )
+        .unwrap();
+        let runtime_root = test_root();
+        let manager = PreviewRuntimeManager::new(runtime_root.clone());
+        let preflight = manager
+            .preflight(
+                "thread-1",
+                &PreviewAppPreflightRequest {
+                    cwd: Some(root.to_string_lossy().to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(preflight.port, port);
+        assert_eq!(preflight.url, format!("http://127.0.0.1:{port}/"));
+        assert!(!preflight.dev_command.contains("--port"));
+        assert!(preflight.dev_command.contains("--host 127.0.0.1"));
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(runtime_root);
+    }
+
+    #[test]
+    fn preview_app_preflight_rejects_busy_explicit_dev_script_port() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let root = test_root();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            format!(r#"{{"private":true,"scripts":{{"dev":"vite --port={port}"}}}}"#),
+        )
+        .unwrap();
+        let runtime_root = test_root();
+        let manager = PreviewRuntimeManager::new(runtime_root.clone());
+        let error = manager
+            .preflight(
+                "thread-1",
+                &PreviewAppPreflightRequest {
+                    cwd: Some(root.to_string_lossy().to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains(&format!("configured port {port}")));
+        assert!(error.contains("already in use"));
+        drop(listener);
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(runtime_root);
+    }
+
+    #[test]
     fn preview_app_start_rejects_stale_managed_files_before_staging() {
         let root = test_root();
         let manager = Arc::new(PreviewRuntimeManager::new(root.clone()));
@@ -3386,6 +3518,7 @@ http.createServer((_request, response) => {
             manager: PackageManager::Npm,
             has_dev_script: true,
             dev_script: "vite".to_string(),
+            explicit_port: None,
         };
 
         let root = test_root();
@@ -3442,10 +3575,48 @@ http.createServer((_request, response) => {
             manager: PackageManager::Npm,
             has_dev_script: true,
             dev_script: "next dev".to_string(),
+            explicit_port: None,
         };
         let args = package.dev_args(3000);
         assert!(args.contains(&"--hostname".to_string()));
         assert!(!args.contains(&"--host".to_string()));
+    }
+
+    #[test]
+    fn preview_app_detects_explicit_dev_script_ports_without_appending_another() {
+        assert_eq!(
+            explicit_dev_script_port("vite --port 4173").unwrap(),
+            Some(4173)
+        );
+        assert_eq!(
+            explicit_dev_script_port("vite --port=4174").unwrap(),
+            Some(4174)
+        );
+        assert_eq!(
+            explicit_dev_script_port("next dev -p 3001").unwrap(),
+            Some(3001)
+        );
+        assert_eq!(
+            explicit_dev_script_port("cross-env PORT=3100 vite").unwrap(),
+            Some(3100)
+        );
+        assert_eq!(
+            explicit_dev_script_port("node server.js -p 3101").unwrap(),
+            None
+        );
+        assert!(explicit_dev_script_port("vite --port").is_err());
+        assert!(explicit_dev_script_port("vite --port 0").is_err());
+
+        let package = PreviewPackage {
+            manager: PackageManager::Npm,
+            has_dev_script: true,
+            dev_script: "vite --port 4173".to_string(),
+            explicit_port: Some(4173),
+        };
+        let args = package.dev_args(4173);
+        assert!(args.contains(&"--host".to_string()));
+        assert!(!args.contains(&"--port".to_string()));
+        assert!(!args.contains(&"4173".to_string()));
     }
 
     #[test]
