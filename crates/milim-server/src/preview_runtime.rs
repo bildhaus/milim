@@ -3281,14 +3281,13 @@ mod tests {
             )
             .unwrap();
 
-        let install_started = root.join("thread-1").join("install-started");
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !install_started.is_file() && Instant::now() < deadline {
+        while manager.status("thread-1").unwrap().pid.is_none() && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         assert!(
-            install_started.is_file(),
-            "npm preinstall did not start; logs: {:?}",
+            manager.status("thread-1").unwrap().pid.is_some(),
+            "npm install process did not start; logs: {:?}",
             manager.logs("thread-1").unwrap()
         );
         let stop_started = Instant::now();
