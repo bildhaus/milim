@@ -1482,19 +1482,6 @@
 .session-section.pinned .section-type-icon {
   color: var(--accent);
 }
-.session-section-title.runtime-preview::after {
-  content: "";
-  position: absolute;
-  left: 2px;
-  top: 8px;
-  bottom: 8px;
-  width: 2px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 72%, transparent);
-}
-.session-section-title.runtime-error::after {
-  background: color-mix(in srgb, var(--error) 78%, transparent);
-}
 .section-icon-btn {
   flex: none;
   display: grid;
@@ -1676,24 +1663,46 @@
 .session-item.child-session .session-title {
   font-size: 12.5px;
 }
-.session-item.active {
-  background: color-mix(in srgb, var(--panel-row-hover) 54%, transparent);
+.session-item.active,
+.session-item.active:hover {
+  background: var(--panel-row-active);
   color: var(--primary-text);
   box-shadow: none;
-  border-color: color-mix(in srgb, var(--border-primary) 26%, transparent);
+  border-color: color-mix(in srgb, var(--focus-border) 30%, transparent);
 }
-.session-item.runtime-preview::after {
-  content: "";
+.session-runtime-marker {
   position: absolute;
   left: 4px;
-  top: 8px;
-  bottom: 8px;
-  width: 2px;
+  top: 50%;
+  width: 3px;
+  height: 14px;
+  transform: translateY(-50%);
   border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 72%, transparent);
 }
-.session-item.runtime-error::after {
-  background: color-mix(in srgb, var(--error) 78%, transparent);
+.session-section-title > .session-runtime-marker {
+  left: 2px;
+}
+.session-runtime-marker.transitioning {
+  background: color-mix(in srgb, var(--accent) 88%, transparent);
+  box-shadow: 0 0 7px color-mix(in srgb, var(--accent-glow) 72%, transparent);
+  animation: sidebar-runtime-pulse 1.2s ease-in-out infinite;
+}
+.session-runtime-marker.running {
+  background: color-mix(in srgb, var(--success) 88%, transparent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--success) 30%, transparent);
+}
+.session-runtime-marker.error {
+  background: color-mix(in srgb, var(--error) 88%, transparent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--error) 30%, transparent);
+}
+@keyframes sidebar-runtime-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .session-runtime-marker.transitioning {
+    animation: none;
+  }
 }
 .session-copy {
   flex: 1;

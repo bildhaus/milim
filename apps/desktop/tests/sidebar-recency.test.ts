@@ -28,5 +28,14 @@ assert(
   /{generating \? \(\s*<WorkingSessionLoader[\s\S]*?className="session-side-indicator"[\s\S]*?\) : unread \? \(\s*<UnreadSessionLoader[\s\S]*?className="session-side-indicator"[\s\S]*?\) : \(\s*<span\s+className="session-side-indicator session-recency"/.test(sidebarSource),
   "working and unread threads should replace expanded-sidebar recency with the shared indicators",
 );
+assert(
+  sidebarSource.includes('aria-current={session.id === activeId ? "page" : undefined}') &&
+    (sidebarSource.match(/aria-current=\{s\.id === activeId \? "page" : undefined\}/g)?.length ?? 0) === 2,
+  "every active thread row should expose its current-page state",
+);
+assert(
+  sidebarSource.includes('role="img"') && sidebarSource.includes('aria-label={indicator.label}'),
+  "app preview runtime markers should expose their status label",
+);
 
 export {};

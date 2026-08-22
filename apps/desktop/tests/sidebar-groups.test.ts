@@ -82,6 +82,7 @@ try {
     runningWorkerParentThreadIdsKey,
     sidebarInboxPullRequestOwner,
     sidebarProjectPullRequestOwner,
+    sidebarRuntimeIndicator,
     sidebarSectionNextRevealCount,
     sidebarSectionUsesPagination,
     sidebarSessionHasMessages,
@@ -111,6 +112,12 @@ try {
         stale: boolean;
       }>,
     ) => { session: SidebarSession; pullRequest: { number: number } } | undefined;
+    sidebarRuntimeIndicator: (runtime?: {
+      status: string;
+      active?: boolean;
+      ready?: boolean;
+      error?: { code: string; message: string };
+    }) => { state: "transitioning" | "running" | "error"; label: string } | null;
     sidebarSectionNextRevealCount: (totalSessions: number, visibleLimit: number, activeIndex: number) => number;
     sidebarSectionUsesPagination: (sectionId: string, inbox: boolean | undefined, searchActive: boolean) => boolean;
     sidebarSessionHasMessages: (session: { messages: unknown[]; messagesHydrated?: boolean; persistedMessageCount?: number }) => boolean;
@@ -558,6 +565,43 @@ try {
     })) === JSON.stringify(["generation", "host", "shared", "title", "worker"]),
     "sidebar working state should union generation, host, background activity, and worker signals",
   );
+
+  assert(
+    JSON.stringify(sidebarRuntimeIndicator({ status: "installing" })) ===
+      JSON.stringify({ state: "transitioning", label: "App preview installing" }),
+    "installing app previews should use the transitional sidebar marker",
+  );
+  assert(
+    JSON.stringify(sidebarRuntimeIndicator({ status: "starting" })) ===
+      JSON.stringify({ state: "transitioning", label: "App preview starting" }),
+    "starting app previews should use the transitional sidebar marker",
+  );
+  assert(
+    JSON.stringify(sidebarRuntimeIndicator({ status: "stopping" })) ===
+      JSON.stringify({ state: "transitioning", label: "App preview stopping" }),
+    "stopping app previews should use the transitional sidebar marker",
+  );
+  assert(
+    JSON.stringify(sidebarRuntimeIndicator({ status: "staging", active: true, ready: false })) ===
+      JSON.stringify({ state: "transitioning", label: "App preview active, not ready" }),
+    "active app previews that are not ready should use the transitional sidebar marker",
+  );
+  assert(
+    JSON.stringify(sidebarRuntimeIndicator({ status: "running", active: true, ready: true })) ===
+      JSON.stringify({ state: "running", label: "App preview running" }),
+    "ready running app previews should use the steady success marker",
+  );
+  assert(
+    JSON.stringify(sidebarRuntimeIndicator({ status: "running", error: { code: "crashed", message: "Exited" } })) ===
+      JSON.stringify({ state: "error", label: "App preview error" }),
+    "app preview errors should override otherwise active runtime state",
+  );
+  for (const status of ["staged", "stopped", "idle"]) {
+    assert(
+      sidebarRuntimeIndicator({ status }) == null,
+      `${status} app previews should not render a sidebar marker`,
+    );
+  }
 } finally {
   await server.close();
 }
