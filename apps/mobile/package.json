@@ -1,6 +1,6 @@
 {
   "name": "milim-mobile",
-  "version": "0.2.53",
+  "version": "0.2.54",
   "private": true,
   "scripts": {
     "android": "react-native run-android",

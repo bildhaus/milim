@@ -1,4 +1,9 @@
 {
+  "0.2.54": {
+    "version": "0.2.54",
+    "summary": "Milim 0.2.54 keeps previews scoped to the correct workspace, shows applied steering messages in chat, clears resolved app badges reliably, and refines sidebar status spacing and site glow.",
+    "items": []
+  },
   "0.2.53": {
     "version": "0.2.53",
     "summary": "Milim 0.2.53 clarifies thread activity in the sidebar and shows immediate feedback when an accepted turn is waiting for its first response.",
