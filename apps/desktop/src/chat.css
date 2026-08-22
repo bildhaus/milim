@@ -413,6 +413,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  transform: translateY(-1px);
   border: 0;
   background: transparent;
   color: color-mix(in srgb, var(--secondary-text) 76%, var(--tertiary-text));
