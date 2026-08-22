@@ -852,9 +852,11 @@ export async function getSecretStorageStatus(): Promise<SecretStorageStatus | nu
 
 export async function setActivePreviewTarget(
   target: PreviewSurfaceTarget | null,
+  threadId?: string,
 ): Promise<void> {
   if (!inTauri) return;
   await invoke("set_active_preview_target", {
+    threadId: threadId?.trim() || null,
     label: target?.label ?? null,
     title: target?.title ?? null,
     url: target?.url ?? null,

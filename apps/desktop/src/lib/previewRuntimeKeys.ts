@@ -6,7 +6,7 @@ export function normalizePreviewRuntimeFolder(folder?: string | null): string {
   return (/^[A-Za-z]:$/.test(trimmed) ? `${trimmed}/` : trimmed).toLowerCase();
 }
 
-function hashPreviewRuntimeKey(value: string): string {
+function legacyHashPreviewRuntimeKey(value: string): string {
   let hash = 0x811c9dc5;
   for (let i = 0; i < value.length; i += 1) {
     hash ^= value.charCodeAt(i);
@@ -15,9 +15,27 @@ function hashPreviewRuntimeKey(value: string): string {
   return hash.toString(36);
 }
 
+function encodePreviewRuntimeFolder(value: string): string {
+  return Array.from(new TextEncoder().encode(value), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
+export function legacyPreviewRuntimeKeyForThread(
+  threadId: string,
+  folder?: string | null,
+): string {
+  const normalizedFolder = normalizePreviewRuntimeFolder(folder);
+  return normalizedFolder
+    ? `project-${legacyHashPreviewRuntimeKey(normalizedFolder)}`
+    : threadId;
+}
+
 export function previewRuntimeKeyForThread(threadId: string, folder?: string | null): string {
   const normalizedFolder = normalizePreviewRuntimeFolder(folder);
-  return normalizedFolder ? `project-${hashPreviewRuntimeKey(normalizedFolder)}` : threadId;
+  return normalizedFolder
+    ? `project-v2-${encodePreviewRuntimeFolder(normalizedFolder)}`
+    : threadId;
 }
 
 export function previewRuntimeFoldersEqual(left?: string | null, right?: string | null): boolean {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   getPreviewAppStatus,
   preflightPreviewApp,
@@ -107,19 +107,45 @@ export function useChatInspectorController({
   visible: boolean;
   onNotice: (notice: InspectorNotice) => void;
 }) {
-  const [activePreviewSurface, setActivePreviewSurface] =
-    useState<PreviewSurfaceTarget | null>(null);
+  const activePreviewRuntimeKey = previewRuntimeKeyForThread(activeId, folder);
+  const [previewSurfaceState, setPreviewSurfaceState] = useState<{
+    threadId: string;
+    target: PreviewSurfaceTarget;
+  } | null>(null);
+  const activePreviewSurface =
+    previewSurfaceState?.threadId === activeId
+      ? previewSurfaceState.target
+      : null;
+  const setActivePreviewSurface = useCallback(
+    (target: PreviewSurfaceTarget | null) => {
+      setPreviewSurfaceState((current) =>
+        target
+          ? { threadId: activeId, target }
+          : current?.threadId === activeId
+            ? null
+            : current,
+      );
+    },
+    [activeId],
+  );
   const [previewAppStatus, setPreviewAppStatus] =
     useState<PreviewAppStatus | null>(null);
   const [previewAppPreflight, setPreviewAppPreflight] =
     useState<PreviewAppPreflight | null>(null);
-  const [previewAppPreflightBusy, setPreviewAppPreflightBusy] = useState(false);
-  const [previewAppBusy, setPreviewAppBusy] = useState<
-    "start" | "stop" | "restart" | null
-  >(null);
+  const [previewAppPreflightBusyKey, setPreviewAppPreflightBusyKey] =
+    useState<string | null>(null);
+  const [previewAppBusyState, setPreviewAppBusyState] = useState<{
+    key: string;
+    action: "start" | "stop" | "restart";
+  } | null>(null);
+  const previewAppPreflightBusy =
+    previewAppPreflightBusyKey === activePreviewRuntimeKey;
+  const previewAppBusy =
+    previewAppBusyState?.key === activePreviewRuntimeKey
+      ? previewAppBusyState.action
+      : null;
   const setSessionPreviewRuntime = useSessions((state) => state.setPreviewRuntime);
   const setPreviewRuntimeByKey = useSessions((state) => state.setPreviewRuntimeByKey);
-  const activePreviewRuntimeKey = previewRuntimeKeyForThread(activeId, folder);
 
   function persistPreviewRuntimeStatus(status: PreviewAppStatus) {
     const state = useSessions.getState();
@@ -143,10 +169,11 @@ export function useChatInspectorController({
   }
 
   async function preflightRuntime(options: PreviewAppStartOptions) {
-    setPreviewAppPreflightBusy(true);
+    const runtimeKey = activePreviewRuntimeKey;
+    setPreviewAppPreflightBusyKey(runtimeKey);
     try {
       const preflight = await preflightPreviewApp(
-        activePreviewRuntimeKey,
+        runtimeKey,
         options,
       );
       setPreviewAppPreflight(preflight);
@@ -165,14 +192,17 @@ export function useChatInspectorController({
       });
       return null;
     } finally {
-      setPreviewAppPreflightBusy(false);
+      setPreviewAppPreflightBusyKey((current) =>
+        current === runtimeKey ? null : current,
+      );
     }
   }
 
   async function startRuntime(options: PreviewAppStartOptions) {
-    setPreviewAppBusy("start");
+    const runtimeKey = activePreviewRuntimeKey;
+    setPreviewAppBusyState({ key: runtimeKey, action: "start" });
     try {
-      const status = await startPreviewApp(activePreviewRuntimeKey, options);
+      const status = await startPreviewApp(runtimeKey, options);
       applyPreviewAppStatus(status);
       return status;
     } catch (error) {
@@ -182,15 +212,18 @@ export function useChatInspectorController({
       });
       return null;
     } finally {
-      setPreviewAppBusy(null);
+      setPreviewAppBusyState((current) =>
+        current?.key === runtimeKey ? null : current,
+      );
     }
   }
 
   async function startStaticRuntime(options: PreviewStaticStartOptions) {
-    setPreviewAppBusy("start");
+    const runtimeKey = activePreviewRuntimeKey;
+    setPreviewAppBusyState({ key: runtimeKey, action: "start" });
     try {
       const status = await startStaticPreview(
-        activePreviewRuntimeKey,
+        runtimeKey,
         options,
       );
       applyPreviewAppStatus(status);
@@ -202,14 +235,17 @@ export function useChatInspectorController({
       });
       return null;
     } finally {
-      setPreviewAppBusy(null);
+      setPreviewAppBusyState((current) =>
+        current?.key === runtimeKey ? null : current,
+      );
     }
   }
 
   async function stopRuntime() {
-    setPreviewAppBusy("stop");
+    const runtimeKey = activePreviewRuntimeKey;
+    setPreviewAppBusyState({ key: runtimeKey, action: "stop" });
     try {
-      const status = await stopPreviewApp(activePreviewRuntimeKey);
+      const status = await stopPreviewApp(runtimeKey);
       applyPreviewAppStatus(status);
       return status;
     } catch (error) {
@@ -219,14 +255,17 @@ export function useChatInspectorController({
       });
       return null;
     } finally {
-      setPreviewAppBusy(null);
+      setPreviewAppBusyState((current) =>
+        current?.key === runtimeKey ? null : current,
+      );
     }
   }
 
   async function restartRuntime(options: PreviewAppStartOptions) {
-    setPreviewAppBusy("restart");
+    const runtimeKey = activePreviewRuntimeKey;
+    setPreviewAppBusyState({ key: runtimeKey, action: "restart" });
     try {
-      const status = await restartPreviewApp(activePreviewRuntimeKey, options);
+      const status = await restartPreviewApp(runtimeKey, options);
       applyPreviewAppStatus(status);
       return status;
     } catch (error) {
@@ -236,7 +275,9 @@ export function useChatInspectorController({
       });
       return null;
     } finally {
-      setPreviewAppBusy(null);
+      setPreviewAppBusyState((current) =>
+        current?.key === runtimeKey ? null : current,
+      );
     }
   }
 

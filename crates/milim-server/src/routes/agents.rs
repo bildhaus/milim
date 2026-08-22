@@ -648,6 +648,8 @@ mod run_context_tests {
         workspace: PathBuf,
     }
 
+    struct ThreadProbe(Option<String>);
+
     #[derive(Clone, Default)]
     struct RecordingRemoteBackend {
         prompts: Arc<Mutex<Vec<String>>>,
@@ -708,6 +710,33 @@ mod run_context_tests {
 
         async fn invoke(&self, _args: Value) -> milim_core::Result<Value> {
             Ok(Value::Null)
+        }
+    }
+
+    #[async_trait]
+    impl Tool for ThreadProbe {
+        fn name(&self) -> &str {
+            "thread_probe"
+        }
+
+        fn description(&self) -> &str {
+            "Return the task bound to this run."
+        }
+
+        fn input_schema(&self) -> Value {
+            json!({"type":"object"})
+        }
+
+        fn effect(&self) -> ToolEffect {
+            ToolEffect::ReadOnly
+        }
+
+        fn scoped_to_thread(&self, thread_id: &str) -> Option<Arc<dyn Tool>> {
+            Some(Arc::new(Self(Some(thread_id.to_string()))))
+        }
+
+        async fn invoke(&self, _args: Value) -> milim_core::Result<Value> {
+            Ok(json!({"thread_id": self.0}))
         }
     }
 
@@ -1376,6 +1405,37 @@ mod run_context_tests {
         std::fs::remove_dir_all(root).ok();
     }
 
+    #[tokio::test]
+    async fn registry_binds_task_owned_tools_to_the_originating_thread() {
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(ThreadProbe(None)));
+        let state = AppState::new(
+            Arc::new(TestBackend::new()),
+            milim_core::config::ServerConfiguration::default(),
+        )
+        .with_tools(tools);
+        let registry = agent_base_registry_with_memory(
+            &state,
+            Some(AgentMemoryContext {
+                thread_id: Some("origin-thread".to_string()),
+                ..Default::default()
+            }),
+            &ToolRunPolicy {
+                approval: ToolApprovalPolicy::Open,
+                ..Default::default()
+            },
+            &RunContext {
+                workspace: None,
+                privacy_mode: crate::privacy::PrivacyMode::Off,
+            },
+        );
+
+        assert_eq!(
+            registry.call("thread_probe", json!({})).await.unwrap()["thread_id"],
+            "origin-thread"
+        );
+    }
+
     #[test]
     fn worker_run_create_fields_distinguish_omitted_from_null() {
         let omitted: WorkerRunCreateRequest = serde_json::from_value(json!({
@@ -1618,6 +1678,14 @@ fn agent_base_registry_with_memory(
         run_context,
         policy.approval == ToolApprovalPolicy::Open && !policy.plan_mode,
     );
+    if let Some(thread_id) = memory
+        .as_ref()
+        .and_then(|context| context.thread_id.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        reg = reg.scoped_to_thread(thread_id);
+    }
     if let Some(store) = st.agents.as_ref() {
         reg.register(Arc::new(ListAgentsTool {
             store: store.clone(),

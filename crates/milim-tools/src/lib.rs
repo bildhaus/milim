@@ -73,6 +73,10 @@ pub trait Tool: Send + Sync {
     fn with_full_access(&self, _cwd: &Path) -> Option<Arc<dyn Tool>> {
         None
     }
+    /// Return a copy bound to the task that originated the run, when applicable.
+    fn scoped_to_thread(&self, _thread_id: &str) -> Option<Arc<dyn Tool>> {
+        None
+    }
     /// Return a copy with mutable UI targets captured for one run.
     fn scoped_for_run(&self) -> Option<Arc<dyn Tool>> {
         None
@@ -389,6 +393,27 @@ impl ToolRegistry {
                 .collect(),
             aliases: self.aliases.clone(),
             run_permits: Arc::new(tokio::sync::Semaphore::new(RUN_TOOL_LIMIT as usize)),
+        };
+        registry.retain_valid_aliases();
+        registry
+    }
+
+    /// Bind tools that route task-owned effects to the task that originated the run.
+    pub fn scoped_to_thread(&self, thread_id: &str) -> Self {
+        let mut registry = Self {
+            tools: self
+                .tools
+                .iter()
+                .map(|(name, tool)| {
+                    (
+                        name.clone(),
+                        tool.scoped_to_thread(thread_id)
+                            .unwrap_or_else(|| tool.clone()),
+                    )
+                })
+                .collect(),
+            aliases: self.aliases.clone(),
+            run_permits: self.run_permits.clone(),
         };
         registry.retain_valid_aliases();
         registry

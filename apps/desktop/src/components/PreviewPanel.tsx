@@ -96,9 +96,13 @@ export function previewSurfaceIsInspectable(surface: PreviewSurfaceTarget | null
   return Boolean(surface?.status === "ready" && surface.capabilities.includes("dom_snapshot"));
 }
 
-async function publishPreviewSurface(surface: PreviewSurfaceTarget | null, onSurfaceChange?: (surface: PreviewSurfaceTarget | null) => void) {
+async function publishPreviewSurface(
+  surface: PreviewSurfaceTarget | null,
+  onSurfaceChange?: (surface: PreviewSurfaceTarget | null) => void,
+  threadId?: string,
+) {
   onSurfaceChange?.(surface);
-  await setActivePreviewTarget(surface).catch(() => undefined);
+  await setActivePreviewTarget(surface, threadId).catch(() => undefined);
 }
 
 export function PreviewPanel({
@@ -134,6 +138,7 @@ export function PreviewPanel({
   onRuntimeRestart,
   controlActivity,
   onSurfaceChange,
+  threadId = "",
   modeSwitcher,
   style,
   workspaceFolder,
@@ -172,6 +177,7 @@ export function PreviewPanel({
   onRuntimeRestart?: () => void;
   controlActivity?: PreviewControlActivity | null;
   onSurfaceChange?: (surface: PreviewSurfaceTarget | null) => void;
+  threadId?: string;
   modeSwitcher?: ReactNode;
   style?: CSSProperties;
   workspaceFolder?: string;
@@ -533,11 +539,11 @@ export function PreviewPanel({
     } else {
       surface = { kind: "artifact_iframe", title, native: false, status: "loading", capabilities: ["source"] };
     }
-    void publishPreviewSurface(surface, onSurfaceChange);
+    void publishPreviewSurface(surface, onSurfaceChange, threadId);
     return () => {
-      void publishPreviewSurface(null, onSurfaceChange);
+      void publishPreviewSurface(null, onSurfaceChange, threadId);
     };
-  }, [activeTab, browserUrl, iframeReadyKey, iframeSurfaceKey, isUrlPreview, onSurfaceChange, previewDeferred, previewDocumentReady, previewError, previewKind, title]);
+  }, [activeTab, browserUrl, iframeReadyKey, iframeSurfaceKey, isUrlPreview, onSurfaceChange, previewDeferred, previewDocumentReady, previewError, previewKind, threadId, title]);
 
   function requestReviewComment(onSubmit: (body: string) => void) {
     reviewCommentSubmitRef.current = onSubmit;
@@ -1429,6 +1435,7 @@ export function PreviewPanel({
                         surfaceReady={selectedPreviewSource === "app" ? Boolean(runtimeStatus?.ready) : undefined}
                         surfaceError={selectedPreviewSource === "app" ? runtimeError : null}
                         zoomPercent={previewBrowserZoomPercent}
+                        threadId={threadId}
                         onNativeLabelChange={(label) => {
                           if (label) nativeBrowserLabelsRef.current.set(tab.id, label);
                           else nativeBrowserLabelsRef.current.delete(tab.id);
@@ -1792,6 +1799,7 @@ function NativeArtifactBrowser({
   surfaceReady,
   surfaceError,
   zoomPercent,
+  threadId,
   onNativeLabelChange,
   onNavigation,
   onNavigationError,
@@ -1813,6 +1821,7 @@ function NativeArtifactBrowser({
   surfaceReady?: boolean;
   surfaceError?: string | null;
   zoomPercent: number;
+  threadId: string;
   onNativeLabelChange?: (label: string | null) => void;
   onNavigation?: (url: string, state: PreviewWebviewLoadState) => void;
   onNavigationError?: (message: string) => void;
@@ -2132,8 +2141,8 @@ function NativeArtifactBrowser({
         native: false,
         status: "not_inspectable",
         capabilities: [],
-      }, onSurfaceChange);
-      return () => { void publishPreviewSurface(null, onSurfaceChange); };
+      }, onSurfaceChange, threadId);
+      return () => { void publishPreviewSurface(null, onSurfaceChange, threadId); };
     }
     const runtimeWaiting = surfaceReady === false;
     const error = nativeError || surfaceError;
@@ -2148,9 +2157,9 @@ function NativeArtifactBrowser({
       status: error ? "error" : ready ? "ready" : "loading",
       capabilities: ready ? DOM_PREVIEW_CAPABILITIES : [],
     };
-    void publishPreviewSurface(surface, onSurfaceChange);
-    return () => { void publishPreviewSurface(null, onSurfaceChange); };
-  }, [visible, nativeError, nativeNavigation, onSurfaceChange, surfaceError, surfaceKind, surfaceReady, title]);
+    void publishPreviewSurface(surface, onSurfaceChange, threadId);
+    return () => { void publishPreviewSurface(null, onSurfaceChange, threadId); };
+  }, [visible, nativeError, nativeNavigation, onSurfaceChange, surfaceError, surfaceKind, surfaceReady, threadId, title]);
 
   useEffect(() => {
     if (!visible || !controlActivity || !IS_TAURI) return;

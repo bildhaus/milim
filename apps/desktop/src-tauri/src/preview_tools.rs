@@ -194,6 +194,7 @@ try {
 
 #[derive(Clone, Debug)]
 struct PreviewTarget {
+    thread_id: Option<String>,
     label: Option<String>,
     title: Option<String>,
     url: Option<String>,
@@ -229,6 +230,7 @@ impl PreviewToolState {
     #[allow(clippy::too_many_arguments)]
     pub fn set_target(
         &self,
+        thread_id: Option<String>,
         label: Option<String>,
         title: Option<String>,
         url: Option<String>,
@@ -238,10 +240,21 @@ impl PreviewToolState {
         capabilities: Option<Vec<String>>,
     ) {
         if let Ok(mut current) = self.target.write() {
-            *current = if label.is_none() && kind.is_none() {
-                None
+            if label.is_none() && kind.is_none() {
+                let owner = thread_id.as_deref().map(str::trim).filter(|value| !value.is_empty());
+                if owner.is_none()
+                    || current
+                        .as_ref()
+                        .and_then(|target| target.thread_id.as_deref())
+                        == owner
+                {
+                    *current = None;
+                }
             } else {
-                Some(PreviewTarget {
+                *current = Some(PreviewTarget {
+                    thread_id: thread_id
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty()),
                     label,
                     title,
                     url,
@@ -255,8 +268,8 @@ impl PreviewToolState {
                     }),
                     status: status.unwrap_or_else(|| "ready".to_string()),
                     capabilities: capabilities.unwrap_or_else(default_preview_capabilities),
-                })
-            };
+                });
+            }
         }
     }
 }
@@ -265,6 +278,7 @@ impl PreviewToolState {
 #[allow(clippy::too_many_arguments)]
 pub fn set_active_preview_target(
     state: tauri::State<'_, SharedPreviewToolState>,
+    thread_id: Option<String>,
     label: Option<String>,
     title: Option<String>,
     url: Option<String>,
@@ -273,13 +287,23 @@ pub fn set_active_preview_target(
     status: Option<String>,
     capabilities: Option<Vec<String>>,
 ) {
-    state.set_target(label, title, url, native, kind, status, capabilities);
+    state.set_target(
+        thread_id,
+        label,
+        title,
+        url,
+        native,
+        kind,
+        status,
+        capabilities,
+    );
 }
 
 pub fn preview_tools(state: SharedPreviewToolState) -> Vec<Arc<dyn Tool>> {
     vec![
         Arc::new(PreviewOpenUrlTool {
             state: state.clone(),
+            thread_id: None,
         }),
         Arc::new(PreviewDomSnapshotTool {
             state: state.clone(),
@@ -304,12 +328,15 @@ struct PreviewOpenUrlArgs {
 }
 
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct PreviewOpenUrlPayload {
+    thread_id: String,
     url: String,
 }
 
 pub struct PreviewOpenUrlTool {
     state: SharedPreviewToolState,
+    thread_id: Option<String>,
 }
 
 #[async_trait]
@@ -337,12 +364,38 @@ impl Tool for PreviewOpenUrlTool {
         ToolEffect::Mutating
     }
 
+    fn scoped_for_run(&self) -> Option<Arc<dyn Tool>> {
+        Some(Arc::new(Self {
+            state: self.state.snapshot(),
+            thread_id: self.thread_id.clone(),
+        }))
+    }
+
+    fn scoped_to_thread(&self, thread_id: &str) -> Option<Arc<dyn Tool>> {
+        Some(Arc::new(Self {
+            state: self.state.clone(),
+            thread_id: Some(thread_id.to_string()),
+        }))
+    }
+
     async fn invoke(&self, args: Value) -> Result<Value> {
         let args: PreviewOpenUrlArgs = serde_json::from_value(args).map_err(|error| {
             Error::InvalidRequest(format!("invalid preview_open_url arguments: {error}"))
         })?;
         let url = crate::preview_webview::allowed_preview_url(&args.url)
             .map_err(Error::InvalidRequest)?;
+        let thread_id = self.thread_id.clone().or_else(|| {
+            self.state.target.read().ok().and_then(|target| {
+                target
+                    .as_ref()
+                    .and_then(|target| target.thread_id.clone())
+            })
+        })
+            .ok_or_else(|| {
+                Error::InvalidRequest(
+                    "The active preview is not bound to an originating thread.".to_string(),
+                )
+            })?;
         let app = self
             .state
             .app
@@ -351,10 +404,12 @@ impl Tool for PreviewOpenUrlTool {
             .and_then(|value| value.clone())
             .ok_or_else(|| Error::Other("Milim desktop preview is unavailable".to_string()))?;
         let url = url.to_string();
-        // ponytail: Open the visible task; add run-id routing if hidden background turns need this.
         app.emit(
             PREVIEW_OPEN_URL_EVENT,
-            PreviewOpenUrlPayload { url: url.clone() },
+            PreviewOpenUrlPayload {
+                thread_id,
+                url: url.clone(),
+            },
         )
         .map_err(|error| Error::Other(format!("failed to open Milim preview: {error}")))?;
         Ok(json!({ "status": "requested", "url": url }))
@@ -816,6 +871,7 @@ mod tests {
     fn preview_state_stores_surface_metadata_and_clears() {
         let state = PreviewToolState::default();
         state.set_target(
+            Some("thread-a".to_string()),
             Some("main".to_string()),
             Some("index.html".to_string()),
             Some("index.html".to_string()),
@@ -825,13 +881,35 @@ mod tests {
             Some(vec!["dom_snapshot".to_string(), "source".to_string()]),
         );
         let target = state.target.read().unwrap().clone().unwrap();
+        assert_eq!(target.thread_id.as_deref(), Some("thread-a"));
         assert_eq!(target.label.as_deref(), Some("main"));
         assert_eq!(target.title.as_deref(), Some("index.html"));
         assert_eq!(target.kind, "artifact_iframe");
         assert_eq!(target.status, "ready");
         assert!(target.capabilities.contains(&"dom_snapshot".to_string()));
 
-        state.set_target(None, None, None, false, None, None, None);
+        state.set_target(
+            Some("thread-b".to_string()),
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+        );
+        assert!(state.target.read().unwrap().is_some());
+
+        state.set_target(
+            Some("thread-a".to_string()),
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+        );
         assert!(state.target.read().unwrap().is_none());
     }
 
@@ -839,6 +917,7 @@ mod tests {
     fn preview_action_rejects_non_inspectable_surface() {
         let state = Arc::new(PreviewToolState::default());
         state.set_target(
+            Some("thread-a".to_string()),
             None,
             Some("Browser".to_string()),
             None,

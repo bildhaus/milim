@@ -42,7 +42,10 @@ import {
   normalizeGenerationOverrides,
   type GenerationOverrides,
 } from "../lib/generationSettings.js";
-import { previewRuntimeKeyForThread } from "../lib/previewRuntimeKeys.js";
+import {
+  legacyPreviewRuntimeKeyForThread,
+  previewRuntimeKeyForThread,
+} from "../lib/previewRuntimeKeys.js";
 import { normalizeProjectColor } from "../lib/projectColors.js";
 import type { PullRequestSnapshot } from "../lib/pullRequests.js";
 import {
@@ -1456,6 +1459,33 @@ function normalizePreviewBrowserSessionsByKey(
     if (session) sessions[key] = session;
   }
   return sessions;
+}
+
+function migratePreviewWorkspaceKeys<T>(
+  values: Record<string, T>,
+  sessions: readonly Pick<Session, "id" | "settings">[],
+): Record<string, T> {
+  const migrated = { ...values };
+  const destinations = new Map<string, Set<string>>();
+  for (const session of sessions) {
+    const folder = session.settings?.folder?.trim();
+    if (!folder) continue;
+    const legacyKey = legacyPreviewRuntimeKeyForThread(session.id, folder);
+    const key = previewRuntimeKeyForThread(session.id, folder);
+    if (legacyKey === key) continue;
+    const keys = destinations.get(legacyKey) ?? new Set<string>();
+    keys.add(key);
+    destinations.set(legacyKey, keys);
+  }
+  for (const [legacyKey, keys] of destinations) {
+    const value = migrated[legacyKey];
+    if (value !== undefined && keys.size === 1) {
+      const [key] = keys;
+      migrated[key] ??= value;
+    }
+    delete migrated[legacyKey];
+  }
+  return migrated;
 }
 
 function legacyWorkerRunFromSession(
@@ -3901,7 +3931,10 @@ export const useSessions = create<SessionState>()(
           .filter((record): record is SessionWorkerRunRecord => Boolean(record));
         const persistedSessions = normalizedSessions.filter((session) => !session.worker);
         const workerRuns = legacyWorkerRuns;
-        const inspectorByKey = normalizeInspectorByKey(state.inspectorByKey);
+        const inspectorByKey = migratePreviewWorkspaceKeys(
+          normalizeInspectorByKey(state.inspectorByKey),
+          persistedSessions,
+        );
         for (const session of [...persistedSessions].sort((a, b) => b.updatedAt - a.updatedAt)) {
           const tab = normalizeInspectorTab(session.inspectorTab);
           if (session.inspectorOpen !== true && !tab) continue;
@@ -3919,13 +3952,16 @@ export const useSessions = create<SessionState>()(
           delete next.inspectorTab;
           return next;
         });
-        const previewRuntimesByKey = normalizePreviewRuntimesByKey(
-          state.previewRuntimesByKey,
+        const previewRuntimesByKey = migratePreviewWorkspaceKeys(
+          normalizePreviewRuntimesByKey(state.previewRuntimesByKey),
+          sessions,
         );
-        const previewBrowserSessionsByKey =
+        const previewBrowserSessionsByKey = migratePreviewWorkspaceKeys(
           normalizePreviewBrowserSessionsByKey(
             state.previewBrowserSessionsByKey,
-          );
+          ),
+          sessions,
+        );
         for (const session of sessions) {
           const folder = normalizeProjectFolder(sessionProjectFolder(session));
           if (folder && session.previewRuntime) {
