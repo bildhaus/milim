@@ -1086,6 +1086,7 @@ impl milim_agents::AgentStepHook for RunJournal {
                         "attachments": accepted.config.attachments,
                         "runId": self.run_id,
                         "steering": true,
+                        "steeringInboxId": item.id,
                     });
                     let message_id = message
                         .get("id")
@@ -7441,7 +7442,7 @@ mod tests {
             .unwrap();
         assert_eq!(mismatched.status, ControlCommandStatusV1::Failed);
         let accepted = manager
-            .command(state, None, steer("steer-accepted", "run-active"))
+            .command(state.clone(), None, steer("steer-accepted", "run-active"))
             .await
             .unwrap();
         assert_eq!(accepted.status, ControlCommandStatusV1::Accepted);
@@ -7452,6 +7453,40 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].kind, "steer");
         assert_eq!(pending[0].target_run_id.as_deref(), Some("run-active"));
+
+        let journal = RunJournal {
+            store: manager.store.clone(),
+            privacy: state.privacy.clone(),
+            privacy_mode: crate::privacy::PrivacyMode::Off,
+            thread_id: "thread-fixture".into(),
+            run_id: "run-active".into(),
+        };
+        let mut messages = vec![ChatMessage::text("user", "active")];
+        journal.prepare_model_step(1, &mut messages).await.unwrap();
+
+        let timeline = manager
+            .timeline_page("thread-fixture", None, None, true, 50)
+            .unwrap()
+            .unwrap();
+        let projected_steer = timeline
+            .items
+            .iter()
+            .find(|item| {
+                item.item_type == "message"
+                    && item
+                        .data
+                        .get("steering")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+            })
+            .expect("claimed steer should be projected into the canonical timeline");
+        assert_eq!(
+            projected_steer
+                .data
+                .get("steeringInboxId")
+                .and_then(Value::as_str),
+            Some(pending[0].id.as_str()),
+        );
     }
 
     #[tokio::test]

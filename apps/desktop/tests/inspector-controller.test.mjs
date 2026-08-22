@@ -31,11 +31,12 @@ assert.match(openArtifact, /if \(tab === "preview"\) selectPreviewSource\("artif
 assert.equal(openArtifact.match(/selectPreviewSource\("artifact"\)/g)?.length, 1);
 
 const startRuntime = functionBody(inspectorController, "startRuntime");
-assert.match(startRuntime, /startPreviewApp\(activePreviewRuntimeKey, options\)/);
+assert.match(startRuntime, /const runtimeKey = activePreviewRuntimeKey/);
+assert.match(startRuntime, /startPreviewApp\(runtimeKey, options\)/);
 assert.match(chatView, /source_fingerprint: activePreviewAppPreflight\.source_fingerprint/);
 
 const restartRuntime = functionBody(inspectorController, "restartRuntime");
-assert.match(restartRuntime, /restartPreviewApp\(activePreviewRuntimeKey, options\)/);
+assert.match(restartRuntime, /restartPreviewApp\(runtimeKey, options\)/);
 assert.doesNotMatch(restartRuntime, /preflightPreviewApp/);
 
 const prepareFix = functionBody(chatView, "sendArtifactFixPrompt");
@@ -49,6 +50,14 @@ assert.match(
 assert.match(chatView, /artifactSelectionsByThreadRef\.current\.get\(activeId\)/);
 assert.match(chatView, /activeSession\?\.browserSession \?\? emptyBrowserSession\(\)/);
 assert.match(chatView, /setSessionBrowserSession\(activeId, restoredBrowser\)/);
+assert.match(chatView, /openUrl\(request\.threadId, request\.url\)/);
+assert.match(chatView, /setSessionBrowserSession\(threadId, next\)/);
+assert.match(chatView, /key=\{activePreviewRuntimeKey\}/);
+assert.match(chatView, /threadId=\{activeId\}/);
+assert.match(
+  chatView,
+  /previewRuntimeKeyForThread\(id, turnFolder\) === activePreviewRuntimeKey/,
+);
 assert.match(chatView, /previewSourcesByThreadRef\.current\.get\(activeId\)/);
 assert.match(chatView, /title=\{inspectorLauncherLabel\}/);
 assert.match(chatView, /`Open Code: \$\{/);

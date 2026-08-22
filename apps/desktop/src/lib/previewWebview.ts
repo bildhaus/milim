@@ -41,6 +41,7 @@ export interface PreviewWebviewTitle {
 }
 
 export interface PreviewOpenUrl {
+  threadId: string;
   url: string;
 }
 

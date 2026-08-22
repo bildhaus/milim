@@ -20,6 +20,7 @@ equal(sessionRecencyLabel(now - 6 * 24 * 60 * 60_000, now), "6d", "day recency s
 equal(sessionRecencyLabel(now - 45 * 24 * 60 * 60_000, now), "1mo", "older recency should use mo");
 
 const sidebarSource = readFileSync("src/components/Sidebar.tsx", "utf8");
+const shellSource = readFileSync("src/shell.css", "utf8");
 assert(
   !sidebarSource.includes('className="session-status"'),
   "expanded threads should not keep the old left status dot",
@@ -40,6 +41,14 @@ assert(
 assert(
   sidebarSource.includes('role="img"') && sidebarSource.includes('aria-label={indicator.label}'),
   "app preview runtime markers should expose their status label",
+);
+assert(
+  /\.inbox-session-item > \.session-runtime-marker,\s*\.session-section-title > \.session-runtime-marker\s*\{\s*left: -4px;/.test(shellSource),
+  "inbox and project runtime markers should share the outer status rail",
+);
+assert(
+  /\.session-list\s*\{[\s\S]*?margin: 3px -4px 0 -6px;[\s\S]*?padding: 0 5px 0 6px;/.test(shellSource),
+  "the sidebar scrollport should expose the outer status rail without shifting row content",
 );
 
 export {};

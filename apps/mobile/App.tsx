@@ -1991,6 +1991,7 @@ function TranscriptItemView({
   }
   return (
     <View style={[styles.message, item.role === 'user' ? styles.userMessage : styles.assistantMessage]}>
+      {item.steering ? <Text style={styles.messageRole}>STEER</Text> : null}
       {item.mailboxLabel ? <Text style={styles.messageRole}>{item.mailboxLabel}</Text> : null}
       {item.role === 'system' ? <Text style={styles.messageRole}>SYSTEM</Text> : null}
       {item.reasoning ? <ReasoningBlock text={item.reasoning} /> : null}

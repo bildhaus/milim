@@ -9,6 +9,16 @@ const chatView = readFileSync(
   join(root, "src", "components", "ChatView.tsx"),
   "utf8",
 );
+const chatMessageRow = readFileSync(
+  join(root, "src", "components", "ChatMessageRow.tsx"),
+  "utf8",
+);
+
+assert.match(
+  chatMessageRow,
+  /m\.steering[\s\S]*data-testid="applied-steer"[\s\S]*>Steer</,
+  "applied steering input must remain visibly distinguished in the transcript",
+);
 
 function section(source, start, end) {
   const startIndex = source.indexOf(start);

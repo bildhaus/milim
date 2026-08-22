@@ -60,6 +60,21 @@ test('live duplicates are idempotent and assistant deltas project in order', () 
   expect(projectMessages(replica.items).at(-1)?.content).toBe('hel');
 });
 
+test('keeps an applied steer as a distinct labeled user message', () => {
+  const projected = projectMessages([
+    {...item(1, 'message', {id: 'user-1', role: 'user', content: 'original'}), run_id: 'run-1'},
+    {...item(2, 'message', {
+      id: 'steer-1',
+      role: 'user',
+      content: 'change direction',
+      steering: true,
+      steeringInboxId: 'inbox-steer-1',
+    }), run_id: 'run-1'},
+  ]);
+  expect(projected.map(message => message.id)).toEqual(['user-1', 'steer-1']);
+  expect(projected[1]).toMatchObject({steering: true, content: 'change direction'});
+});
+
 test('ignores live events emitted by a different desktop host', () => {
   const replica = applyTimelinePage(emptyReplica('t'), page('e1', [item(1)]), 'tail');
   const foreign: ControlEventV1 = {

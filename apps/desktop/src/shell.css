@@ -1253,7 +1253,15 @@
 .session-menu.project-menu button span {
   white-space: nowrap;
 }
-.session-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; margin: 3px -4px 0 0; padding-right: 5px; }
+.session-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 3px -4px 0 -6px;
+  padding: 0 5px 0 6px;
+}
 .session-list::-webkit-scrollbar {
   width: 10px;
 }
@@ -1679,8 +1687,9 @@
   transform: translateY(-50%);
   border-radius: 999px;
 }
+.inbox-session-item > .session-runtime-marker,
 .session-section-title > .session-runtime-marker {
-  left: 2px;
+  left: -4px;
 }
 .session-runtime-marker.transitioning {
   background: color-mix(in srgb, var(--accent) 88%, transparent);

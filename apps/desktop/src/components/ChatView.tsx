@@ -320,6 +320,7 @@ import {
   mergeModelChangeMessages,
   mergeControlRunMessages,
   modelChangeMessagesFromTimeline,
+  pendingInputsAfterProjection,
   pollControlRun,
   projectControlRunMessages,
   shouldReconcileControlRunProjection,
@@ -2908,6 +2909,7 @@ export function ChatView({
           }
           const projected = projectControlRunMessages(timeline.items, runId);
           if (!projected.length) continue;
+          setCanonicalPendingInputs((current) => pendingInputsAfterProjection(current, projected));
           if (JSON.stringify(currentRunMessages) === JSON.stringify(projected)) {
             continue;
           }
@@ -2956,6 +2958,7 @@ export function ChatView({
           if (disposed) return;
           const projected = projectControlRunMessages(items, run.id);
           if (!projected.length) return;
+          setCanonicalPendingInputs((current) => pendingInputsAfterProjection(current, projected));
           const current = sessionMessages(activeId);
           const reconciled = mergeModelChangeMessages(
             mergeControlRunMessages(current, run.id, projected),
@@ -3507,13 +3510,16 @@ export function ChatView({
   }, [activeId, sessionsHydrated]);
 
   useEffect(() => {
-    const openUrl = (value: unknown) => {
+    const openUrl = (threadId: string, value: unknown) => {
       if (typeof value !== "string") return;
       const url = normalizeArtifactBrowserUrl(value);
       if (!url) return;
+      const target = useSessions
+        .getState()
+        .sessions.find((session) => session.id === threadId);
+      if (!target) return;
       const current =
-        useSessions.getState().sessions.find((session) => session.id === activeId)
-          ?.browserSession ??
+        target.browserSession ??
         emptyBrowserSession();
       const tab = emptyBrowserTab(url);
       const next = {
@@ -3521,18 +3527,22 @@ export function ChatView({
         tabs: [...current.tabs, tab],
         activeTabId: tab.id,
       };
-      setSessionBrowserSession(activeId, next);
-      previewSourcesByThreadRef.current.set(activeId, "url");
-      setPreviewSource("url");
-      setPreviewPanelClosing(false);
-      setSessionInspectorTab(activeId, "preview");
-      setSessionInspectorOpen(activeId, true);
+      setSessionBrowserSession(threadId, next);
+      previewSourcesByThreadRef.current.set(threadId, "url");
+      if (threadId === activeId) {
+        setPreviewSource("url");
+        setPreviewPanelClosing(false);
+      }
+      setSessionInspectorTab(threadId, "preview");
+      setSessionInspectorOpen(threadId, true);
     };
     const openWindowUrl = (event: Event) =>
-      openUrl((event as CustomEvent<{ url?: unknown }>).detail?.url);
+      openUrl(activeId, (event as CustomEvent<{ url?: unknown }>).detail?.url);
     let disposed = false;
     let stopListening: () => void = () => undefined;
-    void listenForPreviewOpenUrl((request) => openUrl(request.url))
+    void listenForPreviewOpenUrl((request) =>
+      openUrl(request.threadId, request.url),
+    )
       .then((unlisten) => {
         if (disposed) unlisten();
         else stopListening = unlisten;
@@ -6439,6 +6449,7 @@ export function ChatView({
         (items) => {
           const projected = projectControlRunMessages(items, runId);
           if (!projected.length) return;
+          setCanonicalPendingInputs((current) => pendingInputsAfterProjection(current, projected));
           const reconciled = mergeModelChangeMessages(
             mergeControlRunMessages(
               sessionMessages(sessionId, convo),
@@ -6711,7 +6722,8 @@ export function ChatView({
         managedPreviewRuntime: managedPreviewRuntimeForSession(store, id),
         previewSurface:
           sidePanelVisible &&
-          (inspectorTab === "preview" || inspectorTab === "code")
+          (inspectorTab === "preview" || inspectorTab === "code") &&
+          previewRuntimeKeyForThread(id, turnFolder) === activePreviewRuntimeKey
             ? activePreviewSurface
             : null,
         activeAgentId: turnActiveAgentId,
@@ -8732,6 +8744,8 @@ export function ChatView({
             ) : (
               visiblePreviewSelection && (
                 <PreviewPanel
+                  key={activePreviewRuntimeKey}
+                  threadId={activeId}
                   artifact={visiblePreviewSelection.artifact}
                   artifacts={visiblePreviewSelection.artifacts}
                   revision={visiblePreviewSelection.revision}

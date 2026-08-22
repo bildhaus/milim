@@ -112,6 +112,30 @@ const persistedSessions = JSON.stringify({
         updatedAt: 1,
       },
     ],
+    previewRuntimesByKey: {
+      "project-1hphydg": {
+        status: "ready",
+        cwd: "C:\\shared",
+        url: "http://127.0.0.1:4173/",
+        active: true,
+        ready: true,
+      },
+    },
+    previewBrowserSessionsByKey: {
+      "project-1hphydg": {
+        profileId: "legacy-app-preview",
+        activeTabId: "legacy-app-tab",
+        tabs: [
+          {
+            id: "legacy-app-tab",
+            url: "http://127.0.0.1:4173/",
+            input: "http://127.0.0.1:4173/",
+            history: ["http://127.0.0.1:4173/"],
+            historyIndex: 0,
+          },
+        ],
+      },
+    },
     activeId: "persisted-session",
     archiveRetentionDays: 30,
     sidebar: {
@@ -169,6 +193,8 @@ function assert(condition: unknown, message: string): asserts condition {
 
 const { inspectorStateForSession, purgeExpiredArchivesAfterHydration, useSessions } =
   await import("../src/sessions/store.js");
+const { previewRuntimeKeyForThread } =
+  await import("../src/lib/previewRuntimeKeys.js");
 const { flushDeferredUserStateWrites } =
   await import("../src/persistence/userStateStorage.js");
 
@@ -198,6 +224,10 @@ if (!useSessions.persist.hasHydrated()) {
 await flushDeferredUserStateWrites("milim.sessions");
 
 const stored = JSON.parse(dbValues.get("milim.sessions") ?? "{}");
+const sharedPreviewKey = previewRuntimeKeyForThread(
+  "persisted-session",
+  "C:\\shared",
+);
 const inspectorFor = (index: number) => {
   const state = useSessions.getState();
   return inspectorStateForSession(state.inspectorByKey, state.sessions[index]);
@@ -244,6 +274,15 @@ assert(
 assert(
   stored.state.projects[0]?.folder === "C:\\keep",
   "startup archive cleanup should preserve hydrated projects",
+);
+assert(
+  useSessions.getState().previewRuntimesByKey[sharedPreviewKey]?.url ===
+    "http://127.0.0.1:4173/" &&
+    useSessions.getState().previewBrowserSessionsByKey[sharedPreviewKey]
+      ?.activeTabId === "legacy-app-tab" &&
+    !useSessions.getState().previewRuntimesByKey["project-1hphydg"] &&
+    !useSessions.getState().previewBrowserSessionsByKey["project-1hphydg"],
+  "hydration should migrate collision-prone workspace preview keys",
 );
 assert(
   useSessions.getState().projects[0]?.icon === "star" &&

@@ -1,17 +1,25 @@
-import type { ChatMessage } from "../api.js";
+import {
+  sessionProjectFolder,
+  type Project,
+  type Session,
+} from "../sessions/store.js";
 import { pendingAttentionKey } from "../ui/sounds.js";
 
 export type NativeNotificationKind = "finished" | "attention";
 
 type NativeBadgeState = {
-  sessions: readonly { id: string; messages: ChatMessage[] }[];
+  sessions: readonly Pick<
+    Session,
+    "id" | "messages" | "archivedAt" | "settings" | "retryWorkspace" | "threadWorkspace"
+  >[];
+  projects: readonly Pick<Project, "folder" | "archivedAt">[];
   unreadSessionIds: readonly string[];
   workerRuns: readonly {
     run: { id: string; parent_thread_id: string; status: string };
   }[];
 };
 
-let badgeUpdateId = 0;
+type NativeBadgeWriter = (count: number) => Promise<void>;
 
 function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -40,17 +48,44 @@ export async function sendMilimNotification(
 }
 
 export function nativeBadgeThreadCount(state: NativeBadgeState): number {
-  const counted = new Set(state.unreadSessionIds);
+  const archivedProjectFolders = new Set(
+    state.projects
+      .filter((project) => project.archivedAt)
+      .map((project) => project.folder),
+  );
+  const visibleSessions = state.sessions.filter(
+    (session) =>
+      !session.archivedAt &&
+      !archivedProjectFolders.has(sessionProjectFolder(session)),
+  );
+  const visibleSessionIds = new Set(visibleSessions.map((session) => session.id));
+  const counted = new Set(
+    state.unreadSessionIds.filter((id) => visibleSessionIds.has(id)),
+  );
   const proposedWorkers = new Map<string, string>();
   for (const { run } of state.workerRuns) {
     if (run.status === "proposed" && !proposedWorkers.has(run.parent_thread_id))
       proposedWorkers.set(run.parent_thread_id, run.id);
   }
-  for (const session of state.sessions) {
+  for (const session of visibleSessions) {
     if (pendingAttentionKey(session.messages, proposedWorkers.get(session.id)))
       counted.add(session.id);
   }
   return counted.size;
+}
+
+export function createNativeBadgeUpdater(write: NativeBadgeWriter): NativeBadgeWriter {
+  let latestUpdateId = 0;
+  let writeQueue = Promise.resolve();
+  return (count) => {
+    const updateId = ++latestUpdateId;
+    const normalizedCount = Math.max(0, Math.floor(count));
+    const update = writeQueue
+      .catch(() => {})
+      .then(() => updateId === latestUpdateId ? write(normalizedCount) : undefined);
+    writeQueue = update;
+    return update;
+  };
 }
 
 export function unreadBadgeLabel(count: number): string | null {
@@ -79,13 +114,9 @@ function unreadBadgeRgba(label: string): Uint8Array {
   return new Uint8Array(context.getImageData(0, 0, 32, 32).data.buffer);
 }
 
-export async function setMilimUnreadBadge(count: number): Promise<void> {
-  if (!isTauriRuntime()) return;
-  const updateId = ++badgeUpdateId;
-  const normalizedCount = Math.max(0, Math.floor(count));
+async function writeMilimUnreadBadge(normalizedCount: number): Promise<void> {
   const label = unreadBadgeLabel(normalizedCount);
   const { getCurrentWindow } = await import("@tauri-apps/api/window");
-  if (updateId !== badgeUpdateId) return;
   const appWindow = getCurrentWindow();
 
   if (navigator.userAgent.includes("Windows")) {
@@ -96,11 +127,17 @@ export async function setMilimUnreadBadge(count: number): Promise<void> {
     const { Image } = await import("@tauri-apps/api/image");
     const icon = await Image.new(unreadBadgeRgba(label), 32, 32);
     try {
-      if (updateId === badgeUpdateId) await appWindow.setOverlayIcon(icon);
+      await appWindow.setOverlayIcon(icon);
     } finally {
       await icon.close();
     }
   } else if (navigator.userAgent.includes("Mac")) {
     await appWindow.setBadgeCount(normalizedCount || undefined);
   }
+}
+
+const updateMilimUnreadBadge = createNativeBadgeUpdater(writeMilimUnreadBadge);
+
+export function setMilimUnreadBadge(count: number): Promise<void> {
+  return isTauriRuntime() ? updateMilimUnreadBadge(count) : Promise.resolve();
 }

@@ -536,7 +536,14 @@ function AppContent() {
   }, [sessionIds, sessionsHydrated]);
   useEffect(() => {
     if (!sessionsHydrated) return;
-    void setMilimUnreadBadge(nativeBadgeCount).catch(() => {});
+    const syncBadge = () => {
+      void setMilimUnreadBadge(nativeBadgeCount).catch((error) =>
+        console.warn("Failed to update the native unread badge:", error),
+      );
+    };
+    syncBadge();
+    window.addEventListener("focus", syncBadge);
+    return () => window.removeEventListener("focus", syncBadge);
   }, [nativeBadgeCount, sessionsHydrated]);
   useEffect(() => {
     refreshAgents();
