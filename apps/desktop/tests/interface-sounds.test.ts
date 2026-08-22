@@ -1,6 +1,7 @@
 const { interfaceSoundForTarget, pendingAttentionKey } = await import("../src/ui/sounds.js");
 const {
   nativeBadgeThreadCount,
+  createNativeBadgeUpdater,
   setMilimUnreadBadge,
   unreadBadgeLabel,
 } = await import("../src/lib/nativeNotifications.js");
@@ -49,15 +50,48 @@ const pendingApproval = {
   content: "",
   streamParts: [{ kind: "event" as const, eventType: "tool" as const, label: "Approve", approvalId: "approval-1", approvalStatus: "pending" as const }],
 };
-equal(nativeBadgeThreadCount({ sessions: [{ id: "unread", messages: [] }], unreadSessionIds: ["unread"], workerRuns: [] }), 1, "unread threads should count toward the native badge");
-equal(nativeBadgeThreadCount({ sessions: [{ id: "approval", messages: [pendingApproval] }], unreadSessionIds: [], workerRuns: [] }), 1, "pending approvals should count toward the native badge");
-equal(nativeBadgeThreadCount({ sessions: [{ id: "approval", messages: [pendingApproval] }], unreadSessionIds: ["approval"], workerRuns: [] }), 1, "unread attention threads should count only once");
-equal(nativeBadgeThreadCount({ sessions: [{ id: "approval", messages: [{ ...pendingApproval, streamParts: [{ ...pendingApproval.streamParts[0], approvalStatus: "approved" }] }] }], unreadSessionIds: [], workerRuns: [] }), 0, "resolved approvals should stop counting");
-equal(nativeBadgeThreadCount({ sessions: [{ id: "worker", messages: [] }], unreadSessionIds: [], workerRuns: [{ run: { id: "run-1", parent_thread_id: "worker", status: "proposed" } }] }), 1, "proposed Worker Runs should count toward the native badge");
-equal(nativeBadgeThreadCount({ sessions: [], unreadSessionIds: [], workerRuns: [] }), 0, "empty state should clear the native badge");
+equal(nativeBadgeThreadCount({ sessions: [{ id: "unread", messages: [] }], projects: [], unreadSessionIds: ["unread"], workerRuns: [] }), 1, "unread threads should count toward the native badge");
+equal(nativeBadgeThreadCount({ sessions: [{ id: "approval", messages: [pendingApproval] }], projects: [], unreadSessionIds: [], workerRuns: [] }), 1, "pending approvals should count toward the native badge");
+equal(nativeBadgeThreadCount({ sessions: [{ id: "approval", messages: [pendingApproval] }], projects: [], unreadSessionIds: ["approval"], workerRuns: [] }), 1, "unread attention threads should count only once");
+equal(nativeBadgeThreadCount({ sessions: [{ id: "approval", messages: [{ ...pendingApproval, streamParts: [{ ...pendingApproval.streamParts[0], approvalStatus: "approved" }] }] }], projects: [], unreadSessionIds: [], workerRuns: [] }), 0, "resolved approvals should stop counting");
+equal(nativeBadgeThreadCount({ sessions: [{ id: "worker", messages: [] }], projects: [], unreadSessionIds: [], workerRuns: [{ run: { id: "run-1", parent_thread_id: "worker", status: "proposed" } }] }), 1, "proposed Worker Runs should count toward the native badge");
+equal(nativeBadgeThreadCount({ sessions: [{ id: "archived", messages: [pendingApproval], archivedAt: Date.now() }], projects: [], unreadSessionIds: ["archived"], workerRuns: [{ run: { id: "run-2", parent_thread_id: "archived", status: "proposed" } }] }), 0, "archived threads should not keep the native badge active");
+equal(nativeBadgeThreadCount({ sessions: [{ id: "archived-project", messages: [pendingApproval], settings: { folder: "C:\\archived" } as never }], projects: [{ folder: "C:\\archived", archivedAt: Date.now() }], unreadSessionIds: ["archived-project"], workerRuns: [] }), 0, "threads in archived projects should not keep the native badge active");
+equal(nativeBadgeThreadCount({ sessions: [], projects: [], unreadSessionIds: [], workerRuns: [] }), 0, "empty state should clear the native badge");
 equal(unreadBadgeLabel(0), null, "zero unread threads should have no badge label");
 equal(unreadBadgeLabel(9), "9", "single-digit badge counts should stay exact");
 equal(unreadBadgeLabel(10), "9+", "large Windows badge counts should clamp to 9+");
+const nativeBadgeWrites: string[] = [];
+let releaseFirstBadgeWrite = () => {};
+let markFirstBadgeWriteStarted = () => {};
+const firstBadgeWrite = new Promise<void>((resolve) => {
+  releaseFirstBadgeWrite = resolve;
+});
+const firstBadgeWriteStarted = new Promise<void>((resolve) => {
+  markFirstBadgeWriteStarted = resolve;
+});
+const updateNativeBadge = createNativeBadgeUpdater(async (count) => {
+  nativeBadgeWrites.push(`start:${count}`);
+  if (count === 1) {
+    markFirstBadgeWriteStarted();
+    await firstBadgeWrite;
+  }
+  nativeBadgeWrites.push(`end:${count}`);
+});
+const staleBadgeWrite = updateNativeBadge(1);
+await firstBadgeWriteStarted;
+const clearBadgeWrite = updateNativeBadge(0);
+releaseFirstBadgeWrite();
+await Promise.all([staleBadgeWrite, clearBadgeWrite]);
+equal(nativeBadgeWrites.join(","), "start:1,end:1,start:0,end:0", "native badge updates should serialize with the newest count applied last");
+let nativeBadgeAttempts = 0;
+const retryNativeBadge = createNativeBadgeUpdater(async () => {
+  nativeBadgeAttempts += 1;
+  if (nativeBadgeAttempts === 1) throw new Error("transient native-shell failure");
+});
+await retryNativeBadge(1).catch(() => {});
+await retryNativeBadge(0);
+equal(nativeBadgeAttempts, 2, "a failed native badge write should not block a later clear retry");
 await setMilimUnreadBadge(1);
 equal(matchingSettingsEntries("sound")[0]?.id, "appearance-interface-sounds", "sound search should find the setting");
 equal(matchingSettingsEntries("audio")[0]?.id, "appearance-interface-sounds", "audio search should find the setting");
