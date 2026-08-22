@@ -655,9 +655,26 @@ export function ProjectCustomizationDialog({
   );
 }
 
-function WorkingSessionLoader({ className = "", ...props }: HTMLAttributes<HTMLSpanElement>) {
+export function sidebarLoaderAnimationDelay(key: string): string {
+  let hash = 2_166_136_261;
+  for (let index = 0; index < key.length; index += 1) {
+    hash ^= key.charCodeAt(index);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return `-${(hash >>> 0) % 1_000}ms`;
+}
+
+function WorkingSessionLoader({
+  className = "",
+  phaseKey,
+  style,
+  ...props
+}: HTMLAttributes<HTMLSpanElement> & { phaseKey?: string }) {
+  const phasedStyle = phaseKey
+    ? { ...style, "--session-loader-delay": sidebarLoaderAnimationDelay(phaseKey) } as CSSProperties
+    : style;
   return (
-    <span className={`session-loader working${className ? ` ${className}` : ""}`} {...props}>
+    <span className={`session-loader working${className ? ` ${className}` : ""}`} style={phasedStyle} {...props}>
       <span className="loader" aria-hidden="true" />
     </span>
   );
@@ -2016,6 +2033,7 @@ export function Sidebar({
               {generating ? (
                 <WorkingSessionLoader
                   className="session-side-indicator"
+                  phaseKey={session.id}
                   data-testid="session-loader"
                   role="img"
                   title={statusLabel}
@@ -2220,7 +2238,7 @@ export function Sidebar({
                     </span>
                     <span className="thread-bar-project-label">{group.label}</span>
                     {working ? (
-                      <WorkingSessionLoader className="thread-bar-project-status" title="Working" aria-label="Working" />
+                      <WorkingSessionLoader className="thread-bar-project-status" phaseKey={group.id} title="Working" aria-label="Working" />
                     ) : unread ? (
                       <UnreadSessionLoader className="thread-bar-project-status" title="Unread update" aria-label="Unread update" />
                     ) : null}
@@ -2357,7 +2375,7 @@ export function Sidebar({
                       onClick={() => switchVisibleSession(session.id)}
                     >
                       {generating ? (
-                        <WorkingSessionLoader aria-hidden="true" />
+                        <WorkingSessionLoader phaseKey={session.id} aria-hidden="true" />
                       ) : (
                         <UnreadSessionLoader aria-hidden="true" />
                       )}
@@ -2761,6 +2779,7 @@ export function Sidebar({
                                   {generating ? (
                                     <WorkingSessionLoader
                                       className="session-side-indicator"
+                                      phaseKey={s.id}
                                       data-testid="session-loader"
                                       role="img"
                                       title={statusLabel}
@@ -3117,6 +3136,7 @@ export function Sidebar({
                             {generating ? (
                               <WorkingSessionLoader
                                 className="session-side-indicator"
+                                phaseKey={s.id}
                                 data-testid="session-loader"
                                 role="img"
                                 title={statusLabel}

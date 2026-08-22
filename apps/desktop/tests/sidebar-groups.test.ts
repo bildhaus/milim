@@ -80,6 +80,7 @@ try {
     nextInboxSessionIdAfterSettle,
     reconcileWorkingSessionActivityAt,
     runningWorkerParentThreadIdsKey,
+    sidebarLoaderAnimationDelay,
     sidebarInboxPullRequestOwner,
     sidebarProjectPullRequestOwner,
     sidebarRuntimeIndicator,
@@ -94,6 +95,7 @@ try {
     nextInboxSessionIdAfterSettle: (groups: SessionGroup[], currentId: string, activityAtBySession?: ReadonlyMap<string, number>) => string | undefined;
     reconcileWorkingSessionActivityAt: (previous: ReadonlyMap<string, number>, sessions: SidebarSession[], workingSessionIds: ReadonlySet<string>) => ReadonlyMap<string, number>;
     runningWorkerParentThreadIdsKey: (records: Array<{ run: { parent_thread_id: string; status: string } }>) => string;
+    sidebarLoaderAnimationDelay: (key: string) => string;
     sidebarInboxPullRequestOwner: (
       session: SidebarSession,
       snapshots: Record<string, {
@@ -564,6 +566,18 @@ try {
       runningWorkerParentIds: ["worker"],
     })) === JSON.stringify(["generation", "host", "shared", "title", "worker"]),
     "sidebar working state should union generation, host, background activity, and worker signals",
+  );
+  assert(
+    sidebarLoaderAnimationDelay("thread-a") === sidebarLoaderAnimationDelay("thread-a"),
+    "a thread should keep the same loader phase across remounts",
+  );
+  assert(
+    sidebarLoaderAnimationDelay("thread-a") !== sidebarLoaderAnimationDelay("thread-b"),
+    "different threads should receive different loader phases",
+  );
+  assert(
+    /^-\d{1,3}ms$/.test(sidebarLoaderAnimationDelay("thread-a")),
+    "the loader phase should remain within its one-second animation cycle",
   );
 
   assert(

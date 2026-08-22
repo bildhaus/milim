@@ -29,6 +29,10 @@ assert(
   "working and unread threads should replace expanded-sidebar recency with the shared indicators",
 );
 assert(
+  sidebarSource.includes('<WorkingSessionLoader phaseKey={session.id} aria-hidden="true" />'),
+  "collapsed working loaders should preserve a stable per-thread animation phase",
+);
+assert(
   sidebarSource.includes('aria-current={session.id === activeId ? "page" : undefined}') &&
     (sidebarSource.match(/aria-current=\{s\.id === activeId \? "page" : undefined\}/g)?.length ?? 0) === 2,
   "every active thread row should expose its current-page state",

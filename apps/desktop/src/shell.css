@@ -1867,6 +1867,7 @@
   height: 16px;
   opacity: 0.85;
   animation: sidebar-loader-rotate 1s infinite;
+  animation-delay: var(--session-loader-delay, 0s);
 }
 .session-loader.working .loader::before,
 .session-loader.working .loader::after {
@@ -1881,11 +1882,13 @@
   background: var(--accent);
   box-shadow: var(--session-loader-offset) 0 0 var(--session-loader-tone-2);
   animation: sidebar-loader-ball1 1s infinite;
+  animation-delay: var(--session-loader-delay, 0s);
 }
 .session-loader.working .loader::after {
   background: var(--session-loader-tone-3);
   box-shadow: var(--session-loader-offset) 0 0 var(--session-loader-tone-4);
   animation: sidebar-loader-ball2 1s infinite;
+  animation-delay: var(--session-loader-delay, 0s);
 }
 .session-loader.unread .loader {
   width: 14px;
