@@ -1151,6 +1151,12 @@ async function runInboxSidebarCheck(page) {
           usage: { prompt_tokens: 1_200, completion_tokens: 300, total_tokens: 1_500 },
         }],
         settings: { folder: projectA, model: "codex:gpt-5.4" },
+        previewRuntime: {
+          status: "running",
+          active: true,
+          ready: true,
+          url: "http://127.0.0.1:4173",
+        },
         createdAt: now,
         updatedAt: now,
       },
@@ -1289,6 +1295,10 @@ async function runInboxSidebarCheck(page) {
   await page.getByRole("complementary", { name: "Chats" }).waitFor();
   await page.getByRole("button", { name: "Collapse Workspace A", exact: true }).waitFor();
   await page.getByRole("button", { name: "Collapse Workspace B", exact: true }).waitFor();
+  await page
+    .locator('[data-sidebar-section-id^="project:"] .session-runtime-marker.running')
+    .first()
+    .waitFor();
   await page.screenshot({ path: screenshots.inboxProjects, fullPage: false });
 
   await openSettings(page);
@@ -1569,6 +1579,9 @@ async function runInboxSidebarCheck(page) {
   await page.getByText("Settled Alpha", { exact: true }).waitFor();
   await search.fill("");
   await page.locator("#sidebar-settled-list").waitFor({ state: "detached" });
+  await page
+    .locator('[data-sidebar-session-id="inbox-active-new"] .session-runtime-marker.running')
+    .waitFor();
   await page.screenshot({ path: screenshots.inboxActive, fullPage: false });
 
   const newestActive = page.locator('[data-sidebar-session-id="inbox-active-new"]');
