@@ -128,6 +128,7 @@ export interface ProjectedMessage {
   reasoning: string;
   runId: string | null;
   ledgerVersion?: number;
+  steering?: boolean;
   seq: number;
   mailboxLabel?: string;
   mailboxStatus?: 'incoming' | 'replied' | 'failed';
@@ -592,6 +593,7 @@ export function projectTranscript(
         reasoning: typeof data.reasoning === 'string' ? data.reasoning : '',
         runId: item.run_id,
         ledgerVersion: typeof data.ledgerVersion === 'number' ? data.ledgerVersion : undefined,
+        steering: data.steering === true,
         seq: item.seq,
         mailboxLabel: asRecord(data.mailboxOrigin)
           ? `From ${stringField(asRecord(data.mailboxOrigin)!, 'origin_title') || 'linked thread'}`

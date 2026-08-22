@@ -7,11 +7,12 @@ import {
   mergeModelChangeMessages,
   mergeControlRunMessages,
   modelChangeMessagesFromTimeline,
+  pendingInputsAfterProjection,
   projectControlRunMessages,
   shouldReconcileControlRunProjection,
   shouldQueueCanonicalFollowup,
 } from "../src/lib/canonicalControl.js";
-import type { ControlQueuedTurnV1, ControlTimelineItemV1 } from "../src/api.js";
+import type { ControlPendingInputV1, ControlQueuedTurnV1, ControlTimelineItemV1 } from "../src/api.js";
 
 const item = (
   seq: number,
@@ -102,6 +103,47 @@ const completed = projectControlRunMessages(
   "run-1",
 );
 assert.equal(completed[1].id, "assistant-1");
+
+const completedWithSteer = projectControlRunMessages(
+  [
+    item(1, "message", { id: "user-1", role: "user", content: "original" }),
+    item(2, "assistant_delta", { text: "working", reasoning: "" }),
+    item(3, "message", {
+      id: "steer-1",
+      role: "user",
+      content: "change direction",
+      steering: true,
+      steeringInboxId: "inbox-steer-1",
+    }),
+    item(4, "message", { id: "assistant-1", role: "assistant", content: "done" }),
+  ],
+  "run-1",
+);
+assert.deepEqual(
+  completedWithSteer.map((message) => message.id),
+  ["user-1", "steer-1", "assistant-1"],
+  "an applied steer must remain a separate user turn without replacing the original prompt",
+);
+assert.equal(completedWithSteer[1].steering, true);
+assert.equal(completedWithSteer[1].steeringInboxId, "inbox-steer-1");
+assert.deepEqual(
+  mergeControlRunMessages(
+    [{ id: "optimistic-user", role: "user", content: "original" }],
+    "run-1",
+    completedWithSteer,
+  ).map((message) => message.id),
+  ["optimistic-user", "steer-1", "assistant-1"],
+  "run reconciliation must preserve both the optimistic original prompt and the applied steer",
+);
+const pendingInputs = [
+  { id: "inbox-steer-1", kind: "steer" },
+  { id: "inbox-steer-2", kind: "steer" },
+] as ControlPendingInputV1[];
+assert.deepEqual(
+  pendingInputsAfterProjection(pendingInputs, completedWithSteer).map((input) => input.id),
+  ["inbox-steer-2"],
+  "projecting an applied steer must clear only its matching pending indicator",
+);
 
 const completedWithProviderCost = projectControlRunMessages(
   [

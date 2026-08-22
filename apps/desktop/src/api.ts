@@ -285,6 +285,10 @@ export interface ChatMessage {
   runId?: string;
   /** Canonical timeline position for non-provider transcript projection. */
   controlSeq?: number;
+  /** This user message was applied to an already-running turn at a model boundary. */
+  steering?: boolean;
+  /** Durable inbox input represented by an applied steering message. */
+  steeringInboxId?: string;
   /** Durable notice that this thread will continue with a different model. */
   modelChange?: {
     previousModel: string;

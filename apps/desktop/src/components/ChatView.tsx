@@ -320,6 +320,7 @@ import {
   mergeModelChangeMessages,
   mergeControlRunMessages,
   modelChangeMessagesFromTimeline,
+  pendingInputsAfterProjection,
   pollControlRun,
   projectControlRunMessages,
   shouldReconcileControlRunProjection,
@@ -2908,6 +2909,7 @@ export function ChatView({
           }
           const projected = projectControlRunMessages(timeline.items, runId);
           if (!projected.length) continue;
+          setCanonicalPendingInputs((current) => pendingInputsAfterProjection(current, projected));
           if (JSON.stringify(currentRunMessages) === JSON.stringify(projected)) {
             continue;
           }
@@ -2956,6 +2958,7 @@ export function ChatView({
           if (disposed) return;
           const projected = projectControlRunMessages(items, run.id);
           if (!projected.length) return;
+          setCanonicalPendingInputs((current) => pendingInputsAfterProjection(current, projected));
           const current = sessionMessages(activeId);
           const reconciled = mergeModelChangeMessages(
             mergeControlRunMessages(current, run.id, projected),
@@ -6446,6 +6449,7 @@ export function ChatView({
         (items) => {
           const projected = projectControlRunMessages(items, runId);
           if (!projected.length) return;
+          setCanonicalPendingInputs((current) => pendingInputsAfterProjection(current, projected));
           const reconciled = mergeModelChangeMessages(
             mergeControlRunMessages(
               sessionMessages(sessionId, convo),

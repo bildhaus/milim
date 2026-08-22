@@ -662,6 +662,9 @@ function MessageRowView({
           </>
         ) : (
           <>
+            {m.steering && (
+              <div className="steer-provenance" data-testid="applied-steer">Steer</div>
+            )}
             {m.mailboxOrigin && (
               <div className="mailbox-provenance incoming" data-testid="mailbox-origin">
                 <span>From {m.mailboxOrigin.origin_title}</span>

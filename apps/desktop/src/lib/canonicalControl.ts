@@ -5,6 +5,7 @@ import {
   type ChatMessage,
   type ChatStreamPart,
   type ControlBootstrapV1,
+  type ControlPendingInputV1,
   type ControlQueuedTurnV1,
   type ControlTimelineItemV1,
 } from "../api.js";
@@ -241,7 +242,7 @@ function appendStreamEvent(
     : part;
 }
 
-/** Fold the authoritative items for one run into the two user-visible turns. */
+/** Fold the authoritative items for one run into its user-visible turns. */
 export function projectControlRunMessages(
   items: ControlTimelineItemV1[],
   runId: string,
@@ -264,7 +265,7 @@ export function projectControlRunMessages(
         : [],
     ),
   );
-  let user: CanonicalMessage | null = null;
+  const users: CanonicalMessage[] = [];
   let assistant: CanonicalMessage | null = null;
   let streamingText = "";
   let streamingReasoning = "";
@@ -291,6 +292,10 @@ export function projectControlRunMessages(
         runId,
         controlSeq: item.seq,
         ledgerVersion: typeof data.ledgerVersion === "number" ? data.ledgerVersion : undefined,
+        steering: data.steering === true,
+        steeringInboxId: typeof data.steeringInboxId === "string"
+          ? data.steeringInboxId
+          : undefined,
         mailboxOrigin: data.mailboxOrigin && typeof data.mailboxOrigin === "object"
           ? data.mailboxOrigin as CanonicalMessage["mailboxOrigin"]
           : undefined,
@@ -309,7 +314,7 @@ export function projectControlRunMessages(
           };
         });
       }
-      if (message.role === "user") user = message;
+      if (message.role === "user") users.push(message);
       if (message.role === "assistant") {
         message.metrics = projectedResponseMetrics(data.metrics);
         const reasoning = typeof data.reasoning === "string" ? data.reasoning : streamingReasoning;
@@ -357,7 +362,19 @@ export function projectControlRunMessages(
         ? "interrupted"
         : "unknown";
   }
-  return [user, assistant].filter((message): message is CanonicalMessage => message !== null);
+  return [...users, assistant].filter((message): message is CanonicalMessage => message !== null);
+}
+
+export function pendingInputsAfterProjection(
+  current: ControlPendingInputV1[],
+  projected: readonly ChatMessage[],
+): ControlPendingInputV1[] {
+  const claimedInboxIds = new Set(
+    projected.flatMap((message) => message.steeringInboxId ? [message.steeringInboxId] : []),
+  );
+  if (!claimedInboxIds.size) return current;
+  const next = current.filter((item) => !claimedInboxIds.has(item.id));
+  return next.length === current.length ? current : next;
 }
 
 export function shouldReconcileControlRunProjection(

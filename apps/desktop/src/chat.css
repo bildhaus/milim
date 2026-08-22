@@ -288,6 +288,16 @@
 .msg.user .md .code-block {
   max-width: 100%;
 }
+.steer-provenance {
+  width: fit-content;
+  margin-bottom: 5px;
+  color: var(--secondary-text);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
 .msg.assistant { align-items: flex-start; }
 .msg.assistant .msg-content {
   max-width: 100%;
