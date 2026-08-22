@@ -1,4 +1,9 @@
 {
+  "0.2.53": {
+    "version": "0.2.53",
+    "summary": "Milim 0.2.53 clarifies thread activity in the sidebar and shows immediate feedback when an accepted turn is waiting for its first response.",
+    "items": []
+  },
   "0.2.52": {
     "version": "0.2.52",
     "summary": "Milim 0.2.52 keeps active conversations steady, makes previews more dependable, and turns pasted images into compact message galleries.",
