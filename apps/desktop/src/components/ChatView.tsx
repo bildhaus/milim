@@ -339,6 +339,7 @@ import { DEFAULT_PREVIEW_PANEL_WIDTH, useUiPreferences } from "../ui/store";
 import { Composer } from "./Composer";
 import { ComposerSurface } from "./ComposerSurface";
 import { ControlBar } from "./ControlBar";
+import { AssistantMessage } from "./AssistantMessage";
 import type { ModelPickerSelection } from "./ModelPicker";
 import { GoalPanel, type GoalPanelDraft } from "./GoalPanel";
 import {
@@ -2177,10 +2178,10 @@ export function ChatView({
     activeWorker?.status === "queued" ||
     activeWorker?.status === "running" ||
     activeWorkerRun?.run.status === "running";
-  const busy =
+  const activeTurnBusy =
     generatingSessionIds.includes(activeId) ||
-    hostBusySessionIds.includes(activeId) ||
-    activeWorkerRunning;
+    hostBusySessionIds.includes(activeId);
+  const busy = activeTurnBusy || activeWorkerRunning;
   useEffect(() => {
     const selected = effectiveModel.trim();
     if (!sessionsHydrated || !modelsSettled || busy || !selected) return;
@@ -7949,6 +7950,8 @@ export function ChatView({
   }, []);
 
   const emptyThread = messages.length === 0;
+  const showTranscriptThinking =
+    activeTurnBusy && messages[messages.length - 1]?.role !== "assistant";
   const activeAssistantRuntime = useMemo(() => {
     if (!busy) return { run: null, streamParts: undefined };
     let run: RunTrace | null = null;
@@ -8256,6 +8259,18 @@ export function ChatView({
                       data-testid="transcript-bottom-spacer"
                       style={{ height: transcriptBottomSpacer }}
                     />
+                  )}
+                  {showTranscriptThinking && (
+                    <div
+                      className="transcript-window-row"
+                      data-testid="transcript-thinking"
+                    >
+                      <div className="msg assistant">
+                        <div className="msg-content" dir="auto">
+                          <AssistantMessage content="" streaming />
+                        </div>
+                      </div>
+                    </div>
                   )}
                 </div>
               )}

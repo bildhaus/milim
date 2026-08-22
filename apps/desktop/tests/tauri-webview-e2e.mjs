@@ -71,6 +71,7 @@ const screenshots = {
   workspaceCode: join(tmpdir(), "milim-tauri-webview-workspace-code.png"),
   modelChange: join(tmpdir(), "milim-tauri-webview-model-change.png"),
   reasoningEffort: join(tmpdir(), "milim-tauri-webview-reasoning-effort.png"),
+  transcriptThinking: join(tmpdir(), "milim-tauri-webview-transcript-thinking.png"),
   failure: join(tmpdir(), "milim-tauri-webview-failure.png"),
   linkedThreadDrop: join(tmpdir(), "milim-tauri-webview-linked-thread-drop.png"),
 };
@@ -126,8 +127,13 @@ const consoleErrors = [];
 let session;
 let failure;
 let turnChangesRepo;
+let generationFixture;
 
 try {
+  if (generationControlsOnly) {
+    generationFixture = await startGenerationFixtureServer();
+    process.env.MILIM_REMOTE_BASE_URL = generationFixture.baseUrl;
+  }
   session = await launchTauri(milimHome);
   await resetFrontendStorage(session.page);
   if (mediaOnly) {
@@ -278,6 +284,9 @@ try {
   await rmWithRetry(milimHome, { label: "MILIM_HOME" }).catch((err) => cleanupErrors.push(err));
   if (turnChangesRepo) {
     await rmWithRetry(turnChangesRepo.folder, { label: "turn changes repository" }).catch((err) => cleanupErrors.push(err));
+  }
+  if (generationFixture) {
+    await generationFixture.close().catch((err) => cleanupErrors.push(err));
   }
   printEvidencePaths(milimHome);
   if (cleanupErrors.length) {
@@ -3039,11 +3048,7 @@ async function runReasoningEffortIsolationCheck(page) {
 async function runGenerationControlsCheck(page) {
   const model = "vllm-e2e-model";
   const sessionId = "generation-controls";
-  await page.route("**/v1/models", (route) => route.fulfill({
-    status: 200,
-    contentType: "application/json",
-    body: JSON.stringify({ data: [{ id: model, owned_by: "vLLM (local)" }] }),
-  }));
+  if (!generationFixture) throw new Error("Generation fixture server is unavailable.");
   await page.evaluate(async ({ modelId, threadId }) => {
     const invoke = window.__TAURI_INTERNALS__.invoke;
     await invoke("user_state_set", {
@@ -3118,6 +3123,84 @@ async function runGenerationControlsCheck(page) {
     const session = raw ? JSON.parse(raw).state?.sessions?.find((item) => item.id === threadId) : null;
     return session?.settings?.generationOverrides?.[modelId] == null;
   }, { modelId: model, threadId: sessionId });
+
+  await page.getByTestId("composer-input").fill("Hold the response while the transcript shows activity.");
+  await page.getByTestId("composer-send").click();
+  await generationFixture.chatRequested;
+  const pendingTranscript = page.getByTestId("transcript-thinking");
+  await pendingTranscript.waitFor();
+  const activityCue = page.getByTestId("assistant-activity-cue");
+  await activityCue.waitFor();
+  if ((await activityCue.innerText()).trim() !== "thinking...") {
+    throw new Error(`Pending transcript activity should read thinking..., got ${JSON.stringify(await activityCue.innerText())}.`);
+  }
+  await page.screenshot({ path: screenshots.transcriptThinking, fullPage: false });
+  generationFixture.releaseChatResponse();
+  await page.getByTestId("assistant-message").last().getByText("Fixture response.").waitFor();
+  await pendingTranscript.waitFor({ state: "hidden" });
+  await activityCue.waitFor({ state: "hidden" });
+}
+
+async function startGenerationFixtureServer() {
+  let markChatRequested;
+  let releaseChatResponse;
+  const chatRequested = new Promise((resolve) => {
+    markChatRequested = resolve;
+  });
+  const chatResponseGate = new Promise((resolve) => {
+    releaseChatResponse = resolve;
+  });
+  const server = http.createServer((request, response) => {
+    const url = new URL(request.url || "/", "http://127.0.0.1");
+    if (request.method === "GET" && url.pathname === "/v1/models") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ data: [{ id: "vllm-e2e-model", owned_by: "vLLM (local)" }] }));
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/v1/chat/completions") {
+      request.resume();
+      markChatRequested();
+      void chatResponseGate.then(() => {
+        response.writeHead(200, {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+          connection: "keep-alive",
+        });
+        response.end([
+          'data: {"id":"fixture","object":"chat.completion.chunk","created":0,"model":"vllm-e2e-model","choices":[{"index":0,"delta":{"content":"Fixture response."},"finish_reason":null}]}',
+          "",
+          'data: {"id":"fixture","object":"chat.completion.chunk","created":0,"model":"vllm-e2e-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":4,"total_tokens":16}}',
+          "",
+          "data: [DONE]",
+          "",
+          "",
+        ].join("\n"));
+      });
+      return;
+    }
+    response.writeHead(404, { "content-type": "application/json" });
+    response.end(JSON.stringify({ error: "not found" }));
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    server.close();
+    throw new Error("Generation fixture server did not bind a TCP port.");
+  }
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}/v1`,
+    chatRequested,
+    releaseChatResponse,
+    async close() {
+      releaseChatResponse();
+      await new Promise((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
+    },
+  };
 }
 
 async function runArtifactCheck(page) {
@@ -6533,6 +6616,7 @@ function printEvidencePaths(milimHome) {
   console.log(`chatLatestScreenshot=${screenshots.chatLatest}`);
   console.log(`modelChangeScreenshot=${screenshots.modelChange}`);
   console.log(`reasoningEffortScreenshot=${screenshots.reasoningEffort}`);
+  console.log(`transcriptThinkingScreenshot=${screenshots.transcriptThinking}`);
   console.log(`linkedThreadDropScreenshot=${screenshots.linkedThreadDrop}`);
   for (const theme of ["light", "dark"]) {
     for (const kind of mcpAppKinds) console.log(`mcpApp${kind}Screenshot(${theme})=${mcpAppViewScreenshot(kind, theme)}`);

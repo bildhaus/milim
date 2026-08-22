@@ -123,6 +123,19 @@ try {
     streamingFallback.includes("md-streaming-answer-fallback"),
     "streaming answers should use the soft-newline fallback",
   );
+  const pendingAssistant = renderToStaticMarkup(createElement(AssistantMessage, {
+    content: "",
+    streamParts: [],
+    streaming: true,
+  }));
+  assert(
+    pendingAssistant.includes(">thinking...</span>"),
+    "an accepted turn should show a lowercase thinking cue before assistant output arrives",
+  );
+  assert(
+    pendingAssistant.includes("shiny-text"),
+    "the pending assistant cue should reuse the live shimmer treatment",
+  );
   const chatCss = readFileSync("src/chat.css", "utf8");
   assert(
     /\.md-streaming-answer-fallback\s*\{[^}]*white-space:\s*normal;[^}]*overflow-wrap:\s*break-word;/s.test(chatCss),

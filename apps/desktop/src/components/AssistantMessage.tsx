@@ -600,7 +600,7 @@ function StreamEventDetail({
 }
 
 function WaitingBlock({
-  label = "reasoning...",
+  label = "thinking...",
   icon = "thinking",
 }: {
   label?: string;
@@ -625,7 +625,7 @@ function activityCueForParts(
   parts: ChatStreamPart[],
 ): { label: string; icon: ChatStreamEventIcon } | null {
   const last = parts[parts.length - 1];
-  if (!last) return { label: "reasoning...", icon: "thinking" };
+  if (!last) return { label: "thinking...", icon: "thinking" };
   if (last.kind === "thinking") return null;
   if (last.kind === "text") return { label: "generating...", icon: "tool" };
   if (last.status === "running" || last.status === "error") return null;

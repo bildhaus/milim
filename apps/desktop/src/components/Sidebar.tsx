@@ -655,9 +655,26 @@ export function ProjectCustomizationDialog({
   );
 }
 
-function WorkingSessionLoader({ className = "", ...props }: HTMLAttributes<HTMLSpanElement>) {
+export function sidebarLoaderAnimationDelay(key: string): string {
+  let hash = 2_166_136_261;
+  for (let index = 0; index < key.length; index += 1) {
+    hash ^= key.charCodeAt(index);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return `-${(hash >>> 0) % 1_000}ms`;
+}
+
+function WorkingSessionLoader({
+  className = "",
+  phaseKey,
+  style,
+  ...props
+}: HTMLAttributes<HTMLSpanElement> & { phaseKey?: string }) {
+  const phasedStyle = phaseKey
+    ? { ...style, "--session-loader-delay": sidebarLoaderAnimationDelay(phaseKey) } as CSSProperties
+    : style;
   return (
-    <span className={`session-loader working${className ? ` ${className}` : ""}`} {...props}>
+    <span className={`session-loader working${className ? ` ${className}` : ""}`} style={phasedStyle} {...props}>
       <span className="loader" aria-hidden="true" />
     </span>
   );
@@ -671,14 +688,40 @@ function UnreadSessionLoader({ className = "", ...props }: HTMLAttributes<HTMLSp
   );
 }
 
-function runtimePreviewState(runtime?: SessionPreviewRuntime): "running" | "error" | null {
-  const status = runtime?.status.toLowerCase();
-  if (status === "error") return "error";
-  return status === "installing" || status === "starting" || status === "running" ? "running" : null;
+export type SidebarRuntimeIndicator = {
+  state: "transitioning" | "running" | "error";
+  label: string;
+};
+
+export function sidebarRuntimeIndicator(runtime?: SessionPreviewRuntime): SidebarRuntimeIndicator | null {
+  const status = runtime?.status.trim().toLowerCase();
+  if (!runtime || !status) return null;
+  if (runtime.error || status === "error") return { state: "error", label: "App preview error" };
+  if (status === "staged" || status === "stopped" || status === "idle") return null;
+  if (status === "installing") return { state: "transitioning", label: "App preview installing" };
+  if (status === "starting") return { state: "transitioning", label: "App preview starting" };
+  if (status === "stopping") return { state: "transitioning", label: "App preview stopping" };
+  if (status === "running" && runtime.ready === true) return { state: "running", label: "App preview running" };
+  if (status === "running" || runtime.active === true) {
+    return { state: "transitioning", label: "App preview active, not ready" };
+  }
+  return null;
 }
 
-function runtimePreviewSidebarState(session: SidebarSessionLike): "running" | "error" | null {
-  return runtimePreviewState(session.previewRuntime);
+function RuntimePreviewMarker({ indicator }: { indicator: SidebarRuntimeIndicator | null }) {
+  if (!indicator) return null;
+  return (
+    <span
+      className={`session-runtime-marker ${indicator.state}`}
+      role="img"
+      title={indicator.label}
+      aria-label={indicator.label}
+    />
+  );
+}
+
+function runtimePreviewSidebarIndicator(session: SidebarSessionLike): SidebarRuntimeIndicator | null {
+  return sidebarRuntimeIndicator(session.previewRuntime);
 }
 
 function sessionPreviewRuntimeForSidebar(state: ReturnType<typeof useSessions.getState>, session: Session): SessionPreviewRuntime | undefined {
@@ -1865,7 +1908,7 @@ export function Sidebar({
     const workerRunning = parentWorkersRunning || session.worker?.status === "queued" || session.worker?.status === "running";
     const generating = generatingSessions.has(session.id) || workerRunning;
     const unread = unreadSessions.has(session.id);
-    const runtimeState = group.settled || group.projectId ? null : runtimePreviewSidebarState(session);
+    const runtimeIndicator = group.settled || group.projectId ? null : runtimePreviewSidebarIndicator(session);
     const statusLabel = parentWorkersRunning
       ? "Workers running"
       : session.worker
@@ -1896,6 +1939,7 @@ export function Sidebar({
         key={session.id}
         data-sidebar-session-id={session.id}
         data-sidebar-session-section-id={group.id}
+        aria-current={session.id === activeId ? "page" : undefined}
         className={
           "session-item thread-bar-session" +
           (group.inbox ? " inbox-session-item" : "") +
@@ -1903,7 +1947,6 @@ export function Sidebar({
           (tierChild ? " child-session" : "") +
           (session.id === activeId ? " active" : "") +
           (generating ? " generating" : "") +
-          (runtimeState ? " runtime-preview runtime-" + runtimeState : "") +
           (pinned ? " pinned" : "") +
           (projectColor ? " project-colored" : "") +
           (confirmArchiveId === session.id ? " delete-pending" : "") +
@@ -1926,6 +1969,7 @@ export function Sidebar({
         }}
         title={session.title}
       >
+        <RuntimePreviewMarker indicator={runtimeIndicator} />
         {editing === session.id ? (
           <input
             className="session-rename"
@@ -1989,6 +2033,7 @@ export function Sidebar({
               {generating ? (
                 <WorkingSessionLoader
                   className="session-side-indicator"
+                  phaseKey={session.id}
                   data-testid="session-loader"
                   role="img"
                   title={statusLabel}
@@ -2193,7 +2238,7 @@ export function Sidebar({
                     </span>
                     <span className="thread-bar-project-label">{group.label}</span>
                     {working ? (
-                      <WorkingSessionLoader className="thread-bar-project-status" title="Working" aria-label="Working" />
+                      <WorkingSessionLoader className="thread-bar-project-status" phaseKey={group.id} title="Working" aria-label="Working" />
                     ) : unread ? (
                       <UnreadSessionLoader className="thread-bar-project-status" title="Unread update" aria-label="Unread update" />
                     ) : null}
@@ -2330,7 +2375,7 @@ export function Sidebar({
                       onClick={() => switchVisibleSession(session.id)}
                     >
                       {generating ? (
-                        <WorkingSessionLoader aria-hidden="true" />
+                        <WorkingSessionLoader phaseKey={session.id} aria-hidden="true" />
                       ) : (
                         <UnreadSessionLoader aria-hidden="true" />
                       )}
@@ -2420,8 +2465,8 @@ export function Sidebar({
               const sectionDragOver = dragOver?.type === "section" && dragOver.id === group.id;
               const sectionDropClass = sectionDragOver ? ` drag-over drop-${dragOver.position}` : "";
               const sectionDragging = dragging?.type === "section" && dragging.id === group.id;
-              const sectionRuntimeState = projectSection
-                ? runtimePreviewState(previewRuntimesByKey[previewRuntimeKeyForThread("", group.subtitle ?? folderFromSectionId(group.id))])
+              const sectionRuntimeIndicator = projectSection
+                ? sidebarRuntimeIndicator(previewRuntimesByKey[previewRuntimeKeyForThread("", group.subtitle ?? folderFromSectionId(group.id))])
                 : null;
               const sectionProjectColor = group.subtitle
                 ? projectColorsByFolder.get(group.subtitle)
@@ -2581,9 +2626,9 @@ export function Sidebar({
                         const generating =
                           generatingSessions.has(s.id) || workerRunning;
                         const unread = unreadSessions.has(s.id);
-                        const runtimeState = settledSection
+                        const runtimeIndicator = settledSection
                           ? null
-                          : runtimePreviewSidebarState(s);
+                          : runtimePreviewSidebarIndicator(s);
                         const statusLabel = parentWorkersRunning
                           ? "Workers running"
                           : s.worker
@@ -2620,9 +2665,6 @@ export function Sidebar({
                             : "") +
                           (s.id === activeId ? " active" : "") +
                           (generating ? " generating" : "") +
-                          (runtimeState
-                            ? " runtime-preview runtime-" + runtimeState
-                            : "") +
                           (pinned ? " pinned" : "") +
                           (confirmArchiveId === s.id
                             ? " delete-pending"
@@ -2632,6 +2674,7 @@ export function Sidebar({
                             key={s.id}
                             data-sidebar-session-id={s.id}
                             data-sidebar-session-section-id={group.id}
+                            aria-current={s.id === activeId ? "page" : undefined}
                             className={rowClass}
                             style={projectStyle}
                             onContextMenu={(event) =>
@@ -2649,6 +2692,7 @@ export function Sidebar({
                             }}
                             title={s.title}
                           >
+                            <RuntimePreviewMarker indicator={runtimeIndicator} />
                             {editing === s.id ? (
                               <input
                                 className="session-rename"
@@ -2735,6 +2779,7 @@ export function Sidebar({
                                   {generating ? (
                                     <WorkingSessionLoader
                                       className="session-side-indicator"
+                                      phaseKey={s.id}
                                       data-testid="session-loader"
                                       role="img"
                                       title={statusLabel}
@@ -2886,10 +2931,11 @@ export function Sidebar({
                   style={sectionProjectStyle}
                 >
                   <div
-                    className={"session-section-title" + (!projectSection ? " fixed" : "") + (sectionRuntimeState ? " runtime-preview runtime-" + sectionRuntimeState : "")}
+                    className={"session-section-title" + (!projectSection ? " fixed" : "")}
                     onPointerDown={projectSection ? (event) => startPointerDrag(event, { type: "section", id: group.id }) : undefined}
                     onContextMenu={(event) => openSectionContextMenu(event, group, collapsed, sectionPinned)}
                   >
+                    <RuntimePreviewMarker indicator={sectionRuntimeIndicator} />
                     <button
                       className="section-toggle"
                       type="button"
@@ -2975,7 +3021,7 @@ export function Sidebar({
                   const workerRunning = parentWorkersRunning || s.worker?.status === "queued" || s.worker?.status === "running";
                   const generating = generatingSessions.has(s.id) || workerRunning;
                   const unread = unreadSessions.has(s.id);
-                  const runtimeState = projectSection ? null : runtimePreviewSidebarState(s);
+                  const runtimeIndicator = projectSection ? null : runtimePreviewSidebarIndicator(s);
                   const pinned = !s.parentId && sidebarState.pinnedSessionIds.includes(s.id);
                   const sessionProjectColor = projectColorsByFolder.get(projectFolderForSession(s));
                   const sessionProjectStyle = sessionProjectColor
@@ -3005,12 +3051,12 @@ export function Sidebar({
                       key={s.id}
                       data-sidebar-session-id={s.id}
                       data-sidebar-session-section-id={group.id}
+                      aria-current={s.id === activeId ? "page" : undefined}
                       className={
                         "session-item" +
                         (tierChild ? " child-session" : "") +
                         (s.id === activeId ? " active" : "") +
                         (generating ? " generating" : "") +
-                        (runtimeState ? " runtime-preview runtime-" + runtimeState : "") +
                         (pinned ? " pinned" : "") +
                         (sessionProjectColor ? " project-colored" : "") +
                         (confirmArchiveId === s.id ? " delete-pending" : "") +
@@ -3032,6 +3078,7 @@ export function Sidebar({
                       }}
                       title={s.title}
                     >
+                      <RuntimePreviewMarker indicator={runtimeIndicator} />
                       {editing === s.id ? (
                         <input
                           className="session-rename"
@@ -3089,6 +3136,7 @@ export function Sidebar({
                             {generating ? (
                               <WorkingSessionLoader
                                 className="session-side-indicator"
+                                phaseKey={s.id}
                                 data-testid="session-loader"
                                 role="img"
                                 title={statusLabel}
