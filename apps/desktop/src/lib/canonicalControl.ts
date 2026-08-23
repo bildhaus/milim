@@ -433,21 +433,90 @@ export function mailboxMessagesFromTimeline(
 export function modelChangeMessagesFromTimeline(
   items: ControlTimelineItemV1[],
 ): ChatMessage[] {
-  return items.flatMap((item) => {
-    if (item.type !== "model_changed") return [];
+  const changes: ChatMessage[] = [];
+  const state: { pending: ChatMessage | null } = { pending: null };
+  for (const item of items) {
+    if (item.type === "message" && item.data.role === "user") {
+      if (state.pending) changes.push(state.pending);
+      state.pending = null;
+      continue;
+    }
+    if (item.type !== "model_changed") continue;
     const previousModel = typeof item.data.previous_model === "string"
       ? item.data.previous_model.trim()
       : "";
     const model = typeof item.data.model === "string" ? item.data.model.trim() : "";
-    if (!previousModel || !model || previousModel === model) return [];
-    return [{
-      id: `timeline-${item.id}`,
-      role: "system",
-      content: "",
-      controlSeq: item.seq,
-      modelChange: { previousModel, model },
-    }];
-  });
+    if (!previousModel || !model || previousModel === model) continue;
+    if (state.pending) {
+      state.pending = {
+        ...state.pending,
+        controlSeq: item.seq,
+        modelChange: {
+          previousModel: state.pending.modelChange!.previousModel,
+          model,
+        },
+      };
+    } else {
+      state.pending = {
+        id: `timeline-${item.id}`,
+        role: "system",
+        content: "",
+        controlSeq: item.seq,
+        modelChange: { previousModel, model },
+      };
+    }
+  }
+  if (state.pending) changes.push(state.pending);
+  return changes;
+}
+
+function coalesceTranscriptModelChanges(messages: ChatMessage[]): ChatMessage[] {
+  const result: ChatMessage[] = [];
+  let pending: {
+    previousModel: string;
+    message: ChatMessage;
+    resultIndex: number | null;
+  } | null = null;
+  for (const message of messages) {
+    if (message.role === "user") {
+      pending = null;
+      result.push(message);
+      continue;
+    }
+    if (!message.modelChange) {
+      result.push(message);
+      continue;
+    }
+    if (!pending) {
+      pending = {
+        previousModel: message.modelChange.previousModel,
+        message,
+        resultIndex: null,
+      };
+    }
+    const coalesced = {
+      ...pending.message,
+      controlSeq: message.controlSeq,
+      modelChange: {
+        previousModel: pending.previousModel,
+        model: message.modelChange.model,
+      },
+    };
+    pending.message = coalesced;
+    const visible = pending.previousModel !== coalesced.modelChange.model;
+    if (pending.resultIndex == null) {
+      if (visible) {
+        pending.resultIndex = result.length;
+        result.push(coalesced);
+      }
+    } else if (visible) {
+      result[pending.resultIndex] = coalesced;
+    } else {
+      result.splice(pending.resultIndex, 1);
+      pending.resultIndex = null;
+    }
+  }
+  return result;
 }
 
 export function mergeModelChangeMessages(
@@ -484,7 +553,7 @@ export function mergeModelChangeMessages(
     merged.splice(previousIndex >= 0 ? previousIndex + 1 : merged.length, 0, change);
     existingIds.add(change.id);
   }
-  return merged;
+  return coalesceTranscriptModelChanges(merged);
 }
 
 export function mergeMailboxMessages(

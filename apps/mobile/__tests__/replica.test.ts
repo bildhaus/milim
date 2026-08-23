@@ -253,16 +253,45 @@ test('projects model switches as ordered transcript notices', () => {
       previous_model: 'codex:gpt-5',
       model: 'claude:sonnet',
     }),
-    item(3, 'message', {id: 'after', role: 'user', content: 'After'}),
+    item(3, 'model_changed', {
+      previous_model: 'claude:sonnet',
+      model: 'openai:gpt-5',
+    }),
+    item(4, 'message', {id: 'after', role: 'user', content: 'After'}),
+    item(5, 'model_changed', {
+      previous_model: 'openai:gpt-5',
+      model: 'codex:gpt-5',
+    }),
   ]);
 
   expect(transcript.map(entry => entry.kind)).toEqual([
     'message',
     'model-change',
     'message',
+    'model-change',
   ]);
   expect(transcript[1]).toMatchObject({
     previousModel: 'codex:gpt-5',
-    model: 'claude:sonnet',
+    model: 'openai:gpt-5',
+    seq: 3,
   });
+  expect(transcript[3]).toMatchObject({
+    previousModel: 'openai:gpt-5',
+    model: 'codex:gpt-5',
+  });
+});
+
+test('removes a pending model switch notice when selection returns to the original model', () => {
+  const transcript = projectTranscript([
+    item(1, 'model_changed', {
+      previous_model: 'codex:gpt-5',
+      model: 'claude:sonnet',
+    }),
+    item(2, 'model_changed', {
+      previous_model: 'claude:sonnet',
+      model: 'codex:gpt-5',
+    }),
+  ]);
+
+  expect(transcript).toEqual([]);
 });

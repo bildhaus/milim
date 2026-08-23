@@ -496,4 +496,31 @@ assert.deepEqual(
   "model changes should keep their canonical position between turns",
 );
 
+const coalescedModelChanges = modelChangeMessagesFromTimeline([
+  { ...item(33, "model_changed", { previous_model: "codex:gpt-5", model: "claude:sonnet" }), run_id: null },
+  { ...item(34, "model_changed", { previous_model: "claude:sonnet", model: "openai:gpt-5" }), run_id: null },
+  { ...item(35, "message", { id: "next-user", role: "user", content: "Continue" }), run_id: null },
+  { ...item(36, "model_changed", { previous_model: "openai:gpt-5", model: "codex:gpt-5" }), run_id: null },
+]);
+assert.deepEqual(
+  coalescedModelChanges.map((message) => message.modelChange),
+  [
+    { previousModel: "codex:gpt-5", model: "openai:gpt-5" },
+    { previousModel: "openai:gpt-5", model: "codex:gpt-5" },
+  ],
+  "model switches should coalesce only until the next user message",
+);
+assert.equal(coalescedModelChanges[0].id, "timeline-event-33");
+assert.equal(coalescedModelChanges[0].controlSeq, 34);
+
+const canceledModelChange = modelChangeMessagesFromTimeline([
+  { ...item(37, "model_changed", { previous_model: "codex:gpt-5", model: "claude:sonnet" }), run_id: null },
+  { ...item(38, "model_changed", { previous_model: "claude:sonnet", model: "codex:gpt-5" }), run_id: null },
+]);
+assert.deepEqual(
+  mergeModelChangeMessages(modelChanges, canceledModelChange),
+  [],
+  "returning to the original model before a user message should remove the pending divider",
+);
+
 console.log("canonical control projection tests passed");
