@@ -234,7 +234,10 @@ import {
   followScrollTop,
   isNearScrollBottom,
   peekEnteringMessageIds,
+  scrollTopForRestoredAnchor,
   scrollTopAfterLayoutChange,
+  transcriptMessageRenderId,
+  transcriptSpacerHeight,
 } from "../lib/scroll";
 import {
   mergeModelListsForPicker,
@@ -431,6 +434,7 @@ const inTauri =
 const MAX_MOUNTED_MESSAGE_ROWS = 200;
 const MESSAGE_WINDOW_SHIFT = 100;
 const DEFAULT_MESSAGE_ROW_HEIGHT = 180;
+const MESSAGE_ROW_GAP = 12;
 const SCHEDULE_RUN_COMPLETED_EVENT = "milim://schedule-run-completed";
 const EMPTY: ChatMessage[] = [];
 const EMPTY_QUEUE: QueuedMessage[] = [];
@@ -456,6 +460,12 @@ const PREVIEW_PANEL_MIN_WIDTH = 360;
 const RECENT_THREAD_SWITCHER_CLOSE_MS = 1600;
 const EVENT_STREAM_RECONNECT_MAX_MS = 5_000;
 const previewArtifactCache = new WeakMap<ChatMessage, ChatArtifact[] | null>();
+
+type TranscriptScrollAnchor = {
+  threadId: string;
+  rowId: string;
+  offset: number;
+};
 
 function waitForEventReconnect(
   signal: AbortSignal,
@@ -2317,6 +2327,7 @@ export function ChatView({
   ]);
 
   const chatScrollRef = useRef<HTMLDivElement>(null);
+  const transcriptContentRef = useRef<HTMLDivElement>(null);
   const chatBodyRef = useRef<HTMLDivElement>(null);
   const chatDockRef = useRef<HTMLDivElement>(null);
   const previewResizeHandleRef = useRef<HTMLDivElement>(null);
@@ -2324,13 +2335,17 @@ export function ChatView({
   const emptyDockTopRef = useRef<number | null>(null);
   const stickToBottomRef = useRef(true);
   const olderMessagePageRef = useRef<string | null>(null);
-  const messageRowHeightsRef = useRef(new Map<string, number>());
-  const messageRowHeightStatsRef = useRef({ total: 0, count: 0 });
+  const messageRowHeightsRef = useRef(
+    new Map<string, Map<string, { height: number; index: number }>>(),
+  );
   const messageRowElementsRef = useRef(new Map<string, HTMLDivElement>());
   const messageRowRefCallbacksRef = useRef(
     new Map<string, (node: HTMLDivElement | null) => void>(),
   );
   const messageRowObserverRef = useRef<ResizeObserver | null>(null);
+  const pendingScrollAnchorRef = useRef<TranscriptScrollAnchor | null>(null);
+  const pendingScrollDeltaRef = useRef(0);
+  const scrollCorrectionFrameRef = useRef<number | null>(null);
   const lastAnimatedThreadIdRef = useRef<string | null>(null);
   const [enteringMessageIds, setEnteringMessageIds] = useState<string[]>([]);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
@@ -2356,18 +2371,36 @@ export function ChatView({
       if (!node) return;
       if (!messageRowObserverRef.current) {
         messageRowObserverRef.current = new ResizeObserver((entries) => {
+          const scroll = chatScrollRef.current;
+          const scrollRect = scroll?.getBoundingClientRect();
+          let heightDeltaAboveViewport = 0;
           for (const entry of entries) {
             const id = (entry.target as HTMLElement).dataset.messageWindowId;
-            if (!id) continue;
+            const threadId = (entry.target as HTMLElement).dataset.messageThreadId;
+            const index = Number((entry.target as HTMLElement).dataset.messageIndex);
+            if (!id || !threadId || !Number.isFinite(index)) continue;
             const height = entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height;
             if (!Number.isFinite(height) || height <= 0) continue;
-            const previousHeight = messageRowHeightsRef.current.get(id);
+            let threadHeights = messageRowHeightsRef.current.get(threadId);
+            if (!threadHeights) {
+              threadHeights = new Map();
+              messageRowHeightsRef.current.set(threadId, threadHeights);
+            }
+            const previousHeight = threadHeights.get(id)?.height;
+            threadHeights.set(id, { height, index });
             if (previousHeight === height) continue;
-            const stats = messageRowHeightStatsRef.current;
-            if (previousHeight === undefined) stats.count += 1;
-            else stats.total -= previousHeight;
-            stats.total += height;
-            messageRowHeightsRef.current.set(id, height);
+            if (
+              previousHeight !== undefined &&
+              scrollRect &&
+              !stickToBottomRef.current &&
+              entry.target.getBoundingClientRect().bottom <= scrollRect.top + 1
+            ) {
+              heightDeltaAboveViewport += height - previousHeight;
+            }
+          }
+          if (stickToBottomRef.current) scheduleTranscriptScrollCorrection();
+          else if (heightDeltaAboveViewport) {
+            scheduleTranscriptScrollCorrection(heightDeltaAboveViewport);
           }
         });
       }
@@ -2379,7 +2412,12 @@ export function ChatView({
   }
 
   useEffect(() => {
-    return () => messageRowObserverRef.current?.disconnect();
+    return () => {
+      messageRowObserverRef.current?.disconnect();
+      if (scrollCorrectionFrameRef.current != null) {
+        window.cancelAnimationFrame(scrollCorrectionFrameRef.current);
+      }
+    };
   }, []);
 
   useLayoutEffect(() => {
@@ -2392,7 +2430,7 @@ export function ChatView({
       return;
     }
     if (stickToBottomRef.current && messageWindow.start !== nextStart) {
-      setMessageWindow({ threadId: activeId, start: nextStart });
+      setTranscriptWindowStart(nextStart);
     }
   }, [activeId, messageWindow.start, messageWindow.threadId, messages.length]);
   const previewResizeStartRef = useRef<{
@@ -2507,9 +2545,88 @@ export function ChatView({
   }, []);
 
   function scrollToChatBottom() {
+    scheduleTranscriptScrollCorrection();
+  }
+
+  function scheduleTranscriptScrollCorrection(heightDelta = 0) {
+    pendingScrollDeltaRef.current += heightDelta;
+    if (scrollCorrectionFrameRef.current != null) return;
+    scrollCorrectionFrameRef.current = window.requestAnimationFrame(() => {
+      scrollCorrectionFrameRef.current = null;
+      const el = chatScrollRef.current;
+      if (!el) {
+        pendingScrollDeltaRef.current = 0;
+        return;
+      }
+      if (stickToBottomRef.current) {
+        pendingScrollDeltaRef.current = 0;
+        const nextTop = followScrollTop(el);
+        if (nextTop !== el.scrollTop) el.scrollTop = nextTop;
+        return;
+      }
+      const delta = pendingScrollDeltaRef.current;
+      pendingScrollDeltaRef.current = 0;
+      if (delta) el.scrollTop = Math.max(0, el.scrollTop + delta);
+    });
+  }
+
+  function captureVisibleTranscriptAnchor(
+    nextStart = messageWindowStart,
+    nextEnd = messageWindowEnd,
+  ) {
+    if (stickToBottomRef.current) return;
     const el = chatScrollRef.current;
     if (!el) return;
-    el.scrollTo({ top: followScrollTop(el), behavior: "auto" });
+    const scrollRect = el.getBoundingClientRect();
+    const candidates = [...messageRowElementsRef.current.entries()]
+      .map(([rowId, node]) => ({
+        rowId,
+        node,
+        index: Number(node.dataset.messageIndex),
+      }))
+      .filter(({ node, index }) =>
+        node.dataset.messageThreadId === activeId &&
+        Number.isFinite(index) &&
+        index >= nextStart &&
+        index < nextEnd
+      )
+      .sort((left, right) => left.index - right.index);
+    const candidate = candidates.find(
+      ({ node }) => node.getBoundingClientRect().bottom > scrollRect.top + 1,
+    ) ?? candidates[0];
+    if (!candidate) return;
+    pendingScrollAnchorRef.current = {
+      threadId: activeId,
+      rowId: candidate.rowId,
+      offset: candidate.node.getBoundingClientRect().top - scrollRect.top,
+    };
+  }
+
+  function restorePendingTranscriptAnchor(): boolean {
+    const anchor = pendingScrollAnchorRef.current;
+    if (!anchor || anchor.threadId !== activeId) return false;
+    const el = chatScrollRef.current;
+    const row = messageRowElementsRef.current.get(anchor.rowId);
+    pendingScrollAnchorRef.current = null;
+    if (!el || !row) return false;
+    const nextOffset =
+      row.getBoundingClientRect().top - el.getBoundingClientRect().top;
+    el.scrollTop = scrollTopForRestoredAnchor(
+      el.scrollTop,
+      anchor.offset,
+      nextOffset,
+    );
+    return true;
+  }
+
+  function setTranscriptWindowStart(start: number) {
+    if (
+      messageWindow.threadId === activeId &&
+      messageWindowStart === start
+    ) return;
+    const nextEnd = Math.min(messages.length, start + MAX_MOUNTED_MESSAGE_ROWS);
+    captureVisibleTranscriptAnchor(start, nextEnd);
+    setMessageWindow({ threadId: activeId, start });
   }
 
   useLayoutEffect(() => {
@@ -2517,11 +2634,26 @@ export function ChatView({
     if (!el || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => {
       const nextTop = scrollTopAfterLayoutChange(el, stickToBottomRef.current);
-      if (nextTop !== el.scrollTop) el.scrollTop = nextTop;
+      if (nextTop !== el.scrollTop) scheduleTranscriptScrollCorrection();
     });
     observer.observe(el);
     return () => observer.disconnect();
   }, [activeId]);
+
+  useLayoutEffect(() => {
+    const content = transcriptContentRef.current;
+    if (!content || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      if (stickToBottomRef.current) scheduleTranscriptScrollCorrection();
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [activeId]);
+
+  useLayoutEffect(() => {
+    if (restorePendingTranscriptAnchor()) return;
+    if (stickToBottomRef.current) scrollToChatBottom();
+  }, [activeId, messageWindowStart]);
 
   const markMessageEntered = useCallback((id: string) => {
     setEnteringMessageIds((current) => {
@@ -2533,6 +2665,11 @@ export function ChatView({
   function jumpToLatest() {
     stickToBottomRef.current = true;
     setShowJumpToLatest(false);
+    pendingScrollAnchorRef.current = null;
+    if (messageWindowStart !== maximumMessageWindowStart) {
+      setTranscriptWindowStart(maximumMessageWindowStart);
+      return;
+    }
     scrollToChatBottom();
   }
 
@@ -3045,7 +3182,7 @@ export function ChatView({
     };
   }, [activeId, autoTitleChats, sessionsHydrated, setMessages, updateCanonicalActiveRun]);
 
-  async function loadOlderMessages(el: HTMLDivElement) {
+  async function loadOlderMessages() {
     const beforeIndex = activeSession?.messagesLoadedFrom ?? 0;
     if (
       !inTauri ||
@@ -3057,25 +3194,24 @@ export function ChatView({
       return;
     }
     olderMessagePageRef.current = activeSession.id;
-    const previousHeight = el.scrollHeight;
-    const previousTop = el.scrollTop;
+    captureVisibleTranscriptAnchor();
     try {
       const page = await loadSessionMessagePage(
         activeSession.id,
         beforeIndex,
         100,
       );
+      const threadHeights = messageRowHeightsRef.current.get(activeSession.id);
+      if (threadHeights && page.messages.length > 0) {
+        for (const measurement of threadHeights.values()) {
+          measurement.index += page.messages.length;
+        }
+      }
       prependMessagePage(
         activeSession.id,
         page.messages as ChatMessage[],
         page.first_index,
         page.total,
-      );
-      window.requestAnimationFrame(() =>
-        window.requestAnimationFrame(() => {
-          if (chatScrollRef.current !== el) return;
-          el.scrollTop = previousTop + (el.scrollHeight - previousHeight);
-        }),
       );
     } finally {
       if (olderMessagePageRef.current === activeSession.id) {
@@ -3085,44 +3221,64 @@ export function ChatView({
   }
 
   function estimatedMessageRowHeight() {
-    const stats = messageRowHeightStatsRef.current;
-    return stats.count > 0
-      ? Math.min(1_000, Math.max(64, stats.total / stats.count))
+    const heights = messageRowHeightsRef.current.get(activeId);
+    if (!heights?.size) return DEFAULT_MESSAGE_ROW_HEIGHT;
+    const total = [...heights.values()].reduce(
+      (sum, measurement) => sum + measurement.height,
+      0,
+    );
+    return heights.size > 0
+      ? Math.min(1_000, Math.max(64, total / heights.size))
       : DEFAULT_MESSAGE_ROW_HEIGHT;
+  }
+
+  function knownMessageRowHeights(start: number, end: number): number[] {
+    const heights = messageRowHeightsRef.current.get(activeId);
+    if (!heights?.size) return [];
+    return [...heights.values()]
+      .filter((measurement) => measurement.index >= start && measurement.index < end)
+      .map((measurement) => measurement.height);
   }
 
   function updateAutoScrollCoupling() {
     const el = chatScrollRef.current;
     if (!el) return;
+    const following = isNearScrollBottom(el);
+    stickToBottomRef.current = following;
+    setShowJumpToLatest(!following);
     const estimate = estimatedMessageRowHeight();
-    const topSpacerHeight = messageWindowStart * estimate;
-    const bottomSpacerHeight =
-      (messages.length - messageWindowEnd) * estimate;
+    const topSpacerHeight = transcriptSpacerHeight(
+      messageWindowStart,
+      estimate,
+      MESSAGE_ROW_GAP,
+      knownMessageRowHeights(0, messageWindowStart),
+    );
+    const bottomSpacerHeight = transcriptSpacerHeight(
+      messages.length - messageWindowEnd,
+      estimate,
+      MESSAGE_ROW_GAP,
+      knownMessageRowHeights(messageWindowEnd, messages.length),
+    );
     if (el.scrollTop <= topSpacerHeight + 600) {
       if (messageWindowStart > 0) {
-        setMessageWindow({
-          threadId: activeId,
-          start: Math.max(0, messageWindowStart - MESSAGE_WINDOW_SHIFT),
-        });
+        setTranscriptWindowStart(
+          Math.max(0, messageWindowStart - MESSAGE_WINDOW_SHIFT),
+        );
       } else {
-        void loadOlderMessages(el);
+        void loadOlderMessages();
       }
     } else if (
       messageWindowEnd < messages.length &&
       el.scrollTop + el.clientHeight >=
         el.scrollHeight - bottomSpacerHeight - 600
     ) {
-      setMessageWindow({
-        threadId: activeId,
-        start: Math.min(
+      setTranscriptWindowStart(
+        Math.min(
           maximumMessageWindowStart,
           messageWindowStart + MESSAGE_WINDOW_SHIFT,
         ),
-      });
+      );
     }
-    const following = isNearScrollBottom(el);
-    stickToBottomRef.current = following;
-    setShowJumpToLatest(!following);
   }
 
   useEffect(() => {
@@ -3137,6 +3293,8 @@ export function ChatView({
     if (threadChanged) {
       lastAnimatedThreadIdRef.current = activeId;
       emptyDockTopRef.current = null;
+      pendingScrollAnchorRef.current = null;
+      pendingScrollDeltaRef.current = 0;
       if (enteringMessageIds.length) setEnteringMessageIds([]);
       stickToBottomRef.current = true;
       setShowJumpToLatest(false);
@@ -3172,6 +3330,7 @@ export function ChatView({
         }
       }
     }
+    if (restorePendingTranscriptAnchor()) return;
     if (stickToBottomRef.current) scrollToChatBottom();
   }, [activeId, enteringMessageIds.length, messages]);
 
@@ -8143,9 +8302,18 @@ export function ChatView({
     () => estimatedMessageRowHeight(),
     [activeId, messageWindowStart, messages.length],
   );
-  const transcriptTopSpacer = messageWindowStart * estimatedRowHeight;
-  const transcriptBottomSpacer =
-    (messages.length - messageWindowEnd) * estimatedRowHeight;
+  const transcriptTopSpacer = transcriptSpacerHeight(
+    messageWindowStart,
+    estimatedRowHeight,
+    MESSAGE_ROW_GAP,
+    knownMessageRowHeights(0, messageWindowStart),
+  );
+  const transcriptBottomSpacer = transcriptSpacerHeight(
+    messages.length - messageWindowEnd,
+    estimatedRowHeight,
+    MESSAGE_ROW_GAP,
+    knownMessageRowHeights(messageWindowEnd, messages.length),
+  );
   const mountedMessages = messages.slice(
     messageWindowStart,
     messageWindowEnd,
@@ -8201,8 +8369,9 @@ export function ChatView({
               ref={chatScrollRef}
               onScroll={updateAutoScrollCoupling}
             >
-              {!emptyThread && (
-                <div className="messages">
+              <div className="chat-transcript-content" ref={transcriptContentRef}>
+                {!emptyThread && (
+                  <div className="messages">
                   {transcriptTopSpacer > 0 && (
                     <div
                       aria-hidden="true"
@@ -8223,13 +8392,15 @@ export function ChatView({
                     const messageTurnChangesKey = m.workspaceCheckpoint
                       ? `${activeId}:${m.id ?? i}:${m.workspaceCheckpoint.ref}`
                       : "";
-                    const rowId = m.id ?? `${activeId}:${i}`;
+                    const rowId = transcriptMessageRenderId(activeId, m, i);
                     return (
                       <div
                         key={rowId}
                         ref={messageRowRef(rowId)}
                         className="transcript-window-row"
                         data-message-window-id={rowId}
+                        data-message-thread-id={activeId}
+                        data-message-index={i}
                       >
                         <MessageRow
                           activeId={activeId}
@@ -8284,22 +8455,23 @@ export function ChatView({
                       </div>
                     </div>
                   )}
-                </div>
-              )}
-              {!emptyThread && runningWorkerRuns.length > 0 && (
-                <div
-                  className="transcript-worker-runs"
-                  data-testid="transcript-worker-runs"
-                >
-                  {runningWorkerRuns.map((record) => (
-                    <WorkerRunEvent
-                      key={record.run.id}
-                      record={record}
-                      onOpen={() => openWorkersInspector(record.run.id)}
-                    />
-                  ))}
-                </div>
-              )}
+                  </div>
+                )}
+                {!emptyThread && runningWorkerRuns.length > 0 && (
+                  <div
+                    className="transcript-worker-runs"
+                    data-testid="transcript-worker-runs"
+                  >
+                    {runningWorkerRuns.map((record) => (
+                      <WorkerRunEvent
+                        key={record.run.id}
+                        record={record}
+                        onOpen={() => openWorkersInspector(record.run.id)}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
             {showJumpToLatest && !emptyThread && (
               <button

@@ -16,6 +16,7 @@ import { markPerfRender } from "../lib/perf";
 import {
   groupCompletedStreamActivity,
   liveWorkGroupSummary,
+  type ChatStreamDisplayPart,
   type ChatStreamWorkGroup,
   type StreamTerminalOutcome,
 } from "../lib/streamParts";
@@ -35,6 +36,54 @@ const NativeChartView = lazy(() =>
   import("./NativeChartView").then((mod) => ({ default: mod.NativeChartView })),
 );
 type ChatStreamEventPart = Extract<ChatStreamPart, { kind: "event" }>;
+
+function streamEventIdentity(part: ChatStreamEventPart): string {
+  return part.callId ?? part.approvalId ?? part.name ?? part.eventType;
+}
+
+function streamPartKey(
+  part: ChatStreamPart,
+  index: number,
+  siblings: readonly ChatStreamPart[],
+): string {
+  if (part.kind === "event") {
+    const identity = streamEventIdentity(part);
+    const occurrence = siblings.slice(0, index).filter(
+      (candidate) => candidate.kind === "event" && streamEventIdentity(candidate) === identity,
+    ).length;
+    return `event:${identity}:${occurrence}`;
+  }
+  const phase = siblings.slice(0, index).filter(
+    (candidate) => candidate.kind === "event",
+  ).length;
+  return `${part.kind}:phase:${phase}`;
+}
+
+function streamDisplayPartKey(
+  part: ChatStreamDisplayPart,
+  index: number,
+  siblings: readonly ChatStreamDisplayPart[],
+): string {
+  if (part.kind === "workGroup") {
+    const anchorIndex = part.parts.findIndex(
+      (candidate) => candidate.kind === "thinking" || candidate.kind === "event",
+    );
+    const resolvedIndex = anchorIndex >= 0 ? anchorIndex : 0;
+    const anchor = part.parts[resolvedIndex];
+    return `work:${anchor ? streamPartKey(anchor, resolvedIndex, part.parts) : "empty"}`;
+  }
+  if (part.kind === "event") {
+    const identity = streamEventIdentity(part);
+    const occurrence = siblings.slice(0, index).filter(
+      (candidate) => candidate.kind === "event" && streamEventIdentity(candidate) === identity,
+    ).length;
+    return `event:${identity}:${occurrence}`;
+  }
+  const phase = siblings.slice(0, index).filter(
+    (candidate) => candidate.kind === "workGroup" || candidate.kind === "event",
+  ).length;
+  return `${part.kind}:phase:${phase}`;
+}
 
 function isNativeChart(descriptor: ToolUiDescriptor): descriptor is NativeChartDescriptor {
   return descriptor.kind === "native_chart";
@@ -301,20 +350,30 @@ function StreamWorkGroup({
     (part): part is ChatStreamEventPart => part.kind === "event",
   );
   const failure = lastFailedEvent(group.parts);
-  const autoOpen = liveSummary?.status === "error";
-  const [open, setOpen] = useState(autoOpen);
-  const autoOpenedRef = useRef(autoOpen);
+  const liveReasoningOnly = streaming && group.parts.every(
+    (part) => part.kind === "thinking",
+  );
+  const autoOpenReason = liveSummary?.status === "error"
+    ? "error"
+    : liveReasoningOnly
+      ? "reasoning"
+      : null;
+  const [open, setOpen] = useState(autoOpenReason != null);
+  const autoOpenedRef = useRef<"error" | "reasoning" | null>(autoOpenReason);
   useEffect(() => {
-    if (autoOpen) {
+    if (autoOpenReason) {
       setOpen((current) => {
-        if (!current) autoOpenedRef.current = true;
+        if (!current) autoOpenedRef.current = autoOpenReason;
         return true;
       });
-    } else if (autoOpenedRef.current) {
-      autoOpenedRef.current = false;
+    } else if (
+      autoOpenedRef.current === "error" ||
+      (autoOpenedRef.current === "reasoning" && !streaming)
+    ) {
+      autoOpenedRef.current = null;
       setOpen(false);
     }
-  }, [autoOpen]);
+  }, [autoOpenReason, streaming]);
   const status =
     liveSummary?.status ??
     (failure ? "error" : "done");
@@ -326,7 +385,7 @@ function StreamWorkGroup({
       onToggle={(event) => {
         const next = event.currentTarget.open;
         if (next === open) return;
-        autoOpenedRef.current = false;
+        autoOpenedRef.current = null;
         setOpen(next);
       }}
     >
@@ -385,17 +444,17 @@ function StreamWorkGroup({
           if (part.kind === "thinking")
             return (
               <ThinkingBlock
-                key={`${part.kind}-${index}`}
+                key={streamPartKey(part, index, group.parts)}
                 content={part.content}
                 streaming={streaming && index === group.parts.length - 1}
                 nested
               />
             );
           if (part.kind === "event")
-            return <StreamEvent key={`${part.kind}-${index}`} part={part} toolApproval="guarded" workspaceFolder={workspaceFolder} />;
+            return <StreamEvent key={streamPartKey(part, index, group.parts)} part={part} toolApproval="guarded" workspaceFolder={workspaceFolder} />;
           return (
             <AnswerText
-              key={`${part.kind}-${index}`}
+              key={streamPartKey(part, index, group.parts)}
               content={part.content}
               previewArtifacts={previewArtifacts}
               onOpenPreview={onOpenPreview}
@@ -780,10 +839,11 @@ function AssistantMessageView({
     <div className="assistant-stream">
       {displayParts.map((part, index) => {
         const isLatest = index === displayParts.length - 1;
+        const partKey = streamDisplayPartKey(part, index, displayParts);
         if (part.kind === "workGroup")
           return (
             <StreamWorkGroup
-              key={`${part.kind}-${index}`}
+              key={partKey}
               group={part}
               durationMs={workGroupCount === 1 ? workDurationMs : undefined}
               streaming={streaming && isLatest}
@@ -797,17 +857,17 @@ function AssistantMessageView({
           const thinking = fallbackThinking || (streaming && isLatest);
           return (
             <ThinkingBlock
-              key={`${part.kind}-${index}`}
+              key={partKey}
               content={part.content}
               streaming={streaming && thinking}
             />
           );
         }
         if (part.kind === "event")
-          return <StreamEvent key={`${part.kind}-${index}`} part={part} toolApproval={toolApproval} workspaceFolder={workspaceFolder} />;
+          return <StreamEvent key={partKey} part={part} toolApproval={toolApproval} workspaceFolder={workspaceFolder} />;
         return (
           <AnswerText
-            key={`${part.kind}-${index}`}
+            key={partKey}
             content={part.content}
             previewArtifacts={previewArtifacts}
             onOpenPreview={onOpenPreview}

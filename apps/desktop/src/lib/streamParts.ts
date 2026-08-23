@@ -188,8 +188,7 @@ export function groupCompletedStreamActivity(
   };
 
   const flush = () => {
-    if (group.length === 1) push(group[0]);
-    else if (group.length > 1) push({ kind: "workGroup", parts: group });
+    if (group.length > 0) push({ kind: "workGroup", parts: group });
     group = [];
   };
 
