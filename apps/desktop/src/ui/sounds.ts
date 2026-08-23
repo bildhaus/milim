@@ -27,6 +27,7 @@ export function pendingAttentionKey(
   proposedWorkerRunId?: string,
 ): string | null {
   if (proposedWorkerRunId) return `worker:${proposedWorkerRunId}`;
+  const seenStreamApprovalIds = new Set<string>();
   for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
     const message = messages[messageIndex];
     const messageKey = message.id ?? String(messageIndex);
@@ -35,11 +36,17 @@ export function pendingAttentionKey(
     }
     const pendingStep = message.run?.steps.find((step) => step.approval?.status === "pending");
     if (pendingStep?.approval) return `tool:${messageKey}:${pendingStep.approval.id}`;
-    const pendingPart = message.streamParts?.find(
-      (part) => part.kind === "event" && part.approvalStatus === "pending",
-    );
-    if (pendingPart?.kind === "event") {
-      return `tool:${messageKey}:${pendingPart.approvalId ?? pendingPart.callId ?? pendingPart.label}`;
+    const streamParts = message.streamParts ?? [];
+    for (let partIndex = streamParts.length - 1; partIndex >= 0; partIndex -= 1) {
+      const part = streamParts[partIndex];
+      if (part.kind !== "event" || !part.approvalStatus) continue;
+      if (part.approvalId) {
+        if (seenStreamApprovalIds.has(part.approvalId)) continue;
+        seenStreamApprovalIds.add(part.approvalId);
+      }
+      if (part.approvalStatus === "pending") {
+        return `tool:${messageKey}:${part.approvalId ?? part.callId ?? part.label}`;
+      }
     }
   }
   return null;
