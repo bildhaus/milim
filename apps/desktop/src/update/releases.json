@@ -1,4 +1,9 @@
 {
+  "0.2.56": {
+    "version": "0.2.56",
+    "summary": "Milim 0.2.56 tightens queued-message actions and makes Claude reasoning summaries easier to understand, including a calm notice when high-effort turns omit them.",
+    "items": []
+  },
   "0.2.55": {
     "version": "0.2.55",
     "summary": "Milim 0.2.55 keeps live transcripts steady while streaming and scrolling, collapses repeated model switches into one clear notice, and clears native badges after approvals resolve.",
