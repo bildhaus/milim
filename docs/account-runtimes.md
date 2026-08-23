@@ -134,4 +134,6 @@ If Claude reports that a persisted session id is already in use, Review and Guar
 
 Milim maps `low`, `medium`, `high`, `xhigh`, and `max` to Claude CLI `--effort`; `auto`, `none`, and `minimal` are omitted. Runs map Milim approval modes onto Claude permission modes and do not set a max-turn cap. Open mode maps to Claude's `bypassPermissions` mode and authorizes exact-session recovery without another prompt; it may run tools and commands without additional Claude prompts, so use it only in trusted workspaces.
 
+Claude's adaptive reasoning may omit a thinking summary even at an explicit high effort. Milim preserves every streamed `thinking_delta` as a **Reasoning summary** and records one metadata-only diagnostic per successful turn with the raw thinking-delta count and projected reasoning-event count; the diagnostic never includes reasoning text and stays out of the visible transcript. When an explicit `high`, `xhigh`, or `max` turn produces no projected reasoning event, Milim adds a calm **No reasoning summary** timeline notice instead of treating the turn as failed.
+
 Claude CLI models in the picker advertise image input plus `low`, `medium`, `high`, `xhigh`, and `max` reasoning efforts. The built-in aliases include `sonnet`, `opus`, `haiku`, and `fable`.

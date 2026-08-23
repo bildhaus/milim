@@ -647,7 +647,13 @@ export function createHarnessEventHandler({
       } else if (event.type === "limit_updated") {
         captureProviderLimit?.(event.limit);
       } else if (event.type === "runtime_notice") {
-        if (event.level === "warning" && event.code === "runtime_warning") {
+        if (event.code === "claude_reasoning_diagnostics") {
+          return;
+        } else if (event.code === "claude_reasoning_omitted") {
+          flush();
+          appendStreamEvent(statusPart("No reasoning summary", event.message));
+          snapshot?.();
+        } else if (event.level === "warning" && event.code === "runtime_warning") {
           state.warning = event.message;
         } else {
           flush();

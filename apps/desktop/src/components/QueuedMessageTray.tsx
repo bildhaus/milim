@@ -238,11 +238,11 @@ export function QueuedMessageTray({
                   <small>From {item.mailboxOrigin.origin_title}</small>
                 )}
               </span>
-              {attachmentCount > 0 && (
-                <span className="queued-meta">
-                  {queuedAttachmentLabel(attachmentCount)}
-                </span>
-              )}
+              <span className="queued-meta">
+                {attachmentCount > 0
+                  ? queuedAttachmentLabel(attachmentCount)
+                  : null}
+              </span>
               <button
                 className="queued-activate"
                 type="button"

@@ -310,7 +310,7 @@ function workGroupDetail(group: ChatStreamWorkGroup): string {
       updates ? plural(updates, "update") : null,
       commands ? plural(commands, "command") : null,
       tools ? plural(tools, "tool") : null,
-      reasoning ? `${plural(reasoning, "reasoning note")}` : null,
+      reasoning ? plural(reasoning, "reasoning summary") : null,
     ]
       .filter(Boolean)
       .join(", ") || plural(group.parts.length, "step")
@@ -736,7 +736,7 @@ function ThinkingBlock({
             (streaming && !nested ? " shiny-text" : "")
           }
         >
-          {streaming && !nested ? "reasoning..." : "Reasoning"}
+          {streaming && !nested ? "reasoning..." : "Reasoning summary"}
         </span>
         <span className="stream-reasoning-meta">
           {streaming ? "live" : `${charCount.toLocaleString()} chars`}

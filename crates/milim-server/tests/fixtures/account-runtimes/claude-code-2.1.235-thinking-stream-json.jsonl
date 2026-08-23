@@ -1,0 +1,15 @@
+{"type":"system","subtype":"init","claude_code_version":"2.1.235","session_id":"fixture-session"}
+{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_fixture","type":"message","role":"assistant","content":[]}}}
+{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Inspecting the fixture "}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"without retaining private content."}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"fixture-signature"}}}
+{"type":"stream_event","event":{"type":"content_block_stop","index":0}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Inspecting the fixture without retaining private content.","signature":"fixture-signature"}]}}
+{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Fixture verified."}}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Fixture verified."}]}}
+{"type":"stream_event","event":{"type":"content_block_stop","index":1}}
+{"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null}}}
+{"type":"stream_event","event":{"type":"message_stop"}}
+{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","usage":{"input_tokens":4,"output_tokens":8}}

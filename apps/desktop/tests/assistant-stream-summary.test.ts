@@ -199,7 +199,8 @@ try {
   );
   assert.match(successfulMarkup, /Worked for 1m 5s/);
   assert.match(successfulMarkup.replace(/<[^>]+>/g, ""), /Ran command · pnpm test/);
-  assert.match(successfulMarkup, /1 update, 1 command, 1 reasoning note/);
+  assert.match(successfulMarkup, /1 update, 1 command, 1 reasoning summary/);
+  assert.match(successfulMarkup, /Reasoning summary/);
 
   const changedFileMarkup = renderToStaticMarkup(
     createElement(AssistantMessage, {
