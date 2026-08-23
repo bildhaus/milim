@@ -719,6 +719,12 @@ enum ClaudeStreamEvent {
     },
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ClaudeReasoningDiagnostics {
+    raw_thinking_deltas: u64,
+    emitted_reasoning_events: u64,
+}
+
 #[derive(Debug, Clone)]
 struct ClaudeToolState {
     name: String,
@@ -1061,6 +1067,7 @@ fn run_stream_with_worker_events(
             let mut content = Unredactor::new(redactions.clone());
             let mut reasoning = Unredactor::new(redactions.clone());
             let mut tools = BTreeMap::new();
+            let mut reasoning_diagnostics = ClaudeReasoningDiagnostics::default();
             let mut saw_terminal_event = false;
             let mut locked_session_error = None;
 
@@ -1072,13 +1079,32 @@ fn run_stream_with_worker_events(
                                 publish_worker(&worker_events, AccountWorkerEvent::NativeWorker { lifecycle });
                             }
                         }
-                        for event in handle_line(&line, &mut content, &mut reasoning, &mut tools, &mut saw_terminal_event) {
+                        for event in handle_line_with_diagnostics(
+                            &line,
+                            &mut content,
+                            &mut reasoning,
+                            &mut tools,
+                            &mut saw_terminal_event,
+                            &mut reasoning_diagnostics,
+                        ) {
                             if matches!(&event, ClaudeStreamEvent::Error { message, .. } if claude_session_in_use_error(message) && !retried_locked_session)
                             {
                                 if let ClaudeStreamEvent::Error { message, .. } = event {
                                     locked_session_error = Some(message);
                                 }
                             } else {
+                                if matches!(&event, ClaudeStreamEvent::Done { .. }) {
+                                    yield runtime_event_with_worker(
+                                        &claude_reasoning_diagnostics_notice(&reasoning_diagnostics),
+                                        &worker_events,
+                                    );
+                                    if let Some(notice) = claude_reasoning_omission_notice(
+                                        req.reasoning_effort,
+                                        &reasoning_diagnostics,
+                                    ) {
+                                        yield runtime_event_with_worker(&notice, &worker_events);
+                                    }
+                                }
                                 yield runtime_event_with_worker(&event, &worker_events);
                             }
                         }
@@ -1104,6 +1130,7 @@ fn run_stream_with_worker_events(
             }
             let rtail = reasoning.flush();
             if !rtail.is_empty() {
+                reasoning_diagnostics.emitted_reasoning_events += 1;
                 yield runtime_event_with_worker(&ClaudeStreamEvent::Reasoning { text: rtail }, &worker_events);
             }
 
@@ -1194,12 +1221,31 @@ fn locked_session_error_event(req: &ClaudeRunRequest, message: String) -> Value 
     })
 }
 
+#[cfg(test)]
 fn handle_line(
     line: &str,
     content: &mut Unredactor,
     reasoning: &mut Unredactor,
     tools: &mut BTreeMap<String, ClaudeToolState>,
     saw_terminal_event: &mut bool,
+) -> Vec<ClaudeStreamEvent> {
+    handle_line_with_diagnostics(
+        line,
+        content,
+        reasoning,
+        tools,
+        saw_terminal_event,
+        &mut ClaudeReasoningDiagnostics::default(),
+    )
+}
+
+fn handle_line_with_diagnostics(
+    line: &str,
+    content: &mut Unredactor,
+    reasoning: &mut Unredactor,
+    tools: &mut BTreeMap<String, ClaudeToolState>,
+    saw_terminal_event: &mut bool,
+    reasoning_diagnostics: &mut ClaudeReasoningDiagnostics,
 ) -> Vec<ClaudeStreamEvent> {
     let Ok(value) = serde_json::from_str::<Value>(line) else {
         return vec![ClaudeStreamEvent::ProtocolNotice {
@@ -1231,9 +1277,11 @@ fn handle_line(
                         }
                     }
                     Some("thinking_delta") => {
+                        reasoning_diagnostics.raw_thinking_deltas += 1;
                         if let Some(text) = delta.get("thinking").and_then(Value::as_str) {
                             let text = reasoning.push(text);
                             if !text.is_empty() {
+                                reasoning_diagnostics.emitted_reasoning_events += 1;
                                 out.push(ClaudeStreamEvent::Reasoning { text });
                             }
                         }
@@ -1284,6 +1332,7 @@ fn handle_line(
         }
         let rtail = reasoning.flush();
         if !rtail.is_empty() {
+            reasoning_diagnostics.emitted_reasoning_events += 1;
             out.push(ClaudeStreamEvent::Reasoning { text: rtail });
         }
         let status = value
@@ -1338,6 +1387,35 @@ fn handle_line(
         });
     }
     out
+}
+
+fn claude_reasoning_diagnostics_notice(
+    diagnostics: &ClaudeReasoningDiagnostics,
+) -> ClaudeStreamEvent {
+    ClaudeStreamEvent::ProtocolNotice {
+        kind: "claude_reasoning_diagnostics",
+        message: format!(
+            "Claude reasoning stream diagnostics: raw_thinking_deltas={}, emitted_reasoning_events={}",
+            diagnostics.raw_thinking_deltas, diagnostics.emitted_reasoning_events
+        ),
+    }
+}
+
+fn claude_reasoning_omission_notice(
+    effort: Option<ReasoningEffort>,
+    diagnostics: &ClaudeReasoningDiagnostics,
+) -> Option<ClaudeStreamEvent> {
+    if !matches!(
+        effort,
+        Some(ReasoningEffort::High | ReasoningEffort::Xhigh | ReasoningEffort::Max)
+    ) || diagnostics.emitted_reasoning_events > 0
+    {
+        return None;
+    }
+    Some(ClaudeStreamEvent::ProtocolNotice {
+        kind: "claude_reasoning_omitted",
+        message: "Claude did not emit a reasoning summary for this high-effort turn.".to_string(),
+    })
 }
 
 fn claude_tool_start_event(
@@ -2482,6 +2560,78 @@ not json
             .contains("private_payload"));
         assert!(done);
         assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn replays_versioned_thinking_fixture_with_content_free_diagnostics() {
+        let fixture = include_str!(
+            "../tests/fixtures/account-runtimes/claude-code-2.1.235-thinking-stream-json.jsonl"
+        );
+        let mut content = Unredactor::new(BTreeMap::new());
+        let mut reasoning = Unredactor::new(BTreeMap::new());
+        let mut tools = BTreeMap::new();
+        let mut done = false;
+        let mut diagnostics = ClaudeReasoningDiagnostics::default();
+        let events = fixture
+            .lines()
+            .flat_map(|line| {
+                handle_line_with_diagnostics(
+                    line,
+                    &mut content,
+                    &mut reasoning,
+                    &mut tools,
+                    &mut done,
+                    &mut diagnostics,
+                )
+            })
+            .collect::<Vec<_>>();
+        let types = events
+            .iter()
+            .map(runtime_event)
+            .filter_map(|event| {
+                event
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(types, ["reasoning", "reasoning", "token", "done"]);
+        assert_eq!(
+            diagnostics,
+            ClaudeReasoningDiagnostics {
+                raw_thinking_deltas: 2,
+                emitted_reasoning_events: 2,
+            }
+        );
+        let notice = runtime_event(&claude_reasoning_diagnostics_notice(&diagnostics));
+        assert_eq!(
+            notice.get("kind").and_then(Value::as_str),
+            Some("claude_reasoning_diagnostics")
+        );
+        assert!(!notice.to_string().contains("Inspecting the fixture"));
+        assert!(
+            claude_reasoning_omission_notice(Some(ReasoningEffort::High), &diagnostics).is_none()
+        );
+        assert!(done);
+        assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn high_effort_without_thinking_emits_nonterminal_omission_notice() {
+        let diagnostics = ClaudeReasoningDiagnostics::default();
+        let notice = claude_reasoning_omission_notice(Some(ReasoningEffort::Xhigh), &diagnostics)
+            .expect("xhigh turns without thinking should remain visible");
+        assert!(matches!(
+            notice,
+            ClaudeStreamEvent::ProtocolNotice {
+                kind: "claude_reasoning_omitted",
+                ..
+            }
+        ));
+        assert!(
+            claude_reasoning_omission_notice(Some(ReasoningEffort::Medium), &diagnostics).is_none()
+        );
     }
 
     #[test]

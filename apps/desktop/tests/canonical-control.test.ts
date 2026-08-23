@@ -89,6 +89,31 @@ assert.deepEqual(interleavedReasoning.streamParts, [
   { kind: "thinking", content: "working folder... " },
 ]);
 
+const omittedClaudeReasoning = projectControlRunMessages(
+  [
+    item(1, "runtime_notice", {
+      code: "claude_reasoning_diagnostics",
+      message: "Claude reasoning stream diagnostics: raw_thinking_deltas=0, emitted_reasoning_events=0",
+    }),
+    item(2, "runtime_notice", {
+      code: "claude_reasoning_omitted",
+      message: "Claude did not emit a reasoning summary for this high-effort turn.",
+    }),
+    item(3, "assistant_delta", { text: "answer", reasoning: "" }),
+  ],
+  "run-1",
+)[0];
+assert.deepEqual(omittedClaudeReasoning.streamParts, [
+  {
+    kind: "event",
+    eventType: "status",
+    label: "No reasoning summary",
+    detail: "Claude did not emit a reasoning summary for this high-effort turn.",
+    status: "done",
+  },
+  { kind: "text", content: "answer" },
+]);
+
 const completed = projectControlRunMessages(
   [
     item(1, "message", { id: "user-1", role: "user", content: "hello" }),

@@ -179,6 +179,18 @@ function eventPart(item: ControlTimelineItemV1): ChatStreamPart | null {
       status: item.type === "error" ? "error" : "done",
     };
   }
+  if (item.type === "runtime_notice") {
+    if (data.code === "claude_reasoning_diagnostics") return null;
+    if (data.code === "claude_reasoning_omitted") {
+      return {
+        kind: "event",
+        eventType: "status",
+        label: "No reasoning summary",
+        detail: typeof data.message === "string" ? data.message : undefined,
+        status: "done",
+      };
+    }
+  }
   return null;
 }
 

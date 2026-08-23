@@ -292,6 +292,20 @@ handler.handle(harnessEnvelope({
   limit: { provider: "Claude", kind: "requests", remaining: 1 },
 }));
 handler.handle(harnessEnvelope({
+  type: "runtime_notice",
+  kind: "info",
+  level: "info",
+  code: "claude_reasoning_diagnostics",
+  message: "Claude reasoning stream diagnostics: raw_thinking_deltas=0, emitted_reasoning_events=0",
+}, "claude"));
+handler.handle(harnessEnvelope({
+  type: "runtime_notice",
+  kind: "info",
+  level: "info",
+  code: "claude_reasoning_omitted",
+  message: "Claude did not emit a reasoning summary for this high-effort turn.",
+}, "claude"));
+handler.handle(harnessEnvelope({
   type: "turn_completed",
   status: "done",
   usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
@@ -312,9 +326,18 @@ handler.handle(harnessEnvelope({
 
 assert.deepEqual(text, ["hello"]);
 assert.deepEqual(thinking, ["thinking"]);
-assert.equal(flushes, 2);
-assert.equal(appended.length, 1);
+assert.equal(flushes, 3);
+assert.equal(appended.length, 2);
 assert.equal(appended[0].kind, "event");
+assert.equal(appended[1].kind, "event");
+assert.equal(
+  appended[1].kind === "event" ? appended[1].label : "",
+  "No reasoning summary",
+);
+assert.equal(
+  appended[1].kind === "event" ? appended[1].detail : "",
+  "Claude did not emit a reasoning summary for this high-effort turn.",
+);
 assert.equal(completed.length, 1);
 assert.equal(completed[0].name, "call-1");
 assert.equal(completed[0].part.kind, "event");
