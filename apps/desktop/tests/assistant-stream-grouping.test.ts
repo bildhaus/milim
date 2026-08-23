@@ -146,7 +146,24 @@ deepEqual(
 const liveFlicker = groupCompletedStreamActivity(openRouterFlicker, true);
 equal(liveFlicker.length, 2, "live flicker should render one reasoning card and one answer");
 assert(liveFlicker[0].kind === "text" && liveFlicker[0].content === "Let me see what gcloud has configured.", "live answer should stay unsplit");
-assert(liveFlicker[1].kind === "thinking" && liveFlicker[1].content === "working folder...", "live reasoning should not split the answer");
+assert(
+  liveFlicker[1].kind === "workGroup" &&
+    liveFlicker[1].parts[0]?.kind === "thinking" &&
+    liveFlicker[1].parts[0].content === "working folder...",
+  "live reasoning should keep a stable work wrapper without splitting the answer",
+);
+
+const growingLiveWork = groupCompletedStreamActivity([
+  { kind: "thinking", content: "checking" },
+], true);
+const grownLiveWork = groupCompletedStreamActivity([
+  { kind: "thinking", content: "checking" },
+  tool("shell", "running"),
+], true);
+assert(
+  growingLiveWork[0].kind === "workGroup" && grownLiveWork[0].kind === "workGroup",
+  "a live reasoning phase should keep the same display shape when tool activity arrives",
+);
 
 const completedFlicker = groupCompletedStreamActivity(openRouterFlicker, false);
 equal(completedFlicker.length, 2, "completed flicker should keep the full answer outside the drawer");

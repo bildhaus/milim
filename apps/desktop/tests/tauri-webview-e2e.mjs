@@ -5536,12 +5536,14 @@ async function runChatAffordancesCheck(page) {
     const invoke = window.__TAURI_INTERNALS__?.invoke;
     if (!invoke) throw new Error("Tauri invoke unavailable for chat affordance fixture.");
     const now = Date.now();
-    const messages = Array.from({ length: 36 }, (_, index) => ({
+    const messages = Array.from({ length: 260 }, (_, index) => ({
       id: `chat-affordance-${index}`,
       role: index % 2 ? "assistant" : "user",
-      content: index === 35
+      content: index === 259
         ? "Read [Prompt Kit docs](https://www.prompt-kit.com/docs?ref=e2e) for the source pattern."
-        : `Transcript fixture message ${index + 1}.`,
+        : index % 9 === 0
+          ? `Transcript fixture message ${index + 1}. ${"Variable-height content ".repeat(18)}`
+          : `Transcript fixture message ${index + 1}.`,
     }));
     await invoke("user_sessions_set", {
       value: JSON.stringify({
@@ -5569,6 +5571,92 @@ async function runChatAffordancesCheck(page) {
     throw new Error("Assistant source chip did not expose its external destination.");
   }
   const scroll = page.locator(".chat-scroll");
+  const windowAnchorGeometry = await scroll.evaluate(async (element) => {
+    const frames = async () => {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    };
+    const rows = () => [...document.querySelectorAll(".transcript-window-row[data-message-window-id]")];
+    const anchorForRange = (minimumIndex, maximumIndex) => {
+      const scrollRect = element.getBoundingClientRect();
+      return rows().find((row) => {
+        const index = Number(row.getAttribute("data-message-index"));
+        return index >= minimumIndex && index < maximumIndex && row.getBoundingClientRect().bottom > scrollRect.top + 1;
+      });
+    };
+    const measureShift = async (direction) => {
+      const spacer = document.querySelector(
+        direction === "up" ? '[data-testid="transcript-top-spacer"]' : '[data-testid="transcript-bottom-spacer"]',
+      );
+      if (!(spacer instanceof HTMLElement)) throw new Error(`${direction} spacer unavailable`);
+      element.scrollTop = direction === "up"
+        ? spacer.offsetHeight + 240
+        : element.scrollHeight - spacer.offsetHeight - element.clientHeight - 240;
+      const anchor = anchorForRange(60, 200);
+      if (!(anchor instanceof HTMLElement)) throw new Error(`${direction} anchor unavailable`);
+      const id = anchor.dataset.messageWindowId;
+      const before = anchor.getBoundingClientRect().top - element.getBoundingClientRect().top;
+      element.dispatchEvent(new Event("scroll"));
+      await frames();
+      const restored = rows().find((row) => row.dataset.messageWindowId === id);
+      if (!(restored instanceof HTMLElement)) throw new Error(`${direction} anchor was unmounted`);
+      const after = restored.getBoundingClientRect().top - element.getBoundingClientRect().top;
+      return { before, after, delta: Math.abs(after - before) };
+    };
+    const upward = await measureShift("up");
+    const downward = await measureShift("down");
+    return { upward, downward };
+  });
+  if (windowAnchorGeometry.upward.delta > 1 || windowAnchorGeometry.downward.delta > 1) {
+    throw new Error(`Transcript window shift moved its visible anchor: ${JSON.stringify(windowAnchorGeometry)}.`);
+  }
+  const asyncResizeGeometry = await scroll.evaluate(async (element) => {
+    const frames = async () => {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    };
+    const appendAsyncHeight = (height) => {
+      const tail = [...document.querySelectorAll(".transcript-window-row[data-message-window-id]")].at(-1);
+      if (!(tail instanceof HTMLElement)) throw new Error("transcript tail unavailable");
+      const block = document.createElement("div");
+      block.style.height = `${height}px`;
+      block.dataset.asyncTranscriptFixture = "true";
+      tail.append(block);
+    };
+    element.scrollTop = element.scrollHeight;
+    element.dispatchEvent(new Event("scroll"));
+    appendAsyncHeight(320);
+    await frames();
+    const bottomGap = element.scrollHeight - element.scrollTop - element.clientHeight;
+
+    element.scrollTop = Math.max(0, element.scrollTop - 520);
+    element.dispatchEvent(new Event("scroll"));
+    const scrollRect = element.getBoundingClientRect();
+    const anchor = [...document.querySelectorAll(".transcript-window-row[data-message-window-id]")]
+      .find((row) => row.getBoundingClientRect().bottom > scrollRect.top + 1);
+    if (!(anchor instanceof HTMLElement)) throw new Error("detached transcript anchor unavailable");
+    const anchorId = anchor.dataset.messageWindowId;
+    const before = anchor.getBoundingClientRect().top - scrollRect.top;
+    appendAsyncHeight(280);
+    await frames();
+    const restored = [...document.querySelectorAll(".transcript-window-row[data-message-window-id]")]
+      .find((row) => row.dataset.messageWindowId === anchorId);
+    if (!(restored instanceof HTMLElement)) throw new Error("detached transcript anchor was unmounted");
+    const after = restored.getBoundingClientRect().top - element.getBoundingClientRect().top;
+    return { bottomGap, detachedDelta: Math.abs(after - before) };
+  });
+  if (asyncResizeGeometry.bottomGap > 32 || asyncResizeGeometry.detachedDelta > 1) {
+    throw new Error(`Async transcript resize broke scroll coupling: ${JSON.stringify(asyncResizeGeometry)}.`);
+  }
+  const resizeLatest = page.getByTestId("chat-jump-latest");
+  await resizeLatest.waitFor();
+  await resizeLatest.click();
+  await page.waitForFunction(() => {
+    const element = document.querySelector(".chat-scroll");
+    return element instanceof HTMLElement &&
+      element.scrollHeight - element.scrollTop - element.clientHeight <= 32;
+  });
   const scrollBeforeHover = await scroll.evaluate((element) => element.scrollTop);
   await source.hover();
   await page.waitForFunction(() => {

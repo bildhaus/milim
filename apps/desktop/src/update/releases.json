@@ -1,4 +1,9 @@
 {
+  "0.2.55": {
+    "version": "0.2.55",
+    "summary": "Milim 0.2.55 keeps live transcripts steady while streaming and scrolling, collapses repeated model switches into one clear notice, and clears native badges after approvals resolve.",
+    "items": []
+  },
   "0.2.54": {
     "version": "0.2.54",
     "summary": "Milim 0.2.54 keeps previews scoped to the correct workspace, shows applied steering messages in chat, clears resolved app badges reliably, and refines sidebar status spacing and site glow.",

@@ -173,6 +173,7 @@
   min-height: 0;
 }
 .chat-scroll-shell > .chat-scroll { width: 100%; }
+.chat-transcript-content { flex: 0 0 auto; width: 100%; min-width: 0; }
 .chat-jump-latest {
   position: absolute;
   z-index: 12;
@@ -245,11 +246,11 @@
 .model-change-primary strong { color: var(--primary-text); font-weight: 650; }
 .model-change-detail { color: var(--tertiary-text); }
 .msg { display: flex; flex-direction: column; gap: 3px; }
-.messages .msg:not(:nth-last-child(-n+3)) { content-visibility: auto; contain-intrinsic-size: auto 140px; }
-.messages .msg:has(.baton-menu.open),
-.messages .msg:has(.md-source:hover),
-.messages .msg:has(.md-source:focus-within),
-.messages .msg.msg-enter { content-visibility: visible; contain-intrinsic-size: none; }
+.messages .transcript-window-row:not(:nth-last-child(-n+3)) { content-visibility: auto; contain-intrinsic-size: auto 140px; }
+.messages .transcript-window-row:has(.baton-menu.open),
+.messages .transcript-window-row:has(.md-source:hover),
+.messages .transcript-window-row:has(.md-source:focus-within),
+.messages .transcript-window-row:has(.msg.msg-enter) { content-visibility: visible; contain-intrinsic-size: none; }
 @keyframes msg-enter {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }

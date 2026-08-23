@@ -527,6 +527,7 @@ export function projectTranscript(
   const groups = new Map<string, MutableActivityGroup>();
   const approvals = new Map<string, ProjectedApprovalItem>();
   const modelChanges: ProjectedModelChange[] = [];
+  const modelChangeState: {pending: ProjectedModelChange | null} = {pending: null};
   const pendingById = new Map(pendingApprovals.map(approval => [approval.id, approval]));
 
   const groupFor = (item: TimelineItemV1) => {
@@ -548,6 +549,15 @@ export function projectTranscript(
 
   for (const item of items) {
     const data = asRecord(item.data) ?? {};
+    if (item.type === 'message' && data.role === 'user') {
+      if (
+        modelChangeState.pending &&
+        modelChangeState.pending.previousModel !== modelChangeState.pending.model
+      ) {
+        modelChanges.push(modelChangeState.pending);
+      }
+      modelChangeState.pending = null;
+    }
     if (item.type === 'message_deleted' && typeof data.message_id === 'string') {
       deleted.add(data.message_id);
       continue;
@@ -556,13 +566,17 @@ export function projectTranscript(
       const previousModel = stringField(data, 'previous_model');
       const model = stringField(data, 'model');
       if (previousModel && model && previousModel !== model) {
-        modelChanges.push({
-          kind: 'model-change',
-          id: `model-change-${item.id}`,
-          seq: item.seq,
-          previousModel,
-          model,
-        });
+        if (modelChangeState.pending) {
+          modelChangeState.pending = {...modelChangeState.pending, seq: item.seq, model};
+        } else {
+          modelChangeState.pending = {
+            kind: 'model-change',
+            id: `model-change-${item.id}`,
+            seq: item.seq,
+            previousModel,
+            model,
+          };
+        }
       }
       continue;
     }
@@ -682,6 +696,12 @@ export function projectTranscript(
       const group = groupFor(item);
       if (group) group.rows.push(row);
     }
+  }
+  if (
+    modelChangeState.pending &&
+    modelChangeState.pending.previousModel !== modelChangeState.pending.model
+  ) {
+    modelChanges.push(modelChangeState.pending);
   }
 
   for (const approval of pendingApprovals) {

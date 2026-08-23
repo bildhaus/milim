@@ -3,7 +3,10 @@ import {
   followScrollTop,
   isNearScrollBottom,
   peekEnteringMessageIds,
+  scrollTopForRestoredAnchor,
   scrollTopAfterLayoutChange,
+  transcriptMessageRenderId,
+  transcriptSpacerHeight,
 } from "../src/lib/scroll.js";
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -62,6 +65,47 @@ assert(
     false,
   ) === 240,
   "a decoupled transcript should preserve the reader's position across layout changes",
+);
+
+assert(
+  transcriptSpacerHeight(3, 100, 12) === 324,
+  "virtual spacers should include the gaps between hidden rows",
+);
+assert(
+  transcriptSpacerHeight(3, 100, 12, [80, 140]) === 344,
+  "virtual spacers should use measured heights and estimate only unknown rows",
+);
+assert(
+  transcriptSpacerHeight(0, 100, 12) === 0,
+  "an empty virtual range should not reserve height",
+);
+assert(
+  scrollTopForRestoredAnchor(400, 24, 57) === 433,
+  "anchor restoration should compensate for the row's layout delta",
+);
+assert(
+  transcriptMessageRenderId(
+    "thread-a",
+    { id: "control-stream-run-1", role: "assistant", runId: "run-1" },
+    4,
+  ) === transcriptMessageRenderId(
+    "thread-a",
+    { id: "assistant-final", role: "assistant", runId: "run-1" },
+    4,
+  ),
+  "a canonical assistant should keep one render identity across stream finalization",
+);
+assert(
+  transcriptMessageRenderId(
+    "thread-b",
+    { id: "assistant-final", role: "assistant", runId: "run-1" },
+    4,
+  ) !== transcriptMessageRenderId(
+    "thread-a",
+    { id: "assistant-final", role: "assistant", runId: "run-1" },
+    4,
+  ),
+  "render identities should stay scoped to their thread",
 );
 
 const peekSeen = new Set(["a"]);
