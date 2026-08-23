@@ -2545,6 +2545,11 @@ export function ChatView({
   }, []);
 
   function scrollToChatBottom() {
+    const el = chatScrollRef.current;
+    if (el && stickToBottomRef.current) {
+      const nextTop = followScrollTop(el);
+      if (nextTop !== el.scrollTop) el.scrollTop = nextTop;
+    }
     scheduleTranscriptScrollCorrection();
   }
 
