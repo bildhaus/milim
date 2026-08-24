@@ -6,7 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 #[cfg(windows)]
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(windows)]
+use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::plugin::{Builder, TauriPlugin};
 use tauri::webview::{NewWindowResponse, PageLoadEvent, PageLoadPayload, WebviewBuilder};
 use tauri::{Emitter, LogicalPosition, LogicalSize, Manager, Runtime, Url, Webview, WebviewUrl};
@@ -24,7 +26,9 @@ const BROWSER_PROFILE_DIRECTORY: &str = "browser-profile";
 const PRIVATE_BROWSER_PROFILE_DIRECTORY: &str = "milim-private-browser";
 const PRIVATE_BROWSER_PROFILE_LOCK: &str = "owner.lock";
 const BROWSER_DATA_STORE_IDENTIFIER: [u8; 16] = *b"milim-browser-v1";
+#[cfg(windows)]
 const PREVIEW_NATIVE_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(windows)]
 const PREVIEW_SUSPEND_TIMEOUT: Duration = Duration::from_secs(2);
 static NEXT_BROWSER_WINDOW_ID: AtomicU64 = AtomicU64::new(1);
 static PREVIEW_SURFACES: OnceLock<Mutex<HashMap<String, PreviewSurfaceState>>> = OnceLock::new();
