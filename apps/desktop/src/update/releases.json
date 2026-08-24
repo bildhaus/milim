@@ -1,4 +1,9 @@
 {
+  "0.2.57": {
+    "version": "0.2.57",
+    "summary": "Milim 0.2.57 makes app previews more reliable and keeps each account runtime in the same native conversation across messages.",
+    "items": []
+  },
   "0.2.56": {
     "version": "0.2.56",
     "summary": "Milim 0.2.56 tightens queued-message actions and makes Claude reasoning summaries easier to understand, including a calm notice when high-effort turns omit them.",
