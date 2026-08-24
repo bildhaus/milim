@@ -48,6 +48,7 @@ const MAX_PREVIEW_RUNTIME_METADATA_CHARS: usize = 64;
 const MAX_PREVIEW_RUNTIME_URL_CHARS: usize = 2_048;
 const DELTA_FLUSH_BYTES: usize = 512;
 const DELTA_FLUSH_INTERVAL: Duration = Duration::from_millis(40);
+const NATIVE_SESSION_FULL_TRANSCRIPT_CURSOR: &str = "__milim_hot_swap_full__";
 pub const MODEL_FAVORITES_SETTINGS_KEY: &str = "milim.settings";
 pub const MODEL_FAVORITES_EVENT_TYPE: &str = "model_favorites.updated";
 
@@ -2641,12 +2642,15 @@ impl RunManager {
             });
         }
         let run_id = self.start_turn(state, thread_id.clone(), accepted)?;
-        let run_capabilities = self
+        let run = self
             .store
             .control_run(&run_id)?
             .map(run_snapshot)
-            .transpose()?
-            .map(|run| run.capabilities);
+            .transpose()?;
+        let run_capabilities = run.as_ref().map(|run| run.capabilities.clone());
+        let native_session_id = run
+            .as_ref()
+            .and_then(|run| run.config.native_session_id.clone());
         let revision = self
             .store
             .control_thread(&thread_id)?
@@ -2660,7 +2664,10 @@ impl RunManager {
             queue_id: None,
             confirmation_token: None,
             message: None,
-            data: json!({ "capabilities": run_capabilities }),
+            data: json!({
+                "capabilities": run_capabilities,
+                "native_session_id": native_session_id,
+            }),
         })
     }
 
@@ -2918,12 +2925,15 @@ impl RunManager {
             preview_runtime: preview_runtime_from_payload(&command.payload)?,
         };
         let run_id = self.start_turn(state, thread_id.clone(), accepted)?;
-        let run_capabilities = self
+        let run = self
             .store
             .control_run(&run_id)?
             .map(run_snapshot)
-            .transpose()?
-            .map(|run| run.capabilities);
+            .transpose()?;
+        let run_capabilities = run.as_ref().map(|run| run.capabilities.clone());
+        let native_session_id = run
+            .as_ref()
+            .and_then(|run| run.config.native_session_id.clone());
         Ok(ControlCommandResultV1 {
             command_id: command.command_id.clone(),
             status: ControlCommandStatusV1::Accepted,
@@ -2939,6 +2949,7 @@ impl RunManager {
             data: json!({
                 "regenerated": true,
                 "capabilities": run_capabilities,
+                "native_session_id": native_session_id,
             }),
         })
     }
@@ -2964,6 +2975,17 @@ impl RunManager {
                 ));
             }
         }
+        if self
+            .active
+            .lock()
+            .expect("control active run store poisoned")
+            .contains_key(&thread_id)
+        {
+            return Err(Error::InvalidRequest(
+                "thread already has an active turn".into(),
+            ));
+        }
+        self.refresh_native_session_for_start(&thread_id, &mut accepted.config)?;
         let run_id = Uuid::new_v4().to_string();
         let (stop, stop_rx) = watch::channel(false);
         {
@@ -3660,27 +3682,12 @@ impl RunManager {
         stop: &mut watch::Receiver<bool>,
     ) -> Result<RunOutcome> {
         let messages = self.store.control_messages(thread_id)?;
-        let transcript_prompt = messages
-            .iter()
-            .filter_map(|raw| serde_json::from_str::<Value>(raw).ok())
-            .filter_map(|message| {
-                let role = message.get("role")?.as_str()?;
-                let content = message
-                    .get("promptContent")
-                    .or_else(|| message.get("content"))?
-                    .as_str()?;
-                Some(format!("{}:\n{}", uppercase_role(role), content))
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        let prompt = if accepted.config.native_session_id.is_some() {
-            // Once an account runtime owns the native history, replaying the
-            // visible Milim transcript would duplicate context in that
-            // session. The frozen current turn remains sufficient.
-            accepted.text.clone()
-        } else {
-            transcript_prompt
-        };
+        let prompt = account_runtime_prompt(
+            &messages,
+            accepted.config.native_session_id.as_deref(),
+            accepted.config.native_session_cursor.as_deref(),
+            &accepted.text,
+        );
         let prompt = if let Some(context) =
             linked_run_context(&accepted.config, &accepted.mailbox_context)
         {
@@ -3791,6 +3798,8 @@ impl RunManager {
         let mut emitted_first_delta = false;
         let mut final_usage: Option<Usage> = None;
         let mut reported_cost_usd: Option<f64> = None;
+        let mut bound_session_id = accepted.config.native_session_id.clone();
+        let mut session_recovery_required = false;
         loop {
             let event = tokio::select! {
                 changed = stop.changed() => {
@@ -3847,6 +3856,41 @@ impl RunManager {
                 .unwrap_or("runtime_notice");
             let timeline_type = event_type;
             let timeline_value = value.clone();
+            if event_type == "session_recovery_required" {
+                let recovery_session_id = bound_session_id.clone().or_else(|| {
+                    value
+                        .get("native_session_id")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string)
+                });
+                if let Some(expected) = recovery_session_id.as_deref() {
+                    bound_session_id = self.clear_native_session_binding(
+                        thread_id,
+                        &accepted.config.adapter,
+                        expected,
+                    )?;
+                }
+                session_recovery_required = true;
+            } else if !session_recovery_required {
+                if let Some(native_session_id) = value
+                    .get("native_session_id")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    if bound_session_id.as_deref() != Some(native_session_id) {
+                        bound_session_id = self.persist_native_session_binding(
+                            thread_id,
+                            run_id,
+                            &accepted.config.adapter,
+                            bound_session_id.as_deref(),
+                            native_session_id,
+                        )?;
+                    }
+                }
+            }
             let mut is_delta = false;
             match event_type {
                 "text_delta" => {
@@ -3958,13 +4002,21 @@ impl RunManager {
                         reported_cost_usd,
                     )
                     .await?;
-                    self.complete_assistant_message(
+                    let assistant_message_id = self.complete_assistant_message(
                         thread_id,
                         run_id,
                         content,
                         reasoning,
                         Some(metrics),
                     )?;
+                    if let Some(native_session_id) = bound_session_id.as_deref() {
+                        self.persist_native_session_cursor(
+                            thread_id,
+                            &accepted.config.adapter,
+                            native_session_id,
+                            &assistant_message_id,
+                        )?;
+                    }
                     return Ok(RunOutcome::Completed);
                 }
                 if event_type == "turn_cancelled" {
@@ -3991,10 +4043,11 @@ impl RunManager {
         content: String,
         reasoning: String,
         metrics: Option<Value>,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let mailbox_content = content.clone();
+        let message_id = Uuid::new_v4().to_string();
         let message = json!({
-            "id": Uuid::new_v4().to_string(),
+            "id": message_id,
             "role": "assistant",
             "content": content,
             "reasoning": reasoning,
@@ -4011,7 +4064,7 @@ impl RunManager {
             json!({"ledger_version": 1}),
         )?;
         self.complete_mailbox_exchange(run_id, Some(&mailbox_content), None)?;
-        Ok(())
+        Ok(message_id)
     }
 
     fn complete_mailbox_exchange(
@@ -4679,6 +4732,113 @@ impl RunManager {
         Ok(record)
     }
 
+    fn preallocate_claude_session(&self, thread_id: &str) -> Result<String> {
+        let session_id = Uuid::new_v4().to_string();
+        if let Some(updated) = self.store.control_compare_and_set_runtime_session(
+            thread_id,
+            runtime_session_field("claude")?,
+            None,
+            Some(&session_id),
+            None,
+        )? {
+            self.emit_thread_changed(&updated, "thread.updated");
+            return Ok(session_id);
+        }
+        current_runtime_session(&self.store, thread_id, "claude")?.ok_or_else(|| {
+            Error::Other("Claude session binding changed but is no longer available".into())
+        })
+    }
+
+    fn refresh_native_session_for_start(
+        &self,
+        thread_id: &str,
+        config: &mut FrozenRunConfigV1,
+    ) -> Result<()> {
+        if runtime_session_field(&config.adapter).is_err() {
+            return Ok(());
+        }
+        config.native_session_id =
+            current_runtime_session(&self.store, thread_id, &config.adapter)?;
+        config.native_session_cursor =
+            current_runtime_cursor(&self.store, thread_id, &config.adapter)?;
+        if config.adapter == "claude" && config.native_session_id.is_none() {
+            config.native_session_id = Some(self.preallocate_claude_session(thread_id)?);
+            config.native_session_cursor = Some(NATIVE_SESSION_FULL_TRANSCRIPT_CURSOR.into());
+        }
+        Ok(())
+    }
+
+    fn persist_native_session_binding(
+        &self,
+        thread_id: &str,
+        run_id: &str,
+        adapter: &str,
+        expected_session_id: Option<&str>,
+        native_session_id: &str,
+    ) -> Result<Option<String>> {
+        let native_session_id = native_session_id.trim();
+        if native_session_id.is_empty() {
+            return Ok(expected_session_id.map(str::to_string));
+        }
+        if let Some(mut run) = self.store.control_run(run_id)? {
+            run.native_session_json = Some(json!({ "id": native_session_id }).to_string());
+            run.updated_at_ms = now_ms();
+            self.store.control_put_run(&run)?;
+        }
+        if expected_session_id == Some(native_session_id) {
+            return Ok(Some(native_session_id.to_string()));
+        }
+        if let Some(updated) = self.store.control_compare_and_set_runtime_session(
+            thread_id,
+            runtime_session_field(adapter)?,
+            expected_session_id,
+            Some(native_session_id),
+            None,
+        )? {
+            self.emit_thread_changed(&updated, "thread.updated");
+            return Ok(Some(native_session_id.to_string()));
+        }
+        current_runtime_session(&self.store, thread_id, adapter)
+    }
+
+    fn clear_native_session_binding(
+        &self,
+        thread_id: &str,
+        adapter: &str,
+        expected_session_id: &str,
+    ) -> Result<Option<String>> {
+        if let Some(updated) = self.store.control_compare_and_set_runtime_session(
+            thread_id,
+            runtime_session_field(adapter)?,
+            Some(expected_session_id),
+            None,
+            None,
+        )? {
+            self.emit_thread_changed(&updated, "thread.updated");
+            return Ok(None);
+        }
+        current_runtime_session(&self.store, thread_id, adapter)
+    }
+
+    fn persist_native_session_cursor(
+        &self,
+        thread_id: &str,
+        adapter: &str,
+        native_session_id: &str,
+        message_id: &str,
+    ) -> Result<()> {
+        if let Some(updated) = self.store.control_compare_and_set_runtime_session(
+            thread_id,
+            runtime_session_field(adapter)?,
+            Some(native_session_id),
+            Some(native_session_id),
+            Some(message_id),
+        )? {
+            self.emit_thread_changed(&updated, "thread.updated");
+        }
+        Ok(())
+    }
+
     fn emit_thread_changed(&self, thread: &ControlThreadRecord, event_type: &str) {
         self.emit(
             event_type,
@@ -5008,14 +5168,23 @@ fn resolve_frozen_config(
         });
     let adapter = runtime_adapter(&selected_model).to_string();
     let model = runtime_model(&selected_model).to_string();
-    let native_session_id = value
-        .get("accountRuntime")
-        .and_then(Value::as_object)
+    let account_runtime = value.get("accountRuntime").and_then(Value::as_object);
+    let native_session_id = account_runtime
         .and_then(|runtime| match adapter.as_str() {
             "codex" => runtime.get("codexThreadId"),
             "claude" => runtime.get("claudeSessionId"),
             "opencode" => runtime.get("opencodeSessionId"),
             "pi" => runtime.get("piSessionId"),
+            _ => None,
+        })
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let native_session_cursor = account_runtime
+        .and_then(|runtime| match adapter.as_str() {
+            "codex" => runtime.get("codexLastSyncedMessageId"),
+            "claude" => runtime.get("claudeLastSyncedMessageId"),
+            "opencode" => runtime.get("opencodeLastSyncedMessageId"),
+            "pi" => runtime.get("piLastSyncedMessageId"),
             _ => None,
         })
         .and_then(Value::as_str)
@@ -5068,6 +5237,7 @@ fn resolve_frozen_config(
         enabled_skills,
         attachments,
         native_session_id,
+        native_session_cursor,
         reasoning_effort,
         generation,
         adapter,
@@ -5215,6 +5385,70 @@ fn runtime_adapter(model: &str) -> &str {
     } else {
         "provider"
     }
+}
+
+fn runtime_session_field(adapter: &str) -> Result<&'static str> {
+    match adapter {
+        "codex" => Ok("codexThreadId"),
+        "claude" => Ok("claudeSessionId"),
+        "opencode" => Ok("opencodeSessionId"),
+        "pi" => Ok("piSessionId"),
+        _ => Err(Error::InvalidRequest(format!(
+            "runtime adapter {adapter} does not own a native session"
+        ))),
+    }
+}
+
+fn runtime_cursor_field(adapter: &str) -> Result<&'static str> {
+    match adapter {
+        "codex" => Ok("codexLastSyncedMessageId"),
+        "claude" => Ok("claudeLastSyncedMessageId"),
+        "opencode" => Ok("opencodeLastSyncedMessageId"),
+        "pi" => Ok("piLastSyncedMessageId"),
+        _ => Err(Error::InvalidRequest(format!(
+            "runtime adapter {adapter} does not own a native session cursor"
+        ))),
+    }
+}
+
+fn current_runtime_session(
+    store: &UserDataStore,
+    thread_id: &str,
+    adapter: &str,
+) -> Result<Option<String>> {
+    let Some(thread) = store.control_thread(thread_id)? else {
+        return Err(Error::NotFound(format!("thread {thread_id}")));
+    };
+    let value: Value = serde_json::from_str(&thread.session_json)
+        .map_err(|error| Error::Other(format!("invalid stored thread JSON: {error}")))?;
+    Ok(value
+        .get("accountRuntime")
+        .and_then(Value::as_object)
+        .and_then(|runtime| runtime.get(runtime_session_field(adapter).ok()?))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string))
+}
+
+fn current_runtime_cursor(
+    store: &UserDataStore,
+    thread_id: &str,
+    adapter: &str,
+) -> Result<Option<String>> {
+    let Some(thread) = store.control_thread(thread_id)? else {
+        return Err(Error::NotFound(format!("thread {thread_id}")));
+    };
+    let value: Value = serde_json::from_str(&thread.session_json)
+        .map_err(|error| Error::Other(format!("invalid stored thread JSON: {error}")))?;
+    Ok(value
+        .get("accountRuntime")
+        .and_then(Value::as_object)
+        .and_then(|runtime| runtime.get(runtime_cursor_field(adapter).ok()?))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string))
 }
 
 fn runtime_model(model: &str) -> &str {
@@ -5825,6 +6059,42 @@ fn decode_appearance_background(source: &str) -> Option<(&'static str, Vec<u8>)>
     Some((mime, bytes))
 }
 
+fn account_runtime_prompt(
+    raw_messages: &[String],
+    native_session_id: Option<&str>,
+    native_session_cursor: Option<&str>,
+    current_turn: &str,
+) -> String {
+    if native_session_id.is_some() && native_session_cursor.is_none() {
+        return current_turn.to_string();
+    }
+    let messages = raw_messages
+        .iter()
+        .filter_map(|raw| serde_json::from_str::<Value>(raw).ok())
+        .collect::<Vec<_>>();
+    let start = native_session_cursor
+        .and_then(|cursor| {
+            messages
+                .iter()
+                .position(|message| message.get("id").and_then(Value::as_str) == Some(cursor))
+        })
+        .map(|index| index + 1)
+        .unwrap_or_default();
+    messages
+        .iter()
+        .skip(start)
+        .filter_map(|message| {
+            let role = message.get("role")?.as_str()?;
+            let content = message
+                .get("promptContent")
+                .or_else(|| message.get("content"))?
+                .as_str()?;
+            Some(format!("{}:\n{}", uppercase_role(role), content))
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 fn uppercase_role(role: &str) -> &'static str {
     match role {
         "system" => "System",
@@ -5922,6 +6192,226 @@ mod tests {
             }),
             confirmation_token: None,
         }
+    }
+
+    #[test]
+    fn account_runtime_sessions_are_reused_across_turns_and_restart() {
+        let store = Arc::new(UserDataStore::new(Database::open_in_memory().unwrap()).unwrap());
+        let manager = RunManager::new(store.clone(), "Fixture desktop").unwrap();
+        let state = AppState::new(Arc::new(TestBackend::new()), ServerConfiguration::default())
+            .with_control(manager.clone());
+
+        for (adapter, model, session_id) in [
+            ("codex", "codex:gpt-5", "codex-session"),
+            ("opencode", "opencode:fixture", "opencode-session"),
+            ("pi", "pi:fixture", "pi-session"),
+        ] {
+            let thread_id = format!("thread-{adapter}");
+            let run_id = format!("run-{adapter}");
+            let thread = store
+                .control_create_thread(
+                    &thread_id,
+                    &json!({
+                        "id": thread_id,
+                        "settings": { "model": model }
+                    })
+                    .to_string(),
+                    &format!("epoch-{adapter}"),
+                )
+                .unwrap();
+            let first = resolve_frozen_config(&state, &store, &thread, vec![]).unwrap();
+            assert_eq!(first.native_session_id, None);
+            store
+                .control_put_run(&ControlRunRecord {
+                    id: run_id.clone(),
+                    thread_id: thread_id.clone(),
+                    status: "running".into(),
+                    adapter: adapter.into(),
+                    request_json: json!({ "text": "first turn" }).to_string(),
+                    agent_snapshot_json: None,
+                    native_session_json: None,
+                    created_at_ms: 1,
+                    updated_at_ms: 1,
+                    completed_at_ms: None,
+                    error_json: None,
+                })
+                .unwrap();
+            let mut stale_terminal_writer = store.control_run(&run_id).unwrap().unwrap();
+            assert_eq!(
+                manager
+                    .persist_native_session_binding(&thread_id, &run_id, adapter, None, session_id,)
+                    .unwrap()
+                    .as_deref(),
+                Some(session_id)
+            );
+            let cursor = format!("assistant-{adapter}");
+            manager
+                .persist_native_session_cursor(&thread_id, adapter, session_id, &cursor)
+                .unwrap();
+            stale_terminal_writer.status = "completed".into();
+            stale_terminal_writer.updated_at_ms = 2;
+            stale_terminal_writer.completed_at_ms = Some(2);
+            store.control_put_run(&stale_terminal_writer).unwrap();
+            let run = store.control_run(&run_id).unwrap().unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(run.native_session_json.as_deref().unwrap()).unwrap(),
+                json!({ "id": session_id })
+            );
+            let mut queued_before_the_first_turn_established = first;
+            manager
+                .refresh_native_session_for_start(
+                    &thread_id,
+                    &mut queued_before_the_first_turn_established,
+                )
+                .unwrap();
+            assert_eq!(
+                queued_before_the_first_turn_established
+                    .native_session_id
+                    .as_deref(),
+                Some(session_id)
+            );
+            assert_eq!(
+                queued_before_the_first_turn_established
+                    .native_session_cursor
+                    .as_deref(),
+                Some(cursor.as_str())
+            );
+        }
+
+        let claude_thread = store
+            .control_create_thread(
+                "thread-claude",
+                &json!({
+                    "id": "thread-claude",
+                    "settings": { "model": "claude:sonnet" }
+                })
+                .to_string(),
+                "epoch-claude",
+            )
+            .unwrap();
+        let mut first_claude =
+            resolve_frozen_config(&state, &store, &claude_thread, vec![]).unwrap();
+        assert!(first_claude.native_session_id.is_none());
+        manager
+            .refresh_native_session_for_start("thread-claude", &mut first_claude)
+            .unwrap();
+        let claude_session = first_claude.native_session_id.clone().unwrap();
+        assert!(Uuid::parse_str(&claude_session).is_ok());
+        assert_eq!(
+            first_claude.native_session_cursor.as_deref(),
+            Some(NATIVE_SESSION_FULL_TRANSCRIPT_CURSOR)
+        );
+        manager
+            .persist_native_session_cursor(
+                "thread-claude",
+                "claude",
+                &claude_session,
+                "assistant-claude",
+            )
+            .unwrap();
+
+        let restarted = RunManager::new(store.clone(), "Restarted fixture desktop").unwrap();
+        let restarted_state =
+            AppState::new(Arc::new(TestBackend::new()), ServerConfiguration::default())
+                .with_control(restarted);
+        for (adapter, expected, expected_cursor) in [
+            ("codex", "codex-session", "assistant-codex"),
+            ("opencode", "opencode-session", "assistant-opencode"),
+            ("pi", "pi-session", "assistant-pi"),
+            ("claude", claude_session.as_str(), "assistant-claude"),
+        ] {
+            let thread = store
+                .control_thread(&format!("thread-{adapter}"))
+                .unwrap()
+                .unwrap();
+            let second = resolve_frozen_config(&restarted_state, &store, &thread, vec![]).unwrap();
+            assert_eq!(second.native_session_id.as_deref(), Some(expected));
+            assert_eq!(
+                second.native_session_cursor.as_deref(),
+                Some(expected_cursor)
+            );
+        }
+    }
+
+    #[test]
+    fn account_runtime_resume_sends_only_messages_after_its_sync_cursor() {
+        let messages = [
+            json!({"id":"user-1","role":"user","content":"first"}).to_string(),
+            json!({"id":"assistant-1","role":"assistant","content":"answer"}).to_string(),
+            json!({"id":"user-2","role":"user","content":"second"}).to_string(),
+        ];
+        assert_eq!(
+            account_runtime_prompt(&messages, Some("native-1"), None, "second"),
+            "second"
+        );
+        assert_eq!(
+            account_runtime_prompt(&messages, Some("native-1"), Some("assistant-1"), "second",),
+            "User:\nsecond"
+        );
+        let full = account_runtime_prompt(
+            &messages,
+            Some("native-1"),
+            Some(NATIVE_SESSION_FULL_TRANSCRIPT_CURSOR),
+            "second",
+        );
+        assert!(full.contains("User:\nfirst"));
+        assert!(full.contains("Assistant:\nanswer"));
+        assert!(full.ends_with("User:\nsecond"));
+        assert_eq!(
+            account_runtime_prompt(&messages, None, None, "second"),
+            full
+        );
+    }
+
+    #[test]
+    fn session_recovery_clears_only_the_matching_adapter_binding() {
+        let store = Arc::new(UserDataStore::new(Database::open_in_memory().unwrap()).unwrap());
+        store
+            .control_create_thread(
+                "thread-runtime-recovery",
+                &json!({
+                    "id": "thread-runtime-recovery",
+                    "accountRuntime": {
+                        "codexThreadId": "codex-old",
+                        "claudeSessionId": "claude-keep",
+                        "opencodeSessionId": "opencode-keep",
+                        "piSessionId": "pi-keep"
+                    }
+                })
+                .to_string(),
+                "epoch-runtime-recovery",
+            )
+            .unwrap();
+        let manager = RunManager::new(store.clone(), "Fixture desktop").unwrap();
+
+        assert_eq!(
+            manager
+                .clear_native_session_binding("thread-runtime-recovery", "codex", "codex-old",)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            current_runtime_session(&store, "thread-runtime-recovery", "claude")
+                .unwrap()
+                .as_deref(),
+            Some("claude-keep")
+        );
+        store
+            .control_compare_and_set_runtime_session(
+                "thread-runtime-recovery",
+                runtime_session_field("codex").unwrap(),
+                None,
+                Some("codex-new"),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            manager
+                .clear_native_session_binding("thread-runtime-recovery", "codex", "codex-old",)
+                .unwrap()
+                .as_deref(),
+            Some("codex-new")
+        );
     }
 
     #[test]

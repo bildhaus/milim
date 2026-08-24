@@ -911,6 +911,8 @@ pub struct SessionsDelta {
 pub struct SessionDelta {
     pub id: String,
     pub session_json: Option<String>,
+    #[serde(default)]
+    pub runtime_binding_changes: Vec<String>,
     pub base_message_count: usize,
     pub message_count: usize,
     #[serde(default)]
@@ -2008,6 +2010,140 @@ impl UserDataStore {
         finish_control_transaction(conn, result)
     }
 
+    /// Atomically changes one account-runtime session binding without replacing
+    /// the rest of the thread JSON. The update is applied only when the current
+    /// binding exactly matches `expected_session_id`, so a stale run cannot
+    /// clear or overwrite a newer native session.
+    pub fn control_compare_and_set_runtime_session(
+        &self,
+        thread_id: &str,
+        runtime_field: &str,
+        expected_session_id: Option<&str>,
+        next_session_id: Option<&str>,
+        next_synced_message_id: Option<&str>,
+    ) -> Result<Option<ControlThreadRecord>> {
+        let thread_id = required_control_text(thread_id, "thread id")?;
+        let last_synced_field = match runtime_field {
+            "codexThreadId" => "codexLastSyncedMessageId",
+            "claudeSessionId" => "claudeLastSyncedMessageId",
+            "opencodeSessionId" => "opencodeLastSyncedMessageId",
+            "piSessionId" => "piLastSyncedMessageId",
+            _ => {
+                return Err(Error::InvalidRequest(format!(
+                    "unsupported account runtime session field: {runtime_field}"
+                )))
+            }
+        };
+        let expected_session_id = expected_session_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let next_session_id = next_session_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let next_synced_message_id = next_synced_message_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
+        let result = (|| -> Result<Option<ControlThreadRecord>> {
+            let Some(mut current) = conn
+                .query_row(
+                    "SELECT s.id, s.session_json, c.revision, c.epoch, s.updated_at_ms
+                     FROM user_sessions s
+                     JOIN user_thread_control c ON c.thread_id = s.id
+                     WHERE s.id = ?1",
+                    params![thread_id],
+                    control_thread_from_row,
+                )
+                .optional()
+                .map_err(sqlite)?
+            else {
+                return Err(Error::InvalidRequest(format!(
+                    "thread {thread_id} does not exist"
+                )));
+            };
+            let mut session: serde_json::Value = serde_json::from_str(&current.session_json)
+                .map_err(|error| Error::Other(format!("invalid stored thread JSON: {error}")))?;
+            let root = session
+                .as_object_mut()
+                .ok_or_else(|| Error::Other("stored thread is not an object".into()))?;
+            let existing = root
+                .get("accountRuntime")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|runtime| runtime.get(runtime_field))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            if existing.as_deref() != expected_session_id {
+                return Ok(None);
+            }
+            let existing_cursor = root
+                .get("accountRuntime")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|runtime| runtime.get(last_synced_field))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            if existing.as_deref() == next_session_id
+                && next_synced_message_id
+                    .is_none_or(|cursor| existing_cursor.as_deref() == Some(cursor))
+            {
+                return Ok(Some(current));
+            }
+            if let Some(session_id) = next_session_id {
+                let runtime = root
+                    .entry("accountRuntime")
+                    .or_insert_with(|| serde_json::json!({}))
+                    .as_object_mut()
+                    .ok_or_else(|| Error::Other("stored accountRuntime is not an object".into()))?;
+                runtime.insert(
+                    runtime_field.to_string(),
+                    serde_json::Value::String(session_id.to_string()),
+                );
+                if let Some(cursor) = next_synced_message_id {
+                    runtime.insert(
+                        last_synced_field.to_string(),
+                        serde_json::Value::String(cursor.to_string()),
+                    );
+                } else if existing.as_deref() != next_session_id {
+                    runtime.remove(last_synced_field);
+                }
+            } else if let Some(runtime) = root
+                .get_mut("accountRuntime")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                runtime.remove(runtime_field);
+                runtime.remove(last_synced_field);
+                if runtime.is_empty() {
+                    root.remove("accountRuntime");
+                }
+            }
+            let now = now_ms();
+            root.insert("updatedAt".into(), serde_json::Value::from(now));
+            current.revision = current.revision.saturating_add(1);
+            current.session_json = session.to_string();
+            current.updated_at_ms = now;
+            conn.execute(
+                "UPDATE user_sessions SET session_json = ?2, updated_at_ms = ?3 WHERE id = ?1",
+                params![thread_id, current.session_json, now],
+            )
+            .map_err(sqlite)?;
+            conn.execute(
+                "UPDATE user_thread_control SET revision = ?2, updated_at_ms = ?3 WHERE thread_id = ?1",
+                params![thread_id, u64_to_i64(current.revision)?, now],
+            )
+            .map_err(sqlite)?;
+            Ok(Some(current))
+        })();
+        finish_control_transaction(conn, result)
+    }
+
     pub fn control_delete_thread(&self, thread_id: &str) -> Result<bool> {
         let thread_id = required_control_text(thread_id, "thread id")?;
         let db = self
@@ -2385,9 +2521,9 @@ impl UserDataStore {
                  (id, thread_id, status, adapter, request_json, agent_snapshot_json,
                   native_session_json, created_at_ms, updated_at_ms, completed_at_ms, error_json)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-                 ON CONFLICT(id) DO UPDATE SET
+                ON CONFLICT(id) DO UPDATE SET
                     status = excluded.status,
-                    native_session_json = excluded.native_session_json,
+                    native_session_json = COALESCE(excluded.native_session_json, user_runs.native_session_json),
                     updated_at_ms = excluded.updated_at_ms,
                     completed_at_ms = excluded.completed_at_ms,
                     error_json = excluded.error_json",
@@ -5095,6 +5231,70 @@ fn should_ignore_default_sessions_snapshot(
     Ok(messages == 0 && title == "New chat")
 }
 
+fn merge_canonical_account_runtime(
+    current: &str,
+    incoming: &str,
+    runtime_binding_changes: &[String],
+    server_owned_run: bool,
+) -> Result<String> {
+    let current = parse_json(current)?;
+    let mut incoming = parse_json(incoming)?;
+    let incoming_object = incoming
+        .as_object_mut()
+        .ok_or_else(|| Error::InvalidRequest("session row must be a JSON object".into()))?;
+    let current_runtime = current
+        .get("accountRuntime")
+        .and_then(serde_json::Value::as_object);
+    if server_owned_run {
+        if let Some(runtime) = current_runtime {
+            incoming_object.insert(
+                "accountRuntime".into(),
+                serde_json::Value::Object(runtime.clone()),
+            );
+        } else {
+            incoming_object.remove("accountRuntime");
+        }
+        return serde_json::to_string(&incoming).map_err(json_error);
+    }
+    let mut next_runtime = incoming_object
+        .get("accountRuntime")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let next_runtime_object = next_runtime
+        .as_object_mut()
+        .ok_or_else(|| Error::InvalidRequest("session accountRuntime must be an object".into()))?;
+    for (kind, id_field, cursor_field) in [
+        ("codex", "codexThreadId", "codexLastSyncedMessageId"),
+        ("claude", "claudeSessionId", "claudeLastSyncedMessageId"),
+        (
+            "opencode",
+            "opencodeSessionId",
+            "opencodeLastSyncedMessageId",
+        ),
+        ("pi", "piSessionId", "piLastSyncedMessageId"),
+    ] {
+        if runtime_binding_changes
+            .iter()
+            .any(|changed| changed == kind)
+        {
+            continue;
+        }
+        for field in [id_field, cursor_field] {
+            if let Some(value) = current_runtime.and_then(|runtime| runtime.get(field)) {
+                next_runtime_object.insert(field.to_string(), value.clone());
+            } else {
+                next_runtime_object.remove(field);
+            }
+        }
+    }
+    if next_runtime_object.is_empty() {
+        incoming_object.remove("accountRuntime");
+    } else {
+        incoming_object.insert("accountRuntime".into(), next_runtime);
+    }
+    serde_json::to_string(&incoming).map_err(json_error)
+}
+
 fn apply_sessions_delta_locked(conn: &Connection, delta: SessionsDelta) -> Result<()> {
     let mut meta = parse_json(&delta.meta_json)?;
     let state = meta
@@ -5162,6 +5362,16 @@ fn apply_sessions_delta_locked(conn: &Connection, delta: SessionsDelta) -> Resul
                 "preserved session deltas cannot include message rows".into(),
             ));
         }
+        let mut runtime_changes = BTreeSet::new();
+        for kind in &session.runtime_binding_changes {
+            if !matches!(kind.as_str(), "codex" | "claude" | "opencode" | "pi")
+                || !runtime_changes.insert(kind)
+            {
+                return Err(Error::InvalidRequest(
+                    "runtime binding changes must be unique supported adapter names".into(),
+                ));
+            }
+        }
         let mut message_indices = BTreeSet::new();
         for message in &session.messages {
             if message.index >= session.message_count || !message_indices.insert(message.index) {
@@ -5190,7 +5400,35 @@ fn apply_sessions_delta_locked(conn: &Connection, delta: SessionsDelta) -> Resul
 
         let now = now_ms();
         for session in &delta.upserts {
+            let server_owned_run = conn
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM user_runs
+                        WHERE thread_id = ?1 AND status IN ('accepted', 'running')
+                    )",
+                    params![session.id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(sqlite)?;
             if let Some(session_json) = &session.session_json {
+                let merged_session_json = conn
+                    .query_row(
+                        "SELECT session_json FROM user_sessions WHERE id = ?1",
+                        params![session.id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                    .map_err(sqlite)?
+                    .map(|current| {
+                        merge_canonical_account_runtime(
+                            &current,
+                            session_json,
+                            &session.runtime_binding_changes,
+                            server_owned_run,
+                        )
+                    })
+                    .transpose()?;
+                let session_json = merged_session_json.as_deref().unwrap_or(session_json);
                 conn.execute(
                     "INSERT INTO user_sessions (id, session_json, sort_order, updated_at_ms)
                      VALUES (?1, ?2, 0, ?3)
@@ -5222,16 +5460,6 @@ fn apply_sessions_delta_locked(conn: &Connection, delta: SessionsDelta) -> Resul
             // contain an intentionally incomplete streaming assistant message,
             // so accepting their positional message delta could overwrite the
             // authoritative user turn or race the final assistant commit.
-            let server_owned_run = conn
-                .query_row(
-                    "SELECT EXISTS(
-                        SELECT 1 FROM user_runs
-                        WHERE thread_id = ?1 AND status IN ('accepted', 'running')
-                    )",
-                    params![session.id],
-                    |row| row.get::<_, bool>(0),
-                )
-                .map_err(sqlite)?;
             if server_owned_run {
                 continue;
             }
@@ -5875,6 +6103,7 @@ mod tests {
                 upserts: vec![SessionDelta {
                     id: "a".into(),
                     session_json: Some(r#"{"id":"a","title":"A2"}"#.into()),
+                    runtime_binding_changes: Vec::new(),
                     base_message_count: 1,
                     message_count: 2,
                     preserve_messages: false,
@@ -5926,6 +6155,7 @@ mod tests {
                 upserts: vec![SessionDelta {
                     id: "a".into(),
                     session_json: None,
+                    runtime_binding_changes: Vec::new(),
                     base_message_count: 2,
                     message_count: 1,
                     preserve_messages: false,
@@ -5959,6 +6189,7 @@ mod tests {
             upserts: vec![SessionDelta {
                 id: "a".into(),
                 session_json: Some(r#"{"id":"a","title":"Changed"}"#.into()),
+                runtime_binding_changes: Vec::new(),
                 base_message_count: 1,
                 message_count: 2,
                 preserve_messages: false,
@@ -5992,6 +6223,7 @@ mod tests {
                 upserts: vec![SessionDelta {
                     id: "a".into(),
                     session_json: Some(r#"{"id":"a","title":"After"}"#.into()),
+                    runtime_binding_changes: Vec::new(),
                     base_message_count: 2,
                     message_count: 2,
                     preserve_messages: true,
@@ -6251,6 +6483,93 @@ mod tests {
             )
             .unwrap(),
             serde_json::from_str::<serde_json::Value>(original).unwrap(),
+        );
+    }
+
+    #[test]
+    fn runtime_session_compare_and_set_preserves_other_adapter_bindings() {
+        let store = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        store
+            .control_create_thread(
+                "thread-1",
+                &serde_json::json!({
+                    "id": "thread-1",
+                    "title": "Runtime bindings",
+                    "accountRuntime": {
+                        "claudeSessionId": "claude-existing",
+                        "claudeLastSyncedMessageId": "message-1"
+                    }
+                })
+                .to_string(),
+                "epoch-1",
+            )
+            .unwrap();
+
+        let bound = store
+            .control_compare_and_set_runtime_session(
+                "thread-1",
+                "codexThreadId",
+                None,
+                Some("codex-new"),
+                None,
+            )
+            .unwrap()
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&bound.session_json).unwrap();
+        assert_eq!(value["accountRuntime"]["codexThreadId"], "codex-new");
+        assert_eq!(
+            value["accountRuntime"]["claudeSessionId"],
+            "claude-existing"
+        );
+
+        let synced = store
+            .control_compare_and_set_runtime_session(
+                "thread-1",
+                "codexThreadId",
+                Some("codex-new"),
+                Some("codex-new"),
+                Some("assistant-1"),
+            )
+            .unwrap()
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&synced.session_json).unwrap();
+        assert_eq!(
+            value["accountRuntime"]["codexLastSyncedMessageId"],
+            "assistant-1"
+        );
+
+        assert!(store
+            .control_compare_and_set_runtime_session(
+                "thread-1",
+                "codexThreadId",
+                Some("stale-codex"),
+                None,
+                None,
+            )
+            .unwrap()
+            .is_none());
+        let cleared = store
+            .control_compare_and_set_runtime_session(
+                "thread-1",
+                "codexThreadId",
+                Some("codex-new"),
+                None,
+                None,
+            )
+            .unwrap()
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&cleared.session_json).unwrap();
+        assert!(value["accountRuntime"].get("codexThreadId").is_none());
+        assert!(value["accountRuntime"]
+            .get("codexLastSyncedMessageId")
+            .is_none());
+        assert_eq!(
+            value["accountRuntime"]["claudeSessionId"],
+            "claude-existing"
+        );
+        assert_eq!(
+            value["accountRuntime"]["claudeLastSyncedMessageId"],
+            "message-1"
         );
     }
 
@@ -6566,6 +6885,7 @@ mod tests {
                 upserts: vec![SessionDelta {
                     id: "thread-1".into(),
                     session_json: None,
+                    runtime_binding_changes: Vec::new(),
                     base_message_count: 1,
                     message_count: 1,
                     preserve_messages: false,
@@ -6581,6 +6901,93 @@ mod tests {
         let messages = store.control_messages("thread-1").unwrap();
         assert!(messages[0].contains("authoritative"));
         assert!(!messages[0].contains("stale"));
+    }
+
+    #[test]
+    fn renderer_metadata_cannot_erase_an_active_run_native_session() {
+        let store = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        store
+            .control_create_thread(
+                "thread-1",
+                r#"{"id":"thread-1","title":"Canonical","accountRuntime":{"codexThreadId":"codex-current","claudeSessionId":"claude-keep"}}"#,
+                "epoch-1",
+            )
+            .unwrap();
+        store
+            .control_put_run(&ControlRunRecord {
+                id: "run-1".into(),
+                thread_id: "thread-1".into(),
+                status: "running".into(),
+                adapter: "codex".into(),
+                request_json: r#"{"text":"authoritative"}"#.into(),
+                agent_snapshot_json: None,
+                native_session_json: Some(r#"{"id":"codex-current"}"#.into()),
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                completed_at_ms: None,
+                error_json: None,
+            })
+            .unwrap();
+        store
+            .apply_sessions_delta(SessionsDelta {
+                meta_json: r#"{"state":{"activeId":"thread-1"},"version":0}"#.into(),
+                session_order: vec!["thread-1".into()],
+                upserts: vec![SessionDelta {
+                    id: "thread-1".into(),
+                    session_json: Some(
+                        r#"{"id":"thread-1","title":"Renderer","accountRuntime":{"codexThreadId":"codex-stale"}}"#
+                            .into(),
+                    ),
+                    runtime_binding_changes: Vec::new(),
+                    base_message_count: 0,
+                    message_count: 0,
+                    preserve_messages: true,
+                    messages: Vec::new(),
+                }],
+                deleted_session_ids: Vec::new(),
+            })
+            .unwrap();
+
+        let thread = store.control_thread("thread-1").unwrap().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&thread.session_json).unwrap();
+        assert_eq!(value["title"], "Renderer");
+        assert_eq!(value["accountRuntime"]["codexThreadId"], "codex-current");
+        assert_eq!(value["accountRuntime"]["claudeSessionId"], "claude-keep");
+
+        let mut run = store.control_run("run-1").unwrap().unwrap();
+        run.status = "completed".into();
+        run.completed_at_ms = Some(2);
+        store.control_put_run(&run).unwrap();
+        for (runtime_binding_changes, expected_codex) in [
+            (Vec::new(), Some("codex-current")),
+            (vec!["codex".into()], None),
+        ] {
+            store
+                .apply_sessions_delta(SessionsDelta {
+                    meta_json: r#"{"state":{"activeId":"thread-1"},"version":0}"#.into(),
+                    session_order: vec!["thread-1".into()],
+                    upserts: vec![SessionDelta {
+                        id: "thread-1".into(),
+                        session_json: Some(r#"{"id":"thread-1","title":"Later renderer"}"#.into()),
+                        runtime_binding_changes,
+                        base_message_count: 0,
+                        message_count: 0,
+                        preserve_messages: true,
+                        messages: Vec::new(),
+                    }],
+                    deleted_session_ids: Vec::new(),
+                })
+                .unwrap();
+            let thread = store.control_thread("thread-1").unwrap().unwrap();
+            let value: serde_json::Value = serde_json::from_str(&thread.session_json).unwrap();
+            assert_eq!(
+                value["accountRuntime"]
+                    .get("codexThreadId")
+                    .and_then(serde_json::Value::as_str),
+                expected_codex
+            );
+            assert_eq!(value["accountRuntime"]["claudeSessionId"], "claude-keep");
+        }
     }
 
     #[test]
@@ -6622,6 +7029,7 @@ mod tests {
                 upserts: vec![SessionDelta {
                     id: "thread-1".into(),
                     session_json: None,
+                    runtime_binding_changes: Vec::new(),
                     base_message_count: 1,
                     message_count: 2,
                     preserve_messages: false,
@@ -6670,6 +7078,7 @@ mod tests {
                 upserts: vec![SessionDelta {
                     id: "thread-1".into(),
                     session_json: Some(r#"{"id":"thread-1","title":"After"}"#.into()),
+                    runtime_binding_changes: Vec::new(),
                     base_message_count: 3,
                     message_count: 3,
                     preserve_messages: false,
@@ -6732,6 +7141,7 @@ mod tests {
                 upserts: vec![SessionDelta {
                     id: "renderer-thread-1".into(),
                     session_json: Some(r#"{"id":"renderer-thread-1","title":"After"}"#.into()),
+                    runtime_binding_changes: Vec::new(),
                     base_message_count: 0,
                     message_count: 0,
                     preserve_messages: false,
@@ -6777,6 +7187,7 @@ mod tests {
                 upserts: vec![SessionDelta {
                     id: "thread-1".into(),
                     session_json: None,
+                    runtime_binding_changes: Vec::new(),
                     base_message_count: 0,
                     message_count: 2,
                     preserve_messages: false,

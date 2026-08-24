@@ -164,7 +164,7 @@ const server = await createServer({
 });
 
 try {
-  const { PreviewPanel, buildFixPrompt, nativePreviewBlockedByAppUi, previewDocumentReadyForSurface, previewSurfaceIsInspectable, nextPreviewTab } = await server.ssrLoadModule("/src/components/PreviewPanel.tsx") as {
+  const { PreviewPanel, buildFixPrompt, nativePreviewBlockedByAppUi, previewDocumentReadyForSurface, previewNativeWebviewLabel, previewSurfaceIsInspectable, nextPreviewTab } = await server.ssrLoadModule("/src/components/PreviewPanel.tsx") as {
     PreviewPanel: ComponentType<PreviewPanelProps>;
     buildFixPrompt: (
       artifact: ChatArtifact,
@@ -175,6 +175,7 @@ try {
       errors: Array<{ id: number; level: "error"; message: string; timestamp: number }>,
     ) => string;
     nativePreviewBlockedByAppUi: (root: Pick<ParentNode, "querySelector">) => boolean;
+    previewNativeWebviewLabel: (surfaceKind: "runtime_browser" | "native_browser", storageMode: "persistent" | "private") => string;
     previewDocumentReadyForSurface: (isUrlPreview: boolean, builtKey: string, requestedKey: string) => boolean;
     previewSurfaceIsInspectable: (surface: PreviewSurfaceTarget | null) => boolean;
     nextPreviewTab: (current: PreviewTab, key: string, tabs: readonly PreviewTab[]) => PreviewTab | null;
@@ -561,6 +562,13 @@ try {
   assert(!blockerSelector.includes('[role="menu"]') && !blockerSelector.includes("aria-modal"), "Native preview blocking should not infer visibility from semantic roles");
   assert(nativePreviewBlockedByAppUi({ querySelector: () => ({}) as Element }), "Native preview should hide behind app modal/menu UI");
   assert(!nativePreviewBlockedByAppUi({ querySelector: () => null }), "Native preview should stay visible without blocking app UI");
+  const appNativeLabel = previewNativeWebviewLabel("runtime_browser", "private");
+  assert(appNativeLabel === "artifact-browser-app-private-slot", "App previews should use the bounded private native slot");
+  assert(
+    previewNativeWebviewLabel("native_browser", "persistent") === "artifact-browser-url-persistent-slot",
+    "Persistent URL previews should use their bounded native slot",
+  );
+  assert(previewNativeWebviewLabel("native_browser", "private") === "artifact-browser-url-private-slot", "Private URL previews should stay isolated from persistent previews");
   let leaveReason = "";
   const unregisterEditorGuard = registerWorkspaceEditorGuard(async (reason) => {
     leaveReason = reason;
@@ -570,13 +578,22 @@ try {
   unregisterEditorGuard();
   assert(await requestWorkspaceEditorLeave("navigate"), "Workspace navigation should continue after the editor guard unmounts");
   const previewPanelSource = readFileSync("src/components/PreviewPanel.tsx", "utf8");
+  const previewWebviewSource = readFileSync("src-tauri/src/preview_webview.rs", "utf8");
   const workspaceCodePanelSource = readFileSync("src/components/WorkspaceCodePanel.tsx", "utf8");
   const workspaceCodeEditorSource = readFileSync("src/components/WorkspaceCodeEditor.tsx", "utf8");
   assert(!previewPanelSource.includes("window.prompt"), "Preview review comments should use the themed dialog instead of a native prompt");
   assert(previewPanelSource.includes('data-testid="review-comment-dialog"'), "Preview review comments should keep a testable themed dialog");
-  assert(previewPanelSource.includes("webview.setZoom(zoomPercentRef.current / 100)"), "Native previews should restore saved zoom when their webview is created");
-  assert(previewPanelSource.includes("webview.setZoom(zoomPercent / 100)"), "Native previews should apply zoom changes without recreating the webview");
-  assert(previewPanelSource.includes("setPreviewWebviewMuted(label, mutedRef.current)"), "Native previews should restore persisted tab mute when their webview is created");
+  assert(previewPanelSource.includes("setPreviewWebviewZoom(label, claim.claimToken, zoomPercentRef.current / 100)"), "Native previews should restore saved zoom through the current Rust claim");
+  assert(previewPanelSource.includes("setPreviewWebviewZoom(claim.label, claim.claimToken, zoomPercent / 100)"), "Native previews should apply zoom changes without recreating the webview");
+  assert(previewPanelSource.includes("setPreviewWebviewMuted(label, claim.claimToken, mutedRef.current)"), "Native previews should restore persisted tab mute through the current Rust claim");
+  assert(previewPanelSource.includes("setPreviewWebviewBounds(claim.label, claim.claimToken, rect)"), "Native preview geometry should reject stale slot owners");
+  assert(previewPanelSource.includes("navigation.claimToken !== claim.claimToken"), "Pooled navigation events should reject superseded logical tab claims");
+  assert(previewPanelSource.includes('PREVIEW_CONTROL_OVERLAY_LABEL = "artifact-overlay-preview"'), "Preview activity should reuse one native overlay window");
+  assert(previewPanelSource.includes("active ? tab.url ? googleTarget"), "Inactive tabs should not mount browser preview surfaces");
+  assert(previewPanelSource.includes("MAX_PREVIEW_BROWSER_TABS = 24"), "Live preview tabs should have the same bound as restored sessions");
+  assert(!previewPanelSource.includes("closePreviewWebview"), "Routine preview lifecycle should not expose controller close calls");
+  assert(previewWebviewSource.includes("current_url.as_str() != payload.url().as_str()"), "Superseded page-load completions should not cross pooled claims");
+  assert(!previewWebviewSource.includes("webview.close()"), "Native preview maintenance should avoid synchronous controller close calls");
   assert(previewPanelSource.includes('label: tab.muted ? "Unmute tab" : "Mute tab"'), "Preview tab menus should toggle audio mute");
   assert(previewPanelSource.includes('shortcut.action === "zoom_in"'), "Native preview shortcuts should update the persisted zoom preference");
   assert(workspaceCodePanelSource.includes('data-testid="workspace-code-rail-resizer"'), "Workspace Code should expose a keyboard-resizable file rail");

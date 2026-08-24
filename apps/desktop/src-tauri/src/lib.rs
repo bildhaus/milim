@@ -4492,12 +4492,33 @@ fn finish_after_server_shutdown<R: tauri::Runtime>(
     let preview_runtime = app.state::<DesktopPreviewRuntime>().0.clone();
     tauri::async_runtime::spawn(async move {
         server_runtime.shutdown(preview_runtime).await;
+        arm_desktop_finish_watchdog(action);
         match action {
             DesktopFinishAction::Exit => app.exit(0),
             DesktopFinishAction::Restart => app.restart(),
         }
     });
 }
+
+#[cfg(windows)]
+fn arm_desktop_finish_watchdog(action: DesktopFinishAction) {
+    let executable = std::env::current_exe().ok();
+    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        if matches!(action, DesktopFinishAction::Restart) {
+            if let Some(executable) = executable {
+                let _ = std::process::Command::new(executable)
+                    .args(arguments)
+                    .spawn();
+            }
+        }
+        std::process::exit(0);
+    });
+}
+
+#[cfg(not(windows))]
+fn arm_desktop_finish_watchdog(_action: DesktopFinishAction) {}
 
 fn exit_after_server_shutdown<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
     finish_after_server_shutdown(app, DesktopFinishAction::Exit);
@@ -5071,11 +5092,12 @@ pub fn run() {
             preview_webview::preview_webview_navigate,
             preview_webview::preview_webview_reload,
             preview_webview::preview_webview_set_muted,
-            preview_webview::preview_webview_history,
-            preview_webview::preview_webview_url,
+            preview_webview::preview_webview_set_zoom,
+            preview_webview::preview_webview_set_bounds,
             preview_webview::preview_webview_create,
             preview_webview::preview_webview_clear_data,
-            preview_webview::preview_webview_close
+            preview_webview::preview_webview_set_visibility,
+            preview_webview::preview_webview_diagnostics
         ])
         .run(tauri::generate_context!())
         .expect("error while running milim desktop");

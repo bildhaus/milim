@@ -19,6 +19,7 @@ export type PreviewWebviewLoadState =
 
 export interface PreviewWebviewNavigation {
   label: string;
+  claimToken: number;
   url: string;
   state: PreviewWebviewLoadState;
   message?: string;
@@ -27,16 +28,19 @@ export interface PreviewWebviewNavigation {
 export interface PreviewWebviewNewTab {
   requestId: number;
   openerLabel: string;
+  claimToken: number;
   url: string;
 }
 
 export interface PreviewWebviewShortcut {
   label: string;
+  claimToken: number;
   action: "new_tab" | "close_tab" | "zoom_in" | "zoom_out" | "zoom_reset";
 }
 
 export interface PreviewWebviewTitle {
   label: string;
+  claimToken: number;
   title: string;
 }
 
@@ -54,6 +58,13 @@ export interface PreviewWebviewBounds {
   height: number;
 }
 
+export interface PreviewWebviewCreateResult {
+  reused: boolean;
+  url: string;
+  claimToken: number;
+  navigated: boolean;
+}
+
 const IS_TAURI =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -63,9 +74,9 @@ export async function createPreviewWebview(
   bounds: PreviewWebviewBounds,
   storageMode: PreviewBrowserStorageMode,
   profileId: string,
-): Promise<void> {
-  if (!IS_TAURI) return;
-  await invoke("preview_webview_create", { label, url, bounds, storageMode, profileId });
+): Promise<PreviewWebviewCreateResult | null> {
+  if (!IS_TAURI) return null;
+  return await invoke<PreviewWebviewCreateResult>("preview_webview_create", { label, url, bounds, storageMode, profileId });
 }
 
 export async function clearPreviewWebviewData(): Promise<void> {
@@ -73,45 +84,55 @@ export async function clearPreviewWebviewData(): Promise<void> {
   await invoke("preview_webview_clear_data");
 }
 
-export async function closePreviewWebview(label: string): Promise<void> {
-  if (!IS_TAURI) return;
-  await invoke("preview_webview_close", { label });
+export async function setPreviewWebviewVisibility(
+  label: string,
+  claimToken: number,
+  visible: boolean,
+  muted: boolean,
+): Promise<boolean> {
+  if (!IS_TAURI) return false;
+  return await invoke<boolean>("preview_webview_set_visibility", { label, claimToken, visible, muted });
 }
 
 export async function navigatePreviewWebview(
   label: string,
+  claimToken: number,
   url: string,
 ): Promise<void> {
   if (!IS_TAURI) return;
-  await invoke("preview_webview_navigate", { label, url });
+  await invoke("preview_webview_navigate", { label, claimToken, url });
 }
 
-export async function reloadPreviewWebview(label: string): Promise<void> {
+export async function reloadPreviewWebview(label: string, claimToken: number): Promise<void> {
   if (!IS_TAURI) return;
-  await invoke("preview_webview_reload", { label });
+  await invoke("preview_webview_reload", { label, claimToken });
 }
 
 export async function setPreviewWebviewMuted(
   label: string,
+  claimToken: number,
   muted: boolean,
 ): Promise<void> {
   if (!IS_TAURI) return;
-  await invoke("preview_webview_set_muted", { label, muted });
+  await invoke("preview_webview_set_muted", { label, claimToken, muted });
 }
 
-export async function movePreviewWebviewHistory(
+export async function setPreviewWebviewZoom(
   label: string,
-  delta: -1 | 1,
+  claimToken: number,
+  scaleFactor: number,
 ): Promise<void> {
   if (!IS_TAURI) return;
-  await invoke("preview_webview_history", { label, delta });
+  await invoke("preview_webview_set_zoom", { label, claimToken, scaleFactor });
 }
 
-export async function currentPreviewWebviewUrl(
+export async function setPreviewWebviewBounds(
   label: string,
-): Promise<string | null> {
-  if (!IS_TAURI) return null;
-  return await invoke<string>("preview_webview_url", { label });
+  claimToken: number,
+  bounds: PreviewWebviewBounds,
+): Promise<void> {
+  if (!IS_TAURI) return;
+  await invoke("preview_webview_set_bounds", { label, claimToken, bounds });
 }
 
 export async function listenForPreviewWebviewNavigation(

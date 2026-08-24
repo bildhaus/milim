@@ -50,6 +50,7 @@ type SessionMessageDelta = { index: number; messageJson: string };
 type SessionDelta = {
   id: string;
   sessionJson?: string;
+  runtimeBindingChanges?: string[];
   baseMessageCount: number;
   messageCount: number;
   preserveMessages?: boolean;
@@ -123,6 +124,27 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+const ACCOUNT_RUNTIME_FIELDS = [
+  ["codex", "codexThreadId", "codexLastSyncedMessageId"],
+  ["claude", "claudeSessionId", "claudeLastSyncedMessageId"],
+  ["opencode", "opencodeSessionId", "opencodeLastSyncedMessageId"],
+  ["pi", "piSessionId", "piLastSyncedMessageId"],
+] as const;
+
+function runtimeBindingChanges(
+  previous: Record<string, unknown> | undefined,
+  next: Record<string, unknown>,
+): string[] {
+  const previousRuntime = asRecord(previous?.accountRuntime);
+  const nextRuntime = asRecord(next.accountRuntime);
+  return ACCOUNT_RUNTIME_FIELDS.flatMap(([kind, idField, cursorField]) =>
+    previousRuntime?.[idField] === nextRuntime?.[idField]
+      && previousRuntime?.[cursorField] === nextRuntime?.[cursorField]
+      ? []
+      : [kind],
+  );
 }
 
 function parseSessionStorageValue(value: string): SessionStorageValue {
@@ -240,6 +262,7 @@ function buildSessionsDelta(
       upserts.push({
         id,
         sessionJson,
+        runtimeBindingChanges: runtimeBindingChanges(previousSession, session),
         baseMessageCount,
         messageCount: preserveMessages
           ? Number(session.persistedMessageCount ?? messages.length)
