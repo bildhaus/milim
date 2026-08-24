@@ -90,6 +90,7 @@ import {
   type ChatStreamPart,
   type ControlPendingInputV1,
   type ControlQueuedTurnV1,
+  type ControlTimelineItemV1,
   type ThreadLinkV1,
   type ChildThreadInfo,
   type DelegationPolicy,
@@ -317,6 +318,7 @@ import { checkpointWorkspaceBeforeTurn } from "../lib/turnWorkspace";
 import {
   controlAttachments,
   controlQueuedMessage,
+  canonicalNativeSessionAction,
   hostBusySessionIdsFromBootstrap,
   mailboxMessagesFromTimeline,
   mergeMailboxMessages,
@@ -460,6 +462,71 @@ const PREVIEW_PANEL_MIN_WIDTH = 360;
 const RECENT_THREAD_SWITCHER_CLOSE_MS = 1600;
 const EVENT_STREAM_RECONNECT_MAX_MS = 5_000;
 const previewArtifactCache = new WeakMap<ChatMessage, ChatArtifact[] | null>();
+
+type CanonicalAccountRuntimeKind = "codex" | "claude" | "opencode" | "pi";
+
+function setCanonicalNativeSession(
+  sessionId: string,
+  adapter: CanonicalAccountRuntimeKind,
+  nativeSessionId: string,
+  lastSyncedMessageId?: string,
+) {
+  const id = nativeSessionId.trim();
+  if (!id) return;
+  const store = useSessions.getState();
+  const current = store.sessions.find((session) => session.id === sessionId)?.accountRuntime;
+  const existing = adapter === "codex"
+    ? current?.codexThreadId
+    : adapter === "claude"
+      ? current?.claudeSessionId
+      : adapter === "opencode"
+        ? current?.opencodeSessionId
+        : current?.piSessionId;
+  const existingCursor = adapter === "codex"
+    ? current?.codexLastSyncedMessageId
+    : adapter === "claude"
+      ? current?.claudeLastSyncedMessageId
+      : adapter === "opencode"
+        ? current?.opencodeLastSyncedMessageId
+        : current?.piLastSyncedMessageId;
+  if (existing === id && (!lastSyncedMessageId || existingCursor === lastSyncedMessageId)) return;
+  if (adapter === "codex") store.setAccountRuntime(sessionId, { codexThreadId: id, ...(lastSyncedMessageId ? { codexLastSyncedMessageId: lastSyncedMessageId } : {}) });
+  else if (adapter === "claude") store.setAccountRuntime(sessionId, { claudeSessionId: id, ...(lastSyncedMessageId ? { claudeLastSyncedMessageId: lastSyncedMessageId } : {}) });
+  else if (adapter === "opencode") store.setAccountRuntime(sessionId, { opencodeSessionId: id, ...(lastSyncedMessageId ? { opencodeLastSyncedMessageId: lastSyncedMessageId } : {}) });
+  else store.setAccountRuntime(sessionId, { piSessionId: id, ...(lastSyncedMessageId ? { piLastSyncedMessageId: lastSyncedMessageId } : {}) });
+}
+
+function syncCanonicalNativeSession(
+  sessionId: string,
+  adapter: string,
+  runId: string,
+  items: readonly ControlTimelineItemV1[],
+) {
+  if (adapter !== "codex" && adapter !== "claude" && adapter !== "opencode" && adapter !== "pi") return;
+  const action = canonicalNativeSessionAction(items, runId);
+  if (!action) return;
+  if (action.kind === "clear") {
+    const store = useSessions.getState();
+    const current = store.sessions.find((session) => session.id === sessionId)?.accountRuntime;
+    const currentId = adapter === "codex"
+      ? current?.codexThreadId
+      : adapter === "claude"
+        ? current?.claudeSessionId
+        : adapter === "opencode"
+          ? current?.opencodeSessionId
+          : current?.piSessionId;
+    if (!action.expectedSessionId || currentId === action.expectedSessionId) {
+      store.clearAccountRuntimeKind(sessionId, adapter);
+    }
+    return;
+  }
+  setCanonicalNativeSession(
+    sessionId,
+    adapter,
+    action.nativeSessionId,
+    action.lastSyncedMessageId,
+  );
+}
 
 type TranscriptScrollAnchor = {
   threadId: string;
@@ -3028,6 +3095,7 @@ export function ChatView({
         const attachedRunId = alreadyAttached ? run?.id : undefined;
         const timeline = await getControlTimeline(activeId, { tail: 500 });
         if (disposed) return;
+        if (run) syncCanonicalNativeSession(activeId, run.adapter, run.id, timeline.items);
         let reconciledMessages = sessionMessages(activeId);
         let timelineChanged = false;
         const timelineRunIds = new Set(
@@ -3098,6 +3166,7 @@ export function ChatView({
         socketController = null;
         await pollControlRun(activeId, run.id, controller.signal, (items) => {
           if (disposed) return;
+          syncCanonicalNativeSession(activeId, run.adapter, run.id, items);
           const projected = projectControlRunMessages(items, run.id);
           if (!projected.length) return;
           setCanonicalPendingInputs((current) => pendingInputsAfterProjection(current, projected));
@@ -6594,6 +6663,14 @@ export function ChatView({
       const runId = command.run_id;
       activeRunId = runId;
       canonicalRunIdsRef.current.set(sessionId, runId);
+      const runtimeKind = accountRuntimeKind(selectedModel);
+      const acceptedNativeSessionId = command.data && typeof command.data === "object" && !Array.isArray(command.data)
+        && typeof command.data.native_session_id === "string"
+        ? command.data.native_session_id
+        : null;
+      if (runtimeKind && acceptedNativeSessionId) {
+        setCanonicalNativeSession(sessionId, runtimeKind, acceptedNativeSessionId);
+      }
       const capabilities = command.data && typeof command.data === "object" && !Array.isArray(command.data)
         ? command.data.capabilities
         : null;
@@ -6611,6 +6688,7 @@ export function ChatView({
         runId,
         controller.signal,
         (items) => {
+          if (runtimeKind) syncCanonicalNativeSession(sessionId, runtimeKind, runId, items);
           const projected = projectControlRunMessages(items, runId);
           if (!projected.length) return;
           setCanonicalPendingInputs((current) => pendingInputsAfterProjection(current, projected));

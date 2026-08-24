@@ -1,5 +1,6 @@
 import { strict as assert } from "node:assert";
 import {
+  canonicalNativeSessionAction,
   controlQueuedMessage,
   hostBusySessionIdsFromBootstrap,
   mailboxMessagesFromTimeline,
@@ -28,6 +29,40 @@ const item = (
   data,
   created_at_ms: seq,
 });
+
+assert.deepEqual(
+  canonicalNativeSessionAction([
+    item(1, "session_established", { native_session_id: "codex-thread-1" }),
+    item(2, "turn_completed", { native_session_id: "codex-thread-1" }),
+  ], "run-1"),
+  { kind: "set", nativeSessionId: "codex-thread-1" },
+  "canonical timeline replication should copy the established native session into the renderer replica",
+);
+assert.deepEqual(
+  canonicalNativeSessionAction([
+    item(1, "session_established", { native_session_id: "codex-thread-1" }),
+    item(2, "session_recovery_required", { native_session_id: "codex-thread-1" }),
+    item(3, "turn_failed", { native_session_id: "codex-thread-1" }),
+  ], "run-1"),
+  { kind: "clear", expectedSessionId: "codex-thread-1" },
+  "a failed terminal event after recovery must not restore the rejected session",
+);
+assert.equal(
+  canonicalNativeSessionAction([
+    item(1, "session_recovery_required", { native_session_id: "obsolete" }),
+    { ...item(2, "session_established", { native_session_id: "current" }), run_id: "run-2" },
+  ], "run-2")?.kind,
+  "set",
+  "recovery history from an older run must not clear the current run's binding",
+);
+assert.deepEqual(
+  canonicalNativeSessionAction([
+    item(1, "session_established", { native_session_id: "codex-thread-1" }),
+    item(2, "message", { id: "assistant-1", role: "assistant", content: "done" }),
+  ], "run-1"),
+  { kind: "set", nativeSessionId: "codex-thread-1", lastSyncedMessageId: "assistant-1" },
+  "completed native turns should advance the renderer's per-adapter sync cursor",
+);
 
 assert.equal(
   shouldQueueCanonicalFollowup("thread-1", ["thread-1"]),

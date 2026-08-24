@@ -184,7 +184,9 @@ try {
   } else if (browserProfileOnly) {
     const errors = collectErrors(session.page);
     await runBrowserProfileCheck(session);
-    consoleErrors.push(...errors);
+    consoleErrors.push(
+      ...errors.filter((message) => !message.includes("net::ERR_CONNECTION_REFUSED")),
+    );
   } else if (nativePreviewOnly) {
     const errors = collectErrors(session.page);
     await runNativePreviewOcclusionCheck(session.page, session.child.pid);
@@ -2226,12 +2228,17 @@ async function runNativePreviewOcclusionCheck(page, pid) {
 
   const apiBase = await page.evaluate(() => window.__TAURI_INTERNALS__.invoke("api_base_url"));
   const previewUrl = new URL("/health", apiBase).toString();
+  const threadId = await page
+    .locator("[data-sidebar-session-id].active")
+    .first()
+    .getAttribute("data-sidebar-session-id");
+  if (!threadId) throw new Error("Expected an active thread before preview test.");
   await page.evaluate(
-    async (url) => window.__TAURI_INTERNALS__.invoke("plugin:event|emit", {
+    async ({ threadId, url }) => window.__TAURI_INTERNALS__.invoke("plugin:event|emit", {
       event: "milim://preview-open-url",
-      payload: { url },
+      payload: { threadId, url },
     }),
-    previewUrl,
+    { threadId, url: previewUrl },
   );
   const input = page.getByTestId("preview-browser-url");
   await input.waitFor();
@@ -2474,13 +2481,19 @@ async function runStaticWorkspacePreviewCheck(page, pid) {
 
 async function runBrowserProfileCheck(session) {
   const testServer = await startBrowserProfileServer();
+  const persistentLabel = "artifact-browser-url-persistent-slot";
+  const privateLabel = "artifact-browser-url-private-slot";
   try {
-    await createE2ePreviewWebview(
+    const persistentCreate = await createE2ePreviewWebview(
       session.page,
-      "artifact-browser-e2e-persistent-1",
+      persistentLabel,
       `${testServer.origin}/?phase=persistent-write&write=persistent`,
       "persistent",
+      "e2e-persistent",
     );
+    if (persistentCreate.reused || !persistentCreate.url.includes("phase=persistent-write")) {
+      throw new Error(`Initial native preview creation returned an unexpected result: ${JSON.stringify(persistentCreate)}`);
+    }
     assertBrowserReport(
       await testServer.waitForReport("persistent-write").then((report) => {
         assertBrowserCapabilities(report);
@@ -2489,26 +2502,41 @@ async function runBrowserProfileCheck(session) {
       "persistent",
       "Persistent browser write",
     );
-    await closeE2ePreviewWebview(session.page, "artifact-browser-e2e-persistent-1");
+    const persistentReuse = await createE2ePreviewWebview(
+      session.page,
+      persistentLabel,
+      `${testServer.origin}/?phase=persistent-reassigned`,
+      "persistent",
+      "e2e-persistent",
+    );
+    if (!persistentReuse.reused || !persistentReuse.navigated || !persistentReuse.url.includes("phase=persistent-reassigned")) {
+      throw new Error(`Bounded native preview slot was not reassigned in place: ${JSON.stringify(persistentReuse)}`);
+    }
+    assertBrowserReport(
+      await testServer.waitForReport("persistent-reassigned"),
+      "persistent",
+      "Persistent browser slot reassignment",
+    );
 
     await createE2ePreviewWebview(
       session.page,
-      "artifact-browser-e2e-persistent-2",
+      persistentLabel,
       `${testServer.origin}/?phase=persistent-reopen`,
       "persistent",
+      "e2e-persistent",
     );
     assertBrowserReport(
       await testServer.waitForReport("persistent-reopen"),
       "persistent",
       "Persistent browser reopen",
     );
-    await closeE2ePreviewWebview(session.page, "artifact-browser-e2e-persistent-2");
     await runRestartCheck(session);
-    await createE2ePreviewWebview(
+    const persistentRestart = await createE2ePreviewWebview(
       session.page,
-      "artifact-browser-e2e-persistent-3",
+      persistentLabel,
       `${testServer.origin}/?phase=persistent-restart`,
       "persistent",
+      "e2e-persistent",
     );
     assertBrowserReport(
       await testServer.waitForReport("persistent-restart"),
@@ -2518,14 +2546,15 @@ async function runBrowserProfileCheck(session) {
 
     await navigateE2ePreviewWebview(
       session.page,
-      "artifact-browser-e2e-persistent-3",
+      persistentLabel,
+      persistentRestart.claimToken,
       `${testServer.origin}/?phase=cache-reload`,
     );
     await testServer.waitForReport("cache-reload", "main", 10_000, (report) => report.version === "rgb(12, 34, 56)");
     testServer.setCacheColor("rgb(65, 43, 21)");
-    await session.page.evaluate(async (label) => {
-      await window.__TAURI_INTERNALS__.invoke("preview_webview_reload", { label });
-    }, "artifact-browser-e2e-persistent-3");
+    await session.page.evaluate(async ({ label, claimToken }) => {
+      await window.__TAURI_INTERNALS__.invoke("preview_webview_reload", { label, claimToken });
+    }, { label: persistentLabel, claimToken: persistentRestart.claimToken });
     assertBrowserReport(
       await testServer.waitForReport("cache-reload", "main", 10_000, (report) => report.version === "rgb(65, 43, 21)"),
       "persistent",
@@ -2534,82 +2563,80 @@ async function runBrowserProfileCheck(session) {
 
     await navigateE2ePreviewWebview(
       session.page,
-      "artifact-browser-e2e-persistent-3",
+      persistentLabel,
+      persistentRestart.claimToken,
       `${testServer.origin}/?phase=blocked-navigation&blocked=1`,
     );
     await testServer.waitForReport("blocked-navigation");
     await testServer.waitForReport("blocked-navigation-survived");
-    await closeE2ePreviewWebview(session.page, "artifact-browser-e2e-persistent-3");
-
     await createE2ePreviewWebview(
       session.page,
-      "artifact-browser-e2e-private-1",
+      privateLabel,
       `${testServer.origin}/?phase=private-write&write=private`,
       "private",
+      "e2e-private-a",
     );
     assertBrowserReport(
       await testServer.waitForReport("private-write"),
       "private",
       "Private browser write",
     );
-    await closeE2ePreviewWebview(session.page, "artifact-browser-e2e-private-1");
     await createE2ePreviewWebview(
       session.page,
-      "artifact-browser-e2e-private-2",
+      privateLabel,
       `${testServer.origin}/?phase=private-reopen`,
       "private",
+      "e2e-private-b",
     );
     assertBrowserReport(
       await testServer.waitForReport("private-reopen"),
       null,
       "Private browser reopen",
     );
-    await closeE2ePreviewWebview(session.page, "artifact-browser-e2e-private-2");
-
     await session.page.evaluate(async () => {
       await window.__TAURI_INTERNALS__.invoke("preview_webview_clear_data");
     });
     await createE2ePreviewWebview(
       session.page,
-      "artifact-browser-e2e-persistent-cleared",
+      persistentLabel,
       `${testServer.origin}/?phase=persistent-cleared`,
       "persistent",
+      "e2e-persistent",
     );
     assertBrowserReport(
       await testServer.waitForReport("persistent-cleared"),
       null,
       "Cleared persistent browser",
     );
-    await closeE2ePreviewWebview(session.page, "artifact-browser-e2e-persistent-cleared");
+    const diagnostics = await session.page.evaluate(async () => {
+      return await window.__TAURI_INTERNALS__.invoke("preview_webview_diagnostics");
+    });
+    if (diagnostics.liveSurfaces > diagnostics.maximumSurfaces || !diagnostics.maintenanceSurface) {
+      throw new Error(`Native preview pool exceeded its bound: ${JSON.stringify(diagnostics)}`);
+    }
   } finally {
     await testServer.close();
   }
 }
 
-async function createE2ePreviewWebview(page, label, url, storageMode) {
-  await page.evaluate(async ({ label, url, storageMode }) => {
-    await window.__TAURI_INTERNALS__.invoke("preview_webview_create", {
+async function createE2ePreviewWebview(page, label, url, storageMode, profileId) {
+  const result = await page.evaluate(async ({ label, url, storageMode, profileId }) => {
+    return await window.__TAURI_INTERNALS__.invoke("preview_webview_create", {
       label,
       url,
       bounds: { x: 1180, y: 160, width: 480, height: 720 },
       storageMode,
-      profileId: label,
+      profileId,
     });
-  }, { label, url, storageMode });
+  }, { label, url, storageMode, profileId });
   await delay(500);
+  return result;
 }
 
-async function navigateE2ePreviewWebview(page, label, url) {
-  await page.evaluate(async ({ label, url }) => {
-    await window.__TAURI_INTERNALS__.invoke("preview_webview_navigate", { label, url });
-  }, { label, url });
-}
-
-async function closeE2ePreviewWebview(page, label) {
-  await page.evaluate(async (label) => {
-    await window.__TAURI_INTERNALS__.invoke("preview_webview_close", { label });
-  }, label);
-  await delay(1_000);
+async function navigateE2ePreviewWebview(page, label, claimToken, url) {
+  await page.evaluate(async ({ label, claimToken, url }) => {
+    await window.__TAURI_INTERNALS__.invoke("preview_webview_navigate", { label, claimToken, url });
+  }, { label, claimToken, url });
 }
 
 function assertBrowserReport(report, expectedValue, label) {
@@ -4663,14 +4690,14 @@ async function assertThemeSurfaceColor(page, expected, message) {
 }
 
 async function runAppShortcutSettingsCheck(page) {
-  await page.getByTestId("settings-section-system").click();
+  await page.getByTestId("settings-section-app").click();
   await page.getByTestId("app-shortcut-stopGeneration").click();
   await page.keyboard.press("F2");
   await shortcutRow(page, "stopGeneration").getByText("F2").waitFor();
 }
 
 async function assertAppShortcutsPersisted(page) {
-  await page.getByTestId("settings-section-system").click();
+  await page.getByTestId("settings-section-app").click();
   await shortcutRow(page, "newChat").getByText("Ctrl+N").waitFor();
   await shortcutRow(page, "focusSearch").getByText("Ctrl+K").waitFor();
   await shortcutRow(page, "focusComposer").getByText("Ctrl+L").waitFor();

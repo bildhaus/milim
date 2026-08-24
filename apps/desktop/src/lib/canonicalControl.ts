@@ -14,6 +14,50 @@ import type { QueuedMessage } from "../sessions/store.js";
 
 type CanonicalMessage = ChatMessage;
 
+export type CanonicalNativeSessionAction =
+  | { kind: "set"; nativeSessionId: string; lastSyncedMessageId?: string }
+  | { kind: "clear"; expectedSessionId: string | null };
+
+export function canonicalNativeSessionAction(
+  items: readonly ControlTimelineItemV1[],
+  runId: string,
+): CanonicalNativeSessionAction | null {
+  let established: string | null = null;
+  let recoverySessionId: string | null = null;
+  let recoveryRequired = false;
+  let lastSyncedMessageId: string | null = null;
+  for (const item of items) {
+    if (item.run_id !== runId) continue;
+    if (
+      item.type === "message"
+      && item.data.role === "assistant"
+      && typeof item.data.id === "string"
+      && item.data.id.trim()
+    ) {
+      lastSyncedMessageId = item.data.id.trim();
+    }
+    const nativeSessionId = typeof item.data.native_session_id === "string"
+      ? item.data.native_session_id.trim()
+      : "";
+    if (item.type === "session_recovery_required") {
+      recoveryRequired = true;
+      recoverySessionId = nativeSessionId || established;
+      continue;
+    }
+    if (!recoveryRequired && nativeSessionId) established = nativeSessionId;
+  }
+  if (recoveryRequired) {
+    return { kind: "clear", expectedSessionId: recoverySessionId };
+  }
+  return established
+    ? {
+        kind: "set",
+        nativeSessionId: established,
+        ...(lastSyncedMessageId ? { lastSyncedMessageId } : {}),
+      }
+    : null;
+}
+
 function projectedResponseMetrics(value: unknown): ChatMessage["metrics"] | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const metrics = value as Record<string, unknown>;

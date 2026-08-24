@@ -27,7 +27,7 @@ Every provider and runtime group can be collapsed. On desktop, the layout is sha
 
 Hot Swap assesses the selected target before committing the change. Full-parity swaps stay one-click. Smaller context windows, explicitly unsupported image/tool input, unavailable setup, or stale account-runtime history open a preflight. Unknown image capability allows an attempted send without falsely claiming support; explicit false blocks the capability claim, and explicit provider metadata wins over model-name fallbacks. Codex and Claude native sessions can receive image pixels, so account-runtime targets are no longer degraded solely because they are account runtimes.
 
-OpenCode model rows use the CLI's verbose catalog for context, output, image, tool-use, and reasoning metadata when the installed version exposes it. Failed or canceled account-runtime turns clear only the affected native session before the next send so a prompt persisted by the CLI cannot be replayed into divergent history.
+OpenCode model rows use the CLI's verbose catalog for context, output, image, tool-use, and reasoning metadata when the installed version exposes it. Each Milim thread durably keeps one native binding per account-runtime adapter and resumes it across later turns and app restarts. Only an explicit session-recovery signal compare-and-clears the matching adapter binding; ordinary failures, cancellations, stale recovery events, and switches to another adapter do not erase valid sessions.
 
 ## Provider kinds
 

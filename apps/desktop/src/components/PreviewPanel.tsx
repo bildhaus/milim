@@ -8,7 +8,7 @@ import { useBrowserRecentVisits, type BrowserRecentVisit } from "../browser/rece
 import type { PreviewControlActivity } from "../lib/previewActivity";
 import { googleWorkspaceUrl } from "../lib/googleWorkspace";
 import type { SessionBrowserSession, SessionBrowserTab } from "../sessions/store";
-import { closePreviewWebview, createPreviewWebview, listenForPreviewWebviewNavigation, listenForPreviewWebviewNewTab, listenForPreviewWebviewShortcut, listenForPreviewWebviewTitle, movePreviewWebviewHistory, navigatePreviewWebview, reloadPreviewWebview, setPreviewWebviewMuted, type PreviewBrowserStorageMode, type PreviewWebviewLoadState, type PreviewWebviewShortcut } from "../lib/previewWebview";
+import { createPreviewWebview, listenForPreviewWebviewNavigation, listenForPreviewWebviewNewTab, listenForPreviewWebviewShortcut, listenForPreviewWebviewTitle, navigatePreviewWebview, reloadPreviewWebview, setPreviewWebviewBounds, setPreviewWebviewMuted, setPreviewWebviewVisibility, setPreviewWebviewZoom, type PreviewBrowserStorageMode, type PreviewWebviewLoadState, type PreviewWebviewNavigation, type PreviewWebviewShortcut, type PreviewWebviewTitle } from "../lib/previewWebview";
 import { useSettings } from "../settings/store";
 import { nextPreviewBrowserZoom, useUiPreferences } from "../ui/store";
 import { shortcutLabel, shortcutMatchesEvent } from "../ui/shortcuts";
@@ -29,18 +29,17 @@ export type PreviewBrowserSession = SessionBrowserSession;
 type PreviewLogLevel = "log" | "info" | "warn" | "error";
 type NativeWebviewHandle = {
   label: string;
-  close: () => Promise<void>;
   hide: () => Promise<void>;
   show: () => Promise<void>;
   once: <T>(event: string, handler: (event: { payload: T }) => void) => Promise<() => void>;
   setPosition: (position: unknown) => Promise<void>;
   setSize: (size: unknown) => Promise<void>;
-  setZoom: (scaleFactor: number) => Promise<void>;
 };
 type NativeOverlayWindowHandle = NativeWebviewHandle & {
   setIgnoreCursorEvents: (ignore: boolean) => Promise<void>;
 };
 type NativeVisibleHandle = Pick<NativeWebviewHandle, "hide" | "show">;
+type NativePreviewClaim = { label: string; claimToken: number };
 type PreviewControlOverlayPoint = { x: number; y: number };
 
 type PreviewControlOverlayPayload = {
@@ -76,6 +75,10 @@ const LOG_DRAWER_MAX_HEIGHT = 360;
 const LOG_DRAWER_KEYBOARD_STEP = 24;
 const PREVIEW_CONTROL_OVERLAY_CLOSE_MS = 3400;
 const PREVIEW_CONTROL_OVERLAY_STORAGE_PREFIX = "milim-preview-control-activity:";
+const PREVIEW_CONTROL_OVERLAY_LABEL = "artifact-overlay-preview";
+const PREVIEW_CONTROL_OVERLAY_CHANNEL = "preview-control-overlay";
+const MAX_PREVIEW_BROWSER_TABS = 24;
+let previewControlOverlayOwner = 0;
 const PREVIEW_TAB_IDS: Record<PreviewTab, string> = {
   preview: "inspector-tab-preview",
   code: "inspector-tab-code",
@@ -94,6 +97,14 @@ export function nativePreviewBlockedByAppUi(root: Pick<ParentNode, "querySelecto
 
 export function previewSurfaceIsInspectable(surface: PreviewSurfaceTarget | null): boolean {
   return Boolean(surface?.status === "ready" && surface.capabilities.includes("dom_snapshot"));
+}
+
+export function previewNativeWebviewLabel(
+  surfaceKind: PreviewSurfaceKind,
+  storageMode: PreviewBrowserStorageMode,
+): string {
+  const surface = surfaceKind === "native_browser" ? "url" : "app";
+  return `artifact-browser-${surface}-${surface === "app" ? "private" : storageMode}-slot`;
 }
 
 async function publishPreviewSurface(
@@ -218,9 +229,8 @@ export function PreviewPanel({
   const logIdRef = useRef(0);
   const logResizeStartRef = useRef<{ clientY: number; height: number } | null>(null);
   const previewWasDeferredRef = useRef(previewDeferred);
-  const nativeBrowserLabelsRef = useRef(new Map<string, string>());
+  const nativeBrowserClaimsRef = useRef(new Map<string, NativePreviewClaim>());
   const handledNewTabRequestsRef = useRef(new Set<number>());
-  const pendingNativeHistoryDeltaRef = useRef(new Map<string, -1 | 1>());
   const pendingNativeUrlRef = useRef(new Map<string, string>());
   const runtimeStatusTriggerRef = useRef<HTMLButtonElement | null>(null);
   const runtimePanelRef = useRef<HTMLElement | null>(null);
@@ -344,6 +354,10 @@ export function PreviewPanel({
     }
     const tab = initialBrowserPage(normalized);
     const current = browserSessionRef.current;
+    if (current.tabs.length >= MAX_PREVIEW_BROWSER_TABS) {
+      setBrowserError(`Preview browser tabs are limited to ${MAX_PREVIEW_BROWSER_TABS}.`);
+      return;
+    }
     updateBrowserSession({
       ...current,
       tabs: [...current.tabs, tab],
@@ -361,8 +375,7 @@ export function PreviewPanel({
   function closeBrowserTab(tabId: string) {
     const index = browserSession.tabs.findIndex((tab) => tab.id === tabId);
     if (index < 0) return;
-    nativeBrowserLabelsRef.current.delete(tabId);
-    pendingNativeHistoryDeltaRef.current.delete(tabId);
+    nativeBrowserClaimsRef.current.delete(tabId);
     pendingNativeUrlRef.current.delete(tabId);
     const tabs = browserSession.tabs.filter((tab) => tab.id !== tabId);
     if (!tabs.length) {
@@ -642,7 +655,7 @@ export function PreviewPanel({
     setBrowserError(null);
     const nextHistory = browserHistory.slice(0, Math.max(browserHistoryIndex + 1, 0));
     if (nextHistory[nextHistory.length - 1] !== url) nextHistory.push(url);
-    if (IS_TAURI && nativeBrowserLabelsRef.current.has(activeBrowserPage.id)) {
+    if (IS_TAURI && nativeBrowserClaimsRef.current.has(activeBrowserPage.id)) {
       pendingNativeUrlRef.current.set(activeBrowserPage.id, url);
     }
     updateBrowserPage({
@@ -703,15 +716,6 @@ export function PreviewPanel({
     const nextIndex = browserHistoryIndex + delta;
     const nextUrl = browserHistory[nextIndex];
     if (!nextUrl) return;
-    const label = nativeBrowserLabelsRef.current.get(activeBrowserPage.id);
-    if (IS_TAURI && label) {
-      pendingNativeHistoryDeltaRef.current.set(activeBrowserPage.id, delta);
-      void movePreviewWebviewHistory(label, delta).catch((error) => {
-        pendingNativeHistoryDeltaRef.current.delete(activeBrowserPage.id);
-        setBrowserError(error instanceof Error ? error.message : String(error));
-      });
-      return;
-    }
     updateBrowserPage({ ...activeBrowserPage, url: nextUrl, input: nextUrl, history: browserHistory, historyIndex: nextIndex });
     setBrowserError(null);
   }
@@ -729,15 +733,7 @@ export function PreviewPanel({
       setBrowserError(null);
       return;
     }
-    const pendingDelta = pendingNativeHistoryDeltaRef.current.get(tabId);
-    if (pendingDelta) {
-      pendingNativeHistoryDeltaRef.current.delete(tabId);
-      const nextIndex = Math.min(Math.max(tab.historyIndex + pendingDelta, 0), Math.max(tab.history.length - 1, 0));
-      const nextHistory = [...tab.history];
-      if (nextHistory.length) nextHistory[nextIndex] = url;
-      else nextHistory.push(url);
-      updateBrowserPage({ ...tab, ...metadata, url, input: url, history: nextHistory, historyIndex: nextIndex });
-    } else if (pendingNativeUrlRef.current.has(tabId)) {
+    if (pendingNativeUrlRef.current.has(tabId)) {
       pendingNativeUrlRef.current.delete(tabId);
       const nextHistory = [...tab.history];
       const index = Math.min(Math.max(tab.historyIndex, 0), Math.max(nextHistory.length - 1, 0));
@@ -756,7 +752,6 @@ export function PreviewPanel({
 
   function handleNativeBrowserError(tabId: string, message: string) {
     pendingNativeUrlRef.current.delete(tabId);
-    pendingNativeHistoryDeltaRef.current.delete(tabId);
     if (tabId === browserSessionRef.current.activeTabId) setBrowserError(message);
   }
 
@@ -779,9 +774,9 @@ export function PreviewPanel({
 
   function reloadBrowser() {
     if (!browserUrl) return;
-    const label = nativeBrowserLabelsRef.current.get(activeBrowserPage.id);
-    if (IS_TAURI && label) {
-      void reloadPreviewWebview(label).catch((error) => setBrowserError(error instanceof Error ? error.message : String(error)));
+    const claim = nativeBrowserClaimsRef.current.get(activeBrowserPage.id);
+    if (IS_TAURI && claim) {
+      void reloadPreviewWebview(claim.label, claim.claimToken).catch((error) => setBrowserError(error instanceof Error ? error.message : String(error)));
       return;
     }
     setFrameKey((key) => key + 1);
@@ -789,9 +784,9 @@ export function PreviewPanel({
 
   function reloadBrowserTab(tab: PreviewBrowserPage) {
     if (!tab.url) return;
-    const label = nativeBrowserLabelsRef.current.get(tab.id);
-    if (IS_TAURI && label) {
-      void reloadPreviewWebview(label).catch((error) => setBrowserError(error instanceof Error ? error.message : String(error)));
+    const claim = nativeBrowserClaimsRef.current.get(tab.id);
+    if (IS_TAURI && claim) {
+      void reloadPreviewWebview(claim.label, claim.claimToken).catch((error) => setBrowserError(error instanceof Error ? error.message : String(error)));
       return;
     }
     if (tab.id !== browserSession.activeTabId) selectBrowserTab(tab.id);
@@ -1411,7 +1406,7 @@ export function PreviewPanel({
                   const active = tab.id === browserSession.activeTabId;
                   return (
                   <div className={`preview-browser-tab-page${active ? " active" : ""}`} key={tab.id}>
-                    {tab.url ? googleTarget ? (
+                    {active ? tab.url ? googleTarget ? (
                       <GoogleWorkspacePreview
                         fileId={googleTarget.fileId}
                         fallbackUrl={tab.url}
@@ -1436,9 +1431,9 @@ export function PreviewPanel({
                         surfaceError={selectedPreviewSource === "app" ? runtimeError : null}
                         zoomPercent={previewBrowserZoomPercent}
                         threadId={threadId}
-                        onNativeLabelChange={(label) => {
-                          if (label) nativeBrowserLabelsRef.current.set(tab.id, label);
-                          else nativeBrowserLabelsRef.current.delete(tab.id);
+                        onNativeClaimChange={(claim) => {
+                          if (claim) nativeBrowserClaimsRef.current.set(tab.id, claim);
+                          else nativeBrowserClaimsRef.current.delete(tab.id);
                         }}
                         onNavigation={(nextUrl, state) => syncNativeNavigation(tab.id, nextUrl, state)}
                         onNavigationError={(message) => handleNativeBrowserError(tab.id, message)}
@@ -1464,7 +1459,7 @@ export function PreviewPanel({
                         <strong>Open a preview URL</strong>
                         <span>Use the address bar for localhost or HTTPS pages.</span>
                       </div>
-                    )}
+                    ) : null}
                   </div>
                   );
                 })}
@@ -1800,7 +1795,7 @@ function NativeArtifactBrowser({
   surfaceError,
   zoomPercent,
   threadId,
-  onNativeLabelChange,
+  onNativeClaimChange,
   onNavigation,
   onNavigationError,
   onNewTab,
@@ -1822,7 +1817,7 @@ function NativeArtifactBrowser({
   surfaceError?: string | null;
   zoomPercent: number;
   threadId: string;
-  onNativeLabelChange?: (label: string | null) => void;
+  onNativeClaimChange?: (claim: NativePreviewClaim | null) => void;
   onNavigation?: (url: string, state: PreviewWebviewLoadState) => void;
   onNavigationError?: (message: string) => void;
   onNewTab?: (requestId: number, url: string) => void;
@@ -1833,18 +1828,19 @@ function NativeArtifactBrowser({
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const webviewRef = useRef<NativeWebviewHandle | null>(null);
+  const claimRef = useRef<NativePreviewClaim | null>(null);
+  const visibilitySyncRef = useRef(Promise.resolve());
   const overlayWindowRef = useRef<NativeOverlayWindowHandle | null>(null);
-  const overlayLabelRef = useRef(`artifact-overlay-${Math.random().toString(36).slice(2)}`);
-  const overlayChannelRef = useRef(`preview-control-overlay-${Math.random().toString(36).slice(2)}`);
+  const overlayOwnerRef = useRef(0);
   const overlayCleanupRef = useRef<(() => void) | null>(null);
   const overlayCloseTimerRef = useRef<number | null>(null);
-  const overlayInstanceRef = useRef(0);
+  const overlayActiveRef = useRef(false);
   const navigationCallbackRef = useRef(onNavigation);
   const navigationErrorCallbackRef = useRef(onNavigationError);
   const newTabCallbackRef = useRef(onNewTab);
   const shortcutCallbackRef = useRef(onShortcut);
   const titleCallbackRef = useRef(onTitle);
-  const labelCallbackRef = useRef(onNativeLabelChange);
+  const claimCallbackRef = useRef(onNativeClaimChange);
   const visibleRef = useRef(visible);
   const zoomPercentRef = useRef(zoomPercent);
   const mutedRef = useRef(muted);
@@ -1856,13 +1852,14 @@ function NativeArtifactBrowser({
     url,
     state: "loading",
   });
+  const nativeLabel = previewNativeWebviewLabel(surfaceKind, storageMode);
 
   navigationCallbackRef.current = onNavigation;
   navigationErrorCallbackRef.current = onNavigationError;
   newTabCallbackRef.current = onNewTab;
   shortcutCallbackRef.current = onShortcut;
   titleCallbackRef.current = onTitle;
-  labelCallbackRef.current = onNativeLabelChange;
+  claimCallbackRef.current = onNativeClaimChange;
   visibleRef.current = visible;
   zoomPercentRef.current = zoomPercent;
   mutedRef.current = muted;
@@ -1873,11 +1870,55 @@ function NativeArtifactBrowser({
     overlayCloseTimerRef.current = null;
   }
 
-  async function closeOverlayWebview() {
+  function ownsOverlay(owner = overlayOwnerRef.current) {
+    return owner !== 0 && previewControlOverlayOwner === owner;
+  }
+
+  async function hideOverlayWebview(owner = overlayOwnerRef.current) {
+    if (!ownsOverlay(owner)) return;
     clearOverlayCloseTimer();
+    overlayActiveRef.current = false;
+    await setNativeWebviewHidden(
+      overlayWindowRef.current,
+      true,
+      () => ownsOverlay(owner),
+    ).catch(() => undefined);
+  }
+
+  async function releaseOverlayWebview() {
+    clearOverlayCloseTimer();
+    overlayActiveRef.current = false;
     overlayCleanupRef.current?.();
     overlayCleanupRef.current = null;
-    await closeNativeWebview(overlayWindowRef);
+    const overlay = overlayWindowRef.current;
+    overlayWindowRef.current = null;
+    const owner = overlayOwnerRef.current;
+    overlayOwnerRef.current = 0;
+    await setNativeWebviewHidden(overlay, true, () => ownsOverlay(owner)).catch(() => undefined);
+    if (previewControlOverlayOwner === owner) previewControlOverlayOwner += 1;
+  }
+
+  function queueNativeVisibility() {
+    visibilitySyncRef.current = visibilitySyncRef.current.then(async () => {
+      const claim = claimRef.current;
+      if (!claim) return;
+      const blocked = !visibleRef.current || nativePreviewBlockedByAppUi();
+      await setPreviewWebviewVisibility(
+        claim.label,
+        claim.claimToken,
+        !blocked,
+        mutedRef.current,
+      );
+      const owner = overlayOwnerRef.current;
+      await setNativeWebviewHidden(
+        overlayWindowRef.current,
+        blocked || !overlayActiveRef.current,
+        () => ownsOverlay(owner),
+      );
+    }).catch((error) => {
+      console.error("Could not update native preview visibility.", error);
+    });
+    return visibilitySyncRef.current;
   }
 
   useEffect(() => {
@@ -1892,17 +1933,32 @@ function NativeArtifactBrowser({
     let unlistenShortcut: (() => void) | null = null;
     let unlistenTitle: (() => void) | null = null;
     let removeLayoutListeners: (() => void) | null = null;
+    let ownedClaim: NativePreviewClaim | null = null;
+    let ownedWebview: NativeWebviewHandle | null = null;
+    const pendingEvents: {
+      navigation: PreviewWebviewNavigation | null;
+      title: PreviewWebviewTitle | null;
+    } = { navigation: null, title: null };
     let raf = 0;
-    let nativeHidden = false;
-    let appUiVisibilitySync = Promise.resolve();
 
-    async function closeWebview() {
-      await closeOverlayWebview();
-      const webview = webviewRef.current;
-      webviewRef.current = null;
-      if (webview) {
-        await webview.hide().catch(() => undefined);
-        await closePreviewWebview(webview.label).catch(() => undefined);
+    async function releaseWebview() {
+      const claim = ownedClaim;
+      const webview = ownedWebview;
+      ownedClaim = null;
+      ownedWebview = null;
+      await releaseOverlayWebview();
+      if (claim && claimRef.current?.claimToken === claim.claimToken) {
+        claimRef.current = null;
+        if (webviewRef.current === webview) webviewRef.current = null;
+        claimCallbackRef.current?.(null);
+      }
+      if (claim) {
+        await setPreviewWebviewVisibility(
+          claim.label,
+          claim.claimToken,
+          false,
+          true,
+        ).catch(() => undefined);
       }
     }
 
@@ -1912,10 +1968,7 @@ function NativeArtifactBrowser({
       const hostElement = host;
       setNativeError(null);
 
-      const [{ Webview }, { LogicalPosition, LogicalSize }] = await Promise.all([
-        import("@tauri-apps/api/webview"),
-        import("@tauri-apps/api/dpi"),
-      ]);
+      const { Webview } = await import("@tauri-apps/api/webview");
       if (cancelled) return;
 
       function bounds() {
@@ -1945,10 +1998,9 @@ function NativeArtifactBrowser({
             const key = boundsKey(rect);
             if (key === lastBoundsKey) continue;
             try {
-              await Promise.all([
-                webview.setPosition(new LogicalPosition(rect.x, rect.y)),
-                webview.setSize(new LogicalSize(rect.width, rect.height)),
-              ]);
+              const claim = claimRef.current;
+              if (!claim) return;
+              await setPreviewWebviewBounds(claim.label, claim.claimToken, rect);
               lastBoundsKey = key;
             } catch {
               // A later observation can retry the latest bounds.
@@ -1961,36 +2013,26 @@ function NativeArtifactBrowser({
         return boundsSync;
       }
 
-      function syncAppUiVisibility() {
-        appUiVisibilitySync = appUiVisibilitySync.then(async () => {
-          if (cancelled) return;
-          const blocked = !visibleRef.current || nativePreviewBlockedByAppUi();
-          if (blocked === nativeHidden) return;
-          try {
-            await setNativeWebviewHidden(webviewRef.current, blocked);
-            if (cancelled) return;
-            nativeHidden = blocked;
-            if (!blocked) await syncBounds(webviewRef.current);
-          } catch (error) {
-            if (!cancelled) console.error(`Could not ${blocked ? "hide" : "show"} native preview for app UI.`, error);
-          }
-          try {
-            await setNativeWebviewHidden(overlayWindowRef.current, blocked);
-          } catch (error) {
-            if (!cancelled) console.error(`Could not ${blocked ? "hide" : "show"} native preview activity.`, error);
-          }
-        });
-        return appUiVisibilitySync;
+      async function syncAppUiVisibility() {
+        await queueNativeVisibility();
+        if (!cancelled && visibleRef.current && !nativePreviewBlockedByAppUi()) {
+          await syncBounds(webviewRef.current);
+        }
       }
 
       const rect = bounds();
       lastBoundsKey = boundsKey(rect);
-      const label = `artifact-browser-${surfaceKind === "native_browser" ? "url" : "app"}-${Math.random().toString(36).slice(2)}`;
+      const label = nativeLabel;
       currentNativeUrlRef.current = url;
       setNativeNavigation({ label, url, state: "loading" });
-      labelCallbackRef.current?.(label);
-      unlistenNavigation = await listenForPreviewWebviewNavigation((navigation) => {
+      const applyNavigation = (navigation: PreviewWebviewNavigation) => {
+        const claim = ownedClaim;
         if (cancelled || navigation.label !== label) return;
+        if (!claim) {
+          pendingEvents.navigation = navigation;
+          return;
+        }
+        if (navigation.claimToken !== claim.claimToken) return;
         if (navigation.state === "error") {
           const message = navigation.message || "This preview navigation was blocked.";
           setNativeError(message);
@@ -2002,19 +2044,29 @@ function NativeArtifactBrowser({
         setNativeError(null);
         setNativeNavigation(navigation);
         navigationCallbackRef.current?.(navigation.url, navigation.state);
-      });
+      };
+      const applyTitle = (title: PreviewWebviewTitle) => {
+        const claim = ownedClaim;
+        if (cancelled || title.label !== label) return;
+        if (!claim) {
+          pendingEvents.title = title;
+          return;
+        }
+        if (title.claimToken !== claim.claimToken) return;
+        titleCallbackRef.current?.(title.title);
+      };
+      unlistenNavigation = await listenForPreviewWebviewNavigation(applyNavigation);
       unlistenNewTab = await listenForPreviewWebviewNewTab((request) => {
-        if (cancelled || request.openerLabel !== label) return;
+        const claim = ownedClaim;
+        if (cancelled || !claim || request.openerLabel !== claim.label || request.claimToken !== claim.claimToken) return;
         newTabCallbackRef.current?.(request.requestId, request.url);
       });
       unlistenShortcut = await listenForPreviewWebviewShortcut((shortcut) => {
-        if (cancelled || shortcut.label !== label) return;
+        const claim = ownedClaim;
+        if (cancelled || !claim || shortcut.label !== claim.label || shortcut.claimToken !== claim.claimToken) return;
         shortcutCallbackRef.current?.(shortcut);
       });
-      unlistenTitle = await listenForPreviewWebviewTitle((title) => {
-        if (cancelled || title.label !== label) return;
-        titleCallbackRef.current?.(title.title);
-      });
+      unlistenTitle = await listenForPreviewWebviewTitle(applyTitle);
       if (cancelled) {
         unlistenNavigation();
         unlistenNewTab();
@@ -2022,16 +2074,31 @@ function NativeArtifactBrowser({
         unlistenTitle();
         return;
       }
-      await createPreviewWebview(label, url, rect, storageMode, profileId);
+      const created = await createPreviewWebview(label, url, rect, storageMode, profileId);
+      if (!created) throw new Error("Could not create the native preview webview.");
+      const claim = { label, claimToken: created.claimToken };
+      ownedClaim = claim;
+      claimRef.current = claim;
+      claimCallbackRef.current?.(claim);
+      if (created.reused) {
+        currentNativeUrlRef.current = created.url;
+        setNativeNavigation({ label, url: created.url, state: created.navigated ? "loading" : "ready" });
+        if (!created.navigated) navigationCallbackRef.current?.(created.url, "ready");
+      }
+      if (pendingEvents.navigation?.claimToken === claim.claimToken) applyNavigation(pendingEvents.navigation);
+      if (pendingEvents.title?.claimToken === claim.claimToken) applyTitle(pendingEvents.title);
+      pendingEvents.navigation = null;
+      pendingEvents.title = null;
       const webview = await Webview.getByLabel(label) as NativeWebviewHandle | null;
       if (!webview) throw new Error("Could not access the created preview webview.");
+      ownedWebview = webview;
       webviewRef.current = webview;
       if (cancelled) {
-        await closeWebview();
+        await releaseWebview();
         return;
       }
-      await webview.setZoom(zoomPercentRef.current / 100);
-      await setPreviewWebviewMuted(label, mutedRef.current);
+      await setPreviewWebviewZoom(label, claim.claimToken, zoomPercentRef.current / 100);
+      await setPreviewWebviewMuted(label, claim.claimToken, mutedRef.current);
       await syncBounds(webview);
       appUiObserver = new MutationObserver(() => void syncAppUiVisibility());
       appUiObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-native-preview-blocker", "open"] });
@@ -2055,6 +2122,7 @@ function NativeArtifactBrowser({
     })()
       .catch((error) => {
         if (cancelled) return;
+        void releaseWebview();
         const message = error instanceof Error ? error.message : String(error);
         setNativeError(message);
         navigationErrorCallbackRef.current?.(message);
@@ -2070,44 +2138,38 @@ function NativeArtifactBrowser({
       unlistenNewTab?.();
       unlistenShortcut?.();
       unlistenTitle?.();
-      labelCallbackRef.current?.(null);
-      void closeWebview();
+      void releaseWebview();
     };
-  }, [mounted, profileId, storageMode, surfaceKind]);
+  }, [mounted, nativeLabel, profileId, storageMode, surfaceKind]);
 
   useEffect(() => {
     if (!IS_TAURI) return;
-    const webview = webviewRef.current;
-    if (!webview) return;
-    void webview.setZoom(zoomPercent / 100).catch((error) => {
+    const claim = claimRef.current;
+    if (!claim) return;
+    void setPreviewWebviewZoom(claim.label, claim.claimToken, zoomPercent / 100).catch((error) => {
       console.error("Could not update native preview zoom.", error);
     });
   }, [zoomPercent]);
 
   useEffect(() => {
     if (!IS_TAURI) return;
-    const webview = webviewRef.current;
-    const label = nativeNavigation.label;
-    if (!webview || !label || webview.label !== label) return;
-    void setPreviewWebviewMuted(label, muted).catch((error) => {
+    const claim = claimRef.current;
+    if (!claim) return;
+    void setPreviewWebviewMuted(claim.label, claim.claimToken, muted).catch((error) => {
       console.error("Could not update native preview audio mute.", error);
     });
   }, [muted, nativeNavigation.label, nativeNavigation.state]);
 
   useEffect(() => {
     if (!IS_TAURI) return;
-    const hidden = !visible || nativePreviewBlockedByAppUi();
-    void Promise.all([
-      setNativeWebviewHidden(webviewRef.current, hidden),
-      setNativeWebviewHidden(overlayWindowRef.current, hidden),
-    ]).catch(() => undefined);
+    void queueNativeVisibility();
   }, [visible]);
 
   useEffect(() => {
-    const label = nativeNavigation.label;
-    if (!IS_TAURI || !label || currentNativeUrlRef.current === url) return;
+    const claim = claimRef.current;
+    if (!IS_TAURI || !claim || currentNativeUrlRef.current === url) return;
     setNativeNavigation((current) => ({ ...current, url, state: "loading" }));
-    void navigatePreviewWebview(label, url).catch((error) => {
+    void navigatePreviewWebview(claim.label, claim.claimToken, url).catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
       setNativeError(message);
       navigationErrorCallbackRef.current?.(message);
@@ -2115,15 +2177,15 @@ function NativeArtifactBrowser({
   }, [nativeNavigation.label, url]);
 
   useEffect(() => {
-    const label = nativeNavigation.label;
-    if (!IS_TAURI || !label) {
+    const claim = claimRef.current;
+    if (!IS_TAURI || !claim) {
       previousFrameKeyRef.current = frameKey;
       return;
     }
     if (previousFrameKeyRef.current === frameKey) return;
     previousFrameKeyRef.current = frameKey;
     setNativeNavigation((current) => ({ ...current, state: "loading" }));
-    void reloadPreviewWebview(label).catch((error) => {
+    void reloadPreviewWebview(claim.label, claim.claimToken).catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
       setNativeError(message);
       navigationErrorCallbackRef.current?.(message);
@@ -2164,12 +2226,15 @@ function NativeArtifactBrowser({
   useEffect(() => {
     if (!visible || !controlActivity || !IS_TAURI) return;
     let cancelled = false;
-    const channel = overlayChannelRef.current;
+    const owner = ++previewControlOverlayOwner;
+    overlayOwnerRef.current = owner;
+    const channel = PREVIEW_CONTROL_OVERLAY_CHANNEL;
     const payload = previewControlOverlayPayload(controlActivity, hostRef.current ?? undefined);
 
+    overlayActiveRef.current = true;
     publishPreviewControlOverlayActivity(channel, payload);
     clearOverlayCloseTimer();
-    overlayCloseTimerRef.current = window.setTimeout(() => void closeOverlayWebview(), PREVIEW_CONTROL_OVERLAY_CLOSE_MS);
+    overlayCloseTimerRef.current = window.setTimeout(() => void hideOverlayWebview(owner), PREVIEW_CONTROL_OVERLAY_CLOSE_MS);
 
     void (async () => {
       const host = hostRef.current;
@@ -2180,11 +2245,11 @@ function NativeArtifactBrowser({
         import("@tauri-apps/api/window"),
         import("@tauri-apps/api/dpi"),
       ]);
-      if (cancelled) return;
+      if (cancelled || !ownsOverlay(owner)) return;
       const mainWindow = getCurrentWindow();
 
       async function syncOverlayBounds() {
-        if (!overlayWindowRef.current || !hostElement.isConnected) return;
+        if (!ownsOverlay(owner) || !overlayWindowRef.current || !hostElement.isConnected) return;
         const nextRect = await nativeBrowserWindowBounds(hostElement, mainWindow);
         await Promise.all([
           overlayWindowRef.current.setPosition(new LogicalPosition(nextRect.x, nextRect.y)),
@@ -2194,8 +2259,8 @@ function NativeArtifactBrowser({
 
       if (!overlayWindowRef.current) {
         const rect = await nativeBrowserWindowBounds(hostElement, mainWindow);
-        const overlayLabel = `${overlayLabelRef.current}-${++overlayInstanceRef.current}`;
-        const overlay = new WebviewWindow(overlayLabel, {
+        const existing = await WebviewWindow.getByLabel(PREVIEW_CONTROL_OVERLAY_LABEL) as NativeOverlayWindowHandle | null;
+        const overlay = existing ?? new WebviewWindow(PREVIEW_CONTROL_OVERLAY_LABEL, {
           url: previewControlOverlayUrl(channel),
           x: rect.x,
           y: rect.y,
@@ -2214,15 +2279,13 @@ function NativeArtifactBrowser({
           dragDropEnabled: false,
         }) as NativeOverlayWindowHandle;
         overlayWindowRef.current = overlay;
-        await waitForNativeCreated(overlay);
-        if (cancelled) {
-          await closeNativeWebview(overlayWindowRef);
+        if (!existing) await waitForNativeCreated(overlay);
+        if (cancelled || !ownsOverlay(owner)) {
+          await setNativeWebviewHidden(overlayWindowRef.current, true, () => ownsOverlay(owner)).catch(() => undefined);
           return;
         }
         await overlay.setIgnoreCursorEvents(true);
         await syncOverlayBounds();
-        if (!nativePreviewBlockedByAppUi()) await overlay.show().catch(() => undefined);
-
         const resizeObserver = new ResizeObserver(() => void syncOverlayBounds());
         resizeObserver.observe(hostElement);
         const onWindowLayout = () => void syncOverlayBounds();
@@ -2248,9 +2311,14 @@ function NativeArtifactBrowser({
         await syncOverlayBounds();
         publishPreviewControlOverlayActivity(channel, payload);
       }
+      if (ownsOverlay(owner) && visibleRef.current && overlayActiveRef.current && !nativePreviewBlockedByAppUi()) {
+        await overlayWindowRef.current?.show().catch(() => undefined);
+      }
+      clearOverlayCloseTimer();
+      overlayCloseTimerRef.current = window.setTimeout(() => void hideOverlayWebview(owner), PREVIEW_CONTROL_OVERLAY_CLOSE_MS);
     })()
       .catch(() => {
-        if (!cancelled) void closeOverlayWebview();
+        if (!cancelled) void hideOverlayWebview(owner);
       });
 
     return () => {
@@ -2284,21 +2352,18 @@ function NativeArtifactBrowser({
   );
 }
 
-async function closeNativeWebview<T extends NativeWebviewHandle>(ref: { current: T | null }) {
-  const webview = ref.current;
-  ref.current = null;
-  if (!webview) return;
-  await webview.hide().catch(() => undefined);
-  await webview.close().catch(() => undefined);
-}
-
-async function setNativeWebviewHidden(webview: NativeVisibleHandle | null, hidden: boolean) {
-  if (!webview) return;
+async function setNativeWebviewHidden(
+  webview: NativeVisibleHandle | null,
+  hidden: boolean,
+  isCurrent: () => boolean = () => true,
+) {
+  if (!webview || !isCurrent()) return;
   const updateVisibility = () => hidden ? webview.hide() : webview.show();
   try {
     await updateVisibility();
   } catch {
     await new Promise((resolve) => window.setTimeout(resolve, 50));
+    if (!isCurrent()) return;
     await updateVisibility();
   }
 }

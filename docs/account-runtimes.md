@@ -10,7 +10,7 @@ On macOS and Linux, Milim resolves symlinked CLI launchers to their real executa
 
 The Providers panel shows each detected CLI version and compares it with the latest stable version published for that CLI. An available update enables and highlights the Update action; a current runtime shows a disabled Up to date action. If the release check is unavailable, the action remains neutral and usable. Updating requires a second confirmation, then invokes that runtime's own updater (`codex update`, `claude update`, `opencode upgrade --pure`, or `pi update self --no-approve`) and rechecks the installed version. Finish active turns first. Milim does not replace these tools' installers, credentials, or standalone configuration.
 
-After a Milim chat has a native Codex thread id, Claude session id, OpenCode session id, or Pi session id, Milim lets that runtime own prior context. Later turns send the current per-turn context plus the latest user message instead of replaying the visible Milim transcript or auto-compacting it first. Manual `/compact` still creates a visible Milim checkpoint, but its summary call is ephemeral and the stored native runtime id is cleared afterward.
+Each Milim thread owns a separate native binding and last-synced message cursor for Codex, Claude, OpenCode, and Pi. Rust preallocates Claude's UUID before its first turn and durably persists IDs established by Codex, OpenCode, or Pi into canonical thread state and the current run record. Later turns—including queued turns accepted before the prior ID arrived and the first turn after an app restart—refresh and resume that adapter's binding. A resumed adapter receives only messages added after its cursor, so switching runtimes preserves intervening Milim context without replaying content the native session already owns. Switching adapters also preserves the other bindings. Manual `/compact` still creates a visible Milim checkpoint, but its summary call is ephemeral and clears only the selected runtime's stored native id afterward.
 
 Every account-runtime turn must report an explicit completion, error, or intentional terminal notice. If a runtime exits or closes its stream without one, Milim shows a runtime error instead of treating an empty response as success.
 
@@ -18,7 +18,7 @@ Review approvals use a shared lifecycle: requested, user-decided, delivered to t
 
 Each adapter maps the normalized Approve/Deny choice to its own protocol. Codex selects only from the request's advertised `availableDecisions`—including `cancel` rather than assuming `decline`—while Claude, OpenCode, and Pi keep their native response shapes.
 
-Failed or canceled turns clear only the affected native session before the next send. This prevents a prompt that the CLI persisted before the failure from being replayed into divergent native history.
+A generic failure or user cancellation does not discard a session that may still be resumable. An explicit `session_recovery_required` event compare-and-clears only the matching adapter binding; a stale recovery event cannot erase a newer binding, and bindings for the other adapters remain untouched.
 
 All account-runtime tool events keep their full input text behind the transcript's visual ellipsis. Claude no longer truncates structured tool inputs server-side, while OpenCode and Pi also preserve completion results and error details in the shared run trace.
 

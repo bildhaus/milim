@@ -218,6 +218,8 @@ pub struct FrozenRunConfigV1 {
     pub enabled_skills: Vec<String>,
     pub attachments: Vec<ControlAttachmentV1>,
     pub native_session_id: Option<String>,
+    #[serde(default)]
+    pub native_session_cursor: Option<String>,
     pub reasoning_effort: Option<String>,
     #[serde(default)]
     pub generation: GenerationSettingsV1,

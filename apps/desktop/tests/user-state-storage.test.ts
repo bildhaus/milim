@@ -545,4 +545,79 @@ assert(
   "manifest hydration markers must remain transient",
 );
 
+await writeUserStateKey(
+  "milim.sessions",
+  JSON.stringify({
+    state: {
+      sessions: [
+        {
+          id: "runtime-binding",
+          messages: [],
+          accountRuntime: { codexThreadId: "codex-a" },
+        },
+      ],
+    },
+    version: 0,
+  }),
+);
+await flushDeferredUserStateWrites("milim.sessions");
+const runtimeBindingCallStart = calls.length;
+await writeUserStateKey(
+  "milim.sessions",
+  JSON.stringify({
+    state: {
+      sessions: [
+        {
+          id: "runtime-binding",
+          messages: [],
+          accountRuntime: {
+            claudeSessionId: "claude-a",
+            codexThreadId: "codex-a",
+          },
+        },
+      ],
+    },
+    version: 0,
+  }),
+);
+await flushDeferredUserStateWrites("milim.sessions");
+const runtimeBindingDelta = calls
+  .slice(runtimeBindingCallStart)
+  .find((call) => call.command === "user_sessions_apply_ops")?.args?.delta as {
+    upserts?: Array<{ runtimeBindingChanges?: string[] }>;
+  };
+equal(
+  JSON.stringify(runtimeBindingDelta.upserts?.[0]?.runtimeBindingChanges),
+  JSON.stringify(["claude"]),
+  "session deltas should identify only the runtime binding changed by the renderer",
+);
+
+const runtimeClearCallStart = calls.length;
+await writeUserStateKey(
+  "milim.sessions",
+  JSON.stringify({
+    state: {
+      sessions: [
+        {
+          id: "runtime-binding",
+          messages: [],
+          accountRuntime: { claudeSessionId: "claude-a" },
+        },
+      ],
+    },
+    version: 0,
+  }),
+);
+await flushDeferredUserStateWrites("milim.sessions");
+const runtimeClearDelta = calls
+  .slice(runtimeClearCallStart)
+  .find((call) => call.command === "user_sessions_apply_ops")?.args?.delta as {
+    upserts?: Array<{ runtimeBindingChanges?: string[] }>;
+  };
+equal(
+  JSON.stringify(runtimeClearDelta.upserts?.[0]?.runtimeBindingChanges),
+  JSON.stringify(["codex"]),
+  "an explicit renderer clear should identify only the cleared runtime binding",
+);
+
 export {};
