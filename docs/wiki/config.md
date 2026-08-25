@@ -9,7 +9,7 @@ order: 100
 updated: 2026-07-13
 ---
 
-Configuration is intentionally local. The desktop app embeds the server, encrypts provider, Google, MCP, and mobile-companion credentials with a master key held in the OS credential vault, and keeps optional native runtimes behind explicit build flags. If the vault is unavailable, Settings > Data & privacy reports the permission-restricted local-key fallback.
+Configuration is intentionally local. The desktop app embeds the server, encrypts provider, Google, MCP, and mobile-companion credentials with a master key held in the OS credential vault, and keeps optional native runtimes behind explicit build flags. macOS also retains a matching owner-only recovery key so encrypted state survives local app rebuilds whose Keychain access identity changes. Settings > Data & privacy reports whenever this permission-restricted local key is present.
 
 ## Default locations
 
@@ -18,7 +18,7 @@ Configuration is intentionally local. The desktop app embeds the server, encrypt
 | Milim home | OS app-data location resolved by `milim-core` paths. |
 | Server config | `~/.milim/config/server.json` for standalone CLI/server use. |
 | Identity key | `~/.milim/identity/master.key`. |
-| Desktop credential key | Windows Credential Manager or macOS Keychain; `desktop-storage.key` is the reported restricted fallback. |
+| Desktop credential key | Windows Credential Manager, or macOS Keychain with a matching owner-only `desktop-storage.key` recovery copy for rebuild continuity. |
 | Provider records | AES-GCM encrypted provider records under the Milim data root. |
 | Runtime assets | Milim runtime directory for downloaded model and media-related assets. Previously downloaded voice assets are left untouched but no longer used. |
 | Schedules | `schedules.db` under the Milim root. |
