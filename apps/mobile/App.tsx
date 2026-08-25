@@ -6,6 +6,8 @@ import {
   Animated,
   FlatList,
   Image,
+  Keyboard,
+  KeyboardAvoidingView,
   Linking,
   Modal,
   PanResponder,
@@ -293,6 +295,24 @@ function ScreenStage({children}: {children: React.ReactNode}) {
   return <Animated.View style={[stylesForMotion.stage, {opacity, transform: [{translateY}]}]}>{children}</Animated.View>;
 }
 
+function ThreadKeyboardAvoidingView({
+  children,
+  enabled,
+}: {
+  children: React.ReactNode;
+  enabled: boolean;
+}) {
+  const {styles} = useAppTheme();
+  return (
+    <KeyboardAvoidingView
+      style={styles.content}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      enabled={enabled}>
+      {children}
+    </KeyboardAvoidingView>
+  );
+}
+
 function AppearanceBackground({uri}: {uri: string | null}) {
   const {appearance, palette, styles} = useAppTheme();
   const background = appearance.background;
@@ -460,7 +480,7 @@ function App(): React.JSX.Element {
             ) : null}
           </Pressable>
         ) : null}
-        <View style={styles.content}>
+        <ThreadKeyboardAvoidingView enabled={screen === 'chat'}>
           <ScreenStage key={screen}>
           {screen === 'chat' ? (
             <ChatScreen controller={controller} openThreads={openThreads} />
@@ -482,7 +502,7 @@ function App(): React.JSX.Element {
             />
           ) : null}
           </ScreenStage>
-        </View>
+        </ThreadKeyboardAvoidingView>
         </SafeAreaView>
         </View>
         <ThreadDrawer
@@ -1320,6 +1340,19 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
     const frame = requestAnimationFrame(() => messageList.current?.scrollToEnd({animated}));
     return () => cancelAnimationFrame(frame);
   }, [transcriptItems]);
+
+  useEffect(() => {
+    const keepLatestVisible = () => {
+      if (!followingLatest.current) return;
+      requestAnimationFrame(() => messageList.current?.scrollToEnd({animated: false}));
+    };
+    const shown = Keyboard.addListener('keyboardDidShow', keepLatestVisible);
+    const hidden = Keyboard.addListener('keyboardDidHide', keepLatestVisible);
+    return () => {
+      shown.remove();
+      hidden.remove();
+    };
+  }, []);
 
   useEffect(() => {
     shouldScrollToLatest.current = true;

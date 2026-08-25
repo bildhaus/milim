@@ -157,6 +157,14 @@ test('iOS picker and drawer source keep one reasoning sparkle and modal-safe ins
   expect(app).toContain('styles.drawerEdgeFade, {opacity: edgeOpacity}');
 });
 
+test('mobile threads follow the native keyboard without losing the latest message', () => {
+  const app = read('App.tsx');
+  expect(app).toContain("behavior={Platform.OS === 'ios' ? 'padding' : 'height'}");
+  expect(app).toContain("Keyboard.addListener('keyboardDidShow', keepLatestVisible)");
+  expect(app).toContain("Keyboard.addListener('keyboardDidHide', keepLatestVisible)");
+  expect(app).toContain('if (!followingLatest.current) return;');
+});
+
 test('iOS app icon catalog contains complete opaque assets', () => {
   const iconRoot = path.join(
     mobileRoot,
