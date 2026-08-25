@@ -1,4 +1,9 @@
 {
+  "0.2.58": {
+    "version": "0.2.58",
+    "summary": "Milim 0.2.58 makes mobile chat and model selection match desktop more closely and hardens macOS mobile-access persistence across restarts.",
+    "items": []
+  },
   "0.2.57": {
     "version": "0.2.57",
     "summary": "Milim 0.2.57 makes app previews more reliable and keeps each account runtime in the same native conversation across messages.",

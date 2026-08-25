@@ -51,6 +51,7 @@ const DELTA_FLUSH_INTERVAL: Duration = Duration::from_millis(40);
 const NATIVE_SESSION_FULL_TRANSCRIPT_CURSOR: &str = "__milim_hot_swap_full__";
 pub const MODEL_FAVORITES_SETTINGS_KEY: &str = "milim.settings";
 pub const MODEL_FAVORITES_EVENT_TYPE: &str = "model_favorites.updated";
+pub const MODEL_CATALOG_STATE_KEY: &str = "milim.modelCatalog";
 
 // Wire declarations live in `milim-control-contract`. Keeping the former
 // declarations compiled out for this cutover makes the ownership move easy to
@@ -1702,6 +1703,22 @@ impl RunManager {
         self.emit("models.updated", None, None, None, json!({}));
     }
 
+    fn published_model_catalog(&self) -> Option<Vec<Value>> {
+        self.store
+            .get_json(MODEL_CATALOG_STATE_KEY)
+            .ok()
+            .flatten()
+            .and_then(|value| serde_json::from_str::<Vec<Value>>(&value).ok())
+            .filter(|models| {
+                models.iter().all(|model| {
+                    model
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| !id.trim().is_empty())
+                })
+            })
+    }
+
     pub fn model_favorites(&self) -> Vec<String> {
         self.store
             .get_json(MODEL_FAVORITES_SETTINGS_KEY)
@@ -1848,15 +1865,18 @@ impl RunManager {
         // A temporarily unavailable provider must not prevent a controller
         // from opening existing threads, stopping work, or resolving an
         // approval. Model discovery can recover on the next bootstrap.
-        let models = state
-            .service
-            .list_models()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(serde_json::to_value)
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|error| Error::Other(format!("serialize models: {error}")))?;
+        let models = match self.published_model_catalog() {
+            Some(models) => models,
+            None => state
+                .service
+                .list_models()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(serde_json::to_value)
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|error| Error::Other(format!("serialize models: {error}")))?,
+        };
         let agents = state
             .agents
             .as_ref()
@@ -7272,6 +7292,23 @@ mod tests {
         let event = receiver.try_recv().unwrap();
         assert_eq!(event.event_type, "models.updated");
         assert_eq!(event.thread_id, None);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_prefers_the_desktop_published_model_catalog() {
+        let (manager, state) = manager_and_state();
+        manager
+            .store
+            .set_json(
+                MODEL_CATALOG_STATE_KEY,
+                r#"[{"id":"codex:gpt-5.6","owned_by":"Codex"},{"id":"provider:openrouter:openai/gpt-5.6","display_id":"openai/gpt-5.6","owned_by":"OpenRouter","provider_id":"openrouter"}]"#,
+            )
+            .unwrap();
+
+        let bootstrap = manager.bootstrap(&state).await.unwrap();
+        assert_eq!(bootstrap.models.len(), 2);
+        assert_eq!(bootstrap.models[0]["id"], "codex:gpt-5.6");
+        assert_eq!(bootstrap.models[1]["provider_id"], "openrouter");
     }
 
     #[tokio::test]

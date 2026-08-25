@@ -198,6 +198,37 @@ export function parseMobileModel(value: JsonValue): MobileModelOption | null {
   };
 }
 
+export function mobileModelOptions(values: JsonValue[]): MobileModelOption[] {
+  const duplicateProviderIds = new Map<string, number>();
+  for (const value of values) {
+    const model = record(value);
+    const id = text(model?.id).trim();
+    const providerId = text(model?.provider_id).trim();
+    if (id && providerId && !id.startsWith('provider:')) {
+      duplicateProviderIds.set(id, (duplicateProviderIds.get(id) ?? 0) + 1);
+    }
+  }
+
+  const models: MobileModelOption[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    const model = record(value);
+    const rawId = text(model?.id).trim();
+    const providerId = text(model?.provider_id).trim();
+    const qualified = model && rawId && providerId && !rawId.startsWith('provider:') &&
+      (duplicateProviderIds.get(rawId) ?? 0) > 1
+      ? {...model, id: `provider:${providerId}:${rawId}`, display_id: model.display_id || rawId}
+      : value;
+    const parsed = parseMobileModel(qualified);
+    const key = parsed ? `${parsed.provider}\0${parsed.id}` : '';
+    if (parsed && !seen.has(key)) {
+      seen.add(key);
+      models.push(parsed);
+    }
+  }
+  return models;
+}
+
 export function modelPickerGroups(
   values: JsonValue[],
   query: string,
@@ -208,9 +239,7 @@ export function modelPickerGroups(
   const favoriteIds = new Set(favorites);
   const groups = new Map<string, MobileModelOption[]>();
   const favoriteModels: MobileModelOption[] = [];
-  for (const value of values) {
-    const model = parseMobileModel(value);
-    if (!model) continue;
+  for (const model of mobileModelOptions(values)) {
     const favorite = favoriteIds.has(model.id);
     if (favoritesOnly && !favorite) continue;
     if (

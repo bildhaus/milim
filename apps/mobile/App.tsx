@@ -6,6 +6,9 @@ import {
   Animated,
   FlatList,
   Image,
+  Keyboard,
+  KeyboardAvoidingView,
+  LayoutAnimation,
   Linking,
   Modal,
   PanResponder,
@@ -20,10 +23,11 @@ import {
   View,
   useWindowDimensions,
   type StyleProp,
+  type KeyboardEvent,
   type TextProps,
   type ViewStyle,
 } from 'react-native';
-import {SafeAreaProvider, SafeAreaView} from 'react-native-safe-area-context';
+import {SafeAreaProvider, SafeAreaView, useSafeAreaInsets} from 'react-native-safe-area-context';
 import Markdown, {MarkdownIt, type RenderRules} from 'react-native-markdown-display';
 import MaskedView from '@react-native-masked-view/masked-view';
 import Svg, {Defs, LinearGradient as SvgLinearGradient, Rect, Stop} from 'react-native-svg';
@@ -70,7 +74,7 @@ import {
   DEFAULT_MODEL_PICKER_PREFERENCES,
   modelPickerFavoriteIds,
   modelPickerGroups,
-  parseMobileModel,
+  mobileModelOptions,
   transcriptModelLabel,
   toggledModelFavoriteIds,
   type MobileModelCapability,
@@ -293,6 +297,69 @@ function ScreenStage({children}: {children: React.ReactNode}) {
   return <Animated.View style={[stylesForMotion.stage, {opacity, transform: [{translateY}]}]}>{children}</Animated.View>;
 }
 
+function ThreadKeyboardAvoidingView({
+  children,
+  enabled,
+}: {
+  children: React.ReactNode;
+  enabled: boolean;
+}) {
+  const {styles} = useAppTheme();
+  const reduced = useReducedMotion();
+  const {bottom: safeBottom} = useSafeAreaInsets();
+  const [keyboardInset, setKeyboardInset] = useState(0);
+
+  const applyKeyboardInset = useCallback((nextInset: number) => {
+    if (!reduced) {
+      LayoutAnimation.configureNext({
+        duration: 120,
+        update: {duration: 120, type: LayoutAnimation.Types.easeOut},
+      });
+    }
+    setKeyboardInset(nextInset);
+  }, [reduced]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'ios' || !enabled) {
+      setKeyboardInset(0);
+      return;
+    }
+
+    const show = ({endCoordinates}: KeyboardEvent) => {
+      applyKeyboardInset(Math.max(0, endCoordinates.height - safeBottom));
+    };
+    const hide = () => applyKeyboardInset(0);
+    const visibleKeyboard = Keyboard.metrics();
+    if (visibleKeyboard) {
+      applyKeyboardInset(Math.max(0, visibleKeyboard.height - safeBottom));
+    }
+
+    const showSubscription = Keyboard.addListener('keyboardWillShow', show);
+    const hideSubscription = Keyboard.addListener('keyboardWillHide', hide);
+    return () => {
+      showSubscription.remove();
+      hideSubscription.remove();
+    };
+  }, [applyKeyboardInset, enabled, safeBottom]);
+
+  if (Platform.OS === 'ios') {
+    return (
+      <View style={[styles.content, enabled && {paddingBottom: keyboardInset}]}>
+        {children}
+      </View>
+    );
+  }
+
+  return (
+    <KeyboardAvoidingView
+      style={styles.content}
+      behavior="height"
+      enabled={enabled}>
+      {children}
+    </KeyboardAvoidingView>
+  );
+}
+
 function AppearanceBackground({uri}: {uri: string | null}) {
   const {appearance, palette, styles} = useAppTheme();
   const background = appearance.background;
@@ -460,7 +527,7 @@ function App(): React.JSX.Element {
             ) : null}
           </Pressable>
         ) : null}
-        <View style={styles.content}>
+        <ThreadKeyboardAvoidingView enabled={screen === 'chat'}>
           <ScreenStage key={screen}>
           {screen === 'chat' ? (
             <ChatScreen controller={controller} openThreads={openThreads} />
@@ -482,7 +549,7 @@ function App(): React.JSX.Element {
             />
           ) : null}
           </ScreenStage>
-        </View>
+        </ThreadKeyboardAvoidingView>
         </SafeAreaView>
         </View>
         <ThreadDrawer
@@ -1190,15 +1257,9 @@ function ThreadCard({thread, attentionCount, selected, onOpen, onMenu}: {thread:
   const {palette, styles} = useAppTheme();
   return (
     <Pressable style={[styles.threadCard, selected && styles.threadCardSelected]} onPress={onOpen}>
-      <View style={[styles.threadStatus, attentionCount > 0 && styles.threadStatusAttention, thread.busy && styles.threadStatusBusy]} />
-      <View style={styles.threadBody}>
-        <View style={styles.threadTopline}>
-          <Text style={styles.threadTitle} numberOfLines={1}>{thread.title}</Text>
-          {attentionCount ? <Text style={styles.queued}>{attentionCount}</Text> : null}
-        </View>
-        <Text style={styles.threadMeta} numberOfLines={1}>
-          {thread.busy ? 'Running · ' : ''}{thread.model || 'No model'}
-        </Text>
+      <View style={styles.threadTopline}>
+        <Text style={styles.threadTitle} numberOfLines={1}>{thread.title}</Text>
+        {attentionCount ? <Text style={styles.queued}>{attentionCount}</Text> : null}
       </View>
       <Pressable
         style={styles.threadMenu}
@@ -1260,7 +1321,7 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
   const returningToLatest = useRef(false);
   const modelsForPicker = useMemo(() => {
     const models = [...(controller.bootstrap?.models ?? [])];
-    const ids = new Set(models.map(modelId).filter(Boolean));
+    const ids = new Set(mobileModelOptions(models).map(model => model.id));
     for (const summary of controller.bootstrap?.threads ?? []) {
       if (summary.model && !ids.has(summary.model)) {
         models.push({id: summary.model, owned_by: 'milim'});
@@ -1270,9 +1331,8 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
     return models;
   }, [controller.bootstrap?.models, controller.bootstrap?.threads]);
   const selectedModel = useMemo(
-    () => modelsForPicker
-      .map(parseMobileModel)
-      .find(model => model?.id === thread?.model) ?? null,
+    () => mobileModelOptions(modelsForPicker)
+      .find(model => model.id === thread?.model) ?? null,
     [modelsForPicker, thread?.model],
   );
   const hasPendingApproval = threadApprovals.length > 0;
@@ -1320,6 +1380,19 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
     const frame = requestAnimationFrame(() => messageList.current?.scrollToEnd({animated}));
     return () => cancelAnimationFrame(frame);
   }, [transcriptItems]);
+
+  useEffect(() => {
+    const keepLatestVisible = () => {
+      if (!followingLatest.current) return;
+      requestAnimationFrame(() => messageList.current?.scrollToEnd({animated: false}));
+    };
+    const shown = Keyboard.addListener('keyboardDidShow', keepLatestVisible);
+    const hidden = Keyboard.addListener('keyboardDidHide', keepLatestVisible);
+    return () => {
+      shown.remove();
+      hidden.remove();
+    };
+  }, []);
 
   useEffect(() => {
     shouldScrollToLatest.current = true;
@@ -2339,7 +2412,10 @@ function ModelPickerRow({
             {visibleCapabilities.length ? (
               <View style={styles.capabilityRow}>
                 {visibleCapabilities.slice(0, 5).map(capability => (
-                  <View key={capability} style={styles.pickerCapabilityIcon} accessibilityLabel={capability}>
+                  <View
+                    key={capability}
+                    style={[styles.pickerCapabilityIcon, capability === 'fast' && styles.pickerCapabilityFastIcon]}
+                    accessibilityLabel={capability}>
                     <MilimIcon name={capabilityIcons[capability]} size={12} color={palette.muted} />
                   </View>
                 ))}
@@ -2932,16 +3008,10 @@ function createStyles(theme: MobileTheme) {
   input: {minHeight: 40, paddingHorizontal: 11, paddingVertical: 8, borderRadius: inputRadius, borderWidth: 1, borderColor: palette.borderStrong, backgroundColor: palette.input, color: palette.text, fontFamily, fontSize: 13.5},
   flex: {flex: 1},
   list: {flexGrow: 1, paddingBottom: 24, gap: 2},
-  threadCard: {minHeight: 58, flexDirection: 'row', alignItems: 'center', backgroundColor: 'transparent', borderWidth: 1, borderColor: 'transparent', borderRadius: 8, paddingLeft: 7, paddingRight: 4, gap: 9},
+  threadCard: {minHeight: 46, flexDirection: 'row', alignItems: 'center', backgroundColor: 'transparent', borderWidth: 1, borderColor: 'transparent', borderRadius: 8, paddingLeft: 10, paddingRight: 4, gap: 5},
   threadCardSelected: {backgroundColor: palette.panel, borderColor: palette.border},
-  threadStatus: {width: 3, height: 26, borderRadius: 2, backgroundColor: palette.borderStrong},
-  threadStatusAttention: {backgroundColor: palette.warning},
-  threadStatusBusy: {backgroundColor: palette.success},
-  threadBody: {flex: 1, minWidth: 0, gap: 3},
-  threadTopline: {flexDirection: 'row', alignItems: 'center', gap: 8},
+  threadTopline: {flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 8},
   threadTitle: {color: palette.text, fontSize: 13.5, fontWeight: '600', flex: 1},
-  threadMeta: {color: palette.muted, fontSize: 10.5},
-  busy: {color: palette.success, fontSize: 9, fontWeight: '800', letterSpacing: 0.8},
   queued: {color: palette.warning, fontSize: 9.5, fontWeight: '800'},
   threadMenu: {width: 38, height: 38, borderRadius: 7, alignItems: 'center', justifyContent: 'center'},
   drawerBackdrop: {flex: 1, flexDirection: 'row-reverse'},
@@ -3016,6 +3086,7 @@ function createStyles(theme: MobileTheme) {
   pickerRowDescription: {color: palette.secondary, fontSize: 10.5, lineHeight: 15},
   capabilityRow: {flexDirection: 'row', alignItems: 'center', height: 14, gap: 4},
   pickerCapabilityIcon: {width: 14, height: 14, alignItems: 'center', justifyContent: 'center'},
+  pickerCapabilityFastIcon: {transform: [{translateY: -1}]},
   capabilityTag: {color: palette.secondary, fontSize: 8, fontWeight: '800', letterSpacing: 0.6, paddingHorizontal: 5, paddingVertical: 2, borderRadius: 4, overflow: 'hidden', backgroundColor: palette.input, borderWidth: StyleSheet.hairlineWidth, borderColor: palette.border},
   pickerRowFavorite: {width: 38, height: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 7},
   pickerRowEffort: {minWidth: 36, height: 44, paddingHorizontal: 6, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, borderRadius: 7},
@@ -3053,7 +3124,7 @@ function createStyles(theme: MobileTheme) {
   modelChangePrimary: {color: palette.secondary, fontSize: 12, lineHeight: 17},
   modelChangeModel: {color: palette.text, fontWeight: '700'},
   modelChangeDetail: {color: palette.muted, fontSize: 10.5, lineHeight: 15, textAlign: 'center'},
-  reasoningBlock: {borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: palette.border, paddingBottom: 7, marginBottom: 6},
+  reasoningBlock: {paddingBottom: 7, marginBottom: 6},
   reasoningHeader: {minHeight: 28, flexDirection: 'row', alignItems: 'center', gap: 6},
   reasoningLabel: {color: palette.muted, fontSize: 10.5, fontWeight: '600'},
   reasoning: {color: palette.muted, fontSize: 11.5, lineHeight: 17, fontStyle: 'italic', paddingTop: 3},

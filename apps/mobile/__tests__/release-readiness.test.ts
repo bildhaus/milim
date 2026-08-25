@@ -153,8 +153,35 @@ test('iOS picker and drawer source keep one reasoning sparkle and modal-safe ins
   const app = read('App.tsx');
   expect(app).toContain("capability !== 'reasoning'");
   expect(app).toContain("pickerRowMeta: {flexDirection: 'row', alignItems: 'center', gap: 6, minHeight: 14}");
+  expect(app).toContain("capability === 'fast' && styles.pickerCapabilityFastIcon");
+  expect(app).toContain('pickerCapabilityFastIcon: {transform: [{translateY: -1}]}');
   expect(app).toMatch(/<Modal visible=\{visible\}[\s\S]*<SafeAreaProvider>[\s\S]*<SafeAreaView style=\{styles\.drawerSafe\} edges=\{\['top', 'left', 'bottom'\]\}>/);
   expect(app).toContain('styles.drawerEdgeFade, {opacity: edgeOpacity}');
+});
+
+test('mobile threads follow the native keyboard without losing the latest message', () => {
+  const app = read('App.tsx');
+  expect(app).toContain("Keyboard.addListener('keyboardWillShow', show)");
+  expect(app).toContain("Keyboard.addListener('keyboardWillHide', hide)");
+  expect(app).toContain('duration: 120');
+  expect(app).toContain('endCoordinates.height - safeBottom');
+  expect(app).toContain('behavior="height"');
+  expect(app).toContain("Keyboard.addListener('keyboardDidShow', keepLatestVisible)");
+  expect(app).toContain("Keyboard.addListener('keyboardDidHide', keepLatestVisible)");
+  expect(app).toContain('if (!followingLatest.current) return;');
+});
+
+test('mobile chat chrome stays quiet and compact', () => {
+  const app = read('App.tsx');
+  const avatar = read('src', 'ui', 'AgentAvatar.tsx');
+
+  expect(app).not.toContain('styles.threadStatus');
+  expect(app).not.toContain("thread.model || 'No model'");
+  expect(app).toContain('threadCard: {minHeight: 46');
+  expect(app).toContain('reasoningBlock: {paddingBottom: 7, marginBottom: 6}');
+  expect(avatar).toContain("texture: 'grain'");
+  expect(avatar).toContain('overlayGradient: true');
+  expect(avatar).toContain('dither: false');
 });
 
 test('iOS app icon catalog contains complete opaque assets', () => {

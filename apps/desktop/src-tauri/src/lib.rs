@@ -990,6 +990,11 @@ async fn user_state_set(
             control.publish_model_favorites();
         }
     }
+    if result.is_ok() && key == milim_server::control::MODEL_CATALOG_STATE_KEY {
+        if let Some(control) = runtime.0.control.as_ref() {
+            control.publish_model_catalog();
+        }
+    }
     result
 }
 
@@ -1015,6 +1020,11 @@ async fn user_state_delete(
     if matches!(result, Ok(true)) && key == milim_server::control::MODEL_FAVORITES_SETTINGS_KEY {
         if let Some(control) = runtime.0.control.as_ref() {
             control.publish_model_favorites();
+        }
+    }
+    if matches!(result, Ok(true)) && key == milim_server::control::MODEL_CATALOG_STATE_KEY {
+        if let Some(control) = runtime.0.control.as_ref() {
+            control.publish_model_catalog();
         }
     }
     result

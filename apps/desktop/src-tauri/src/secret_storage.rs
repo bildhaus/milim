@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 
 const SERVICE_NAME: &str = "com.milim.desktop";
 const FALLBACK_FILE: &str = "desktop-storage.key";
+const RETAIN_NATIVE_RECOVERY_KEY: bool = cfg!(target_os = "macos");
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -63,7 +64,11 @@ fn initialize_inner(root: &Path) -> Result<([u8; 32], SecretStorageStatus)> {
     let fallback_path = root.join(FALLBACK_FILE);
     let entry = Entry::new(SERVICE_NAME, &account);
     let (key, mut status) = match entry {
-        Ok(entry) => resolve_with_native_store(&entry, &fallback_path)?,
+        Ok(entry) => resolve_with_native_store(
+            &entry,
+            &fallback_path,
+            RETAIN_NATIVE_RECOVERY_KEY,
+        )?,
         Err(error) => restricted_fallback(
             &fallback_path,
             format!("OS credential vault unavailable: {error}"),
@@ -81,10 +86,30 @@ fn initialize_inner(root: &Path) -> Result<([u8; 32], SecretStorageStatus)> {
 fn resolve_with_native_store(
     entry: &Entry,
     fallback_path: &Path,
+    retain_recovery_key: bool,
 ) -> Result<([u8; 32], SecretStorageStatus)> {
     match entry.get_secret() {
         Ok(bytes) => {
             let native_key = key_from_bytes(&bytes, "native credential")?;
+            if retain_recovery_key {
+                let key = if fallback_path.exists() {
+                    let fallback_key = read_restricted_key(fallback_path)?;
+                    if fallback_key == native_key {
+                        native_key
+                    } else {
+                        reconcile_native_and_recovery_keys(
+                            entry,
+                            fallback_path,
+                            native_key,
+                            fallback_key,
+                        )?
+                    }
+                } else {
+                    ensure_fallback(fallback_path, &native_key)?;
+                    native_key
+                };
+                return Ok((key, native_recovery_status()));
+            }
             if fallback_path.exists() {
                 let fallback_key = read_restricted_key(fallback_path)?;
                 if fallback_key != native_key {
@@ -110,8 +135,14 @@ fn resolve_with_native_store(
             } else {
                 EncryptedStore::random_key()
             };
+            if retain_recovery_key {
+                ensure_fallback(fallback_path, &key)?;
+            }
             match store_and_verify(entry, &key) {
                 Ok(()) => {
+                    if retain_recovery_key {
+                        return Ok((key, native_recovery_status()));
+                    }
                     if fallback_path.exists() {
                         if let Err(error) = std::fs::remove_file(fallback_path) {
                             tracing::warn!("failed to remove desktop secret fallback: {error}");
@@ -177,6 +208,75 @@ fn ensure_fallback(path: &Path, key: &[u8; 32]) -> Result<()> {
     create_private_file(path, key)
 }
 
+fn replace_fallback(path: &Path, key: &[u8; 32]) -> Result<()> {
+    if !path.exists() {
+        return create_private_file(path, key);
+    }
+    read_restricted_key(path)?;
+    atomic_write(path, key)?;
+    read_restricted_key(path).map(|_| ())
+}
+
+fn reconcile_native_and_recovery_keys(
+    entry: &Entry,
+    fallback_path: &Path,
+    native_key: [u8; 32],
+    fallback_key: [u8; 32],
+) -> Result<[u8; 32]> {
+    let root = fallback_path
+        .parent()
+        .ok_or_else(|| Error::InvalidRequest("desktop recovery key has no parent directory".into()))?;
+    let native_matches = key_opens_existing_encrypted_state(root, &native_key)?;
+    let fallback_matches = key_opens_existing_encrypted_state(root, &fallback_key)?;
+    match (native_matches, fallback_matches) {
+        (Some(true), Some(false)) => {
+            replace_fallback(fallback_path, &native_key)?;
+            tracing::warn!(
+                "repaired a stale desktop recovery key from the validated native credential"
+            );
+            Ok(native_key)
+        }
+        (Some(false), Some(true)) => {
+            store_and_verify(entry, &fallback_key)?;
+            tracing::warn!(
+                "repaired a stale native credential from the validated desktop recovery key"
+            );
+            Ok(fallback_key)
+        }
+        (None, None) => {
+            replace_fallback(fallback_path, &native_key)?;
+            Ok(native_key)
+        }
+        _ => Err(Error::Other(
+            "native and recovery master keys differ, and encrypted state cannot identify one consistent key"
+                .into(),
+        )),
+    }
+}
+
+fn key_opens_existing_encrypted_state(root: &Path, key: &[u8; 32]) -> Result<Option<bool>> {
+    let encryption = EncryptedStore::from_key(key);
+    let paths = [
+        root.join("google-workspace.enc"),
+        root.join("providers.enc"),
+        root.join("mcp-secrets.enc"),
+        root.join("config").join("mobile-companion.enc"),
+    ];
+    let mut found = false;
+    for path in paths {
+        let data = match std::fs::read(&path) {
+            Ok(data) => data,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        found = true;
+        if encryption.decrypt(&data).is_err() {
+            return Ok(Some(false));
+        }
+    }
+    Ok(found.then_some(true))
+}
+
 fn store_and_verify(entry: &Entry, key: &[u8; 32]) -> Result<()> {
     entry
         .set_secret(key)
@@ -210,6 +310,12 @@ fn restricted_status(detail: &str) -> SecretStorageStatus {
         mode: SecretStorageMode::RestrictedFile,
         detail: detail.into(),
     }
+}
+
+fn native_recovery_status() -> SecretStorageStatus {
+    restricted_status(
+        "The encryption key is stored in macOS Keychain with a matching owner-only local recovery key so encrypted state survives local app rebuilds.",
+    )
 }
 
 fn hex_digest(value: &[u8]) -> String {
@@ -410,13 +516,125 @@ mod tests {
         create_private_file(&fallback, &key).unwrap();
         let entry = Entry::new_with_credential(Box::<MockCredential>::default());
 
-        let (resolved, status) = resolve_with_native_store(&entry, &fallback).unwrap();
+        let (resolved, status) = resolve_with_native_store(&entry, &fallback, false).unwrap();
 
         assert_eq!(resolved, key);
         assert!(matches!(status.mode, SecretStorageMode::Native));
         assert_eq!(entry.get_secret().unwrap(), key);
         assert!(!fallback.exists());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn retained_recovery_key_survives_native_store_unavailability() {
+        let root = root("native-recovery");
+        let fallback = root.join(FALLBACK_FILE);
+        let entry = Entry::new_with_credential(Box::<MockCredential>::default());
+
+        let (first_key, first_status) =
+            resolve_with_native_store(&entry, &fallback, true).unwrap();
+        assert!(matches!(first_status.mode, SecretStorageMode::RestrictedFile));
+        assert_eq!(read_restricted_key(&fallback).unwrap(), first_key);
+
+        let companion_path = root.join("config").join("mobile-companion.enc");
+        let bridge = milim_server::companion::MobileCompanionBridge::persistent_encrypted(
+            companion_path.clone(),
+            EncryptedStore::from_key(&first_key),
+        )
+        .unwrap();
+        bridge.set_enabled(true, 1);
+        let pairing = bridge.start_pairing(2).unwrap();
+        let secret = pairing.path.split("secret=").nth(1).unwrap().to_string();
+        let paired = bridge
+            .pair_device(
+                milim_server::companion::MobilePairRequest {
+                    pair_id: pairing.id,
+                    secret,
+                    device_name: Some("Mac test phone".into()),
+                },
+                3,
+                None,
+            )
+            .unwrap();
+
+        let credential = entry
+            .get_credential()
+            .downcast_ref::<MockCredential>()
+            .unwrap();
+        credential.set_error(KeyringError::NoStorageAccess(Box::new(
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "vault unavailable"),
+        )));
+
+        let (reloaded_key, reloaded_status) =
+            resolve_with_native_store(&entry, &fallback, true).unwrap();
+        assert_eq!(reloaded_key, first_key);
+        assert!(matches!(
+            reloaded_status.mode,
+            SecretStorageMode::RestrictedFile
+        ));
+        let reloaded = milim_server::companion::MobileCompanionBridge::persistent_encrypted(
+            companion_path,
+            EncryptedStore::from_key(&reloaded_key),
+        )
+        .unwrap();
+        let status = reloaded.status(4);
+        assert!(status.enabled);
+        assert_eq!(status.devices.len(), 1);
+        assert_eq!(status.devices[0].id, paired.device_id);
+        assert!(reloaded
+            .authenticate_device(&paired.device_key, 5)
+            .is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reconciles_native_and_recovery_keys_against_encrypted_state() {
+        let native_root = root("native-reconcile");
+        let native_fallback = native_root.join(FALLBACK_FILE);
+        let native_key = [21_u8; 32];
+        let stale_key = [22_u8; 32];
+        create_private_file(&native_fallback, &stale_key).unwrap();
+        let native_config = native_root.join("config");
+        std::fs::create_dir_all(&native_config).unwrap();
+        std::fs::write(
+            native_config.join("mobile-companion.enc"),
+            EncryptedStore::from_key(&native_key)
+                .encrypt(br#"{"enabled":true,"devices":[]}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        let native_entry = Entry::new_with_credential(Box::<MockCredential>::default());
+        native_entry.set_secret(&native_key).unwrap();
+
+        let (recovered_native, _) =
+            resolve_with_native_store(&native_entry, &native_fallback, true).unwrap();
+        assert_eq!(recovered_native, native_key);
+        assert_eq!(read_restricted_key(&native_fallback).unwrap(), native_key);
+
+        let recovery_root = root("recovery-reconcile");
+        let recovery_fallback = recovery_root.join(FALLBACK_FILE);
+        let recovery_key = [31_u8; 32];
+        let stale_native_key = [32_u8; 32];
+        create_private_file(&recovery_fallback, &recovery_key).unwrap();
+        let recovery_config = recovery_root.join("config");
+        std::fs::create_dir_all(&recovery_config).unwrap();
+        std::fs::write(
+            recovery_config.join("mobile-companion.enc"),
+            EncryptedStore::from_key(&recovery_key)
+                .encrypt(br#"{"enabled":true,"devices":[]}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        let recovery_entry = Entry::new_with_credential(Box::<MockCredential>::default());
+        recovery_entry.set_secret(&stale_native_key).unwrap();
+
+        let (recovered_fallback, _) =
+            resolve_with_native_store(&recovery_entry, &recovery_fallback, true).unwrap();
+        assert_eq!(recovered_fallback, recovery_key);
+        assert_eq!(recovery_entry.get_secret().unwrap(), recovery_key);
+
+        let _ = std::fs::remove_dir_all(native_root);
+        let _ = std::fs::remove_dir_all(recovery_root);
     }
 
     #[test]
