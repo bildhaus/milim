@@ -35,11 +35,11 @@ export function agentAvatarPalette(recipeShape: number[]) {
   return AGENT_AVATAR_PALETTES[index];
 }
 
-/** Remove web-only SVG filters while preserving the package's native-safe geometry and gradients. */
+/** Remove web-only SVG filters while preserving native-safe geometry, texture, and gradients. */
 export function nativeAgentAvatarSvg(svg: string): string {
   return svg
-    .replace(/<filter id="[^"]+-field"[\s\S]*?<\/filter>/, '')
-    .replace(/\sfilter="url\(#[^"]+-field\)"/g, '')
+    .replace(/<filter\b[^>]*>[\s\S]*?<\/filter>/g, '')
+    .replace(/\sfilter="url\(#[^"]+\)"/g, '')
     .replace(/\sdata-[a-z-]+="[^"]*"/g, '')
     .replace(/\sstyle="[^"]*"/g, '');
 }

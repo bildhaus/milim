@@ -1,6 +1,7 @@
 import {
   modelPickerFavoriteIds,
   modelPickerGroups,
+  mobileModelOptions,
   normalizeModelPickerPreferences,
   parseMobileModel,
   transcriptModelLabel,
@@ -56,6 +57,21 @@ test('adds favorites first and supports favorites-only filtering', () => {
   expect(groups[0].title).toBe('Favorites');
   expect(groups[0].models.map(model => model.id)).toEqual(['claude:opus']);
   expect(modelPickerGroups(values, '', ['claude:opus'], true)).toHaveLength(1);
+});
+
+test('qualifies duplicate provider models like the desktop picker', () => {
+  const values = [
+    {id: 'shared/model', owned_by: 'Provider A', provider_id: 'provider-a'},
+    {id: 'shared/model', owned_by: 'Provider B', provider_id: 'provider-b'},
+  ];
+  expect(mobileModelOptions(values).map(model => [model.id, model.label])).toEqual([
+    ['provider:provider-a:shared/model', 'shared/model'],
+    ['provider:provider-b:shared/model', 'shared/model'],
+  ]);
+  expect(modelPickerGroups(values, '', ['provider:provider-b:shared/model'])[0]).toMatchObject({
+    title: 'Favorites',
+    models: [{id: 'provider:provider-b:shared/model'}],
+  });
 });
 
 test('normalizes persisted mobile picker preferences', () => {

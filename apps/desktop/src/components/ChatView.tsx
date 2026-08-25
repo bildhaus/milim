@@ -332,7 +332,7 @@ import {
   shouldQueueCanonicalFollowup,
 } from "../lib/canonicalControl.js";
 import { createChatMessageId } from "../lib/messageIds.js";
-import { flushDeferredUserStateWrites } from "../persistence/userStateStorage";
+import { flushDeferredUserStateWrites, writeUserStateKey } from "../persistence/userStateStorage";
 import { useSettings } from "../settings/store";
 import { WINDOW_ATTACH_FILES_EVENT } from "../lib/windowFileDrop";
 import { shortcutLabel, shortcutMatchesEvent } from "../ui/shortcuts";
@@ -2158,6 +2158,12 @@ export function ChatView({
     () => mergeModelListsForPicker(models, mediaModelEntries),
     [models, mediaModelEntries],
   );
+  useEffect(() => {
+    if (!modelsLoaded) return;
+    void Promise.resolve(
+      writeUserStateKey("milim.modelCatalog", JSON.stringify(pickerModels)),
+    ).catch((error) => console.warn("Failed to publish mobile model catalog:", error));
+  }, [modelsLoaded, pickerModels]);
   function unsupportedImageInputMessage(modelId: string): string | null {
     const selected = pickerModels.find((item) => item.id === modelId);
     if (modelImageInputSupport(selected) !== "unsupported") return null;
