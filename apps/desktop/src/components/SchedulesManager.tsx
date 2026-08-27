@@ -436,6 +436,8 @@ export function SchedulesManager({ onClose }: { onClose: () => void }) {
   const agents = useAgents((s) => s.agents);
   const refreshAgents = useAgents((s) => s.refresh);
   const activeSession = useSessions((s) => s.sessions.find((session) => session.id === s.activeId));
+  const scheduleThreads = useSessions((s) => s.sessions.filter((session) => session.origin?.kind === "schedule"));
+  const switchTo = useSessions((s) => s.switchTo);
   const activeThreadModel = activeSession?.settings?.model?.trim() ?? "";
   const currentThreadModel = isAccountRuntimeModel(activeThreadModel)
     ? ""
@@ -606,6 +608,11 @@ export function SchedulesManager({ onClose }: { onClose: () => void }) {
   const cronStatus = useMemo(() => validateCron(cron), [cron]);
   const activeCount = schedules.filter((s) => s.enabled).length;
   const selectedSchedule = sel && sel !== "new" ? sel : null;
+  const latestRun = selectedSchedule
+    ? scheduleThreads
+        .filter((session) => session.origin?.kind === "schedule" && session.origin.schedule_id === selectedSchedule.id)
+        .sort((a, b) => b.updatedAt - a.updatedAt)[0]
+    : undefined;
   const currentAttachmentFingerprint = useMemo(() => attachmentFingerprint(attachments), [attachments]);
   const selectedAttachmentFingerprint = useMemo(
     () => attachmentFingerprint(selectedSchedule?.attachments ?? []),
@@ -885,6 +892,11 @@ export function SchedulesManager({ onClose }: { onClose: () => void }) {
                 </section>
 
                 <div className="schedule-action-footer">
+                  {latestRun && (
+                    <button className="btn-ghost" type="button" onClick={() => { switchTo(latestRun.id); onClose(); }}>
+                      Open latest run
+                    </button>
+                  )}
                   {sel !== "new" && (
                     <button className="btn-ghost danger schedule-delete-action" type="button" disabled={busy} onClick={remove}>
                       <Trash size={14} />

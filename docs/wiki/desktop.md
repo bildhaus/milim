@@ -82,7 +82,7 @@ Run inspection remains byte-for-byte lossless while using a content-addressed SQ
 
 `pnpm -C apps/desktop perf:suite` runs that canonical scenario in seven fresh release processes and writes median/p95 samples to `canonical-suite/performance-suite-v2.json`; add `--enforce` through the `perf:suite:enforce` script only on a pinned benchmark machine. The suite report labels its current scope explicitly: the scale, ten-minute idle, migration/compaction, backup/restore, compositor-theme, and macOS parity scenarios are not promoted by the canonical runner yet.
 
-Schedules accept the same stored `dataUrl` pixels and build a multimodal user message when they fire. A legacy scheduled image without stored pixel data records a visible reattachment error. Background schedules list and accept provider/local API models only; account runtimes remain interactive because their approval and session semantics are not safe for unattended runs.
+Schedules accept the same stored `dataUrl` pixels and build a multimodal user message when they fire. Every occurrence is created directly as a canonical thread, marked with its schedule origin, and replicated to desktop and mobile like any other run; retries reuse deterministic command receipts instead of creating duplicate work. A legacy scheduled image without stored pixel data records a visible reattachment error in that thread. Background schedules list and accept provider/local API models only; account runtimes remain interactive because their approval and session semantics are not safe for unattended runs.
 
 ## Session controls
 

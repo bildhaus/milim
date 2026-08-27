@@ -117,6 +117,7 @@ fn generated_contract() -> String {
         ThreadLinkV1,
         FrozenLinkedThreadGrantV1,
         MailboxOriginV1,
+        ThreadOriginV1,
         ThreadSummaryV1,
         AgentSummaryV1,
         AgentSnapshotV1,

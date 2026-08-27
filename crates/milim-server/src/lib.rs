@@ -39,7 +39,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::routing::{delete, get, post, put};
 use axum::Router;
 
-use milim_core::{api::openai::ChatMessage, Result};
+use milim_control_contract::{
+    ControlCommandKindV1, ControlCommandStatusV1, ControlCommandV1, ThreadOriginV1,
+};
+use milim_core::{api::openai::ChatMessage, Error, Result};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
@@ -400,7 +403,6 @@ pub fn build_router(state: AppState) -> Router {
             "/schedules",
             get(routes::schedules_list).post(routes::schedule_create),
         )
-        .route("/schedules/events", get(routes::schedule_events))
         .route(
             "/schedules/{id}",
             put(routes::schedule_update).delete(routes::schedule_delete),
@@ -661,142 +663,160 @@ fn skill_instruction_message(skills: &[milim_skills::SkillDef]) -> Option<ChatMe
     ))
 }
 
-/// Run any schedules due at `now_unix` once, returning how many fired. Each
-/// schedule is marked as run before its (optional) agent's tool-use loop starts.
-/// Factored out from the loop so it's deterministically testable.
+/// Dispatch every schedule occurrence due at `now_unix` through the canonical
+/// control ledger. The durable command receipts make retries idempotent.
 pub async fn fire_due(state: &AppState, now_unix: i64) -> Result<usize> {
-    let Some(schedules) = state.schedules.as_ref() else {
+    let Some(schedules) = state.schedules.clone() else {
         return Ok(0);
     };
     let due = schedules.due(now_unix)?;
     let limit = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
     let mut jobs = tokio::task::JoinSet::new();
-    for (index, s) in due.into_iter().enumerate() {
-        schedules.mark_ran(&s.id, now_unix)?;
+    for occurrence in due {
         let state = state.clone();
+        let schedules = schedules.clone();
         let limit = limit.clone();
         jobs.spawn(async move {
             let _permit = limit.acquire_owned().await.ok();
-            fire_schedule(state, s, now_unix, index).await
+            let schedule_id = occurrence.schedule.id.clone();
+            let handled = fire_schedule(state, occurrence).await?;
+            if handled {
+                schedules.mark_ran(&schedule_id, now_unix)?;
+            }
+            Ok::<bool, Error>(handled)
         });
     }
 
     let mut fired = 0;
+    let mut first_error = None;
     while let Some(result) = jobs.join_next().await {
         match result {
-            Ok(true) => fired += 1,
-            Ok(false) => {}
-            Err(error) => tracing::warn!("scheduled run task failed: {error}"),
+            Ok(Ok(true)) => fired += 1,
+            Ok(Ok(false)) => {}
+            Ok(Err(error)) => {
+                tracing::warn!("scheduled run dispatch failed: {error}");
+                first_error.get_or_insert(error);
+            }
+            Err(error) => {
+                tracing::warn!("scheduled run task failed: {error}");
+                first_error.get_or_insert_with(|| Error::Other(error.to_string()));
+            }
         }
     }
-    Ok(fired)
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(fired),
+    }
 }
 
-async fn fire_schedule(
-    mut state: AppState,
-    schedule: milim_automation::Schedule,
-    now_unix: i64,
-    index: usize,
-) -> bool {
-    const MAX_RUN: std::time::Duration = std::time::Duration::from_secs(15 * 60);
-    let workspace = schedule.workspace.as_deref().and_then(|value| {
-        std::fs::canonicalize(value)
-            .ok()
-            .filter(|path| path.is_dir())
-    });
-    state.workspace = std::sync::Arc::new(std::sync::RwLock::new(workspace));
+async fn fire_schedule(state: AppState, occurrence: milim_automation::DueSchedule) -> Result<bool> {
+    let schedule = &occurrence.schedule;
+    let control = state.control.clone().ok_or_else(|| {
+        Error::Other("scheduled runs require the canonical control manager".to_string())
+    })?;
+    let model = if schedule.model.trim().is_empty() {
+        schedule
+            .agent_id
+            .as_deref()
+            .and_then(|id| state.agents.as_ref()?.get(id).ok().flatten())
+            .map(|agent| agent.model)
+            .unwrap_or_default()
+    } else {
+        schedule.model.trim().to_string()
+    };
+    let thread_id = format!("schedule-{}-{}", schedule.id, occurrence.scheduled_for);
+    let origin = ThreadOriginV1::Schedule {
+        schedule_id: schedule.id.clone(),
+        schedule_name: schedule.name.clone(),
+        occurrence_unix: occurrence.scheduled_for,
+    };
+    let created = control
+        .command(
+            state.clone(),
+            Some("system:scheduler".to_string()),
+            ControlCommandV1 {
+                command_id: format!(
+                    "schedule:{}:{}:create",
+                    schedule.id, occurrence.scheduled_for
+                ),
+                kind: ControlCommandKindV1::ThreadCreate,
+                thread_id: None,
+                expected_revision: None,
+                payload: serde_json::json!({
+                    "id": thread_id,
+                    "title": format!("Schedule: {}", schedule.name),
+                    "settings": {
+                        "model": model,
+                        "folder": schedule.workspace,
+                        "activeAgentId": schedule.agent_id,
+                        "toolApproval": "guarded",
+                        "memory": false,
+                        "delegationPolicy": "off",
+                        "computerUse": false,
+                        "sandbox": false,
+                        "planMode": false,
+                        "privacy": "off"
+                    },
+                    "origin": origin,
+                }),
+                confirmation_token: None,
+            },
+        )
+        .await?;
+    if created.status == ControlCommandStatusV1::Failed {
+        return Ok(false);
+    }
 
-    let user_message =
-        match milim_automation::message_with_attachments(&schedule.prompt, &schedule.attachments) {
-            Ok(message) => message,
-            Err(error) => {
-                state.schedule_runs.push(state::ScheduleRunEvent {
-                    id: format!("{}-{now_unix}-{index}", schedule.id),
-                    schedule_id: schedule.id,
-                    schedule_name: schedule.name,
-                    prompt: schedule.prompt,
-                    response: format!("Schedule error: {error}"),
-                    model: schedule.model,
-                    ran_at: now_unix,
-                });
-                return true;
-            }
-        };
-    let prompt = user_message.text_content();
-    let agent = schedule
-        .agent_id
-        .as_deref()
-        .and_then(|id| state.agents.as_ref()?.get(id).ok().flatten());
-    let mut messages = Vec::new();
-    let mut model = schedule.model.trim().to_string();
-    if let Some(agent) = &agent {
-        if !agent.system_prompt.is_empty() {
-            messages.push(ChatMessage::text("system", agent.system_prompt.clone()));
-        }
-        messages.extend(agent_skill_messages(&state, agent, &prompt));
-        if model.is_empty() && !agent.model.trim().is_empty() {
-            model = agent.model.clone();
-        }
-    }
-    if model.is_empty() {
-        state.schedule_runs.push(state::ScheduleRunEvent {
-            id: format!("{}-{now_unix}-{index}", schedule.id),
-            schedule_id: schedule.id,
-            schedule_name: schedule.name,
-            prompt: schedule.prompt,
-            response: "Schedule error: no model is configured. Edit this schedule and choose a model before it can run.".to_string(),
-            model,
-            ran_at: now_unix,
-        });
-        return true;
-    }
-    let lower_model = model.to_ascii_lowercase();
-    if lower_model.starts_with("codex:")
-        || lower_model.starts_with("claude:")
-        || lower_model.starts_with("opencode:")
-        || lower_model.starts_with("pi:")
+    if let Err(error) =
+        milim_automation::message_with_attachments(&schedule.prompt, &schedule.attachments)
     {
-        state.schedule_runs.push(state::ScheduleRunEvent {
-            id: format!("{}-{now_unix}-{index}", schedule.id),
-            schedule_id: schedule.id,
-            schedule_name: schedule.name,
-            prompt: schedule.prompt,
-            response: "Schedule error: account-runtime models are interactive only. Choose a configured provider model for background schedules.".to_string(),
-            model,
-            ran_at: now_unix,
-        });
-        return true;
+        control.record_schedule_error(&thread_id, &error.to_string())?;
+        return Ok(true);
     }
-    messages.push(user_message);
-    let tools = agent
-        .as_ref()
-        .map(|agent| routes::scheduled_agent_registry(&state, agent))
-        .unwrap_or_default();
-    let result = tokio::time::timeout(
-        MAX_RUN,
-        milim_agents::run_agent(state.service.as_ref(), &tools, &model, messages, None),
-    )
-    .await
-    .map_err(|_| milim_core::Error::Other("scheduled run timed out after 15 minutes".into()))
-    .and_then(|result| result);
-    match result {
-        Ok(outcome) => {
-            state.schedule_runs.push(state::ScheduleRunEvent {
-                id: format!("{}-{now_unix}-{index}", schedule.id),
-                schedule_id: schedule.id,
-                schedule_name: schedule.name,
-                prompt: schedule.prompt,
-                response: outcome.message.text_content(),
-                model,
-                ran_at: now_unix,
-            });
-            true
-        }
-        Err(error) => {
-            tracing::warn!("schedule {} failed: {error}", schedule.id);
-            false
-        }
+    let prompt = milim_automation::prompt_with_attachments(&schedule.prompt, &schedule.attachments);
+
+    let attachments = schedule
+        .attachments
+        .iter()
+        .map(|attachment| {
+            serde_json::json!({
+                "id": attachment.id,
+                "name": attachment.name,
+                "mime": attachment.mime,
+                "size": attachment.size,
+                "content": attachment.content,
+                "data_url": attachment.data_url,
+                "truncated": attachment.truncated,
+            })
+        })
+        .collect::<Vec<_>>();
+    let sent = control
+        .command(
+            state,
+            Some("system:scheduler".to_string()),
+            ControlCommandV1 {
+                command_id: format!("schedule:{}:{}:send", schedule.id, occurrence.scheduled_for),
+                kind: ControlCommandKindV1::TurnSend,
+                thread_id: Some(thread_id.clone()),
+                expected_revision: None,
+                payload: serde_json::json!({
+                    "text": prompt,
+                    "display_text": schedule.prompt,
+                    "attachments": attachments,
+                }),
+                confirmation_token: None,
+            },
+        )
+        .await?;
+    if sent.status == ControlCommandStatusV1::Failed {
+        control.record_schedule_error(
+            &thread_id,
+            sent.message
+                .as_deref()
+                .unwrap_or("The scheduled turn could not be accepted."),
+        )?;
     }
+    Ok(true)
 }
 
 /// Run the background scheduler loop (checks for due schedules every 30s).
@@ -823,105 +843,33 @@ mod tests {
 
     use milim_core::config::ServerConfiguration;
     use milim_inference::test_backend::TestBackend;
-    use milim_storage::Database;
+    use milim_storage::{Database, UserDataStore};
     use std::sync::Arc;
 
-    #[test]
-    fn agent_skill_messages_respect_agent_mode() {
-        let store = milim_skills::SkillStore::new(Database::open_in_memory().unwrap()).unwrap();
-        let skill = store
-            .create("Review", "Use for review", "Check regressions first.")
-            .unwrap();
+    fn control_state() -> (AppState, Arc<control::RunManager>, Arc<UserDataStore>) {
+        let store = Arc::new(UserDataStore::new(Database::open_in_memory().unwrap()).unwrap());
+        let control = control::RunManager::new(store.clone(), "Schedule fixture").unwrap();
         let state = AppState::new(Arc::new(TestBackend::new()), ServerConfiguration::default())
-            .with_skills(store);
-        let mut agent = milim_agents::AgentDef {
-            id: "agent-1".to_string(),
-            name: "Reviewer".to_string(),
-            description: String::new(),
-            system_prompt: String::new(),
-            model: "test-echo".to_string(),
-            tool_mode: "all".to_string(),
-            enabled_tools: Vec::new(),
-            skill_mode: "custom".to_string(),
-            enabled_skills: vec![skill.id],
-            avatar: String::new(),
-        };
-
-        let messages = agent_skill_messages(&state, &agent, "please review");
-        assert_eq!(messages.len(), 1);
-        assert!(messages[0]
-            .text_content()
-            .contains("Check regressions first."));
-
-        agent.skill_mode = "none".to_string();
-        assert!(agent_skill_messages(&state, &agent, "please review").is_empty());
+            .with_control(control.clone());
+        (state, control, store)
     }
 
-    #[test]
-    fn scheduled_agent_registry_respects_saved_tool_mode() {
-        let state = AppState::new(Arc::new(TestBackend::new()), ServerConfiguration::default())
-            .with_tools(milim_tools::ToolRegistry::with_builtins());
-        let agent = milim_agents::AgentDef {
-            id: "agent-none".to_string(),
-            name: "No tools".to_string(),
-            description: String::new(),
-            system_prompt: String::new(),
-            model: "test-echo".to_string(),
-            tool_mode: "none".to_string(),
-            enabled_tools: Vec::new(),
-            skill_mode: "none".to_string(),
-            enabled_skills: Vec::new(),
-            avatar: String::new(),
-        };
-        assert!(routes::scheduled_agent_registry(&state, &agent).is_empty());
+    fn occurrence(schedule: milim_automation::Schedule) -> milim_automation::DueSchedule {
+        milim_automation::DueSchedule {
+            schedule,
+            scheduled_for: 3_600,
+        }
     }
 
     #[tokio::test]
-    async fn legacy_schedule_falls_back_to_saved_agent_model() {
-        let agents = milim_agents::AgentStore::new(Database::open_in_memory().unwrap()).unwrap();
-        let agent = agents
-            .create(
-                "Legacy",
-                "",
-                "test-echo",
-                "",
-                "none",
-                Vec::new(),
-                "none",
-                Vec::new(),
-                "",
-            )
-            .unwrap();
-        let state = AppState::new(Arc::new(TestBackend::new()), ServerConfiguration::default())
-            .with_agents(agents);
+    async fn scheduled_occurrence_creates_one_canonical_thread_and_run() {
+        let (state, control, store) = control_state();
         let schedule = milim_automation::Schedule {
-            id: "legacy-schedule".to_string(),
-            name: "Legacy schedule".to_string(),
-            cron: "0 0 * * * *".to_string(),
-            agent_id: Some(agent.id),
-            model: String::new(),
-            prompt: "hello".to_string(),
-            attachments: Vec::new(),
-            enabled: true,
-            workspace: None,
-            created_unix: 0,
-            last_run: None,
-        };
-
-        assert!(fire_schedule(state.clone(), schedule, 10, 0).await);
-        let events = state.schedule_runs.take();
-        assert_eq!(events[0].model, "test-echo");
-    }
-
-    #[tokio::test]
-    async fn schedule_without_any_model_records_visible_error() {
-        let state = AppState::new(Arc::new(TestBackend::new()), ServerConfiguration::default());
-        let schedule = milim_automation::Schedule {
-            id: "missing-model".to_string(),
-            name: "Missing model".to_string(),
+            id: "daily-review".to_string(),
+            name: "Daily review".to_string(),
             cron: "0 0 * * * *".to_string(),
             agent_id: None,
-            model: String::new(),
+            model: "test-echo".to_string(),
             prompt: "hello".to_string(),
             attachments: Vec::new(),
             enabled: true,
@@ -930,14 +878,29 @@ mod tests {
             last_run: None,
         };
 
-        assert!(fire_schedule(state.clone(), schedule, 10, 0).await);
-        let events = state.schedule_runs.take();
-        assert!(events[0].response.contains("no model is configured"));
+        assert!(fire_schedule(state.clone(), occurrence(schedule.clone()))
+            .await
+            .unwrap());
+        assert!(fire_schedule(state.clone(), occurrence(schedule))
+            .await
+            .unwrap());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let bootstrap = control.bootstrap(&state).await.unwrap();
+        assert_eq!(bootstrap.threads.len(), 1);
+        assert_eq!(bootstrap.threads[0].title, "Schedule: Daily review");
+        assert!(matches!(
+            bootstrap.threads[0].origin,
+            Some(ThreadOriginV1::Schedule { ref schedule_id, occurrence_unix: 3_600, .. })
+                if schedule_id == "daily-review"
+        ));
+        let runs = store.control_runs(false).unwrap();
+        assert_eq!(runs.len(), 1);
     }
 
     #[tokio::test]
-    async fn legacy_schedule_image_without_pixels_records_visible_error() {
-        let state = AppState::new(Arc::new(TestBackend::new()), ServerConfiguration::default());
+    async fn invalid_schedule_input_is_recorded_in_the_canonical_timeline() {
+        let (state, control, _) = control_state();
         let schedule = milim_automation::Schedule {
             id: "legacy-image".to_string(),
             name: "Legacy image".to_string(),
@@ -961,8 +924,16 @@ mod tests {
             last_run: None,
         };
 
-        assert!(fire_schedule(state.clone(), schedule, 10, 0).await);
-        let events = state.schedule_runs.take();
-        assert!(events[0].response.contains("reattach it"));
+        assert!(fire_schedule(state, occurrence(schedule)).await.unwrap());
+        let timeline = control
+            .timeline_page("schedule-legacy-image-3600", None, None, true, 20)
+            .unwrap()
+            .unwrap();
+        assert!(timeline.items.iter().any(|item| {
+            item.item_type == "runtime_notice"
+                && item.data["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("reattach it"))
+        }));
     }
 }

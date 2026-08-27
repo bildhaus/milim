@@ -1259,6 +1259,7 @@ function ThreadCard({thread, attentionCount, selected, onOpen, onMenu}: {thread:
     <Pressable style={[styles.threadCard, selected && styles.threadCardSelected]} onPress={onOpen}>
       <View style={styles.threadTopline}>
         <Text style={styles.threadTitle} numberOfLines={1}>{thread.title}</Text>
+        {thread.origin?.kind === 'schedule' ? <Text style={styles.threadOrigin}>Scheduled</Text> : null}
         {attentionCount ? <Text style={styles.queued}>{attentionCount}</Text> : null}
       </View>
       <Pressable
@@ -1492,6 +1493,7 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
     <View style={styles.screen}>
       <View style={styles.chatHeader}>
         <Text style={styles.chatTitle} numberOfLines={1}>{thread.title}</Text>
+        {thread.origin?.kind === 'schedule' ? <Text style={styles.threadOrigin}>Scheduled</Text> : null}
         {thread.busy ? (
           <View style={styles.chatRunState}>
             <View style={[styles.dot, styles.dotOnline]} />
@@ -3012,6 +3014,7 @@ function createStyles(theme: MobileTheme) {
   threadCardSelected: {backgroundColor: palette.panel, borderColor: palette.border},
   threadTopline: {flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 8},
   threadTitle: {color: palette.text, fontSize: 13.5, fontWeight: '600', flex: 1},
+  threadOrigin: {color: palette.muted, fontSize: 9, fontWeight: '700', letterSpacing: 0.4, textTransform: 'uppercase'},
   queued: {color: palette.warning, fontSize: 9.5, fontWeight: '800'},
   threadMenu: {width: 38, height: 38, borderRadius: 7, alignItems: 'center', justifyContent: 'center'},
   drawerBackdrop: {flex: 1, flexDirection: 'row-reverse'},

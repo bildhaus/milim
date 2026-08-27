@@ -14,6 +14,7 @@
     "run_ledger": true,
     "steering": true,
     "thread_links": true,
+    "thread_origins": true,
     "timeline_sync": true,
     "websocket_tickets": true,
     "workers": true

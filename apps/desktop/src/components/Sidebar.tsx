@@ -126,6 +126,7 @@ type SidebarSessionSettings = {
 export type SidebarSessionLike = {
   id: string;
   title: string;
+  origin?: Session["origin"];
   hasMessages?: boolean;
   settings?: SidebarSessionSettings;
   previewRuntime?: SessionPreviewRuntime;
@@ -1988,6 +1989,11 @@ export function Sidebar({
         ) : (
           <>
             <span className={group.inbox ? "session-copy inbox-session-copy" : "session-copy"}>
+              {session.origin?.kind === "schedule" && (
+                <span className="session-origin-marker" title="Scheduled run" aria-label="Scheduled run">
+                  <Calendar size={10} />
+                </span>
+              )}
               <HoverScrollText
                 className="session-title"
                 innerClassName={generating ? "shiny-text" : undefined}

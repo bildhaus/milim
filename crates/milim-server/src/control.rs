@@ -2218,6 +2218,12 @@ impl RunManager {
         if let Some(project) = command.payload.get("project") {
             session["project"] = project.clone();
         }
+        if let Some(origin) = command.payload.get("origin") {
+            let _: ThreadOriginV1 = serde_json::from_value(origin.clone()).map_err(|error| {
+                Error::InvalidRequest(format!("invalid thread origin: {error}"))
+            })?;
+            session["origin"] = origin.clone();
+        }
         let thread = self.store.control_create_thread(
             &id,
             &session.to_string(),
@@ -4719,6 +4725,20 @@ impl RunManager {
         Ok(record)
     }
 
+    pub fn record_schedule_error(&self, thread_id: &str, message: &str) -> Result<()> {
+        self.persist_and_emit(
+            thread_id,
+            None,
+            "runtime_notice",
+            json!({
+                "message": message,
+                "tone": "error",
+                "source": "schedule",
+            }),
+        )?;
+        Ok(())
+    }
+
     fn persist_message_and_event(
         &self,
         thread_id: &str,
@@ -5676,6 +5696,12 @@ fn thread_summary(
             .and_then(|settings| settings.get("folder"))
             .and_then(Value::as_str)
             .map(str::to_string),
+        origin: value
+            .get("origin")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| Error::Other(format!("invalid stored thread origin: {error}")))?,
         busy,
         queued_turns,
         linked_threads: Vec::new(),

@@ -74,6 +74,13 @@ pub struct Schedule {
     pub last_run: Option<i64>,
 }
 
+/// One enabled schedule occurrence ready for dispatch.
+#[derive(Debug, Clone)]
+pub struct DueSchedule {
+    pub schedule: Schedule,
+    pub scheduled_for: i64,
+}
+
 /// Named payload for updating an existing schedule.
 pub struct ScheduleUpdate<'a> {
     pub id: &'a str,
@@ -508,13 +515,16 @@ impl ScheduleStore {
     }
 
     /// Enabled schedules whose next fire time (after their last run) is ≤ `now_unix`.
-    pub fn due(&self, now_unix: i64) -> Result<Vec<Schedule>> {
+    pub fn due(&self, now_unix: i64) -> Result<Vec<DueSchedule>> {
         let mut due = Vec::new();
         for s in self.list()?.into_iter().filter(|s| s.enabled) {
             let after = s.last_run.unwrap_or(s.created_unix);
             if let Some(next) = cron_next_after(&s.cron, after)? {
                 if next <= now_unix {
-                    due.push(s);
+                    due.push(DueSchedule {
+                        schedule: s,
+                        scheduled_for: next,
+                    });
                 }
             }
         }
@@ -644,7 +654,8 @@ mod tests {
         // last_run None → after=0 → next fire 3600; now far in the future → due.
         let due = s.due(10_000).unwrap();
         assert_eq!(due.len(), 1);
-        assert_eq!(due[0].id, sched.id);
+        assert_eq!(due[0].schedule.id, sched.id);
+        assert_eq!(due[0].scheduled_for, 3600);
 
         // After marking it ran at now, it's no longer due until the next hour.
         s.mark_ran(&sched.id, 10_000).unwrap();

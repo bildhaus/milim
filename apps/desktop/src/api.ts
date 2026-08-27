@@ -5070,16 +5070,6 @@ export interface ScheduleInfo {
   last_run?: number | null;
 }
 
-export interface ScheduleRunEvent {
-  id: string;
-  schedule_id: string;
-  schedule_name: string;
-  prompt: string;
-  response: string;
-  model: string;
-  ran_at: number;
-}
-
 export async function listSchedules(): Promise<ScheduleInfo[]> {
   try {
     const ctrl = new AbortController();
@@ -5089,17 +5079,6 @@ export async function listSchedules(): Promise<ScheduleInfo[]> {
     if (!r.ok) return [];
     const j = await r.json();
     return (j.schedules ?? []) as ScheduleInfo[];
-  } catch {
-    return [];
-  }
-}
-
-export async function pollScheduleRunEvents(): Promise<ScheduleRunEvent[]> {
-  try {
-    const r = await authFetch(`${BASE}/schedules/events`);
-    if (!r.ok) return [];
-    const j = await r.json();
-    return (j.events ?? []) as ScheduleRunEvent[];
   } catch {
     return [];
   }

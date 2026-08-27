@@ -403,7 +403,6 @@ const WORKSPACE_EDITOR_LEAVE_EVENT: &str = "milim://workspace-editor-leave-reque
 const USER_STATE_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 const DESKTOP_SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const RUNTIME_FAILED_EVENT: &str = "milim://runtime-failed";
-const SCHEDULE_RUN_COMPLETED_EVENT: &str = "milim://schedule-run-completed";
 const MODEL_FAVORITES_UPDATED_EVENT: &str = "milim://model-favorites-updated";
 const APP_MENU_EVENT: &str = "milim://menu-action";
 const APP_MENU_NEW_CHAT_ID: &str = "app.new-chat";
@@ -4838,7 +4837,6 @@ pub fn run() {
     let server_runtime =
         DesktopServerRuntimeState::new(state.control.clone(), Some(mobile_state.clone()));
     let model_favorites_control = state.control.clone();
-    let schedule_run_events = state.schedule_runs.clone();
     let artifact_migration_store = user_data.clone();
 
     let perf_runtime = std::env::var_os("MILIM_PERF").is_some();
@@ -4882,23 +4880,6 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 mcp.connect_all().await;
             });
-            {
-                let schedule_app = app.handle().clone();
-                let mut events = schedule_run_events.subscribe();
-                tauri::async_runtime::spawn(async move {
-                    loop {
-                        match events.recv().await {
-                            Ok(_) => {
-                                let _ = schedule_app.emit(SCHEDULE_RUN_COMPLETED_EVENT, ());
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                let _ = schedule_app.emit(SCHEDULE_RUN_COMPLETED_EVENT, ());
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        }
-                    }
-                });
-            }
             tauri::async_runtime::spawn(async move {
                 loop {
                     let store = artifact_migration_store.clone();

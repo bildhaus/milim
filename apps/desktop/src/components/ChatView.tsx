@@ -49,7 +49,6 @@ import {
   openDiagnosticsFolder,
   openExternalUrl,
   pickAttachmentFiles,
-  pollScheduleRunEvents,
   previewArtifactFile,
   readWorkspaceAttachmentFile,
   resolveToolApproval,
@@ -108,7 +107,6 @@ import {
   type ReasoningEffort,
   type RunTrace,
   type SavedArtifactFile,
-  type ScheduleRunEvent,
   type TokenUsage,
   type WorkspaceFileSuggestion,
   type WorkspaceCheckpoint,
@@ -437,7 +435,6 @@ const MAX_MOUNTED_MESSAGE_ROWS = 200;
 const MESSAGE_WINDOW_SHIFT = 100;
 const DEFAULT_MESSAGE_ROW_HEIGHT = 180;
 const MESSAGE_ROW_GAP = 12;
-const SCHEDULE_RUN_COMPLETED_EVENT = "milim://schedule-run-completed";
 const EMPTY: ChatMessage[] = [];
 const EMPTY_QUEUE: QueuedMessage[] = [];
 
@@ -1865,7 +1862,6 @@ export function ChatView({
     (s) => s.experimentalHashlinePatch,
   );
   const showEmptyChatRidgeline = useUiPreferences((s) => s.showEmptyChatRidgeline);
-  const pushNotice = useUiPreferences((s) => s.pushNotice);
   const quickActionMode = useUiPreferences((s) => s.quickActionMode);
   const pinnedQuickActions = useUiPreferences((s) => s.pinnedQuickActions);
   const projectQuickActionOverrides = useUiPreferences((s) => s.projectQuickActionOverrides);
@@ -2539,7 +2535,6 @@ export function ChatView({
   const preparedPreviewFilesByThreadRef = useRef(
     new Map<string, PreviewAppFile[]>(),
   );
-  const scheduleRunPollingRef = useRef(false);
   const gitStatusUpdatedAtRef = useRef<number | null>(null);
   const [previewResizing, setPreviewResizing] = useState(false);
   const [previewPanelOverlay, setPreviewPanelOverlay] = useState(false);
@@ -3075,6 +3070,7 @@ export function ChatView({
       try {
         const bootstrap = await getControlBootstrap();
         if (disposed) return;
+        useSessions.getState().upsertScheduledControlThreads(bootstrap.threads);
         setCanonicalQueuedTurns(bootstrap.queued_turns);
         setCanonicalPendingInputs(bootstrap.pending_inputs);
         const controlThread = bootstrap.threads.find(
@@ -8154,60 +8150,6 @@ export function ChatView({
         ?.focus();
     });
   }
-
-  function applyScheduleRunEvent(event: ScheduleRunEvent) {
-    const title = `Schedule: ${event.schedule_name || event.schedule_id}`;
-    const importedId = useSessions.getState().importSession({
-      title,
-      messages: [
-        { role: "user", content: event.prompt },
-        { role: "assistant", content: event.response || "(No response.)" },
-      ],
-      settings: { model: event.model },
-    });
-    if (importedId) {
-      const notice = { tone: "info", message: `${title} completed.` } as const;
-      setChatNotice(notice);
-      pushNotice(notice);
-    }
-  }
-
-  useEffect(() => {
-    let cancelled = false;
-    async function pollScheduleRuns() {
-      if (!documentVisible()) return;
-      if (scheduleRunPollingRef.current) return;
-      scheduleRunPollingRef.current = true;
-      try {
-        const events = await pollScheduleRunEvents();
-        if (!cancelled) {
-          for (const event of events) applyScheduleRunEvent(event);
-        }
-      } finally {
-        scheduleRunPollingRef.current = false;
-      }
-    }
-    void pollScheduleRuns();
-    let dispose: (() => void) | undefined;
-    const onVisible = () => {
-      if (documentVisible()) void pollScheduleRuns();
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    if (inTauri) {
-      void import("@tauri-apps/api/event").then(async ({ listen }) => {
-        const unlisten = await listen(SCHEDULE_RUN_COMPLETED_EVENT, () => {
-          void pollScheduleRuns();
-        });
-        if (cancelled) unlisten();
-        else dispose = unlisten;
-      });
-    }
-    return () => {
-      cancelled = true;
-      dispose?.();
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, []);
 
   const emptyThread = messages.length === 0;
   const showTranscriptThinking =

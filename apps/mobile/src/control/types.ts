@@ -31,6 +31,7 @@ export interface ControlCapabilitiesV1 {
   context_injection?: boolean;
   model_favorites?: boolean;
   thread_links?: boolean;
+  thread_origins?: boolean;
 }
 
 export interface ThreadLinkV1 {
@@ -67,6 +68,13 @@ export interface MailboxOriginV1 {
   origin_project: string | null;
 }
 
+export type ThreadOriginV1 = {
+  kind: 'schedule';
+  schedule_id: string;
+  schedule_name: string;
+  occurrence_unix: number;
+};
+
 export interface ThreadSummaryV1 {
   id: string;
   title: string;
@@ -78,6 +86,7 @@ export interface ThreadSummaryV1 {
   reasoning_effort_overrides?: Record<string, string>;
   agent_id: string | null;
   workspace: string | null;
+  origin?: ThreadOriginV1;
   busy: boolean;
   queued_turns: number;
   linked_threads?: ThreadLinkV1[];

@@ -8,6 +8,7 @@ import type {
   ChatStreamPart,
   ChildThreadInfo,
   ChildThreadStatus,
+  ControlThreadSummaryV1,
   DelegationPolicy,
   MemoryNotice,
   ToolUiDescriptor,
@@ -162,6 +163,7 @@ export type ThreadSettingsPatch = Partial<Omit<ThreadSettings, "goal">> & {
 export interface Session {
   id: string;
   title: string;
+  origin?: ControlThreadSummaryV1["origin"];
   messages: ChatMessage[];
   /** False while only a tail page is resident in the renderer. */
   messagesHydrated?: boolean;
@@ -737,6 +739,14 @@ function normalizeSettings(
     next.workerModel = DEFAULT_THREAD_SETTINGS.workerModel;
   }
   return next;
+}
+
+function sameThreadOrigin(a: Session["origin"], b: Session["origin"]): boolean {
+  if (!a || !b) return a === b;
+  return a.kind === b.kind
+    && a.schedule_id === b.schedule_id
+    && a.schedule_name === b.schedule_name
+    && a.occurrence_unix === b.occurrence_unix;
 }
 
 function normalizeProjectFolder(folder?: string): string {
@@ -1889,6 +1899,7 @@ interface SessionState {
   queuedMessagesBySession: Record<string, QueuedMessage[]>;
   sidebar: SessionSidebarState;
   newChat: (settings?: ThreadSettingsPatch, id?: string) => string;
+  upsertScheduledControlThreads: (threads: readonly ControlThreadSummaryV1[]) => void;
   getNewUserChatSettings: (settings?: ThreadSettingsPatch) => ThreadSettings;
   newUserChat: (settings?: ThreadSettingsPatch, id?: string) => string;
   forkSession: (id: string, throughMessageIndex?: number) => string | null;
@@ -2124,6 +2135,76 @@ export const useSessions = create<SessionState>()(
           }));
           return s.id;
         },
+
+        upsertScheduledControlThreads: (threads) =>
+          set((st) => {
+            const scheduled = threads.filter((thread) => thread.origin?.kind === "schedule");
+            if (!scheduled.length) return st;
+            const byId = new Map(scheduled.map((thread) => [thread.id, thread]));
+            const existingIds = new Set(st.sessions.map((session) => session.id));
+            let changed = false;
+            const sessions = st.sessions.map((session) => {
+              const thread = byId.get(session.id);
+              if (!thread) return session;
+              byId.delete(session.id);
+              if (
+                session.title === thread.title &&
+                session.updatedAt === thread.updated_at_ms &&
+                session.archivedAt === (thread.archived_at_ms ?? undefined) &&
+                sameThreadOrigin(session.origin, thread.origin)
+              ) return session;
+              changed = true;
+              return {
+                ...session,
+                title: thread.title,
+                updatedAt: thread.updated_at_ms,
+                archivedAt: thread.archived_at_ms ?? undefined,
+                origin: thread.origin,
+              };
+            });
+            const added = [...byId.values()].map((thread) => {
+              changed = true;
+              const settings = normalizeSettings({
+                model: thread.model ?? "",
+                folder: thread.workspace ?? "",
+                activeAgentId: thread.agent_id,
+                toolApproval: "guarded",
+                memory: false,
+                delegationPolicy: "off",
+                computerUse: false,
+              });
+              return {
+                id: thread.id,
+                title: thread.title,
+                origin: thread.origin,
+                messages: [],
+                messagesHydrated: false,
+                persistedMessageCount: 1,
+                settings,
+                threadWorkspace: normalizeThreadWorkspace(undefined, settings.folder),
+                createdAt: thread.updated_at_ms,
+                updatedAt: thread.updated_at_ms,
+                archivedAt: thread.archived_at_ms ?? undefined,
+              } satisfies Session;
+            });
+            if (!changed) return st;
+            const nextSessions = [...added, ...sessions];
+            const addedIds = added.map((session) => session.id).filter((id) => !existingIds.has(id));
+            return {
+              sessions: nextSessions,
+              projects: added.reduce(
+                (projects, session) => upsertProject(projects, session.settings?.folder ?? ""),
+                st.projects,
+              ),
+              sidebar: normalizeSidebarState(
+                {
+                  ...st.sidebar,
+                  sessionOrder: [...addedIds, ...st.sidebar.sessionOrder],
+                },
+                nextSessions,
+              ),
+            };
+          }),
 
         getNewUserChatSettings: (settings) => {
           const current = get().sessions.find((session) => session.id === get().activeId);

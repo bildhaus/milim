@@ -50,6 +50,10 @@ pub struct ControlCapabilitiesV1 {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub thread_links: Option<bool>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub thread_origins: Option<bool>,
 }
 
 impl Default for ControlCapabilitiesV1 {
@@ -72,6 +76,7 @@ impl Default for ControlCapabilitiesV1 {
             context_injection: Some(true),
             model_favorites: Some(true),
             thread_links: Some(true),
+            thread_origins: Some(true),
         }
     }
 }
@@ -113,6 +118,17 @@ pub struct MailboxOriginV1 {
     pub origin_project: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(tag = "kind", rename_all = "snake_case")]
+pub enum ThreadOriginV1 {
+    Schedule {
+        schedule_id: String,
+        schedule_name: String,
+        occurrence_unix: i64,
+    },
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 pub struct ThreadSummaryV1 {
     pub id: String,
@@ -126,6 +142,10 @@ pub struct ThreadSummaryV1 {
     pub reasoning_effort_overrides: HashMap<String, String>,
     pub agent_id: Option<String>,
     pub workspace: Option<String>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub origin: Option<ThreadOriginV1>,
     pub busy: bool,
     pub queued_turns: usize,
     #[serde(default)]

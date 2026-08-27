@@ -4,7 +4,7 @@ export type JsonValue = null | boolean | number | string | JsonValue[] | { [key:
 
 export type ControlProtocolRangeV1 = { min: number, max: number, };
 
-export type ControlCapabilitiesV1 = { timeline_sync: boolean, queued_turns: boolean, approvals: boolean, agents: boolean, workers: boolean, attachments: boolean, websocket_tickets: boolean, lan_discovery: boolean, push_notifications: boolean, inline_branches: boolean, appearance_assets: boolean, run_ledger?: boolean, run_inspection?: boolean, steering?: boolean, context_injection?: boolean, model_favorites?: boolean, thread_links?: boolean, };
+export type ControlCapabilitiesV1 = { timeline_sync: boolean, queued_turns: boolean, approvals: boolean, agents: boolean, workers: boolean, attachments: boolean, websocket_tickets: boolean, lan_discovery: boolean, push_notifications: boolean, inline_branches: boolean, appearance_assets: boolean, run_ledger?: boolean, run_inspection?: boolean, steering?: boolean, context_injection?: boolean, model_favorites?: boolean, thread_links?: boolean, thread_origins?: boolean, };
 
 export type ThreadLinkV1 = { owner_thread_id: string, target_thread_id: string, target_title: string, target_workspace: string | null, target_project: string | null, target_model: string | null, target_runtime: string, target_archived_at_ms: number | null, target_busy: boolean, target_queued_turns: number, created_at_ms: number, };
 
@@ -12,7 +12,9 @@ export type FrozenLinkedThreadGrantV1 = { target_thread_id: string, title: strin
 
 export type MailboxOriginV1 = { exchange_id: string, origin_thread_id: string, origin_title: string, origin_workspace: string | null, origin_project: string | null, };
 
-export type ThreadSummaryV1 = { id: string, title: string, revision: number, epoch: string, updated_at_ms: number, archived_at_ms: number | null, model: string | null, reasoning_effort_overrides: { [key in string]?: string }, agent_id: string | null, workspace: string | null, busy: boolean, queued_turns: number, linked_threads: Array<ThreadLinkV1>, };
+export type ThreadOriginV1 = { "kind": "schedule", schedule_id: string, schedule_name: string, occurrence_unix: number, };
+
+export type ThreadSummaryV1 = { id: string, title: string, revision: number, epoch: string, updated_at_ms: number, archived_at_ms: number | null, model: string | null, reasoning_effort_overrides: { [key in string]?: string }, agent_id: string | null, workspace: string | null, origin?: ThreadOriginV1, busy: boolean, queued_turns: number, linked_threads: Array<ThreadLinkV1>, };
 
 export type AgentSummaryV1 = { id: string, name: string, description: string, avatar: string, tool_mode: string, enabled_tool_count: number, skill_mode: string, enabled_skill_count: number, };
 

@@ -1914,17 +1914,6 @@ fn plan_mode_registry(
     reg
 }
 
-fn agent_registry_for_mode(
-    st: &AppState,
-    tool_mode: &str,
-    enabled_tools: &[String],
-    memory: Option<AgentMemoryContext>,
-    policy: &ToolRunPolicy,
-) -> ToolRegistry {
-    let run_context = RunContext::current(st);
-    agent_registry_for_mode_with_context(st, tool_mode, enabled_tools, memory, policy, &run_context)
-}
-
 fn agent_registry_for_mode_with_context(
     st: &AppState,
     tool_mode: &str,
@@ -1963,21 +1952,6 @@ fn agent_registry_for_mode_with_context(
         "custom" => reg.filtered(enabled_tools),
         _ => reg,
     }
-}
-
-pub(crate) fn scheduled_agent_registry(
-    st: &AppState,
-    agent: &milim_agents::AgentDef,
-) -> ToolRegistry {
-    let mut registry = agent_registry_for_mode(
-        st,
-        &agent.tool_mode,
-        &agent.enabled_tools,
-        None,
-        &ToolRunPolicy::default(),
-    );
-    register_skill_tools(&mut registry, st, &agent.skill_mode, &agent.enabled_skills);
-    registry
 }
 
 fn register_linked_thread_tools(
@@ -4605,17 +4579,6 @@ pub(crate) async fn schedules_list(
         None => Vec::new(),
     };
     Ok(Json(json!({ "schedules": schedules })).into_response())
-}
-
-/// `POST /schedules` — create a cron schedule.
-/// `GET /schedules/events` - drain completed background schedule runs.
-pub(crate) async fn schedule_events(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-    peer: Peer,
-) -> Result<Response, ApiError> {
-    authorize(&st, &headers, peer_addr(peer))?;
-    Ok(Json(json!({ "events": st.schedule_runs.take() })).into_response())
 }
 
 /// `POST /schedules` - create a cron schedule.
