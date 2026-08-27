@@ -37,6 +37,10 @@ pub struct ControlCapabilitiesV1 {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
+    pub effective_run_preview: Option<bool>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub steering: Option<bool>,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -72,6 +76,7 @@ impl Default for ControlCapabilitiesV1 {
             appearance_assets: true,
             run_ledger: Some(true),
             run_inspection: Some(true),
+            effective_run_preview: Some(true),
             steering: Some(true),
             context_injection: Some(true),
             model_favorites: Some(true),
@@ -714,12 +719,36 @@ pub struct ResolvedRunCompositionV1 {
     pub reasoning_effort: Option<String>,
     #[serde(default)]
     pub generation: GenerationSettingsV1,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub native_session_boundary: Option<String>,
     pub workspace: Option<String>,
     pub environment_policy: String,
+    #[serde(default)]
+    pub explicit_environment_grants: Vec<Value>,
     pub prompt_sections: Vec<Value>,
     pub tools: Vec<Value>,
     pub policies: Value,
     pub attachments: Vec<Value>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, TS)]
+pub struct EffectiveRunPreviewRequestV1 {
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub attachments: Vec<ControlAttachmentV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+pub struct EffectiveRunPreviewV1 {
+    pub thread_id: String,
+    pub thread_revision: u64,
+    pub resolved_at_ms: i64,
+    pub composition: ResolvedRunCompositionV1,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]

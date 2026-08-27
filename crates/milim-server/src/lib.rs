@@ -104,6 +104,10 @@ pub fn build_router(state: AppState) -> Router {
             get(routes::control_timeline),
         )
         .route(
+            "/control/v1/threads/{id}/effective-run",
+            post(routes::control_effective_run_preview),
+        )
+        .route(
             "/control/v1/runs/{run_id}",
             get(routes::control_run_inspection),
         )
@@ -459,6 +463,10 @@ pub fn build_mobile_companion_router(state: AppState) -> Router {
         .route(
             "/control/v1/threads/{id}/timeline",
             get(routes::control_timeline),
+        )
+        .route(
+            "/control/v1/threads/{id}/effective-run",
+            post(routes::control_effective_run_preview),
         )
         .route(
             "/control/v1/runs/{run_id}",

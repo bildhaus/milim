@@ -144,6 +144,8 @@ fn generated_contract() -> String {
         ControlCommandV1,
         ControlCommandResultV1,
         ResolvedRunCompositionV1,
+        EffectiveRunPreviewRequestV1,
+        EffectiveRunPreviewV1,
         RunEventV1,
         RunEventPageV1,
         RunInspectionV1,

@@ -1,7 +1,8 @@
 use super::*;
 
 use crate::control::{
-    ControlCommandV1, ControlEventV1, RunEventPageV1, RunInspectionV1, RunManager, TimelinePageV1,
+    ControlCommandV1, ControlEventV1, EffectiveRunPreviewRequestV1, EffectiveRunPreviewV1,
+    RunEventPageV1, RunInspectionV1, RunManager, TimelinePageV1,
 };
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 
@@ -170,6 +171,24 @@ pub(crate) async fn control_run_inspection(
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(Error::ModelNotFound(format!("run {run_id}"))))?;
     Ok(Json(inspection).into_response())
+}
+
+/// `POST /control/v1/threads/{id}/effective-run` — resolve the next run
+/// without accepting a turn or mutating canonical state.
+pub(crate) async fn control_effective_run_preview(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    peer: Peer,
+    Json(request): Json<EffectiveRunPreviewRequestV1>,
+) -> Result<Response, ApiError> {
+    control_identity(&st, &headers, peer_addr(peer))?;
+    let manager = control_manager(&st)?;
+    let preview: EffectiveRunPreviewV1 = manager
+        .effective_run_preview(&st, &id, request)
+        .map_err(ApiError)?
+        .ok_or_else(|| ApiError(Error::ModelNotFound(format!("thread {id}"))))?;
+    Ok(Json(preview).into_response())
 }
 
 /// `GET /control/v1/runs/{run_id}/events` — bounded, forward-only ledger

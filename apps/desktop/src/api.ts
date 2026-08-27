@@ -13,6 +13,8 @@ import type {
   ControlCommandResultV1 as GeneratedControlCommandResultV1,
   ControlCommandV1 as GeneratedControlCommandV1,
   ControlEventV1 as GeneratedControlEventV1,
+  EffectiveRunPreviewRequestV1,
+  EffectiveRunPreviewV1,
   RunEventPageV1,
   RunInspectionV1,
   PendingInputV1 as GeneratedControlPendingInputV1,
@@ -23,7 +25,13 @@ import type {
   TimelineItemV1 as GeneratedControlTimelineItemV1,
   TimelinePageV1 as GeneratedControlTimelinePageV1,
 } from "./generated/control-v1.js";
-export type { RunEventPageV1, RunEventV1, RunInspectionV1 } from "./generated/control-v1.js";
+export type {
+  EffectiveRunPreviewRequestV1,
+  EffectiveRunPreviewV1,
+  RunEventPageV1,
+  RunEventV1,
+  RunInspectionV1,
+} from "./generated/control-v1.js";
 export {
   attachmentsToPromptContext,
   wireMessageContent,
@@ -994,6 +1002,24 @@ export async function getControlRunInspection(runId: string): Promise<RunInspect
     throw new Error(await responseErrorMessage(response, "Run details fetch failed."));
   }
   return response.json() as Promise<RunInspectionV1>;
+}
+
+export async function getControlEffectiveRunPreview(
+  threadId: string,
+  request: EffectiveRunPreviewRequestV1,
+): Promise<EffectiveRunPreviewV1> {
+  const response = await authFetch(
+    `${BASE}/control/v1/threads/${encodeURIComponent(threadId)}/effective-run`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response, "Effective run preview failed."));
+  }
+  return response.json() as Promise<EffectiveRunPreviewV1>;
 }
 
 export async function getControlRunEvents(

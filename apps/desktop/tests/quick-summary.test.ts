@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createElement, type ComponentType, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
-import type { ChatMessage, WorkspaceGitStatus } from "../src/api.js";
+import type { ChatMessage, EffectiveRunPreviewV1, WorkspaceGitStatus } from "../src/api.js";
 import { DEFAULT_GOAL_SETTINGS } from "../src/lib/goals.js";
 import {
   buildQuickSummary,
@@ -225,9 +225,49 @@ const server = await createServer({
 });
 
 try {
-  const { QuickSummaryPanel } = await server.ssrLoadModule("/src/components/QuickSummaryPanel.tsx") as {
+  const { EffectiveRunDetails, QuickSummaryPanel } = await server.ssrLoadModule("/src/components/QuickSummaryPanel.tsx") as {
+    EffectiveRunDetails: ComponentType<{ preview: EffectiveRunPreviewV1 }>;
     QuickSummaryPanel: ComponentType<QuickSummaryPanelProps>;
   };
+  const effectiveMarkup = renderToStaticMarkup(createElement(EffectiveRunDetails, {
+    preview: {
+      thread_id: "thread-1",
+      thread_revision: 7,
+      resolved_at_ms: 1,
+      composition: {
+        visibility: "model_visible",
+        adapter: "provider",
+        model: "openrouter/test",
+        reasoning_effort: "high",
+        generation: {
+          max_tokens: null,
+          temperature: null,
+          top_p: null,
+          seed: null,
+          stop: [],
+          frequency_penalty: null,
+          presence_penalty: null,
+          top_k: null,
+          min_p: null,
+          repetition_penalty: null,
+          thinking_token_budget: null,
+        },
+        workspace: "C:\\work\\milim",
+        environment_policy: "MilimProviderBoundary",
+        explicit_environment_grants: [],
+        prompt_sections: [{ kind: "user", provenance: "accepted_turn", content: "draft" }],
+        tools: [{ name: "read_file", provenance: "frozen_run_config" }],
+        policies: { approval: "review", privacy: "redact", memory: true, skill_mode: "auto" },
+        attachments: [],
+      },
+      warnings: ["Inherited tools resolve at start."],
+    },
+  }));
+  assert.match(effectiveMarkup, /data-testid="effective-run-details"/);
+  assert.match(effectiveMarkup, />openrouter\/test</);
+  assert.match(effectiveMarkup, />Review</i);
+  assert.match(effectiveMarkup, /accepted_turn/);
+  assert.match(effectiveMarkup, /Nothing is sent|Inherited tools resolve at start/);
   const missingRowsMarkup = renderToStaticMarkup(
     createElement(QuickSummaryPanel, {
       summary: { sources: [] } as unknown as QuickSummary,

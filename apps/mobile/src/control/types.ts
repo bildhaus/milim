@@ -27,6 +27,7 @@ export interface ControlCapabilitiesV1 {
   appearance_assets?: boolean;
   run_ledger?: boolean;
   run_inspection?: boolean;
+  effective_run_preview?: boolean;
   steering?: boolean;
   context_injection?: boolean;
   model_favorites?: boolean;

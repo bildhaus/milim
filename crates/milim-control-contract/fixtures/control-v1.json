@@ -5,6 +5,7 @@
     "approvals": true,
     "attachments": true,
     "context_injection": true,
+    "effective_run_preview": true,
     "inline_branches": false,
     "lan_discovery": true,
     "model_favorites": true,

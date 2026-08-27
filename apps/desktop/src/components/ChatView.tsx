@@ -25,6 +25,7 @@ import {
   inferAttachmentMime,
   createControlCommandId,
   getControlBootstrap,
+  getControlEffectiveRunPreview,
   getControlTimeline,
   getClaudeStatus,
   getOpenCodeStatus,
@@ -8829,6 +8830,10 @@ export function ChatView({
                 onOpenGit={openGitPanel}
                 onOpenGoal={() => openGoalPanel()}
                 onOpenSource={openQuickSummarySource}
+                onInspectEffectiveRun={() => getControlEffectiveRunPreview(activeId, {
+                  text: wireMessageContent({ role: "user", content: input, attachments: pendingAttachments }),
+                  attachments: controlAttachments(pendingAttachments),
+                })}
               />
             </Suspense>
           )}

@@ -893,82 +893,14 @@ impl ModelInputResolver<'_> {
 
 impl RunJournal {
     fn commit_composition(&self, accepted: &AcceptedTurnV1) -> Result<()> {
-        let visibility = if matches!(
-            accepted.config.adapter.as_str(),
-            "codex" | "claude" | "opencode" | "pi"
-        ) {
-            "harness_boundary"
-        } else {
-            "model_visible"
+        let resolver = ModelInputResolver {
+            privacy: &self.privacy,
+            privacy_mode: self.privacy_mode,
         };
-        let environment_policy = if visibility == "harness_boundary" {
-            "AccountRuntimeInherited"
-        } else {
-            "MilimProviderBoundary"
-        };
-        let attachments = accepted
-            .config
-            .attachments
-            .iter()
-            .map(|attachment| {
-                let identity = attachment
-                    .data_url
-                    .as_deref()
-                    .or(attachment.content.as_deref())
-                    .unwrap_or_default();
-                json!({
-                    "id": attachment.id,
-                    "name": attachment.name,
-                    "mime": attachment.mime,
-                    "size": attachment.size,
-                    "digest": format!("sha256:{:x}", Sha256::digest(identity.as_bytes())),
-                    "reference": format!("control-attachment:{}", attachment.id),
-                    "truncated": attachment.truncated,
-                })
-            })
-            .collect::<Vec<_>>();
-        let composition = json!({
-            "visibility": visibility,
-            "adapter": accepted.config.adapter,
-            "model": accepted.config.model,
-            "reasoning_effort": accepted.config.reasoning_effort,
-            "generation": accepted.config.generation,
-            "native_session_boundary": accepted.config.native_session_id,
-            "workspace": accepted.config.workspace,
-            "environment_policy": environment_policy,
-            "explicit_environment_grants": [],
-            "prompt_sections": [
-                {
-                    "kind": "global_instructions",
-                    "provenance": "frozen_run_config",
-                    "content": self.privacy_processed_text(&accepted.config.global_instructions)?,
-                },
-                {
-                    "kind": "thread_instructions",
-                    "provenance": "frozen_run_config",
-                    "content": self.privacy_processed_text(&accepted.config.instructions)?,
-                },
-                {
-                    "kind": "user",
-                    "provenance": "accepted_turn",
-                    "content": self.privacy_processed_text(&accepted.text)?,
-                }
-            ],
-            "tools": accepted.config.enabled_tools.iter().map(|name| json!({
-                "name": name,
-                "provenance": "frozen_run_config",
-            })).collect::<Vec<_>>(),
-            "policies": {
-                "privacy": accepted.config.privacy,
-                "approval": accepted.config.approval_mode,
-                "tool_mode": accepted.config.tool_mode,
-                "plan_mode": accepted.config.plan_mode,
-                "sandbox": accepted.config.sandbox,
-                "computer_use": accepted.config.computer_use,
-                "delegation": accepted.config.delegation_policy,
-            },
-            "attachments": attachments,
-        });
+        let composition = resolved_run_composition(accepted, &resolver)?;
+        let visibility = composition.visibility.clone();
+        let composition = serde_json::to_value(composition)
+            .map_err(|error| Error::Other(format!("serialize run composition: {error}")))?;
         let digest = self.put_artifact("run_composition", &composition)?;
         self.store.control_append_run_event(
             &self.run_id,
@@ -979,6 +911,113 @@ impl RunJournal {
         )?;
         Ok(())
     }
+}
+
+fn resolved_run_composition(
+    accepted: &AcceptedTurnV1,
+    resolver: &ModelInputResolver<'_>,
+) -> Result<ResolvedRunCompositionV1> {
+    let visibility = if matches!(
+        accepted.config.adapter.as_str(),
+        "codex" | "claude" | "opencode" | "pi"
+    ) {
+        "harness_boundary"
+    } else {
+        "model_visible"
+    };
+    let environment_policy = if visibility == "harness_boundary" {
+        "AccountRuntimeInherited"
+    } else {
+        "MilimProviderBoundary"
+    };
+    let attachments = accepted
+        .config
+        .attachments
+        .iter()
+        .map(|attachment| {
+            let identity = attachment
+                .data_url
+                .as_deref()
+                .or(attachment.content.as_deref())
+                .unwrap_or_default();
+            json!({
+                "id": attachment.id,
+                "name": attachment.name,
+                "mime": attachment.mime,
+                "size": attachment.size,
+                "digest": format!("sha256:{:x}", Sha256::digest(identity.as_bytes())),
+                "reference": format!("control-attachment:{}", attachment.id),
+                "truncated": attachment.truncated,
+            })
+        })
+        .collect::<Vec<_>>();
+    let (instruction_kind, instruction_provenance, instruction_content) =
+        if let Some(agent) = accepted.config.agent.as_ref() {
+            (
+                "agent_instructions",
+                format!("agent:{}", agent.id),
+                resolver.resolve_text(&agent.system_prompt)?,
+            )
+        } else {
+            (
+                "thread_instructions",
+                "frozen_run_config".to_string(),
+                resolver.resolve_text(&accepted.config.instructions)?,
+            )
+        };
+    Ok(ResolvedRunCompositionV1 {
+        visibility: visibility.to_string(),
+        adapter: accepted.config.adapter.clone(),
+        model: accepted.config.model.clone(),
+        reasoning_effort: accepted.config.reasoning_effort.clone(),
+        generation: accepted.config.generation.clone(),
+        native_session_boundary: accepted.config.native_session_id.clone(),
+        workspace: accepted.config.workspace.clone(),
+        environment_policy: environment_policy.to_string(),
+        explicit_environment_grants: Vec::new(),
+        prompt_sections: vec![
+            json!({
+                "kind": "global_instructions",
+                "provenance": "frozen_run_config",
+                "content": resolver.resolve_text(&accepted.config.global_instructions)?,
+            }),
+            json!({
+                "kind": instruction_kind,
+                "provenance": instruction_provenance,
+                "content": instruction_content,
+            }),
+            json!({
+                "kind": "user",
+                "provenance": "accepted_turn",
+                "content": resolver.resolve_text(&accepted.text)?,
+            }),
+        ],
+        tools: accepted
+            .config
+            .enabled_tools
+            .iter()
+            .map(|name| {
+                json!({
+                    "name": name,
+                    "provenance": "frozen_run_config",
+                })
+            })
+            .collect::<Vec<_>>(),
+        policies: json!({
+            "privacy": accepted.config.privacy,
+            "approval": accepted.config.approval_mode,
+            "tool_mode": accepted.config.tool_mode,
+            "skill_mode": accepted.config.skill_mode,
+            "enabled_skills": accepted.config.enabled_skills,
+            "memory": accepted.config.memory,
+            "plan_mode": accepted.config.plan_mode,
+            "sandbox": accepted.config.sandbox,
+            "computer_use": accepted.config.computer_use,
+            "delegation": accepted.config.delegation_policy,
+            "linked_thread_grants": accepted.config.linked_thread_grants,
+        }),
+        attachments,
+    })
 }
 
 fn credential_field_name(key: &str) -> bool {
@@ -1993,6 +2032,67 @@ impl RunManager {
         Ok(Some(RunInspectionV1 {
             run: run_snapshot(run)?,
             composition,
+        }))
+    }
+
+    pub fn effective_run_preview(
+        &self,
+        state: &AppState,
+        thread_id: &str,
+        request: EffectiveRunPreviewRequestV1,
+    ) -> Result<Option<EffectiveRunPreviewV1>> {
+        validate_control_attachments(&request.attachments)?;
+        let Some(thread) = self.store.control_thread(thread_id)? else {
+            return Ok(None);
+        };
+        let mut config = resolve_frozen_config(state, &self.store, &thread, request.attachments)?;
+        config.linked_thread_grants = self.freeze_linked_thread_grants(thread_id)?;
+        if config.agent.is_none() {
+            if let Some(agent_id) = thread_agent_id(&thread) {
+                return Err(Error::InvalidRequest(format!(
+                    "thread is bound to missing Agent {agent_id}; replace or clear the binding before sending"
+                )));
+            }
+        }
+        let accepted = AcceptedTurnV1 {
+            text: request.text,
+            display_text: None,
+            config,
+            append_user: true,
+            mailbox_origin: None,
+            mailbox_context: Vec::new(),
+            preview_runtime: None,
+        };
+        let resolver = ModelInputResolver {
+            privacy: &state.privacy,
+            privacy_mode: crate::privacy::PrivacyMode::parse(&accepted.config.privacy),
+        };
+        let mut warnings = Vec::new();
+        if accepted.text.trim().is_empty() && accepted.config.attachments.is_empty() {
+            warnings.push("No draft or attachment is included in this preview.".to_string());
+        }
+        if !self
+            .store
+            .control_pending_inbox(Some(thread_id))?
+            .is_empty()
+        {
+            warnings.push(
+                "Pending inbox inputs are claimed atomically only when the turn starts and are not included in this preview."
+                    .to_string(),
+            );
+        }
+        if accepted.config.tool_mode != "custom" && accepted.config.enabled_tools.is_empty() {
+            warnings.push(
+                "The inherited tool registry is resolved when the run starts; this preview shows its frozen policy rather than every runtime tool schema."
+                    .to_string(),
+            );
+        }
+        Ok(Some(EffectiveRunPreviewV1 {
+            thread_id: thread.id,
+            thread_revision: thread.revision,
+            resolved_at_ms: now_ms(),
+            composition: resolved_run_composition(&accepted, &resolver)?,
+            warnings,
         }))
     }
 
@@ -6238,6 +6338,54 @@ mod tests {
             }),
             confirmation_token: None,
         }
+    }
+
+    #[tokio::test]
+    async fn effective_run_preview_resolves_without_accepting_work() {
+        let (manager, state) = manager_and_state();
+        manager
+            .command(
+                state.clone(),
+                None,
+                create_command("create-preview", "test-echo"),
+            )
+            .await
+            .unwrap();
+
+        let preview = manager
+            .effective_run_preview(
+                &state,
+                "thread-fixture",
+                EffectiveRunPreviewRequestV1 {
+                    text: "inspect this".into(),
+                    attachments: vec![ControlAttachmentV1 {
+                        id: "notes".into(),
+                        name: "notes.txt".into(),
+                        mime: "text/plain".into(),
+                        size: 5,
+                        content: Some("hello".into()),
+                        data_url: None,
+                        truncated: false,
+                    }],
+                },
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(preview.thread_id, "thread-fixture");
+        assert_eq!(preview.composition.model, "test-echo");
+        assert_eq!(preview.composition.attachments.len(), 1);
+        assert_eq!(preview.composition.policies["approval"], "review");
+        assert!(manager.store.control_runs(false).unwrap().is_empty());
+        assert_eq!(
+            manager
+                .store
+                .control_thread("thread-fixture")
+                .unwrap()
+                .unwrap()
+                .revision,
+            preview.thread_revision
+        );
     }
 
     #[test]
