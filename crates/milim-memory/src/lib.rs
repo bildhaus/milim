@@ -820,7 +820,7 @@ impl MemoryStore {
             )));
         }
         let top_k = top_k.clamp(1, 50);
-        let mut results = Vec::with_capacity(cases.len());
+        let mut results = Vec::new();
         for (index, case) in cases.into_iter().enumerate() {
             if case.query.trim().is_empty() || case.relevant_node_ids.is_empty() {
                 return Err(Error::InvalidRequest(format!(
