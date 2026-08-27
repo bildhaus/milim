@@ -17,6 +17,8 @@ use milim_core::{Error, Result};
 use milim_inference::SharedService;
 use milim_storage::{Database, Migration};
 
+const MAX_MEMORY_BENCHMARK_CASES: usize = 100;
+
 /// Schema for the memory store.
 pub const MEMORY_MIGRATIONS: &[Migration] = &[
     Migration {
@@ -812,6 +814,11 @@ impl MemoryStore {
                 "memory benchmark requires at least one case".to_string(),
             ));
         }
+        if cases.len() > MAX_MEMORY_BENCHMARK_CASES {
+            return Err(Error::InvalidRequest(format!(
+                "memory benchmark supports at most {MAX_MEMORY_BENCHMARK_CASES} cases"
+            )));
+        }
         let top_k = top_k.clamp(1, 50);
         let mut results = Vec::with_capacity(cases.len());
         for (index, case) in cases.into_iter().enumerate() {
@@ -1584,6 +1591,23 @@ mod tests {
         assert_eq!(report.cases[0].first_relevant_rank, Some(1));
         assert_eq!(report.recall_at_k, 1.0);
         assert_eq!(report.mean_reciprocal_rank, 1.0);
+    }
+
+    #[tokio::test]
+    async fn memory_benchmark_rejects_unbounded_case_counts() {
+        let case = MemoryBenchmarkCase {
+            name: "Bounded case".into(),
+            query: "bounded query".into(),
+            relevant_node_ids: vec!["node-1".into()],
+            scopes: Vec::new(),
+        };
+        let error = lexical_store()
+            .benchmark("m", vec![case; MAX_MEMORY_BENCHMARK_CASES + 1], 5, false)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("supports at most 100 cases"));
     }
 
     #[tokio::test]

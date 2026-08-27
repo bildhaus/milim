@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::Read as _;
 use std::net::TcpListener;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
@@ -28,6 +29,7 @@ use tower_http::services::ServeDir;
 const MAX_LOG_LINES: usize = 500;
 const INSTALL_MARKER_FILE: &str = ".milim-install-ok";
 const PREVIEW_MANIFEST_FILE: &str = ".milim/preview.json";
+const MAX_PREVIEW_MANIFEST_BYTES: u64 = 64 * 1024;
 #[cfg(not(test))]
 const PREVIEW_COMPILE_ERROR_QUIET_MS: u64 = 1_000;
 #[cfg(test)]
@@ -1851,11 +1853,35 @@ fn inspect_preview_source(
 }
 
 fn preview_manifest_from_dir(dir: &Path) -> Result<Option<PreviewManifest>> {
-    let path = dir.join(PREVIEW_MANIFEST_FILE);
-    if !path.is_file() {
+    let canonical_root = std::fs::canonicalize(dir)
+        .map_err(|error| Error::InvalidRequest(format!("preview workspace is invalid: {error}")))?;
+    let candidate = canonical_root.join(PREVIEW_MANIFEST_FILE);
+    if !candidate.exists() {
         return Ok(None);
     }
-    let source = std::fs::read_to_string(&path)?;
+    let path = std::fs::canonicalize(&candidate).map_err(|error| {
+        Error::InvalidRequest(format!("invalid {PREVIEW_MANIFEST_FILE}: {error}"))
+    })?;
+    if !path.starts_with(&canonical_root) || !path.is_file() {
+        return Err(Error::InvalidRequest(format!(
+            "{PREVIEW_MANIFEST_FILE} must be a regular file inside the workspace"
+        )));
+    }
+    let metadata = std::fs::metadata(&path)?;
+    if metadata.len() > MAX_PREVIEW_MANIFEST_BYTES {
+        return Err(Error::InvalidRequest(format!(
+            "{PREVIEW_MANIFEST_FILE} must be at most {MAX_PREVIEW_MANIFEST_BYTES} bytes"
+        )));
+    }
+    let mut source = String::new();
+    std::fs::File::open(&path)?
+        .take(MAX_PREVIEW_MANIFEST_BYTES + 1)
+        .read_to_string(&mut source)?;
+    if source.len() as u64 > MAX_PREVIEW_MANIFEST_BYTES {
+        return Err(Error::InvalidRequest(format!(
+            "{PREVIEW_MANIFEST_FILE} must be at most {MAX_PREVIEW_MANIFEST_BYTES} bytes"
+        )));
+    }
     parse_preview_manifest(&source).map(Some)
 }
 
@@ -3284,6 +3310,22 @@ mod tests {
                 .unwrap_err()
                 .to_string();
         assert!(shell_text.contains("invalid .milim/preview.json"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn preview_app_manifest_rejects_oversized_files() {
+        let root = test_root();
+        std::fs::create_dir_all(root.join(".milim")).unwrap();
+        std::fs::write(
+            root.join(PREVIEW_MANIFEST_FILE),
+            "x".repeat(MAX_PREVIEW_MANIFEST_BYTES as usize + 1),
+        )
+        .unwrap();
+
+        let error = preview_manifest_from_dir(&root).unwrap_err().to_string();
+
+        assert!(error.contains("must be at most 65536 bytes"));
         let _ = std::fs::remove_dir_all(root);
     }
 
