@@ -4177,7 +4177,14 @@ async function runLinkedThreadDropCheck(page) {
   await page.mouse.up();
   const pill = page.getByTestId(`linked-thread-pill-${targetId}`);
   await pill.waitFor();
-  await pill.getByRole("button", { name: /^Unlink / }).click();
+  await source.click();
+  await page.locator(`[data-sidebar-session-id="${targetId}"].active`).waitFor();
+  const reciprocalPill = page.getByTestId(`linked-thread-pill-${originId}`);
+  await reciprocalPill.waitFor();
+  await reciprocalPill.getByRole("button", { name: /^Unlink / }).click();
+  await reciprocalPill.waitFor({ state: "detached" });
+  await page.locator(`[data-sidebar-session-id="${originId}"]:visible`).first().click();
+  await page.locator(`[data-sidebar-session-id="${originId}"].active`).waitFor();
   await pill.waitFor({ state: "detached" });
 }
 

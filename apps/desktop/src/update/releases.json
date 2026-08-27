@@ -52,11 +52,11 @@
         "id": "linked-thread-collaboration",
         "eyebrow": "Thread collaboration",
         "title": "Let threads work together",
-        "description": "Link one root chat to another so agents can read a bounded transcript and exchange asynchronous mailbox messages without merging either conversation.",
+        "description": "Link one root chat to another so agents can read a bounded transcript, exchange durable mailbox messages, and explicitly wait for required replies without merging either conversation.",
         "details": [
-          "Drag a root chat onto another active chat to create a durable directional link",
+          "Drag a root chat onto another active chat to create a durable reciprocal link",
           "Freeze linked transcript reads at the turn boundary while keeping hidden prompts, reasoning, and tool ledgers private",
-          "Show mailbox inputs, replies, failures, and provenance across desktop and mobile"
+          "Show mailbox inputs, replies, failures, and provenance, with bounded reply waits for dependent work"
         ],
         "accent": "var(--accent)",
         "icon": "plug"
@@ -97,11 +97,11 @@
         "id": "linked-thread-collaboration",
         "eyebrow": "Thread collaboration",
         "title": "Let threads work together",
-        "description": "Link one root chat to another so agents can read a bounded transcript and exchange asynchronous mailbox messages without merging either conversation.",
+        "description": "Link one root chat to another so agents can read a bounded transcript, exchange durable mailbox messages, and explicitly wait for required replies without merging either conversation.",
         "details": [
-          "Drag a root chat onto another active chat to create a durable directional link",
+          "Drag a root chat onto another active chat to create a durable reciprocal link",
           "Freeze linked transcript reads at the turn boundary while keeping hidden prompts, reasoning, and tool ledgers private",
-          "Show mailbox inputs, replies, failures, and provenance across desktop and mobile"
+          "Show mailbox inputs, replies, failures, and provenance, with bounded reply waits for dependent work"
         ],
         "accent": "var(--accent)",
         "icon": "plug"
@@ -142,11 +142,11 @@
         "id": "linked-thread-collaboration",
         "eyebrow": "Thread collaboration",
         "title": "Let threads work together",
-        "description": "Link one root chat to another so agents can read a bounded transcript and exchange asynchronous mailbox messages without merging either conversation.",
+        "description": "Link one root chat to another so agents can read a bounded transcript, exchange durable mailbox messages, and explicitly wait for required replies without merging either conversation.",
         "details": [
-          "Drag a root chat onto another active chat to create a durable directional link",
+          "Drag a root chat onto another active chat to create a durable reciprocal link",
           "Freeze linked transcript reads at the turn boundary while keeping hidden prompts, reasoning, and tool ledgers private",
-          "Show mailbox inputs, replies, failures, and provenance across desktop and mobile"
+          "Show mailbox inputs, replies, failures, and provenance, with bounded reply waits for dependent work"
         ],
         "accent": "var(--accent)",
         "icon": "plug"

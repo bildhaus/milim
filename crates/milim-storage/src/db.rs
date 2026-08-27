@@ -654,6 +654,14 @@ const USER_DATA_MIGRATIONS: &[Migration] = &[
             DELETE FROM user_session_message_fts WHERE source_rowid = OLD.rowid;
         END;",
     },
+    Migration {
+        version: 10,
+        name: "reciprocal_thread_links",
+        sql: "INSERT OR IGNORE INTO user_thread_links
+                (owner_thread_id, target_thread_id, created_at_ms)
+              SELECT target_thread_id, owner_thread_id, created_at_ms
+              FROM user_thread_links;",
+    },
 ];
 
 /// Encrypted key/value store (API keys, OAuth tokens, agent secrets).
@@ -2201,7 +2209,7 @@ impl UserDataStore {
         owner_thread_id: &str,
         target_thread_id: &str,
         item_id: &str,
-    ) -> Result<Option<ControlTimelineRecord>> {
+    ) -> Result<Vec<ControlTimelineRecord>> {
         let owner_thread_id = required_control_text(owner_thread_id, "owner thread id")?;
         let target_thread_id = required_control_text(target_thread_id, "target thread id")?;
         let item_id = required_control_text(item_id, "timeline item id")?;
@@ -2216,28 +2224,40 @@ impl UserDataStore {
             .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
         let conn = db.conn();
         conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
-        let result = (|| -> Result<Option<ControlTimelineRecord>> {
+        let result = (|| -> Result<Vec<ControlTimelineRecord>> {
             let now = now_ms();
-            let changed = conn
-                .execute(
-                    "INSERT OR IGNORE INTO user_thread_links
-                     (owner_thread_id, target_thread_id, created_at_ms) VALUES (?1, ?2, ?3)",
-                    params![owner_thread_id, target_thread_id, now],
-                )
-                .map_err(sqlite)?;
-            if changed == 0 {
-                return Ok(None);
+            let reciprocal_item_id = format!("{item_id}-reciprocal");
+            let pairs = [
+                (owner_thread_id, target_thread_id, item_id),
+                (
+                    target_thread_id,
+                    owner_thread_id,
+                    reciprocal_item_id.as_str(),
+                ),
+            ];
+            let mut timelines = Vec::with_capacity(2);
+            for (link_owner, link_target, timeline_item_id) in pairs {
+                let changed = conn
+                    .execute(
+                        "INSERT OR IGNORE INTO user_thread_links
+                         (owner_thread_id, target_thread_id, created_at_ms) VALUES (?1, ?2, ?3)",
+                        params![link_owner, link_target, now],
+                    )
+                    .map_err(sqlite)?;
+                if changed == 0 {
+                    continue;
+                }
+                timelines.push(append_control_timeline_locked(
+                    conn,
+                    link_owner,
+                    timeline_item_id,
+                    None,
+                    "thread_link_added",
+                    &serde_json::json!({ "target_thread_id": link_target }).to_string(),
+                    now,
+                )?);
             }
-            append_control_timeline_locked(
-                conn,
-                owner_thread_id,
-                item_id,
-                None,
-                "thread_link_added",
-                &serde_json::json!({ "target_thread_id": target_thread_id }).to_string(),
-                now,
-            )
-            .map(Some)
+            Ok(timelines)
         })();
         finish_control_transaction(conn, result)
     }
@@ -2247,7 +2267,7 @@ impl UserDataStore {
         owner_thread_id: &str,
         target_thread_id: &str,
         item_id: &str,
-    ) -> Result<Option<ControlTimelineRecord>> {
+    ) -> Result<Vec<ControlTimelineRecord>> {
         let owner_thread_id = required_control_text(owner_thread_id, "owner thread id")?;
         let target_thread_id = required_control_text(target_thread_id, "target thread id")?;
         let item_id = required_control_text(item_id, "timeline item id")?;
@@ -2257,28 +2277,40 @@ impl UserDataStore {
             .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
         let conn = db.conn();
         conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
-        let result = (|| -> Result<Option<ControlTimelineRecord>> {
-            let changed = conn
-                .execute(
-                    "DELETE FROM user_thread_links
-                     WHERE owner_thread_id = ?1 AND target_thread_id = ?2",
-                    params![owner_thread_id, target_thread_id],
-                )
-                .map_err(sqlite)?;
-            if changed == 0 {
-                return Ok(None);
-            }
+        let result = (|| -> Result<Vec<ControlTimelineRecord>> {
             let now = now_ms();
-            append_control_timeline_locked(
-                conn,
-                owner_thread_id,
-                item_id,
-                None,
-                "thread_link_removed",
-                &serde_json::json!({ "target_thread_id": target_thread_id }).to_string(),
-                now,
-            )
-            .map(Some)
+            let reciprocal_item_id = format!("{item_id}-reciprocal");
+            let pairs = [
+                (owner_thread_id, target_thread_id, item_id),
+                (
+                    target_thread_id,
+                    owner_thread_id,
+                    reciprocal_item_id.as_str(),
+                ),
+            ];
+            let mut timelines = Vec::with_capacity(2);
+            for (link_owner, link_target, timeline_item_id) in pairs {
+                let changed = conn
+                    .execute(
+                        "DELETE FROM user_thread_links
+                         WHERE owner_thread_id = ?1 AND target_thread_id = ?2",
+                        params![link_owner, link_target],
+                    )
+                    .map_err(sqlite)?;
+                if changed == 0 {
+                    continue;
+                }
+                timelines.push(append_control_timeline_locked(
+                    conn,
+                    link_owner,
+                    timeline_item_id,
+                    None,
+                    "thread_link_removed",
+                    &serde_json::json!({ "target_thread_id": link_target }).to_string(),
+                    now,
+                )?);
+            }
+            Ok(timelines)
         })();
         finish_control_transaction(conn, result)
     }
@@ -3572,14 +3604,29 @@ impl UserDataStore {
             .db
             .lock()
             .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
-        db.conn()
-            .execute(
+        let conn = db.conn();
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
+        let result = (|| -> Result<usize> {
+            let now = now_ms();
+            conn.execute(
+                "UPDATE user_thread_mailbox
+                 SET status = 'queued', target_run_id = NULL, updated_at_ms = ?2
+                 WHERE id IN (
+                    SELECT id FROM user_run_inbox
+                    WHERE kind = 'steer' AND state = 'pending' AND target_run_id = ?1
+                 )",
+                params![run_id, now],
+            )
+            .map_err(sqlite)?;
+            conn.execute(
                 "UPDATE user_run_inbox
                  SET kind = 'followup', target_run_id = NULL
                  WHERE kind = 'steer' AND state = 'pending' AND target_run_id = ?1",
                 params![run_id],
             )
             .map_err(sqlite)
+        })();
+        finish_control_transaction(conn, result)
     }
 
     pub fn control_put_mailbox(&self, item: &ControlMailboxRecord) -> Result<()> {
@@ -3674,25 +3721,29 @@ impl UserDataStore {
             .map_err(sqlite)
     }
 
-    pub fn control_mailbox_for_target_run(
+    pub fn control_mailboxes_for_target_run(
         &self,
         target_run_id: &str,
-    ) -> Result<Option<ControlMailboxRecord>> {
+    ) -> Result<Vec<ControlMailboxRecord>> {
         let target_run_id = required_control_text(target_run_id, "target run id")?;
         let db = self
             .db
             .lock()
             .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
-        db.conn()
-            .query_row(
+        let mut statement = db
+            .conn()
+            .prepare(
                 "SELECT id, origin_thread_id, target_thread_id, origin_run_id, target_run_id,
                         status, request_json, reply_json, created_at_ms, updated_at_ms, consumed_at_ms,
                         projected_at_ms
-                 FROM user_thread_mailbox WHERE target_run_id = ?1",
-                params![target_run_id],
-                control_mailbox_from_row,
+                 FROM user_thread_mailbox WHERE target_run_id = ?1
+                 ORDER BY created_at_ms, id",
             )
-            .optional()
+            .map_err(sqlite)?;
+        let rows = statement
+            .query_map(params![target_run_id], control_mailbox_from_row)
+            .map_err(sqlite)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(sqlite)
     }
 
@@ -3720,6 +3771,31 @@ impl UserDataStore {
                  SET projected_at_ms = COALESCE(projected_at_ms, ?2), updated_at_ms = ?2
                  WHERE id = ?1 AND status IN ('replied', 'failed')",
                 params![id, now_ms()],
+            )
+            .map(|changed| changed > 0)
+            .map_err(sqlite)
+    }
+
+    pub fn control_mark_mailbox_consumed(
+        &self,
+        id: &str,
+        origin_thread_id: &str,
+        origin_run_id: &str,
+    ) -> Result<bool> {
+        let id = required_control_text(id, "mailbox id")?;
+        let origin_thread_id = required_control_text(origin_thread_id, "origin thread id")?;
+        let origin_run_id = required_control_text(origin_run_id, "origin run id")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        db.conn()
+            .execute(
+                "UPDATE user_thread_mailbox
+                 SET consumed_at_ms = ?4, updated_at_ms = ?4
+                 WHERE id = ?1 AND origin_thread_id = ?2 AND origin_run_id = ?3
+                   AND status IN ('replied', 'failed') AND consumed_at_ms IS NULL",
+                params![id, origin_thread_id, origin_run_id, now_ms()],
             )
             .map(|changed| changed > 0)
             .map_err(sqlite)
@@ -4312,16 +4388,17 @@ impl UserDataStore {
                 .map_err(sqlite)?;
             }
             for item in &backup.thread_links {
-                conn.execute(
-                    "INSERT INTO user_thread_links
-                     (owner_thread_id, target_thread_id, created_at_ms) VALUES (?1, ?2, ?3)",
-                    params![
-                        item.owner_thread_id,
-                        item.target_thread_id,
-                        item.created_at_ms
-                    ],
-                )
-                .map_err(sqlite)?;
+                for (owner_thread_id, target_thread_id) in [
+                    (&item.owner_thread_id, &item.target_thread_id),
+                    (&item.target_thread_id, &item.owner_thread_id),
+                ] {
+                    conn.execute(
+                        "INSERT OR IGNORE INTO user_thread_links
+                         (owner_thread_id, target_thread_id, created_at_ms) VALUES (?1, ?2, ?3)",
+                        params![owner_thread_id, target_thread_id, item.created_at_ms],
+                    )
+                    .map_err(sqlite)?;
+                }
             }
             for item in &backup.mailbox {
                 conn.execute(
@@ -7286,6 +7363,44 @@ mod tests {
     }
 
     #[test]
+    fn v10_migration_makes_existing_thread_links_reciprocal() {
+        let db = Database::open_in_memory().unwrap();
+        db.migrate_scoped("user_data", &USER_DATA_MIGRATIONS[..7])
+            .unwrap();
+        for (sort_order, id) in ["origin", "target"].into_iter().enumerate() {
+            db.conn()
+                .execute(
+                    "INSERT INTO user_sessions (id, session_json, sort_order, updated_at_ms)
+                     VALUES (?1, ?2, ?3, 1)",
+                    params![id, serde_json::json!({ "id": id }).to_string(), sort_order],
+                )
+                .unwrap();
+        }
+        db.conn()
+            .execute(
+                "INSERT INTO user_thread_links
+                 (owner_thread_id, target_thread_id, created_at_ms)
+                 VALUES ('origin', 'target', 1)",
+                [],
+            )
+            .unwrap();
+
+        db.migrate_scoped("user_data", USER_DATA_MIGRATIONS)
+            .unwrap();
+
+        let reciprocal: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM user_thread_links
+                 WHERE owner_thread_id = 'target' AND target_thread_id = 'origin'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(reciprocal, 1);
+    }
+
+    #[test]
     fn durable_inbox_claim_cancel_retarget_and_restart_are_atomic() {
         let store = Arc::new(UserDataStore::new(Database::open_in_memory().unwrap()).unwrap());
         store
@@ -7764,7 +7879,7 @@ mod tests {
     }
 
     #[test]
-    fn thread_links_and_mailbox_are_durable_idempotent_and_cascading() {
+    fn reciprocal_thread_links_and_mailbox_are_durable_idempotent_and_cascading() {
         let source = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
         for (id, epoch) in [("origin", "epoch-origin"), ("target", "epoch-target")] {
             source
@@ -7775,18 +7890,33 @@ mod tests {
                 )
                 .unwrap();
         }
-        let before = source.control_thread("origin").unwrap().unwrap().revision;
+        let origin_before = source.control_thread("origin").unwrap().unwrap().revision;
+        let target_before = source.control_thread("target").unwrap().unwrap().revision;
         let added = source
             .control_add_thread_link("origin", "target", "link-event")
-            .unwrap()
             .unwrap();
-        assert_eq!(added.item_type, "thread_link_added");
+        assert_eq!(added.len(), 2);
+        assert!(added
+            .iter()
+            .all(|timeline| timeline.item_type == "thread_link_added"));
         let linked_revision = source.control_thread("origin").unwrap().unwrap().revision;
-        assert_eq!(linked_revision, before + 1);
+        assert_eq!(linked_revision, origin_before + 1);
+        assert_eq!(
+            source.control_thread("target").unwrap().unwrap().revision,
+            target_before + 1
+        );
+        assert_eq!(
+            source.control_thread_links(Some("origin")).unwrap().len(),
+            1
+        );
+        assert_eq!(
+            source.control_thread_links(Some("target")).unwrap().len(),
+            1
+        );
         assert!(source
             .control_add_thread_link("origin", "target", "duplicate-event")
             .unwrap()
-            .is_none());
+            .is_empty());
         assert_eq!(
             source.control_thread("origin").unwrap().unwrap().revision,
             linked_revision
@@ -7818,10 +7948,13 @@ mod tests {
             .unwrap()
             .is_empty());
 
-        let backup = source.control_backup_state().unwrap();
+        let mut backup = source.control_backup_state().unwrap();
         assert_eq!(backup.schema_version, 3);
-        assert_eq!(backup.thread_links.len(), 1);
+        assert_eq!(backup.thread_links.len(), 2);
         assert_eq!(backup.mailbox.len(), 1);
+        backup
+            .thread_links
+            .retain(|link| link.owner_thread_id == "origin");
         assert!(source.control_delete_thread("origin").unwrap());
         assert!(source.control_thread("target").unwrap().is_some());
         assert!(source
@@ -7844,6 +7977,32 @@ mod tests {
         );
         assert_eq!(
             target_store
+                .control_thread_links(Some("target"))
+                .unwrap()
+                .len(),
+            1
+        );
+        let removed = target_store
+            .control_remove_thread_link("target", "origin", "unlink-event")
+            .unwrap();
+        assert_eq!(removed.len(), 2);
+        assert!(target_store
+            .control_thread_links(Some("origin"))
+            .unwrap()
+            .is_empty());
+        assert!(target_store
+            .control_thread_links(Some("target"))
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            target_store
+                .control_add_thread_link("origin", "target", "relink-event")
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            target_store
                 .control_mailbox_for_origin("origin")
                 .unwrap()
                 .len(),
@@ -7857,6 +8016,50 @@ mod tests {
             .is_empty());
         assert!(target_store
             .control_mailbox_for_origin("origin")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn mailbox_reply_can_be_consumed_by_its_originating_run() {
+        let store = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        for id in ["origin", "target"] {
+            store
+                .control_create_thread(
+                    id,
+                    &serde_json::json!({ "id": id, "title": id }).to_string(),
+                    &format!("epoch-{id}"),
+                )
+                .unwrap();
+        }
+        store
+            .control_put_mailbox(&ControlMailboxRecord {
+                id: "exchange-waited".into(),
+                origin_thread_id: "origin".into(),
+                target_thread_id: "target".into(),
+                origin_run_id: Some("origin-run".into()),
+                target_run_id: None,
+                status: "replied".into(),
+                request_json: r#"{"message":"hello"}"#.into(),
+                reply_json: Some(r#"{"content":"world"}"#.into()),
+                created_at_ms: 1,
+                updated_at_ms: 2,
+                consumed_at_ms: None,
+                projected_at_ms: Some(2),
+            })
+            .unwrap();
+
+        assert!(!store
+            .control_mark_mailbox_consumed("exchange-waited", "origin", "wrong-run")
+            .unwrap());
+        assert!(store
+            .control_mark_mailbox_consumed("exchange-waited", "origin", "origin-run")
+            .unwrap());
+        assert!(!store
+            .control_mark_mailbox_consumed("exchange-waited", "origin", "origin-run")
+            .unwrap());
+        assert!(store
+            .control_claim_mailbox_replies("origin", "later-run", 20)
             .unwrap()
             .is_empty());
     }

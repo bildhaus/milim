@@ -4,7 +4,7 @@
 //! The durable user session tables remain authoritative; this module adds
 //! sequencing, command idempotency, queues, and live replication around them.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -48,6 +48,7 @@ const MAX_PREVIEW_RUNTIME_METADATA_CHARS: usize = 64;
 const MAX_PREVIEW_RUNTIME_URL_CHARS: usize = 2_048;
 const DELTA_FLUSH_BYTES: usize = 512;
 const DELTA_FLUSH_INTERVAL: Duration = Duration::from_millis(40);
+pub(crate) const MAX_LINKED_THREAD_WAIT_MS: u64 = 90_000;
 const NATIVE_SESSION_FULL_TRANSCRIPT_CURSOR: &str = "__milim_hot_swap_full__";
 pub const MODEL_FAVORITES_SETTINGS_KEY: &str = "milim.settings";
 pub const MODEL_FAVORITES_EVENT_TYPE: &str = "model_favorites.updated";
@@ -1128,6 +1129,7 @@ impl milim_agents::AgentStepHook for RunJournal {
                         "runId": self.run_id,
                         "steering": true,
                         "steeringInboxId": item.id,
+                        "mailboxOrigin": accepted.mailbox_origin,
                     });
                     let message_id = message
                         .get("id")
@@ -1421,11 +1423,13 @@ impl RunManager {
             .store
             .control_queued_turns(Some(target_thread_id))?
             .len();
-        let busy = self
+        let active_delivery = self
             .active
             .lock()
             .expect("control active run store poisoned")
-            .contains_key(target_thread_id);
+            .get(target_thread_id)
+            .map(|run| if run.steering { "steer" } else { "queue" });
+        let delivery = active_delivery.unwrap_or(if queued_turns > 0 { "queue" } else { "start" });
         let current_model = current
             .as_ref()
             .and_then(|thread| thread.model.as_deref())
@@ -1448,8 +1452,10 @@ impl RunManager {
                 "destination_model": current_model,
                 "destination_runtime": current_runtime,
                 "message": arguments.get("message").cloned().unwrap_or(Value::Null),
-                "delivery": if busy || queued_turns > 0 { "queue" } else { "start" },
-                "model_work_notice": if busy || queued_turns > 0 {
+                "delivery": delivery,
+                "model_work_notice": if delivery == "steer" {
+                    "Approval steers the destination's active run and may use its provider or account subscription."
+                } else if delivery == "queue" {
                     "Approval queues model work in the destination and may use its provider or account subscription."
                 } else {
                     "Approval starts model work in the destination and may use its provider or account subscription."
@@ -1616,19 +1622,29 @@ impl RunManager {
             mailbox_context: Vec::new(),
             preview_runtime: None,
         };
-        let busy = self
+        let active_delivery = self
             .active
             .lock()
             .expect("control active run store poisoned")
-            .contains_key(target_thread_id);
+            .get(target_thread_id)
+            .map(|run| (run.run_id.clone(), run.steering));
+        let busy = active_delivery.is_some();
+        let steer_run_id = active_delivery
+            .as_ref()
+            .and_then(|(run_id, steering)| steering.then(|| run_id.clone()));
         let now = now_ms();
         let mut exchange = ControlMailboxRecord {
             id: exchange_id.clone(),
             origin_thread_id: origin_thread_id.to_string(),
             target_thread_id: target_thread_id.to_string(),
             origin_run_id: origin_run_id.map(str::to_string),
-            target_run_id: None,
-            status: if busy { "queued" } else { "running" }.into(),
+            target_run_id: steer_run_id.clone(),
+            status: if busy && steer_run_id.is_none() {
+                "queued"
+            } else {
+                "running"
+            }
+            .into(),
             request_json: json!({
                 "message": message,
                 "origin": mailbox_origin,
@@ -1642,7 +1658,49 @@ impl RunManager {
             projected_at_ms: None,
         };
         self.store.control_put_mailbox(&exchange)?;
-        if busy {
+        if let Some(run_id) = steer_run_id {
+            if let Err(error) = self.store.control_put_inbox(&ControlInboxRecord {
+                id: exchange_id.clone(),
+                thread_id: target_thread_id.to_string(),
+                target_run_id: Some(run_id.clone()),
+                command_id: Some(format!("mailbox-{exchange_id}")),
+                kind: "steer".into(),
+                state: "pending".into(),
+                payload_json: serde_json::to_string(&accepted)
+                    .map_err(|error| Error::Other(format!("serialize mailbox steer: {error}")))?,
+                created_at_ms: now,
+                claimed_at_ms: None,
+                resolved_at_ms: None,
+            }) {
+                let _ = self.store.control_delete_mailbox(&exchange_id);
+                return Err(error);
+            }
+            self.persist_and_emit(
+                origin_thread_id,
+                origin_run_id,
+                "mailbox_steered",
+                json!({
+                    "exchange_id": exchange_id,
+                    "target_thread_id": target_thread_id,
+                    "target_title": target_summary.title,
+                    "target_run_id": run_id,
+                    "status": "running",
+                }),
+            )?;
+            self.emit(
+                "mailbox.steered",
+                Some(target_thread_id),
+                Some(&target.epoch),
+                None,
+                json!({ "exchange_id": exchange_id, "run_id": run_id }),
+            );
+            Ok(json!({
+                "exchange_id": exchange_id,
+                "status": "steering",
+                "run_id": run_id,
+                "target": grant,
+            }))
+        } else if busy {
             let queue_id = format!("mailbox-{exchange_id}");
             if let Err(error) = self.store.control_enqueue_turn(&ControlQueuedTurnRecord {
                 id: queue_id.clone(),
@@ -1696,6 +1754,94 @@ impl RunManager {
                 "run_id": run_id,
                 "target": grant,
             }))
+        }
+    }
+
+    pub(crate) async fn linked_thread_wait(
+        &self,
+        origin_thread_id: &str,
+        origin_run_id: &str,
+        grants: &[FrozenLinkedThreadGrantV1],
+        exchange_id: &str,
+        timeout_ms: u64,
+    ) -> Result<Value> {
+        let exchange_id = exchange_id.trim();
+        if exchange_id.is_empty() {
+            return Err(Error::InvalidRequest(
+                "linked_thread_wait requires an exchange id".into(),
+            ));
+        }
+        if !(100..=MAX_LINKED_THREAD_WAIT_MS).contains(&timeout_ms) {
+            return Err(Error::InvalidRequest(format!(
+                "linked_thread_wait timeout_ms must be between 100 and {MAX_LINKED_THREAD_WAIT_MS}"
+            )));
+        }
+
+        let mut events = self.subscribe();
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        loop {
+            let exchange = self
+                .store
+                .control_mailbox(exchange_id)?
+                .ok_or_else(|| Error::NotFound(format!("mailbox exchange {exchange_id}")))?;
+            let owned_by_run = exchange.origin_thread_id == origin_thread_id
+                && exchange.origin_run_id.as_deref() == Some(origin_run_id)
+                && grants
+                    .iter()
+                    .any(|grant| grant.target_thread_id == exchange.target_thread_id);
+            if !owned_by_run {
+                return Err(Error::InvalidRequest(
+                    "mailbox exchange is not available to this linked-thread run".into(),
+                ));
+            }
+
+            if matches!(exchange.status.as_str(), "replied" | "failed") {
+                if exchange.consumed_at_ms.is_none()
+                    && self.store.control_mark_mailbox_consumed(
+                        exchange_id,
+                        origin_thread_id,
+                        origin_run_id,
+                    )?
+                {
+                    let _ = self.persist_and_emit(
+                        origin_thread_id,
+                        Some(origin_run_id),
+                        "mailbox_reply_consumed",
+                        json!({
+                            "exchange_id": exchange.id,
+                            "target_thread_id": exchange.target_thread_id,
+                            "status": exchange.status,
+                            "source": "linked_thread_wait",
+                        }),
+                    );
+                }
+                return mailbox_wait_result(&exchange, false);
+            }
+            if exchange.status == "discarded" {
+                return mailbox_wait_result(&exchange, false);
+            }
+
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return mailbox_wait_result(&exchange, true);
+            }
+            match tokio::time::timeout(remaining, events.recv()).await {
+                Ok(Ok(event)) => {
+                    if event
+                        .data
+                        .get("exchange_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| id == exchange_id)
+                    {
+                        continue;
+                    }
+                }
+                Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(broadcast::error::RecvError::Closed)) => {
+                    return Err(Error::Other("control event stream closed".into()))
+                }
+                Err(_) => continue,
+            }
         }
     }
 
@@ -2596,7 +2742,7 @@ impl RunManager {
         if add && target.is_none() {
             return Err(Error::NotFound(format!("thread {target_thread_id}")));
         }
-        let timeline = if add {
+        let timelines = if add {
             self.store.control_add_thread_link(
                 owner_thread_id,
                 &target_thread_id,
@@ -2618,16 +2764,26 @@ impl RunManager {
         } else {
             "thread.link.removed"
         };
-        if let Some(timeline) = timeline {
+        let owner_title = thread_title(&owner);
+        let target_title = target
+            .as_ref()
+            .map(thread_title)
+            .unwrap_or_else(|| "Unavailable chat".into());
+        for timeline in timelines {
+            let (event_target_id, event_target_title) = if timeline.thread_id == owner_thread_id {
+                (target_thread_id.as_str(), target_title.as_str())
+            } else {
+                (owner_thread_id, owner_title.as_str())
+            };
             self.emit(
                 event_type,
-                Some(owner_thread_id),
+                Some(&timeline.thread_id),
                 Some(&timeline.epoch),
                 Some(timeline.seq),
                 json!({
-                    "owner_thread_id": owner_thread_id,
-                    "target_thread_id": target_thread_id,
-                    "target_title": target.as_ref().map(thread_title).unwrap_or_else(|| "Unavailable chat".into()),
+                    "owner_thread_id": timeline.thread_id,
+                    "target_thread_id": event_target_id,
+                    "target_title": event_target_title,
                 }),
             );
         }
@@ -4199,42 +4355,57 @@ impl RunManager {
         content: Option<&str>,
         failure: Option<&str>,
     ) -> Result<()> {
-        let Some(mut exchange) = self.store.control_mailbox_for_target_run(target_run_id)? else {
+        let exchanges = self.store.control_mailboxes_for_target_run(target_run_id)?;
+        let Some(first) = exchanges.first() else {
             return Ok(());
         };
-        if matches!(exchange.status.as_str(), "replied" | "failed" | "discarded") {
-            return Ok(());
-        }
-        let target = self.store.control_thread(&exchange.target_thread_id)?;
-        let target_title = target
-            .as_ref()
-            .map(thread_title)
-            .unwrap_or_else(|| "Deleted linked thread".into());
-        let target_summary = target
-            .as_ref()
-            .map(|thread| thread_summary(thread, false, 0))
-            .transpose()?;
-        exchange.status = if failure.is_some() {
-            "failed"
-        } else {
-            "replied"
-        }
-        .into();
-        exchange.updated_at_ms = now_ms();
-        exchange.reply_json = Some(
-            json!({
-                "target_title": target_title,
-                "target_workspace": target_summary.as_ref().and_then(|summary| summary.workspace.clone()),
-                "target_project": target_summary.as_ref().and_then(|summary| summary.workspace.as_deref().and_then(project_label)),
-                "target_model": target_summary.as_ref().and_then(|summary| summary.model.clone()),
-                "target_runtime": target_summary.as_ref().map(|summary| runtime_adapter(summary.model.as_deref().unwrap_or_default())),
-                "content": content.unwrap_or_default(),
-                "error": failure,
+        let pending_steer_ids = self
+            .store
+            .control_pending_inbox(Some(&first.target_thread_id))?
+            .into_iter()
+            .filter(|item| {
+                item.kind == "steer" && item.target_run_id.as_deref() == Some(target_run_id)
             })
-            .to_string(),
-        );
-        self.store.control_put_mailbox(&exchange)?;
-        self.project_mailbox_reply(&exchange)
+            .map(|item| item.id)
+            .collect::<HashSet<_>>();
+        for mut exchange in exchanges {
+            if pending_steer_ids.contains(&exchange.id)
+                || matches!(exchange.status.as_str(), "replied" | "failed" | "discarded")
+            {
+                continue;
+            }
+            let target = self.store.control_thread(&exchange.target_thread_id)?;
+            let target_title = target
+                .as_ref()
+                .map(thread_title)
+                .unwrap_or_else(|| "Deleted linked thread".into());
+            let target_summary = target
+                .as_ref()
+                .map(|thread| thread_summary(thread, false, 0))
+                .transpose()?;
+            exchange.status = if failure.is_some() {
+                "failed"
+            } else {
+                "replied"
+            }
+            .into();
+            exchange.updated_at_ms = now_ms();
+            exchange.reply_json = Some(
+                json!({
+                    "target_title": target_title,
+                    "target_workspace": target_summary.as_ref().and_then(|summary| summary.workspace.clone()),
+                    "target_project": target_summary.as_ref().and_then(|summary| summary.workspace.as_deref().and_then(project_label)),
+                    "target_model": target_summary.as_ref().and_then(|summary| summary.model.clone()),
+                    "target_runtime": target_summary.as_ref().map(|summary| runtime_adapter(summary.model.as_deref().unwrap_or_default())),
+                    "content": content.unwrap_or_default(),
+                    "error": failure,
+                })
+                .to_string(),
+            );
+            self.store.control_put_mailbox(&exchange)?;
+            self.project_mailbox_reply(&exchange)?;
+        }
+        Ok(())
     }
 
     fn fail_mailbox_exchange_by_id(&self, exchange_id: &str, failure: &str) -> Result<()> {
@@ -5606,6 +5777,24 @@ fn project_label(workspace: &str) -> Option<String> {
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .filter(|name| !name.is_empty())
+}
+
+fn mailbox_wait_result(exchange: &ControlMailboxRecord, timed_out: bool) -> Result<Value> {
+    let reply = exchange
+        .reply_json
+        .as_deref()
+        .map(parse_value)
+        .transpose()?
+        .unwrap_or(Value::Null);
+    Ok(json!({
+        "exchange_id": exchange.id,
+        "target_thread_id": exchange.target_thread_id,
+        "target_run_id": exchange.target_run_id,
+        "status": exchange.status,
+        "completed": matches!(exchange.status.as_str(), "replied" | "failed" | "discarded"),
+        "timed_out": timed_out,
+        "reply": reply,
+    }))
 }
 
 fn mailbox_context_from_record(exchange: &ControlMailboxRecord) -> Option<String> {
@@ -8211,7 +8400,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn linked_threads_freeze_reads_and_deliver_non_waking_mailbox_replies() {
+    async fn linked_threads_freeze_reads_and_support_durable_mailbox_waits() {
         let (manager, state) = manager_and_state();
         for (id, title) in [("origin", "Origin"), ("target", "Target")] {
             let created = manager
@@ -8303,6 +8492,9 @@ mod tests {
         assert_eq!(linked.status, ControlCommandStatusV1::Applied);
         let grants = manager.freeze_linked_thread_grants("origin").unwrap();
         assert_eq!(grants.len(), 1);
+        let reciprocal_grants = manager.freeze_linked_thread_grants("target").unwrap();
+        assert_eq!(reciprocal_grants.len(), 1);
+        assert_eq!(reciprocal_grants[0].target_thread_id, "origin");
         let mut approval_config = resolve_frozen_config(
             &state,
             &manager.store,
@@ -8379,11 +8571,27 @@ mod tests {
         assert!(!raw.contains("too late"));
         assert!(raw.contains("note.txt"));
 
+        manager
+            .store
+            .control_put_run(&ControlRunRecord {
+                id: "origin-wait-run".into(),
+                thread_id: "origin".into(),
+                status: "running".into(),
+                adapter: "provider".into(),
+                request_json: r#"{"text":"coordinate"}"#.into(),
+                agent_snapshot_json: None,
+                native_session_json: None,
+                created_at_ms: now_ms(),
+                updated_at_ms: now_ms(),
+                completed_at_ms: None,
+                error_json: None,
+            })
+            .unwrap();
         let sent = manager
             .linked_thread_send(
                 state.clone(),
                 "origin",
-                None,
+                Some("origin-wait-run"),
                 &grants,
                 "target",
                 "Please answer asynchronously",
@@ -8392,24 +8600,46 @@ mod tests {
             .unwrap();
         assert_eq!(sent["status"], "running");
         let exchange_id = sent["exchange_id"].as_str().unwrap().to_string();
-        for _ in 0..100 {
-            if manager
-                .store
-                .control_mailbox(&exchange_id)
-                .unwrap()
-                .is_some_and(|exchange| exchange.status == "replied")
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        let waited = manager
+            .linked_thread_wait("origin", "origin-wait-run", &grants, &exchange_id, 1_000)
+            .await
+            .unwrap();
+        assert_eq!(waited["status"], "replied");
+        assert_eq!(waited["completed"], true);
+        assert_eq!(waited["timed_out"], false);
+        assert!(waited["reply"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Please answer asynchronously"));
+        assert!(manager
+            .linked_thread_wait("origin", "wrong-run", &grants, &exchange_id, 100)
+            .await
+            .is_err());
         let exchange = manager
             .store
             .control_mailbox(&exchange_id)
             .unwrap()
             .unwrap();
         assert_eq!(exchange.status, "replied");
-        assert!(exchange.projected_at_ms.is_some());
+        assert!(exchange.consumed_at_ms.is_some());
+        for _ in 0..20 {
+            if manager
+                .store
+                .control_mailbox(&exchange_id)
+                .unwrap()
+                .is_some_and(|exchange| exchange.projected_at_ms.is_some())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(manager
+            .store
+            .control_mailbox(&exchange_id)
+            .unwrap()
+            .unwrap()
+            .projected_at_ms
+            .is_some());
         assert!(!manager.active.lock().unwrap().contains_key("origin"));
         assert!(manager
             .store
@@ -8429,11 +8659,27 @@ mod tests {
                 stop: busy_stop,
             },
         );
+        manager
+            .store
+            .control_put_run(&ControlRunRecord {
+                id: "origin-timeout-run".into(),
+                thread_id: "origin".into(),
+                status: "running".into(),
+                adapter: "provider".into(),
+                request_json: r#"{"text":"coordinate"}"#.into(),
+                agent_snapshot_json: None,
+                native_session_json: None,
+                created_at_ms: now_ms(),
+                updated_at_ms: now_ms(),
+                completed_at_ms: None,
+                error_json: None,
+            })
+            .unwrap();
         let queued_send = manager
             .linked_thread_send(
                 state.clone(),
                 "origin",
-                None,
+                Some("origin-timeout-run"),
                 &grants,
                 "target",
                 "Wait behind current work",
@@ -8441,6 +8687,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(queued_send["status"], "queued");
+        let queued_exchange_id = queued_send["exchange_id"].as_str().unwrap();
+        let timed_out = manager
+            .linked_thread_wait(
+                "origin",
+                "origin-timeout-run",
+                &grants,
+                queued_exchange_id,
+                100,
+            )
+            .await
+            .unwrap();
+        assert_eq!(timed_out["status"], "queued");
+        assert_eq!(timed_out["completed"], false);
+        assert_eq!(timed_out["timed_out"], true);
+        assert!(manager
+            .store
+            .control_mailbox(queued_exchange_id)
+            .unwrap()
+            .unwrap()
+            .consumed_at_ms
+            .is_none());
         let queued_turns = manager.store.control_queued_turns(Some("target")).unwrap();
         assert_eq!(queued_turns.len(), 1);
         let queued_accepted: AcceptedTurnV1 =
@@ -8451,6 +8718,114 @@ mod tests {
                 .as_ref()
                 .map(|origin| origin.origin_thread_id.as_str()),
             Some("origin")
+        );
+        manager.active.lock().unwrap().remove("target");
+
+        manager
+            .store
+            .control_put_run(&ControlRunRecord {
+                id: "steerable-target-run".into(),
+                thread_id: "target".into(),
+                status: "running".into(),
+                adapter: "provider".into(),
+                request_json: r#"{"text":"active"}"#.into(),
+                agent_snapshot_json: None,
+                native_session_json: None,
+                created_at_ms: now_ms(),
+                updated_at_ms: now_ms(),
+                completed_at_ms: None,
+                error_json: None,
+            })
+            .unwrap();
+        let (steer_stop, _steer_stop_rx) = watch::channel(false);
+        manager.active.lock().unwrap().insert(
+            "target".into(),
+            ActiveRun {
+                run_id: "steerable-target-run".into(),
+                steering: true,
+                stop: steer_stop,
+            },
+        );
+        let steered_send = manager
+            .linked_thread_send(
+                state.clone(),
+                "origin",
+                None,
+                &grants,
+                "target",
+                "Use this during the active run",
+            )
+            .await
+            .unwrap();
+        assert_eq!(steered_send["status"], "steering");
+        let steered_exchange_id = steered_send["exchange_id"].as_str().unwrap().to_string();
+        let pending_steer = manager
+            .store
+            .control_pending_inbox(Some("target"))
+            .unwrap()
+            .into_iter()
+            .find(|item| item.id == steered_exchange_id)
+            .unwrap();
+        assert_eq!(pending_steer.kind, "steer");
+        assert_eq!(
+            pending_steer.target_run_id.as_deref(),
+            Some("steerable-target-run")
+        );
+        let steered_accepted: AcceptedTurnV1 =
+            serde_json::from_str(&pending_steer.payload_json).unwrap();
+        assert_eq!(
+            steered_accepted
+                .mailbox_origin
+                .as_ref()
+                .map(|origin| origin.origin_thread_id.as_str()),
+            Some("origin")
+        );
+        let claimed_steers = manager
+            .store
+            .control_claim_step_inputs("target", "steerable-target-run")
+            .unwrap();
+        assert_eq!(claimed_steers.len(), 1);
+        manager
+            .complete_mailbox_exchange(
+                "steerable-target-run",
+                Some("Active run incorporated the message"),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            manager
+                .store
+                .control_mailbox(&steered_exchange_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "replied"
+        );
+
+        let fallback_send = manager
+            .linked_thread_send(
+                state.clone(),
+                "origin",
+                None,
+                &grants,
+                "target",
+                "Preserve this if the active run finishes first",
+            )
+            .await
+            .unwrap();
+        let fallback_exchange_id = fallback_send["exchange_id"].as_str().unwrap();
+        manager
+            .store
+            .control_retarget_pending_steers("steerable-target-run")
+            .unwrap();
+        assert_eq!(
+            manager
+                .store
+                .control_mailbox(fallback_exchange_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "queued"
         );
         manager.active.lock().unwrap().remove("target");
 
@@ -8475,7 +8850,10 @@ mod tests {
             .unwrap()
             .unwrap();
         let accepted: AcceptedTurnV1 = serde_json::from_str(&run.request_json).unwrap();
-        assert_eq!(accepted.config.claimed_mailbox_ids, vec![exchange_id]);
+        assert_eq!(
+            accepted.config.claimed_mailbox_ids,
+            vec![steered_exchange_id]
+        );
         assert_eq!(accepted.mailbox_context.len(), 1);
 
         let mailbox_count = manager

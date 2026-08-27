@@ -397,6 +397,7 @@ const PLAN_MODE_READ_ONLY_TOOL_NAMES: &[&str] = &[
     "linked_thread_read",
 ];
 const MAX_CHILD_THREAD_WAIT_MS: u64 = 300_000;
+const DEFAULT_LINKED_THREAD_WAIT_MS: u64 = 60_000;
 const WORKSPACE_UNAVAILABLE_SYSTEM_PROMPT: &str = concat!(
     "No working folder is selected in Milim. Host filesystem and host shell tools are unavailable. ",
     "If the user asks to create a new file, web app, document, dataset, or other generated artifact ",
@@ -1084,6 +1085,7 @@ mod run_context_tests {
         assert!(plan.contains("linked_thread_list"));
         assert!(plan.contains("linked_thread_read"));
         assert!(!plan.contains("linked_thread_send"));
+        assert!(!plan.contains("linked_thread_wait"));
 
         let guarded = agent_base_registry_with_memory(
             &state,
@@ -1094,6 +1096,7 @@ mod run_context_tests {
         assert!(guarded.contains("linked_thread_list"));
         assert!(guarded.contains("linked_thread_read"));
         assert!(!guarded.contains("linked_thread_send"));
+        assert!(!guarded.contains("linked_thread_wait"));
 
         let review = agent_base_registry_with_memory(
             &state,
@@ -1106,6 +1109,7 @@ mod run_context_tests {
             &run_context,
         );
         assert!(review.contains("linked_thread_send"));
+        assert!(review.contains("linked_thread_wait"));
 
         let open = ToolRunPolicy {
             approval: ToolApprovalPolicy::Open,
@@ -1114,6 +1118,7 @@ mod run_context_tests {
         let open_registry =
             agent_base_registry_with_memory(&state, Some(memory.clone()), &open, &run_context);
         assert!(open_registry.contains("linked_thread_send"));
+        assert!(open_registry.contains("linked_thread_wait"));
         let custom = agent_registry_for_mode_with_context(
             &state,
             "custom",
@@ -1125,6 +1130,7 @@ mod run_context_tests {
         assert!(custom.contains("linked_thread_read"));
         assert!(!custom.contains("linked_thread_list"));
         assert!(!custom.contains("linked_thread_send"));
+        assert!(!custom.contains("linked_thread_wait"));
 
         let account_context: AccountRuntimeMilimContext = serde_json::from_value(json!({
             "tool_context": {
@@ -1169,6 +1175,7 @@ mod run_context_tests {
         assert!(names.contains(&"linked_thread_list"));
         assert!(names.contains(&"linked_thread_read"));
         assert!(names.contains(&"linked_thread_send"));
+        assert!(names.contains(&"linked_thread_wait"));
     }
 
     #[test]
@@ -1975,6 +1982,7 @@ fn register_linked_thread_tools(
         grants: grants.clone(),
     }));
     if !policy.plan_mode && policy.approval != ToolApprovalPolicy::Guarded {
+        let origin_run_id = context.message_id.clone();
         let destinations = grants
             .iter()
             .map(|grant| {
@@ -1991,14 +1999,22 @@ fn register_linked_thread_tools(
             .join("; ");
         registry.register(Arc::new(LinkedThreadSendTool {
             state,
-            control,
-            origin_thread_id,
-            origin_run_id: context.message_id,
-            grants,
+            control: control.clone(),
+            origin_thread_id: origin_thread_id.clone(),
+            origin_run_id: origin_run_id.clone(),
+            grants: grants.clone(),
             description: format!(
-                "Send a message to a granted Milim thread. This starts or queues paid/model work with the destination's own settings and returns asynchronously through the mailbox. Destinations: {destinations}"
+                "Send a message to a linked Milim thread. This starts idle work, steers a compatible active run, or queues a durable follow-up with the destination's own settings, then returns asynchronously through the mailbox. When this run depends on the reply, pass the returned exchange_id to linked_thread_wait. Destinations: {destinations}"
             ),
         }));
+        if let Some(origin_run_id) = origin_run_id {
+            registry.register(Arc::new(LinkedThreadWaitTool {
+                control,
+                origin_thread_id,
+                origin_run_id,
+                grants,
+            }));
+        }
     }
 }
 
@@ -2167,6 +2183,79 @@ impl Tool for LinkedThreadSendTool {
                 &self.grants,
                 args.target_thread_id.trim(),
                 &args.message,
+            )
+            .await
+    }
+}
+
+struct LinkedThreadWaitTool {
+    control: Arc<crate::control::RunManager>,
+    origin_thread_id: String,
+    origin_run_id: String,
+    grants: Vec<crate::control::FrozenLinkedThreadGrantV1>,
+}
+
+#[derive(Deserialize)]
+struct LinkedThreadWaitArgs {
+    exchange_id: String,
+    #[serde(default = "default_linked_thread_wait_ms")]
+    timeout_ms: u64,
+}
+
+fn default_linked_thread_wait_ms() -> u64 {
+    DEFAULT_LINKED_THREAD_WAIT_MS
+}
+
+#[async_trait]
+impl Tool for LinkedThreadWaitTool {
+    fn name(&self) -> &str {
+        "linked_thread_wait"
+    }
+
+    fn description(&self) -> &str {
+        "Wait for a specific linked_thread_send exchange only when this run depends on its reply. The wait is bounded, may be repeated after a timeout, and never discards a late reply."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "exchange_id": { "type": "string", "minLength": 1 },
+                "timeout_ms": {
+                    "type": "integer",
+                    "minimum": 100,
+                    "maximum": crate::control::MAX_LINKED_THREAD_WAIT_MS,
+                    "default": DEFAULT_LINKED_THREAD_WAIT_MS
+                }
+            },
+            "required": ["exchange_id"],
+            "additionalProperties": false
+        })
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
+    }
+
+    fn concurrency(&self) -> milim_tools::ToolConcurrency {
+        milim_tools::ToolConcurrency::Parallel
+    }
+
+    fn environment_policy(&self) -> milim_tools::ProcessEnvironmentPolicy {
+        milim_tools::ProcessEnvironmentPolicy::ConfiguredIntegrationSanitized
+    }
+
+    async fn invoke(&self, args: Value) -> milim_core::Result<Value> {
+        let args: LinkedThreadWaitArgs = serde_json::from_value(args).map_err(|error| {
+            Error::InvalidRequest(format!("invalid linked_thread_wait arguments: {error}"))
+        })?;
+        self.control
+            .linked_thread_wait(
+                &self.origin_thread_id,
+                &self.origin_run_id,
+                &self.grants,
+                args.exchange_id.trim(),
+                args.timeout_ms,
             )
             .await
     }

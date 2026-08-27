@@ -3788,7 +3788,7 @@ span.provider-brand-icon {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin: 0 0 8px;
+  margin: 8px 10px 0;
 }
 .linked-thread-pill {
   display: inline-flex;
@@ -3842,6 +3842,20 @@ span.provider-brand-icon {
   font-size: 10px;
 }
 .mailbox-provenance span { color: var(--primary-text); font-weight: 600; }
+.mailbox-provenance.incoming {
+  max-width: 100%;
+  min-width: 0;
+  white-space: nowrap;
+}
+.mailbox-provenance.incoming span,
+.mailbox-provenance.incoming small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mailbox-provenance.incoming span { flex: 1 1 auto; }
+.mailbox-provenance.incoming small { flex: 0 1 auto; }
 .mailbox-provenance.failed { border-color: color-mix(in srgb, var(--error) 50%, var(--border-primary)); }
 
 body.thread-link-target-active [data-thread-link-drop-target]::after {
