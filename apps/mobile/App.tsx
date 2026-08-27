@@ -1285,9 +1285,13 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
     () => controller.bootstrap?.pending_approvals.filter(approval => approval.thread_id === thread?.id) ?? [],
     [controller.bootstrap?.pending_approvals, thread?.id],
   );
+  const threadPendingInputs = useMemo(
+    () => controller.bootstrap?.pending_inputs.filter(input => input.thread_id === thread?.id) ?? [],
+    [controller.bootstrap?.pending_inputs, thread?.id],
+  );
   const transcriptItems = useMemo(
-    () => projectTranscript(controller.timeline?.items ?? [], threadApprovals),
-    [controller.timeline?.items, threadApprovals],
+    () => projectTranscript(controller.timeline?.items ?? [], threadApprovals, threadPendingInputs),
+    [controller.timeline?.items, threadApprovals, threadPendingInputs],
   );
   const inspectableRunIds = useMemo(
     () => new Set(
@@ -2066,7 +2070,9 @@ function TranscriptItemView({
   }
   return (
     <View style={[styles.message, item.role === 'user' ? styles.userMessage : styles.assistantMessage]}>
-      {item.steering ? <Text style={styles.messageRole}>STEER</Text> : null}
+      {item.steering ? (
+        <Text style={styles.messageRole}>{item.steeringPending ? 'STEER · PENDING' : 'STEER'}</Text>
+      ) : null}
       {item.mailboxLabel ? <Text style={styles.messageRole}>{item.mailboxLabel}</Text> : null}
       {item.role === 'system' ? <Text style={styles.messageRole}>SYSTEM</Text> : null}
       {item.reasoning ? <ReasoningBlock text={item.reasoning} /> : null}

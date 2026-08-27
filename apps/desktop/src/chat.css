@@ -299,6 +299,7 @@
   line-height: 1.2;
   text-transform: uppercase;
 }
+.steer-provenance.pending { color: var(--warning); }
 .msg.assistant { align-items: flex-start; }
 .msg.assistant .msg-content {
   max-width: 100%;

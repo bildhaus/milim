@@ -297,6 +297,8 @@ export interface ChatMessage {
   steering?: boolean;
   /** Durable inbox input represented by an applied steering message. */
   steeringInboxId?: string;
+  /** Accepted steering input that has not reached a model-step boundary yet. */
+  steeringPending?: boolean;
   /** Durable notice that this thread will continue with a different model. */
   modelChange?: {
     previousModel: string;

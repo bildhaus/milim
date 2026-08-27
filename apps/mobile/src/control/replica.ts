@@ -2,6 +2,7 @@ import type {
   ControlEventV1,
   JsonValue,
   PendingApprovalV1,
+  PendingInputV1,
   TimelineItemV1,
   TimelinePageV1,
 } from './types';
@@ -129,6 +130,8 @@ export interface ProjectedMessage {
   runId: string | null;
   ledgerVersion?: number;
   steering?: boolean;
+  steeringInboxId?: string;
+  steeringPending?: boolean;
   seq: number;
   mailboxLabel?: string;
   mailboxStatus?: 'incoming' | 'replied' | 'failed';
@@ -520,6 +523,7 @@ function approvalCopy(approval: PendingApprovalV1 | null, data: Record<string, u
 export function projectTranscript(
   items: TimelineItemV1[],
   pendingApprovals: PendingApprovalV1[] = [],
+  pendingInputs: PendingInputV1[] = [],
 ): ProjectedTranscriptItem[] {
   const messages: ProjectedMessage[] = [];
   const deleted = new Set<string>();
@@ -608,6 +612,7 @@ export function projectTranscript(
         runId: item.run_id,
         ledgerVersion: typeof data.ledgerVersion === 'number' ? data.ledgerVersion : undefined,
         steering: data.steering === true,
+        steeringInboxId: typeof data.steeringInboxId === 'string' ? data.steeringInboxId : undefined,
         seq: item.seq,
         mailboxLabel: asRecord(data.mailboxOrigin)
           ? `From ${stringField(asRecord(data.mailboxOrigin)!, 'origin_title') || 'linked thread'}`
@@ -702,6 +707,32 @@ export function projectTranscript(
     modelChangeState.pending.previousModel !== modelChangeState.pending.model
   ) {
     modelChanges.push(modelChangeState.pending);
+  }
+
+  const appliedSteerIds = new Set(
+    messages.flatMap(message => message.steeringInboxId ? [message.steeringInboxId] : []),
+  );
+  const pendingSeq = (items.at(-1)?.seq ?? 0) + 1;
+  for (const [index, input] of pendingInputs.entries()) {
+    if (
+      input.kind !== 'steer' ||
+      input.state !== 'pending' ||
+      !input.target_run_id ||
+      typeof input.display_text !== 'string' ||
+      appliedSteerIds.has(input.id)
+    ) continue;
+    messages.push({
+      kind: 'message',
+      id: `pending-steer-${input.id}`,
+      role: 'user',
+      content: input.display_text,
+      reasoning: '',
+      runId: input.target_run_id,
+      steering: true,
+      steeringInboxId: input.id,
+      steeringPending: true,
+      seq: pendingSeq + index,
+    });
   }
 
   for (const approval of pendingApprovals) {

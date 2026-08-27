@@ -318,6 +318,14 @@ pub struct PendingInputV1 {
     pub target_run_id: Option<String>,
     pub kind: String,
     pub state: String,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub display_text: Option<String>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub attachments: Option<Vec<ControlAttachmentV1>>,
     pub created_at_ms: i64,
 }
 

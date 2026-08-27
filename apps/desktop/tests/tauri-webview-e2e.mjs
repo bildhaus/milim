@@ -6002,6 +6002,7 @@ async function runHarnessHardeningUiCheck(page) {
   bootstrap.queued_turns = [];
   bootstrap.pending_inputs = [];
   bootstrap.pending_approvals = [];
+  let steeringTimelineItems = [];
   await page.route("**/control/v1/bootstrap", (route) => route.fulfill({
     status: 200,
     contentType: "application/json",
@@ -6013,11 +6014,11 @@ async function runHarnessHardeningUiCheck(page) {
     body: JSON.stringify({
       thread_id: "e2e-ledger-thread",
       epoch: "e2e-ledger-epoch",
-      first_seq: null,
-      last_seq: null,
+      first_seq: steeringTimelineItems.at(0)?.seq ?? null,
+      last_seq: steeringTimelineItems.at(-1)?.seq ?? null,
       has_more_before: false,
       has_more_after: false,
-      items: [],
+      items: steeringTimelineItems,
     }),
   }));
   await page.route("**/control/v1/commands", async (route) => {
@@ -6040,6 +6041,8 @@ async function runHarnessHardeningUiCheck(page) {
         target_run_id: body.payload?.run_id ?? null,
         kind: "steer",
         state: "pending",
+        display_text: body.payload?.display_text ?? body.payload?.text ?? "",
+        attachments: body.payload?.attachments ?? [],
         created_at_ms: Date.now(),
       });
     } else if (body.kind === "turn.queue_resume") {
@@ -6089,11 +6092,38 @@ async function runHarnessHardeningUiCheck(page) {
   await page.waitForTimeout(1_750);
   await composer.fill("Steer with the keyboard shortcut");
   await composer.press(process.platform === "darwin" ? "Meta+Enter" : "Control+Enter");
-  await page.waitForFunction(() => document.body.textContent?.includes("Steering will be applied"));
+  const pendingSteer = page.getByTestId("pending-steer-message").filter({ hasText: "Steer with the keyboard shortcut" });
+  await pendingSteer.waitFor();
+  steeringTimelineItems = [{
+    id: "e2e-steer-message-1",
+    thread_id: "e2e-ledger-thread",
+    epoch: "e2e-ledger-epoch",
+    seq: 1,
+    run_id: "e2e-active-provider-run",
+    type: "message",
+    data: {
+      id: "e2e-steer-message-1",
+      role: "user",
+      content: "Steer with the keyboard shortcut",
+      runId: "e2e-active-provider-run",
+      steering: true,
+      steeringInboxId: "e2e-steer-1",
+    },
+    created_at_ms: Date.now(),
+  }];
+  const appliedSteer = page.getByTestId("applied-steer").filter({ hasText: "Steer" });
+  await appliedSteer.waitFor();
+  if (await pendingSteer.isVisible().catch(() => false)) {
+    throw new Error("Claimed steering should replace its pending transcript bubble.");
+  }
+  const appliedSteerRow = page.getByTestId("applied-steer").locator("..");
+  if (!(await appliedSteerRow.innerText()).includes("Steer with the keyboard shortcut")) {
+    throw new Error("Claimed steering should retain its submitted transcript text.");
+  }
   await composer.fill("Steer with the explicit menu action");
   await page.getByLabel("More actions for active run").click();
   await page.getByRole("menuitem", { name: "Steer next step" }).click();
-  await page.waitForFunction(() => document.body.textContent?.includes("Steering will be applied"));
+  await page.getByTestId("pending-steer-message").filter({ hasText: "Steer with the explicit menu action" }).waitFor();
   if (commandBodies.length !== 3 || commandBodies[0].kind !== "turn.send" || commandBodies[1].kind !== "turn.steer" || commandBodies[2].kind !== "turn.steer") {
     throw new Error(`Busy composer should queue on Enter and steer by modifier Enter or the explicit menu: ${JSON.stringify(commandBodies)}.`);
   }

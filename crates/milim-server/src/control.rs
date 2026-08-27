@@ -1950,7 +1950,7 @@ impl RunManager {
             .into_iter()
             .filter(|item| item.kind != "followup")
             .map(pending_input)
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
         let pending_approvals = self
             .store
             .control_pending_approvals()?
@@ -5836,15 +5836,28 @@ fn run_snapshot(run: ControlRunRecord) -> Result<RunSnapshotV1> {
     })
 }
 
-fn pending_input(item: ControlInboxRecord) -> PendingInputV1 {
-    PendingInputV1 {
+fn pending_input(item: ControlInboxRecord) -> Result<PendingInputV1> {
+    let accepted = (item.kind == "steer")
+        .then(|| serde_json::from_str::<AcceptedTurnV1>(&item.payload_json))
+        .transpose()
+        .map_err(|error| Error::Other(format!("stored steering input is invalid: {error}")))?;
+    let display_text = accepted.as_ref().map(|accepted| {
+        accepted
+            .display_text
+            .clone()
+            .unwrap_or_else(|| accepted.text.clone())
+    });
+    let attachments = accepted.map(|accepted| accepted.config.attachments);
+    Ok(PendingInputV1 {
         id: item.id,
         thread_id: item.thread_id,
         target_run_id: item.target_run_id,
         kind: item.kind,
         state: item.state,
+        display_text,
+        attachments,
         created_at_ms: item.created_at_ms,
-    }
+    })
 }
 
 fn queued_turn(turn: ControlQueuedTurnRecord) -> Result<QueuedTurnV1> {
@@ -8154,6 +8167,13 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].kind, "steer");
         assert_eq!(pending[0].target_run_id.as_deref(), Some("run-active"));
+        let projected_pending = manager.bootstrap(&state).await.unwrap().pending_inputs;
+        assert_eq!(projected_pending.len(), 1);
+        assert_eq!(projected_pending[0].display_text.as_deref(), Some("adjust"));
+        assert!(projected_pending[0]
+            .attachments
+            .as_deref()
+            .is_some_and(<[_]>::is_empty));
 
         let journal = RunJournal {
             store: manager.store.clone(),

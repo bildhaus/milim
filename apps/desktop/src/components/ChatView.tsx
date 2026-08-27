@@ -325,6 +325,7 @@ import {
   mergeControlRunMessages,
   modelChangeMessagesFromTimeline,
   pendingInputsAfterProjection,
+  pendingSteerMessages,
   pollControlRun,
   projectControlRunMessages,
   shouldReconcileControlRunProjection,
@@ -2046,6 +2047,14 @@ export function ChatView({
       && item.kind === "steer"
       && item.state === "pending",
   ).length;
+  const pendingSteerTranscriptMessages = useMemo(
+    () => pendingSteerMessages(canonicalPendingInputs, activeId, messages),
+    [activeId, canonicalPendingInputs, messages],
+  );
+  const undisplayedPendingSteerCount = Math.max(
+    0,
+    pendingSteerCount - pendingSteerTranscriptMessages.length,
+  );
   const canonicalQueuedMessages = useMemo(
     () =>
       canonicalQueuedTurns
@@ -7590,6 +7599,8 @@ export function ChatView({
             target_run_id: runId,
             kind: "steer",
             state: "pending",
+            display_text: text,
+            attachments: controlAttachments(attachments),
             created_at_ms: Date.now(),
           },
         ]);
@@ -8468,6 +8479,33 @@ export function ChatView({
                       </div>
                     );
                   })}
+                  {pendingSteerTranscriptMessages.map((message, offset) => (
+                    <div
+                      key={message.id}
+                      className="transcript-window-row"
+                      data-message-thread-id={activeId}
+                      data-testid="pending-steer-transcript-row"
+                    >
+                      <MessageRow
+                        activeId={activeId}
+                        appSessionId={APP_SESSION_ID}
+                        message={message}
+                        index={messages.length + offset}
+                        isEditing={false}
+                        isLastAssistant={false}
+                        assistantStreaming={false}
+                        busy
+                        activeMediaTargetPresent={Boolean(activeMediaTarget)}
+                        folderIsEmpty={!folder.trim()}
+                        workspaceFolder={folder}
+                        activeRun={activeRun}
+                        previewAppBusy={previewAppBusy}
+                        previewAppStatus={activePreviewAppStatus}
+                        toolApproval={toolApproval}
+                        actionsRef={messageRowActionsRef}
+                      />
+                    </div>
+                  ))}
                   {transcriptBottomSpacer > 0 && (
                     <div
                       aria-hidden="true"
@@ -8700,16 +8738,16 @@ export function ChatView({
                 onMove={moveQueuedMessageFromTray}
                 onRemove={removeQueuedMessageFromTray}
               />
-              {pendingSteerCount > 0 ? (
+              {undisplayedPendingSteerCount > 0 ? (
                 <div
                   className="review-comment-tray pending-steer-tray"
                   data-testid="pending-steer"
                   role="status"
                   aria-live="polite"
                 >
-                  {pendingSteerCount === 1
+                  {undisplayedPendingSteerCount === 1
                     ? "Steering will be applied at the next model step."
-                    : `${pendingSteerCount} steering messages will be applied at the next model step.`}
+                    : `${undisplayedPendingSteerCount} steering messages will be applied at the next model step.`}
                 </div>
               ) : null}
               {pendingReviewComments.length ? (

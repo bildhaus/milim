@@ -186,6 +186,8 @@ export interface PendingInputV1 {
   target_run_id: string | null;
   kind: string;
   state: string;
+  display_text?: string;
+  attachments?: ControlAttachmentV1[];
   created_at_ms: number;
 }
 

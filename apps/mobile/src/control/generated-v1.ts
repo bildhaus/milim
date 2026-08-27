@@ -34,7 +34,7 @@ export type PendingApprovalV1 = { id: string, run_id: string, thread_id: string,
 
 export type QueuedTurnV1 = { id: string, thread_id: string, command_id: string, accepted_at_ms: number, display_text: string, attachments: Array<ControlAttachmentV1>, mailbox_origin?: MailboxOriginV1, };
 
-export type PendingInputV1 = { id: string, thread_id: string, target_run_id: string | null, kind: string, state: string, created_at_ms: number, };
+export type PendingInputV1 = { id: string, thread_id: string, target_run_id: string | null, kind: string, state: string, display_text?: string, attachments?: Array<ControlAttachmentV1>, created_at_ms: number, };
 
 export type AppearanceColorsV1 = { primary_text: string, secondary_text: string, tertiary_text: string, placeholder_text: string, bg_primary: string, bg_secondary: string, bg_tertiary: string, sidebar_bg: string, accent: string, accent_light: string, border_primary: string, border_secondary: string, focus_border: string, success: string, warning: string, error: string, info: string, card_bg: string, card_border: string, input_bg: string, input_border: string, };
 
