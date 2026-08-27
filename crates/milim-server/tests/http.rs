@@ -5699,6 +5699,58 @@ async fn memory_graph_register_search_update_and_delete() {
         .await
         .unwrap();
     assert_eq!(updated["title"], "Use scoped graph memory");
+    assert!(updated["reviewed_at"].as_str().is_some());
+
+    let benchmark: Value = client
+        .post(format!("{base}/memory/benchmark"))
+        .json(&json!({
+            "model": "test-echo",
+            "top_k": 5,
+            "cases": [{
+                "name": "Graph node",
+                "query": "scoped graph memory",
+                "relevant_node_ids": [node_id.clone()],
+                "scopes": [{ "kind": "thread", "locator": "thread-http" }]
+            }]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(benchmark["case_count"], 1);
+    assert_eq!(benchmark["cases"][0]["first_relevant_rank"], 1);
+
+    let archived: Value = client
+        .post(format!("{base}/memory/nodes/{node_id}/archive"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(archived["archived"], true);
+
+    let restored: Value = client
+        .post(format!("{base}/memory/nodes/{node_id}/restore"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(restored["restored"], true);
+
+    let reviewed: Value = client
+        .post(format!("{base}/memory/nodes/{node_id}/review"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(reviewed["reviewed"], true);
 
     let deleted: Value = client
         .delete(format!("{base}/memory/nodes/{node_id}"))

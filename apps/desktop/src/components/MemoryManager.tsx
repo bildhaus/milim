@@ -5,6 +5,8 @@ import {
   getWorkspaceContext,
   listMemoryNodes,
   registerGraphMemory,
+  restoreMemoryNode,
+  reviewMemoryNode,
   searchGraphMemory,
   updateMemoryNode,
   type MemoryNode,
@@ -250,6 +252,38 @@ export function MemoryManager({
     }
   }
 
+  async function restoreSelected() {
+    if (!selected || !isArchived(selected)) return;
+    setBusy(true);
+    setNote(null);
+    try {
+      if (!await restoreMemoryNode(selected.id)) {
+        setNote("Failed to restore memory.");
+        return;
+      }
+      await load(selected.id);
+      setNote("Restored and marked reviewed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function reviewSelected() {
+    if (!selected || isArchived(selected) || selected.reviewed_at) return;
+    setBusy(true);
+    setNote(null);
+    try {
+      if (!await reviewMemoryNode(selected.id)) {
+        setNote("Failed to mark memory reviewed.");
+        return;
+      }
+      await load(selected.id);
+      setNote("Marked reviewed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function deleteSelected() {
     if (!selected || !isArchived(selected)) return;
     if (confirmDeleteId !== selected.id) {
@@ -293,6 +327,10 @@ export function MemoryManager({
       });
       if (!saved) {
         setNote("Failed to move memory.");
+        return;
+      }
+      if (!saved.node.reviewed_at && !(await reviewMemoryNode(saved.node.id))) {
+        setNote("Copied, but the moved memory could not be marked reviewed.");
         return;
       }
       if (!await archiveMemoryNode(selected.id)) {
@@ -353,13 +391,19 @@ export function MemoryManager({
             <MemoryForm title="Edit memory" draft={draft} onChange={setDraft} busy={busy} onCancel={() => setMode("view")} onSave={() => void saveSelected()} saveLabel="Save" canSave={canSave} />
           ) : selected ? (
             <>
-              <div className="mem-detail-head"><div><span>{tab === "legacy" ? "Legacy thread" : tab === "personal" ? "Personal" : "Project"}</span><h3>{titleFor(selected)}</h3></div>{isArchived(selected) && <em>Archived</em>}</div>
+              <div className="mem-detail-head"><div><span>{tab === "legacy" ? "Legacy thread" : tab === "personal" ? "Personal" : "Project"}</span><h3>{titleFor(selected)}</h3></div>{isArchived(selected) ? <em>Archived</em> : !selected.reviewed_at ? <em>Needs review</em> : <em>Reviewed</em>}</div>
               <div className="mem-content">{selected.body.trim() || <span>No additional details.</span>}</div>
               <p className="mem-date">Updated {formatDate(selected.updated_at)}</p>
               {tab === "legacy" && !isArchived(selected) && <div className="mem-move"><span>Move this memory to:</span><button className="btn-ghost" type="button" disabled={busy} onClick={() => void moveLegacy("personal")}>Personal</button><button className="btn-ghost" type="button" disabled={busy || !canUseProject} onClick={() => void moveLegacy("project")}>Project</button></div>}
               {note && <p className="sheet-hint">{note}</p>}
               <div className="mem-actions">
-                {!isArchived(selected) ? <button className="btn-ghost mem-icon-action" type="button" disabled={busy} onClick={() => void forgetSelected()}><Archive size={14} /> Forget</button> : <button className="btn-ghost danger mem-icon-action" type="button" disabled={busy} onClick={() => void deleteSelected()}>{confirmDeleteId === selected.id ? <Check size={14} /> : <Trash size={14} />} Delete permanently</button>}
+                {!isArchived(selected) ? <>
+                  <button className="btn-ghost mem-icon-action" type="button" disabled={busy} onClick={() => void forgetSelected()}><Archive size={14} /> Forget</button>
+                  {!selected.reviewed_at && <button className="btn-ghost mem-icon-action" type="button" disabled={busy} onClick={() => void reviewSelected()}><Check size={14} /> Mark reviewed</button>}
+                </> : <>
+                  <button className="btn-ghost mem-icon-action" type="button" disabled={busy} onClick={() => void restoreSelected()}><Refresh size={14} /> Restore</button>
+                  <button className="btn-ghost danger mem-icon-action" type="button" disabled={busy} onClick={() => void deleteSelected()}>{confirmDeleteId === selected.id ? <Check size={14} /> : <Trash size={14} />} Delete permanently</button>
+                </>}
                 <span className="spacer" />
                 <button className="btn-ghost mem-icon-action" type="button" disabled={busy} onClick={() => { setDraft(draftFrom(selected)); setMode("edit"); setNote(null); }}><Pencil size={14} /> Edit</button>
               </div>

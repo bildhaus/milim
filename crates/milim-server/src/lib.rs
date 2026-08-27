@@ -372,6 +372,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/memory/search", post(routes::memory_search))
         .route("/memory/register", post(routes::memory_register))
         .route("/memory/graph/search", post(routes::memory_graph_search))
+        .route("/memory/benchmark", post(routes::memory_benchmark))
         .route("/memory/scopes", get(routes::memory_scopes))
         .route("/memory/nodes", get(routes::memory_nodes))
         .route(
@@ -381,6 +382,14 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/memory/nodes/{id}/archive",
             post(routes::memory_node_archive),
+        )
+        .route(
+            "/memory/nodes/{id}/restore",
+            post(routes::memory_node_restore),
+        )
+        .route(
+            "/memory/nodes/{id}/review",
+            post(routes::memory_node_review),
         )
         // Privacy filter
         .route("/privacy/scan", post(routes::privacy_scan))

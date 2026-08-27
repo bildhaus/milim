@@ -1054,6 +1054,17 @@ struct MemoryGraphSearchResponse {
     hits: Vec<milim_memory::MemoryGraphHit>,
 }
 
+#[derive(Deserialize)]
+pub(crate) struct MemoryBenchmarkRequest {
+    #[serde(default = "default_memory_model")]
+    model: String,
+    #[serde(default = "default_top_k")]
+    top_k: usize,
+    #[serde(default)]
+    include_archived: bool,
+    cases: Vec<milim_memory::MemoryBenchmarkCase>,
+}
+
 /// `POST /memory/graph/search` — hybrid lexical/semantic search over scoped memories.
 pub(crate) async fn memory_graph_search(
     State(st): State<AppState>,
@@ -1074,6 +1085,21 @@ pub(crate) async fn memory_graph_search(
         .await
         .map_err(ApiError)?;
     Ok(Json(MemoryGraphSearchResponse { hits }).into_response())
+}
+
+/// `POST /memory/benchmark` — evaluate scoped retrieval against labeled relevant nodes.
+pub(crate) async fn memory_benchmark(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: Peer,
+    Json(req): Json<MemoryBenchmarkRequest>,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    let report = memory_store(&st)?
+        .benchmark(&req.model, req.cases, req.top_k, req.include_archived)
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(report).into_response())
 }
 
 /// `GET /memory/scopes` — list thread/project/global memory scopes.
@@ -1170,6 +1196,30 @@ pub(crate) async fn memory_node_archive(
     authorize(&st, &headers, peer_addr(peer))?;
     let archived = memory_store(&st)?.archive_node(&id).map_err(ApiError)?;
     Ok(Json(json!({ "archived": archived })).into_response())
+}
+
+/// `POST /memory/nodes/{id}/restore` — restore one archived memory and mark it reviewed.
+pub(crate) async fn memory_node_restore(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    peer: Peer,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    let restored = memory_store(&st)?.restore_node(&id).map_err(ApiError)?;
+    Ok(Json(json!({ "restored": restored })).into_response())
+}
+
+/// `POST /memory/nodes/{id}/review` — acknowledge one active memory as current.
+pub(crate) async fn memory_node_review(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    peer: Peer,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    let reviewed = memory_store(&st)?.review_node(&id).map_err(ApiError)?;
+    Ok(Json(json!({ "reviewed": reviewed })).into_response())
 }
 
 // ----- Embeddings -----

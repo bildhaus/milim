@@ -4912,6 +4912,7 @@ export interface MemoryNode {
   created_at: string;
   updated_at: string;
   archived_at?: string | null;
+  reviewed_at?: string | null;
 }
 
 export interface MemoryNotice {
@@ -4926,6 +4927,29 @@ export interface MemoryNotice {
 export interface MemoryGraphHit {
   node: MemoryNode;
   score: number;
+}
+
+export interface MemoryBenchmarkCase {
+  name?: string;
+  query: string;
+  relevant_node_ids: string[];
+  scopes?: MemoryScopeRef[];
+}
+
+export interface MemoryBenchmarkReport {
+  top_k: number;
+  case_count: number;
+  recall_at_k: number;
+  mean_reciprocal_rank: number;
+  cases: Array<{
+    name: string;
+    query: string;
+    relevant_node_ids: string[];
+    retrieved_node_ids: string[];
+    first_relevant_rank?: number | null;
+    recall_at_k: number;
+    reciprocal_rank: number;
+  }>;
 }
 
 export interface RegisterMemoryInput {
@@ -5035,6 +5059,28 @@ export async function searchGraphMemory(
   }
 }
 
+export async function benchmarkGraphMemory(
+  cases: MemoryBenchmarkCase[],
+  topK = 5,
+  model?: string,
+  includeArchived = false,
+): Promise<MemoryBenchmarkReport> {
+  const memoryModel = model && isUsableChatModel(model) ? model : "default";
+  return await parseJsonResponse<MemoryBenchmarkReport>(
+    await authFetch(`${BASE}/memory/benchmark`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: memoryModel,
+        cases,
+        top_k: topK,
+        include_archived: includeArchived,
+      }),
+    }),
+    "memory benchmark failed",
+  );
+}
+
 export async function updateMemoryNode(
   id: string,
   update: Partial<
@@ -5081,6 +5127,34 @@ export async function archiveMemoryNode(id: string): Promise<boolean> {
     if (!r.ok) return false;
     const j = await r.json();
     return Boolean(j.archived);
+  } catch {
+    return false;
+  }
+}
+
+export async function restoreMemoryNode(id: string): Promise<boolean> {
+  try {
+    const r = await authFetch(
+      `${BASE}/memory/nodes/${encodeURIComponent(id)}/restore`,
+      { method: "POST" },
+    );
+    if (!r.ok) return false;
+    const j = await r.json();
+    return Boolean(j.restored);
+  } catch {
+    return false;
+  }
+}
+
+export async function reviewMemoryNode(id: string): Promise<boolean> {
+  try {
+    const r = await authFetch(
+      `${BASE}/memory/nodes/${encodeURIComponent(id)}/review`,
+      { method: "POST" },
+    );
+    if (!r.ok) return false;
+    const j = await r.json();
+    return Boolean(j.reviewed);
   } catch {
     return false;
   }

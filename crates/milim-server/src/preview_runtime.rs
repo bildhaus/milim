@@ -369,7 +369,7 @@ impl PreviewRuntimeManager {
         }
         let inspected = inspect_preview_source(&target, &request.files)?;
         let package = &inspected.package;
-        validate_preview_package(&package)?;
+        validate_preview_package(package)?;
         let port = match package.explicit_port {
             Some(port) => port,
             None => free_port()?,

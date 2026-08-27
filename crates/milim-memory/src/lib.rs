@@ -6,7 +6,7 @@
 //! exact-term retrieval for thread and project recall.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
 };
 
@@ -120,6 +120,11 @@ pub const MEMORY_MIGRATIONS: &[Migration] = &[
             DELETE FROM memory_nodes_fts WHERE node_id = old.id;
           END;",
     },
+    Migration {
+        version: 4,
+        name: "memory_review_lifecycle",
+        sql: "ALTER TABLE memory_nodes ADD COLUMN reviewed_at TEXT;",
+    },
 ];
 
 /// A search hit: the stored text and its similarity to the query.
@@ -212,6 +217,7 @@ pub struct MemoryNode {
     pub created_at: String,
     pub updated_at: String,
     pub archived_at: Option<String>,
+    pub reviewed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -259,6 +265,36 @@ pub struct MemoryRegistration {
 pub struct MemoryGraphHit {
     pub node: MemoryNode,
     pub score: f32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MemoryBenchmarkCase {
+    #[serde(default)]
+    pub name: String,
+    pub query: String,
+    pub relevant_node_ids: Vec<String>,
+    #[serde(default)]
+    pub scopes: Vec<MemoryScopeRef>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MemoryBenchmarkCaseResult {
+    pub name: String,
+    pub query: String,
+    pub relevant_node_ids: Vec<String>,
+    pub retrieved_node_ids: Vec<String>,
+    pub first_relevant_rank: Option<usize>,
+    pub recall_at_k: f32,
+    pub reciprocal_rank: f32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MemoryBenchmarkReport {
+    pub top_k: usize,
+    pub case_count: usize,
+    pub recall_at_k: f32,
+    pub mean_reciprocal_rank: f32,
+    pub cases: Vec<MemoryBenchmarkCaseResult>,
 }
 
 /// An embedding-backed memory store.
@@ -317,6 +353,7 @@ impl MemoryStore {
     ) -> Result<MemoryRegistration> {
         let scope = normalize_scope(scope)?;
         let node = normalize_node(node)?;
+        let reviewed_by_user = node.source.eq_ignore_ascii_case("user");
         let text = memory_text(&node.title, &node.body);
         let embedding = match self.embed_one(model, &text).await {
             Ok(v) => v,
@@ -339,8 +376,9 @@ impl MemoryStore {
         db.conn()
             .execute(
                 "INSERT INTO memory_nodes
-                 (id, scope_id, kind, title, body, dim, embedding, confidence, source)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 (id, scope_id, kind, title, body, dim, embedding, confidence, source, reviewed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                         CASE WHEN ?10 THEN datetime('now') END)",
                 params![
                     node_id,
                     scope.id,
@@ -350,7 +388,8 @@ impl MemoryStore {
                     embedding.len() as i64,
                     bytes,
                     clamp_confidence(node.confidence),
-                    node.source
+                    node.source,
+                    reviewed_by_user,
                 ],
             )
             .map_err(sqlite)?;
@@ -447,7 +486,8 @@ impl MemoryStore {
             let scope_id = scope_id_for(&normalize_scope_ref(&scope)?);
             let sql = format!(
                 "SELECT n.id, n.scope_id, s.kind, s.label, n.kind, n.title, n.body,
-                        n.confidence, n.source, n.created_at, n.updated_at, n.archived_at
+                        n.confidence, n.source, n.created_at, n.updated_at, n.archived_at,
+                        n.reviewed_at
                  FROM memory_nodes n
                  JOIN memory_scopes s ON s.id = n.scope_id
                  WHERE n.scope_id = ?1 {archived_clause}
@@ -463,7 +503,8 @@ impl MemoryStore {
 
         let sql = format!(
             "SELECT n.id, n.scope_id, s.kind, s.label, n.kind, n.title, n.body,
-                    n.confidence, n.source, n.created_at, n.updated_at, n.archived_at
+                    n.confidence, n.source, n.created_at, n.updated_at, n.archived_at,
+                    n.reviewed_at
              FROM memory_nodes n
              JOIN memory_scopes s ON s.id = n.scope_id
              WHERE 1 = 1 {archived_clause}
@@ -558,7 +599,8 @@ impl MemoryStore {
             .execute(
                 "UPDATE memory_nodes
                  SET kind = ?2, title = ?3, body = ?4, dim = ?5, embedding = ?6,
-                     confidence = ?7, source = ?8, updated_at = datetime('now')
+                     confidence = ?7, source = ?8, reviewed_at = datetime('now'),
+                     updated_at = datetime('now')
                  WHERE id = ?1",
                 params![
                     id,
@@ -593,6 +635,35 @@ impl MemoryStore {
                  SET archived_at = COALESCE(archived_at, datetime('now')),
                      updated_at = datetime('now')
                  WHERE id = ?1",
+                params![id],
+            )
+            .map_err(sqlite)?;
+        Ok(n > 0)
+    }
+
+    pub fn restore_node(&self, id: &str) -> Result<bool> {
+        let db = self.db.lock().expect("memory db poisoned");
+        let n = db
+            .conn()
+            .execute(
+                "UPDATE memory_nodes
+                 SET archived_at = NULL, reviewed_at = datetime('now'),
+                     updated_at = datetime('now')
+                 WHERE id = ?1 AND archived_at IS NOT NULL",
+                params![id],
+            )
+            .map_err(sqlite)?;
+        Ok(n > 0)
+    }
+
+    pub fn review_node(&self, id: &str) -> Result<bool> {
+        let db = self.db.lock().expect("memory db poisoned");
+        let n = db
+            .conn()
+            .execute(
+                "UPDATE memory_nodes
+                 SET reviewed_at = datetime('now')
+                 WHERE id = ?1 AND archived_at IS NULL",
                 params![id],
             )
             .map_err(sqlite)?;
@@ -636,6 +707,7 @@ impl MemoryStore {
                 let sql = format!(
                     "SELECT n.id, n.scope_id, s.kind, s.label, n.kind, n.title, n.body,
                             n.confidence, n.source, n.created_at, n.updated_at, n.archived_at,
+                            n.reviewed_at,
                             n.embedding
                      FROM memory_nodes n
                      JOIN memory_scopes s ON s.id = n.scope_id
@@ -651,6 +723,7 @@ impl MemoryStore {
                 let sql = format!(
                     "SELECT n.id, n.scope_id, s.kind, s.label, n.kind, n.title, n.body,
                             n.confidence, n.source, n.created_at, n.updated_at, n.archived_at,
+                            n.reviewed_at,
                             n.embedding
                      FROM memory_nodes n
                      JOIN memory_scopes s ON s.id = n.scope_id
@@ -725,6 +798,80 @@ impl MemoryStore {
         })
         .await
         .map_err(|error| Error::Other(format!("memory graph search task: {error}")))?
+    }
+
+    pub async fn benchmark(
+        &self,
+        model: &str,
+        cases: Vec<MemoryBenchmarkCase>,
+        top_k: usize,
+        include_archived: bool,
+    ) -> Result<MemoryBenchmarkReport> {
+        if cases.is_empty() {
+            return Err(Error::InvalidRequest(
+                "memory benchmark requires at least one case".to_string(),
+            ));
+        }
+        let top_k = top_k.clamp(1, 50);
+        let mut results = Vec::with_capacity(cases.len());
+        for (index, case) in cases.into_iter().enumerate() {
+            if case.query.trim().is_empty() || case.relevant_node_ids.is_empty() {
+                return Err(Error::InvalidRequest(format!(
+                    "memory benchmark case {} requires a query and relevant_node_ids",
+                    index + 1
+                )));
+            }
+            let relevant_node_ids = case.relevant_node_ids.clone();
+            let relevant = case
+                .relevant_node_ids
+                .iter()
+                .cloned()
+                .collect::<HashSet<_>>();
+            let hits = self
+                .search_graph(model, &case.query, &case.scopes, top_k, include_archived)
+                .await?;
+            let retrieved_node_ids = hits
+                .iter()
+                .map(|hit| hit.node.id.clone())
+                .collect::<Vec<_>>();
+            let first_relevant_rank = retrieved_node_ids
+                .iter()
+                .position(|id| relevant.contains(id))
+                .map(|index| index + 1);
+            let retrieved_relevant = retrieved_node_ids
+                .iter()
+                .filter(|id| relevant.contains(*id))
+                .count();
+            let recall_at_k = retrieved_relevant as f32 / relevant.len() as f32;
+            let reciprocal_rank = first_relevant_rank
+                .map(|rank| 1.0 / rank as f32)
+                .unwrap_or_default();
+            results.push(MemoryBenchmarkCaseResult {
+                name: if case.name.trim().is_empty() {
+                    format!("Case {}", index + 1)
+                } else {
+                    case.name
+                },
+                query: case.query,
+                relevant_node_ids,
+                retrieved_node_ids,
+                first_relevant_rank,
+                recall_at_k,
+                reciprocal_rank,
+            });
+        }
+        let case_count = results.len();
+        let recall_at_k =
+            results.iter().map(|case| case.recall_at_k).sum::<f32>() / case_count as f32;
+        let mean_reciprocal_rank =
+            results.iter().map(|case| case.reciprocal_rank).sum::<f32>() / case_count as f32;
+        Ok(MemoryBenchmarkReport {
+            top_k,
+            case_count,
+            recall_at_k,
+            mean_reciprocal_rank,
+            cases: results,
+        })
     }
 
     /// Return the `top_k` entries most similar to `query`.
@@ -960,7 +1107,8 @@ fn get_scope_by_id(conn: &rusqlite::Connection, id: &str) -> Result<MemoryScope>
 fn get_node_by_id(conn: &rusqlite::Connection, id: &str) -> Result<Option<MemoryNode>> {
     conn.query_row(
         "SELECT n.id, n.scope_id, s.kind, s.label, n.kind, n.title, n.body,
-                n.confidence, n.source, n.created_at, n.updated_at, n.archived_at
+                n.confidence, n.source, n.created_at, n.updated_at, n.archived_at,
+                n.reviewed_at
          FROM memory_nodes n
          JOIN memory_scopes s ON s.id = n.scope_id
          WHERE n.id = ?1",
@@ -1008,11 +1156,12 @@ fn row_to_node(r: &rusqlite::Row) -> rusqlite::Result<MemoryNode> {
         created_at: r.get(9)?,
         updated_at: r.get(10)?,
         archived_at: r.get(11)?,
+        reviewed_at: r.get(12)?,
     })
 }
 
 fn row_to_node_with_embedding(r: &rusqlite::Row) -> rusqlite::Result<(MemoryNode, Vec<u8>)> {
-    Ok((row_to_node(r)?, r.get(12)?))
+    Ok((row_to_node(r)?, r.get(13)?))
 }
 
 fn row_to_edge(r: &rusqlite::Row) -> rusqlite::Result<MemoryEdge> {
@@ -1186,6 +1335,7 @@ mod tests {
             created_at: updated_at.into(),
             updated_at: updated_at.into(),
             archived_at: None,
+            reviewed_at: None,
         }
     }
 
@@ -1342,6 +1492,7 @@ mod tests {
             .unwrap();
         assert_eq!(updated.title, "New");
         assert_eq!(updated.body, "New body");
+        assert!(updated.reviewed_at.is_some());
 
         assert!(mem.archive_node(&reg.node.id).unwrap());
         assert!(mem
@@ -1355,7 +1506,84 @@ mod tests {
             )
             .unwrap()
             .is_empty());
+        assert!(mem.restore_node(&reg.node.id).unwrap());
+        let restored = mem
+            .list_nodes(
+                Some(MemoryScopeRef {
+                    kind: "thread".into(),
+                    locator: "thread-2".into(),
+                }),
+                false,
+                10,
+            )
+            .unwrap();
+        assert_eq!(restored.len(), 1);
+        assert!(restored[0].reviewed_at.is_some());
         assert!(mem.delete_node(&reg.node.id).unwrap());
+    }
+
+    #[tokio::test]
+    async fn memory_benchmark_reports_recall_and_reciprocal_rank() {
+        let mem = lexical_store();
+        let scope = MemoryScopeInput {
+            kind: "project".into(),
+            label: "milim".into(),
+            locator: "project-a".into(),
+        };
+        let relevant = mem
+            .register(
+                "m",
+                scope.clone(),
+                MemoryNodeInput {
+                    kind: "decision".into(),
+                    title: "Preview manifest".into(),
+                    body: "Use the exact token PREVIEW-4173 for repository launch metadata.".into(),
+                    confidence: 1.0,
+                    source: "user".into(),
+                },
+                Vec::new(),
+                MemoryEventInput::default(),
+            )
+            .await
+            .unwrap();
+        mem.register(
+            "m",
+            scope.clone(),
+            MemoryNodeInput {
+                kind: "fact".into(),
+                title: "Unrelated".into(),
+                body: "Desktop colors and spacing.".into(),
+                confidence: 1.0,
+                source: "test".into(),
+            },
+            Vec::new(),
+            MemoryEventInput::default(),
+        )
+        .await
+        .unwrap();
+
+        let report = mem
+            .benchmark(
+                "m",
+                vec![MemoryBenchmarkCase {
+                    name: "Exact preview token".into(),
+                    query: "PREVIEW-4173".into(),
+                    relevant_node_ids: vec![relevant.node.id],
+                    scopes: vec![MemoryScopeRef {
+                        kind: scope.kind,
+                        locator: scope.locator,
+                    }],
+                }],
+                5,
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(report.case_count, 1);
+        assert_eq!(report.cases[0].first_relevant_rank, Some(1));
+        assert_eq!(report.recall_at_k, 1.0);
+        assert_eq!(report.mean_reciprocal_rank, 1.0);
     }
 
     #[tokio::test]
