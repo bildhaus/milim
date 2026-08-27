@@ -50,6 +50,10 @@ const assistantMessage = readFileSync(
   join(root, "src", "components", "AssistantMessage.tsx"),
   "utf8",
 );
+const toolApprovalPrompt = readFileSync(
+  join(root, "src", "components", "ToolApprovalPrompt.tsx"),
+  "utf8",
+);
 const sidebar = readFileSync(
   join(root, "src", "components", "Sidebar.tsx"),
   "utf8",
@@ -69,10 +73,32 @@ const styleFiles = [
   "pull-requests.css",
 ];
 const styleEntry = readFileSync(join(root, "src", "styles.css"), "utf8");
+const foundationStyles = readFileSync(
+  join(root, "src", "foundation.css"),
+  "utf8",
+);
+const settingsStyles = readFileSync(join(root, "src", "settings.css"), "utf8");
 const expectedStyleEntry =
   globalStyleFiles.map((file) => `@import "./${file}";`).join("\n") + "\n";
 if (styleEntry !== expectedStyleEntry) {
   throw new Error("styles.css must preserve the ordered desktop CSS imports");
+}
+for (const needle of [
+  ".btn-ghost, .btn-accent, .btn-file",
+  ".btn-accent:disabled",
+  ".btn-accent:focus-visible",
+  ".btn-ghost.running::before",
+  "@keyframes spin",
+]) {
+  if (!foundationStyles.includes(needle)) {
+    throw new Error(`Eager button primitives must include ${needle}`);
+  }
+}
+if (settingsStyles.includes(".btn-ghost, .btn-accent, .btn-file")) {
+  throw new Error("Shared button primitives must not depend on lazy settings CSS");
+}
+if (!toolApprovalPrompt.includes('<button className="approval-btn" type="button"')) {
+  throw new Error("Tool approval links must use the Milim approval button style");
 }
 const styles = styleFiles
   .map((file) => readFileSync(join(root, "src", file), "utf8"))
