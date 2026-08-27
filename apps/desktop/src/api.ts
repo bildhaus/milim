@@ -1492,12 +1492,14 @@ export interface PreviewAppPreflight {
   managed: boolean;
   scope: "managed" | "selected_folder";
   package_manager: string;
+  configuration: "manifest" | "package_json" | string;
   install_required: boolean;
   install_command?: string | null;
   dev_command?: string | null;
   source_fingerprint: string;
   port: number;
   url: string;
+  healthcheck_url: string;
 }
 
 export interface PreviewAppStatus {

@@ -109,12 +109,14 @@ const runtimePreflight: PreviewAppPreflight = {
   managed: false,
   scope: "selected_folder",
   package_manager: "pnpm",
+  configuration: "manifest",
   install_required: true,
   install_command: "pnpm install --ignore-scripts",
   dev_command: "pnpm dev -- --host 127.0.0.1 --port 4173",
   source_fingerprint: "0123456789abcdef0123456789abcdef",
   port: 4173,
   url: "http://127.0.0.1:4173/",
+  healthcheck_url: "http://127.0.0.1:4173/health",
 };
 
 const runtimeStatus: PreviewAppStatus = {
@@ -758,7 +760,9 @@ try {
   assert(runtimeMarkup.includes("generated-app"), "App context should use the project folder title");
   assert(runtimeMarkup.includes("Refresh commands"), "Runtime review should name the read-only command check");
   assert(runtimeMarkup.includes('data-testid="preview-runtime-preflight-details"'), "Runtime review should show preflight details");
+  assert(runtimeMarkup.includes(".milim/preview.json"), "Runtime review should identify repository manifest configuration");
   assert(runtimeMarkup.includes("pnpm install --ignore-scripts"), "Runtime review should show the exact install command");
+  assert(runtimeMarkup.includes("http://127.0.0.1:4173/health"), "Runtime review should show the readiness target");
   assert(runtimeMarkup.includes("may modify the selected folder"), "Selected-folder installs should show a mutation warning");
   assert(runtimeMarkup.includes('aria-label="Run app preview"'), "Runtime should expose an explicit accessible Run action");
   assert(runtimeMarkup.includes('data-testid="preview-prepare-fix"'), "App runtime errors should offer Prepare fix");

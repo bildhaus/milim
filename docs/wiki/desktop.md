@@ -163,6 +163,20 @@ The Sheets controls share one compact toolbar: range loading and search flex to 
 
 Runnable generated apps never start automatically. Choose App, select **Review commands**, and inspect the scope, working folder, package manager, install requirement, exact install and dev commands, and source fingerprint. **Run** is enabled only for that current review. Preflight preserves numeric `--port`, Next.js `-p`, and `PORT=` declarations in `package.json`'s dev script; otherwise Milim allocates a free loopback port. A configured port that is already in use blocks preflight instead of being silently replaced. Once healthy, the review collapses into a Ready status control and one-click Stop action; select Ready to reopen the details and Restart action. No-folder projects are atomically staged into Milim's managed runtime directory only after Run; selected-folder previews execute in that folder and warn when dependency installation may modify it. Stop covers installation and the dev server, and restart cannot let an older run overwrite newer state. The runtime probes its loopback URL rather than trusting console text, distinguishes active-but-unhealthy from stopped, preserves the last URL through compile failures and polling disconnects, and returns to ready after recovery. **Prepare fix** adds an editable queued message containing the selected revision and recent failure evidence; it does not send, replace the composer draft, or remove attachments.
 
+Repositories may make that launch contract explicit with `.milim/preview.json`. Version 1 uses argv arrays, never shell text; `cwd` stays workspace-relative, `port` is optional, and the browser and health-check locations are loopback paths. `install` is optional, and omitting the manifest preserves package-manager and `scripts.dev` detection.
+
+```json
+{
+  "version": 1,
+  "cwd": "apps/site",
+  "command": ["pnpm", "run", "dev", "--", "--host", "127.0.0.1", "--port", "{port}"],
+  "install": ["pnpm", "install"],
+  "port": 4173,
+  "url_path": "/",
+  "healthcheck_path": "/health"
+}
+```
+
 Static workspace previews use the same normalized-workspace runtime slot and Stop action but skip Review commands, Run, and Restart because they execute no host command. Opening another HTML entry in the same workspace reuses that static server; an active Node app preview must be stopped before switching runtime modes.
 
 Every desktop turn accepted while that managed App or static runtime is active receives a frozen, sanitized snapshot containing only its kind, status, active/readiness flags, and loopback URL. This awareness is independent of whether the Inspector is open or App is the selected preview source, and includes active-but-unhealthy runtimes; stopped runtimes contribute no context. The snapshot is explicitly untrusted metadata, excludes commands, logs, errors, source, and runtime messages, and never grants preview tools or implies that the model inspected page contents.
