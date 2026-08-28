@@ -26,9 +26,12 @@ const inboxSidebarOnly = process.argv.includes("--inbox-sidebar-only");
 const newChatSplitOnly = process.argv.includes("--new-chat-split-only");
 const commandPaletteOnly = process.argv.includes("--command-palette-only");
 const settingsOnly = process.argv.includes("--settings-only");
+const schedulesOnly = process.argv.includes("--schedules-only");
+const composerControlsOnly = process.argv.includes("--composer-controls-only");
 const appMenuOnly = process.argv.includes("--app-menu-only");
 const turnChangesOnly = process.argv.includes("--turn-changes-only");
 const chatAffordancesOnly = process.argv.includes("--chat-affordances-only");
+const sourceHoverOnly = process.argv.includes("--source-hover-only");
 const modelChangeOnly = process.argv.includes("--model-change-only");
 const reasoningEffortOnly = process.argv.includes("--reasoning-effort-only");
 const generationControlsOnly = process.argv.includes("--generation-controls-only");
@@ -161,6 +164,10 @@ try {
     turnChangesRepo = createTurnChangesRepo();
     await runTurnChangesCheck(session.page, turnChangesRepo);
     consoleErrors.push(...errors);
+  } else if (sourceHoverOnly) {
+    const errors = collectErrors(session.page);
+    await runSourceHoverScrollCheck(session.page);
+    consoleErrors.push(...errors.filter((message) => !message.includes("/codex/models")));
   } else if (chatAffordancesOnly) {
     const errors = collectErrors(session.page);
     await runChatAffordancesCheck(session.page);
@@ -238,6 +245,18 @@ try {
   } else if (settingsOnly) {
     const errors = collectErrors(session.page);
     await runSettingsLayoutCheck(session.page);
+    consoleErrors.push(...errors.filter((message) => !message.includes("/codex/models")));
+  } else if (composerControlsOnly) {
+    const errors = collectErrors(session.page);
+    await session.page.getByTestId("chat-shell").waitFor();
+    await dismissOnboardingIfPresent(session.page);
+    await runComposerControlsCheck(session.page);
+    consoleErrors.push(...errors.filter((message) => !message.includes("/codex/models")));
+  } else if (schedulesOnly) {
+    const errors = collectErrors(session.page);
+    await session.page.getByTestId("chat-shell").waitFor();
+    await dismissOnboardingIfPresent(session.page);
+    await runSchedulesOpenCheck(session.page);
     consoleErrors.push(...errors.filter((message) => !message.includes("/codex/models")));
   } else if (resizeHandlesOnly) {
     const errors = collectErrors(session.page);
@@ -4088,7 +4107,7 @@ async function runLinkedThreadDropCheck(page) {
       ...(Array.isArray(state.sessions)
         ? state.sessions.filter((session) => session?.id !== target && session?.id !== origin)
         : []),
-      { id: target, title: "Linked target", messages: [{ id: `${target}-message`, role: "user", content: "Target fixture" }], createdAt: now, updatedAt: now },
+      { id: target, title: "Linked target with a deliberately long title that must truncate", messages: [{ id: `${target}-message`, role: "user", content: "Target fixture" }], createdAt: now, updatedAt: now },
       { id: origin, title: "Linked origin", messages: [{ id: `${origin}-message`, role: "user", content: "Origin fixture" }], createdAt: now, updatedAt: now },
     ];
     state.activeId = origin;
@@ -4177,6 +4196,27 @@ async function runLinkedThreadDropCheck(page) {
   await page.mouse.up();
   const pill = page.getByTestId(`linked-thread-pill-${targetId}`);
   await pill.waitFor();
+  const pillLayout = await pill.evaluate((element) => {
+    const titleElement = element.querySelector("strong");
+    const title = titleElement?.getBoundingClientRect();
+    const project = element.querySelector(".linked-thread-pill-project")?.getBoundingClientRect();
+    const status = element.querySelector(".linked-thread-pill-status")?.getBoundingClientRect();
+    const button = element.querySelector("button")?.getBoundingClientRect();
+    return {
+      titleWidth: title?.width ?? 0,
+      titleTruncated: titleElement ? titleElement.scrollWidth > titleElement.clientWidth : false,
+      centers: [title, project, status, button].map((rect) => rect ? Math.round(rect.top + rect.height / 2) : null),
+    };
+  });
+  if (pillLayout.titleWidth <= 0 || pillLayout.centers.some((center) => center == null)) {
+    throw new Error(`Native linked-chat pill was missing inline content: ${JSON.stringify(pillLayout)}.`);
+  }
+  if (Math.max(...pillLayout.centers) - Math.min(...pillLayout.centers) > 2) {
+    throw new Error(`Native linked-chat pill content wrapped onto multiple rows: ${JSON.stringify(pillLayout)}.`);
+  }
+  if (!pillLayout.titleTruncated) {
+    throw new Error(`Native linked-chat pill did not truncate its long thread title: ${JSON.stringify(pillLayout)}.`);
+  }
   await source.click();
   await page.locator(`[data-sidebar-session-id="${targetId}"].active`).waitFor();
   const reciprocalPill = page.getByTestId(`linked-thread-pill-${originId}`);
@@ -5750,6 +5790,80 @@ async function runChatAffordancesCheck(page) {
   await latest.waitFor({ state: "hidden" });
 }
 
+async function runSourceHoverScrollCheck(page) {
+  await page.getByTestId("chat-shell").waitFor();
+  await dismissOnboardingIfPresent(page);
+  await page.evaluate(async () => {
+    const invoke = window.__TAURI_INTERNALS__?.invoke;
+    if (!invoke) throw new Error("Tauri invoke unavailable for source-hover fixture.");
+    const now = Date.now();
+    const messages = Array.from({ length: 100 }, (_, index) => ({
+      id: `source-hover-${index}`,
+      role: index % 2 ? "assistant" : "user",
+      content: index === 21
+        ? "Read [Prompt Kit docs](https://www.prompt-kit.com/docs?ref=e2e) for the source pattern."
+        : index % 9 === 0
+          ? `Source-hover fixture message ${index + 1}. ${"Variable-height content ".repeat(18)}`
+          : `Source-hover fixture message ${index + 1}.`,
+    }));
+    await invoke("user_sessions_set", {
+      value: JSON.stringify({
+        state: {
+          sessions: [{
+            id: "e2e-source-hover",
+            title: "Source hover fixture",
+            messages,
+            createdAt: now,
+            updatedAt: now,
+          }],
+          activeId: "e2e-source-hover",
+        },
+        version: 0,
+      }),
+    });
+  });
+  await page.reload();
+  await page.getByTestId("chat-shell").waitFor();
+  await dismissOnboardingIfPresent(page);
+
+  const source = page.locator(".md-source-link").first();
+  await source.waitFor();
+  const scroll = page.locator(".chat-scroll");
+  await source.scrollIntoViewIfNeeded();
+  await scroll.evaluate((element) => {
+    const row = document.querySelector(".md-source-link")?.closest(".transcript-window-row");
+    if (!(row instanceof HTMLElement)) throw new Error("Source-hover row unavailable.");
+    const scrollRect = element.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    element.scrollTop += rowRect.top - scrollRect.top - (element.clientHeight - rowRect.height) / 2;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  await page.mouse.move(0, 0);
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+
+  const geometry = async () => scroll.evaluate((element) => {
+    const row = document.querySelector(".md-source-link")?.closest(".transcript-window-row");
+    if (!(row instanceof HTMLElement)) throw new Error("Source-hover row unavailable.");
+    return {
+      scrollTop: element.scrollTop,
+      rowTop: row.getBoundingClientRect().top - element.getBoundingClientRect().top,
+    };
+  });
+  const before = await geometry();
+  const sourceBox = await source.boundingBox();
+  if (!sourceBox) throw new Error("Source-hover pill bounds unavailable.");
+  await page.mouse.move(sourceBox.x + sourceBox.width / 2, sourceBox.y + sourceBox.height / 2);
+  await page.waitForFunction(() => {
+    const preview = document.querySelector(".md-source-preview");
+    return preview instanceof HTMLElement && getComputedStyle(preview).position === "fixed";
+  });
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const after = await geometry();
+  if (Math.abs(after.scrollTop - before.scrollTop) > 1 || Math.abs(after.rowTop - before.rowTop) > 1) {
+    throw new Error(`Source hover moved the transcript: ${JSON.stringify({ before, after })}.`);
+  }
+}
+
 async function runHarnessHardeningUiCheck(page) {
   const requests = [];
   // The preceding chat-affordance interaction can leave a debounced session
@@ -6276,6 +6390,37 @@ async function assertScheduleAgentAvatar(page, profile) {
   await option.click();
   await assertAvatarSeed(select.locator("shatz-avatar"), profile.avatar);
   await page.getByRole("button", { name: "Close schedules" }).click();
+}
+
+async function runSchedulesOpenCheck(page) {
+  const tools = page.getByRole("button", { name: "Tools", exact: true }).last();
+  if ((await tools.getAttribute("aria-expanded")) !== "true") await tools.click();
+  await page.getByRole("button", { name: "Schedules", exact: true }).last().click();
+  await page.getByRole("dialog", { name: "Schedules" }).waitFor();
+  await page.getByRole("button", { name: "New schedule", exact: true }).click();
+  await page.getByTestId("schedule-agent-select").waitFor();
+  await page.getByRole("button", { name: "Close schedules" }).click();
+}
+
+async function runComposerControlsCheck(page) {
+  const trigger = page.getByTestId("context-menu-trigger");
+  const assertApprovalLabel = async (expected) => {
+    const actual = (await trigger.locator(".chip-label").innerText()).trim();
+    if (actual !== expected) throw new Error(`Expected composer controls label ${expected}, got ${actual}.`);
+    if (await trigger.locator(".chip-detail").count()) {
+      throw new Error("Composer controls pill should render only the approval label.");
+    }
+  };
+
+  await assertApprovalLabel("Review");
+  await trigger.click();
+  const approvalGroup = page.locator('[role="radiogroup"][aria-label="Tool approval"]');
+  for (const label of ["Guarded", "Open", "Review"]) {
+    await approvalGroup.getByRole("radio", { name: label }).click();
+    await trigger.getByText(label, { exact: true }).waitFor();
+    await assertApprovalLabel(label);
+  }
+  await trigger.click();
 }
 
 async function assertAgentAvatarsInLightTheme(page) {

@@ -242,6 +242,8 @@ try {
   assert(controlBarMarkup.includes(">Ready<"), "The pre-send Goal pill should communicate that it is ready");
   assert(controlBarMarkup.includes('data-provider-brand="openai"'), "The active model chip should render its provider icon");
   assert(controlBarMarkup.includes('<span class="chip-detail">High</span>'), "The closed model chip should show a selected non-auto reasoning effort");
+  assert(controlBarMarkup.includes('<span class="chip-label">Guarded</span>'), "The closed session-controls pill should prioritize tool approval");
+  assert(!controlBarMarkup.includes("Privacy Off</span>"), "The closed session-controls pill should not repeat privacy state");
 
   const overriddenControlBarMarkup = renderToStaticMarkup(
     createElement(ControlBar, {

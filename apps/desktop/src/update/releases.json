@@ -1,4 +1,9 @@
 {
+  "0.2.60": {
+    "version": "0.2.60",
+    "summary": "Milim now keeps desktop controls stable and compact, with reliable schedules, cleaner composer context, single-line linked chats, and scroll-safe source previews.",
+    "items": []
+  },
   "0.2.59": {
     "version": "0.2.59",
     "summary": "Milim 0.2.59 makes canonical threads more reliable, gives scheduled work complete execution context, and makes runtime safety boundaries clearer before every turn.",

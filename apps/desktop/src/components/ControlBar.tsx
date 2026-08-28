@@ -339,10 +339,7 @@ export function ControlBar({
               aria-expanded={menu === "context"}
             >
               <Sliders size={13} />
-              <span className="chip-label">
-                Privacy {PRIVACY_LABEL[privacy]}
-              </span>
-              <span className="chip-detail">{TOOL_APPROVAL_LABEL[toolApproval]}</span>
+              <span className="chip-label">{TOOL_APPROVAL_LABEL[toolApproval]}</span>
               <ChevronDown size={12} className="chip-chev" />
             </button>
             {menu === "context" && (

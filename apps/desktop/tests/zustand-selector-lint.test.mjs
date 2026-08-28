@@ -9,6 +9,8 @@ const selectorCallsGetSettings =
   /useSessions\s*\(\s*\(?\s*([A-Za-z_$][\w$]*)\)?\s*=>[\s\S]{0,300}?\1\.getSettings\s*\(/g;
 const metadataOnlyFullSessionSelector =
   /useSessions\s*\(\s*\(?\s*([A-Za-z_$][\w$]*)\)?\s*=>\s*\1\.sessions\s*\)/g;
+const filteredSessionsSelector =
+  /useSessions\s*\(\s*\(?\s*([A-Za-z_$][\w$]*)\)?\s*=>[\s\S]{0,300}?\1\.sessions\.filter\s*\(/g;
 
 function files(path) {
   const stat = statSync(path);
@@ -21,6 +23,10 @@ for (const file of files(src)) {
   for (const match of text.matchAll(selectorCallsGetSettings)) {
     const line = text.slice(0, match.index).split(/\r?\n/).length;
     findings.push(`${file}:${line}: do not call getSettings inside a useSessions selector`);
+  }
+  for (const match of text.matchAll(filteredSessionsSelector)) {
+    const line = text.slice(0, match.index).split(/\r?\n/).length;
+    findings.push(`${file}:${line}: derive filtered session arrays outside useSessions so the selector returns a stable reference`);
   }
   if (
     file.endsWith(`${join("components", "Sidebar.tsx")}`) ||

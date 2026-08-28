@@ -424,8 +424,12 @@ export function SchedulesManager({ onClose }: { onClose: () => void }) {
   const agents = useAgents((s) => s.agents);
   const refreshAgents = useAgents((s) => s.refresh);
   const activeSession = useSessions((s) => s.sessions.find((session) => session.id === s.activeId));
-  const scheduleThreads = useSessions((s) => s.sessions.filter((session) => session.origin?.kind === "schedule"));
+  const sessions = useSessions((s) => s.sessions);
   const switchTo = useSessions((s) => s.switchTo);
+  const scheduleThreads = useMemo(
+    () => sessions.filter((session) => session.origin?.kind === "schedule"),
+    [sessions],
+  );
   const activeThreadModel = activeSession?.settings?.model?.trim() ?? "";
   const currentThreadModel = isAccountRuntimeModel(activeThreadModel)
     ? ""
