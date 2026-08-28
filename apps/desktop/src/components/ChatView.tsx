@@ -8695,8 +8695,12 @@ export function ChatView({
                       >
                         <span className="linked-thread-pill-copy">
                           <strong>{link.target_title}</strong>
-                          <small>{provenance} · {status}</small>
+                          <span className="linked-thread-pill-separator" aria-hidden="true">·</span>
+                          <small className="linked-thread-pill-project">{provenance}</small>
+                          <span className="linked-thread-pill-separator" aria-hidden="true">·</span>
+                          <small className="linked-thread-pill-status">{status}</small>
                         </span>
+                        <span className="linked-thread-pill-separator" aria-hidden="true">·</span>
                         <button
                           type="button"
                           title={`Unlink ${link.target_title}`}

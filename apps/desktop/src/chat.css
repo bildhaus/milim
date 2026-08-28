@@ -246,11 +246,6 @@
 .model-change-primary strong { color: var(--primary-text); font-weight: 650; }
 .model-change-detail { color: var(--tertiary-text); }
 .msg { display: flex; flex-direction: column; gap: 3px; }
-.messages .transcript-window-row:not(:nth-last-child(-n+3)) { content-visibility: auto; contain-intrinsic-size: auto 140px; }
-.messages .transcript-window-row:has(.baton-menu.open),
-.messages .transcript-window-row:has(.md-source:hover),
-.messages .transcript-window-row:has(.md-source:focus-within),
-.messages .transcript-window-row:has(.msg.msg-enter) { content-visibility: visible; contain-intrinsic-size: none; }
 @keyframes msg-enter {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }
@@ -3793,10 +3788,10 @@ span.provider-brand-icon {
 .linked-thread-pill {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 5px;
   min-width: 0;
   max-width: min(100%, 320px);
-  padding: 5px 6px 5px 9px;
+  padding: 4px 5px 4px 9px;
   border: 1px solid var(--border-primary);
   border-radius: 999px;
   background: var(--bg-secondary);
@@ -3804,18 +3799,33 @@ span.provider-brand-icon {
 }
 .linked-thread-pill.archived { opacity: 0.65; }
 .linked-thread-pill-copy {
-  display: grid;
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 5px;
   min-width: 0;
   line-height: 1.15;
 }
 .linked-thread-pill-copy strong,
-.linked-thread-pill-copy small {
+.linked-thread-pill-project {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.linked-thread-pill-copy strong { font-size: 11px; font-weight: 600; }
+.linked-thread-pill-copy strong {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 600;
+}
 .linked-thread-pill-copy small { color: var(--secondary-text); font-size: 9px; }
+.linked-thread-pill-project {
+  flex: 0 1 auto;
+  max-width: 96px;
+}
+.linked-thread-pill-status,
+.linked-thread-pill-separator { flex: 0 0 auto; }
+.linked-thread-pill-separator { color: var(--tertiary-text); font-size: 9px; }
 .linked-thread-pill button {
   display: grid;
   place-items: center;
