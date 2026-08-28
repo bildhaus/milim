@@ -2940,4 +2940,32 @@ assert(
   "deleting an expired project should delete its chats",
 );
 
+useSessions.getState().upsertScheduledControlThreads([{
+  id: "scheduled-thread-1",
+  title: "Schedule: Daily review",
+  revision: 2,
+  epoch: "schedule-epoch",
+  updated_at_ms: 12_345,
+  archived_at_ms: null,
+  model: "openrouter/test",
+  reasoning_effort_overrides: {},
+  agent_id: null,
+  workspace: "C:\\workspace",
+  origin: {
+    kind: "schedule",
+    schedule_id: "daily-review",
+    schedule_name: "Daily review",
+    occurrence_unix: 3_600,
+  },
+  busy: false,
+  queued_turns: 0,
+  linked_threads: [],
+}]);
+const scheduledThread = useSessions
+  .getState()
+  .sessions.find((session) => session.id === "scheduled-thread-1");
+equal(scheduledThread?.origin?.kind, "schedule", "scheduled bootstrap threads should enter the desktop replica");
+equal(scheduledThread?.messagesHydrated, false, "scheduled bootstrap threads should hydrate their timeline lazily");
+equal(scheduledThread?.settings.folder, "C:\\workspace", "scheduled bootstrap threads should retain their workspace");
+
 export {};

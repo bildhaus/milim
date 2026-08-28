@@ -48,12 +48,14 @@ function hsvToRgb(h: number, s: number, v: number): { r: number; g: number; b: n
 }
 
 function drag(onMove: (e: PointerEvent) => void) {
-  const up = () => {
+  const stop = () => {
     window.removeEventListener("pointermove", onMove);
-    window.removeEventListener("pointerup", up);
+    window.removeEventListener("pointerup", stop);
+    window.removeEventListener("pointercancel", stop);
   };
   window.addEventListener("pointermove", onMove);
-  window.addEventListener("pointerup", up);
+  window.addEventListener("pointerup", stop);
+  window.addEventListener("pointercancel", stop);
 }
 
 /** A themed color picker (swatch -> popover with SV square, hue slider, hex). */
@@ -86,12 +88,19 @@ export function ColorField({
 
   return (
     <div className="ui-color" ref={ref}>
-      <button type="button" className="ui-color-swatch" style={{ background: value }} title={value} onClick={() => setOpen((o) => !o)} />
+      <button type="button" className="ui-color-swatch" style={{ background: value }} title={value} aria-label={`Choose color, current value ${value}`} aria-expanded={open} onClick={() => setOpen((o) => !o)} />
       {label && <span className="ui-color-label">{label}</span>}
       {open && (
-        <div className="ui-color-pop" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="ui-color-pop" role="dialog" aria-label="Color picker" onMouseDown={(e) => e.stopPropagation()}>
           <div
             className="ui-sv"
+            role="slider"
+            tabIndex={0}
+            aria-label="Color saturation and brightness"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.round(s * 100)}
+            aria-valuetext={`${Math.round(s * 100)}% saturation, ${Math.round(v * 100)}% brightness`}
             style={{ background: `linear-gradient(to top, #000, transparent), linear-gradient(to right, #fff, hsl(${h}, 100%, 50%))` }}
             onPointerDown={(e) => {
               const el = e.currentTarget;
@@ -102,11 +111,26 @@ export function ColorField({
               set(e.clientX, e.clientY);
               drag((ev) => set(ev.clientX, ev.clientY));
             }}
+            onKeyDown={(event) => {
+              const delta = event.shiftKey ? 0.1 : 0.02;
+              if (event.key === "ArrowLeft") emit(h, clamp01(s - delta), v);
+              else if (event.key === "ArrowRight") emit(h, clamp01(s + delta), v);
+              else if (event.key === "ArrowDown") emit(h, s, clamp01(v - delta));
+              else if (event.key === "ArrowUp") emit(h, s, clamp01(v + delta));
+              else return;
+              event.preventDefault();
+            }}
           >
             <span className="ui-sv-dot" style={{ left: `${s * 100}%`, top: `${(1 - v) * 100}%` }} />
           </div>
           <div
             className="ui-hue"
+            role="slider"
+            tabIndex={0}
+            aria-label="Hue"
+            aria-valuemin={0}
+            aria-valuemax={360}
+            aria-valuenow={Math.round(h)}
             onPointerDown={(e) => {
               const el = e.currentTarget;
               const set = (cx: number) => {
@@ -116,11 +140,21 @@ export function ColorField({
               set(e.clientX);
               drag((ev) => set(ev.clientX));
             }}
+            onKeyDown={(event) => {
+              const delta = event.shiftKey ? 10 : 1;
+              if (event.key === "ArrowLeft" || event.key === "ArrowDown") {
+                emit((h - delta + 360) % 360, s || 1, v || 1);
+              } else if (event.key === "ArrowRight" || event.key === "ArrowUp") {
+                emit((h + delta) % 360, s || 1, v || 1);
+              } else return;
+              event.preventDefault();
+            }}
           >
             <span className="ui-hue-thumb" style={{ left: `${(h / 360) * 100}%` }} />
           </div>
           <input
             className="ui-hex"
+            aria-label="Hex color"
             value={value}
             onChange={(e) => {
               const x = e.target.value.trim();
@@ -186,15 +220,15 @@ export function Checkbox({
 }) {
   return (
     <label className="ui-check" title={title}>
-      <button
-        type="button"
-        role="checkbox"
-        aria-checked={checked}
-        className={"ui-check-box" + (checked ? " on" : "")}
-        onClick={() => onChange(!checked)}
-      >
+      <input
+        className="ui-check-native"
+        type="checkbox"
+        checked={checked}
+        onChange={(event) => onChange(event.currentTarget.checked)}
+      />
+      <span className={"ui-check-box" + (checked ? " on" : "")} aria-hidden="true">
         {checked && <Check size={11} />}
-      </button>
+      </span>
       {children && <span>{children}</span>}
     </label>
   );
@@ -236,9 +270,11 @@ export function Slider({
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
   };
 
   return (
@@ -253,8 +289,14 @@ export function Slider({
       tabIndex={0}
       onPointerDown={onPointerDown}
       onKeyDown={(e) => {
-        if (e.key === "ArrowLeft" || e.key === "ArrowDown") onChange(clamp(value - step));
-        if (e.key === "ArrowRight" || e.key === "ArrowUp") onChange(clamp(value + step));
+        if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
+          e.preventDefault();
+          onChange(clamp(value - step));
+        }
+        if (e.key === "ArrowRight" || e.key === "ArrowUp") {
+          e.preventDefault();
+          onChange(clamp(value + step));
+        }
       }}
     >
       <div className="ui-slider-track">

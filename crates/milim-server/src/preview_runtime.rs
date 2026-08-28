@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::Read as _;
 use std::net::TcpListener;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
@@ -27,6 +28,8 @@ use tower_http::services::ServeDir;
 
 const MAX_LOG_LINES: usize = 500;
 const INSTALL_MARKER_FILE: &str = ".milim-install-ok";
+const PREVIEW_MANIFEST_FILE: &str = ".milim/preview.json";
+const MAX_PREVIEW_MANIFEST_BYTES: u64 = 64 * 1024;
 #[cfg(not(test))]
 const PREVIEW_COMPILE_ERROR_QUIET_MS: u64 = 1_000;
 #[cfg(test)]
@@ -69,12 +72,14 @@ pub struct PreviewAppPreflight {
     pub managed: bool,
     pub scope: String,
     pub package_manager: String,
+    pub configuration: String,
     pub install_required: bool,
     pub install_command: String,
     pub dev_command: String,
     pub source_fingerprint: String,
     pub port: u16,
     pub url: String,
+    pub healthcheck_url: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -364,17 +369,22 @@ impl PreviewRuntimeManager {
                 "selected-folder preview preflight does not accept managed files".to_string(),
             ));
         }
-        let (package, install_required, source_fingerprint) =
-            inspect_preview_source(&target, &request.files)?;
-        validate_preview_package(&package)?;
+        let inspected = inspect_preview_source(&target, &request.files)?;
+        let package = &inspected.package;
+        validate_preview_package(package)?;
         let port = match package.explicit_port {
             Some(port) => port,
             None => free_port()?,
         };
         if package.explicit_port.is_some() && !port_is_available(port) {
-            return Err(configured_preview_port_in_use_error(port));
+            return Err(configured_preview_port_in_use_error(
+                port,
+                &package.configuration,
+            ));
         }
-        let cwd = target.dir.to_string_lossy().to_string();
+        let cwd = inspected.dir.to_string_lossy().to_string();
+        let url = preview_loopback_url(port, &package.url_path);
+        let healthcheck_url = preview_loopback_url(port, &package.healthcheck_path);
         let preflight = PreviewAppPreflight {
             thread_id: thread_id.clone(),
             cwd,
@@ -384,16 +394,18 @@ impl PreviewRuntimeManager {
             } else {
                 "selected_folder".to_string()
             },
-            package_manager: package.manager.command_name().to_string(),
-            install_required,
+            package_manager: package.launcher_name(),
+            configuration: package.configuration.clone(),
+            install_required: inspected.install_required,
             install_command: package.install_label(),
             dev_command: package.dev_label(port),
-            source_fingerprint,
+            source_fingerprint: inspected.source_fingerprint,
             port,
-            url: format!("http://127.0.0.1:{port}/"),
+            url,
+            healthcheck_url,
         };
         self.set_entry(&thread_id, |entry| {
-            entry.cwd = Some(target.dir.clone());
+            entry.cwd = Some(inspected.dir.clone());
             entry.kind = "app".to_string();
             entry.managed = target.managed;
             entry.preflight = Some(preflight.clone());
@@ -408,9 +420,6 @@ impl PreviewRuntimeManager {
     ) -> Result<PreviewAppStatus> {
         let thread_id = safe_thread_id(thread_id)?;
         let target = self.start_target(&thread_id, request.cwd.as_deref())?;
-        if let Some(status) = self.running_status(&thread_id, &target.dir)? {
-            return Ok(status);
-        }
         if !target.managed && !request.files.is_empty() {
             return Err(Error::InvalidRequest(
                 "selected-folder preview start does not accept managed files".to_string(),
@@ -440,24 +449,35 @@ impl PreviewRuntimeManager {
                     )
                 })?
         };
-        if expected.managed != target.managed || Path::new(&expected.cwd) != target.dir.as_path() {
+        let inspected = inspect_preview_source(&target, &request.files)?;
+        if let Some(status) = self.running_status(&thread_id, &inspected.dir)? {
+            return Ok(status);
+        }
+        let inspected_package = &inspected.package;
+        validate_preview_package(inspected_package)?;
+        if expected.managed != target.managed || Path::new(&expected.cwd) != inspected.dir.as_path()
+        {
             return Err(stale_preflight_error());
         }
-        let (inspected_package, install_required, current_fingerprint) =
-            inspect_preview_source(&target, &request.files)?;
-        validate_preview_package(&inspected_package)?;
         if supplied_fingerprint != expected.source_fingerprint
-            || current_fingerprint != expected.source_fingerprint
-            || install_required != expected.install_required
-            || inspected_package.manager.command_name() != expected.package_manager
+            || inspected.source_fingerprint != expected.source_fingerprint
+            || inspected.install_required != expected.install_required
+            || inspected_package.launcher_name() != expected.package_manager
+            || inspected_package.configuration != expected.configuration
             || inspected_package.install_label() != expected.install_command
             || inspected_package.dev_label(expected.port) != expected.dev_command
+            || preview_loopback_url(expected.port, &inspected_package.url_path) != expected.url
+            || preview_loopback_url(expected.port, &inspected_package.healthcheck_path)
+                != expected.healthcheck_url
         {
             return Err(stale_preflight_error());
         }
         if !port_is_available(expected.port) {
             return Err(if inspected_package.explicit_port.is_some() {
-                configured_preview_port_in_use_error(expected.port)
+                configured_preview_port_in_use_error(
+                    expected.port,
+                    &inspected_package.configuration,
+                )
             } else {
                 Error::InvalidRequest(
                     "preview app preflight port is no longer available; run preflight again"
@@ -466,8 +486,9 @@ impl PreviewRuntimeManager {
             });
         }
 
-        let dir = target.dir;
-        let package = inspected_package;
+        let dir = inspected.dir;
+        let package = inspected.package;
+        let install_required = inspected.install_required;
         let files = request.files.clone();
         let stages_files = target.managed && !files.is_empty();
         let run_id = uuid::Uuid::new_v4().simple().to_string();
@@ -526,11 +547,13 @@ impl PreviewRuntimeManager {
         let manager = self.clone();
         let run_thread_id = thread_id.clone();
         let port = expected.port;
+        let healthcheck_url = expected.healthcheck_url.clone();
         let run = PreviewRun {
             thread_id: run_thread_id,
             run_id,
             dir,
             port,
+            healthcheck_url,
             package,
             managed: target.managed,
             files,
@@ -977,6 +1000,7 @@ struct PreviewRun {
     run_id: String,
     dir: PathBuf,
     port: u16,
+    healthcheck_url: String,
     package: PreviewPackage,
     managed: bool,
     files: Vec<PreviewAppFile>,
@@ -1155,6 +1179,7 @@ async fn run_preview_app(
         run_id,
         dir,
         port,
+        healthcheck_url,
         package,
         managed,
         files,
@@ -1243,8 +1268,8 @@ async fn run_preview_app(
         return;
     }
     let command = package.dev_label(port);
-    let dev_args = package.dev_args(port);
-    let mut child = match preview_command(package.manager.command_name())
+    let (dev_program, dev_args) = package.dev_invocation(port);
+    let mut child = match preview_command(&dev_program)
         .args(&dev_args)
         .current_dir(&dir)
         .env("HOST", "127.0.0.1")
@@ -1375,7 +1400,7 @@ async fn run_preview_app(
                 return;
             }
             _ = probe_interval.tick() => {
-                let probe = probe_preview_url(&format!("http://127.0.0.1:{port}/")).await;
+                let probe = probe_preview_url(&healthcheck_url).await;
                 apply_probe_result(
                     &manager,
                     &thread_id,
@@ -1403,7 +1428,9 @@ async fn run_install_command(
     cancel: &mut watch::Receiver<bool>,
 ) -> Result<CommandOutcome> {
     let label = package.install_label();
-    let args = package.install_args();
+    let (program, args) = package.install_invocation().ok_or_else(|| {
+        Error::InvalidRequest("preview install command is unavailable".to_string())
+    })?;
     let _ = manager.with_run_entry(thread_id, run_id, |entry| {
         if entry.active {
             entry.status = "installing".to_string();
@@ -1413,7 +1440,7 @@ async fn run_install_command(
             push_log(entry, "system", &label);
         }
     });
-    let mut child = preview_command(package.manager.command_name())
+    let mut child = preview_command(&program)
         .args(&args)
         .current_dir(dir)
         .stdin(Stdio::null())
@@ -1490,6 +1517,35 @@ struct PreviewPackage {
     has_dev_script: bool,
     dev_script: String,
     explicit_port: Option<u16>,
+    install_command: Option<Vec<String>>,
+    dev_command: Option<Vec<String>>,
+    url_path: String,
+    healthcheck_path: String,
+    configuration: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreviewManifest {
+    version: u8,
+    #[serde(default)]
+    cwd: Option<String>,
+    command: Vec<String>,
+    #[serde(default)]
+    install: Option<Vec<String>>,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    url_path: Option<String>,
+    #[serde(default)]
+    healthcheck_path: Option<String>,
+}
+
+struct InspectedPreviewSource {
+    package: PreviewPackage,
+    dir: PathBuf,
+    install_required: bool,
+    source_fingerprint: String,
 }
 
 impl PackageManager {
@@ -1504,7 +1560,7 @@ impl PackageManager {
 }
 
 impl PreviewPackage {
-    fn install_args(&self) -> Vec<String> {
+    fn default_install_args(&self) -> Vec<String> {
         match self.manager {
             PackageManager::Npm => vec!["install", "--no-audit", "--no-fund"],
             PackageManager::Pnpm | PackageManager::Yarn | PackageManager::Bun => vec!["install"],
@@ -1514,7 +1570,7 @@ impl PreviewPackage {
         .collect()
     }
 
-    fn dev_args(&self, port: u16) -> Vec<String> {
+    fn default_dev_args(&self, port: u16) -> Vec<String> {
         let port = port.to_string();
         let server_args = if self.is_next_dev() && self.explicit_port.is_some() {
             vec!["--hostname", "127.0.0.1"]
@@ -1536,11 +1592,46 @@ impl PreviewPackage {
     }
 
     fn install_label(&self) -> String {
-        command_label(self.manager.command_name(), &self.install_args())
+        self.install_invocation()
+            .map(|(program, args)| command_label(&program, &args))
+            .unwrap_or_default()
     }
 
     fn dev_label(&self, port: u16) -> String {
-        command_label(self.manager.command_name(), &self.dev_args(port))
+        let (program, args) = self.dev_invocation(port);
+        command_label(&program, &args)
+    }
+
+    fn launcher_name(&self) -> String {
+        self.dev_command
+            .as_ref()
+            .and_then(|command| command.first())
+            .cloned()
+            .unwrap_or_else(|| self.manager.command_name().to_string())
+    }
+
+    fn install_invocation(&self) -> Option<(String, Vec<String>)> {
+        if let Some(command) = self.install_command.as_ref() {
+            return Some(command_invocation(command, 0));
+        }
+        (self.configuration == "package_json").then(|| {
+            (
+                self.manager.command_name().to_string(),
+                self.default_install_args(),
+            )
+        })
+    }
+
+    fn dev_invocation(&self, port: u16) -> (String, Vec<String>) {
+        self.dev_command
+            .as_ref()
+            .map(|command| command_invocation(command, port))
+            .unwrap_or_else(|| {
+                (
+                    self.manager.command_name().to_string(),
+                    self.default_dev_args(port),
+                )
+            })
     }
 
     fn is_next_dev(&self) -> bool {
@@ -1554,6 +1645,14 @@ impl PreviewPackage {
             .split_whitespace()
             .any(|part| part == "vite" || part.ends_with("/vite"))
     }
+}
+
+fn command_invocation(command: &[String], port: u16) -> (String, Vec<String>) {
+    let replace = |value: &str| value.replace("{port}", &port.to_string());
+    (
+        replace(command.first().expect("validated preview command")),
+        command[1..].iter().map(|value| replace(value)).collect(),
+    )
 }
 
 fn command_label(command: &str, args: &[String]) -> String {
@@ -1580,6 +1679,11 @@ fn preview_package(dir: &Path) -> Result<PreviewPackage> {
         has_dev_script: !dev_script.is_empty(),
         dev_script,
         explicit_port,
+        install_command: None,
+        dev_command: None,
+        url_path: "/".to_string(),
+        healthcheck_path: "/".to_string(),
+        configuration: "package_json".to_string(),
     })
 }
 
@@ -1632,6 +1736,11 @@ fn preview_package_from_files(files: &[PreviewAppFile]) -> Result<PreviewPackage
         has_dev_script: !dev_script.is_empty(),
         dev_script,
         explicit_port,
+        install_command: None,
+        dev_command: None,
+        url_path: "/".to_string(),
+        healthcheck_path: "/".to_string(),
+        configuration: "package_json".to_string(),
     })
 }
 
@@ -1694,30 +1803,219 @@ fn validate_preview_package(package: &PreviewPackage) -> Result<()> {
 fn inspect_preview_source(
     target: &PreviewAppTarget,
     files: &[PreviewAppFile],
-) -> Result<(PreviewPackage, bool, String)> {
+) -> Result<InspectedPreviewSource> {
     if target.managed && !files.is_empty() {
-        return Ok((
-            preview_package_from_files(files)?,
-            true,
-            fingerprint_files(files)?,
-        ));
+        let source_fingerprint = fingerprint_files(files)?;
+        if let Some(manifest) = preview_manifest_from_files(files)? {
+            let (package, dir) = preview_package_from_manifest(&target.dir, manifest, false)?;
+            return Ok(InspectedPreviewSource {
+                install_required: package.install_invocation().is_some(),
+                package,
+                dir,
+                source_fingerprint,
+            });
+        }
+        return Ok(InspectedPreviewSource {
+            package: preview_package_from_files(files)?,
+            dir: target.dir.clone(),
+            install_required: true,
+            source_fingerprint,
+        });
     }
-    if !target.dir.join("package.json").is_file() {
-        return Err(Error::InvalidRequest(
-            "preview app requires package.json".to_string(),
-        ));
-    }
-    let package = preview_package(&target.dir)?;
-    let fingerprint = if target.managed {
+    let source_fingerprint = if target.managed {
         fingerprint_managed_dir(&target.dir)?
     } else {
         fingerprint_selected_dir(&target.dir)?
     };
-    Ok((
+    if let Some(manifest) = preview_manifest_from_dir(&target.dir)? {
+        let (package, dir) = preview_package_from_manifest(&target.dir, manifest, true)?;
+        let install_required = package.install_invocation().is_some()
+            && needs_dependency_install(&dir, target.managed);
+        return Ok(InspectedPreviewSource {
+            package,
+            dir,
+            install_required,
+            source_fingerprint,
+        });
+    }
+    if !target.dir.join("package.json").is_file() {
+        return Err(Error::InvalidRequest(format!(
+            "preview app requires package.json or {PREVIEW_MANIFEST_FILE}"
+        )));
+    }
+    let package = preview_package(&target.dir)?;
+    Ok(InspectedPreviewSource {
         package,
-        needs_dependency_install(&target.dir, target.managed),
-        fingerprint,
+        dir: target.dir.clone(),
+        install_required: needs_dependency_install(&target.dir, target.managed),
+        source_fingerprint,
+    })
+}
+
+fn preview_manifest_from_dir(dir: &Path) -> Result<Option<PreviewManifest>> {
+    let canonical_root = std::fs::canonicalize(dir)
+        .map_err(|error| Error::InvalidRequest(format!("preview workspace is invalid: {error}")))?;
+    let candidate = canonical_root.join(PREVIEW_MANIFEST_FILE);
+    if !candidate.exists() {
+        return Ok(None);
+    }
+    let path = std::fs::canonicalize(&candidate).map_err(|error| {
+        Error::InvalidRequest(format!("invalid {PREVIEW_MANIFEST_FILE}: {error}"))
+    })?;
+    if !path.starts_with(&canonical_root) || !path.is_file() {
+        return Err(Error::InvalidRequest(format!(
+            "{PREVIEW_MANIFEST_FILE} must be a regular file inside the workspace"
+        )));
+    }
+    let metadata = std::fs::metadata(&path)?;
+    if metadata.len() > MAX_PREVIEW_MANIFEST_BYTES {
+        return Err(Error::InvalidRequest(format!(
+            "{PREVIEW_MANIFEST_FILE} must be at most {MAX_PREVIEW_MANIFEST_BYTES} bytes"
+        )));
+    }
+    let mut source = String::new();
+    std::fs::File::open(&path)?
+        .take(MAX_PREVIEW_MANIFEST_BYTES + 1)
+        .read_to_string(&mut source)?;
+    if source.len() as u64 > MAX_PREVIEW_MANIFEST_BYTES {
+        return Err(Error::InvalidRequest(format!(
+            "{PREVIEW_MANIFEST_FILE} must be at most {MAX_PREVIEW_MANIFEST_BYTES} bytes"
+        )));
+    }
+    parse_preview_manifest(&source).map(Some)
+}
+
+fn preview_manifest_from_files(files: &[PreviewAppFile]) -> Result<Option<PreviewManifest>> {
+    for file in files {
+        if safe_relative_path(&file.path)? == Path::new(PREVIEW_MANIFEST_FILE) {
+            return parse_preview_manifest(&file.content).map(Some);
+        }
+    }
+    Ok(None)
+}
+
+fn parse_preview_manifest(source: &str) -> Result<PreviewManifest> {
+    let manifest: PreviewManifest = serde_json::from_str(source).map_err(|error| {
+        Error::InvalidRequest(format!("invalid {PREVIEW_MANIFEST_FILE}: {error}"))
+    })?;
+    if manifest.version != 1 {
+        return Err(Error::InvalidRequest(format!(
+            "{PREVIEW_MANIFEST_FILE} version must be 1"
+        )));
+    }
+    validate_manifest_command("command", &manifest.command)?;
+    if let Some(install) = manifest.install.as_ref() {
+        validate_manifest_command("install", install)?;
+    }
+    if manifest.port == Some(0) {
+        return Err(Error::InvalidRequest(format!(
+            "{PREVIEW_MANIFEST_FILE} port must be between 1 and 65535"
+        )));
+    }
+    validate_preview_path("url_path", manifest.url_path.as_deref().unwrap_or("/"))?;
+    validate_preview_path(
+        "healthcheck_path",
+        manifest
+            .healthcheck_path
+            .as_deref()
+            .or(manifest.url_path.as_deref())
+            .unwrap_or("/"),
+    )?;
+    Ok(manifest)
+}
+
+fn validate_manifest_command(field: &str, command: &[String]) -> Result<()> {
+    if command.is_empty() || command[0].trim().is_empty() {
+        return Err(Error::InvalidRequest(format!(
+            "{PREVIEW_MANIFEST_FILE} {field} must be a non-empty argv array"
+        )));
+    }
+    if command
+        .iter()
+        .any(|part| part.contains('\0') || part.contains('\r') || part.contains('\n'))
+    {
+        return Err(Error::InvalidRequest(format!(
+            "{PREVIEW_MANIFEST_FILE} {field} contains an invalid control character"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_preview_path(field: &str, value: &str) -> Result<()> {
+    if !value.starts_with('/')
+        || value.starts_with("//")
+        || value.contains('\r')
+        || value.contains('\n')
+        || value.contains('#')
+    {
+        return Err(Error::InvalidRequest(format!(
+            "{PREVIEW_MANIFEST_FILE} {field} must be a loopback URL path beginning with one /"
+        )));
+    }
+    Ok(())
+}
+
+fn preview_package_from_manifest(
+    root: &Path,
+    manifest: PreviewManifest,
+    require_existing_cwd: bool,
+) -> Result<(PreviewPackage, PathBuf)> {
+    let relative_cwd = match manifest.cwd.as_deref().map(str::trim) {
+        None | Some("") | Some(".") => None,
+        Some(value) => Some(safe_relative_path(value)?),
+    };
+    let joined = relative_cwd
+        .as_deref()
+        .map_or_else(|| root.to_path_buf(), |relative| root.join(relative));
+    let dir = if require_existing_cwd {
+        let canonical_root = std::fs::canonicalize(root).map_err(|error| {
+            Error::InvalidRequest(format!("preview workspace is invalid: {error}"))
+        })?;
+        let canonical_dir = std::fs::canonicalize(&joined).map_err(|error| {
+            Error::InvalidRequest(format!(
+                "{PREVIEW_MANIFEST_FILE} cwd does not resolve to a directory: {error}"
+            ))
+        })?;
+        if !canonical_dir.is_dir() || !canonical_dir.starts_with(&canonical_root) {
+            return Err(Error::InvalidRequest(format!(
+                "{PREVIEW_MANIFEST_FILE} cwd must stay inside the workspace"
+            )));
+        }
+        canonical_dir
+    } else {
+        joined
+    };
+    let manager = package_manager_from_text(&manifest.command[0])
+        .or_else(|| {
+            manifest
+                .install
+                .as_ref()
+                .and_then(|command| package_manager_from_text(&command[0]))
+        })
+        .unwrap_or(PackageManager::Npm);
+    let url_path = manifest.url_path.unwrap_or_else(|| "/".to_string());
+    let healthcheck_path = manifest
+        .healthcheck_path
+        .unwrap_or_else(|| url_path.clone());
+    let dev_script = manifest.command.join(" ");
+    Ok((
+        PreviewPackage {
+            manager,
+            has_dev_script: true,
+            dev_script,
+            explicit_port: manifest.port,
+            install_command: manifest.install,
+            dev_command: Some(manifest.command),
+            url_path,
+            healthcheck_path,
+            configuration: "manifest".to_string(),
+        },
+        dir,
     ))
+}
+
+fn preview_loopback_url(port: u16, path: &str) -> String {
+    format!("http://127.0.0.1:{port}{path}")
 }
 
 fn fingerprint_files(files: &[PreviewAppFile]) -> Result<String> {
@@ -2098,6 +2396,7 @@ async fn terminate_child(child: &mut Child) {
 
 async fn probe_preview_url(url: &str) -> Option<u16> {
     let port = preview_url_port(url)?;
+    let path = preview_url_request_path(url)?;
     let mut stream = tokio::time::timeout(
         Duration::from_millis(PREVIEW_READY_REQUEST_TIMEOUT_MS),
         TcpStream::connect(("127.0.0.1", port)),
@@ -2105,7 +2404,8 @@ async fn probe_preview_url(url: &str) -> Option<u16> {
     .await
     .ok()?
     .ok()?;
-    let request = format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    let request =
+        format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
     tokio::time::timeout(
         Duration::from_millis(PREVIEW_READY_REQUEST_TIMEOUT_MS),
         stream.write_all(request.as_bytes()),
@@ -2132,6 +2432,12 @@ fn preview_url_port(url: &str) -> Option<u16> {
         .next()?
         .parse()
         .ok()
+}
+
+fn preview_url_request_path(url: &str) -> Option<&str> {
+    let rest = url.trim().strip_prefix("http://127.0.0.1:")?;
+    let path_start = rest.find('/');
+    Some(path_start.map_or("/", |index| &rest[index..]))
 }
 
 fn push_log(entry: &mut PreviewAppEntry, stream: &str, line: &str) {
@@ -2211,9 +2517,14 @@ fn port_is_available(port: u16) -> bool {
     false
 }
 
-fn configured_preview_port_in_use_error(port: u16) -> Error {
+fn configured_preview_port_in_use_error(port: u16, configuration: &str) -> Error {
+    let source = if configuration == "manifest" {
+        PREVIEW_MANIFEST_FILE
+    } else {
+        "package.json scripts.dev"
+    };
     Error::InvalidRequest(format!(
-        "preview app configured port {port} from package.json scripts.dev is already in use; stop the process using it or change scripts.dev"
+        "preview app configured port {port} from {source} is already in use; stop the process using it or change the preview configuration"
     ))
 }
 
@@ -2934,6 +3245,91 @@ mod tests {
     }
 
     #[test]
+    fn preview_app_preflight_prefers_repository_manifest() {
+        let root = test_root();
+        std::fs::create_dir_all(root.join(".milim")).unwrap();
+        std::fs::create_dir_all(root.join("apps").join("site")).unwrap();
+        let port = free_port().unwrap();
+        std::fs::write(
+            root.join(".milim").join("preview.json"),
+            format!(
+                r#"{{"version":1,"cwd":"apps/site","command":["pnpm","run","preview","--","--port","{{port}}"],"port":{port},"url_path":"/demo","healthcheck_path":"/health"}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"private":true,"scripts":{"dev":"vite"}}"#,
+        )
+        .unwrap();
+        let runtime_root = test_root();
+        let manager = PreviewRuntimeManager::new(runtime_root.clone());
+        let preflight = manager
+            .preflight(
+                "thread-1",
+                &PreviewAppPreflightRequest {
+                    cwd: Some(root.to_string_lossy().to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(preflight.configuration, "manifest");
+        assert_eq!(
+            preflight.cwd,
+            std::fs::canonicalize(root.join("apps/site"))
+                .unwrap()
+                .to_string_lossy()
+        );
+        assert_eq!(
+            preflight.dev_command,
+            format!("pnpm run preview -- --port {port}")
+        );
+        assert!(!preflight.install_required);
+        assert_eq!(preflight.install_command, "");
+        assert_eq!(preflight.url, format!("http://127.0.0.1:{port}/demo"));
+        assert_eq!(
+            preflight.healthcheck_url,
+            format!("http://127.0.0.1:{port}/health")
+        );
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(runtime_root);
+    }
+
+    #[test]
+    fn preview_app_manifest_rejects_workspace_escape_and_shell_text() {
+        let escaped =
+            parse_preview_manifest(r#"{"version":1,"cwd":"../outside","command":["pnpm","dev"]}"#)
+                .unwrap();
+        let root = test_root();
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(preview_package_from_manifest(&root, escaped, false).is_err());
+
+        let shell_text =
+            parse_preview_manifest(r#"{"version":1,"command":"pnpm dev && echo unsafe"}"#)
+                .unwrap_err()
+                .to_string();
+        assert!(shell_text.contains("invalid .milim/preview.json"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn preview_app_manifest_rejects_oversized_files() {
+        let root = test_root();
+        std::fs::create_dir_all(root.join(".milim")).unwrap();
+        std::fs::write(
+            root.join(PREVIEW_MANIFEST_FILE),
+            "x".repeat(MAX_PREVIEW_MANIFEST_BYTES as usize + 1),
+        )
+        .unwrap();
+
+        let error = preview_manifest_from_dir(&root).unwrap_err().to_string();
+
+        assert!(error.contains("must be at most 65536 bytes"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn preview_app_preflight_rejects_busy_explicit_dev_script_port() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -3334,6 +3730,7 @@ mod tests {
                 run_id: "run-1".to_string(),
                 dir: root.clone(),
                 port: free_port().unwrap(),
+                healthcheck_url: "http://127.0.0.1:1/".to_string(),
                 package: preview_package(&root).unwrap(),
                 managed: false,
                 files: Vec::new(),
@@ -3518,6 +3915,11 @@ http.createServer((_request, response) => {
             has_dev_script: true,
             dev_script: "vite".to_string(),
             explicit_port: None,
+            install_command: None,
+            dev_command: None,
+            url_path: "/".to_string(),
+            healthcheck_path: "/".to_string(),
+            configuration: "package_json".to_string(),
         };
 
         let root = test_root();
@@ -3575,8 +3977,13 @@ http.createServer((_request, response) => {
             has_dev_script: true,
             dev_script: "next dev".to_string(),
             explicit_port: None,
+            install_command: None,
+            dev_command: None,
+            url_path: "/".to_string(),
+            healthcheck_path: "/".to_string(),
+            configuration: "package_json".to_string(),
         };
-        let args = package.dev_args(3000);
+        let (_, args) = package.dev_invocation(3000);
         assert!(args.contains(&"--hostname".to_string()));
         assert!(!args.contains(&"--host".to_string()));
     }
@@ -3611,8 +4018,13 @@ http.createServer((_request, response) => {
             has_dev_script: true,
             dev_script: "vite --port 4173".to_string(),
             explicit_port: Some(4173),
+            install_command: None,
+            dev_command: None,
+            url_path: "/".to_string(),
+            healthcheck_path: "/".to_string(),
+            configuration: "package_json".to_string(),
         };
-        let args = package.dev_args(4173);
+        let (_, args) = package.dev_invocation(4173);
         assert!(args.contains(&"--host".to_string()));
         assert!(!args.contains(&"--port".to_string()));
         assert!(!args.contains(&"4173".to_string()));

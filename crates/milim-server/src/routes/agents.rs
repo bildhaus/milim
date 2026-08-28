@@ -397,6 +397,7 @@ const PLAN_MODE_READ_ONLY_TOOL_NAMES: &[&str] = &[
     "linked_thread_read",
 ];
 const MAX_CHILD_THREAD_WAIT_MS: u64 = 300_000;
+const DEFAULT_LINKED_THREAD_WAIT_MS: u64 = 60_000;
 const WORKSPACE_UNAVAILABLE_SYSTEM_PROMPT: &str = concat!(
     "No working folder is selected in Milim. Host filesystem and host shell tools are unavailable. ",
     "If the user asks to create a new file, web app, document, dataset, or other generated artifact ",
@@ -1084,6 +1085,7 @@ mod run_context_tests {
         assert!(plan.contains("linked_thread_list"));
         assert!(plan.contains("linked_thread_read"));
         assert!(!plan.contains("linked_thread_send"));
+        assert!(!plan.contains("linked_thread_wait"));
 
         let guarded = agent_base_registry_with_memory(
             &state,
@@ -1094,6 +1096,7 @@ mod run_context_tests {
         assert!(guarded.contains("linked_thread_list"));
         assert!(guarded.contains("linked_thread_read"));
         assert!(!guarded.contains("linked_thread_send"));
+        assert!(!guarded.contains("linked_thread_wait"));
 
         let review = agent_base_registry_with_memory(
             &state,
@@ -1106,6 +1109,7 @@ mod run_context_tests {
             &run_context,
         );
         assert!(review.contains("linked_thread_send"));
+        assert!(review.contains("linked_thread_wait"));
 
         let open = ToolRunPolicy {
             approval: ToolApprovalPolicy::Open,
@@ -1114,6 +1118,7 @@ mod run_context_tests {
         let open_registry =
             agent_base_registry_with_memory(&state, Some(memory.clone()), &open, &run_context);
         assert!(open_registry.contains("linked_thread_send"));
+        assert!(open_registry.contains("linked_thread_wait"));
         let custom = agent_registry_for_mode_with_context(
             &state,
             "custom",
@@ -1125,6 +1130,7 @@ mod run_context_tests {
         assert!(custom.contains("linked_thread_read"));
         assert!(!custom.contains("linked_thread_list"));
         assert!(!custom.contains("linked_thread_send"));
+        assert!(!custom.contains("linked_thread_wait"));
 
         let account_context: AccountRuntimeMilimContext = serde_json::from_value(json!({
             "tool_context": {
@@ -1169,6 +1175,7 @@ mod run_context_tests {
         assert!(names.contains(&"linked_thread_list"));
         assert!(names.contains(&"linked_thread_read"));
         assert!(names.contains(&"linked_thread_send"));
+        assert!(names.contains(&"linked_thread_wait"));
     }
 
     #[test]
@@ -1714,7 +1721,12 @@ fn agent_base_registry_with_memory(
         }
     }
     if let Some(store) = st.schedules.as_ref() {
-        register_schedule_tools(&mut reg, store.clone(), run_context.workspace.clone());
+        register_schedule_tools(
+            &mut reg,
+            store.clone(),
+            run_context.workspace.clone(),
+            run_context.privacy_mode.as_str(),
+        );
     }
     if let (Some(memory), Some(store)) = (memory.clone(), st.memory.as_ref()) {
         if memory.enabled {
@@ -1914,17 +1926,6 @@ fn plan_mode_registry(
     reg
 }
 
-fn agent_registry_for_mode(
-    st: &AppState,
-    tool_mode: &str,
-    enabled_tools: &[String],
-    memory: Option<AgentMemoryContext>,
-    policy: &ToolRunPolicy,
-) -> ToolRegistry {
-    let run_context = RunContext::current(st);
-    agent_registry_for_mode_with_context(st, tool_mode, enabled_tools, memory, policy, &run_context)
-}
-
 fn agent_registry_for_mode_with_context(
     st: &AppState,
     tool_mode: &str,
@@ -1965,21 +1966,6 @@ fn agent_registry_for_mode_with_context(
     }
 }
 
-pub(crate) fn scheduled_agent_registry(
-    st: &AppState,
-    agent: &milim_agents::AgentDef,
-) -> ToolRegistry {
-    let mut registry = agent_registry_for_mode(
-        st,
-        &agent.tool_mode,
-        &agent.enabled_tools,
-        None,
-        &ToolRunPolicy::default(),
-    );
-    register_skill_tools(&mut registry, st, &agent.skill_mode, &agent.enabled_skills);
-    registry
-}
-
 fn register_linked_thread_tools(
     registry: &mut ToolRegistry,
     state: AppState,
@@ -2001,6 +1987,7 @@ fn register_linked_thread_tools(
         grants: grants.clone(),
     }));
     if !policy.plan_mode && policy.approval != ToolApprovalPolicy::Guarded {
+        let origin_run_id = context.message_id.clone();
         let destinations = grants
             .iter()
             .map(|grant| {
@@ -2017,14 +2004,22 @@ fn register_linked_thread_tools(
             .join("; ");
         registry.register(Arc::new(LinkedThreadSendTool {
             state,
-            control,
-            origin_thread_id,
-            origin_run_id: context.message_id,
-            grants,
+            control: control.clone(),
+            origin_thread_id: origin_thread_id.clone(),
+            origin_run_id: origin_run_id.clone(),
+            grants: grants.clone(),
             description: format!(
-                "Send a message to a granted Milim thread. This starts or queues paid/model work with the destination's own settings and returns asynchronously through the mailbox. Destinations: {destinations}"
+                "Send a message to a linked Milim thread. This starts idle work, steers a compatible active run, or queues a durable follow-up with the destination's own settings, then returns asynchronously through the mailbox. When this run depends on the reply, pass the returned exchange_id to linked_thread_wait. Destinations: {destinations}"
             ),
         }));
+        if let Some(origin_run_id) = origin_run_id {
+            registry.register(Arc::new(LinkedThreadWaitTool {
+                control,
+                origin_thread_id,
+                origin_run_id,
+                grants,
+            }));
+        }
     }
 }
 
@@ -2193,6 +2188,79 @@ impl Tool for LinkedThreadSendTool {
                 &self.grants,
                 args.target_thread_id.trim(),
                 &args.message,
+            )
+            .await
+    }
+}
+
+struct LinkedThreadWaitTool {
+    control: Arc<crate::control::RunManager>,
+    origin_thread_id: String,
+    origin_run_id: String,
+    grants: Vec<crate::control::FrozenLinkedThreadGrantV1>,
+}
+
+#[derive(Deserialize)]
+struct LinkedThreadWaitArgs {
+    exchange_id: String,
+    #[serde(default = "default_linked_thread_wait_ms")]
+    timeout_ms: u64,
+}
+
+fn default_linked_thread_wait_ms() -> u64 {
+    DEFAULT_LINKED_THREAD_WAIT_MS
+}
+
+#[async_trait]
+impl Tool for LinkedThreadWaitTool {
+    fn name(&self) -> &str {
+        "linked_thread_wait"
+    }
+
+    fn description(&self) -> &str {
+        "Wait for a specific linked_thread_send exchange only when this run depends on its reply. The wait is bounded, may be repeated after a timeout, and never discards a late reply."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "exchange_id": { "type": "string", "minLength": 1 },
+                "timeout_ms": {
+                    "type": "integer",
+                    "minimum": 100,
+                    "maximum": crate::control::MAX_LINKED_THREAD_WAIT_MS,
+                    "default": DEFAULT_LINKED_THREAD_WAIT_MS
+                }
+            },
+            "required": ["exchange_id"],
+            "additionalProperties": false
+        })
+    }
+
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
+    }
+
+    fn concurrency(&self) -> milim_tools::ToolConcurrency {
+        milim_tools::ToolConcurrency::Parallel
+    }
+
+    fn environment_policy(&self) -> milim_tools::ProcessEnvironmentPolicy {
+        milim_tools::ProcessEnvironmentPolicy::ConfiguredIntegrationSanitized
+    }
+
+    async fn invoke(&self, args: Value) -> milim_core::Result<Value> {
+        let args: LinkedThreadWaitArgs = serde_json::from_value(args).map_err(|error| {
+            Error::InvalidRequest(format!("invalid linked_thread_wait arguments: {error}"))
+        })?;
+        self.control
+            .linked_thread_wait(
+                &self.origin_thread_id,
+                &self.origin_run_id,
+                &self.grants,
+                args.exchange_id.trim(),
+                args.timeout_ms,
             )
             .await
     }
@@ -3001,10 +3069,12 @@ pub(crate) fn register_schedule_tools(
     reg: &mut ToolRegistry,
     store: Arc<milim_automation::ScheduleStore>,
     workspace: Option<PathBuf>,
+    privacy: &str,
 ) {
     reg.register(Arc::new(ScheduleCreateTool {
         store: store.clone(),
         workspace: workspace.map(|path| path.to_string_lossy().to_string()),
+        privacy: privacy.to_string(),
     }));
     reg.register(Arc::new(ScheduleUpdateTool {
         store: store.clone(),
@@ -3018,6 +3088,7 @@ pub(crate) fn register_schedule_tools(
 struct ScheduleCreateTool {
     store: Arc<milim_automation::ScheduleStore>,
     workspace: Option<String>,
+    privacy: String,
 }
 
 struct ScheduleUpdateTool {
@@ -3162,7 +3233,7 @@ impl Tool for ScheduleCreateTool {
         let cron = trim_required_tool_arg(args.cron, "cron")?;
         let prompt = trim_required_tool_arg(args.prompt, "prompt")?;
         let model = provider_schedule_model(trim_required_tool_arg(args.model, "model")?)?;
-        let schedule = self.store.create_with_model_context(
+        let schedule = self.store.create_with_run_context(
             &name,
             &cron,
             trim_optional_agent_id(args.agent_id),
@@ -3171,6 +3242,8 @@ impl Tool for ScheduleCreateTool {
             args.attachments,
             args.enabled,
             self.workspace.clone(),
+            &self.privacy,
+            "local",
         )?;
         Ok(json!({ "ok": true, "schedule": schedule }))
     }
@@ -3276,6 +3349,8 @@ impl Tool for ScheduleUpdateTool {
             attachments,
             enabled: args.enabled.unwrap_or(current.enabled),
             workspace: current.workspace,
+            privacy: current.privacy,
+            timezone_mode: current.timezone_mode,
             created_unix: current.created_unix,
             last_run: current.last_run,
         })?;
@@ -4555,6 +4630,14 @@ pub(crate) struct CreateScheduleRequest {
     prompt: String,
     #[serde(default)]
     attachments: Vec<milim_automation::ScheduleAttachment>,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    workspace: RequestValue,
+    #[serde(default)]
+    privacy: Option<String>,
+    #[serde(default)]
+    timezone_mode: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -4568,10 +4651,14 @@ pub(crate) struct UpdateScheduleRequest {
     prompt: String,
     #[serde(default)]
     attachments: Vec<milim_automation::ScheduleAttachment>,
-    #[serde(default = "default_true")]
-    enabled: bool,
     #[serde(default)]
-    last_run: Option<i64>,
+    workspace: RequestValue,
+    #[serde(default)]
+    privacy: Option<String>,
+    #[serde(default)]
+    timezone_mode: Option<String>,
+    #[serde(default)]
+    enabled: Option<bool>,
 }
 
 fn provider_schedule_model(model: String) -> milim_core::Result<String> {
@@ -4593,6 +4680,33 @@ pub(crate) fn default_true() -> bool {
     true
 }
 
+fn schedule_json(schedule: milim_automation::Schedule) -> milim_core::Result<Value> {
+    let next_run_unix = milim_automation::schedule_next_run(&schedule)?;
+    let mut value = serde_json::to_value(schedule)
+        .map_err(|error| Error::Other(format!("serialize schedule: {error}")))?;
+    value
+        .as_object_mut()
+        .ok_or_else(|| Error::Other("serialized schedule is not an object".to_string()))?
+        .insert("next_run_unix".to_string(), json!(next_run_unix));
+    Ok(value)
+}
+
+fn schedule_workspace(
+    requested: RequestValue,
+    fallback: Option<String>,
+) -> milim_core::Result<Option<String>> {
+    match requested {
+        RequestValue::Missing => Ok(fallback),
+        RequestValue::Present(Value::Null) => Ok(None),
+        RequestValue::Present(Value::String(value)) => {
+            Ok(Some(value.trim().to_string()).filter(|value| !value.is_empty()))
+        }
+        RequestValue::Present(_) => Err(Error::InvalidRequest(
+            "workspace must be a string or null".to_string(),
+        )),
+    }
+}
+
 /// `GET /schedules` — list cron schedules.
 pub(crate) async fn schedules_list(
     State(st): State<AppState>,
@@ -4604,18 +4718,12 @@ pub(crate) async fn schedules_list(
         Some(store) => store.list().map_err(ApiError)?,
         None => Vec::new(),
     };
+    let schedules = schedules
+        .into_iter()
+        .map(schedule_json)
+        .collect::<milim_core::Result<Vec<_>>>()
+        .map_err(ApiError)?;
     Ok(Json(json!({ "schedules": schedules })).into_response())
-}
-
-/// `POST /schedules` — create a cron schedule.
-/// `GET /schedules/events` - drain completed background schedule runs.
-pub(crate) async fn schedule_events(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-    peer: Peer,
-) -> Result<Response, ApiError> {
-    authorize(&st, &headers, peer_addr(peer))?;
-    Ok(Json(json!({ "events": st.schedule_runs.take() })).into_response())
 }
 
 /// `POST /schedules` - create a cron schedule.
@@ -4635,18 +4743,24 @@ pub(crate) async fn schedule_create(
         provider_schedule_model(trim_required_tool_arg(req.model, "model").map_err(ApiError)?)
             .map_err(ApiError)?;
     let schedule = store
-        .create_with_model_context(
+        .create_with_run_context(
             &req.name,
             &req.cron,
             req.agent_id,
             &model,
             &req.prompt,
             req.attachments,
-            true,
-            workspace_snapshot(&st).map(|path| path.to_string_lossy().to_string()),
+            req.enabled,
+            schedule_workspace(
+                req.workspace,
+                workspace_snapshot(&st).map(|path| path.to_string_lossy().to_string()),
+            )
+            .map_err(ApiError)?,
+            req.privacy.as_deref().unwrap_or("off"),
+            req.timezone_mode.as_deref().unwrap_or("local"),
         )
         .map_err(ApiError)?;
-    Ok(Json(schedule).into_response())
+    Ok(Json(schedule_json(schedule).map_err(ApiError)?).into_response())
 }
 
 /// `DELETE /schedules/{id}` — remove a schedule.
@@ -4668,6 +4782,12 @@ pub(crate) async fn schedule_update(
     let model =
         provider_schedule_model(trim_required_tool_arg(req.model, "model").map_err(ApiError)?)
             .map_err(ApiError)?;
+    let workspace =
+        schedule_workspace(req.workspace, current.workspace.clone()).map_err(ApiError)?;
+    let privacy = req.privacy.unwrap_or_else(|| current.privacy.clone());
+    let timezone_mode = req
+        .timezone_mode
+        .unwrap_or_else(|| current.timezone_mode.clone());
     let schedule = store
         .update(milim_automation::ScheduleUpdate {
             id: &id,
@@ -4677,13 +4797,15 @@ pub(crate) async fn schedule_update(
             model: &model,
             prompt: &req.prompt,
             attachments: req.attachments,
-            enabled: req.enabled,
-            workspace: current.workspace,
+            enabled: req.enabled.unwrap_or(current.enabled),
+            workspace,
+            privacy,
+            timezone_mode,
             created_unix: current.created_unix,
-            last_run: req.last_run,
+            last_run: current.last_run,
         })
         .map_err(ApiError)?;
-    Ok(Json(schedule).into_response())
+    Ok(Json(schedule_json(schedule).map_err(ApiError)?).into_response())
 }
 
 pub(crate) async fn schedule_delete(

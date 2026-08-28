@@ -9,6 +9,7 @@ import {
   mergeControlRunMessages,
   modelChangeMessagesFromTimeline,
   pendingInputsAfterProjection,
+  pendingSteerMessages,
   projectControlRunMessages,
   shouldReconcileControlRunProjection,
   shouldQueueCanonicalFollowup,
@@ -196,9 +197,44 @@ assert.deepEqual(
   "run reconciliation must preserve both the optimistic original prompt and the applied steer",
 );
 const pendingInputs = [
-  { id: "inbox-steer-1", kind: "steer" },
-  { id: "inbox-steer-2", kind: "steer" },
+  {
+    id: "inbox-steer-1",
+    thread_id: "thread-1",
+    target_run_id: "run-1",
+    kind: "steer",
+    state: "pending",
+    display_text: "change direction",
+    attachments: [],
+    created_at_ms: 1,
+  },
+  {
+    id: "inbox-steer-2",
+    thread_id: "thread-1",
+    target_run_id: "run-1",
+    kind: "steer",
+    state: "pending",
+    display_text: "then verify it",
+    attachments: [],
+    created_at_ms: 2,
+  },
 ] as ControlPendingInputV1[];
+assert.deepEqual(
+  pendingSteerMessages(pendingInputs, "thread-1", []).map((message) => ({
+    content: message.content,
+    pending: message.steeringPending,
+    inboxId: message.steeringInboxId,
+  })),
+  [
+    { content: "change direction", pending: true, inboxId: "inbox-steer-1" },
+    { content: "then verify it", pending: true, inboxId: "inbox-steer-2" },
+  ],
+  "accepted steers must render immediately as pending transcript messages",
+);
+assert.deepEqual(
+  pendingSteerMessages(pendingInputs, "thread-1", completedWithSteer).map((message) => message.steeringInboxId),
+  ["inbox-steer-2"],
+  "a canonical claimed steer must replace its pending transcript message",
+);
 assert.deepEqual(
   pendingInputsAfterProjection(pendingInputs, completedWithSteer).map((input) => input.id),
   ["inbox-steer-2"],

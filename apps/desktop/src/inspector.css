@@ -409,6 +409,71 @@ button.quick-summary-row:disabled {
   min-height: 28px;
   padding: 2px 8px;
 }
+.effective-run-section > h3 {
+  padding: 2px 8px 4px;
+  color: var(--muted-text);
+  font-size: 11px;
+  font-weight: 550;
+}
+.effective-run-trigger {
+  align-items: flex-start;
+}
+.effective-run-details {
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+  border-top: 1px solid var(--border-primary);
+}
+.effective-run-grid {
+  display: grid;
+  grid-template-columns: minmax(68px, auto) minmax(0, 1fr);
+  gap: 4px 8px;
+  font-size: 10px;
+}
+.effective-run-grid > span { color: var(--muted-text); }
+.effective-run-grid > strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--secondary-text);
+  font-weight: 550;
+}
+.effective-run-prompts {
+  display: grid;
+  gap: 4px;
+}
+.effective-run-prompts details {
+  border: 1px solid var(--border-primary);
+  border-radius: 5px;
+}
+.effective-run-prompts summary {
+  padding: 6px;
+  color: var(--secondary-text);
+  font-size: 10px;
+  text-transform: capitalize;
+  cursor: pointer;
+}
+.effective-run-prompts summary small { color: var(--muted-text); }
+.effective-run-prompts pre {
+  max-height: 180px;
+  margin: 0;
+  padding: 8px;
+  overflow: auto;
+  border-top: 1px solid var(--border-primary);
+  color: var(--secondary-text);
+  font: 10px/1.4 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.effective-run-warning,
+.effective-run-error {
+  margin: 0;
+  padding: 0 2px;
+  color: var(--warning);
+  font-size: 10px;
+  line-height: 1.35;
+}
+.effective-run-error { color: var(--danger); }
+.effective-run-revision { color: var(--muted-text); font-size: 9px; }
 .preview-tab {
   display: inline-flex;
   align-items: center;

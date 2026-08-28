@@ -6,7 +6,7 @@ title: Quickstart
 summary: Connect any model runtime, optionally pick a workspace, keep one canonical thread, switch models inline, and review the result.
 group: Start
 order: 20
-updated: 2026-07-29
+updated: 2026-08-28
 ---
 
 Aim for one safe core loop: connect a runtime, optionally select a workspace, approve one small change, inspect the resulting diff, and continue the same thread with another model. Switching models changes the next turn; it does not reset workspace context or conversation history.
@@ -16,7 +16,7 @@ Aim for one safe core loop: connect a runtime, optionally select a workspace, ap
 | Step | What to check |
 |---|---|
 | Install or run | Use a release build for normal use. Use `pnpm -C apps/desktop tauri:dev` only when working on the app. |
-| Runtime | The searchable picker detects hosted providers, Ollama, LM Studio, Codex, Claude, OpenCode, and Pi. Cached provider models appear first; slower runtime results join as they arrive. Select any reachable model, then choose **Continue**. |
+| Runtime | The searchable picker detects hosted providers, Ollama, LM Studio, Codex, Claude, OpenCode, and Pi. Cached provider models appear first; slower runtime results join as they arrive. Select any reachable model, then choose **Continue**. **Continue without a model** is available, but chat stays disabled until **Manage models** above the composer is used to connect one. |
 | Workspace | A folder is optional for chat and required for repository work. Choose one or skip it, then select **Open Milim**. The composer receives focus and no task is sent automatically. |
 
 Onboarding reaches the composer in two advances: Runtime → optional Workspace → app. Provider, privacy, approval, and workspace choices remain editable from the thread.

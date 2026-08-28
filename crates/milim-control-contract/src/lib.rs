@@ -6,6 +6,9 @@ use ts_rs::TS;
 
 pub const CONTROL_PROTOCOL_MIN: u16 = 1;
 pub const CONTROL_PROTOCOL_MAX: u16 = 1;
+pub const CONTROL_MAX_ATTACHMENTS: usize = 12;
+pub const CONTROL_MAX_ATTACHMENT_BYTES: u64 = 2 * 1024 * 1024;
+pub const CONTROL_MAX_ATTACHMENT_CONTENT_CHARS: usize = 128 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, TS)]
 pub struct ControlProtocolRangeV1 {
@@ -37,6 +40,10 @@ pub struct ControlCapabilitiesV1 {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
+    pub effective_run_preview: Option<bool>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub steering: Option<bool>,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -50,6 +57,10 @@ pub struct ControlCapabilitiesV1 {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub thread_links: Option<bool>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub thread_origins: Option<bool>,
 }
 
 impl Default for ControlCapabilitiesV1 {
@@ -68,10 +79,12 @@ impl Default for ControlCapabilitiesV1 {
             appearance_assets: true,
             run_ledger: Some(true),
             run_inspection: Some(true),
+            effective_run_preview: Some(true),
             steering: Some(true),
             context_injection: Some(true),
             model_favorites: Some(true),
             thread_links: Some(true),
+            thread_origins: Some(true),
         }
     }
 }
@@ -113,6 +126,17 @@ pub struct MailboxOriginV1 {
     pub origin_project: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(tag = "kind", rename_all = "snake_case")]
+pub enum ThreadOriginV1 {
+    Schedule {
+        schedule_id: String,
+        schedule_name: String,
+        occurrence_unix: i64,
+    },
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 pub struct ThreadSummaryV1 {
     pub id: String,
@@ -126,6 +150,10 @@ pub struct ThreadSummaryV1 {
     pub reasoning_effort_overrides: HashMap<String, String>,
     pub agent_id: Option<String>,
     pub workspace: Option<String>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub origin: Option<ThreadOriginV1>,
     pub busy: bool,
     pub queued_turns: usize,
     #[serde(default)]
@@ -157,7 +185,7 @@ pub struct AgentSnapshotV1 {
     pub enabled_skills: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, TS)]
 pub struct ControlAttachmentV1 {
     pub id: String,
     pub name: String,
@@ -293,6 +321,14 @@ pub struct PendingInputV1 {
     pub target_run_id: Option<String>,
     pub kind: String,
     pub state: String,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub display_text: Option<String>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub attachments: Option<Vec<ControlAttachmentV1>>,
     pub created_at_ms: i64,
 }
 
@@ -547,6 +583,9 @@ pub enum ControlCommandKindV1 {
     #[serde(rename = "thread.set_agent")]
     #[ts(rename = "thread.set_agent")]
     ThreadSetAgent,
+    #[serde(rename = "thread.set_execution_settings")]
+    #[ts(rename = "thread.set_execution_settings")]
+    ThreadSetExecutionSettings,
     #[serde(rename = "thread.link.add")]
     #[ts(rename = "thread.link.add")]
     ThreadLinkAdd,
@@ -609,6 +648,7 @@ impl ControlCommandKindV1 {
             Self::ThreadDelete => "thread.delete",
             Self::ThreadSetModel => "thread.set_model",
             Self::ThreadSetAgent => "thread.set_agent",
+            Self::ThreadSetExecutionSettings => "thread.set_execution_settings",
             Self::ThreadLinkAdd => "thread.link.add",
             Self::ThreadLinkRemove => "thread.link.remove",
             Self::MessageDelete => "message.delete",
@@ -694,12 +734,36 @@ pub struct ResolvedRunCompositionV1 {
     pub reasoning_effort: Option<String>,
     #[serde(default)]
     pub generation: GenerationSettingsV1,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub native_session_boundary: Option<String>,
     pub workspace: Option<String>,
     pub environment_policy: String,
+    #[serde(default)]
+    pub explicit_environment_grants: Vec<Value>,
     pub prompt_sections: Vec<Value>,
     pub tools: Vec<Value>,
     pub policies: Value,
     pub attachments: Vec<Value>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, TS)]
+pub struct EffectiveRunPreviewRequestV1 {
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub attachments: Vec<ControlAttachmentV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+pub struct EffectiveRunPreviewV1 {
+    pub thread_id: String,
+    pub thread_revision: u64,
+    pub resolved_at_ms: i64,
+    pub composition: ResolvedRunCompositionV1,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]

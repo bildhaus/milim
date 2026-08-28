@@ -1,6 +1,6 @@
 //! Shared server state.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
@@ -14,7 +14,6 @@ use milim_inference::SharedService;
 use milim_memory::MemoryStore;
 use milim_skills::SkillStore;
 use milim_tools::ToolRegistry;
-use serde::Serialize;
 
 use crate::companion::MobileCompanionBridge;
 use crate::control::RunManager;
@@ -27,32 +26,6 @@ pub(crate) struct AccountRuntimeToolSession {
     pub token: String,
     pub registry: ToolRegistry,
     pub review: bool,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct ScheduleRunEvent {
-    pub id: String,
-    pub schedule_id: String,
-    pub schedule_name: String,
-    pub prompt: String,
-    pub response: String,
-    pub model: String,
-    pub ran_at: i64,
-}
-
-pub struct ScheduleRunQueue {
-    events: Mutex<VecDeque<ScheduleRunEvent>>,
-    subscribers: tokio::sync::broadcast::Sender<ScheduleRunEvent>,
-}
-
-impl Default for ScheduleRunQueue {
-    fn default() -> Self {
-        let (subscribers, _) = tokio::sync::broadcast::channel(64);
-        Self {
-            events: Mutex::new(VecDeque::new()),
-            subscribers,
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -112,26 +85,6 @@ impl McpAppViewStore {
     }
 }
 
-impl ScheduleRunQueue {
-    pub fn push(&self, event: ScheduleRunEvent) {
-        let _ = self.subscribers.send(event.clone());
-        let mut events = self.events.lock().expect("schedule run queue poisoned");
-        events.push_back(event);
-        while events.len() > 100 {
-            events.pop_front();
-        }
-    }
-
-    pub fn take(&self) -> Vec<ScheduleRunEvent> {
-        let mut events = self.events.lock().expect("schedule run queue poisoned");
-        events.drain(..).collect()
-    }
-
-    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<ScheduleRunEvent> {
-        self.subscribers.subscribe()
-    }
-}
-
 /// Cloneable handle to everything request handlers need.
 #[derive(Clone)]
 pub struct AppState {
@@ -158,8 +111,6 @@ pub struct AppState {
     pub threads: Option<Arc<ThreadSupervisor>>,
     /// Optional cron schedule store exposed via `/schedules` (+ firing loop).
     pub schedules: Option<Arc<ScheduleStore>>,
-    /// Completed background schedule runs waiting for the desktop to surface.
-    pub schedule_runs: Arc<ScheduleRunQueue>,
     /// Optional skills store exposed via `/skills`.
     pub skills: Option<Arc<SkillStore>>,
     /// Optional multi-provider registry exposed via `/providers`.
@@ -215,7 +166,6 @@ impl AppState {
             agents: None,
             threads: None,
             schedules: None,
-            schedule_runs: Arc::new(ScheduleRunQueue::default()),
             skills: None,
             providers: None,
             google_workspace: None,

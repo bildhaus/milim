@@ -514,6 +514,51 @@ textarea,
 }
 
 button { font-family: inherit; }
+
+/* Shared button primitives must remain in the eager stylesheet. They are used
+   by startup surfaces that render before lazy Settings/Agents CSS is loaded. */
+.btn-ghost, .btn-accent, .btn-file {
+  border: 1px solid var(--border-primary);
+  background: transparent;
+  color: var(--primary-text);
+  font-size: 13px;
+  font-weight: 500;
+  padding: 6px 12px;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, filter 0.15s, opacity 0.15s;
+}
+.btn-ghost:hover:not(:disabled),
+.btn-file:hover:not(:disabled) { background: var(--chip-hover); }
+.btn-ghost.danger { color: var(--error); border-color: transparent; background: transparent; }
+.btn-ghost.danger:hover:not(:disabled) { background: rgba(239, 68, 68, 0.12); }
+.btn-accent { background: var(--accent); color: var(--accent-contrast); border-color: transparent; }
+.btn-accent:hover:not(:disabled) { filter: brightness(1.08); }
+.btn-file { display: inline-flex; align-items: center; }
+.btn-ghost:focus-visible,
+.btn-accent:focus-visible,
+.btn-file:focus-visible {
+  outline: 2px solid var(--focus-border);
+  outline-offset: 2px;
+}
+.btn-ghost:disabled,
+.btn-accent:disabled,
+.btn-file:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+.btn-ghost.running::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
 .hover-scroll-text {
   display: block;
   min-width: 0;

@@ -25,6 +25,7 @@ import {
   inferAttachmentMime,
   createControlCommandId,
   getControlBootstrap,
+  getControlEffectiveRunPreview,
   getControlTimeline,
   getClaudeStatus,
   getOpenCodeStatus,
@@ -44,12 +45,10 @@ import {
   listProviders,
   listTools,
   listWorkerRuns,
-  MAX_ATTACHMENT_BYTES,
   openArtifactLocation,
   openDiagnosticsFolder,
   openExternalUrl,
   pickAttachmentFiles,
-  pollScheduleRunEvents,
   previewArtifactFile,
   readWorkspaceAttachmentFile,
   resolveToolApproval,
@@ -108,7 +107,6 @@ import {
   type ReasoningEffort,
   type RunTrace,
   type SavedArtifactFile,
-  type ScheduleRunEvent,
   type TokenUsage,
   type WorkspaceFileSuggestion,
   type WorkspaceCheckpoint,
@@ -134,6 +132,7 @@ import {
   type SessionVirtualFile,
   type HotSwapAction,
   type NativeSessionMode,
+  type ThreadSettingsPatch,
 } from "../sessions/store";
 import {
   artifactPreviewAutoOpenKey,
@@ -158,7 +157,10 @@ import {
   workerRunReadyForSynthesis,
   workerRunSynthesisId,
 } from "../lib/workerRuns";
-import { readBrowserAttachmentDataUrl } from "../lib/attachmentInput";
+import {
+  browserAttachment,
+  MAX_DESKTOP_ATTACHMENTS,
+} from "../lib/attachmentInput";
 import {
   buildEmptyStarterStrip,
   type EmptyStarterStrip,
@@ -326,12 +328,17 @@ import {
   mergeControlRunMessages,
   modelChangeMessagesFromTimeline,
   pendingInputsAfterProjection,
+  pendingSteerMessages,
   pollControlRun,
   projectControlRunMessages,
   shouldReconcileControlRunProjection,
   shouldQueueCanonicalFollowup,
 } from "../lib/canonicalControl.js";
 import { createChatMessageId } from "../lib/messageIds.js";
+import {
+  syncCanonicalExecutionSettings,
+  syncCanonicalThreadAgent,
+} from "../lib/canonicalThreadMutations.js";
 import { flushDeferredUserStateWrites, writeUserStateKey } from "../persistence/userStateStorage";
 import { useSettings } from "../settings/store";
 import { WINDOW_ATTACH_FILES_EVENT } from "../lib/windowFileDrop";
@@ -437,7 +444,6 @@ const MAX_MOUNTED_MESSAGE_ROWS = 200;
 const MESSAGE_WINDOW_SHIFT = 100;
 const DEFAULT_MESSAGE_ROW_HEIGHT = 180;
 const MESSAGE_ROW_GAP = 12;
-const SCHEDULE_RUN_COMPLETED_EVENT = "milim://schedule-run-completed";
 const EMPTY: ChatMessage[] = [];
 const EMPTY_QUEUE: QueuedMessage[] = [];
 
@@ -754,26 +760,7 @@ function attachmentId(): string {
 
 async function browserFileAttachment(file: File): Promise<ChatAttachment> {
   const mime = file.type || inferAttachmentMime(file.name);
-  const textLike =
-    mime.startsWith("text/") ||
-    mime === "application/json" ||
-    mime === "application/xml" ||
-    mime === "application/javascript";
-  const [content, dataUrl] = await Promise.all([
-    textLike
-      ? file.slice(0, MAX_ATTACHMENT_BYTES).text()
-      : Promise.resolve(undefined),
-    readBrowserAttachmentDataUrl(file, mime),
-  ]);
-  return {
-    id: attachmentId(),
-    name: file.name || "attachment",
-    mime,
-    size: file.size,
-    content,
-    dataUrl,
-    truncated: textLike ? file.size > MAX_ATTACHMENT_BYTES : false,
-  };
+  return browserAttachment(file, mime, attachmentId());
 }
 
 function previewArtifactsForMessage(
@@ -1865,7 +1852,6 @@ export function ChatView({
     (s) => s.experimentalHashlinePatch,
   );
   const showEmptyChatRidgeline = useUiPreferences((s) => s.showEmptyChatRidgeline);
-  const pushNotice = useUiPreferences((s) => s.pushNotice);
   const quickActionMode = useUiPreferences((s) => s.quickActionMode);
   const pinnedQuickActions = useUiPreferences((s) => s.pinnedQuickActions);
   const projectQuickActionOverrides = useUiPreferences((s) => s.projectQuickActionOverrides);
@@ -2023,6 +2009,7 @@ export function ChatView({
   const persistingTurnIdsRef = useRef<Set<string>>(new Set());
   const canonicalRunIdsRef = useRef<Map<string, string>>(new Map());
   const canonicalModelWritesRef = useRef<Map<string, CanonicalModelWrite>>(new Map());
+  const canonicalThreadMutationWritesRef = useRef<Map<string, Promise<void>>>(new Map());
   const canonicalThreadModelsRef = useRef(new Map<string, string>());
   const deletingMessageIdsRef = useRef(new Set<string>());
   const handledUnavailableModelRoutesRef = useRef(new Set<string>());
@@ -2049,6 +2036,14 @@ export function ChatView({
       && item.kind === "steer"
       && item.state === "pending",
   ).length;
+  const pendingSteerTranscriptMessages = useMemo(
+    () => pendingSteerMessages(canonicalPendingInputs, activeId, messages),
+    [activeId, canonicalPendingInputs, messages],
+  );
+  const undisplayedPendingSteerCount = Math.max(
+    0,
+    pendingSteerCount - pendingSteerTranscriptMessages.length,
+  );
   const canonicalQueuedMessages = useMemo(
     () =>
       canonicalQueuedTurns
@@ -2539,7 +2534,6 @@ export function ChatView({
   const preparedPreviewFilesByThreadRef = useRef(
     new Map<string, PreviewAppFile[]>(),
   );
-  const scheduleRunPollingRef = useRef(false);
   const gitStatusUpdatedAtRef = useRef<number | null>(null);
   const [previewResizing, setPreviewResizing] = useState(false);
   const [previewPanelOverlay, setPreviewPanelOverlay] = useState(false);
@@ -3075,6 +3069,7 @@ export function ChatView({
       try {
         const bootstrap = await getControlBootstrap();
         if (disposed) return;
+        useSessions.getState().upsertScheduledControlThreads(bootstrap.threads);
         setCanonicalQueuedTurns(bootstrap.queued_turns);
         setCanonicalPendingInputs(bootstrap.pending_inputs);
         const controlThread = bootstrap.threads.find(
@@ -3538,7 +3533,11 @@ export function ChatView({
         return next;
       });
     }
-    updateThreadSettings(activeId, { planMode: active });
+    void writeCanonicalExecutionSettings(
+      activeId,
+      { plan_mode: active },
+      { planMode: active },
+    ).catch(() => {});
     setChatNotice(
       active
         ? {
@@ -3569,7 +3568,13 @@ export function ChatView({
       else delete next[activeId];
       return next;
     });
-    if (active) updateThreadSettings(activeId, { planMode: false });
+    if (active) {
+      void writeCanonicalExecutionSettings(
+        activeId,
+        { plan_mode: false },
+        { planMode: false },
+      ).catch(() => {});
+    }
     setChatNotice(
       active
         ? {
@@ -4559,7 +4564,10 @@ export function ChatView({
       return;
     }
     const target = pickerModels.find((item) => item.id === selection.model);
-    if (!target) return;
+    if (!target) {
+      setChatNotice({ tone: "error", message: `Model not found: ${selection.model}` });
+      return;
+    }
     if (target.capabilities?.imageOutput || target.capabilities?.videoOutput || target.capabilities?.musicOutput) {
       if (action === "switch") commitHotSwap(target, action, messageIndex, undefined, selection);
       return;
@@ -4960,6 +4968,53 @@ export function ChatView({
     };
     void promise.then(clear, clear);
     return promise;
+  }
+
+  async function writeCanonicalExecutionSettings(
+    sessionId: string,
+    payload: Record<string, string | boolean | null>,
+    patch: ThreadSettingsPatch,
+  ): Promise<void> {
+    const previous = canonicalThreadMutationWritesRef.current.get(sessionId)?.catch(() => undefined)
+      ?? Promise.resolve();
+    const promise = previous.then(async () => {
+      await syncCanonicalExecutionSettings(sessionId, payload);
+      updateThreadSettings(sessionId, patch);
+    }).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      setChatNotice({ tone: "error", message });
+      throw error;
+    });
+    canonicalThreadMutationWritesRef.current.set(sessionId, promise);
+    void promise.finally(() => {
+      if (canonicalThreadMutationWritesRef.current.get(sessionId) === promise) {
+        canonicalThreadMutationWritesRef.current.delete(sessionId);
+      }
+    }).catch(() => {});
+    await promise;
+  }
+
+  async function writeCanonicalThreadAgent(
+    sessionId: string,
+    agentId: string | null,
+  ): Promise<void> {
+    const previous = canonicalThreadMutationWritesRef.current.get(sessionId)?.catch(() => undefined)
+      ?? Promise.resolve();
+    const promise = previous.then(async () => {
+      await syncCanonicalThreadAgent(sessionId, agentId);
+      updateThreadSettings(sessionId, { activeAgentId: agentId });
+    }).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      setChatNotice({ tone: "error", message });
+      throw error;
+    });
+    canonicalThreadMutationWritesRef.current.set(sessionId, promise);
+    void promise.finally(() => {
+      if (canonicalThreadMutationWritesRef.current.get(sessionId) === promise) {
+        canonicalThreadMutationWritesRef.current.delete(sessionId);
+      }
+    }).catch(() => {});
+    await promise;
   }
 
   function requireChatModel(): string | null {
@@ -5979,13 +6034,17 @@ export function ChatView({
 
   async function pickFolder() {
     const selected = await openFolderPicker();
-    if (selected && await requestWorkspaceEditorLeave("navigate")) updateThreadSettings(activeId, { folder: selected });
+    if (selected) await startChatInFolder(selected).catch(() => {});
   }
 
   async function startChatInFolder(nextFolder: string) {
     if (messages.length === 0) {
       if (!(await requestWorkspaceEditorLeave("navigate"))) return;
-      updateThreadSettings(activeId, { folder: nextFolder });
+      await writeCanonicalExecutionSettings(
+        activeId,
+        { workspace: nextFolder },
+        { folder: nextFolder },
+      );
     } else {
       await createInteractiveChat({ folder: nextFolder });
     }
@@ -5995,7 +6054,7 @@ export function ChatView({
 
   async function pickProjectFolder() {
     const selected = await openFolderPicker();
-    if (selected) await startChatInFolder(selected);
+    if (selected) await startChatInFolder(selected).catch(() => {});
   }
 
   async function handleAttachFiles(files?: File[]) {
@@ -6032,11 +6091,13 @@ export function ChatView({
           setChatNotice({
             tone: "warning",
             message: available > 0
-              ? `Attached ${available} files. A message can include up to 12 attachments.`
-              : "A message can include up to 12 attachments.",
+              ? `Attached ${available} files. A message can include up to ${MAX_DESKTOP_ATTACHMENTS} attachments.`
+              : `A message can include up to ${MAX_DESKTOP_ATTACHMENTS} attachments.`,
           });
         }
-        setPendingAttachments((current) => [...current, ...next].slice(0, 12));
+        setPendingAttachments((current) =>
+          [...current, ...next].slice(0, MAX_DESKTOP_ATTACHMENTS),
+        );
       }
       if (rejectedImageCount && unsupportedMessage) {
         setChatNotice({ tone: "error", message: unsupportedMessage });
@@ -6067,7 +6128,9 @@ export function ChatView({
         ...(await readWorkspaceAttachmentFile(folder, file.path)),
       };
       if (rejectUnsupportedImageAttachments([next])) return false;
-      setPendingAttachments((current) => [...current, next].slice(0, 12));
+      setPendingAttachments((current) =>
+        [...current, next].slice(0, MAX_DESKTOP_ATTACHMENTS),
+      );
       return true;
     } catch (e) {
       setChatNotice({
@@ -6311,7 +6374,11 @@ export function ChatView({
         const selectedModel = requireChatModel();
         if (!selectedModel) return true;
         if (rejectUnsupportedImageAttachments(pendingAttachments, selectedModel)) return true;
-        updateThreadSettings(activeId, { planMode: true });
+        void writeCanonicalExecutionSettings(
+          activeId,
+          { plan_mode: true },
+          { planMode: true },
+        ).catch(() => {});
         const attachments = pendingAttachments;
         setPendingAttachments([]);
         if (busy) {
@@ -6352,8 +6419,7 @@ export function ChatView({
         return true;
       case "model": {
         if (arg) {
-          updateThreadSettings(activeId, { model: arg });
-          setChatNotice(null);
+          requestHotSwap({ model: arg });
         } else {
           setChatNotice({
             tone: "info",
@@ -6364,31 +6430,31 @@ export function ChatView({
         return true;
       }
       case "folder": {
-        if (arg) updateThreadSettings(activeId, { folder: arg });
+        if (arg) void startChatInFolder(arg).catch(() => {});
         else void pickFolder();
         return true;
       }
       case "sandbox":
-        updateThreadSettings(activeId, { sandbox: true });
+        void writeCanonicalExecutionSettings(activeId, { sandbox: true }, { sandbox: true }).catch(() => {});
         return true;
       case "nosandbox":
-        updateThreadSettings(activeId, { sandbox: false });
+        void writeCanonicalExecutionSettings(activeId, { sandbox: false }, { sandbox: false }).catch(() => {});
         return true;
       case "computer":
-        updateThreadSettings(activeId, { computerUse: true });
+        void writeCanonicalExecutionSettings(activeId, { computer_use: true }, { computerUse: true }).catch(() => {});
         return true;
       case "nocomputer":
-        updateThreadSettings(activeId, { computerUse: false });
+        void writeCanonicalExecutionSettings(activeId, { computer_use: false }, { computerUse: false }).catch(() => {});
         return true;
       case "memory":
-        updateThreadSettings(activeId, { memory: true });
+        void writeCanonicalExecutionSettings(activeId, { memory: true }, { memory: true }).catch(() => {});
         return true;
       case "nomemory":
-        updateThreadSettings(activeId, { memory: false });
+        void writeCanonicalExecutionSettings(activeId, { memory: false }, { memory: false }).catch(() => {});
         return true;
       case "privacy": {
         if (arg === "off" || arg === "redact" || arg === "block") {
-          updateThreadSettings(activeId, { privacy: arg });
+          void writeCanonicalExecutionSettings(activeId, { privacy: arg }, { privacy: arg }).catch(() => {});
         } else {
           setChatNotice({ tone: "info", message: "Use /privacy off, /privacy redact, or /privacy block." });
         }
@@ -6396,7 +6462,7 @@ export function ChatView({
       }
       case "approval": {
         if (arg === "review" || arg === "guarded" || arg === "open") {
-          updateThreadSettings(activeId, { toolApproval: arg });
+          void writeCanonicalExecutionSettings(activeId, { tool_approval: arg }, { toolApproval: arg }).catch(() => {});
         } else {
           setChatNotice({ tone: "info", message: "Use /approval review, /approval guarded, or /approval open." });
         }
@@ -6410,7 +6476,7 @@ export function ChatView({
           target === "off" ||
           target === "default"
         ) {
-          updateThreadSettings(activeId, { activeAgentId: null });
+          void writeCanonicalThreadAgent(activeId, null).catch(() => {});
           return true;
         }
         const agent = agents.find(
@@ -6418,7 +6484,7 @@ export function ChatView({
             a.id.toLowerCase() === target || a.name.toLowerCase() === target,
         );
         if (agent) {
-          updateThreadSettings(activeId, { activeAgentId: agent.id });
+          void writeCanonicalThreadAgent(activeId, agent.id).catch(() => {});
           setChatNotice(null);
         } else {
           setChatNotice({ tone: "error", message: `Agent not found: ${arg}` });
@@ -6607,6 +6673,7 @@ export function ChatView({
       } else {
         await canonicalModelWritesRef.current.get(sessionId)?.promise;
       }
+      await canonicalThreadMutationWritesRef.current.get(sessionId);
       await flushDeferredUserStateWrites();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -6649,6 +6716,7 @@ export function ChatView({
               }
             : {
                 text: wireMessageContent(last),
+                client_message_id: last.id,
                 display_text: last.content,
                 attachments: controlAttachments(last.attachments),
                 ...(managedPreviewRuntime ? { preview_runtime: managedPreviewRuntime } : {}),
@@ -7593,6 +7661,8 @@ export function ChatView({
             target_run_id: runId,
             kind: "steer",
             state: "pending",
+            display_text: text,
+            attachments: controlAttachments(attachments),
             created_at_ms: Date.now(),
           },
         ]);
@@ -7628,12 +7698,17 @@ export function ChatView({
         ? { ...message, plan: { status: "executed" as const, executedAt: now } }
         : message,
     );
-    updateThreadSettings(activeId, { planMode: false });
     setChatNotice({ tone: "info", message: "Plan approved. Executing..." });
-    void runTurnAndDrain(
-      appendUserTurn(baseMessages, executePlanPrompt(planText)),
-      selectedModel,
-    );
+    void writeCanonicalExecutionSettings(
+      activeId,
+      { plan_mode: false },
+      { planMode: false },
+    ).then(() =>
+      runTurnAndDrain(
+        appendUserTurn(baseMessages, executePlanPrompt(planText)),
+        selectedModel,
+      ),
+    ).catch(() => {});
   }
 
   /** Re-run the last user turn (drop trailing assistant message(s)). */
@@ -8155,60 +8230,6 @@ export function ChatView({
     });
   }
 
-  function applyScheduleRunEvent(event: ScheduleRunEvent) {
-    const title = `Schedule: ${event.schedule_name || event.schedule_id}`;
-    const importedId = useSessions.getState().importSession({
-      title,
-      messages: [
-        { role: "user", content: event.prompt },
-        { role: "assistant", content: event.response || "(No response.)" },
-      ],
-      settings: { model: event.model },
-    });
-    if (importedId) {
-      const notice = { tone: "info", message: `${title} completed.` } as const;
-      setChatNotice(notice);
-      pushNotice(notice);
-    }
-  }
-
-  useEffect(() => {
-    let cancelled = false;
-    async function pollScheduleRuns() {
-      if (!documentVisible()) return;
-      if (scheduleRunPollingRef.current) return;
-      scheduleRunPollingRef.current = true;
-      try {
-        const events = await pollScheduleRunEvents();
-        if (!cancelled) {
-          for (const event of events) applyScheduleRunEvent(event);
-        }
-      } finally {
-        scheduleRunPollingRef.current = false;
-      }
-    }
-    void pollScheduleRuns();
-    let dispose: (() => void) | undefined;
-    const onVisible = () => {
-      if (documentVisible()) void pollScheduleRuns();
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    if (inTauri) {
-      void import("@tauri-apps/api/event").then(async ({ listen }) => {
-        const unlisten = await listen(SCHEDULE_RUN_COMPLETED_EVENT, () => {
-          void pollScheduleRuns();
-        });
-        if (cancelled) unlisten();
-        else dispose = unlisten;
-      });
-    }
-    return () => {
-      cancelled = true;
-      dispose?.();
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, []);
-
   const emptyThread = messages.length === 0;
   const showTranscriptThinking =
     activeTurnBusy && messages[messages.length - 1]?.role !== "assistant";
@@ -8525,6 +8546,33 @@ export function ChatView({
                       </div>
                     );
                   })}
+                  {pendingSteerTranscriptMessages.map((message, offset) => (
+                    <div
+                      key={message.id}
+                      className="transcript-window-row"
+                      data-message-thread-id={activeId}
+                      data-testid="pending-steer-transcript-row"
+                    >
+                      <MessageRow
+                        activeId={activeId}
+                        appSessionId={APP_SESSION_ID}
+                        message={message}
+                        index={messages.length + offset}
+                        isEditing={false}
+                        isLastAssistant={false}
+                        assistantStreaming={false}
+                        busy
+                        activeMediaTargetPresent={Boolean(activeMediaTarget)}
+                        folderIsEmpty={!folder.trim()}
+                        workspaceFolder={folder}
+                        activeRun={activeRun}
+                        previewAppBusy={previewAppBusy}
+                        previewAppStatus={activePreviewAppStatus}
+                        toolApproval={toolApproval}
+                        actionsRef={messageRowActionsRef}
+                      />
+                    </div>
+                  ))}
                   {transcriptBottomSpacer > 0 && (
                     <div
                       aria-hidden="true"
@@ -8699,22 +8747,46 @@ export function ChatView({
                 onModel={(m) => requestHotSwap(m)}
                 sandbox={sandbox}
                 onToggleSandbox={() =>
-                  updateThreadSettings(activeId, { sandbox: !sandbox })
+                  void writeCanonicalExecutionSettings(
+                    activeId,
+                    { sandbox: !sandbox },
+                    { sandbox: !sandbox },
+                  ).catch(() => {})
                 }
                 computerUse={computerUse}
                 onToggleComputer={() =>
-                  updateThreadSettings(activeId, { computerUse: !computerUse })
+                  void writeCanonicalExecutionSettings(
+                    activeId,
+                    { computer_use: !computerUse },
+                    { computerUse: !computerUse },
+                  ).catch(() => {})
                 }
                 memory={memory}
                 onToggleMemory={() =>
-                  updateThreadSettings(activeId, { memory: !memory })
+                  void writeCanonicalExecutionSettings(
+                    activeId,
+                    { memory: !memory },
+                    { memory: !memory },
+                  ).catch(() => {})
                 }
                 planMode={planMode}
                 onTogglePlanMode={() => setPlanModeActive(!planMode)}
                 privacy={privacy}
-                onPrivacy={(next) => updateThreadSettings(activeId, { privacy: next })}
+                onPrivacy={(next) =>
+                  void writeCanonicalExecutionSettings(
+                    activeId,
+                    { privacy: next },
+                    { privacy: next },
+                  ).catch(() => {})
+                }
                 toolApproval={toolApproval}
-                onToolApproval={(next) => updateThreadSettings(activeId, { toolApproval: next })}
+                onToolApproval={(next) =>
+                  void writeCanonicalExecutionSettings(
+                    activeId,
+                    { tool_approval: next },
+                    { toolApproval: next },
+                  ).catch(() => {})
+                }
                 onManageProviders={() => setProvidersOpen(true)}
                 onManageMcp={() => setMcpOpen(true)}
                 onManageMemory={() => {
@@ -8757,16 +8829,16 @@ export function ChatView({
                 onMove={moveQueuedMessageFromTray}
                 onRemove={removeQueuedMessageFromTray}
               />
-              {pendingSteerCount > 0 ? (
+              {undisplayedPendingSteerCount > 0 ? (
                 <div
                   className="review-comment-tray pending-steer-tray"
                   data-testid="pending-steer"
                   role="status"
                   aria-live="polite"
                 >
-                  {pendingSteerCount === 1
+                  {undisplayedPendingSteerCount === 1
                     ? "Steering will be applied at the next model step."
-                    : `${pendingSteerCount} steering messages will be applied at the next model step.`}
+                    : `${undisplayedPendingSteerCount} steering messages will be applied at the next model step.`}
                 </div>
               ) : null}
               {pendingReviewComments.length ? (
@@ -8809,11 +8881,7 @@ export function ChatView({
                 agents={agents}
                 activeAgentId={activeAgentId}
                 onAgent={(agent) => {
-                  const target = agent?.model || model;
-                  updateThreadSettings(activeId, {
-                    activeAgentId: agent?.id ?? null,
-                    ...(target ? { model: target } : {}),
-                  });
+                  void writeCanonicalThreadAgent(activeId, agent?.id ?? null).catch(() => {});
                 }}
                 onManageAgents={onManageAgents}
                 instructions={instructions}
@@ -8887,6 +8955,10 @@ export function ChatView({
                 onOpenGit={openGitPanel}
                 onOpenGoal={() => openGoalPanel()}
                 onOpenSource={openQuickSummarySource}
+                onInspectEffectiveRun={() => getControlEffectiveRunPreview(activeId, {
+                  text: wireMessageContent({ role: "user", content: input, attachments: pendingAttachments }),
+                  attachments: controlAttachments(pendingAttachments),
+                })}
               />
             </Suspense>
           )}

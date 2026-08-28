@@ -1764,10 +1764,12 @@ function PreviewRuntimeStatus({
           <dl>
             <div><dt>Scope</dt><dd>{preflight.managed ? "Managed copy" : "Selected folder"}</dd></div>
             <div><dt>Folder</dt><dd title={preflight.cwd}>{preflight.cwd}</dd></div>
-            <div><dt>Package manager</dt><dd>{preflight.package_manager}</dd></div>
+            <div><dt>Configuration</dt><dd>{preflight.configuration === "manifest" ? ".milim/preview.json" : "package.json"}</dd></div>
+            <div><dt>{preflight.configuration === "manifest" ? "Launcher" : "Package manager"}</dt><dd>{preflight.package_manager}</dd></div>
             <div><dt>Install</dt><dd>{preflight.install_required ? "Required" : "Not required"}</dd></div>
             <div><dt>Install command</dt><dd><code>{preflight.install_command || "None"}</code></dd></div>
             <div><dt>Dev command</dt><dd><code>{preflight.dev_command || "Unavailable"}</code></dd></div>
+            <div><dt>Readiness</dt><dd title={preflight.healthcheck_url}><code>{preflight.healthcheck_url}</code></dd></div>
             <div><dt>Source</dt><dd title={preflight.source_fingerprint}><code>{shortFingerprint(preflight.source_fingerprint)}</code></dd></div>
           </dl>
           {!preflight.managed && preflight.install_required && (

@@ -13,6 +13,8 @@ import type {
   ControlCommandResultV1 as GeneratedControlCommandResultV1,
   ControlCommandV1 as GeneratedControlCommandV1,
   ControlEventV1 as GeneratedControlEventV1,
+  EffectiveRunPreviewRequestV1,
+  EffectiveRunPreviewV1,
   RunEventPageV1,
   RunInspectionV1,
   PendingInputV1 as GeneratedControlPendingInputV1,
@@ -23,7 +25,13 @@ import type {
   TimelineItemV1 as GeneratedControlTimelineItemV1,
   TimelinePageV1 as GeneratedControlTimelinePageV1,
 } from "./generated/control-v1.js";
-export type { RunEventPageV1, RunEventV1, RunInspectionV1 } from "./generated/control-v1.js";
+export type {
+  EffectiveRunPreviewRequestV1,
+  EffectiveRunPreviewV1,
+  RunEventPageV1,
+  RunEventV1,
+  RunInspectionV1,
+} from "./generated/control-v1.js";
 export {
   attachmentsToPromptContext,
   wireMessageContent,
@@ -289,6 +297,8 @@ export interface ChatMessage {
   steering?: boolean;
   /** Durable inbox input represented by an applied steering message. */
   steeringInboxId?: string;
+  /** Accepted steering input that has not reached a model-step boundary yet. */
+  steeringPending?: boolean;
   /** Durable notice that this thread will continue with a different model. */
   modelChange?: {
     previousModel: string;
@@ -996,6 +1006,24 @@ export async function getControlRunInspection(runId: string): Promise<RunInspect
   return response.json() as Promise<RunInspectionV1>;
 }
 
+export async function getControlEffectiveRunPreview(
+  threadId: string,
+  request: EffectiveRunPreviewRequestV1,
+): Promise<EffectiveRunPreviewV1> {
+  const response = await authFetch(
+    `${BASE}/control/v1/threads/${encodeURIComponent(threadId)}/effective-run`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response, "Effective run preview failed."));
+  }
+  return response.json() as Promise<EffectiveRunPreviewV1>;
+}
+
 export async function getControlRunEvents(
   runId: string,
   afterSeq?: number,
@@ -1464,12 +1492,14 @@ export interface PreviewAppPreflight {
   managed: boolean;
   scope: "managed" | "selected_folder";
   package_manager: string;
+  configuration: "manifest" | "package_json" | string;
   install_required: boolean;
   install_command?: string | null;
   dev_command?: string | null;
   source_fingerprint: string;
   port: number;
   url: string;
+  healthcheck_url: string;
 }
 
 export interface PreviewAppStatus {
@@ -4882,6 +4912,7 @@ export interface MemoryNode {
   created_at: string;
   updated_at: string;
   archived_at?: string | null;
+  reviewed_at?: string | null;
 }
 
 export interface MemoryNotice {
@@ -4896,6 +4927,29 @@ export interface MemoryNotice {
 export interface MemoryGraphHit {
   node: MemoryNode;
   score: number;
+}
+
+export interface MemoryBenchmarkCase {
+  name?: string;
+  query: string;
+  relevant_node_ids: string[];
+  scopes?: MemoryScopeRef[];
+}
+
+export interface MemoryBenchmarkReport {
+  top_k: number;
+  case_count: number;
+  recall_at_k: number;
+  mean_reciprocal_rank: number;
+  cases: Array<{
+    name: string;
+    query: string;
+    relevant_node_ids: string[];
+    retrieved_node_ids: string[];
+    first_relevant_rank?: number | null;
+    recall_at_k: number;
+    reciprocal_rank: number;
+  }>;
 }
 
 export interface RegisterMemoryInput {
@@ -5005,6 +5059,28 @@ export async function searchGraphMemory(
   }
 }
 
+export async function benchmarkGraphMemory(
+  cases: MemoryBenchmarkCase[],
+  topK = 5,
+  model?: string,
+  includeArchived = false,
+): Promise<MemoryBenchmarkReport> {
+  const memoryModel = model && isUsableChatModel(model) ? model : "default";
+  return await parseJsonResponse<MemoryBenchmarkReport>(
+    await authFetch(`${BASE}/memory/benchmark`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: memoryModel,
+        cases,
+        top_k: topK,
+        include_archived: includeArchived,
+      }),
+    }),
+    "memory benchmark failed",
+  );
+}
+
 export async function updateMemoryNode(
   id: string,
   update: Partial<
@@ -5056,6 +5132,34 @@ export async function archiveMemoryNode(id: string): Promise<boolean> {
   }
 }
 
+export async function restoreMemoryNode(id: string): Promise<boolean> {
+  try {
+    const r = await authFetch(
+      `${BASE}/memory/nodes/${encodeURIComponent(id)}/restore`,
+      { method: "POST" },
+    );
+    if (!r.ok) return false;
+    const j = await r.json();
+    return Boolean(j.restored);
+  } catch {
+    return false;
+  }
+}
+
+export async function reviewMemoryNode(id: string): Promise<boolean> {
+  try {
+    const r = await authFetch(
+      `${BASE}/memory/nodes/${encodeURIComponent(id)}/review`,
+      { method: "POST" },
+    );
+    if (!r.ok) return false;
+    const j = await r.json();
+    return Boolean(j.reviewed);
+  } catch {
+    return false;
+  }
+}
+
 // ----- Schedules -----
 
 export interface ScheduleInfo {
@@ -5067,39 +5171,31 @@ export interface ScheduleInfo {
   prompt: string;
   attachments?: ChatAttachment[];
   enabled: boolean;
+  workspace?: string | null;
+  privacy: PrivacyMode;
+  timezone_mode: "local" | "utc";
+  next_run_unix?: number | null;
   last_run?: number | null;
 }
 
-export interface ScheduleRunEvent {
-  id: string;
-  schedule_id: string;
-  schedule_name: string;
-  prompt: string;
-  response: string;
-  model: string;
-  ran_at: number;
+export async function listSchedulesStrict(): Promise<ScheduleInfo[]> {
+  const ctrl = new AbortController();
+  const timeout = setTimeout(() => ctrl.abort(), 2500);
+  try {
+    const response = await authFetch(`${BASE}/schedules`, { signal: ctrl.signal });
+    if (!response.ok) {
+      throw new Error(await responseErrorMessage(response, "Loading schedules failed."));
+    }
+    const body = await response.json();
+    return (body.schedules ?? []) as ScheduleInfo[];
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export async function listSchedules(): Promise<ScheduleInfo[]> {
   try {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 2500);
-    const r = await authFetch(`${BASE}/schedules`, { signal: ctrl.signal });
-    clearTimeout(t);
-    if (!r.ok) return [];
-    const j = await r.json();
-    return (j.schedules ?? []) as ScheduleInfo[];
-  } catch {
-    return [];
-  }
-}
-
-export async function pollScheduleRunEvents(): Promise<ScheduleRunEvent[]> {
-  try {
-    const r = await authFetch(`${BASE}/schedules/events`);
-    if (!r.ok) return [];
-    const j = await r.json();
-    return (j.events ?? []) as ScheduleRunEvent[];
+    return await listSchedulesStrict();
   } catch {
     return [];
   }
@@ -5112,32 +5208,34 @@ export async function createSchedule(s: {
   model: string;
   prompt: string;
   attachments?: ChatAttachment[];
-}): Promise<ScheduleInfo | null> {
-  try {
-    const r = await authFetch(`${BASE}/schedules`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(s),
-    });
-    return r.ok ? ((await r.json()) as ScheduleInfo) : null;
-  } catch {
-    return null;
+  enabled: boolean;
+  workspace?: string | null;
+  privacy: PrivacyMode;
+  timezone_mode: "local" | "utc";
+}): Promise<ScheduleInfo> {
+  const response = await authFetch(`${BASE}/schedules`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(s),
+  });
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response, "Creating schedule failed."));
   }
+  return (await response.json()) as ScheduleInfo;
 }
 
 export async function updateSchedule(
   s: ScheduleInfo,
-): Promise<ScheduleInfo | null> {
-  try {
-    const r = await authFetch(`${BASE}/schedules/${encodeURIComponent(s.id)}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(s),
-    });
-    return r.ok ? ((await r.json()) as ScheduleInfo) : null;
-  } catch {
-    return null;
+): Promise<ScheduleInfo> {
+  const response = await authFetch(`${BASE}/schedules/${encodeURIComponent(s.id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(s),
+  });
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response, "Updating schedule failed."));
   }
+  return (await response.json()) as ScheduleInfo;
 }
 
 export async function deleteSchedule(id: string): Promise<boolean> {

@@ -1,4 +1,6 @@
 export const MAX_ATTACHMENT_IMAGE_BYTES = 2 * 1024 * 1024;
+export const MAX_ATTACHMENT_TEXT_BYTES = 128 * 1024;
+export const MAX_DESKTOP_ATTACHMENTS = 12;
 export const MAX_OUTBOUND_IMAGE_DATA_URL_BYTES = 20 * 1024 * 1024;
 export const OMITTED_IMAGE_NOTE =
   "[Earlier image attachments were omitted from this request to stay within Milim's size limit.]";
@@ -142,4 +144,51 @@ export function readBrowserAttachmentDataUrl(
       reject(new Error(`${file.name || "Image"} could not be read as image data.`));
     reader.readAsDataURL(file);
   });
+}
+
+export function isTextLikeAttachmentMime(mime: string): boolean {
+  const normalized = mime.toLowerCase();
+  return (
+    normalized.startsWith("text/") ||
+    normalized === "application/json" ||
+    normalized === "application/xml" ||
+    normalized === "application/javascript"
+  );
+}
+
+export async function browserAttachment(
+  file: File,
+  mime: string,
+  id: string,
+): Promise<{
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+  content?: string;
+  dataUrl?: string;
+  truncated: boolean;
+}> {
+  const textLike = isTextLikeAttachmentMime(mime);
+  const image = mime.toLowerCase().startsWith("image/");
+  if (!textLike && !image) {
+    throw new Error(
+      `${file.name || "Attachment"} is not a supported text or image file.`,
+    );
+  }
+  const [content, dataUrl] = await Promise.all([
+    textLike
+      ? file.slice(0, MAX_ATTACHMENT_TEXT_BYTES).text()
+      : Promise.resolve(undefined),
+    readBrowserAttachmentDataUrl(file, mime),
+  ]);
+  return {
+    id,
+    name: file.name || "attachment",
+    mime,
+    size: file.size,
+    content,
+    dataUrl,
+    truncated: textLike && file.size > MAX_ATTACHMENT_TEXT_BYTES,
+  };
 }

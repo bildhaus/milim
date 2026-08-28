@@ -75,6 +75,39 @@ test('keeps an applied steer as a distinct labeled user message', () => {
   expect(projected[1]).toMatchObject({steering: true, content: 'change direction'});
 });
 
+test('shows pending steer text and reconciles it after the canonical claim', () => {
+  const pending = [{
+    id: 'inbox-steer-1',
+    thread_id: 't',
+    target_run_id: 'run-1',
+    kind: 'steer',
+    state: 'pending',
+    display_text: 'change direction',
+    attachments: [],
+    created_at_ms: 2,
+  }];
+  const beforeClaim = projectTranscript([], [], pending);
+  expect(beforeClaim).toEqual([expect.objectContaining({
+    id: 'pending-steer-inbox-steer-1',
+    content: 'change direction',
+    steering: true,
+    steeringPending: true,
+  })]);
+
+  const afterClaim = projectTranscript([
+    {...item(2, 'message', {
+      id: 'steer-1',
+      role: 'user',
+      content: 'change direction',
+      steering: true,
+      steeringInboxId: 'inbox-steer-1',
+    }), run_id: 'run-1'},
+  ], [], pending);
+  expect(afterClaim).toHaveLength(1);
+  expect(afterClaim[0]).toMatchObject({id: 'steer-1', steering: true});
+  expect(afterClaim[0]).not.toHaveProperty('steeringPending');
+});
+
 test('ignores live events emitted by a different desktop host', () => {
   const replica = applyTimelinePage(emptyReplica('t'), page('e1', [item(1)]), 'tail');
   const foreign: ControlEventV1 = {

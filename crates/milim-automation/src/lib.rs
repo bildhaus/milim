@@ -9,7 +9,7 @@ use std::str::FromStr;
 use std::sync::Mutex;
 
 use base64::Engine;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
@@ -66,12 +66,25 @@ pub struct Schedule {
     /// Workspace captured when the schedule was created.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
+    /// Outbound privacy mode frozen for unattended runs.
+    #[serde(default = "default_privacy")]
+    pub privacy: String,
+    /// Cron evaluation zone: `local` for the host clock or `utc`.
+    #[serde(default = "default_timezone_mode")]
+    pub timezone_mode: String,
     /// Creation time used as the lower bound for the first cron occurrence.
     #[serde(default)]
     pub created_unix: i64,
     /// Last fire time (unix seconds), if any.
     #[serde(default)]
     pub last_run: Option<i64>,
+}
+
+/// One enabled schedule occurrence ready for dispatch.
+#[derive(Debug, Clone)]
+pub struct DueSchedule {
+    pub schedule: Schedule,
+    pub scheduled_for: i64,
 }
 
 /// Named payload for updating an existing schedule.
@@ -85,12 +98,22 @@ pub struct ScheduleUpdate<'a> {
     pub attachments: Vec<ScheduleAttachment>,
     pub enabled: bool,
     pub workspace: Option<String>,
+    pub privacy: String,
+    pub timezone_mode: String,
     pub created_unix: i64,
     pub last_run: Option<i64>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_privacy() -> String {
+    "off".to_string()
+}
+
+fn default_timezone_mode() -> String {
+    "utc".to_string()
 }
 
 /// Schema for the schedule store.
@@ -127,6 +150,12 @@ pub const SCHEDULE_MIGRATIONS: &[Migration] = &[
         version: 4,
         name: "schedule_model",
         sql: "ALTER TABLE schedules ADD COLUMN model TEXT NOT NULL DEFAULT '';",
+    },
+    Migration {
+        version: 5,
+        name: "schedule_run_boundaries",
+        sql: "ALTER TABLE schedules ADD COLUMN privacy TEXT NOT NULL DEFAULT 'off';
+              ALTER TABLE schedules ADD COLUMN timezone_mode TEXT NOT NULL DEFAULT 'utc';",
     },
 ];
 
@@ -227,8 +256,19 @@ fn validate_schedule_image(data_url: &str, mime: &str, name: &str) -> Result<()>
 }
 
 fn validate_schedule_attachments(attachments: &[ScheduleAttachment]) -> Result<()> {
+    if attachments.len() > MAX_SCHEDULE_ATTACHMENTS {
+        return Err(Error::InvalidRequest(format!(
+            "a schedule may contain at most {MAX_SCHEDULE_ATTACHMENTS} attachments"
+        )));
+    }
     for attachment in attachments {
         if !attachment.mime.to_ascii_lowercase().starts_with("image/") {
+            if attachment.content.is_none() {
+                return Err(Error::InvalidRequest(format!(
+                    "scheduled attachment '{}' is not a supported text or image file",
+                    attachment.name
+                )));
+            }
             continue;
         }
         if !matches!(
@@ -311,17 +351,60 @@ pub fn attachments_prompt_context(attachments: &[ScheduleAttachment]) -> String 
 
 /// Next fire time (unix seconds) strictly after `after_unix`, per `cron_expr`.
 pub fn cron_next_after(cron_expr: &str, after_unix: i64) -> Result<Option<i64>> {
+    cron_next_after_in_timezone(cron_expr, after_unix, "utc")
+}
+
+pub fn cron_next_after_in_timezone(
+    cron_expr: &str,
+    after_unix: i64,
+    timezone_mode: &str,
+) -> Result<Option<i64>> {
     let schedule = cron::Schedule::from_str(cron_expr)
         .map_err(|e| Error::InvalidRequest(format!("invalid cron expression: {e}")))?;
-    let after = DateTime::<Utc>::from_timestamp(after_unix, 0)
-        .ok_or_else(|| Error::Other("timestamp out of range".to_string()))?;
-    Ok(schedule.after(&after).next().map(|dt| dt.timestamp()))
+    match timezone_mode {
+        "utc" => {
+            let after = DateTime::<Utc>::from_timestamp(after_unix, 0)
+                .ok_or_else(|| Error::Other("timestamp out of range".to_string()))?;
+            Ok(schedule.after(&after).next().map(|dt| dt.timestamp()))
+        }
+        "local" => {
+            let after = DateTime::<Utc>::from_timestamp(after_unix, 0)
+                .ok_or_else(|| Error::Other("timestamp out of range".to_string()))?
+                .with_timezone(&Local);
+            Ok(schedule.after(&after).next().map(|dt| dt.timestamp()))
+        }
+        value => Err(Error::InvalidRequest(format!(
+            "unsupported schedule timezone: {value}"
+        ))),
+    }
+}
+
+pub fn schedule_next_run(schedule: &Schedule) -> Result<Option<i64>> {
+    cron_next_after_in_timezone(
+        &schedule.cron,
+        schedule.last_run.unwrap_or(schedule.created_unix),
+        &schedule.timezone_mode,
+    )
 }
 
 fn validate_cron(cron_expr: &str) -> Result<()> {
     cron::Schedule::from_str(cron_expr)
         .map(|_| ())
         .map_err(|e| Error::InvalidRequest(format!("invalid cron expression: {e}")))
+}
+
+fn validate_run_context(privacy: &str, timezone_mode: &str) -> Result<()> {
+    if !matches!(privacy, "off" | "redact" | "block") {
+        return Err(Error::InvalidRequest(format!(
+            "unsupported schedule privacy mode: {privacy}"
+        )));
+    }
+    if !matches!(timezone_mode, "local" | "utc") {
+        return Err(Error::InvalidRequest(format!(
+            "unsupported schedule timezone: {timezone_mode}"
+        )));
+    }
+    Ok(())
 }
 
 /// CRUD + due-selection over [`Schedule`] rows.
@@ -392,7 +475,37 @@ impl ScheduleStore {
         enabled: bool,
         workspace: Option<String>,
     ) -> Result<Schedule> {
+        self.create_with_run_context(
+            name,
+            cron,
+            agent_id,
+            model,
+            prompt,
+            attachments,
+            enabled,
+            workspace,
+            "off",
+            "local",
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_with_run_context(
+        &self,
+        name: &str,
+        cron: &str,
+        agent_id: Option<String>,
+        model: &str,
+        prompt: &str,
+        attachments: Vec<ScheduleAttachment>,
+        enabled: bool,
+        workspace: Option<String>,
+        privacy: &str,
+        timezone_mode: &str,
+    ) -> Result<Schedule> {
         validate_cron(cron)?;
+        validate_run_context(privacy, timezone_mode)?;
+        validate_schedule_attachments(&attachments)?;
         let attachments = normalize_attachments(attachments);
         validate_schedule_attachments(&attachments)?;
         let schedule = Schedule {
@@ -405,6 +518,8 @@ impl ScheduleStore {
             attachments,
             enabled,
             workspace,
+            privacy: privacy.to_string(),
+            timezone_mode: timezone_mode.to_string(),
             created_unix: Utc::now().timestamp(),
             last_run: None,
         };
@@ -418,12 +533,13 @@ impl ScheduleStore {
             .map_err(|e| Error::Other(format!("schedule attachments json: {e}")))?;
         db.conn()
             .execute(
-                "INSERT INTO schedules (id, name, cron, agent_id, model, prompt, attachments_json, enabled, workspace, created_unix, last_run)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                "INSERT INTO schedules (id, name, cron, agent_id, model, prompt, attachments_json, enabled, workspace, privacy, timezone_mode, created_unix, last_run)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                  ON CONFLICT(id) DO UPDATE SET
                    name=excluded.name, cron=excluded.cron, agent_id=excluded.agent_id,
                    model=excluded.model, prompt=excluded.prompt, attachments_json=excluded.attachments_json,
                    enabled=excluded.enabled, workspace=excluded.workspace,
+                   privacy=excluded.privacy, timezone_mode=excluded.timezone_mode,
                    created_unix=excluded.created_unix, last_run=excluded.last_run",
                 params![
                     s.id,
@@ -435,6 +551,8 @@ impl ScheduleStore {
                     attachments_json,
                     s.enabled as i64,
                     s.workspace,
+                    s.privacy,
+                    s.timezone_mode,
                     s.created_unix,
                     s.last_run
                 ],
@@ -446,6 +564,8 @@ impl ScheduleStore {
     /// Update an existing schedule, preserving the supplied id.
     pub fn update(&self, update: ScheduleUpdate<'_>) -> Result<Schedule> {
         validate_cron(update.cron)?;
+        validate_run_context(&update.privacy, &update.timezone_mode)?;
+        validate_schedule_attachments(&update.attachments)?;
         let attachments = normalize_attachments(update.attachments);
         validate_schedule_attachments(&attachments)?;
         let schedule = Schedule {
@@ -458,6 +578,8 @@ impl ScheduleStore {
             attachments,
             enabled: update.enabled,
             workspace: update.workspace,
+            privacy: update.privacy,
+            timezone_mode: update.timezone_mode,
             created_unix: update.created_unix,
             last_run: update.last_run,
         };
@@ -470,7 +592,7 @@ impl ScheduleStore {
         let conn = db.conn();
         let mut stmt = conn
             .prepare(
-                "SELECT id, name, cron, agent_id, model, prompt, attachments_json, enabled, workspace, created_unix, last_run
+                "SELECT id, name, cron, agent_id, model, prompt, attachments_json, enabled, workspace, privacy, timezone_mode, created_unix, last_run
                  FROM schedules ORDER BY created_at DESC",
             )
             .map_err(sqlite)?;
@@ -508,13 +630,16 @@ impl ScheduleStore {
     }
 
     /// Enabled schedules whose next fire time (after their last run) is ≤ `now_unix`.
-    pub fn due(&self, now_unix: i64) -> Result<Vec<Schedule>> {
+    pub fn due(&self, now_unix: i64) -> Result<Vec<DueSchedule>> {
         let mut due = Vec::new();
         for s in self.list()?.into_iter().filter(|s| s.enabled) {
             let after = s.last_run.unwrap_or(s.created_unix);
-            if let Some(next) = cron_next_after(&s.cron, after)? {
+            if let Some(next) = cron_next_after_in_timezone(&s.cron, after, &s.timezone_mode)? {
                 if next <= now_unix {
-                    due.push(s);
+                    due.push(DueSchedule {
+                        schedule: s,
+                        scheduled_for: next,
+                    });
                 }
             }
         }
@@ -533,8 +658,10 @@ fn row_to_schedule(r: &rusqlite::Row) -> rusqlite::Result<Schedule> {
         attachments: parse_attachments_json(r.get::<_, String>(6)?),
         enabled: r.get::<_, i64>(7)? != 0,
         workspace: r.get(8)?,
-        created_unix: r.get(9)?,
-        last_run: r.get(10)?,
+        privacy: r.get(9)?,
+        timezone_mode: r.get(10)?,
+        created_unix: r.get(11)?,
+        last_run: r.get(12)?,
     })
 }
 
@@ -644,7 +771,8 @@ mod tests {
         // last_run None → after=0 → next fire 3600; now far in the future → due.
         let due = s.due(10_000).unwrap();
         assert_eq!(due.len(), 1);
-        assert_eq!(due[0].id, sched.id);
+        assert_eq!(due[0].schedule.id, sched.id);
+        assert_eq!(due[0].scheduled_for, 3600);
 
         // After marking it ran at now, it's no longer due until the next hour.
         s.mark_ran(&sched.id, 10_000).unwrap();

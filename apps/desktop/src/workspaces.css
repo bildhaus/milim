@@ -283,6 +283,17 @@
 .ui-switch:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .ui-check { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--secondary-text); cursor: pointer; }
+.ui-check-native {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.ui-check-native:focus-visible + .ui-check-box {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .ui-check-box {
   display: grid;
   place-items: center;

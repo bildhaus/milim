@@ -5,6 +5,7 @@
     "approvals": true,
     "attachments": true,
     "context_injection": true,
+    "effective_run_preview": true,
     "inline_branches": false,
     "lan_discovery": true,
     "model_favorites": true,
@@ -14,6 +15,7 @@
     "run_ledger": true,
     "steering": true,
     "thread_links": true,
+    "thread_origins": true,
     "timeline_sync": true,
     "websocket_tickets": true,
     "workers": true
@@ -25,6 +27,7 @@
     "thread.delete",
     "thread.set_model",
     "thread.set_agent",
+    "thread.set_execution_settings",
     "thread.link.add",
     "thread.link.remove",
     "message.delete",

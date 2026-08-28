@@ -6,7 +6,7 @@ title: Privacy and security
 summary: Local and remote data boundaries, Google Workspace access, privacy modes, redaction, blocking, bearer auth, and CORS boundaries.
 group: Local data
 order: 70
-updated: 2026-08-20
+updated: 2026-08-28
 ---
 
 Privacy settings are easiest to reason about as a routing question: what stays local, what goes to a provider, and which gate runs before a remote send.
@@ -38,6 +38,8 @@ Because image content cannot be scanned or redacted by the text privacy gate, re
 | Local Ollama or LM Studio | Not scanned by Milim because the configured local runtime receives the prompt on the machine. |
 
 Each desktop run snapshots its selected privacy mode and canonical workspace when the request starts. That immutable context is reused for every inference iteration, tool call, delegation, approval, and retry, so changing another thread cannot redirect or reclassify an in-flight run. Legacy API clients may omit the run mode; the server then snapshots the current `POST /privacy/mode` default once at request start. An invalid explicit mode or workspace is rejected instead of falling back.
+
+Schedules persist their own privacy and workspace boundary. New desktop schedules inherit the active thread's values, migrated schedules remain explicitly Privacy Off, and every occurrence freezes that saved context before it enters the canonical run path.
 
 Canonical runs keep a local privacy-processed ledger for their lifetime. The resolved model request is transformed and committed before provider execution; a failed pre-request commit prevents the call, and a failed post-response or tool-result commit prevents another model step. Privacy Block rejects detected text before any request artifact is written. Redact persists the redacted form. Independently of the selected privacy mode, credential-shaped text and fields such as authorization, API keys, bearer tokens, device keys, refresh tokens, and client secrets are replaced before ledger persistence. Attachment bodies are not duplicated: the ledger stores identity, digest, metadata, and a durable reference.
 
@@ -71,7 +73,7 @@ The desktop app disables loopback trust and uses a per-launch bearer token for i
 
 The mobile listener exposes only a host identity probe, pairing and device authentication, and `/control/v1`; it cannot reach the full desktop/provider API and serves no legacy browser relay. Pairing creates a revocable per-device credential stored by the phone in Keychain or Keystore. A pairing secret is consumed by its first successful claim, and the native client verifies that the endpoint's stable host identity matches the scanned claim before submitting it. WebSockets use short-lived, single-use tickets, and revocation invalidates HTTP access, unused tickets, and live sockets. Optional LAN exposure is off by default and advertises only the isolated listener; plain HTTP carries an explicit trusted-network warning.
 
-Every accepted control turn freezes its model, workspace, privacy and approval modes, plan state, Agent snapshot, enabled tools and skills, attachments, native session identity, and each linked chat's revision and maximum timeline sequence. Later settings, links, or Agent edits affect later turns only. Linked reads expose only canonical visible user/assistant content up to that frozen boundary; they omit hidden prompts, reasoning, tool ledgers, and account-runtime history. The consuming chat's privacy policy governs linked transcript reads, while a mailbox destination starts with its own frozen privacy and approval settings. Control backup version 3 includes canonical runs, timelines, the run ledger, content-addressed artifacts, durable inbox, directional links, mailbox exchanges, command receipts, and approvals; paired-device secrets remain in their existing encrypted desktop store. Ordinary transcript exports do not include the ledger. Ledger retention follows thread lifetime.
+Every accepted control turn freezes its model, workspace, privacy and approval modes, plan state, Agent snapshot, enabled tools and skills, attachments, native session identity, and each linked chat's revision and maximum timeline sequence. Later settings, links, or Agent edits affect later turns only. Linked reads expose only canonical visible user/assistant content up to that frozen boundary; they omit hidden prompts, reasoning, tool ledgers, and account-runtime history. The consuming chat's privacy policy governs linked transcript reads, while a mailbox destination starts with its own frozen privacy and approval settings. Control backup version 3 includes canonical runs, timelines, the run ledger, content-addressed artifacts, durable inbox, reciprocal links, mailbox exchanges, command receipts, and approvals; paired-device secrets remain in their existing encrypted desktop store. Ordinary transcript exports do not include the ledger. Ledger retention follows thread lifetime.
 
 ```bash Scan text before sending
 curl http://127.0.0.1:7377/privacy/scan \

@@ -1723,6 +1723,13 @@
   color: var(--primary-text);
   line-height: 1.25;
 }
+
+.session-origin-marker {
+  align-items: center;
+  color: var(--tertiary-text);
+  display: inline-flex;
+  flex: 0 0 auto;
+}
 .session-item.project-colored .session-title {
   color: var(--project-color);
 }

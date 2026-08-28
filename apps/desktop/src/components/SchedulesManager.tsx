@@ -1,19 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useAgents } from "../agents/store";
 import {
-  MAX_ATTACHMENT_BYTES,
   createSchedule,
   deleteSchedule,
   inferAttachmentMime,
   isAccountRuntimeModel,
   listModels,
-  listSchedules,
+  listSchedulesStrict,
   pickAttachmentFiles,
   updateSchedule,
   type ChatAttachment,
   type ScheduleInfo,
 } from "../api";
-import { readBrowserAttachmentDataUrl } from "../lib/attachmentInput";
+import {
+  browserAttachment,
+  MAX_DESKTOP_ATTACHMENTS,
+} from "../lib/attachmentInput";
 import { useSessions } from "../sessions/store";
 import { Calendar, Paperclip, Plus, Trash, X } from "./icons";
 import { AgentAvatar } from "./AgentAvatar";
@@ -39,7 +41,7 @@ type CronStatus = {
 };
 
 const DEFAULT_CRON = "0 0 9 * * Mon-Fri";
-const MAX_SCHEDULE_ATTACHMENTS = 12;
+const MAX_SCHEDULE_ATTACHMENTS = MAX_DESKTOP_ATTACHMENTS;
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 const QUICK_CREATE_PRESETS: SchedulePreset[] = [
@@ -152,32 +154,9 @@ function attachmentFingerprint(attachments: ChatAttachment[]): string {
   );
 }
 
-function textLikeMime(mime: string): boolean {
-  return (
-    mime.startsWith("text/") ||
-    mime === "application/json" ||
-    mime === "application/xml" ||
-    mime === "application/javascript"
-  );
-}
-
 async function browserFileAttachment(file: File): Promise<ChatAttachment> {
   const mime = file.type || inferAttachmentMime(file.name);
-  const [content, dataUrl] = await Promise.all([
-    textLikeMime(mime)
-      ? file.slice(0, MAX_ATTACHMENT_BYTES).text()
-      : Promise.resolve(undefined),
-    readBrowserAttachmentDataUrl(file, mime),
-  ]);
-  return {
-    id: attachmentId(),
-    name: file.name || "attachment",
-    mime,
-    size: file.size,
-    content,
-    dataUrl,
-    truncated: textLikeMime(mime) ? file.size > MAX_ATTACHMENT_BYTES : false,
-  };
+  return browserAttachment(file, mime, attachmentId());
 }
 
 function lastRunLabel(lastRun: number | null | undefined): string {
@@ -193,6 +172,15 @@ function lastRunLabel(lastRun: number | null | undefined): string {
     hour: "2-digit",
     minute: "2-digit",
   })}`;
+}
+
+function nextRunLabel(nextRun: number | null | undefined, timezoneMode: "local" | "utc"): string {
+  if (!nextRun) return "Next run unavailable";
+  return `Next run ${new Date(nextRun * 1000).toLocaleString([], {
+    dateStyle: "medium",
+    timeStyle: "short",
+    timeZone: timezoneMode === "utc" ? "UTC" : undefined,
+  })}${timezoneMode === "utc" ? " UTC" : " local time"}`;
 }
 
 function numericField(value: string, min: number, max: number): number | null {
@@ -436,10 +424,14 @@ export function SchedulesManager({ onClose }: { onClose: () => void }) {
   const agents = useAgents((s) => s.agents);
   const refreshAgents = useAgents((s) => s.refresh);
   const activeSession = useSessions((s) => s.sessions.find((session) => session.id === s.activeId));
+  const scheduleThreads = useSessions((s) => s.sessions.filter((session) => session.origin?.kind === "schedule"));
+  const switchTo = useSessions((s) => s.switchTo);
   const activeThreadModel = activeSession?.settings?.model?.trim() ?? "";
   const currentThreadModel = isAccountRuntimeModel(activeThreadModel)
     ? ""
     : activeThreadModel;
+  const currentThreadWorkspace = activeSession?.settings?.folder?.trim() ?? "";
+  const currentThreadPrivacy = activeSession?.settings?.privacy ?? "off";
 
   const [schedules, setSchedules] = useState<ScheduleInfo[]>([]);
   const [models, setModels] = useState<string[]>([]);
@@ -451,12 +443,21 @@ export function SchedulesManager({ onClose }: { onClose: () => void }) {
   const [prompt, setPrompt] = useState("");
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [enabled, setEnabled] = useState(true);
+  const [workspace, setWorkspace] = useState("");
+  const [privacy, setPrivacy] = useState<"off" | "redact" | "block">("off");
+  const [timezoneMode, setTimezoneMode] = useState<"local" | "utc">("local");
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   useEffect(() => {
-    void listSchedules().then(setSchedules);
+    void listSchedulesStrict()
+      .then((items) => {
+        setSchedules(items);
+        setLoadError(null);
+      })
+      .catch((error) => setLoadError(error instanceof Error ? error.message : String(error)));
     void listModels().then((items) => setModels(items.filter((item) => !isAccountRuntimeModel(item))));
     void refreshAgents();
   }, [refreshAgents]);
@@ -468,7 +469,9 @@ export function SchedulesManager({ onClose }: { onClose: () => void }) {
   }, [agents, model, sel]);
 
   async function refresh() {
-    setSchedules(await listSchedules());
+    const items = await listSchedulesStrict();
+    setSchedules(items);
+    setLoadError(null);
   }
 
   function edit(s: ScheduleInfo | "new") {
@@ -483,6 +486,9 @@ export function SchedulesManager({ onClose }: { onClose: () => void }) {
       setPrompt("");
       setAttachments([]);
       setEnabled(true);
+      setWorkspace(currentThreadWorkspace);
+      setPrivacy(currentThreadPrivacy);
+      setTimezoneMode("local");
     } else {
       setName(s.name);
       setCron(s.cron);
@@ -492,6 +498,9 @@ export function SchedulesManager({ onClose }: { onClose: () => void }) {
       setPrompt(s.prompt);
       setAttachments(s.attachments ?? []);
       setEnabled(s.enabled);
+      setWorkspace(s.workspace ?? "");
+      setPrivacy(s.privacy ?? "off");
+      setTimezoneMode(s.timezone_mode ?? "utc");
     }
   }
 
@@ -506,6 +515,9 @@ export function SchedulesManager({ onClose }: { onClose: () => void }) {
     setPrompt(preset.prompt);
     setAttachments([]);
     setEnabled(true);
+    setWorkspace(currentThreadWorkspace);
+    setPrivacy(currentThreadPrivacy);
+    setTimezoneMode("local");
   }
 
   async function attachFiles(files?: File[]) {
@@ -549,26 +561,28 @@ export function SchedulesManager({ onClose }: { onClose: () => void }) {
       model: model.trim(),
       prompt: prompt.trim(),
       attachments,
+      enabled,
+      workspace: workspace.trim() || null,
+      privacy,
+      timezone_mode: timezoneMode,
     };
-    const saved =
-      sel && sel !== "new"
-        ? await updateSchedule({
-            ...payload,
-            id: sel.id,
-            enabled,
-            last_run: sel.last_run ?? null,
-          })
-        : await createSchedule(payload);
-
-    const finalSchedule = saved && saved.enabled !== enabled ? await updateSchedule({ ...saved, enabled }) : saved;
-    setBusy(false);
-    if (!finalSchedule) {
-      setNote("Error: Failed to save schedule. Check the cron expression.");
-      return;
+    try {
+      const saved =
+        sel && sel !== "new"
+          ? await updateSchedule({
+              ...payload,
+              id: sel.id,
+              last_run: sel.last_run ?? null,
+            })
+          : await createSchedule(payload);
+      await refresh();
+      setSel(saved);
+      setNote(saved.enabled ? "Schedule saved." : "Schedule saved disabled.");
+    } catch (error) {
+      setNote(`Error: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setBusy(false);
     }
-    await refresh();
-    setSel(finalSchedule);
-    setNote(finalSchedule.enabled ? "Schedule saved." : "Schedule saved disabled.");
   }
 
   async function remove() {
@@ -578,11 +592,15 @@ export function SchedulesManager({ onClose }: { onClose: () => void }) {
       setNote(`Click Delete again to remove "${sel.name}".`);
       return;
     }
-    await deleteSchedule(sel.id);
-    await refresh();
-    setConfirmDeleteId(null);
-    setSel(null);
-    setNote(null);
+    try {
+      if (!(await deleteSchedule(sel.id))) throw new Error("Deleting schedule failed.");
+      await refresh();
+      setConfirmDeleteId(null);
+      setSel(null);
+      setNote(null);
+    } catch (error) {
+      setNote(`Error: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   const agentOptions = useMemo(
@@ -606,13 +624,20 @@ export function SchedulesManager({ onClose }: { onClose: () => void }) {
   const cronStatus = useMemo(() => validateCron(cron), [cron]);
   const activeCount = schedules.filter((s) => s.enabled).length;
   const selectedSchedule = sel && sel !== "new" ? sel : null;
+  const latestRun = selectedSchedule
+    ? scheduleThreads
+        .filter((session) => session.origin?.kind === "schedule" && session.origin.schedule_id === selectedSchedule.id)
+        .sort((a, b) => b.updatedAt - a.updatedAt)[0]
+    : undefined;
   const currentAttachmentFingerprint = useMemo(() => attachmentFingerprint(attachments), [attachments]);
   const selectedAttachmentFingerprint = useMemo(
     () => attachmentFingerprint(selectedSchedule?.attachments ?? []),
     [selectedSchedule],
   );
   const hasDraftContent = Boolean(
-    name.trim() || prompt.trim() || attachments.length > 0 || agentId || !enabled || normalizeCron(cron) !== DEFAULT_CRON,
+    name.trim() || prompt.trim() || attachments.length > 0 || agentId || !enabled ||
+      workspace.trim() !== currentThreadWorkspace || privacy !== currentThreadPrivacy ||
+      timezoneMode !== "local" || normalizeCron(cron) !== DEFAULT_CRON,
   );
   const formComplete = Boolean(name.trim() && cron.trim() && model.trim() && prompt.trim());
   const formReady = formComplete && cronStatus.valid;
@@ -627,7 +652,10 @@ export function SchedulesManager({ onClose }: { onClose: () => void }) {
               model.trim() !== scheduleModel(selectedSchedule) ||
               prompt !== selectedSchedule.prompt ||
               currentAttachmentFingerprint !== selectedAttachmentFingerprint ||
-              enabled !== selectedSchedule.enabled),
+              enabled !== selectedSchedule.enabled ||
+              workspace.trim() !== (selectedSchedule.workspace ?? "") ||
+              privacy !== (selectedSchedule.privacy ?? "off") ||
+              timezoneMode !== (selectedSchedule.timezone_mode ?? "utc")),
         );
   const canSave = Boolean(formReady && !busy && (sel === "new" || isDirty));
   const editorTitle = sel === "new" ? "New schedule" : sel ? name || sel.name : "Select a schedule";
@@ -690,6 +718,12 @@ export function SchedulesManager({ onClose }: { onClose: () => void }) {
               <span>New</span>
             </button>
 
+            {loadError && (
+              <p className="schedule-note error" role="alert">
+                Schedule list unavailable: {loadError}
+              </p>
+            )}
+
             {schedules.length > 0 ? (
               <div className="schedule-list">
                 {schedules.map((s) => {
@@ -717,6 +751,7 @@ export function SchedulesManager({ onClose }: { onClose: () => void }) {
                           </span>
                           <span>{effectiveScheduleModel(s, agents) || "Model missing"}</span>
                           <span>{attachmentSummary(s.attachments)}</span>
+                          <span>{nextRunLabel(s.next_run_unix, s.timezone_mode ?? "utc")}</span>
                           <span>{lastRunLabel(s.last_run)}</span>
                         </span>
                       </span>
@@ -807,6 +842,55 @@ export function SchedulesManager({ onClose }: { onClose: () => void }) {
                     <span>Agent</span>
                     <Select value={agentId} placeholder="Default agent" options={agentOptions} onChange={setAgentId} testId="schedule-agent-select" />
                   </div>
+                  <label className="schedule-field">
+                    <span>Workspace</span>
+                    <input
+                      className="css-input schedule-input"
+                      value={workspace}
+                      onChange={(event) => setWorkspace(event.target.value)}
+                      placeholder="No workspace"
+                    />
+                  </label>
+                  {currentThreadWorkspace && workspace !== currentThreadWorkspace && (
+                    <button
+                      className="btn-ghost"
+                      type="button"
+                      onClick={() => setWorkspace(currentThreadWorkspace)}
+                    >
+                      Use current workspace
+                    </button>
+                  )}
+                  <div className="schedule-field">
+                    <span>Privacy</span>
+                    <Select
+                      value={privacy}
+                      options={[
+                        { label: "Off", value: "off" },
+                        { label: "Redact secrets", value: "redact" },
+                        { label: "Block remote", value: "block" },
+                      ]}
+                      onChange={(value) => setPrivacy(value as "off" | "redact" | "block")}
+                      testId="schedule-privacy-select"
+                    />
+                  </div>
+                  <div className="schedule-field">
+                    <span>Timezone</span>
+                    <Select
+                      value={timezoneMode}
+                      options={[
+                        { label: "Local time", value: "local" },
+                        { label: "UTC", value: "utc" },
+                      ]}
+                      onChange={(value) => setTimezoneMode(value as "local" | "utc")}
+                      testId="schedule-timezone-select"
+                    />
+                  </div>
+                  <div className="schedule-status-card">
+                    <div>
+                      <strong>Guarded approval</strong>
+                      <span>Scheduled runs always pause consequential tools for review.</span>
+                    </div>
+                  </div>
                 </section>
 
                 <section className="schedule-editor-section schedule-prompt-section">
@@ -872,7 +956,7 @@ export function SchedulesManager({ onClose }: { onClose: () => void }) {
                 <section className="schedule-editor-section">
                   <div className="schedule-section-head">
                     <h4>Status</h4>
-                    <span>{sel === "new" ? "Not saved yet" : lastRunLabel(sel.last_run)}</span>
+                    <span>{sel === "new" ? "Not saved yet" : nextRunLabel(sel.next_run_unix, timezoneMode)}</span>
                   </div>
                   <div className="schedule-status-card">
                     <Toggle checked={enabled} onChange={setEnabled} label="Enabled" />
@@ -885,6 +969,11 @@ export function SchedulesManager({ onClose }: { onClose: () => void }) {
                 </section>
 
                 <div className="schedule-action-footer">
+                  {latestRun && (
+                    <button className="btn-ghost" type="button" onClick={() => { switchTo(latestRun.id); onClose(); }}>
+                      Open latest run
+                    </button>
+                  )}
                   {sel !== "new" && (
                     <button className="btn-ghost danger schedule-delete-action" type="button" disabled={busy} onClick={remove}>
                       <Trash size={14} />

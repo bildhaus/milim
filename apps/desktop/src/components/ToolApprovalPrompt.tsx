@@ -296,7 +296,7 @@ function ApprovalRequestBody({
       {request?.kind === "mcp_url" && (
         <div className="stream-approval-url">
           <p>{request.message}</p>
-          <button type="button" disabled={disabled} onClick={() => onOpenUrl(request.url)}>Open link</button>
+          <button className="approval-btn" type="button" disabled={disabled} onClick={() => onOpenUrl(request.url)}>Open link</button>
         </div>
       )}
       {request?.kind === "mcp_unsupported" && (

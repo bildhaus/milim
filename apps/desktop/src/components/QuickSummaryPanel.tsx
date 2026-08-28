@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
-import { getCodexRateLimits, isCodexModel } from "../api";
+import { getCodexRateLimits, isCodexModel, type EffectiveRunPreviewV1 } from "../api";
 import type {
   QuickSummary,
   QuickSummaryRow,
@@ -20,6 +20,7 @@ import {
   Gear,
   GitBranch,
   Globe,
+  Eye,
   Lightbulb,
   Paperclip,
   Shield,
@@ -30,6 +31,61 @@ import {
 } from "./icons";
 
 const SOURCE_LIMIT = 5;
+
+function jsonRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function displayValue(value: unknown, fallback = "Off"): string {
+  if (typeof value === "boolean") return value ? "On" : "Off";
+  if (typeof value === "string" && value.trim()) return value;
+  if (typeof value === "number") return String(value);
+  return fallback;
+}
+
+export function EffectiveRunDetails({ preview }: { preview: EffectiveRunPreviewV1 }) {
+  const composition = preview.composition;
+  const policies = jsonRecord(composition.policies);
+  const enabledSkills = Array.isArray(policies.enabled_skills)
+    ? policies.enabled_skills.filter((value): value is string => typeof value === "string")
+    : [];
+  const toolNames = composition.tools
+    .map((tool) => jsonRecord(tool).name)
+    .filter((value): value is string => typeof value === "string");
+  return (
+    <div className="effective-run-details" data-testid="effective-run-details">
+      <div className="effective-run-grid">
+        <span>Model</span><strong>{composition.model}</strong>
+        <span>Boundary</span><strong>{composition.visibility === "harness_boundary" ? "Account runtime" : "Provider"}</strong>
+        <span>Workspace</span><strong title={composition.workspace ?? undefined}>{composition.workspace || "None"}</strong>
+        <span>Approval</span><strong>{displayValue(policies.approval)}</strong>
+        <span>Privacy</span><strong>{displayValue(policies.privacy)}</strong>
+        <span>Memory</span><strong>{displayValue(policies.memory)}</strong>
+        <span>Tools</span><strong>{toolNames.length ? toolNames.join(", ") : displayValue(policies.tool_mode, "None")}</strong>
+        <span>Skills</span><strong>{enabledSkills.length ? enabledSkills.join(", ") : displayValue(policies.skill_mode, "None")}</strong>
+        <span>Attachments</span><strong>{composition.attachments.length}</strong>
+      </div>
+      <div className="effective-run-prompts">
+        {composition.prompt_sections.map((section, index) => {
+          const record = jsonRecord(section);
+          const kind = displayValue(record.kind, `Section ${index + 1}`);
+          const provenance = displayValue(record.provenance, "resolved");
+          const content = typeof record.content === "string" ? record.content : "";
+          return (
+            <details key={`${kind}:${index}`}>
+              <summary>{kind.replace(/_/g, " ")} <small>{provenance}</small></summary>
+              <pre>{content || "(empty)"}</pre>
+            </details>
+          );
+        })}
+      </div>
+      {preview.warnings.map((warning) => <p className="effective-run-warning" key={warning}>{warning}</p>)}
+      <small className="effective-run-revision">Thread revision {preview.thread_revision}</small>
+    </div>
+  );
+}
 
 function toneClass(tone?: QuickSummaryRow["tone"]): string {
   return tone ? ` ${tone}` : "";
@@ -213,6 +269,7 @@ export function QuickSummaryPanel({
   onOpenGit,
   onOpenGoal,
   onOpenSource,
+  onInspectEffectiveRun,
 }: {
   summary: QuickSummary;
   open: boolean;
@@ -224,11 +281,15 @@ export function QuickSummaryPanel({
   onOpenGit: () => void;
   onOpenGoal: () => void;
   onOpenSource: (source: QuickSummarySource) => void;
+  onInspectEffectiveRun?: () => Promise<EffectiveRunPreviewV1>;
 }) {
   const rows = Array.isArray(summary?.rows) ? summary.rows : [];
   const sources = Array.isArray(summary?.sources) ? summary.sources : [];
   const [liveQuota, setLiveQuota] = useState("");
   const [sourcesExpanded, setSourcesExpanded] = useState(false);
+  const [effectiveRun, setEffectiveRun] = useState<EffectiveRunPreviewV1 | null>(null);
+  const [effectiveRunLoading, setEffectiveRunLoading] = useState(false);
+  const [effectiveRunError, setEffectiveRunError] = useState("");
   const model = summary?.model?.trim() ?? "";
 
   useEffect(() => {
@@ -274,6 +335,20 @@ export function QuickSummaryPanel({
   ];
   const sourcesCollapsed = collapsedSections.includes("sources");
 
+  const inspectEffectiveRun = async () => {
+    if (!onInspectEffectiveRun || effectiveRunLoading) return;
+    setEffectiveRunLoading(true);
+    setEffectiveRunError("");
+    try {
+      setEffectiveRun(await onInspectEffectiveRun());
+    } catch (error) {
+      setEffectiveRun(null);
+      setEffectiveRunError(error instanceof Error ? error.message : "Effective run preview failed.");
+    } finally {
+      setEffectiveRunLoading(false);
+    }
+  };
+
   return (
     <aside
       id="quick-summary-panel"
@@ -292,6 +367,25 @@ export function QuickSummaryPanel({
           </div>
           <div className="quick-summary-scroll">
             {workerPanel}
+            {onInspectEffectiveRun && (
+              <section className="quick-summary-section effective-run-section" aria-label="Next run">
+                <h3>Next run</h3>
+                <button
+                  className="quick-summary-row effective-run-trigger"
+                  type="button"
+                  disabled={effectiveRunLoading}
+                  onClick={() => void inspectEffectiveRun()}
+                >
+                  <span className="quick-summary-row-icon"><Eye size={13} /></span>
+                  <span className="quick-summary-row-copy">
+                    <strong>{effectiveRunLoading ? "Resolving..." : effectiveRun ? "Refresh effective run" : "Inspect effective run"}</strong>
+                    <small>Resolve the configuration Milim would freeze now. Nothing is sent.</small>
+                  </span>
+                </button>
+                {effectiveRunError && <p className="effective-run-error" role="alert">{effectiveRunError}</p>}
+                {effectiveRun && <EffectiveRunDetails preview={effectiveRun} />}
+              </section>
+            )}
             {groups.map((group) => {
               const sectionRows = displayRows.filter((row) => group.kinds.includes(row.kind));
               if (!sectionRows.length) return null;

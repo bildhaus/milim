@@ -16,8 +16,8 @@ const chatMessageRow = readFileSync(
 
 assert.match(
   chatMessageRow,
-  /m\.steering[\s\S]*data-testid="applied-steer"[\s\S]*>Steer</,
-  "applied steering input must remain visibly distinguished in the transcript",
+  /m\.steering[\s\S]*m\.steeringPending \? "pending-steer-message" : "applied-steer"[\s\S]*m\.steeringPending \? "Steer · Pending" : "Steer"/,
+  "pending and applied steering input must remain visibly distinguished in the transcript",
 );
 
 function section(source, start, end) {

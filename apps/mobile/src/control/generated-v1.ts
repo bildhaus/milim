@@ -4,7 +4,7 @@ export type JsonValue = null | boolean | number | string | JsonValue[] | { [key:
 
 export type ControlProtocolRangeV1 = { min: number, max: number, };
 
-export type ControlCapabilitiesV1 = { timeline_sync: boolean, queued_turns: boolean, approvals: boolean, agents: boolean, workers: boolean, attachments: boolean, websocket_tickets: boolean, lan_discovery: boolean, push_notifications: boolean, inline_branches: boolean, appearance_assets: boolean, run_ledger?: boolean, run_inspection?: boolean, steering?: boolean, context_injection?: boolean, model_favorites?: boolean, thread_links?: boolean, };
+export type ControlCapabilitiesV1 = { timeline_sync: boolean, queued_turns: boolean, approvals: boolean, agents: boolean, workers: boolean, attachments: boolean, websocket_tickets: boolean, lan_discovery: boolean, push_notifications: boolean, inline_branches: boolean, appearance_assets: boolean, run_ledger?: boolean, run_inspection?: boolean, effective_run_preview?: boolean, steering?: boolean, context_injection?: boolean, model_favorites?: boolean, thread_links?: boolean, thread_origins?: boolean, };
 
 export type ThreadLinkV1 = { owner_thread_id: string, target_thread_id: string, target_title: string, target_workspace: string | null, target_project: string | null, target_model: string | null, target_runtime: string, target_archived_at_ms: number | null, target_busy: boolean, target_queued_turns: number, created_at_ms: number, };
 
@@ -12,7 +12,9 @@ export type FrozenLinkedThreadGrantV1 = { target_thread_id: string, title: strin
 
 export type MailboxOriginV1 = { exchange_id: string, origin_thread_id: string, origin_title: string, origin_workspace: string | null, origin_project: string | null, };
 
-export type ThreadSummaryV1 = { id: string, title: string, revision: number, epoch: string, updated_at_ms: number, archived_at_ms: number | null, model: string | null, reasoning_effort_overrides: { [key in string]?: string }, agent_id: string | null, workspace: string | null, busy: boolean, queued_turns: number, linked_threads: Array<ThreadLinkV1>, };
+export type ThreadOriginV1 = { "kind": "schedule", schedule_id: string, schedule_name: string, occurrence_unix: number, };
+
+export type ThreadSummaryV1 = { id: string, title: string, revision: number, epoch: string, updated_at_ms: number, archived_at_ms: number | null, model: string | null, reasoning_effort_overrides: { [key in string]?: string }, agent_id: string | null, workspace: string | null, origin?: ThreadOriginV1, busy: boolean, queued_turns: number, linked_threads: Array<ThreadLinkV1>, };
 
 export type AgentSummaryV1 = { id: string, name: string, description: string, avatar: string, tool_mode: string, enabled_tool_count: number, skill_mode: string, enabled_skill_count: number, };
 
@@ -32,7 +34,7 @@ export type PendingApprovalV1 = { id: string, run_id: string, thread_id: string,
 
 export type QueuedTurnV1 = { id: string, thread_id: string, command_id: string, accepted_at_ms: number, display_text: string, attachments: Array<ControlAttachmentV1>, mailbox_origin?: MailboxOriginV1, };
 
-export type PendingInputV1 = { id: string, thread_id: string, target_run_id: string | null, kind: string, state: string, created_at_ms: number, };
+export type PendingInputV1 = { id: string, thread_id: string, target_run_id: string | null, kind: string, state: string, display_text?: string, attachments?: Array<ControlAttachmentV1>, created_at_ms: number, };
 
 export type AppearanceColorsV1 = { primary_text: string, secondary_text: string, tertiary_text: string, placeholder_text: string, bg_primary: string, bg_secondary: string, bg_tertiary: string, sidebar_bg: string, accent: string, accent_light: string, border_primary: string, border_secondary: string, focus_border: string, success: string, warning: string, error: string, info: string, card_bg: string, card_border: string, input_bg: string, input_border: string, };
 
@@ -56,13 +58,17 @@ export type ControlEventV1 = { event_id: string, host_id: string, thread_id?: st
 
 export type ControlCommandStatusV1 = "applied" | "accepted" | "queued" | "needs_confirmation" | "conflict" | "failed";
 
-export type ControlCommandKindV1 = "thread.create" | "thread.rename" | "thread.archive" | "thread.delete" | "thread.set_model" | "thread.set_agent" | "thread.link.add" | "thread.link.remove" | "message.delete" | "model_favorites.set" | "turn.send" | "turn.steer" | "context.inject" | "turn.inbox_delete" | "turn.stop" | "turn.regenerate" | "turn.queue_resume" | "turn.queue_move" | "turn.queue_delete" | "approval.resolve" | "worker.start" | "worker.continue_solo" | "worker.stop";
+export type ControlCommandKindV1 = "thread.create" | "thread.rename" | "thread.archive" | "thread.delete" | "thread.set_model" | "thread.set_agent" | "thread.set_execution_settings" | "thread.link.add" | "thread.link.remove" | "message.delete" | "model_favorites.set" | "turn.send" | "turn.steer" | "context.inject" | "turn.inbox_delete" | "turn.stop" | "turn.regenerate" | "turn.queue_resume" | "turn.queue_move" | "turn.queue_delete" | "approval.resolve" | "worker.start" | "worker.continue_solo" | "worker.stop";
 
 export type ControlCommandV1 = { command_id: string, kind: ControlCommandKindV1, thread_id?: string, expected_revision?: number, payload: JsonValue, confirmation_token?: string, };
 
 export type ControlCommandResultV1 = { command_id: string, status: ControlCommandStatusV1, thread_id?: string, revision?: number, run_id?: string, queue_id?: string, confirmation_token?: string, message?: string, data: JsonValue, };
 
-export type ResolvedRunCompositionV1 = { visibility: string, adapter: string, model: string, reasoning_effort: string | null, generation: GenerationSettingsV1, workspace: string | null, environment_policy: string, prompt_sections: Array<JsonValue>, tools: Array<JsonValue>, policies: JsonValue, attachments: Array<JsonValue>, };
+export type ResolvedRunCompositionV1 = { visibility: string, adapter: string, model: string, reasoning_effort: string | null, generation: GenerationSettingsV1, native_session_boundary?: string, workspace: string | null, environment_policy: string, explicit_environment_grants: Array<JsonValue>, prompt_sections: Array<JsonValue>, tools: Array<JsonValue>, policies: JsonValue, attachments: Array<JsonValue>, };
+
+export type EffectiveRunPreviewRequestV1 = { text: string, attachments: Array<ControlAttachmentV1>, };
+
+export type EffectiveRunPreviewV1 = { thread_id: string, thread_revision: number, resolved_at_ms: number, composition: ResolvedRunCompositionV1, warnings: Array<string>, };
 
 export type RunEventV1 = { id: string, run_id: string, seq: number, step_id: string | null, type: string, data: JsonValue, created_at_ms: number, };
 

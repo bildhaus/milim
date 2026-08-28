@@ -145,6 +145,41 @@ export function controlQueuedMessage(turn: ControlQueuedTurnV1): QueuedMessage {
   };
 }
 
+export function pendingSteerMessages(
+  inputs: readonly ControlPendingInputV1[],
+  threadId: string,
+  appliedMessages: readonly ChatMessage[],
+): ChatMessage[] {
+  const appliedInboxIds = new Set(
+    appliedMessages.flatMap((message) => message.steeringInboxId ? [message.steeringInboxId] : []),
+  );
+  return inputs.flatMap((input) => {
+    if (
+      input.thread_id !== threadId
+      || input.kind !== "steer"
+      || input.state !== "pending"
+      || !input.target_run_id
+      || appliedInboxIds.has(input.id)
+      || typeof input.display_text !== "string"
+    ) {
+      return [];
+    }
+    return [{
+      id: `pending-steer-${input.id}`,
+      role: "user",
+      content: input.display_text,
+      runId: input.target_run_id,
+      steering: true,
+      steeringInboxId: input.id,
+      steeringPending: true,
+      attachments: (input.attachments ?? []).map(({ data_url, ...attachment }) => ({
+        ...attachment,
+        dataUrl: data_url,
+      })),
+    }];
+  });
+}
+
 function streamEventCallId(item: ControlTimelineItemV1): string | undefined {
   const data = item.data;
   return typeof data.call_id === "string"

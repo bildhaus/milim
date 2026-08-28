@@ -3,7 +3,7 @@ id: memory
 path: memory
 label: Memory
 title: Memory and RAG
-summary: Personal and Project hybrid memory, bounded provenance-aware context injection, archive recovery, and explicit tool-registered memories.
+summary: Personal and Project hybrid memory, bounded provenance-aware context injection, review/revoke lifecycle, and measurable retrieval quality.
 group: Local data
 order: 60
 updated: 2026-07-20
@@ -19,7 +19,8 @@ When Memory is enabled, normal chat turns search scoped memory with exact-term a
 |---|---|---|
 | Classic RAG | `/memory/ingest` and `/memory/search` | Embeds text through the configured embedding-capable provider and retrieves nearby memories. |
 | Scoped hybrid memory | `/memory/register` and `/memory/graph/search` | Retrieves scoped, non-archived nodes with lexical and semantic ranking. The `/memory/graph/search` name is retained for compatibility; retrieval does not traverse memory edges. |
-| Memory library | `/memory/scopes`, `/memory/nodes`, node update/delete/archive routes | Searches, adds, edits, archives, restores, permanently deletes, and moves legacy entries. |
+| Memory library | `/memory/scopes`, `/memory/nodes`, node update/delete/archive/review/restore routes | Searches, adds, edits, reviews, archives, restores, permanently deletes, and moves legacy entries. |
+| Retrieval benchmark | `/memory/benchmark` | Runs labeled queries through the production scoped retriever and reports recall@k and mean reciprocal rank without mutating memory. |
 | Agent memory tool | `memory_register` | Saves `content` plus an optional `title` to `personal` or `project`; it defaults to Project when a folder exists and Personal otherwise. |
 
 ## Scopes
@@ -40,6 +41,14 @@ Embeddings follow the selected provider route. Local Ollama or LM Studio embeddi
 ## Plan-mode guard
 
 Plan mode disables memory search and memory writes. Planning remains read-only: the assistant can inspect context, but it cannot register durable memory while the plan is still unapproved.
+
+## Review, revoke, and restore
+
+Every memory exposes its lifecycle in the Memory library. User-created and manually edited entries are marked reviewed. Tool-created or migrated entries remain **Needs review** until explicitly acknowledged. **Forget** revokes an entry from normal retrieval by archiving it; **Restore** returns it to retrieval and marks it reviewed; permanent deletion remains a second, confirmed action available only for archived entries. Review status is provenance for the user and does not silently change ranking.
+
+## Retrieval benchmark
+
+`POST /memory/benchmark` accepts labeled cases containing a query, relevant memory node IDs, and optional scopes. It calls the same hybrid retrieval path used by chat, then returns per-case retrieved IDs, first relevant rank, recall@k, reciprocal rank, macro-average recall@k, and mean reciprocal rank. Empty cases and cases without relevance labels are rejected, `top_k` is bounded to 50, and archived entries remain excluded unless explicitly requested. This makes retrieval changes comparable against stable project-specific fixtures instead of relying on anecdotal prompts.
 
 ## Register memory over HTTP
 

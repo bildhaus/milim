@@ -5699,6 +5699,58 @@ async fn memory_graph_register_search_update_and_delete() {
         .await
         .unwrap();
     assert_eq!(updated["title"], "Use scoped graph memory");
+    assert!(updated["reviewed_at"].as_str().is_some());
+
+    let benchmark: Value = client
+        .post(format!("{base}/memory/benchmark"))
+        .json(&json!({
+            "model": "test-echo",
+            "top_k": 5,
+            "cases": [{
+                "name": "Graph node",
+                "query": "scoped graph memory",
+                "relevant_node_ids": [node_id.clone()],
+                "scopes": [{ "kind": "thread", "locator": "thread-http" }]
+            }]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(benchmark["case_count"], 1);
+    assert_eq!(benchmark["cases"][0]["first_relevant_rank"], 1);
+
+    let archived: Value = client
+        .post(format!("{base}/memory/nodes/{node_id}/archive"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(archived["archived"], true);
+
+    let restored: Value = client
+        .post(format!("{base}/memory/nodes/{node_id}/restore"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(restored["restored"], true);
+
+    let reviewed: Value = client
+        .post(format!("{base}/memory/nodes/{node_id}/review"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(reviewed["reviewed"], true);
 
     let deleted: Value = client
         .delete(format!("{base}/memory/nodes/{node_id}"))
@@ -7004,20 +7056,30 @@ async fn schedules_crud_and_fire_due() {
     store.upsert(&schedule).unwrap();
     let backend = MessageCaptureBackend::default();
     let seen_messages = backend.seen();
+    let control_store =
+        Arc::new(milim_storage::UserDataStore::new(Database::open_in_memory().unwrap()).unwrap());
+    let control =
+        milim_server::control::RunManager::new(control_store, "Schedule fixture").unwrap();
     let state = AppState::new(Arc::new(backend), ServerConfiguration::default())
         .with_tools(milim_tools::ToolRegistry::with_builtins())
-        .with_schedules(store);
+        .with_schedules(store)
+        .with_control(control);
 
     // fire_due runs the due schedule and marks it ran (deterministic).
     let fired = milim_server::fire_due(&state, 10_000).await.unwrap();
     assert_eq!(fired, 1);
+    for _ in 0..50 {
+        if !seen_messages.read().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     {
         let captured = seen_messages.read().unwrap();
         let prompt = captured[0].last().unwrap();
         assert!(prompt.contains("summarize the attachment"));
         assert!(prompt.contains("[Attached files]"));
         assert!(prompt.contains("name=notes.md"));
-        assert!(prompt.contains("path=C:\\tmp\\notes.md"));
         assert!(prompt.contains("alpha\nbeta"));
     }
     assert!(state
@@ -7031,26 +7093,6 @@ async fn schedules_crud_and_fire_due() {
     // HTTP CRUD.
     let base = spawn(state).await;
     let client = reqwest::Client::new();
-    let events: Value = client
-        .get(format!("{base}/schedules/events"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(events["events"][0]["schedule_name"], "hourly");
-    assert_eq!(events["events"][0]["response"], "ok");
-    let drained: Value = client
-        .get(format!("{base}/schedules/events"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert!(drained["events"].as_array().unwrap().is_empty());
-
     let created: Value = client
         .post(format!("{base}/schedules"))
         .json(&json!({
@@ -7161,7 +7203,7 @@ async fn schedules_crud_and_fire_due() {
 }
 
 #[tokio::test]
-async fn schedule_mark_failure_prevents_agent_run() {
+async fn schedule_mark_failure_retries_an_idempotent_canonical_run() {
     use milim_automation::ScheduleStore;
     use milim_storage::Database;
 
@@ -7187,15 +7229,30 @@ async fn schedule_mark_failure_prevents_agent_run() {
 
     let backend = MessageCaptureBackend::default();
     let seen_messages = backend.seen();
+    let control_store =
+        Arc::new(milim_storage::UserDataStore::new(Database::open_in_memory().unwrap()).unwrap());
+    let control = milim_server::control::RunManager::new(
+        control_store.clone(),
+        "Schedule mark failure fixture",
+    )
+    .unwrap();
     let state = AppState::new(Arc::new(backend), ServerConfiguration::default())
         .with_tools(milim_tools::ToolRegistry::with_builtins())
-        .with_schedules(store);
+        .with_schedules(store)
+        .with_control(control);
 
     let err = milim_server::fire_due(&state, 10_000)
         .await
-        .expect_err("mark failure should stop the run");
+        .expect_err("mark failure should be reported after dispatch");
     assert!(err.to_string().contains("mark failed"));
-    assert!(seen_messages.read().unwrap().is_empty());
+    for _ in 0..50 {
+        if !seen_messages.read().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(seen_messages.read().unwrap().len(), 1);
+    assert_eq!(control_store.control_runs(false).unwrap().len(), 1);
 
     fs::remove_file(&db_path).ok();
     fs::remove_file(db_path.with_extension("db-wal")).ok();
