@@ -32,12 +32,9 @@ use crate::AppState;
 
 const CONTROL_EVENT_CAPACITY: usize = 1_024;
 const CONFIRMATION_TTL: Duration = Duration::from_secs(5 * 60);
-const MAX_CONTROL_ATTACHMENTS: usize = 6;
 const MAX_CONTROL_ATTACHMENT_NAME_CHARS: usize = 140;
 const MAX_CONTROL_ATTACHMENT_MIME_CHARS: usize = 120;
-const MAX_CONTROL_ATTACHMENT_CONTENT_CHARS: usize = 128 * 1024;
 const MAX_CONTROL_ATTACHMENT_DATA_URL_CHARS: usize = 3 * 1024 * 1024;
-const MAX_CONTROL_ATTACHMENT_BYTES: u64 = 2 * 1024 * 1024;
 const APPEARANCE_STATE_KEY: &str = "milim.appearanceSnapshot";
 const CUSTOM_THEMES_STATE_KEY: &str = "milim.customThemes";
 const MAX_APPEARANCE_BACKGROUND_BYTES: usize = 8 * 1024 * 1024;
@@ -562,6 +559,8 @@ pub(crate) struct AppearanceBackgroundAsset {
 struct TurnSendPayloadV1 {
     text: String,
     #[serde(default)]
+    client_message_id: Option<String>,
+    #[serde(default)]
     display_text: Option<String>,
     #[serde(default)]
     attachments: Vec<ControlAttachmentV1>,
@@ -582,6 +581,8 @@ struct ManagedPreviewRuntimeV1 {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct AcceptedTurnV1 {
     text: String,
+    #[serde(default)]
+    client_message_id: Option<String>,
     #[serde(default)]
     display_text: Option<String>,
     config: FrozenRunConfigV1,
@@ -1615,6 +1616,7 @@ impl RunManager {
                 "Linked-thread mailbox message from \"{}\" (thread {}):\n{}",
                 origin_summary.title, origin_thread_id, message
             ),
+            client_message_id: None,
             display_text: Some(message.to_string()),
             config,
             append_user: true,
@@ -2202,6 +2204,7 @@ impl RunManager {
         }
         let accepted = AcceptedTurnV1 {
             text: request.text,
+            client_message_id: None,
             display_text: None,
             config,
             append_user: true,
@@ -2383,6 +2386,9 @@ impl RunManager {
             ControlCommandKindV1::ThreadDelete => self.delete_thread(&command),
             ControlCommandKindV1::ThreadSetModel => self.patch_thread(&command, ThreadPatch::Model),
             ControlCommandKindV1::ThreadSetAgent => self.patch_thread(&command, ThreadPatch::Agent),
+            ControlCommandKindV1::ThreadSetExecutionSettings => {
+                self.patch_thread(&command, ThreadPatch::Execution)
+            }
             ControlCommandKindV1::ThreadLinkAdd => self.link_thread(&command, true),
             ControlCommandKindV1::ThreadLinkRemove => self.link_thread(&command, false),
             ControlCommandKindV1::MessageDelete => self.delete_message(&command),
@@ -2637,6 +2643,89 @@ impl RunManager {
                 }
                 settings_object(object)?.insert("activeAgentId".into(), agent);
             }
+            ThreadPatch::Execution => {
+                const ALLOWED: &[&str] = &[
+                    "workspace",
+                    "privacy",
+                    "tool_approval",
+                    "memory",
+                    "sandbox",
+                    "computer_use",
+                    "plan_mode",
+                ];
+                let payload = command.payload.as_object().ok_or_else(|| {
+                    Error::InvalidRequest("execution settings payload must be an object".into())
+                })?;
+                if let Some(key) = payload.keys().find(|key| !ALLOWED.contains(&key.as_str())) {
+                    return Err(Error::InvalidRequest(format!(
+                        "unsupported execution setting: {key}"
+                    )));
+                }
+                let previous_workspace = object
+                    .get("settings")
+                    .and_then(Value::as_object)
+                    .and_then(|settings| settings.get("folder"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .to_string();
+                let settings = settings_object(object)?;
+                let mut workspace_changed = false;
+                for (wire_key, stored_key) in [
+                    ("memory", "memory"),
+                    ("sandbox", "sandbox"),
+                    ("computer_use", "computerUse"),
+                    ("plan_mode", "planMode"),
+                ] {
+                    if let Some(value) = payload.get(wire_key) {
+                        let value = value.as_bool().ok_or_else(|| {
+                            Error::InvalidRequest(format!("{wire_key} must be a boolean"))
+                        })?;
+                        settings.insert(stored_key.into(), Value::Bool(value));
+                    }
+                }
+                if let Some(value) = payload.get("workspace") {
+                    if !value.is_null() && !value.is_string() {
+                        return Err(Error::InvalidRequest(
+                            "workspace must be a string or null".into(),
+                        ));
+                    }
+                    let workspace = value
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(|value| Value::String(value.to_string()))
+                        .unwrap_or(Value::Null);
+                    let next_workspace = workspace.as_str().unwrap_or_default();
+                    workspace_changed = previous_workspace != next_workspace;
+                    settings.insert("folder".into(), workspace);
+                }
+                if let Some(value) = payload.get("privacy") {
+                    let value = value.as_str().ok_or_else(|| {
+                        Error::InvalidRequest("privacy must be a supported string".into())
+                    })?;
+                    if !matches!(value, "off" | "redact" | "block") {
+                        return Err(Error::InvalidRequest(format!(
+                            "unsupported privacy mode: {value}"
+                        )));
+                    }
+                    settings.insert("privacy".into(), Value::String(value.to_string()));
+                }
+                if let Some(value) = payload.get("tool_approval") {
+                    let value = value.as_str().ok_or_else(|| {
+                        Error::InvalidRequest("tool_approval must be a supported string".into())
+                    })?;
+                    if !matches!(value, "review" | "guarded" | "open") {
+                        return Err(Error::InvalidRequest(format!(
+                            "unsupported tool approval mode: {value}"
+                        )));
+                    }
+                    settings.insert("toolApproval".into(), Value::String(value.to_string()));
+                }
+                if workspace_changed {
+                    settings.insert("toolApproval".into(), Value::String("review".to_string()));
+                }
+            }
         }
         object.insert("updatedAt".into(), Value::from(now_ms()));
         let timeline_item_id = model_change
@@ -2857,6 +2946,15 @@ impl RunManager {
                 "turn.send requires text or at least one attachment".into(),
             ));
         }
+        if payload
+            .client_message_id
+            .as_ref()
+            .is_some_and(|id| id.trim().is_empty() || id.chars().count() > 200)
+        {
+            return Err(Error::InvalidRequest(
+                "client_message_id must contain 1 to 200 characters".into(),
+            ));
+        }
         validate_control_attachments(&payload.attachments)?;
         let thread = self
             .store
@@ -2882,6 +2980,7 @@ impl RunManager {
         }
         let accepted = AcceptedTurnV1 {
             text: payload.text,
+            client_message_id: payload.client_message_id,
             display_text: payload.display_text,
             config,
             append_user: true,
@@ -2995,6 +3094,7 @@ impl RunManager {
             .ok_or_else(|| Error::NotFound(format!("thread {thread_id}")))?;
         let accepted = AcceptedTurnV1 {
             text: payload.text,
+            client_message_id: payload.client_message_id,
             display_text: payload.display_text,
             config: resolve_frozen_config(state, &self.store, &thread, payload.attachments)?,
             append_user: true,
@@ -3199,6 +3299,7 @@ impl RunManager {
         }
         let accepted = AcceptedTurnV1 {
             text,
+            client_message_id: None,
             display_text,
             config,
             append_user: false,
@@ -3394,7 +3495,10 @@ impl RunManager {
             return Err(error);
         }
         if accepted.append_user {
-            let user_message_id = Uuid::new_v4().to_string();
+            let user_message_id = accepted
+                .client_message_id
+                .clone()
+                .unwrap_or_else(|| Uuid::new_v4().to_string());
             let user_message = json!({
                 "id": user_message_id,
                 "role": "user",
@@ -3404,14 +3508,24 @@ impl RunManager {
                 "runId": run_id,
                 "mailboxOrigin": accepted.mailbox_origin.clone(),
             });
-            self.persist_message_and_event(
-                &thread_id,
-                &run_id,
-                user_message,
-                None,
-                "accepted_input_projected",
-                json!({"source": "turn.send"}),
-            )?;
+            if accepted.client_message_id.is_some() {
+                self.persist_adopted_message_and_event(
+                    &thread_id,
+                    &run_id,
+                    user_message,
+                    "accepted_input_projected",
+                    json!({"source": "turn.send", "adopted_optimistic_message": true}),
+                )?;
+            } else {
+                self.persist_message_and_event(
+                    &thread_id,
+                    &run_id,
+                    user_message,
+                    None,
+                    "accepted_input_projected",
+                    json!({"source": "turn.send"}),
+                )?;
+            }
         }
         let manager = self.clone();
         let spawned_run_id = run_id.clone();
@@ -5043,6 +5157,38 @@ impl RunManager {
         Ok(record)
     }
 
+    fn persist_adopted_message_and_event(
+        &self,
+        thread_id: &str,
+        run_id: &str,
+        message: Value,
+        event_type: &str,
+        event_data: Value,
+    ) -> Result<ControlTimelineRecord> {
+        let item_id = message
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::InvalidRequest("message projection is missing id".into()))?;
+        let (record, _) = self.store.control_adopt_message_projection_and_event(
+            thread_id,
+            run_id,
+            item_id,
+            &message.to_string(),
+            &Uuid::new_v4().to_string(),
+            None,
+            event_type,
+            &event_data.to_string(),
+        )?;
+        self.emit(
+            "timeline.appended",
+            Some(thread_id),
+            Some(&record.epoch),
+            Some(record.seq),
+            json!({ "item": timeline_item(record.clone())? }),
+        );
+        Ok(record)
+    }
+
     fn preallocate_claude_session(&self, thread_id: &str) -> Result<String> {
         let session_id = Uuid::new_v4().to_string();
         if let Some(updated) = self.store.control_compare_and_set_runtime_session(
@@ -5312,9 +5458,9 @@ fn estimate_usage_cost_usd(pricing: &ModelPricing, usage: Usage) -> Option<f64> 
 }
 
 fn validate_control_attachments(attachments: &[ControlAttachmentV1]) -> Result<()> {
-    if attachments.len() > MAX_CONTROL_ATTACHMENTS {
+    if attachments.len() > CONTROL_MAX_ATTACHMENTS {
         return Err(Error::InvalidRequest(format!(
-            "a turn may contain at most {MAX_CONTROL_ATTACHMENTS} attachments"
+            "a turn may contain at most {CONTROL_MAX_ATTACHMENTS} attachments"
         )));
     }
     for attachment in attachments {
@@ -5331,7 +5477,9 @@ fn validate_control_attachments(attachments: &[ControlAttachmentV1]) -> Result<(
                 attachment.name
             )));
         }
-        if attachment.size > MAX_CONTROL_ATTACHMENT_BYTES {
+        if attachment.size > CONTROL_MAX_ATTACHMENT_BYTES
+            && !(attachment.truncated && attachment.content.is_some())
+        {
             return Err(Error::InvalidRequest(format!(
                 "attachment {} exceeds the 2 MiB limit",
                 attachment.name
@@ -5340,7 +5488,7 @@ fn validate_control_attachments(attachments: &[ControlAttachmentV1]) -> Result<(
         if attachment
             .content
             .as_ref()
-            .is_some_and(|value| value.chars().count() > MAX_CONTROL_ATTACHMENT_CONTENT_CHARS)
+            .is_some_and(|value| value.chars().count() > CONTROL_MAX_ATTACHMENT_CONTENT_CHARS)
         {
             return Err(Error::InvalidRequest(format!(
                 "attachment {} text exceeds the 128 KiB limit",
@@ -5373,6 +5521,7 @@ enum ThreadPatch {
     Archive,
     Model,
     Agent,
+    Execution,
 }
 
 enum RunOutcome {
@@ -7826,7 +7975,7 @@ mod tests {
             id: "attachment-1".into(),
             name: "large.png".into(),
             mime: "image/png".into(),
-            size: MAX_CONTROL_ATTACHMENT_BYTES + 1,
+            size: CONTROL_MAX_ATTACHMENT_BYTES + 1,
             content: None,
             data_url: Some("data:image/png;base64,AA==".into()),
             truncated: false,
@@ -8278,6 +8427,7 @@ mod tests {
                 adapter: "provider".into(),
                 request_json: serde_json::to_string(&AcceptedTurnV1 {
                     text: "active".into(),
+                    client_message_id: None,
                     display_text: None,
                     config: resolve_frozen_config(
                         &state,
@@ -8507,6 +8657,7 @@ mod tests {
             .enrich_linked_thread_send_approval(
                 &AcceptedTurnV1 {
                     text: "origin turn".into(),
+                    client_message_id: None,
                     display_text: None,
                     config: approval_config,
                     append_user: true,

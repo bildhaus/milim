@@ -27,6 +27,7 @@
     "thread.delete",
     "thread.set_model",
     "thread.set_agent",
+    "thread.set_execution_settings",
     "thread.link.add",
     "thread.link.remove",
     "message.delete",

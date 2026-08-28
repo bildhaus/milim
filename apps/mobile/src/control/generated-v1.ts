@@ -58,7 +58,7 @@ export type ControlEventV1 = { event_id: string, host_id: string, thread_id?: st
 
 export type ControlCommandStatusV1 = "applied" | "accepted" | "queued" | "needs_confirmation" | "conflict" | "failed";
 
-export type ControlCommandKindV1 = "thread.create" | "thread.rename" | "thread.archive" | "thread.delete" | "thread.set_model" | "thread.set_agent" | "thread.link.add" | "thread.link.remove" | "message.delete" | "model_favorites.set" | "turn.send" | "turn.steer" | "context.inject" | "turn.inbox_delete" | "turn.stop" | "turn.regenerate" | "turn.queue_resume" | "turn.queue_move" | "turn.queue_delete" | "approval.resolve" | "worker.start" | "worker.continue_solo" | "worker.stop";
+export type ControlCommandKindV1 = "thread.create" | "thread.rename" | "thread.archive" | "thread.delete" | "thread.set_model" | "thread.set_agent" | "thread.set_execution_settings" | "thread.link.add" | "thread.link.remove" | "message.delete" | "model_favorites.set" | "turn.send" | "turn.steer" | "context.inject" | "turn.inbox_delete" | "turn.stop" | "turn.regenerate" | "turn.queue_resume" | "turn.queue_move" | "turn.queue_delete" | "approval.resolve" | "worker.start" | "worker.continue_solo" | "worker.stop";
 
 export type ControlCommandV1 = { command_id: string, kind: ControlCommandKindV1, thread_id?: string, expected_revision?: number, payload: JsonValue, confirmation_token?: string, };
 

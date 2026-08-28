@@ -6,6 +6,9 @@ use ts_rs::TS;
 
 pub const CONTROL_PROTOCOL_MIN: u16 = 1;
 pub const CONTROL_PROTOCOL_MAX: u16 = 1;
+pub const CONTROL_MAX_ATTACHMENTS: usize = 12;
+pub const CONTROL_MAX_ATTACHMENT_BYTES: u64 = 2 * 1024 * 1024;
+pub const CONTROL_MAX_ATTACHMENT_CONTENT_CHARS: usize = 128 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, TS)]
 pub struct ControlProtocolRangeV1 {
@@ -182,7 +185,7 @@ pub struct AgentSnapshotV1 {
     pub enabled_skills: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, TS)]
 pub struct ControlAttachmentV1 {
     pub id: String,
     pub name: String,
@@ -580,6 +583,9 @@ pub enum ControlCommandKindV1 {
     #[serde(rename = "thread.set_agent")]
     #[ts(rename = "thread.set_agent")]
     ThreadSetAgent,
+    #[serde(rename = "thread.set_execution_settings")]
+    #[ts(rename = "thread.set_execution_settings")]
+    ThreadSetExecutionSettings,
     #[serde(rename = "thread.link.add")]
     #[ts(rename = "thread.link.add")]
     ThreadLinkAdd,
@@ -642,6 +648,7 @@ impl ControlCommandKindV1 {
             Self::ThreadDelete => "thread.delete",
             Self::ThreadSetModel => "thread.set_model",
             Self::ThreadSetAgent => "thread.set_agent",
+            Self::ThreadSetExecutionSettings => "thread.set_execution_settings",
             Self::ThreadLinkAdd => "thread.link.add",
             Self::ThreadLinkRemove => "thread.link.remove",
             Self::MessageDelete => "message.delete",

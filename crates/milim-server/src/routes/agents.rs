@@ -1721,7 +1721,12 @@ fn agent_base_registry_with_memory(
         }
     }
     if let Some(store) = st.schedules.as_ref() {
-        register_schedule_tools(&mut reg, store.clone(), run_context.workspace.clone());
+        register_schedule_tools(
+            &mut reg,
+            store.clone(),
+            run_context.workspace.clone(),
+            run_context.privacy_mode.as_str(),
+        );
     }
     if let (Some(memory), Some(store)) = (memory.clone(), st.memory.as_ref()) {
         if memory.enabled {
@@ -3064,10 +3069,12 @@ pub(crate) fn register_schedule_tools(
     reg: &mut ToolRegistry,
     store: Arc<milim_automation::ScheduleStore>,
     workspace: Option<PathBuf>,
+    privacy: &str,
 ) {
     reg.register(Arc::new(ScheduleCreateTool {
         store: store.clone(),
         workspace: workspace.map(|path| path.to_string_lossy().to_string()),
+        privacy: privacy.to_string(),
     }));
     reg.register(Arc::new(ScheduleUpdateTool {
         store: store.clone(),
@@ -3081,6 +3088,7 @@ pub(crate) fn register_schedule_tools(
 struct ScheduleCreateTool {
     store: Arc<milim_automation::ScheduleStore>,
     workspace: Option<String>,
+    privacy: String,
 }
 
 struct ScheduleUpdateTool {
@@ -3225,7 +3233,7 @@ impl Tool for ScheduleCreateTool {
         let cron = trim_required_tool_arg(args.cron, "cron")?;
         let prompt = trim_required_tool_arg(args.prompt, "prompt")?;
         let model = provider_schedule_model(trim_required_tool_arg(args.model, "model")?)?;
-        let schedule = self.store.create_with_model_context(
+        let schedule = self.store.create_with_run_context(
             &name,
             &cron,
             trim_optional_agent_id(args.agent_id),
@@ -3234,6 +3242,8 @@ impl Tool for ScheduleCreateTool {
             args.attachments,
             args.enabled,
             self.workspace.clone(),
+            &self.privacy,
+            "local",
         )?;
         Ok(json!({ "ok": true, "schedule": schedule }))
     }
@@ -3339,6 +3349,8 @@ impl Tool for ScheduleUpdateTool {
             attachments,
             enabled: args.enabled.unwrap_or(current.enabled),
             workspace: current.workspace,
+            privacy: current.privacy,
+            timezone_mode: current.timezone_mode,
             created_unix: current.created_unix,
             last_run: current.last_run,
         })?;
@@ -4618,6 +4630,14 @@ pub(crate) struct CreateScheduleRequest {
     prompt: String,
     #[serde(default)]
     attachments: Vec<milim_automation::ScheduleAttachment>,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    workspace: RequestValue,
+    #[serde(default)]
+    privacy: Option<String>,
+    #[serde(default)]
+    timezone_mode: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -4631,10 +4651,14 @@ pub(crate) struct UpdateScheduleRequest {
     prompt: String,
     #[serde(default)]
     attachments: Vec<milim_automation::ScheduleAttachment>,
-    #[serde(default = "default_true")]
-    enabled: bool,
     #[serde(default)]
-    last_run: Option<i64>,
+    workspace: RequestValue,
+    #[serde(default)]
+    privacy: Option<String>,
+    #[serde(default)]
+    timezone_mode: Option<String>,
+    #[serde(default)]
+    enabled: Option<bool>,
 }
 
 fn provider_schedule_model(model: String) -> milim_core::Result<String> {
@@ -4656,6 +4680,33 @@ pub(crate) fn default_true() -> bool {
     true
 }
 
+fn schedule_json(schedule: milim_automation::Schedule) -> milim_core::Result<Value> {
+    let next_run_unix = milim_automation::schedule_next_run(&schedule)?;
+    let mut value = serde_json::to_value(schedule)
+        .map_err(|error| Error::Other(format!("serialize schedule: {error}")))?;
+    value
+        .as_object_mut()
+        .ok_or_else(|| Error::Other("serialized schedule is not an object".to_string()))?
+        .insert("next_run_unix".to_string(), json!(next_run_unix));
+    Ok(value)
+}
+
+fn schedule_workspace(
+    requested: RequestValue,
+    fallback: Option<String>,
+) -> milim_core::Result<Option<String>> {
+    match requested {
+        RequestValue::Missing => Ok(fallback),
+        RequestValue::Present(Value::Null) => Ok(None),
+        RequestValue::Present(Value::String(value)) => {
+            Ok(Some(value.trim().to_string()).filter(|value| !value.is_empty()))
+        }
+        RequestValue::Present(_) => Err(Error::InvalidRequest(
+            "workspace must be a string or null".to_string(),
+        )),
+    }
+}
+
 /// `GET /schedules` — list cron schedules.
 pub(crate) async fn schedules_list(
     State(st): State<AppState>,
@@ -4667,6 +4718,11 @@ pub(crate) async fn schedules_list(
         Some(store) => store.list().map_err(ApiError)?,
         None => Vec::new(),
     };
+    let schedules = schedules
+        .into_iter()
+        .map(schedule_json)
+        .collect::<milim_core::Result<Vec<_>>>()
+        .map_err(ApiError)?;
     Ok(Json(json!({ "schedules": schedules })).into_response())
 }
 
@@ -4687,18 +4743,24 @@ pub(crate) async fn schedule_create(
         provider_schedule_model(trim_required_tool_arg(req.model, "model").map_err(ApiError)?)
             .map_err(ApiError)?;
     let schedule = store
-        .create_with_model_context(
+        .create_with_run_context(
             &req.name,
             &req.cron,
             req.agent_id,
             &model,
             &req.prompt,
             req.attachments,
-            true,
-            workspace_snapshot(&st).map(|path| path.to_string_lossy().to_string()),
+            req.enabled,
+            schedule_workspace(
+                req.workspace,
+                workspace_snapshot(&st).map(|path| path.to_string_lossy().to_string()),
+            )
+            .map_err(ApiError)?,
+            req.privacy.as_deref().unwrap_or("off"),
+            req.timezone_mode.as_deref().unwrap_or("local"),
         )
         .map_err(ApiError)?;
-    Ok(Json(schedule).into_response())
+    Ok(Json(schedule_json(schedule).map_err(ApiError)?).into_response())
 }
 
 /// `DELETE /schedules/{id}` — remove a schedule.
@@ -4720,6 +4782,12 @@ pub(crate) async fn schedule_update(
     let model =
         provider_schedule_model(trim_required_tool_arg(req.model, "model").map_err(ApiError)?)
             .map_err(ApiError)?;
+    let workspace =
+        schedule_workspace(req.workspace, current.workspace.clone()).map_err(ApiError)?;
+    let privacy = req.privacy.unwrap_or_else(|| current.privacy.clone());
+    let timezone_mode = req
+        .timezone_mode
+        .unwrap_or_else(|| current.timezone_mode.clone());
     let schedule = store
         .update(milim_automation::ScheduleUpdate {
             id: &id,
@@ -4729,13 +4797,15 @@ pub(crate) async fn schedule_update(
             model: &model,
             prompt: &req.prompt,
             attachments: req.attachments,
-            enabled: req.enabled,
-            workspace: current.workspace,
+            enabled: req.enabled.unwrap_or(current.enabled),
+            workspace,
+            privacy,
+            timezone_mode,
             created_unix: current.created_unix,
-            last_run: req.last_run,
+            last_run: current.last_run,
         })
         .map_err(ApiError)?;
-    Ok(Json(schedule).into_response())
+    Ok(Json(schedule_json(schedule).map_err(ApiError)?).into_response())
 }
 
 pub(crate) async fn schedule_delete(

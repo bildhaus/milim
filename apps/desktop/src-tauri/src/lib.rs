@@ -1639,6 +1639,10 @@ fn read_attachment_file_blocking(
             bytes.truncate(limit as usize);
         }
         content = Some(String::from_utf8_lossy(&bytes).into_owned());
+    } else {
+        return Err(format!(
+            "{name} is not a supported text or image attachment"
+        ));
     }
 
     Ok(AttachmentFilePayload {

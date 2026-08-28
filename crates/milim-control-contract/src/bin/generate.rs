@@ -54,6 +54,7 @@ fn generated_fixture() -> String {
         ControlCommandKindV1::ThreadDelete,
         ControlCommandKindV1::ThreadSetModel,
         ControlCommandKindV1::ThreadSetAgent,
+        ControlCommandKindV1::ThreadSetExecutionSettings,
         ControlCommandKindV1::ThreadLinkAdd,
         ControlCommandKindV1::ThreadLinkRemove,
         ControlCommandKindV1::MessageDelete,

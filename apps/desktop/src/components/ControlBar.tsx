@@ -243,7 +243,11 @@ export function ControlBar({
             <span className={`dot ${activeModelDot}`} />
             <ProviderIcon brand={providerBrandForModel(activeModel, providers)} />
             <span className="chip-label">{activeModelLabel || "Choose model"}</span>
-            {activeReasoningEffortLabel && <span className="chip-detail">{activeReasoningEffortLabel}</span>}
+            {(activeReasoningEffortLabel || activeModelProfile.laneLabel) && (
+              <span className="chip-detail">
+                {activeReasoningEffortLabel || activeModelProfile.laneLabel}
+              </span>
+            )}
             <ChevronDown size={12} className="chip-chev" />
           </button>
           {menu === "model" && (
@@ -329,21 +333,22 @@ export function ControlBar({
               onClick={() =>
                 setMenu((m) => (m === "context" ? null : "context"))
               }
-              title="Session controls"
+              title={`Privacy ${PRIVACY_LABEL[privacy]}, approval ${TOOL_APPROVAL_LABEL[toolApproval]}`}
               aria-label={contextAccessibleLabel}
-              aria-haspopup="menu"
+              aria-haspopup="dialog"
               aria-expanded={menu === "context"}
             >
               <Sliders size={13} />
               <span className="chip-label">
-                {TOOL_APPROVAL_LABEL[toolApproval]}
+                Privacy {PRIVACY_LABEL[privacy]}
               </span>
+              <span className="chip-detail">{TOOL_APPROVAL_LABEL[toolApproval]}</span>
               <ChevronDown size={12} className="chip-chev" />
             </button>
             {menu === "context" && (
               <div
                 className="context-menu"
-                role="menu"
+                role="dialog"
                 aria-label="Session controls"
               >
                 <button

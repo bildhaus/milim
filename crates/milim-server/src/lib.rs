@@ -696,11 +696,9 @@ pub async fn fire_due(state: &AppState, now_unix: i64) -> Result<usize> {
         jobs.spawn(async move {
             let _permit = limit.acquire_owned().await.ok();
             let schedule_id = occurrence.schedule.id.clone();
-            let handled = fire_schedule(state, occurrence).await?;
-            if handled {
-                schedules.mark_ran(&schedule_id, now_unix)?;
-            }
-            Ok::<bool, Error>(handled)
+            let outcome = fire_schedule(state, occurrence).await?;
+            schedules.mark_ran(&schedule_id, now_unix)?;
+            Ok::<ScheduleDispatchOutcome, Error>(outcome)
         });
     }
 
@@ -708,8 +706,8 @@ pub async fn fire_due(state: &AppState, now_unix: i64) -> Result<usize> {
     let mut first_error = None;
     while let Some(result) = jobs.join_next().await {
         match result {
-            Ok(Ok(true)) => fired += 1,
-            Ok(Ok(false)) => {}
+            Ok(Ok(ScheduleDispatchOutcome::TurnAccepted)) => fired += 1,
+            Ok(Ok(ScheduleDispatchOutcome::FailureRecorded)) => {}
             Ok(Err(error)) => {
                 tracing::warn!("scheduled run dispatch failed: {error}");
                 first_error.get_or_insert(error);
@@ -726,7 +724,16 @@ pub async fn fire_due(state: &AppState, now_unix: i64) -> Result<usize> {
     }
 }
 
-async fn fire_schedule(state: AppState, occurrence: milim_automation::DueSchedule) -> Result<bool> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScheduleDispatchOutcome {
+    TurnAccepted,
+    FailureRecorded,
+}
+
+async fn fire_schedule(
+    state: AppState,
+    occurrence: milim_automation::DueSchedule,
+) -> Result<ScheduleDispatchOutcome> {
     let schedule = &occurrence.schedule;
     let control = state.control.clone().ok_or_else(|| {
         Error::Other("scheduled runs require the canonical control manager".to_string())
@@ -772,7 +779,7 @@ async fn fire_schedule(state: AppState, occurrence: milim_automation::DueSchedul
                         "computerUse": false,
                         "sandbox": false,
                         "planMode": false,
-                        "privacy": "off"
+                        "privacy": schedule.privacy
                     },
                     "origin": origin,
                 }),
@@ -781,14 +788,16 @@ async fn fire_schedule(state: AppState, occurrence: milim_automation::DueSchedul
         )
         .await?;
     if created.status == ControlCommandStatusV1::Failed {
-        return Ok(false);
+        return Err(Error::Other(created.message.unwrap_or_else(|| {
+            "The scheduled run thread could not be created.".to_string()
+        })));
     }
 
     if let Err(error) =
         milim_automation::message_with_attachments(&schedule.prompt, &schedule.attachments)
     {
         control.record_schedule_error(&thread_id, &error.to_string())?;
-        return Ok(true);
+        return Ok(ScheduleDispatchOutcome::FailureRecorded);
     }
     let prompt = milim_automation::prompt_with_attachments(&schedule.prompt, &schedule.attachments);
 
@@ -832,8 +841,18 @@ async fn fire_schedule(state: AppState, occurrence: milim_automation::DueSchedul
                 .as_deref()
                 .unwrap_or("The scheduled turn could not be accepted."),
         )?;
+        return Ok(ScheduleDispatchOutcome::FailureRecorded);
     }
-    Ok(true)
+    if sent.status != ControlCommandStatusV1::Accepted {
+        control.record_schedule_error(
+            &thread_id,
+            sent.message
+                .as_deref()
+                .unwrap_or("The scheduled turn was not accepted."),
+        )?;
+        return Ok(ScheduleDispatchOutcome::FailureRecorded);
+    }
+    Ok(ScheduleDispatchOutcome::TurnAccepted)
 }
 
 /// Run the background scheduler loop (checks for due schedules every 30s).
@@ -891,16 +910,24 @@ mod tests {
             attachments: Vec::new(),
             enabled: true,
             workspace: None,
+            privacy: "off".to_string(),
+            timezone_mode: "utc".to_string(),
             created_unix: 0,
             last_run: None,
         };
 
-        assert!(fire_schedule(state.clone(), occurrence(schedule.clone()))
-            .await
-            .unwrap());
-        assert!(fire_schedule(state.clone(), occurrence(schedule))
-            .await
-            .unwrap());
+        assert_eq!(
+            fire_schedule(state.clone(), occurrence(schedule.clone()))
+                .await
+                .unwrap(),
+            ScheduleDispatchOutcome::TurnAccepted
+        );
+        assert_eq!(
+            fire_schedule(state.clone(), occurrence(schedule))
+                .await
+                .unwrap(),
+            ScheduleDispatchOutcome::TurnAccepted
+        );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let bootstrap = control.bootstrap(&state).await.unwrap();
@@ -937,11 +964,16 @@ mod tests {
             }],
             enabled: true,
             workspace: None,
+            privacy: "off".to_string(),
+            timezone_mode: "utc".to_string(),
             created_unix: 0,
             last_run: None,
         };
 
-        assert!(fire_schedule(state, occurrence(schedule)).await.unwrap());
+        assert_eq!(
+            fire_schedule(state, occurrence(schedule)).await.unwrap(),
+            ScheduleDispatchOutcome::FailureRecorded
+        );
         let timeline = control
             .timeline_page("schedule-legacy-image-3600", None, None, true, 20)
             .unwrap()

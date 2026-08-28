@@ -5171,18 +5171,31 @@ export interface ScheduleInfo {
   prompt: string;
   attachments?: ChatAttachment[];
   enabled: boolean;
+  workspace?: string | null;
+  privacy: PrivacyMode;
+  timezone_mode: "local" | "utc";
+  next_run_unix?: number | null;
   last_run?: number | null;
+}
+
+export async function listSchedulesStrict(): Promise<ScheduleInfo[]> {
+  const ctrl = new AbortController();
+  const timeout = setTimeout(() => ctrl.abort(), 2500);
+  try {
+    const response = await authFetch(`${BASE}/schedules`, { signal: ctrl.signal });
+    if (!response.ok) {
+      throw new Error(await responseErrorMessage(response, "Loading schedules failed."));
+    }
+    const body = await response.json();
+    return (body.schedules ?? []) as ScheduleInfo[];
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export async function listSchedules(): Promise<ScheduleInfo[]> {
   try {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 2500);
-    const r = await authFetch(`${BASE}/schedules`, { signal: ctrl.signal });
-    clearTimeout(t);
-    if (!r.ok) return [];
-    const j = await r.json();
-    return (j.schedules ?? []) as ScheduleInfo[];
+    return await listSchedulesStrict();
   } catch {
     return [];
   }
@@ -5195,32 +5208,34 @@ export async function createSchedule(s: {
   model: string;
   prompt: string;
   attachments?: ChatAttachment[];
-}): Promise<ScheduleInfo | null> {
-  try {
-    const r = await authFetch(`${BASE}/schedules`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(s),
-    });
-    return r.ok ? ((await r.json()) as ScheduleInfo) : null;
-  } catch {
-    return null;
+  enabled: boolean;
+  workspace?: string | null;
+  privacy: PrivacyMode;
+  timezone_mode: "local" | "utc";
+}): Promise<ScheduleInfo> {
+  const response = await authFetch(`${BASE}/schedules`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(s),
+  });
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response, "Creating schedule failed."));
   }
+  return (await response.json()) as ScheduleInfo;
 }
 
 export async function updateSchedule(
   s: ScheduleInfo,
-): Promise<ScheduleInfo | null> {
-  try {
-    const r = await authFetch(`${BASE}/schedules/${encodeURIComponent(s.id)}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(s),
-    });
-    return r.ok ? ((await r.json()) as ScheduleInfo) : null;
-  } catch {
-    return null;
+): Promise<ScheduleInfo> {
+  const response = await authFetch(`${BASE}/schedules/${encodeURIComponent(s.id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(s),
+  });
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response, "Updating schedule failed."));
   }
+  return (await response.json()) as ScheduleInfo;
 }
 
 export async function deleteSchedule(id: string): Promise<boolean> {

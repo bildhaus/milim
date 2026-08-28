@@ -1,4 +1,9 @@
 {
+  "0.2.59": {
+    "version": "0.2.59",
+    "summary": "Milim 0.2.59 makes canonical threads more reliable, gives scheduled work complete execution context, and makes runtime safety boundaries clearer before every turn.",
+    "items": []
+  },
   "0.2.58": {
     "version": "0.2.58",
     "summary": "Milim 0.2.58 makes mobile chat and model selection match desktop more closely and hardens macOS mobile-access persistence across restarts.",

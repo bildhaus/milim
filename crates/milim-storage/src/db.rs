@@ -2667,6 +2667,59 @@ impl UserDataStore {
         event_type: &str,
         event_data_json: &str,
     ) -> Result<(ControlTimelineRecord, ControlRunEventRecord)> {
+        self.control_commit_message_projection_and_event_inner(
+            thread_id,
+            run_id,
+            item_id,
+            message_json,
+            event_id,
+            step_id,
+            event_type,
+            event_data_json,
+            false,
+        )
+    }
+
+    /// Atomically adopt a renderer-persisted optimistic message when its ID
+    /// already exists, then append the canonical timeline and ledger records.
+    #[allow(clippy::too_many_arguments)]
+    pub fn control_adopt_message_projection_and_event(
+        &self,
+        thread_id: &str,
+        run_id: &str,
+        item_id: &str,
+        message_json: &str,
+        event_id: &str,
+        step_id: Option<&str>,
+        event_type: &str,
+        event_data_json: &str,
+    ) -> Result<(ControlTimelineRecord, ControlRunEventRecord)> {
+        self.control_commit_message_projection_and_event_inner(
+            thread_id,
+            run_id,
+            item_id,
+            message_json,
+            event_id,
+            step_id,
+            event_type,
+            event_data_json,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn control_commit_message_projection_and_event_inner(
+        &self,
+        thread_id: &str,
+        run_id: &str,
+        item_id: &str,
+        message_json: &str,
+        event_id: &str,
+        step_id: Option<&str>,
+        event_type: &str,
+        event_data_json: &str,
+        adopt_existing_message: bool,
+    ) -> Result<(ControlTimelineRecord, ControlRunEventRecord)> {
         let thread_id = required_control_text(thread_id, "thread id")?;
         let run_id = required_control_text(run_id, "run id")?;
         let item_id = required_control_text(item_id, "timeline item id")?;
@@ -2681,20 +2734,42 @@ impl UserDataStore {
         let conn = db.conn();
         conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
         let result = (|| -> Result<(ControlTimelineRecord, ControlRunEventRecord)> {
-            let message_index: i64 = conn
-                .query_row(
-                    "SELECT COALESCE(MAX(message_index), -1) + 1
-                     FROM user_session_messages WHERE session_id = ?1",
-                    params![thread_id],
-                    |row| row.get(0),
+            let existing_message_index = if adopt_existing_message {
+                conn.query_row(
+                    "SELECT message_index FROM user_session_messages
+                     WHERE session_id = ?1 AND json_extract(message_json, '$.id') = ?2
+                     ORDER BY message_index LIMIT 1",
+                    params![thread_id, item_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(sqlite)?
+            } else {
+                None
+            };
+            if let Some(message_index) = existing_message_index {
+                conn.execute(
+                    "UPDATE user_session_messages SET message_json = ?3
+                     WHERE session_id = ?1 AND message_index = ?2",
+                    params![thread_id, message_index, message_json],
                 )
                 .map_err(sqlite)?;
-            conn.execute(
-                "INSERT INTO user_session_messages
-                 (session_id, message_index, message_json) VALUES (?1, ?2, ?3)",
-                params![thread_id, message_index, message_json],
-            )
-            .map_err(sqlite)?;
+            } else {
+                let message_index: i64 = conn
+                    .query_row(
+                        "SELECT COALESCE(MAX(message_index), -1) + 1
+                         FROM user_session_messages WHERE session_id = ?1",
+                        params![thread_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(sqlite)?;
+                conn.execute(
+                    "INSERT INTO user_session_messages
+                     (session_id, message_index, message_json) VALUES (?1, ?2, ?3)",
+                    params![thread_id, message_index, message_json],
+                )
+                .map_err(sqlite)?;
+            }
 
             let (epoch, timeline_seq): (String, i64) = conn
                 .query_row(

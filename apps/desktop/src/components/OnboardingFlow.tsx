@@ -720,9 +720,16 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
       </div>
 
       <div className="onboarding-footer">
-        <button className="btn-ghost" type="button" onClick={dismiss}>
-          Skip for now
-        </button>
+        <div>
+          <button className="btn-ghost" type="button" onClick={dismiss}>
+            {selectedModelReady ? "Skip for now" : "Continue without a model"}
+          </button>
+          {!selectedModelReady && (
+            <p className="onboarding-path-note">
+              Chat stays disabled until you connect one. Use Manage models above the composer to resume setup.
+            </p>
+          )}
+        </div>
         <div className="onboarding-footer-actions">
           <button className="btn-accent" type="button" onClick={nextStep} disabled={step === "model" && !selectedModelReady}>
             <span>{step === "context" ? "Open Milim" : "Continue"}</span>

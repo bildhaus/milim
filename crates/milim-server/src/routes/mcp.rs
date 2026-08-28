@@ -236,7 +236,12 @@ impl Tool for MilimSkillReadTool {
 fn mcp_catalog_registry(st: &AppState) -> ToolRegistry {
     let mut registry = mcp_registry(st);
     if let Some(store) = st.schedules.as_ref() {
-        register_schedule_tools(&mut registry, store.clone(), workspace_snapshot(st));
+        register_schedule_tools(
+            &mut registry,
+            store.clone(),
+            workspace_snapshot(st),
+            st.privacy.mode().as_str(),
+        );
     }
     if let Some(store) = st.memory.as_ref() {
         registry.register(Arc::new(MemoryRegisterTool {
