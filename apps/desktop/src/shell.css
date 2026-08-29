@@ -1610,6 +1610,8 @@
   color: var(--secondary-text);
   font-size: 13px;
   border: 1px solid transparent;
+  -webkit-user-select: none;
+  user-select: none;
 }
 .session-item::before {
   content: "";
@@ -2039,6 +2041,8 @@
   font-size: 13px;
   padding: 3px 6px;
   outline: none;
+  -webkit-user-select: text;
+  user-select: text;
 }
 .session-empty {
   margin: 12px 8px;

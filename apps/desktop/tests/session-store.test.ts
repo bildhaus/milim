@@ -1840,6 +1840,25 @@ deepEqual(
   "opening an unread thread should mark it read",
 );
 useSessions.getState().switchTo(second);
+useSessions.getState().setHostBusySessionIds([first]);
+deepEqual(
+  useSessions.getState().unreadSessionIds,
+  [],
+  "a canonical background run should stay working until Rust reports it terminal",
+);
+useSessions.getState().setHostBusySessionIds([]);
+deepEqual(
+  useSessions.getState().unreadSessionIds,
+  [first],
+  "a canonical background run should become unread when Rust reports it terminal",
+);
+useSessions.getState().switchTo(first);
+deepEqual(
+  useSessions.getState().unreadSessionIds,
+  [],
+  "opening a canonically completed background thread should mark it read",
+);
+useSessions.getState().switchTo(second);
 const projectA = projectSectionId("C:\\workspace-a");
 useSessions.getState().toggleSessionPinned(first);
 deepEqual(

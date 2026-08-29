@@ -3536,6 +3536,7 @@ export type WorkerRunStatus =
   | "error";
 
 export interface AgentToolContext {
+  parent_model?: string;
   workspace?: string | null;
   privacy_mode?: PrivacyMode;
   tool_approval_policy?: ToolApprovalMode;
