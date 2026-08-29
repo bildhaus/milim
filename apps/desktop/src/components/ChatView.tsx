@@ -9023,10 +9023,18 @@ export function ChatView({
                 modeSwitcher={inspectorTabSwitcher}
                 onSettingsOpenChange={setWorkerSettingsOpen}
                 onPolicyChange={(next) =>
-                  updateThreadSettings(activeId, { delegationPolicy: next })
+                  void writeCanonicalExecutionSettings(
+                    activeId,
+                    { delegation_policy: next },
+                    { delegationPolicy: next },
+                  ).catch(() => {})
                 }
                 onWorkerModelChange={(next) =>
-                  updateThreadSettings(activeId, { workerModel: next })
+                  void writeCanonicalExecutionSettings(
+                    activeId,
+                    { worker_model: next },
+                    { workerModel: next },
+                  ).catch(() => {})
                 }
                 onStart={(runId) => void approveWorkerRun(runId)}
                 onStop={(runId) => void stopActiveWorkerRun(runId)}

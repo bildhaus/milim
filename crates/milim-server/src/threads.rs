@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
@@ -21,6 +21,19 @@ use milim_inference::SharedService;
 use milim_tools::ToolRegistry;
 
 const TOKEN_EVENT_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
+
+pub type ChildAgentStream = std::pin::Pin<Box<dyn Stream<Item = AgentEvent> + Send + 'static>>;
+pub type ChildStreamFactory =
+    Arc<dyn Fn(ChildRunSpec) -> Result<ChildAgentStream> + Send + Sync + 'static>;
+
+#[derive(Clone)]
+enum ChildRunSource {
+    Agent {
+        service: SharedService,
+        tools: Arc<ToolRegistry>,
+    },
+    Stream(ChildStreamFactory),
+}
 
 #[derive(Clone)]
 pub struct ThreadSupervisor {
@@ -121,6 +134,30 @@ impl ThreadSupervisor {
         tools: ToolRegistry,
         specs: Vec<ChildRunSpec>,
     ) -> Result<Vec<AgentThread>> {
+        self.spawn_batch_from(
+            ChildRunSource::Agent {
+                service,
+                tools: Arc::new(tools),
+            },
+            specs,
+        )
+    }
+
+    pub fn spawn_stream(
+        &self,
+        factory: ChildStreamFactory,
+        spec: ChildRunSpec,
+    ) -> Result<AgentThread> {
+        self.spawn_batch_from(ChildRunSource::Stream(factory), vec![spec])?
+            .pop()
+            .ok_or_else(|| Error::Other("worker batch created no worker".to_string()))
+    }
+
+    fn spawn_batch_from(
+        &self,
+        source: ChildRunSource,
+        specs: Vec<ChildRunSpec>,
+    ) -> Result<Vec<AgentThread>> {
         const MAX_ACTIVE_CHILDREN: usize = 16;
         const MAX_ACTIVE_CHILDREN_PER_PARENT: usize = 4;
         if specs.is_empty() || specs.len() > MAX_ACTIVE_CHILDREN_PER_PARENT {
@@ -150,7 +187,6 @@ impl ThreadSupervisor {
                 "at most {MAX_ACTIVE_CHILDREN_PER_PARENT} child threads may run for one parent"
             )));
         }
-        let tools = Arc::new(tools);
         let mut workers = Vec::with_capacity(specs.len());
         for spec in specs {
             let thread = self.store.create_worker(
@@ -189,10 +225,22 @@ impl ThreadSupervisor {
             let store = self.store.clone();
             let handles = self.handles.clone();
             let events = self.events.clone();
-            let service = service.clone();
-            let tools = tools.clone();
+            let source = source.clone();
             let handle = tokio::spawn(async move {
-                run_child_thread(store, events, service, tools, task_thread, spec).await;
+                let stream = match &source {
+                    ChildRunSource::Agent { service, tools } => {
+                        agent_child_stream(service.clone(), tools.clone(), spec.clone())
+                    }
+                    ChildRunSource::Stream(factory) => match factory(spec.clone()) {
+                        Ok(stream) => stream,
+                        Err(error) => Box::pin(futures::stream::once(async move {
+                            AgentEvent::Error {
+                                message: error.to_string(),
+                            }
+                        })),
+                    },
+                };
+                run_child_stream(store, events, stream, task_thread, spec).await;
                 let _ = handles.lock().map(|mut h| h.remove(&task_id));
             });
             active.insert(id, handle);
@@ -422,27 +470,36 @@ fn flush_token_event(
     emit_thread_event(store, events, thread, "token", json!({ "text": text }));
 }
 
-async fn run_child_thread(
-    store: Arc<ThreadStore>,
-    events: broadcast::Sender<SupervisorEvent>,
+fn agent_child_stream(
     service: SharedService,
     tools: Arc<ToolRegistry>,
-    mut thread: AgentThread,
     spec: ChildRunSpec,
-) {
+) -> ChildAgentStream {
     let mut messages = Vec::new();
-    if let Some(system_prompt) = spec.system_prompt.filter(|p| !p.trim().is_empty()) {
+    if let Some(system_prompt) = spec
+        .system_prompt
+        .as_deref()
+        .filter(|prompt| !prompt.trim().is_empty())
+    {
         messages.push(ChatMessage::text("system", system_prompt));
     }
     messages.push(ChatMessage::text(
         "system",
         "You are a Milim Worker. Complete only the delegated task and return a concise final report. Do not delegate more work.",
     ));
-    messages.push(ChatMessage::text("user", spec.prompt));
-
-    let mut stream = Box::pin(milim_agents::run_agent_stream(
+    messages.push(ChatMessage::text("user", &spec.prompt));
+    Box::pin(milim_agents::run_agent_stream(
         service, tools, spec.model, messages, None,
-    ));
+    ))
+}
+
+async fn run_child_stream(
+    store: Arc<ThreadStore>,
+    events: broadcast::Sender<SupervisorEvent>,
+    mut stream: ChildAgentStream,
+    mut thread: AgentThread,
+    spec: ChildRunSpec,
+) {
     let mut text = String::new();
     let mut final_text = None;
     let mut token_buffer = String::new();
@@ -669,6 +726,52 @@ mod tests {
         let stopped = waiter.await.unwrap();
 
         assert_eq!(stopped.status, THREAD_STATUS_STOPPED);
+    }
+
+    #[tokio::test]
+    async fn custom_worker_stream_uses_the_same_supervisor_lifecycle() {
+        let supervisor = supervisor();
+        let factory: ChildStreamFactory = Arc::new(|_| {
+            Ok(Box::pin(futures::stream::iter(vec![
+                AgentEvent::Token {
+                    text: "account result".to_string(),
+                },
+                AgentEvent::Final {
+                    content: "account result".to_string(),
+                },
+                AgentEvent::Done {
+                    iterations: 1,
+                    stopped_at_limit: false,
+                    usage: milim_core::api::openai::Usage::new(1, 2),
+                },
+            ])))
+        });
+        let worker = supervisor
+            .spawn_stream(
+                factory,
+                ChildRunSpec {
+                    parent_id: "parent-1".to_string(),
+                    title: "Account Worker".to_string(),
+                    model: "codex:gpt-5.6".to_string(),
+                    agent_id: None,
+                    system_prompt: None,
+                    prompt: "work".to_string(),
+                    run_id: None,
+                    runtime: WorkerRuntime::Managed,
+                    access: WorkerAccess::ReadOnly,
+                    worktree_path: None,
+                },
+            )
+            .unwrap();
+
+        let done = supervisor.wait(&worker.id, 10_000).await.unwrap().unwrap();
+        assert_eq!(done.status, THREAD_STATUS_DONE);
+        assert_eq!(done.summary.as_deref(), Some("account result"));
+        assert!(supervisor
+            .events(&worker.id, 10)
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "done"));
     }
 
     #[test]

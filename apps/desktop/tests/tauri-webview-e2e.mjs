@@ -17,6 +17,7 @@ const staticPreviewOnly = process.argv.includes("--static-preview-only");
 const browserProfileOnly = process.argv.includes("--browser-profile-only");
 const zoomOnly = process.argv.includes("--zoom-only");
 const microUiOnly = process.argv.includes("--micro-ui-only");
+const textSelectionOnly = process.argv.includes("--text-selection-only");
 const resizeHandlesOnly = process.argv.includes("--resize-handles-only");
 const workersOnly = process.argv.includes("--workers-only");
 const workerPreviewTabOnly = process.argv.includes("--worker-preview-tab-only");
@@ -270,6 +271,12 @@ try {
     await runAccountUsageTitleBarCheck(session.page);
     if (microUiOnly) await runMicroUiCheck(session.page);
     consoleErrors.push(...errors);
+  } else if (textSelectionOnly) {
+    const errors = collectErrors(session.page);
+    await session.page.getByTestId("chat-shell").waitFor();
+    await dismissOnboardingIfPresent(session.page);
+    await runTextSelectionPolicyCheck(session.page);
+    consoleErrors.push(...errors.filter((message) => !message.includes("/codex/models")));
   } else {
     consoleErrors.push(...(await runProfileSetup(session.page)));
     await session.page.screenshot({ path: screenshots.profiles, fullPage: false });
@@ -3776,17 +3783,27 @@ async function runTextSelectionPolicyCheck(page) {
     nestedControl.textContent = "Message action";
     copyable.append(nestedControl);
     const input = document.createElement("input");
+    const sidebarThread = document.createElement("div");
+    sidebarThread.className = "session-item";
+    const sidebarThreadTitle = document.createElement("span");
+    sidebarThreadTitle.className = "session-title";
+    sidebarThreadTitle.textContent = "Sidebar thread";
+    const renameInput = document.createElement("input");
+    renameInput.className = "session-rename";
+    sidebarThread.append(sidebarThreadTitle, renameInput);
     const editable = document.createElement("div");
     editable.contentEditable = "true";
-    fixture.append(copyable, input, editable);
+    fixture.append(copyable, input, sidebarThread, editable);
     app.append(fixture);
 
     const result = {
       chrome: getComputedStyle(titlebar).userSelect,
+      sidebarThreadTitle: getComputedStyle(sidebarThreadTitle).userSelect,
       nestedControl: getComputedStyle(nestedControl).userSelect,
       copyable: getComputedStyle(copyable).userSelect,
       composer: getComputedStyle(composer).userSelect,
       input: getComputedStyle(input).userSelect,
+      renameInput: getComputedStyle(renameInput).userSelect,
       editable: getComputedStyle(editable).userSelect,
     };
     fixture.remove();
@@ -3795,10 +3812,12 @@ async function runTextSelectionPolicyCheck(page) {
 
   const expected = {
     chrome: "none",
+    sidebarThreadTitle: "none",
     nestedControl: "none",
     copyable: "text",
     composer: "text",
     input: "text",
+    renameInput: "text",
     editable: "text",
   };
   for (const [surface, value] of Object.entries(expected)) {

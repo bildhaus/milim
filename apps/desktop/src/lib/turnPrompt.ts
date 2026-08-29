@@ -99,6 +99,7 @@ export function buildTurnPromptContext({
   explicitSkillIds = [],
   goal,
   turnId,
+  parentModel,
   codexModel,
   claudeModel,
   accountRuntimeKind,
@@ -136,6 +137,7 @@ export function buildTurnPromptContext({
   explicitSkillIds?: string[];
   goal?: GoalSettings;
   turnId: string;
+  parentModel?: string;
   codexModel?: string | null;
   claudeModel?: string | null;
   accountRuntimeKind?: "codex" | "claude" | "opencode" | "pi";
@@ -266,6 +268,7 @@ export function buildTurnPromptContext({
     enabledSkills,
     runMemoryContext,
     toolContext: {
+      parent_model: parentModel,
       workspace: folder.trim() || null,
       privacy_mode: privacy,
       tool_approval_policy: toolApproval,
@@ -403,6 +406,7 @@ export async function prepareTurnPromptContext({
     explicitSkillIds: skillSelection.explicitIds,
     goal,
     turnId,
+    parentModel: model,
     codexModel,
     claudeModel,
     accountRuntimeKind,

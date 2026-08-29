@@ -1,4 +1,9 @@
 {
+  "0.2.61": {
+    "version": "0.2.61",
+    "summary": "Milim 0.2.61 lets managed Workers inherit Codex, Claude, OpenCode, and Pi runtimes directly, keeps completed background chats visibly unread, and prevents accidental sidebar title selection.",
+    "items": []
+  },
   "0.2.60": {
     "version": "0.2.60",
     "summary": "Milim now keeps desktop controls stable and compact, with reliable schedules, cleaner composer context, single-line linked chats, and scroll-safe source previews.",

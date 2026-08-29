@@ -2828,6 +2828,17 @@ export const useSessions = create<SessionState>()(
               return {};
             }
             const busy = new Set(next);
+            const unreadIds = new Set(st.unreadSessionIds);
+            for (const completedId of st.hostBusySessionIds) {
+              if (
+                !busy.has(completedId) &&
+                completedId !== st.activeId &&
+                st.sessions.some((session) => session.id === completedId)
+              ) {
+                unreadIds.add(completedId);
+              }
+            }
+            for (const busyId of busy) unreadIds.delete(busyId);
             return {
               sessions: st.sessions.map((session) =>
                 busy.has(session.id) && session.settledAt
@@ -2835,9 +2846,7 @@ export const useSessions = create<SessionState>()(
                   : session,
               ),
               hostBusySessionIds: next,
-              unreadSessionIds: st.unreadSessionIds.filter(
-                (unreadId) => !busy.has(unreadId),
-              ),
+              unreadSessionIds: Array.from(unreadIds),
             };
           }),
 

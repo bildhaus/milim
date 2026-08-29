@@ -45,6 +45,7 @@ pub(crate) struct AccountRuntimeMilimContext {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct AccountRuntimeToolContext {
+    parent_model: Option<String>,
     #[serde(default)]
     workspace: RequestValue,
     #[serde(default)]
@@ -125,7 +126,11 @@ pub(crate) fn account_runtime_tool_endpoint(
     };
     let memory = AgentMemoryContext {
         enabled: context.memory_context.memory_enabled,
-        model: model.to_string(),
+        model: context
+            .tool_context
+            .parent_model
+            .clone()
+            .unwrap_or_else(|| model.to_string()),
         thread_id: context.memory_context.thread_id.clone(),
         project_locator: context.memory_context.project_locator.clone(),
         project_label: context.memory_context.project_label.clone(),
@@ -2629,6 +2634,34 @@ fn worker_model_is_available(available: &[Model], model: &str) -> bool {
     }
 }
 
+fn account_runtime_worker_target(model: &str) -> Option<(&'static str, &str)> {
+    let model = model.trim();
+    for (adapter, prefix) in [
+        ("codex", "codex:"),
+        ("claude", "claude:"),
+        ("opencode", "opencode:"),
+        ("pi", "pi:"),
+    ] {
+        if model
+            .get(..prefix.len())
+            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
+        {
+            let runtime_model = model.get(prefix.len()..)?.trim();
+            return (!runtime_model.is_empty()).then_some((adapter, runtime_model));
+        }
+    }
+    None
+}
+
+fn resolve_account_runtime_worker_model(requested: &str, preferred_model: &str) -> Option<String> {
+    let requested = requested.trim();
+    if account_runtime_worker_target(requested).is_some() {
+        return Some(requested.to_string());
+    }
+    let (adapter, _) = account_runtime_worker_target(preferred_model)?;
+    (!requested.is_empty() && !requested.contains(':')).then(|| format!("{adapter}:{requested}"))
+}
+
 fn resolve_worker_model(
     available: &[Model],
     requested: &str,
@@ -2686,6 +2719,7 @@ fn resolve_worker_model(
 
 async fn resolve_worker_plan(
     state: &AppState,
+    run_context: &RunContext,
     parent_model: &str,
     worker_model: Option<&str>,
     tasks: Vec<DelegateWorkerTaskArgs>,
@@ -2695,7 +2729,7 @@ async fn resolve_worker_plan(
             "delegate_workers requires 1 to 4 independent tasks".to_string(),
         ));
     }
-    let available = state.service.list_models().await?;
+    let mut available = None;
     let mut plan = Vec::with_capacity(tasks.len());
     let mut system_prompts = Vec::with_capacity(tasks.len());
     for task in tasks {
@@ -2710,7 +2744,20 @@ async fn resolve_worker_plan(
             .map(str::trim)
             .filter(|v| !v.is_empty())
             .unwrap_or(preferred_model);
-        let model = resolve_worker_model(&available, requested_model, preferred_model)?;
+        let model = if let Some(model) =
+            resolve_account_runtime_worker_model(requested_model, preferred_model)
+        {
+            model
+        } else {
+            if available.is_none() {
+                available = Some(service_for_run(state, run_context).list_models().await?);
+            }
+            resolve_worker_model(
+                available.as_deref().unwrap_or_default(),
+                requested_model,
+                preferred_model,
+            )?
+        };
         let agent_id = trim_optional_agent_id(task.agent_id);
         let agent_snapshot = if let Some(agent_id) = agent_id.as_deref() {
             let store = state
@@ -2738,6 +2785,7 @@ async fn resolve_worker_plan(
             (!agent.system_prompt.trim().is_empty()).then(|| agent.system_prompt.clone())
         });
         let title = child_thread_title(task.title, &prompt);
+        let account_runtime = account_runtime_worker_target(&model).is_some();
         plan.push(milim_agents::WorkerPlanTask {
             id: uuid::Uuid::new_v4().to_string(),
             title,
@@ -2746,7 +2794,11 @@ async fn resolve_worker_plan(
             agent_id,
             agent_snapshot,
             model,
-            access: task.access.unwrap_or_default(),
+            access: if account_runtime {
+                milim_agents::WorkerAccess::ReadOnly
+            } else {
+                task.access.unwrap_or_default()
+            },
         });
         system_prompts.push(system_prompt);
     }
@@ -2819,6 +2871,134 @@ mod worker_model_tests {
                 .contains("not available")
         );
     }
+
+    #[test]
+    fn account_runtime_workers_inherit_runtime_without_reusing_provider_routing() {
+        assert_eq!(
+            resolve_account_runtime_worker_model("codex:gpt-5.6", "codex:gpt-5.6"),
+            Some("codex:gpt-5.6".to_string())
+        );
+        assert_eq!(
+            resolve_account_runtime_worker_model("gpt-5.5", "codex:gpt-5.6"),
+            Some("codex:gpt-5.5".to_string())
+        );
+        assert_eq!(
+            resolve_account_runtime_worker_model(
+                "provider:openrouter:openai/gpt-5.6",
+                "codex:gpt-5.6"
+            ),
+            None
+        );
+        assert_eq!(
+            account_runtime_worker_target("pi:openai-codex/gpt-5.3-codex"),
+            Some(("pi", "openai-codex/gpt-5.3-codex"))
+        );
+    }
+
+    #[tokio::test]
+    async fn account_runtime_worker_plan_freezes_inherited_runtime_as_read_only() {
+        let state = AppState::new(
+            Arc::new(milim_inference::test_backend::TestBackend::new()),
+            milim_core::config::ServerConfiguration::default(),
+        );
+        let (tasks, _) = resolve_worker_plan(
+            &state,
+            &RunContext {
+                workspace: None,
+                privacy_mode: crate::privacy::PrivacyMode::Off,
+            },
+            "opencode:openai/gpt-5.6",
+            None,
+            vec![DelegateWorkerTaskArgs {
+                prompt: "Inspect the code.".to_string(),
+                title: None,
+                role: None,
+                agent_id: None,
+                model: None,
+                access: Some(milim_agents::WorkerAccess::WriteReview),
+            }],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(tasks[0].model, "opencode:openai/gpt-5.6");
+        assert_eq!(tasks[0].access, milim_agents::WorkerAccess::ReadOnly);
+    }
+
+    #[test]
+    fn account_runtime_worker_request_uses_a_fresh_guarded_session() {
+        let spec = ChildRunSpec {
+            parent_id: "parent".to_string(),
+            title: "Worker".to_string(),
+            model: "claude:sonnet".to_string(),
+            agent_id: None,
+            system_prompt: Some("Inspect the implementation.".to_string()),
+            prompt: "Find the bug.".to_string(),
+            run_id: Some("run".to_string()),
+            runtime: milim_agents::WorkerRuntime::Managed,
+            access: milim_agents::WorkerAccess::ReadOnly,
+            worktree_path: None,
+        };
+        let (adapter, request) = account_worker_harness_request(
+            &spec,
+            &RunContext {
+                workspace: None,
+                privacy_mode: crate::privacy::PrivacyMode::Off,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(adapter, "claude");
+        assert_eq!(request.model, "sonnet");
+        assert_eq!(request.native_session_id, None);
+        assert_eq!(request.persist_session, Some(false));
+        assert_eq!(request.tool_approval_policy.as_deref(), Some("guarded"));
+        assert!(!request.interactive_tool_approval);
+        assert_eq!(
+            request
+                .milim_context
+                .as_ref()
+                .and_then(|value| value.pointer("/tool_context/delegation_policy"))
+                .and_then(Value::as_str),
+            Some("off")
+        );
+        assert_eq!(
+            request
+                .milim_context
+                .as_ref()
+                .and_then(|value| value.get("tool_mode"))
+                .and_then(Value::as_str),
+            Some("none")
+        );
+        assert!(request.prompt.contains("Do not delegate more work"));
+    }
+
+    #[tokio::test]
+    async fn account_runtime_worker_events_normalize_into_the_existing_worker_stream() {
+        use crate::account_runtime_events::{HarnessEvent, HarnessEventKind};
+        use serde_json::Map;
+
+        let mut delta = Map::new();
+        delta.insert("text".to_string(), Value::String("done".to_string()));
+        let stream: AccountHarnessStream = Box::pin(futures::stream::iter(vec![
+            HarnessEvent::new(HarnessEventKind::TextDelta, delta),
+            HarnessEvent::new(HarnessEventKind::TurnCompleted, Map::new()),
+        ]));
+        let events = account_worker_events(stream).collect::<Vec<_>>().await;
+
+        assert!(matches!(
+            events.first(),
+            Some(milim_agents::AgentEvent::Token { text }) if text == "done"
+        ));
+        assert!(matches!(
+            events.get(1),
+            Some(milim_agents::AgentEvent::Final { content }) if content == "done"
+        ));
+        assert!(matches!(
+            events.get(2),
+            Some(milim_agents::AgentEvent::Done { iterations: 1, .. })
+        ));
+    }
 }
 
 fn worker_specs(
@@ -2850,6 +3030,183 @@ fn worker_specs(
             }
         })
         .collect()
+}
+
+fn account_worker_harness_request(
+    spec: &ChildRunSpec,
+    run_context: &RunContext,
+) -> milim_core::Result<(String, HarnessRunRequest)> {
+    let (adapter, model) = account_runtime_worker_target(&spec.model).ok_or_else(|| {
+        Error::InvalidRequest(format!(
+            "worker model '{}' is not an account runtime",
+            spec.model
+        ))
+    })?;
+    let mut instructions = vec![
+        "You are a Milim Worker. Complete only the delegated task and return a concise final report. Do not delegate more work. Your workspace access is read-only."
+            .to_string(),
+    ];
+    if let Some(system_prompt) = spec
+        .system_prompt
+        .as_deref()
+        .filter(|prompt| !prompt.trim().is_empty())
+    {
+        instructions.insert(0, system_prompt.to_string());
+    }
+    let prompt = format!(
+        "System instructions:\n{}\n\n{}",
+        instructions.join("\n\n"),
+        spec.prompt
+    );
+    Ok((
+        adapter.to_string(),
+        HarnessRunRequest {
+            prompt,
+            images: Vec::new(),
+            model: model.to_string(),
+            cwd: spec
+                .worktree_path
+                .clone()
+                .or_else(|| run_context.workspace_text()),
+            reasoning_effort: None,
+            native_session_id: None,
+            persist_session: Some(false),
+            tool_approval_policy: Some("guarded".to_string()),
+            tool_approval_grant: false,
+            interactive_tool_approval: false,
+            plan_mode: false,
+            allow_session_recovery: false,
+            milim_context: Some(json!({
+                "tool_context": {
+                    "parent_model": spec.model,
+                    "workspace": run_context.workspace_text(),
+                    "privacy_mode": run_context.privacy_mode.as_str(),
+                    "tool_approval_policy": "guarded",
+                    "delegation_policy": "off",
+                },
+                "tool_mode": "none",
+                "skill_mode": "auto",
+            })),
+        },
+    ))
+}
+
+fn account_worker_agent_stream(
+    state: &AppState,
+    run_context: &RunContext,
+    spec: ChildRunSpec,
+) -> milim_core::Result<crate::threads::ChildAgentStream> {
+    let (adapter, request) = account_worker_harness_request(&spec, run_context)?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        HOST,
+        HeaderValue::from_str(&format!("127.0.0.1:{}", state.config.port))
+            .map_err(|error| Error::Other(format!("invalid Worker host header: {error}")))?,
+    );
+    let stream =
+        account_harness_stream(state, &headers, &adapter, request).map_err(|error| error.0)?;
+    Ok(Box::pin(account_worker_events(stream)))
+}
+
+fn account_worker_events(
+    mut stream: AccountHarnessStream,
+) -> impl futures::Stream<Item = milim_agents::AgentEvent> + Send {
+    async_stream::stream! {
+        let mut content = String::new();
+        let mut usage = Usage::new(0, 0);
+        let mut terminal = false;
+        while let Some(event) = stream.next().await {
+            let value = serde_json::to_value(event).unwrap_or_else(|error| {
+                json!({"type":"turn_failed","message":format!("serialize Worker harness event: {error}")})
+            });
+            if let Some(next_usage) = value
+                .get("usage")
+                .filter(|value| !value.is_null())
+                .and_then(|value| serde_json::from_value::<Usage>(value.clone()).ok())
+            {
+                usage = next_usage;
+                yield milim_agents::AgentEvent::UsageDelta { usage: next_usage };
+            }
+            match value.get("type").and_then(Value::as_str).unwrap_or_default() {
+                "text_delta" => {
+                    if let Some(text) = value.get("text").and_then(Value::as_str) {
+                        content.push_str(text);
+                        yield milim_agents::AgentEvent::Token { text: text.to_string() };
+                    }
+                }
+                "reasoning_delta" => {
+                    if let Some(text) = value.get("text").and_then(Value::as_str) {
+                        yield milim_agents::AgentEvent::Reasoning { text: text.to_string() };
+                    }
+                }
+                "tool_started" => {
+                    let call_id = value.get("id").and_then(Value::as_str).map(str::to_string);
+                    let name = value.get("name").and_then(Value::as_str).unwrap_or("tool").to_string();
+                    let arguments = value
+                        .get("arguments")
+                        .or_else(|| value.get("input"))
+                        .map(|value| value.as_str().map(str::to_string).unwrap_or_else(|| value.to_string()))
+                        .unwrap_or_else(|| "{}".to_string());
+                    yield milim_agents::AgentEvent::ToolCall {
+                        call_id,
+                        name,
+                        arguments,
+                        mcp_app: None,
+                    };
+                }
+                "tool_finished" => {
+                    let call_id = value.get("id").and_then(Value::as_str).map(str::to_string);
+                    let name = value.get("name").and_then(Value::as_str).unwrap_or("tool").to_string();
+                    let result = value
+                        .get("result")
+                        .or_else(|| value.get("output"))
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    yield milim_agents::AgentEvent::ToolResult {
+                        call_id,
+                        name,
+                        result,
+                        mcp_app: None,
+                        mcp_app_result: None,
+                    };
+                }
+                "turn_completed" => {
+                    if content.trim().is_empty() {
+                        content = value
+                            .get("content")
+                            .or_else(|| value.get("text"))
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                    }
+                    yield milim_agents::AgentEvent::Final { content: content.clone() };
+                    yield milim_agents::AgentEvent::Done {
+                        iterations: 1,
+                        stopped_at_limit: false,
+                        usage,
+                    };
+                    terminal = true;
+                    break;
+                }
+                "turn_failed" | "turn_cancelled" => {
+                    let message = value
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("account-runtime Worker failed")
+                        .to_string();
+                    yield milim_agents::AgentEvent::Error { message };
+                    terminal = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        if !terminal {
+            yield milim_agents::AgentEvent::Error {
+                message: "account-runtime Worker ended without a terminal event".to_string(),
+            };
+        }
+    }
 }
 
 fn managed_worker_context(workspace: Option<&FsPath>, base: Option<&str>) -> Option<String> {
@@ -2927,7 +3284,15 @@ pub(crate) async fn start_managed_worker_run(
         } else {
             tools.read_only()
         };
-        workers.push(supervisor.spawn(service.clone(), worker_tools, spec)?);
+        if account_runtime_worker_target(&spec.model).is_some() {
+            let state = state.clone();
+            let run_context = run_context.clone();
+            let factory: crate::threads::ChildStreamFactory =
+                Arc::new(move |spec| account_worker_agent_stream(&state, &run_context, spec));
+            workers.push(supervisor.spawn_stream(factory, spec)?);
+        } else {
+            workers.push(supervisor.spawn(service.clone(), worker_tools, spec)?);
+        }
     }
     Ok((running, workers))
 }
@@ -3003,6 +3368,7 @@ impl Tool for DelegateWorkersTool {
         let parent_id = child_thread_parent_id(&self.context)?;
         let (mut tasks, _) = resolve_worker_plan(
             &self.state,
+            &self.run_context,
             &self.context.model,
             self.context.worker_model.as_deref(),
             args.tasks,
@@ -4189,9 +4555,15 @@ pub(crate) async fn worker_run_create(
                 ))
             })?
     };
-    let (mut tasks, _) = resolve_worker_plan(&st, &default_model, req.model.as_deref(), req.tasks)
-        .await
-        .map_err(ApiError)?;
+    let (mut tasks, _) = resolve_worker_plan(
+        &st,
+        &run_context,
+        &default_model,
+        req.model.as_deref(),
+        req.tasks,
+    )
+    .await
+    .map_err(ApiError)?;
     for task in &mut tasks {
         task.access = milim_agents::WorkerAccess::ReadOnly;
     }
@@ -4370,6 +4742,7 @@ pub(crate) async fn worker_run_task_retry(
         .unwrap_or(&task.model);
     let (tasks, _) = resolve_worker_plan(
         &st,
+        &run_context,
         &task.model,
         None,
         vec![DelegateWorkerTaskArgs {

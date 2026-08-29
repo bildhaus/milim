@@ -2652,6 +2652,8 @@ impl RunManager {
                     "sandbox",
                     "computer_use",
                     "plan_mode",
+                    "delegation_policy",
+                    "worker_model",
                 ];
                 let payload = command.payload.as_object().ok_or_else(|| {
                     Error::InvalidRequest("execution settings payload must be an object".into())
@@ -2721,6 +2723,23 @@ impl RunManager {
                         )));
                     }
                     settings.insert("toolApproval".into(), Value::String(value.to_string()));
+                }
+                if let Some(value) = payload.get("delegation_policy") {
+                    let value = value.as_str().ok_or_else(|| {
+                        Error::InvalidRequest("delegation_policy must be a supported string".into())
+                    })?;
+                    if !matches!(value, "off" | "ask" | "auto") {
+                        return Err(Error::InvalidRequest(format!(
+                            "unsupported delegation policy: {value}"
+                        )));
+                    }
+                    settings.insert("delegationPolicy".into(), Value::String(value.to_string()));
+                }
+                if let Some(value) = payload.get("worker_model") {
+                    let value = value.as_str().ok_or_else(|| {
+                        Error::InvalidRequest("worker_model must be a string".into())
+                    })?;
+                    settings.insert("workerModel".into(), Value::String(value.to_string()));
                 }
                 if workspace_changed {
                     settings.insert("toolApproval".into(), Value::String("review".to_string()));
@@ -4125,6 +4144,7 @@ impl RunManager {
             allow_session_recovery: false,
             milim_context: Some(json!({
                 "tool_context": {
+                    "parent_model": format!("{}:{}", accepted.config.adapter, accepted.config.model),
                     "workspace": accepted.config.workspace,
                     "privacy_mode": accepted.config.privacy,
                     "tool_approval_policy": accepted.config.approval_mode,
@@ -7548,6 +7568,71 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(resolve_frozen_config(&state, &manager.store, &thread, vec![]).is_err());
+    }
+
+    #[tokio::test]
+    async fn execution_patch_persists_worker_routing_and_inheritance() {
+        let (manager, state) = manager_and_state();
+        let created = manager
+            .command(
+                state.clone(),
+                None,
+                create_command("create-worker-routing", "test-echo"),
+            )
+            .await
+            .unwrap();
+        let selected = manager
+            .command(
+                state.clone(),
+                None,
+                ControlCommandV1 {
+                    command_id: "set-worker-routing".into(),
+                    kind: ControlCommandKindV1::ThreadSetExecutionSettings,
+                    thread_id: Some("thread-fixture".into()),
+                    expected_revision: created.revision,
+                    payload: json!({
+                        "delegation_policy": "auto",
+                        "worker_model": "provider:worker:model"
+                    }),
+                    confirmation_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(selected.status, ControlCommandStatusV1::Applied);
+
+        let thread = manager
+            .store
+            .control_thread("thread-fixture")
+            .unwrap()
+            .unwrap();
+        let frozen = resolve_frozen_config(&state, &manager.store, &thread, vec![]).unwrap();
+        assert_eq!(frozen.delegation_policy, "auto");
+        assert_eq!(frozen.worker_model, "provider:worker:model");
+
+        let inherited = manager
+            .command(
+                state.clone(),
+                None,
+                ControlCommandV1 {
+                    command_id: "inherit-worker-routing".into(),
+                    kind: ControlCommandKindV1::ThreadSetExecutionSettings,
+                    thread_id: Some("thread-fixture".into()),
+                    expected_revision: selected.revision,
+                    payload: json!({"worker_model": ""}),
+                    confirmation_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(inherited.status, ControlCommandStatusV1::Applied);
+        let thread = manager
+            .store
+            .control_thread("thread-fixture")
+            .unwrap()
+            .unwrap();
+        let frozen = resolve_frozen_config(&state, &manager.store, &thread, vec![]).unwrap();
+        assert_eq!(frozen.worker_model, "");
     }
 
     #[tokio::test]

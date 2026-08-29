@@ -810,6 +810,11 @@ assert.equal(searched.at(-1)?.model, undefined, "account-runtime memory search s
 assert.equal(selectedQueries.at(-1)?.query, "use account runtime");
 assert.equal(accountPrepared.accountRuntimeMayUseTools, true);
 assert.equal(
+  accountPrepared.toolContext.parent_model,
+  "codex:gpt-5",
+  "account-runtime tools should retain the parent runtime-qualified model",
+);
+assert.equal(
   accountPrepared.toolContext.preview_runtime_key,
   previewRuntimeKeyForThread("s6", "C:\\repo"),
 );
