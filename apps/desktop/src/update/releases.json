@@ -1,4 +1,9 @@
 {
+  "0.2.63": {
+    "version": "0.2.63",
+    "summary": "Milim 0.2.63 restores OpenCode and Pi launches when the desktop app starts with a minimal system PATH.",
+    "items": []
+  },
   "0.2.62": {
     "version": "0.2.62",
     "summary": "Milim 0.2.62 makes mobile conversations faster and leaner, streams paired-device attachments outside the JavaScript heap, and clarifies model and runtime controls.",
