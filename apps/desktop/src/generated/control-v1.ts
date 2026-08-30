@@ -4,7 +4,7 @@ export type JsonValue = null | boolean | number | string | JsonValue[] | { [key:
 
 export type ControlProtocolRangeV1 = { min: number, max: number, };
 
-export type ControlCapabilitiesV1 = { timeline_sync: boolean, queued_turns: boolean, approvals: boolean, agents: boolean, workers: boolean, attachments: boolean, websocket_tickets: boolean, lan_discovery: boolean, push_notifications: boolean, inline_branches: boolean, appearance_assets: boolean, run_ledger?: boolean, run_inspection?: boolean, effective_run_preview?: boolean, steering?: boolean, context_injection?: boolean, model_favorites?: boolean, thread_links?: boolean, thread_origins?: boolean, };
+export type ControlCapabilitiesV1 = { timeline_sync: boolean, queued_turns: boolean, approvals: boolean, agents: boolean, workers: boolean, attachments: boolean, websocket_tickets: boolean, lan_discovery: boolean, push_notifications: boolean, inline_branches: boolean, appearance_assets: boolean, attachment_uploads?: boolean, run_ledger?: boolean, run_inspection?: boolean, effective_run_preview?: boolean, steering?: boolean, context_injection?: boolean, model_favorites?: boolean, thread_links?: boolean, thread_origins?: boolean, };
 
 export type ThreadLinkV1 = { owner_thread_id: string, target_thread_id: string, target_title: string, target_workspace: string | null, target_project: string | null, target_model: string | null, target_runtime: string, target_archived_at_ms: number | null, target_busy: boolean, target_queued_turns: number, created_at_ms: number, };
 
@@ -20,7 +20,7 @@ export type AgentSummaryV1 = { id: string, name: string, description: string, av
 
 export type AgentSnapshotV1 = { id: string, name: string, description: string, avatar: string, system_prompt: string, tool_mode: string, enabled_tools: Array<string>, skill_mode: string, enabled_skills: Array<string>, };
 
-export type ControlAttachmentV1 = { id: string, name: string, mime: string, size: number, content?: string, data_url?: string, truncated: boolean, };
+export type ControlAttachmentV1 = { id: string, name: string, mime: string, size: number, content?: string, data_url?: string, upload_id?: string, truncated: boolean, };
 
 export type GenerationSettingsV1 = { max_tokens: number | null, temperature: number | null, top_p: number | null, seed: number | null, stop: Array<string>, frequency_penalty: number | null, presence_penalty: number | null, top_k: number | null, min_p: number | null, repetition_penalty: number | null, thinking_token_budget: number | null, };
 

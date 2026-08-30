@@ -126,6 +126,13 @@ assert.match(
   providersManager,
   /confirmRuntimeUpdate !== runtime[\s\S]*click Confirm update/,
 );
+assert.match(providersManager, /data-testid="account-runtimes-update-all"/);
+assert.match(
+  providersManager,
+  /for \(const \[index, runtime\] of targets\.entries\(\)\)[\s\S]*await updateAccountRuntime\(runtime\)/,
+);
+assert.match(providersManager, /"Confirm update all"/);
+assert.match(providersManager, /`Update all \(\$\{runtimeUpdateTargets\.length\}\)`/);
 assert.match(
   providersCss,
   /\.provider-account-card\s*\{[^}]*grid-template-columns:\s*minmax\(220px,\s*1fr\)\s+auto\s+auto;/,

@@ -3,6 +3,7 @@
     "agents": true,
     "appearance_assets": true,
     "approvals": true,
+    "attachment_uploads": true,
     "attachments": true,
     "context_injection": true,
     "effective_run_preview": true,

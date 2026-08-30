@@ -281,6 +281,23 @@
   background: transparent;
 }
 
+.provider-account-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.provider-account-head > .providers-section-head {
+  min-width: 0;
+}
+
+.provider-account-head > button {
+  min-height: 30px;
+  flex: none;
+  white-space: nowrap;
+}
+
 .provider-account-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -1261,6 +1278,15 @@
   .providers-detail-head,
   .provider-enabled-row {
     grid-template-columns: 1fr;
+  }
+
+  .provider-account-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .provider-account-head > button {
+    align-self: flex-start;
   }
 
   .provider-account-card {

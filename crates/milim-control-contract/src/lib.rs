@@ -32,6 +32,10 @@ pub struct ControlCapabilitiesV1 {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
+    pub attachment_uploads: Option<bool>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub run_ledger: Option<bool>,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -77,6 +81,7 @@ impl Default for ControlCapabilitiesV1 {
             push_notifications: false,
             inline_branches: false,
             appearance_assets: true,
+            attachment_uploads: Some(true),
             run_ledger: Some(true),
             run_inspection: Some(true),
             effective_run_preview: Some(true),
@@ -200,7 +205,17 @@ pub struct ControlAttachmentV1 {
     #[ts(optional)]
     pub data_url: Option<String>,
     #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub upload_id: Option<String>,
+    #[serde(default)]
     pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, TS)]
+pub struct ControlAttachmentUploadV1 {
+    pub upload_id: String,
+    pub expires_at_ms: i64,
 }
 
 /// Provider sampling controls frozen at turn acceptance time. Missing values

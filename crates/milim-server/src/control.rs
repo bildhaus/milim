@@ -35,6 +35,8 @@ const CONFIRMATION_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_CONTROL_ATTACHMENT_NAME_CHARS: usize = 140;
 const MAX_CONTROL_ATTACHMENT_MIME_CHARS: usize = 120;
 const MAX_CONTROL_ATTACHMENT_DATA_URL_CHARS: usize = 3 * 1024 * 1024;
+const CONTROL_ATTACHMENT_UPLOAD_TTL: Duration = Duration::from_secs(15 * 60);
+const CONTROL_MAX_PENDING_UPLOADS_PER_DEVICE: usize = 12;
 const APPEARANCE_STATE_KEY: &str = "milim.appearanceSnapshot";
 const CUSTOM_THEMES_STATE_KEY: &str = "milim.customThemes";
 const MAX_APPEARANCE_BACKGROUND_BYTES: usize = 8 * 1024 * 1024;
@@ -1257,6 +1259,18 @@ struct ConfirmationGrant {
 }
 
 #[derive(Clone)]
+struct PendingAttachmentUpload {
+    upload_id: String,
+    client_attachment_id: String,
+    device_id: String,
+    name: String,
+    mime: String,
+    bytes: Vec<u8>,
+    expires_at: Instant,
+    expires_at_ms: i64,
+}
+
+#[derive(Clone)]
 pub(crate) struct SocketTicket {
     pub device_key: Option<String>,
     pub expires_at: Instant,
@@ -1271,6 +1285,7 @@ pub struct RunManager {
     thread_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     confirmations: Mutex<HashMap<String, ConfirmationGrant>>,
     socket_tickets: Mutex<HashMap<String, SocketTicket>>,
+    attachment_uploads: Mutex<HashMap<String, PendingAttachmentUpload>>,
     events: broadcast::Sender<ControlEventV1>,
 }
 
@@ -1289,6 +1304,7 @@ impl RunManager {
             thread_locks: Mutex::new(HashMap::new()),
             confirmations: Mutex::new(HashMap::new()),
             socket_tickets: Mutex::new(HashMap::new()),
+            attachment_uploads: Mutex::new(HashMap::new()),
             events,
         });
         manager.backfill_message_timelines()?;
@@ -1989,6 +2005,94 @@ impl RunManager {
         tickets.remove(ticket)
     }
 
+    pub(crate) fn put_attachment_upload(
+        &self,
+        device_id: &str,
+        client_attachment_id: &str,
+        name: &str,
+        mime: &str,
+        declared_size: u64,
+        bytes: Vec<u8>,
+    ) -> Result<ControlAttachmentUploadV1> {
+        if client_attachment_id.trim().is_empty() || client_attachment_id.chars().count() > 200 {
+            return Err(Error::InvalidRequest(
+                "attachment upload IDs must contain 1 to 200 characters".into(),
+            ));
+        }
+        if name.trim().is_empty()
+            || name.chars().count() > MAX_CONTROL_ATTACHMENT_NAME_CHARS
+            || mime.trim().is_empty()
+            || mime.chars().count() > MAX_CONTROL_ATTACHMENT_MIME_CHARS
+        {
+            return Err(Error::InvalidRequest(
+                "attachment upload metadata is missing or too long".into(),
+            ));
+        }
+        if bytes.is_empty() || bytes.len() as u64 != declared_size {
+            return Err(Error::InvalidRequest(
+                "attachment upload size does not match its body".into(),
+            ));
+        }
+        if declared_size > CONTROL_MAX_ATTACHMENT_BYTES {
+            return Err(Error::InvalidRequest(format!(
+                "attachment {name} exceeds the 2 MiB limit"
+            )));
+        }
+
+        let now = Instant::now();
+        let mut uploads = self
+            .attachment_uploads
+            .lock()
+            .expect("control attachment upload store poisoned");
+        uploads.retain(|_, upload| upload.expires_at > now);
+        let existing = uploads.values().find(|upload| {
+            upload.device_id == device_id && upload.client_attachment_id == client_attachment_id
+        });
+        if let Some(existing) = existing {
+            if existing.name != name
+                || existing.mime != mime
+                || existing.bytes.as_slice() != bytes.as_slice()
+            {
+                return Err(Error::InvalidRequest(
+                    "an attachment upload ID cannot be reused for different content".into(),
+                ));
+            }
+            return Ok(ControlAttachmentUploadV1 {
+                upload_id: existing.upload_id.clone(),
+                expires_at_ms: existing.expires_at_ms,
+            });
+        }
+        if uploads
+            .values()
+            .filter(|upload| upload.device_id == device_id)
+            .count()
+            >= CONTROL_MAX_PENDING_UPLOADS_PER_DEVICE
+        {
+            return Err(Error::InvalidRequest(
+                "this device already has 12 pending attachment uploads".into(),
+            ));
+        }
+        let upload_id = Uuid::new_v4().to_string();
+        let expires_at_ms = now_ms() + CONTROL_ATTACHMENT_UPLOAD_TTL.as_millis() as i64;
+        uploads.insert(
+            upload_id.clone(),
+            PendingAttachmentUpload {
+                upload_id: upload_id.clone(),
+                client_attachment_id: client_attachment_id.to_string(),
+                device_id: device_id.to_string(),
+                name: name.to_string(),
+                mime: mime.to_string(),
+                bytes,
+                expires_at: now + CONTROL_ATTACHMENT_UPLOAD_TTL,
+                expires_at_ms,
+            },
+        );
+        Ok(ControlAttachmentUploadV1 {
+            upload_id,
+            expires_at_ms,
+        })
+    }
+
     pub async fn bootstrap(&self, state: &AppState) -> Result<ControlBootstrapV1> {
         let threads = self.store.control_threads()?;
         let queued = self.store.control_queued_turns(None)?;
@@ -2311,11 +2415,114 @@ impl RunManager {
         }))
     }
 
+    fn resolve_command_attachment_uploads(
+        &self,
+        device_id: Option<&str>,
+        command: &mut ControlCommandV1,
+    ) -> Result<Vec<String>> {
+        let Some(attachments) = command
+            .payload
+            .get_mut("attachments")
+            .and_then(Value::as_array_mut)
+        else {
+            return Ok(Vec::new());
+        };
+        let requested = attachments
+            .iter()
+            .filter_map(|attachment| {
+                attachment
+                    .get("upload_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect::<Vec<_>>();
+        if requested.is_empty() {
+            return Ok(Vec::new());
+        }
+        let device_id = device_id.ok_or_else(|| {
+            Error::Unauthorized("attachment uploads require a paired-device credential".into())
+        })?;
+        let uploads = {
+            let now = Instant::now();
+            let mut pending = self
+                .attachment_uploads
+                .lock()
+                .expect("control attachment upload store poisoned");
+            pending.retain(|_, upload| upload.expires_at > now);
+            requested
+                .iter()
+                .map(|upload_id| {
+                    pending.get(upload_id).cloned().ok_or_else(|| {
+                        Error::InvalidRequest(
+                            "an attachment upload expired; attach the file again".into(),
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
+        for (attachment, upload) in attachments
+            .iter_mut()
+            .filter(|attachment| attachment.get("upload_id").is_some())
+            .zip(uploads.iter())
+        {
+            if upload.device_id != device_id {
+                return Err(Error::Unauthorized(
+                    "attachment upload belongs to another paired device".into(),
+                ));
+            }
+            let object = attachment
+                .as_object_mut()
+                .ok_or_else(|| Error::InvalidRequest("attachments must be JSON objects".into()))?;
+            let id = object.get("id").and_then(Value::as_str).unwrap_or_default();
+            let name = object
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let mime = object
+                .get("mime")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let size = object
+                .get("size")
+                .and_then(Value::as_u64)
+                .unwrap_or_default();
+            if id != upload.client_attachment_id
+                || name != upload.name
+                || mime != upload.mime
+                || size != upload.bytes.len() as u64
+            {
+                return Err(Error::InvalidRequest(
+                    "attachment upload metadata does not match the command".into(),
+                ));
+            }
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&upload.bytes);
+            object.insert(
+                "data_url".into(),
+                Value::String(format!("data:{};base64,{encoded}", upload.mime)),
+            );
+            object.remove("upload_id");
+        }
+        Ok(requested)
+    }
+
+    fn consume_attachment_uploads(&self, upload_ids: &[String]) {
+        if upload_ids.is_empty() {
+            return;
+        }
+        let mut pending = self
+            .attachment_uploads
+            .lock()
+            .expect("control attachment upload store poisoned");
+        for upload_id in upload_ids {
+            pending.remove(upload_id);
+        }
+    }
+
     pub async fn command(
         self: &Arc<Self>,
         state: AppState,
         device_id: Option<String>,
-        command: ControlCommandV1,
+        mut command: ControlCommandV1,
     ) -> Result<ControlCommandResultV1> {
         validate_command_id(&command.command_id)?;
         let command_lock = self.lock_for_command(&command.command_id);
@@ -2325,6 +2532,8 @@ impl RunManager {
                 Error::Other(format!("stored control command result is invalid: {error}"))
             });
         }
+        let attachment_upload_ids =
+            self.resolve_command_attachment_uploads(device_id.as_deref(), &mut command)?;
         if command.kind.destructive() && !self.consume_confirmation(&command) {
             return Ok(self.confirmation_result(&command));
         }
@@ -2369,6 +2578,14 @@ impl RunManager {
                 result_json,
                 created_at_ms: now_ms(),
             })?;
+        if matches!(
+            result.status,
+            ControlCommandStatusV1::Accepted
+                | ControlCommandStatusV1::Queued
+                | ControlCommandStatusV1::Applied
+        ) {
+            self.consume_attachment_uploads(&attachment_upload_ids);
+        }
         Ok(result)
     }
 
@@ -6736,6 +6953,7 @@ mod tests {
                         size: 5,
                         content: Some("hello".into()),
                         data_url: None,
+                        upload_id: None,
                         truncated: false,
                     }],
                 },
@@ -8063,6 +8281,7 @@ mod tests {
             size: CONTROL_MAX_ATTACHMENT_BYTES + 1,
             content: None,
             data_url: Some("data:image/png;base64,AA==".into()),
+            upload_id: None,
             truncated: false,
         };
         let error = validate_control_attachments(&[oversized]).unwrap_err();
@@ -8075,9 +8294,161 @@ mod tests {
             size: 0,
             content: None,
             data_url: None,
+            upload_id: None,
             truncated: false,
         };
         assert!(validate_control_attachments(&[empty]).is_err());
+    }
+
+    #[test]
+    fn paired_attachment_uploads_are_idempotent_owned_and_resolved_before_acceptance() {
+        let (manager, _) = manager_and_state();
+        let first = manager
+            .put_attachment_upload(
+                "device-a",
+                "attachment-1",
+                "pixel.png",
+                "image/png",
+                3,
+                vec![1, 2, 3],
+            )
+            .unwrap();
+        let repeated = manager
+            .put_attachment_upload(
+                "device-a",
+                "attachment-1",
+                "pixel.png",
+                "image/png",
+                3,
+                vec![1, 2, 3],
+            )
+            .unwrap();
+        assert_eq!(first, repeated);
+        let conflict = manager
+            .put_attachment_upload(
+                "device-a",
+                "attachment-1",
+                "pixel.png",
+                "image/png",
+                3,
+                vec![3, 2, 1],
+            )
+            .unwrap_err();
+        assert!(conflict.to_string().contains("different content"));
+
+        let command = || ControlCommandV1 {
+            command_id: "attachment-command".into(),
+            kind: ControlCommandKindV1::TurnSend,
+            thread_id: Some("thread-fixture".into()),
+            expected_revision: None,
+            payload: json!({
+                "text": "inspect",
+                "attachments": [{
+                    "id": "attachment-1",
+                    "name": "pixel.png",
+                    "mime": "image/png",
+                    "size": 3,
+                    "upload_id": first.upload_id,
+                    "truncated": false
+                }]
+            }),
+            confirmation_token: None,
+        };
+        let mut foreign = command();
+        let error = manager
+            .resolve_command_attachment_uploads(Some("device-b"), &mut foreign)
+            .unwrap_err();
+        assert!(error.to_string().contains("another paired device"));
+
+        let mut owned = command();
+        let resolved = manager
+            .resolve_command_attachment_uploads(Some("device-a"), &mut owned)
+            .unwrap();
+        assert_eq!(resolved, vec![first.upload_id]);
+        let attachment = &owned.payload["attachments"][0];
+        assert_eq!(attachment["data_url"], "data:image/png;base64,AQID");
+        assert!(attachment.get("upload_id").is_none());
+    }
+
+    #[test]
+    fn attachment_uploads_enforce_the_per_device_pending_limit() {
+        let (manager, _) = manager_and_state();
+        for index in 0..CONTROL_MAX_PENDING_UPLOADS_PER_DEVICE {
+            manager
+                .put_attachment_upload(
+                    "device-a",
+                    &format!("attachment-{index}"),
+                    "pixel.png",
+                    "image/png",
+                    1,
+                    vec![index as u8],
+                )
+                .unwrap();
+        }
+        let error = manager
+            .put_attachment_upload(
+                "device-a",
+                "attachment-over-limit",
+                "pixel.png",
+                "image/png",
+                1,
+                vec![255],
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("12 pending"));
+        manager
+            .put_attachment_upload(
+                "device-b",
+                "attachment-other-device",
+                "pixel.png",
+                "image/png",
+                1,
+                vec![255],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn expired_attachment_uploads_are_rejected_recoverably() {
+        let (manager, _) = manager_and_state();
+        let upload = manager
+            .put_attachment_upload(
+                "device-a",
+                "attachment-expired",
+                "pixel.png",
+                "image/png",
+                1,
+                vec![1],
+            )
+            .unwrap();
+        manager
+            .attachment_uploads
+            .lock()
+            .unwrap()
+            .get_mut(&upload.upload_id)
+            .unwrap()
+            .expires_at = Instant::now() - Duration::from_secs(1);
+        let mut command = ControlCommandV1 {
+            command_id: "expired-upload".into(),
+            kind: ControlCommandKindV1::TurnSend,
+            thread_id: Some("thread-fixture".into()),
+            expected_revision: None,
+            payload: json!({
+                "attachments": [{
+                    "id": "attachment-expired",
+                    "name": "pixel.png",
+                    "mime": "image/png",
+                    "size": 1,
+                    "upload_id": upload.upload_id,
+                    "truncated": false
+                }]
+            }),
+            confirmation_token: None,
+        };
+        let error = manager
+            .resolve_command_attachment_uploads(Some("device-a"), &mut command)
+            .unwrap_err();
+        assert!(error.to_string().contains("expired"));
     }
 
     #[tokio::test]

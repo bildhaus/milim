@@ -16,6 +16,7 @@ import {
   Platform,
   Pressable,
   ScrollView,
+  SectionList,
   StatusBar,
   StyleSheet,
   Text as NativeText,
@@ -29,9 +30,7 @@ import {
 } from 'react-native';
 import {SafeAreaProvider, SafeAreaView, useSafeAreaInsets} from 'react-native-safe-area-context';
 import Markdown, {MarkdownIt, type RenderRules} from 'react-native-markdown-display';
-import MaskedView from '@react-native-masked-view/masked-view';
 import Svg, {Defs, LinearGradient as SvgLinearGradient, Rect, Stop} from 'react-native-svg';
-import {Camera} from 'react-native-camera-kit';
 import {
   cleanupAttachments,
   cleanupStaleAttachments,
@@ -39,18 +38,18 @@ import {
   pickFiles,
   pickPhoto,
   promptWithAttachments,
-  wireAttachments,
 } from './src/attachments';
 import {MOBILE_MARKDOWN_OPTIONS} from './src/markdown';
 import {newCommandId} from './src/control/client';
 import type {RunEventPageV1, RunEventV1, RunInspectionV1} from './src/control/generated-v1';
 import {
-  projectTranscript,
+  projectTranscriptIncrementally,
   type ActivityStatus,
   type ProjectedActivityGroup,
   type ProjectedActivityIcon,
   type ProjectedActivityRow,
   type ProjectedTranscriptItem,
+  type TranscriptProjectionCache,
 } from './src/control/replica';
 import type {
   AppearanceSnapshotV1,
@@ -90,6 +89,7 @@ import {
   type MobilePalette,
   type MobileTheme,
 } from './src/theme';
+import {mobilePerfMark, mobilePerfMeasure, mobileStartupTiming} from './src/performance';
 import {
   canUseCompactComposer,
   friendlyEndpoint,
@@ -206,27 +206,38 @@ function DrawerBackdropFade() {
   );
 }
 
-function TranscriptFadeMask({bottomInset}: {bottomInset: Animated.AnimatedInterpolation<number>}) {
+function TranscriptFadeOverlay({
+  bottomInset,
+  color,
+}: {
+  bottomInset: Animated.AnimatedInterpolation<number>;
+  color: string;
+}) {
   return (
-    <View pointerEvents="none" style={StyleSheet.absoluteFill}>
-      <Animated.View style={[StyleSheet.absoluteFill, {bottom: bottomInset}]}>
-        <View style={stylesStatic.transcriptMaskOpaque} />
-        <Svg width="100%" height={TRANSCRIPT_FADE_HEIGHT}>
-          <Defs>
-            <SvgLinearGradient id="transcript-fade-mask" x1="0" y1="0" x2="0" y2="1">
-              <Stop offset="0" stopColor="#fff" stopOpacity="1" />
-              <Stop offset="1" stopColor="#fff" stopOpacity="0" />
-            </SvgLinearGradient>
-          </Defs>
-          <Rect width="100%" height={TRANSCRIPT_FADE_HEIGHT} fill="url(#transcript-fade-mask)" />
-        </Svg>
-      </Animated.View>
-    </View>
+    <Animated.View
+      pointerEvents="none"
+      style={[stylesStatic.transcriptFadeOverlay, {bottom: bottomInset}]}>
+      <Svg width="100%" height="100%">
+        <Defs>
+          <SvgLinearGradient id="transcript-fade-overlay" x1="0" y1="0" x2="0" y2="1">
+            <Stop offset="0" stopColor={color} stopOpacity="0" />
+            <Stop offset="1" stopColor={color} stopOpacity="0.96" />
+          </SvgLinearGradient>
+        </Defs>
+        <Rect width="100%" height="100%" fill="url(#transcript-fade-overlay)" />
+      </Svg>
+    </Animated.View>
   );
 }
 
 const stylesStatic = StyleSheet.create({
-  transcriptMaskOpaque: {flex: 1, backgroundColor: '#fff'},
+  transcriptFadeOverlay: {
+    position: 'absolute',
+    right: 0,
+    left: 0,
+    zIndex: 1,
+    height: TRANSCRIPT_FADE_HEIGHT,
+  },
 });
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
@@ -400,6 +411,33 @@ const stylesForMotion = StyleSheet.create({
   stage: {flex: 1},
 });
 
+mobilePerfMark('app.render.start');
+
+type MilimController = ReturnType<typeof useMilimController>;
+type ChatController = Pick<MilimController,
+  | 'activeHost'
+  | 'bootstrap'
+  | 'command'
+  | 'draft'
+  | 'execute'
+  | 'loadMoreRunEvents'
+  | 'loadRunDetails'
+  | 'prepareAttachments'
+  | 'refreshTimeline'
+  | 'selectedThreadId'
+  | 'setDraft'
+  | 'status'
+  | 'timeline'
+>;
+type HostsController = Pick<MilimController,
+  | 'activeHost'
+  | 'addManualHostCandidate'
+  | 'hosts'
+  | 'removeHost'
+  | 'setActiveHost'
+  | 'status'
+>;
+
 function App(): React.JSX.Element {
   const controller = useMilimController();
   const appearance = controller.bootstrap?.appearance;
@@ -417,6 +455,60 @@ function App(): React.JSX.Element {
     [controller.hosts],
   );
   const openThreads = useCallback(() => setThreadDrawerVisible(true), []);
+  const closeThreads = useCallback(() => setThreadDrawerVisible(false), []);
+  const openPairing = useCallback(() => setPairingVisible(true), []);
+  const returnToChat = useCallback(() => setScreen('chat'), []);
+  const {setSelectedThreadId} = controller;
+  const selectThread = useCallback((id: string) => {
+    mobilePerfMark('thread.open.start');
+    setSelectedThreadId(id);
+    setScreen('chat');
+    setThreadDrawerVisible(false);
+  }, [setSelectedThreadId]);
+  const chatController = useMemo<ChatController>(() => ({
+    activeHost: controller.activeHost,
+    bootstrap: controller.bootstrap,
+    command: controller.command,
+    draft: controller.draft,
+    execute: controller.execute,
+    loadMoreRunEvents: controller.loadMoreRunEvents,
+    loadRunDetails: controller.loadRunDetails,
+    prepareAttachments: controller.prepareAttachments,
+    refreshTimeline: controller.refreshTimeline,
+    selectedThreadId: controller.selectedThreadId,
+    setDraft: controller.setDraft,
+    status: controller.status,
+    timeline: controller.timeline,
+  }), [
+    controller.activeHost,
+    controller.bootstrap,
+    controller.command,
+    controller.draft,
+    controller.execute,
+    controller.loadMoreRunEvents,
+    controller.loadRunDetails,
+    controller.prepareAttachments,
+    controller.refreshTimeline,
+    controller.selectedThreadId,
+    controller.setDraft,
+    controller.status,
+    controller.timeline,
+  ]);
+  const hostsController = useMemo<HostsController>(() => ({
+    activeHost: controller.activeHost,
+    addManualHostCandidate: controller.addManualHostCandidate,
+    hosts: controller.hosts,
+    removeHost: controller.removeHost,
+    setActiveHost: controller.setActiveHost,
+    status: controller.status,
+  }), [
+    controller.activeHost,
+    controller.addManualHostCandidate,
+    controller.hosts,
+    controller.removeHost,
+    controller.setActiveHost,
+    controller.status,
+  ]);
   const threadDrawerEdgeGesture = useMemo(() => PanResponder.create({
     onMoveShouldSetPanResponderCapture: (_event, gestureState) => (
       !threadDrawerVisible &&
@@ -435,6 +527,9 @@ function App(): React.JSX.Element {
   }), [openThreads, threadDrawerVisible]);
 
   useEffect(() => {
+    mobilePerfMark('app.render.end');
+    mobilePerfMeasure('app.render', 'app.render.start', 'app.render.end');
+    void mobileStartupTiming();
     void cleanupStaleAttachments();
     void Linking.getInitialURL().then(url => {
       if (url) {
@@ -530,7 +625,7 @@ function App(): React.JSX.Element {
         <ThreadKeyboardAvoidingView enabled={screen === 'chat'}>
           <ScreenStage key={screen}>
           {screen === 'chat' ? (
-            <ChatScreen controller={controller} openThreads={openThreads} />
+            <ChatScreen controller={chatController} openThreads={openThreads} />
           ) : null}
           {screen === 'attention' ? (
             <AttentionScreen
@@ -543,9 +638,9 @@ function App(): React.JSX.Element {
           ) : null}
           {screen === 'hosts' ? (
             <HostsScreen
-              controller={controller}
-              onPair={() => setPairingVisible(true)}
-              onBack={() => setScreen('chat')}
+              controller={hostsController}
+              onPair={openPairing}
+              onBack={returnToChat}
             />
           ) : null}
           </ScreenStage>
@@ -558,14 +653,10 @@ function App(): React.JSX.Element {
           models={controller.bootstrap?.models ?? []}
           approvals={controller.bootstrap?.pending_approvals ?? []}
           selectedThreadId={controller.selectedThreadId}
-          onSelect={id => {
-            controller.setSelectedThreadId(id);
-            setScreen('chat');
-            setThreadDrawerVisible(false);
-          }}
+          onSelect={selectThread}
           command={controller.command}
           execute={controller.execute}
-          onClose={() => setThreadDrawerVisible(false)}
+          onClose={closeThreads}
         />
         <PairingModal
           visible={pairingVisible}
@@ -949,11 +1040,13 @@ function Scanner({visible, onClose, onRead}: {visible: boolean; onClose: () => v
       setAllowed(result === PermissionsAndroid.RESULTS.GRANTED);
     });
   }, [visible]);
+  if (!visible) return null;
+  const CameraView = require('react-native-camera-kit').Camera as typeof import('react-native-camera-kit').Camera;
   return (
     <Modal visible={visible} animationType="fade" onRequestClose={onClose}>
       <View style={styles.scanner}>
         {allowed ? (
-          <Camera
+          <CameraView
             style={StyleSheet.absoluteFill}
             scanBarcode
             showFrame
@@ -973,7 +1066,7 @@ function Scanner({visible, onClose, onRead}: {visible: boolean; onClose: () => v
   );
 }
 
-function ThreadDrawer({
+const ThreadDrawer = React.memo(function MemoizedThreadDrawer({
   visible,
   threads,
   models,
@@ -1018,6 +1111,10 @@ function ThreadDrawer({
   const groups = useMemo(() => groupMobileThreads(threads, approvalCounts), [approvalCounts, threads]);
   const visibleCount = groups.reduce((count, group) => count + group.threads.length, 0);
   const defaultModel = modelId(models[0]) ?? '';
+  const drawerSections = useMemo(() => groups.map(group => ({
+    group,
+    data: collapsedGroups[group.id] ? [] : group.threads,
+  })), [collapsedGroups, groups]);
 
   useEffect(() => {
     if (!visible || initializedGroups.current || !groups.length) return;
@@ -1133,11 +1230,21 @@ function ThreadDrawer({
                 <MilimIcon name="plus" size={17} color={palette.accentInk} />
               </MotionPressable>
             </View>
-            <ScrollView style={styles.drawerGroups} contentContainerStyle={styles.drawerGroupList}>
-              {groups.length ? groups.map(group => {
+            <SectionList
+              style={styles.drawerGroups}
+              contentContainerStyle={styles.drawerGroupList}
+              sections={drawerSections}
+              keyExtractor={item => item.id}
+              stickySectionHeadersEnabled={false}
+              initialNumToRender={18}
+              windowSize={7}
+              renderSectionFooter={() => <View style={styles.drawerGroupSeparator} />}
+              ListEmptyComponent={<Empty title="No threads yet" copy="Create one here or start from an Agent on desktop." />}
+              renderSectionHeader={({section}) => {
+                const group = section.group;
                 const collapsed = Boolean(collapsedGroups[group.id]);
                 return (
-                  <View key={group.id} style={styles.drawerGroup}>
+                  <View style={styles.drawerGroup}>
                     <View style={styles.drawerGroupHeader}>
                       <MotionPressable
                         style={styles.drawerGroupToggle}
@@ -1169,20 +1276,19 @@ function ThreadDrawer({
                         <Text style={styles.drawerProjectPath} selectable>{group.workspace}</Text>
                       </View>
                     ) : null}
-                    {!collapsed ? group.threads.map(item => (
-                      <ThreadCard
-                        key={item.id}
-                        thread={item}
-                        attentionCount={item.queued_turns + (approvalCounts[item.id] ?? 0)}
-                        selected={item.id === selectedThreadId}
-                        onOpen={() => onSelect(item.id)}
-                        onMenu={() => setActionsFor(item)}
-                      />
-                    )) : null}
                   </View>
                 );
-              }) : <Empty title="No threads yet" copy="Create one here or start from an Agent on desktop." />}
-            </ScrollView>
+              }}
+              renderItem={({item}) => (
+                <ThreadCard
+                  thread={item}
+                  attentionCount={item.queued_turns + (approvalCounts[item.id] ?? 0)}
+                  selected={item.id === selectedThreadId}
+                  onOpen={() => onSelect(item.id)}
+                  onMenu={() => setActionsFor(item)}
+                />
+              )}
+            />
           </SafeAreaView>
         </Animated.View>
       </View>
@@ -1251,7 +1357,7 @@ function ThreadDrawer({
       </SafeAreaProvider>
     </Modal>
   );
-}
+});
 
 function ThreadCard({thread, attentionCount, selected, onOpen, onMenu}: {thread: ThreadSummaryV1; attentionCount: number; selected: boolean; onOpen: () => void; onMenu: () => void}) {
   const {palette, styles} = useAppTheme();
@@ -1277,10 +1383,15 @@ function ThreadCard({thread, attentionCount, selected, onOpen, onMenu}: {thread:
   );
 }
 
-function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof useMilimController>; openThreads: () => void}) {
+const ChatScreen = React.memo(function MemoizedChatScreen({controller, openThreads}: {controller: ChatController; openThreads: () => void}) {
   const {markdownStyles, palette, styles} = useAppTheme();
   const reduced = useReducedMotion();
   const thread = controller.bootstrap?.threads.find(item => item.id === controller.selectedThreadId);
+  useEffect(() => {
+    if (!thread || controller.timeline?.threadId !== thread.id) return;
+    mobilePerfMark('thread.open.end');
+    mobilePerfMeasure('thread.open', 'thread.open.start', 'thread.open.end');
+  }, [controller.timeline?.threadId, thread]);
   const threadApprovals = useMemo(
     () => controller.bootstrap?.pending_approvals.filter(approval => approval.thread_id === thread?.id) ?? [],
     [controller.bootstrap?.pending_approvals, thread?.id],
@@ -1289,10 +1400,29 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
     () => controller.bootstrap?.pending_inputs.filter(input => input.thread_id === thread?.id) ?? [],
     [controller.bootstrap?.pending_inputs, thread?.id],
   );
-  const transcriptItems = useMemo(
-    () => projectTranscript(controller.timeline?.items ?? [], threadApprovals, threadPendingInputs),
-    [controller.timeline?.items, threadApprovals, threadPendingInputs],
-  );
+  const transcriptProjection = useRef<{
+    threadId: string | null;
+    epoch: string;
+    cache: TranscriptProjectionCache | null;
+  }>({threadId: null, epoch: '', cache: null});
+  const transcriptItems = useMemo(() => {
+    mobilePerfMark('transcript.project.start');
+    const timeline = controller.timeline;
+    const threadId = thread?.id ?? null;
+    const matchingTimeline = timeline?.threadId === threadId ? timeline : null;
+    const epoch = matchingTimeline?.epoch ?? '';
+    const previous = transcriptProjection.current;
+    const cache = projectTranscriptIncrementally(
+      previous.threadId === threadId && previous.epoch === epoch ? previous.cache : null,
+      matchingTimeline?.items ?? [],
+      threadApprovals,
+      threadPendingInputs,
+    );
+    mobilePerfMark('transcript.project.end');
+    mobilePerfMeasure('transcript.project', 'transcript.project.start', 'transcript.project.end');
+    transcriptProjection.current = {threadId, epoch, cache};
+    return cache.projected;
+  }, [controller.timeline, thread?.id, threadApprovals, threadPendingInputs]);
   const inspectableRunIds = useMemo(
     () => new Set(
       transcriptItems
@@ -1324,6 +1454,32 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
   const shouldScrollToLatest = useRef(true);
   const followingLatest = useRef(true);
   const returningToLatest = useRef(false);
+  const latestScrollFrame = useRef<number | null>(null);
+  const latestScrollAnimated = useRef(false);
+  const showLatestRef = useRef(false);
+  const awayFromLatestRef = useRef(false);
+  const scheduleLatestScroll = useCallback((animated: boolean) => {
+    latestScrollAnimated.current = latestScrollFrame.current === null
+      ? animated
+      : latestScrollAnimated.current && animated;
+    if (latestScrollFrame.current !== null) return;
+    latestScrollFrame.current = requestAnimationFrame(() => {
+      latestScrollFrame.current = null;
+      const shouldAnimate = latestScrollAnimated.current;
+      latestScrollAnimated.current = false;
+      messageList.current?.scrollToEnd({animated: shouldAnimate});
+    });
+  }, []);
+  const updateShowLatest = useCallback((value: boolean) => {
+    if (showLatestRef.current === value) return;
+    showLatestRef.current = value;
+    setShowLatest(value);
+  }, []);
+  const updateAwayFromLatest = useCallback((value: boolean) => {
+    if (awayFromLatestRef.current === value) return;
+    awayFromLatestRef.current = value;
+    setAwayFromLatest(value);
+  }, []);
   const modelsForPicker = useMemo(() => {
     const models = [...(controller.bootstrap?.models ?? [])];
     const ids = new Set(mobileModelOptions(models).map(model => model.id));
@@ -1382,14 +1538,13 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
     if ((!shouldScrollToLatest.current && !followingLatest.current) || !transcriptItems.length) return;
     const animated = !shouldScrollToLatest.current;
     shouldScrollToLatest.current = false;
-    const frame = requestAnimationFrame(() => messageList.current?.scrollToEnd({animated}));
-    return () => cancelAnimationFrame(frame);
-  }, [transcriptItems]);
+    scheduleLatestScroll(animated);
+  }, [scheduleLatestScroll, transcriptItems]);
 
   useEffect(() => {
     const keepLatestVisible = () => {
       if (!followingLatest.current) return;
-      requestAnimationFrame(() => messageList.current?.scrollToEnd({animated: false}));
+      scheduleLatestScroll(false);
     };
     const shown = Keyboard.addListener('keyboardDidShow', keepLatestVisible);
     const hidden = Keyboard.addListener('keyboardDidHide', keepLatestVisible);
@@ -1397,17 +1552,37 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
       shown.remove();
       hidden.remove();
     };
+  }, [scheduleLatestScroll]);
+
+  useEffect(() => () => {
+    if (latestScrollFrame.current !== null) cancelAnimationFrame(latestScrollFrame.current);
   }, []);
 
   useEffect(() => {
     shouldScrollToLatest.current = true;
     followingLatest.current = true;
     returningToLatest.current = false;
-    setShowLatest(false);
-    setAwayFromLatest(false);
+    updateShowLatest(false);
+    updateAwayFromLatest(false);
     setForcedComposerOpen(false);
     setInputFocused(false);
-  }, [thread?.id]);
+  }, [thread?.id, updateAwayFromLatest, updateShowLatest]);
+  const renderTranscriptItem = useCallback(({item}: {item: ProjectedTranscriptItem}) => (
+    <TranscriptItemView
+      item={item}
+      markdownStyles={markdownStyles}
+      execute={controller.execute}
+      runDetailsEnabled={item.kind === 'activity' && inspectableRunIds.has(item.runId)}
+      loadRunDetails={controller.loadRunDetails}
+      loadMoreRunEvents={controller.loadMoreRunEvents}
+    />
+  ), [
+    controller.execute,
+    controller.loadMoreRunEvents,
+    controller.loadRunDetails,
+    inspectableRunIds,
+    markdownStyles,
+  ]);
   if (!thread) {
     return <Empty title="Choose a thread" copy="Open the thread drawer to select or create a conversation." action="Open threads" onAction={openThreads} />;
   }
@@ -1422,12 +1597,13 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
     }
     setBusy(true);
     try {
+      const wireAttachments = await controller.prepareAttachments(attachments);
       await controller.command(
         'turn.send',
         {
           text: promptWithAttachments(controller.draft, attachments),
           display_text: controller.draft,
-          attachments: wireAttachments(attachments),
+          attachments: wireAttachments,
         } as unknown as JsonValue,
         thread.id,
         thread.revision,
@@ -1438,9 +1614,9 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
       shouldScrollToLatest.current = true;
       followingLatest.current = true;
       returningToLatest.current = false;
-      setShowLatest(false);
-      setAwayFromLatest(false);
-      requestAnimationFrame(() => messageList.current?.scrollToEnd({animated: !reduced}));
+      updateShowLatest(false);
+      updateAwayFromLatest(false);
+      scheduleLatestScroll(!reduced);
     } catch (error) {
       showError(error);
     } finally {
@@ -1455,13 +1631,14 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
     }
     setBusy(true);
     try {
+      const wireAttachments = await controller.prepareAttachments(attachments);
       await controller.command(
         'turn.steer',
         {
           run_id: activeRun.id,
           text: promptWithAttachments(controller.draft, attachments),
           display_text: controller.draft,
-          attachments: wireAttachments(attachments),
+          attachments: wireAttachments,
         } as unknown as JsonValue,
         thread.id,
       );
@@ -1506,16 +1683,16 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
         ) : null}
       </View>
       <View style={styles.chatBody}>
-        <MaskedView
-          style={styles.transcriptMask}
-          maskElement={<TranscriptFadeMask bottomInset={composerHeight} />}
-          androidRenderingMode="software">
+        <View style={styles.transcriptMask}>
         <FlatList
           ref={messageList}
           style={styles.messageList}
           contentContainerStyle={styles.messageContent}
           data={transcriptItems}
           keyExtractor={item => item.id}
+          windowSize={7}
+          maxToRenderPerBatch={6}
+          updateCellsBatchingPeriod={32}
           ListHeaderComponent={controller.timeline?.hasOlder ? (
             <MotionPressable
               style={[styles.historyControl, loadingOlder && styles.disabled]}
@@ -1534,7 +1711,7 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
           }}
           onContentSizeChange={() => {
             if (!followingLatest.current || !transcriptItems.length) return;
-            messageList.current?.scrollToEnd({animated: false});
+            scheduleLatestScroll(false);
           }}
           onScroll={({nativeEvent}) => {
             const distance = transcriptDistanceFromLatest({
@@ -1548,26 +1725,18 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
               if (!nearLatest) return;
               returningToLatest.current = false;
               followingLatest.current = true;
-              setShowLatest(false);
-              setAwayFromLatest(false);
+              updateShowLatest(false);
+              updateAwayFromLatest(false);
               return;
             }
             followingLatest.current = nearLatest;
-            setShowLatest(!nearLatest);
-            setAwayFromLatest(current => nextAwayFromLatest(current, distance));
+            updateShowLatest(!nearLatest);
+            updateAwayFromLatest(nextAwayFromLatest(awayFromLatestRef.current, distance));
           }}
-          renderItem={({item}) => (
-            <TranscriptItemView
-              item={item}
-              markdownStyles={markdownStyles}
-              execute={controller.execute}
-              runDetailsEnabled={item.kind === 'activity' && inspectableRunIds.has(item.runId)}
-              loadRunDetails={controller.loadRunDetails}
-              loadMoreRunEvents={controller.loadMoreRunEvents}
-            />
-          )}
+          renderItem={renderTranscriptItem}
         />
-        </MaskedView>
+        <TranscriptFadeOverlay bottomInset={composerHeight} color={palette.bg} />
+        </View>
         {showLatest ? (
           <Animated.View pointerEvents="box-none" style={[styles.latestDock, {bottom: composerHeight}]}>
             <MotionPressable
@@ -1575,9 +1744,9 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
               onPress={() => {
                 returningToLatest.current = !reduced;
                 followingLatest.current = true;
-                setShowLatest(false);
-                messageList.current?.scrollToEnd({animated: !reduced});
-                if (reduced) setAwayFromLatest(false);
+                updateShowLatest(false);
+                scheduleLatestScroll(!reduced);
+                if (reduced) updateAwayFromLatest(false);
               }}>
               <MilimIcon name="chevron-down" size={13} color={palette.secondary} />
               <Text style={styles.latestText}>Latest</Text>
@@ -1776,7 +1945,7 @@ function ChatScreen({controller, openThreads}: {controller: ReturnType<typeof us
       />
     </View>
   );
-}
+});
 
 function activityStatusLabel(status: ActivityStatus): string {
   switch (status) {
@@ -2007,7 +2176,7 @@ function ActivityGroup({
   );
 }
 
-function TranscriptItemView({
+const TranscriptItemView = React.memo(function MemoizedTranscriptItem({
   item,
   markdownStyles,
   execute,
@@ -2081,7 +2250,7 @@ function TranscriptItemView({
       </Markdown>
     </View>
   );
-}
+});
 
 function PickerChip({
   label,
@@ -2500,11 +2669,11 @@ function AgentPickerSheet({
 }) {
   const {palette, styles} = useAppTheme();
   const [query, setQuery] = useState('');
-  const filtered = agents.filter(agent =>
+  const filtered = useMemo(() => agents.filter(agent =>
     !query.trim() || [agent.name, agent.description, agent.id].some(value =>
       value.toLowerCase().includes(query.trim().toLowerCase()),
     ),
-  );
+  ), [agents, query]);
   useEffect(() => {
     if (!visible) setQuery('');
   }, [visible]);
@@ -2524,8 +2693,14 @@ function AgentPickerSheet({
           placeholderTextColor={palette.placeholder}
         />
       </View>
-      <ScrollView contentContainerStyle={styles.pickerList} keyboardShouldPersistTaps="handled">
-        {!query ? (
+      <FlatList
+        data={filtered}
+        keyExtractor={agent => agent.id}
+        contentContainerStyle={styles.pickerList}
+        keyboardShouldPersistTaps="handled"
+        initialNumToRender={12}
+        windowSize={7}
+        ListHeaderComponent={!query ? (
           <MotionPressable style={[styles.pickerRow, !selectedId && styles.pickerRowSelected]} onPress={() => onSelect('')}>
             <View style={styles.pickerRowIcon}>
               <MilimIcon name="x" size={14} color={palette.secondary} />
@@ -2537,10 +2712,9 @@ function AgentPickerSheet({
             {!selectedId ? <MilimIcon name="check" size={15} color={palette.accent} /> : null}
           </MotionPressable>
         ) : null}
-        {!filtered.length ? <Empty title="No matching Agents" copy="Agent names and descriptions are searchable here." /> : null}
-        {filtered.map(agent => (
+        ListEmptyComponent={<Empty title="No matching Agents" copy="Agent names and descriptions are searchable here." />}
+        renderItem={({item: agent}) => (
           <MotionPressable
-            key={agent.id}
             style={[styles.pickerRow, agent.id === selectedId && styles.pickerRowSelected]}
             onPress={() => onSelect(agent.id)}>
             <View style={[styles.pickerRowIcon, agent.id === selectedId && styles.pickerRowIconSelected]}>
@@ -2557,8 +2731,8 @@ function AgentPickerSheet({
               </Text>
             </View>
           </MotionPressable>
-        ))}
-      </ScrollView>
+        )}
+      />
     </PickerSheetFrame>
   );
 }
@@ -2681,12 +2855,12 @@ function ApprovalCard({approval, execute, inline = false}: {approval: PendingApp
   );
 }
 
-function HostsScreen({
+const HostsScreen = React.memo(function MemoizedHostsScreen({
   controller,
   onPair,
   onBack,
 }: {
-  controller: ReturnType<typeof useMilimController>;
+  controller: HostsController;
   onPair: () => void;
   onBack: () => void;
 }) {
@@ -2860,7 +3034,7 @@ function HostsScreen({
       </PickerSheetFrame>
     </View>
   );
-}
+});
 
 function Button({
   label,
@@ -3037,7 +3211,8 @@ function createStyles(theme: MobileTheme) {
   drawerCreateRow: {flexDirection: 'row', gap: 7, paddingHorizontal: 12, paddingTop: 11, paddingBottom: 8},
   drawerCreateButton: {width: 40, height: 40, borderRadius: 8, alignItems: 'center', justifyContent: 'center', backgroundColor: palette.accent},
   drawerGroups: {flex: 1},
-  drawerGroupList: {paddingHorizontal: 8, paddingTop: 2, paddingBottom: 20, gap: 8},
+  drawerGroupList: {paddingHorizontal: 8, paddingTop: 2, paddingBottom: 20},
+  drawerGroupSeparator: {height: 8},
   drawerGroup: {gap: 2},
   drawerGroupHeader: {minHeight: 48, flexDirection: 'row', alignItems: 'center'},
   drawerGroupToggle: {flex: 1, minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 7, paddingLeft: 6},

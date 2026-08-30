@@ -1,9 +1,10 @@
 use super::*;
 
 use crate::control::{
-    ControlCommandV1, ControlEventV1, EffectiveRunPreviewRequestV1, EffectiveRunPreviewV1,
-    RunEventPageV1, RunInspectionV1, RunManager, TimelinePageV1,
+    ControlAttachmentUploadV1, ControlCommandV1, ControlEventV1, EffectiveRunPreviewRequestV1,
+    EffectiveRunPreviewV1, RunEventPageV1, RunInspectionV1, RunManager, TimelinePageV1,
 };
+use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 
 fn control_manager(st: &AppState) -> Result<Arc<RunManager>, ApiError> {
@@ -79,6 +80,12 @@ pub(crate) struct ControlAppearanceBackgroundQuery {
 pub(crate) struct ControlRunEventsQuery {
     after_seq: Option<u64>,
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ControlAttachmentUploadQuery {
+    name: String,
+    size: u64,
 }
 
 /// `GET /control/v1/bootstrap`
@@ -189,6 +196,40 @@ pub(crate) async fn control_effective_run_preview(
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(Error::ModelNotFound(format!("thread {id}"))))?;
     Ok(Json(preview).into_response())
+}
+
+/// `PUT /control/v1/attachments/{id}` — stage one paired-device attachment
+/// without copying its binary payload through the React Native JavaScript heap.
+pub(crate) async fn control_attachment_upload(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<ControlAttachmentUploadQuery>,
+    headers: HeaderMap,
+    peer: Peer,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let identity = control_identity(&st, &headers, peer_addr(peer))?;
+    let device_id = identity.device_id.ok_or_else(|| {
+        ApiError(Error::Unauthorized(
+            "attachment uploads require a paired-device credential".to_string(),
+        ))
+    })?;
+    let mime = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/octet-stream");
+    let manager = control_manager(&st)?;
+    let upload: ControlAttachmentUploadV1 = manager
+        .put_attachment_upload(
+            &device_id,
+            &id,
+            &query.name,
+            mime,
+            query.size,
+            body.to_vec(),
+        )
+        .map_err(ApiError)?;
+    Ok(Json(upload).into_response())
 }
 
 /// `GET /control/v1/runs/{run_id}/events` — bounded, forward-only ledger

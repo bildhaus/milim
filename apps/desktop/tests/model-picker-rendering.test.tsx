@@ -216,6 +216,7 @@ try {
       model: "gpt-5-render",
       reasoningEffortByModel: { "gpt-5-render": "high" },
       providers,
+      toolIntent: true,
       onModel: () => {},
       sandbox: false,
       onToggleSandbox: () => {},
@@ -241,7 +242,9 @@ try {
   assert(controlBarMarkup.includes('data-testid="goal-mode-chip"'), "Goal mode should show its pill before a goal starts");
   assert(controlBarMarkup.includes(">Ready<"), "The pre-send Goal pill should communicate that it is ready");
   assert(controlBarMarkup.includes('data-provider-brand="openai"'), "The active model chip should render its provider icon");
-  assert(controlBarMarkup.includes('<span class="chip-detail">High</span>'), "The closed model chip should show a selected non-auto reasoning effort");
+  assert(controlBarMarkup.includes('<span class="chip-detail">OpenAI</span>'), "The closed model chip should show the selected provider route");
+  assert(!controlBarMarkup.includes('<span class="chip-detail">Milim tools</span>'), "The closed model chip should not replace provider identity with its execution lane");
+  assert(!controlBarMarkup.includes('<span class="chip-detail">High</span>'), "The closed model chip should keep reasoning effort in picker and accessible metadata");
   assert(controlBarMarkup.includes('<span class="chip-label">Guarded</span>'), "The closed session-controls pill should prioritize tool approval");
   assert(!controlBarMarkup.includes("Privacy Off</span>"), "The closed session-controls pill should not repeat privacy state");
 
@@ -276,8 +279,12 @@ try {
     }),
   );
   assert(
-    overriddenControlBarMarkup.includes('<span class="chip-detail">Low</span>'),
-    "The model chip should show this thread's effort override instead of the app-wide default",
+    overriddenControlBarMarkup.includes("reasoning effort Low"),
+    "The model chip should expose this thread's effort override in accessible metadata",
+  );
+  assert(
+    overriddenControlBarMarkup.includes('<span class="chip-detail">OpenAI</span>'),
+    "A reasoning override should not replace the closed chip's provider route",
   );
 
   const { providerBrandForModel, providerBrandForProvider } = (await server.ssrLoadModule(
