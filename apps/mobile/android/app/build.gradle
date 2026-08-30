@@ -57,7 +57,7 @@ react {
 /**
  * Set this to true to Run Proguard on Release builds to minify the Java bytecode.
  */
-def enableProguardInReleaseBuilds = false
+def enableProguardInReleaseBuilds = true
 
 /**
  * The preferred build flavor of JavaScriptCore (JSC)
@@ -72,7 +72,7 @@ def enableProguardInReleaseBuilds = false
  */
 def jscFlavor = 'io.github.react-native-community:jsc-android:2026004.+'
 def milimVersionCode = (System.getenv("MILIM_ANDROID_VERSION_CODE") ?: "1").toInteger()
-def milimVersionName = System.getenv("MILIM_MOBILE_VERSION") ?: "0.2.61"
+def milimVersionName = System.getenv("MILIM_MOBILE_VERSION") ?: "0.2.62"
 
 android {
     ndkVersion rootProject.ext.ndkVersion
@@ -112,6 +112,7 @@ android {
                 signingConfig signingConfigs.release
             }
             minifyEnabled enableProguardInReleaseBuilds
+            shrinkResources enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
         }
     }

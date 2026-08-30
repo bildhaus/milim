@@ -27,7 +27,6 @@ export function controlEventInvalidatesBootstrap(eventType: string): boolean {
     eventType === 'appearance.updated' ||
     eventType === 'models.updated' ||
     eventType === 'model_favorites.updated' ||
-    eventType === 'timeline.appended' ||
     eventType === 'sync.required';
 }
 
@@ -93,31 +92,66 @@ export function applyControlEvent(
   event: ControlEventV1,
   expectedHostId: string,
 ): TimelineReplica {
-  if (event.host_id !== expectedHostId) return current;
-  if (event.type === 'sync.required') {
-    return {...current, needsTailRefresh: true};
+  return applyControlEvents(current, [event], expectedHostId);
+}
+
+export function applyControlEvents(
+  current: TimelineReplica,
+  events: ControlEventV1[],
+  expectedHostId: string,
+): TimelineReplica {
+  let epoch = current.epoch;
+  let lastSeq = current.lastSeq;
+  let needsTailRefresh = current.needsTailRefresh;
+  let appended: TimelineItemV1[] | null = null;
+
+  for (const event of events) {
+    if (event.host_id !== expectedHostId) continue;
+    if (event.type === 'sync.required') {
+      needsTailRefresh = true;
+      continue;
+    }
+    if (event.type !== 'timeline.appended' || event.thread_id !== current.threadId) continue;
+    const item = (event.data as {item?: TimelineItemV1})?.item;
+    if (!item || (epoch && item.epoch !== epoch) || (event.epoch && epoch && event.epoch !== epoch)) {
+      needsTailRefresh = true;
+      continue;
+    }
+    if (lastSeq !== null && item.seq > lastSeq + 1) {
+      needsTailRefresh = true;
+      continue;
+    }
+    // Timeline coordinates are immutable. Replayed socket events are common
+    // after reconnect and do not need a full Map allocation or resort. A
+    // changed payload at an existing coordinate is exceptional and must be
+    // reconciled from the authoritative tail.
+    if (lastSeq !== null && item.seq <= lastSeq) {
+      const existing = current.items.find(candidate => candidate.seq === item.seq);
+      if (existing && (
+        existing.id !== item.id ||
+        existing.epoch !== item.epoch ||
+        existing.type !== item.type ||
+        existing.run_id !== item.run_id ||
+        existing.created_at_ms !== item.created_at_ms ||
+        JSON.stringify(existing.data) !== JSON.stringify(item.data)
+      )) needsTailRefresh = true;
+      continue;
+    }
+    appended ??= [];
+    appended.push(item);
+    epoch = item.epoch;
+    lastSeq = item.seq;
   }
-  if (event.type !== 'timeline.appended' || event.thread_id !== current.threadId) {
-    return current;
-  }
-  if (current.epoch && event.epoch && current.epoch !== event.epoch) {
-    return {...current, needsTailRefresh: true};
-  }
-  if (event.seq !== undefined && current.lastSeq !== null && event.seq > current.lastSeq + 1) {
-    return {...current, needsTailRefresh: true};
-  }
-  const data = event.data as {item?: TimelineItemV1};
-  if (!data?.item) {
-    return {...current, needsTailRefresh: true};
-  }
-  const items = uniqueSorted([...current.items, data.item]);
+
+  if (!appended?.length && needsTailRefresh === current.needsTailRefresh) return current;
+  const items = appended?.length ? [...current.items, ...appended] : current.items;
   return {
     ...current,
-    epoch: data.item.epoch,
+    epoch,
     firstSeq: items.at(0)?.seq ?? null,
     lastSeq: items.at(-1)?.seq ?? null,
     items,
-    needsTailRefresh: false,
+    needsTailRefresh,
   };
 }
 
@@ -533,6 +567,7 @@ export function projectTranscript(
   const modelChanges: ProjectedModelChange[] = [];
   const modelChangeState: {pending: ProjectedModelChange | null} = {pending: null};
   const pendingById = new Map(pendingApprovals.map(approval => [approval.id, approval]));
+  const latestAtByRun = new Map<string, number>();
 
   const groupFor = (item: TimelineItemV1) => {
     if (!item.run_id) return null;
@@ -552,6 +587,7 @@ export function projectTranscript(
   };
 
   for (const item of items) {
+    if (item.run_id) latestAtByRun.set(item.run_id, item.created_at_ms);
     const data = asRecord(item.data) ?? {};
     if (item.type === 'message' && data.role === 'user') {
       if (
@@ -774,7 +810,7 @@ export function projectTranscript(
       group.terminalStatus = 'completed';
       group.completedAtMs = Math.max(
         group.startedAtMs,
-        ...items.filter(item => item.run_id === group.runId).map(item => item.created_at_ms),
+        latestAtByRun.get(group.runId) ?? group.startedAtMs,
       );
     }
     const orderedRows = [...group.rows].sort((a, b) => a.seq - b.seq);
@@ -810,6 +846,180 @@ export function projectTranscript(
   return [...visibleMessages, ...modelChanges, ...projectedGroups, ...approvals.values()].sort(
     (a, b) => a.seq - b.seq,
   );
+}
+
+export interface TranscriptProjectionCache {
+  timelineItems: TimelineItemV1[];
+  projected: ProjectedTranscriptItem[];
+  runFirstSeq: Map<string, number>;
+  pendingModelSeq: number | null;
+  pendingApprovalsKey: string;
+  pendingInputsKey: string;
+}
+
+function pendingApprovalsKey(values: PendingApprovalV1[]): string {
+  return JSON.stringify(values);
+}
+
+function pendingInputsKey(values: PendingInputV1[]): string {
+  return JSON.stringify(values);
+}
+
+function projectionState(items: TimelineItemV1[]) {
+  const runFirstSeq = new Map<string, number>();
+  let pendingModelSeq: number | null = null;
+  for (const item of items) {
+    if (item.run_id && !runFirstSeq.has(item.run_id)) runFirstSeq.set(item.run_id, item.seq);
+    const data = asRecord(item.data);
+    if (item.type === 'message' && data?.role === 'user') pendingModelSeq = null;
+    if (item.type === 'model_changed' && pendingModelSeq === null) pendingModelSeq = item.seq;
+  }
+  return {runFirstSeq, pendingModelSeq};
+}
+
+function sameProjectionItem(
+  previous: ProjectedTranscriptItem,
+  next: ProjectedTranscriptItem,
+): boolean {
+  if (previous.kind !== next.kind || previous.id !== next.id) return false;
+  if (previous.kind === 'message' && next.kind === 'message') {
+    return previous.role === next.role && previous.content === next.content &&
+      previous.reasoning === next.reasoning && previous.runId === next.runId &&
+      previous.ledgerVersion === next.ledgerVersion && previous.steering === next.steering &&
+      previous.steeringInboxId === next.steeringInboxId &&
+      previous.steeringPending === next.steeringPending && previous.seq === next.seq &&
+      previous.mailboxLabel === next.mailboxLabel && previous.mailboxStatus === next.mailboxStatus;
+  }
+  if (previous.kind === 'model-change' && next.kind === 'model-change') {
+    return previous.seq === next.seq && previous.previousModel === next.previousModel &&
+      previous.model === next.model;
+  }
+  if (previous.kind === 'approval' && next.kind === 'approval') {
+    return previous.runId === next.runId && previous.seq === next.seq &&
+      previous.status === next.status && previous.label === next.label &&
+      previous.detail === next.detail && previous.approval?.id === next.approval?.id &&
+      previous.approval?.status === next.approval?.status;
+  }
+  if (previous.kind === 'activity' && next.kind === 'activity') {
+    if (previous.runId !== next.runId || previous.seq !== next.seq ||
+      previous.status !== next.status || previous.label !== next.label ||
+      previous.detail !== next.detail || previous.duration !== next.duration ||
+      previous.rows.length !== next.rows.length) return false;
+    return previous.rows.every((row, index) => {
+      const candidate = next.rows[index];
+      return row.id === candidate.id && row.kind === candidate.kind && row.seq === candidate.seq &&
+        row.label === candidate.label && row.detail === candidate.detail &&
+        row.status === candidate.status && row.icon === candidate.icon &&
+        row.additions === candidate.additions && row.deletions === candidate.deletions;
+    });
+  }
+  return false;
+}
+
+function stabilizeProjection(
+  previous: ProjectedTranscriptItem[],
+  next: ProjectedTranscriptItem[],
+): ProjectedTranscriptItem[] {
+  const previousById = new Map(previous.map(item => [item.id, item]));
+  let changed = previous.length !== next.length;
+  const stable = next.map((item, index) => {
+    const candidate = previousById.get(item.id);
+    if (candidate && sameProjectionItem(candidate, item)) {
+      if (previous[index] !== candidate) changed = true;
+      return candidate;
+    }
+    changed = true;
+    return item;
+  });
+  return changed ? stable : previous;
+}
+
+function firstIndexAtOrAfter(items: TimelineItemV1[], seq: number): number {
+  let low = 0;
+  let high = items.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (items[middle].seq < seq) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+export function projectTranscriptIncrementally(
+  previous: TranscriptProjectionCache | null,
+  items: TimelineItemV1[],
+  pendingApprovals: PendingApprovalV1[] = [],
+  pendingInputs: PendingInputV1[] = [],
+): TranscriptProjectionCache {
+  const approvalsKey = pendingApprovalsKey(pendingApprovals);
+  const inputsKey = pendingInputsKey(pendingInputs);
+  const appendOnly = Boolean(
+    previous &&
+    items.length >= previous.timelineItems.length &&
+    (previous.timelineItems.length === 0 ||
+      items[previous.timelineItems.length - 1] === previous.timelineItems.at(-1)),
+  );
+  const pendingChanged = !previous || previous.pendingApprovalsKey !== approvalsKey ||
+    previous.pendingInputsKey !== inputsKey;
+  const appendedItems = previous && appendOnly
+    ? items.slice(previous.timelineItems.length)
+    : items;
+  const requiresFullProjection = !previous || !appendOnly || pendingChanged ||
+    appendedItems.some(item => item.type === 'message_deleted');
+
+  if (requiresFullProjection) {
+    const state = projectionState(items);
+    const projected = projectTranscript(items, pendingApprovals, pendingInputs);
+    return {
+      timelineItems: items,
+      projected: previous ? stabilizeProjection(previous.projected, projected) : projected,
+      ...state,
+      pendingApprovalsKey: approvalsKey,
+      pendingInputsKey: inputsKey,
+    };
+  }
+  if (!appendedItems.length) return previous;
+
+  const runFirstSeq = new Map(previous.runFirstSeq);
+  let pendingModelSeq = previous.pendingModelSeq;
+  let boundarySeq = appendedItems[0].seq;
+  for (const item of appendedItems) {
+    if (item.run_id) {
+      const firstSeq = runFirstSeq.get(item.run_id) ?? item.seq;
+      runFirstSeq.set(item.run_id, firstSeq);
+      boundarySeq = Math.min(boundarySeq, firstSeq);
+    }
+    const data = asRecord(item.data);
+    if (item.type === 'model_changed') {
+      pendingModelSeq ??= item.seq;
+      boundarySeq = Math.min(boundarySeq, pendingModelSeq);
+    } else if (item.type === 'message' && data?.role === 'user') {
+      if (pendingModelSeq !== null) boundarySeq = Math.min(boundarySeq, pendingModelSeq);
+      pendingModelSeq = null;
+    }
+    if (APPROVAL_EVENTS.has(item.type)) {
+      const id = approvalId(data ?? {});
+      const existing = previous.projected.find(candidate => candidate.id === `approval-${id}`);
+      if (existing) boundarySeq = Math.min(boundarySeq, existing.seq);
+    }
+  }
+
+  const suffixIndex = firstIndexAtOrAfter(items, boundarySeq);
+  const prefix = previous.projected.filter(item => item.seq < boundarySeq);
+  const affectedApprovals = pendingApprovals.filter(approval => {
+    const firstSeq = approval.run_id ? runFirstSeq.get(approval.run_id) : undefined;
+    return firstSeq === undefined || firstSeq >= boundarySeq;
+  });
+  const suffix = projectTranscript(items.slice(suffixIndex), affectedApprovals, pendingInputs);
+  const projected = stabilizeProjection(previous.projected, [...prefix, ...suffix]);
+  return {
+    timelineItems: items,
+    projected,
+    runFirstSeq,
+    pendingModelSeq,
+    pendingApprovalsKey: approvalsKey,
+    pendingInputsKey: inputsKey,
+  };
 }
 
 export function projectMessages(items: TimelineItemV1[]): ProjectedMessage[] {

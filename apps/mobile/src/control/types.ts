@@ -25,6 +25,7 @@ export interface ControlCapabilitiesV1 {
   push_notifications: boolean;
   inline_branches: boolean;
   appearance_assets?: boolean;
+  attachment_uploads?: boolean;
   run_ledger?: boolean;
   run_inspection?: boolean;
   effective_run_preview?: boolean;
@@ -111,6 +112,7 @@ export interface ControlAttachmentV1 {
   size: number;
   content?: string;
   data_url?: string;
+  upload_id?: string;
   truncated?: boolean;
   /** Client-only path removed after send/cancel/cleanup. */
   local_uri?: string;

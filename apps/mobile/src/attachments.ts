@@ -1,7 +1,7 @@
 import ReactNativeBlobUtil from 'react-native-blob-util';
-import {pick, keepLocalCopy} from '@react-native-documents/picker';
-import {launchCamera, launchImageLibrary} from 'react-native-image-picker';
 import type {ControlAttachmentV1} from './control/types';
+import {normalizeEndpoint} from './control/client';
+import {mobilePerfMark, mobilePerfMeasure} from './performance';
 import {
   forgetTemporaryFile,
   staleTemporaryFiles,
@@ -49,18 +49,17 @@ async function fromLocalFile(
       local_uri: uri,
     };
   }
-  const base64 = await ReactNativeBlobUtil.fs.readFile(path, 'base64');
   return {
     id: id(),
     name,
     mime,
     size: actualSize,
-    data_url: `data:${mime};base64,${base64}`,
     local_uri: uri,
   };
 }
 
 export async function pickFiles(): Promise<ControlAttachmentV1[]> {
+  const {pick, keepLocalCopy} = require('@react-native-documents/picker') as typeof import('@react-native-documents/picker');
   const selected = await pick({allowMultiSelection: true});
   const files = selected.slice(0, MAX_ATTACHMENTS).map(file => ({
     uri: file.uri,
@@ -86,6 +85,7 @@ export async function pickFiles(): Promise<ControlAttachmentV1[]> {
 }
 
 export async function pickPhoto(source: 'camera' | 'library'): Promise<ControlAttachmentV1[]> {
+  const {launchCamera, launchImageLibrary} = require('react-native-image-picker') as typeof import('react-native-image-picker');
   const result = await (source === 'camera'
     ? launchCamera({mediaType: 'photo', quality: 0.8})
     : launchImageLibrary({mediaType: 'photo', quality: 0.8, selectionLimit: MAX_ATTACHMENTS}));
@@ -127,8 +127,53 @@ export async function cleanupStaleAttachments(): Promise<void> {
   }
 }
 
-export function wireAttachments(attachments: ControlAttachmentV1[]): ControlAttachmentV1[] {
-  return attachments.map(({local_uri: _localUri, ...attachment}) => attachment);
+export async function prepareWireAttachments(
+  attachments: ControlAttachmentV1[],
+  transport: {endpoint: string; deviceKey: string; uploads: boolean},
+): Promise<ControlAttachmentV1[]> {
+  const prepared: ControlAttachmentV1[] = [];
+  for (const attachment of attachments) {
+    const {local_uri: localUri, ...wire} = attachment;
+    if (wire.content !== undefined || wire.data_url || wire.upload_id || !localUri) {
+      prepared.push(wire);
+      continue;
+    }
+    const path = localUri.replace(/^file:\/\//, '');
+    if (!transport.uploads) {
+      const base64 = await ReactNativeBlobUtil.fs.readFile(path, 'base64');
+      prepared.push({...wire, data_url: `data:${wire.mime};base64,${base64}`});
+      continue;
+    }
+    const query = new URLSearchParams({name: wire.name, size: String(wire.size)});
+    mobilePerfMark('attachment.upload.start');
+    const response = await ReactNativeBlobUtil.fetch(
+      'PUT',
+      `${normalizeEndpoint(transport.endpoint)}/control/v1/attachments/${encodeURIComponent(wire.id)}?${query}`,
+      {
+        Accept: 'application/json',
+        Authorization: `Bearer ${transport.deviceKey}`,
+        'Content-Type': wire.mime,
+      },
+      ReactNativeBlobUtil.wrap(path),
+    );
+    mobilePerfMark('attachment.upload.end');
+    mobilePerfMeasure(
+      'attachment.upload',
+      'attachment.upload.start',
+      'attachment.upload.end',
+    );
+    const status = response.info().status;
+    const body = response.json() as {
+      upload_id?: string;
+      error?: {message?: string};
+      message?: string;
+    };
+    if (status < 200 || status >= 300 || !body.upload_id) {
+      throw new Error(body.error?.message ?? body.message ?? `Attachment upload failed with HTTP ${status}.`);
+    }
+    prepared.push({...wire, upload_id: body.upload_id});
+  }
+  return prepared;
 }
 
 export function promptWithAttachments(text: string, attachments: ControlAttachmentV1[]): string {

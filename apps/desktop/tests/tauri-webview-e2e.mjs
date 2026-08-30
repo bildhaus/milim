@@ -3071,7 +3071,14 @@ async function runReasoningEffortIsolationCheck(page) {
   await page.getByTestId("chat-shell").waitFor();
   await dismissOnboardingIfPresent(page);
   const trigger = page.getByTestId("model-picker-trigger");
-  await assertTextContains(trigger.locator(".chip-detail"), "Medium");
+  const assertReasoningEffort = async (expected) => {
+    const label = await trigger.getAttribute("aria-label");
+    if (!label?.includes(`reasoning effort ${expected}`)) {
+      throw new Error(`Expected model chip reasoning effort ${expected}, got ${label}.`);
+    }
+    await assertTextContains(trigger.locator(".chip-detail"), "OpenAI");
+  };
+  await assertReasoningEffort("Medium");
 
   await trigger.click();
   const picker = page.locator(".mp");
@@ -3079,7 +3086,7 @@ async function runReasoningEffortIsolationCheck(page) {
   await picker.getByRole("button", { name: `Reasoning effort for ${model}: Medium` }).click();
   const effortMenu = page.getByRole("menu", { name: `Reasoning effort for ${model}` });
   await effortMenu.getByRole("menuitemradio").filter({ hasText: "High" }).click();
-  await assertTextContains(trigger.locator(".chip-detail"), "High");
+  await assertReasoningEffort("High");
   await trigger.click();
   await picker.waitFor({ state: "hidden" }).catch(() => {});
 
@@ -3096,12 +3103,12 @@ async function runReasoningEffortIsolationCheck(page) {
   }, { modelId: model, sessionId: changedId });
 
   await page.locator(`[data-sidebar-session-id="${originalId}"]:visible`).first().click();
-  await assertTextContains(trigger.locator(".chip-detail"), "Medium");
+  await assertReasoningEffort("Medium");
   await page.locator(`[data-sidebar-session-id="${changedId}"]:visible`).first().click();
-  await assertTextContains(trigger.locator(".chip-detail"), "High");
+  await assertReasoningEffort("High");
 
   await page.locator("button.new-chat:not(.new-chat-menu):visible").first().click();
-  await assertTextContains(trigger.locator(".chip-detail"), "Medium");
+  await assertReasoningEffort("Medium");
   await page.waitForFunction(async ({ modelId, previousId }) => {
     const raw = await window.__TAURI_INTERNALS__.invoke("user_state_get", { key: "milim.sessions" });
     const state = raw ? JSON.parse(raw).state ?? {} : {};

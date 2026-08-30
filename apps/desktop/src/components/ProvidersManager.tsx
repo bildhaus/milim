@@ -73,6 +73,13 @@ const ACCOUNT_RUNTIME_LABEL: Record<AccountRuntimeKind, string> = {
   pi: "Pi",
 };
 
+const ACCOUNT_RUNTIME_KINDS: AccountRuntimeKind[] = [
+  "codex",
+  "claude",
+  "opencode",
+  "pi",
+];
+
 function isMediaProvider(
   provider: Pick<ProviderInfo, "kind" | "name" | "base_url">,
 ): boolean {
@@ -210,10 +217,15 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
   const [runtimeUpdates, setRuntimeUpdates] = useState<
     Partial<Record<AccountRuntimeKind, AccountRuntimeUpdateStatus>>
   >({});
+  const [runtimeUpdatesLoaded, setRuntimeUpdatesLoaded] = useState(false);
   const [confirmRuntimeUpdate, setConfirmRuntimeUpdate] =
-    useState<AccountRuntimeKind | null>(null);
+    useState<AccountRuntimeKind | "all" | null>(null);
   const [updatingRuntime, setUpdatingRuntime] =
-    useState<AccountRuntimeKind | null>(null);
+    useState<AccountRuntimeKind | "all" | null>(null);
+  const [runtimeUpdateProgress, setRuntimeUpdateProgress] = useState<{
+    current: number;
+    total: number;
+  } | null>(null);
   const [discoveries, setDiscoveries] = useState<ProviderDiscovery[]>([]);
   const [note, setNote] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
@@ -224,6 +236,12 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
   const accountRuntimeEnabled = useSettings((s) => s.accountRuntimeEnabled);
   const setAccountRuntimeEnabled = useSettings(
     (s) => s.setAccountRuntimeEnabled,
+  );
+  const runtimeUpdateTargets = ACCOUNT_RUNTIME_KINDS.filter(
+    (runtime) =>
+      accountRuntimeEnabled[runtime] &&
+      runtimeUpdates[runtime]?.available &&
+      runtimeUpdates[runtime]?.update_available === true,
   );
 
   const refresh = () => listProviders().then(setProviders);
@@ -386,6 +404,8 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
       setRuntimeUpdates((await getAccountRuntimeUpdates()).runtimes);
     } catch {
       setRuntimeUpdates({});
+    } finally {
+      setRuntimeUpdatesLoaded(true);
     }
   }
 
@@ -433,6 +453,57 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
     } finally {
       setConfirmRuntimeUpdate(null);
       setUpdatingRuntime(null);
+    }
+  }
+
+  async function runAllRuntimeUpdates() {
+    const targets = [...runtimeUpdateTargets];
+    if (!targets.length) return;
+    if (confirmRuntimeUpdate !== "all") {
+      setConfirmRuntimeUpdate("all");
+      for (const runtime of targets) {
+        setRuntimeNote(runtime, {
+          tone: "warning",
+          message: "Finish active account-runtime turns, then click Confirm update all.",
+        });
+      }
+      return;
+    }
+
+    setUpdatingRuntime("all");
+    setRuntimeUpdateProgress({ current: 1, total: targets.length });
+    try {
+      for (const [index, runtime] of targets.entries()) {
+        setRuntimeUpdateProgress({ current: index + 1, total: targets.length });
+        try {
+          const result = await updateAccountRuntime(runtime);
+          setRuntimeNote(runtime, {
+            tone: "ready",
+            message: result.updated
+              ? `${ACCOUNT_RUNTIME_LABEL[runtime]} updated from ${result.previous_version} to ${result.version}.`
+              : `${ACCOUNT_RUNTIME_LABEL[runtime]} is current at ${result.version}.`,
+          });
+        } catch (error) {
+          setRuntimeNote(runtime, {
+            tone: "error",
+            message:
+              error instanceof Error
+                ? error.message
+                : `${ACCOUNT_RUNTIME_LABEL[runtime]} update failed.`,
+          });
+        }
+      }
+      await refreshRuntimeUpdates();
+      await Promise.allSettled([
+        refreshCodexAccount(),
+        refreshClaudeStatus(),
+        refreshOpenCodeStatus(),
+        refreshPiStatus(),
+      ]);
+    } finally {
+      setConfirmRuntimeUpdate(null);
+      setUpdatingRuntime(null);
+      setRuntimeUpdateProgress(null);
     }
   }
 
@@ -924,13 +995,36 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
             aria-labelledby="provider-account-title"
             hidden={Boolean(sel)}
           >
-            <div className="providers-section-head">
-              <h4 id="provider-account-title">Account runtimes</h4>
-              <p>
-                These runtimes use separately installed tools and credentials.
-                Disable one to hide its models and block new runs without
-                signing out.
-              </p>
+            <div className="provider-account-head">
+              <div className="providers-section-head">
+                <h4 id="provider-account-title">Account runtimes</h4>
+                <p>
+                  These runtimes use separately installed tools and credentials.
+                  Disable one to hide its models and block new runs without
+                  signing out.
+                </p>
+              </div>
+              <button
+                className={runtimeUpdateTargets.length ? "btn-accent" : "btn-ghost"}
+                data-testid="account-runtimes-update-all"
+                type="button"
+                onClick={() => void runAllRuntimeUpdates()}
+                disabled={
+                  !runtimeUpdatesLoaded ||
+                  runtimeUpdateTargets.length === 0 ||
+                  updatingRuntime !== null
+                }
+              >
+                {updatingRuntime === "all" && runtimeUpdateProgress
+                  ? `Updating ${runtimeUpdateProgress.current} of ${runtimeUpdateProgress.total}...`
+                  : confirmRuntimeUpdate === "all"
+                    ? "Confirm update all"
+                    : !runtimeUpdatesLoaded
+                      ? "Checking updates..."
+                      : runtimeUpdateTargets.length
+                        ? `Update all (${runtimeUpdateTargets.length})`
+                        : "All up to date"}
+              </button>
             </div>
             <div className="provider-account-grid">
               <div

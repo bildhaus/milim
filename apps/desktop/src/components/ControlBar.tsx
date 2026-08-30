@@ -243,9 +243,9 @@ export function ControlBar({
             <span className={`dot ${activeModelDot}`} />
             <ProviderIcon brand={providerBrandForModel(activeModel, providers)} />
             <span className="chip-label">{activeModelLabel || "Choose model"}</span>
-            {(activeReasoningEffortLabel || activeModelProfile.laneLabel) && (
+            {activeModelLabel && activeModelProfile.routeLabel && (
               <span className="chip-detail">
-                {activeReasoningEffortLabel || activeModelProfile.laneLabel}
+                {activeModelProfile.routeLabel}
               </span>
             )}
             <ChevronDown size={12} className="chip-chev" />

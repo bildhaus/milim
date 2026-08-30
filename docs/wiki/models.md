@@ -6,7 +6,7 @@ title: Models and providers
 summary: Model-agnostic dev chat routing across provider APIs, local runtimes, Codex, Claude, OpenCode, and Pi bridges.
 group: Core
 order: 40
-updated: 2026-08-21
+updated: 2026-08-30
 ---
 
 Model routing is provider-agnostic and centered on the active dev thread. The provider registry stores enabled remotes and their model metadata, then the desktop model picker merges local API runtime models, provider models, account runtime models, and media-capable models. Duplicate provider model ids stay provider-scoped in the picker and route back to the selected provider; provider sections with fewer visible models appear first.
@@ -15,7 +15,7 @@ On desktop startup, the picker emits the last usable provider catalog immediatel
 
 After the startup model lanes settle, opening a thread reconciles its saved provider route with the current catalog. If a provider was recreated and the raw model id has exactly one current route, Milim updates the thread lazily without copying or replacing its conversation. Missing or ambiguous provider routes are cleared and require an explicit choice in the model picker. Plain provider ids and account-runtime ids that may belong to a temporarily unavailable catalog lane are preserved. Model and per-thread reasoning changes are written to Rust-owned canonical thread state, and an immediate send waits for that write plus desktop persistence before the turn is accepted. Switching from one non-empty model selection to another appends a canonical `model_changed` timeline item. Desktop and mobile render it in sequence as **Continuing with _new model_** and **Previously _old model_ · thread retained**. Further selections before the next user message update the same pending notice from its original model to the latest choice; returning to the original model removes the notice. A user message freezes the current notice, so later switches start a new one. Choosing the initial model, clearing an unavailable selection, or changing only reasoning effort does not add transcript noise.
 
-The model chip and picker classify the selected model into one runtime lane: plain chat, Milim tools, Codex runtime, Claude runtime, OpenCode runtime, Pi runtime, or media. Switching models changes the next turn for the active thread without resetting workspace context, memory, previews, artifacts, approvals, or queued messages.
+The closed model chip keeps the selected provider or account-runtime route visible. The picker also classifies the selected model into one execution lane: plain chat, Milim tools, Codex runtime, Claude runtime, OpenCode runtime, Pi runtime, or media. Switching models changes the next turn for the active thread without resetting workspace context, memory, previews, artifacts, approvals, or queued messages.
 
 Worker routing is a separate thread setting. A thread may choose an optional Worker model; otherwise managed Workers inherit the parent model. Account-runtime inheritance starts a fresh Worker-owned Codex, Claude, OpenCode, or Pi session for each managed Worker; Workers never reuse or update the parent's native session binding. Delegated bare model names resolve against the catalog's `provider/model` ids, preferring the selected Worker or parent namespace and rejecting ambiguous matches. Saved Agents remain portable roles: their instructions and resolved skills transfer to the selected Worker runtime, while Milim still governs Worker access independently. In Auto, provider and local parents use Milim-managed Workers. Read-only Codex and Claude turns may normalize native worker activity into Milim Runs; write-capable account-runtime turns use managed read-only Workers so only the parent edits the workspace. If a runtime cannot report reliable worker lineage, Milim falls back to managed Workers or ordinary tool activity instead of inventing a parent/child relationship.
 
@@ -84,6 +84,8 @@ Verification is recorded per provider and modality. OpenRouter image is live-ver
 ## Account runtimes
 
 Codex, the installed Claude CLI, OpenCode, and Pi are separate from saved provider records. They are backed by user-installed CLIs, appear in the model picker after authentication/configuration, and reuse the active Milim chat session when the runtime exposes a native session id. Milim does not read or store their credentials.
+
+Provider settings checks installed account runtimes for newer versions. You can update an enabled runtime individually or use **Update all** to apply every detected update in sequence; both paths ask you to finish active runtime turns and confirm before changing an installed CLI.
 
 Each account runtime keeps its native skill catalog. Milim does not copy all enabled skill bodies into every turn: it supplies compact ranked candidates and read-only lazy search/read tools through the authenticated per-turn gateway. Explicitly tagged Milim skills are resolved immediately, while a saved Agent's Custom skill selection acts as an allowlist.
 

@@ -41,6 +41,7 @@ use axum::Router;
 
 use milim_control_contract::{
     ControlCommandKindV1, ControlCommandStatusV1, ControlCommandV1, ThreadOriginV1,
+    CONTROL_MAX_ATTACHMENT_BYTES,
 };
 use milim_core::{api::openai::ChatMessage, Error, Result};
 use tower_http::cors::{Any, CorsLayer};
@@ -106,6 +107,12 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/control/v1/threads/{id}/effective-run",
             post(routes::control_effective_run_preview),
+        )
+        .route(
+            "/control/v1/attachments/{id}",
+            put(routes::control_attachment_upload).layer(RequestBodyLimitLayer::new(
+                CONTROL_MAX_ATTACHMENT_BYTES as usize,
+            )),
         )
         .route(
             "/control/v1/runs/{run_id}",
@@ -476,6 +483,12 @@ pub fn build_mobile_companion_router(state: AppState) -> Router {
         .route(
             "/control/v1/threads/{id}/effective-run",
             post(routes::control_effective_run_preview),
+        )
+        .route(
+            "/control/v1/attachments/{id}",
+            put(routes::control_attachment_upload).layer(RequestBodyLimitLayer::new(
+                CONTROL_MAX_ATTACHMENT_BYTES as usize,
+            )),
         )
         .route(
             "/control/v1/runs/{run_id}",

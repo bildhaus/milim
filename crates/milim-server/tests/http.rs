@@ -601,6 +601,102 @@ async fn mobile_companion_pair_request_is_approved_on_desktop_and_claimed_on_pho
 }
 
 #[tokio::test]
+async fn paired_mobile_attachment_upload_is_authenticated_bounded_and_idempotent() {
+    let state = control_mobile_test_state();
+    let desktop = spawn(state.clone()).await;
+    let mobile = spawn_mobile(state).await;
+    let client = reqwest::Client::new();
+    client
+        .post(format!("{desktop}/mobile/enabled"))
+        .json(&json!({ "enabled": true }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let pairing: Value = client
+        .post(format!("{desktop}/mobile/pairing"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let secret = pairing["path"]
+        .as_str()
+        .unwrap()
+        .split("secret=")
+        .nth(1)
+        .unwrap();
+    let paired: Value = client
+        .post(format!("{mobile}/mobile/pair"))
+        .json(&json!({
+            "pair_id": pairing["id"],
+            "secret": secret,
+            "device_name": "Attachment QA"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let device_key = paired["device_key"].as_str().unwrap();
+    let url = format!("{mobile}/control/v1/attachments/attachment-1?name=pixel.png&size=3");
+    let unauthenticated = client
+        .put(&url)
+        .header("content-type", "image/png")
+        .body(vec![1, 2, 3])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let upload: Value = client
+        .put(&url)
+        .bearer_auth(device_key)
+        .header("content-type", "image/png")
+        .body(vec![1, 2, 3])
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let repeated: Value = client
+        .put(&url)
+        .bearer_auth(device_key)
+        .header("content-type", "image/png")
+        .body(vec![1, 2, 3])
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(upload["upload_id"], repeated["upload_id"]);
+    assert!(upload["expires_at_ms"].as_i64().unwrap() > 0);
+
+    let wrong_size = client
+        .put(format!(
+            "{mobile}/control/v1/attachments/attachment-2?name=pixel.png&size=4"
+        ))
+        .bearer_auth(device_key)
+        .header("content-type", "image/png")
+        .body(vec![1, 2, 3])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong_size.status(), reqwest::StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn mobile_phone_router_exposes_native_control_only() {
     let base = spawn_mobile(control_mobile_test_state()).await;
     let client = reqwest::Client::new();

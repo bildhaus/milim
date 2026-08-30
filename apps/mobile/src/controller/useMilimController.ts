@@ -4,6 +4,7 @@ import {
   cleanupAppearanceBackgrounds,
   fetchAppearanceBackground,
 } from '../appearance';
+import {prepareWireAttachments} from '../attachments';
 import {
   cancelPairingRequest,
   claimPairing,
@@ -21,7 +22,7 @@ import {
   sendCommand,
 } from '../control/client';
 import {
-  applyControlEvent,
+  applyControlEvents,
   applyTimelinePage,
   controlEventInvalidatesBootstrap,
   emptyReplica,
@@ -31,6 +32,8 @@ import type {
   ControlBootstrapV1,
   ControlCommandResultV1,
   ControlCommandV1,
+  ControlEventV1,
+  ControlAttachmentV1,
   JsonValue,
   SavedHost,
 } from '../control/types';
@@ -54,6 +57,7 @@ import {
   removeDeviceCredential,
   saveDeviceCredential,
 } from '../storage/secure';
+import {mobilePerfMark, mobilePerfMeasure} from '../performance';
 
 export type ConnectionStatus = 'offline' | 'connecting' | 'online' | 'incompatible';
 export type NearbyPairingStage = 'requesting' | 'waiting' | 'connecting';
@@ -118,6 +122,18 @@ export function useMilimController() {
   const selectedThreadRef = useRef<string | null>(null);
   const timelineRef = useRef<TimelineReplica | null>(null);
   const bootstrapRefreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const bootstrapRefreshPromise = useRef<Promise<ControlBootstrapV1 | null> | null>(null);
+  const timelineRefreshPromises = useRef<Partial<Record<'tail' | 'after' | 'before', Promise<void>>>>({});
+  const eventBuffer = useRef<ControlEventV1[]>([]);
+  const eventFlushFrame = useRef<number | null>(null);
+  const reconciliationTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const draftPersistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingDraft = useRef<{hostId: string; threadId: string; text: string} | null>(null);
+  const draftPersistChain = useRef<Promise<void>>(Promise.resolve());
+  const timelineCacheTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingTimelineCache = useRef<{hostId: string; replica: TimelineReplica} | null>(null);
+  const timelineCacheChain = useRef<Promise<void>>(Promise.resolve());
+  const lastTimelineCacheKey = useRef('');
 
   useEffect(() => {
     listHosts()
@@ -175,54 +191,141 @@ export function useMilimController() {
     throw lastFailure ?? new Error('milim desktop is unavailable.');
   }, []);
 
-  const refreshBootstrap = useCallback(async () => {
-    const host = activeHostRef.current;
-    if (!host || !credential.current || !host.lastSuccessfulUrl) return null;
-    const next = await fetchBootstrap(host.lastSuccessfulUrl, credential.current);
-    assertHostIdentity(host.hostId, next.host_id);
-    setBootstrap(current =>
-      current?.appearance?.revision &&
-      current.appearance.revision === next.appearance?.revision
-        ? {...next, appearance: current.appearance}
-        : next,
-    );
-    return next;
+  const flushDraftPersistence = useCallback(async () => {
+    if (draftPersistTimer.current) clearTimeout(draftPersistTimer.current);
+    draftPersistTimer.current = null;
+    const pending = pendingDraft.current;
+    pendingDraft.current = null;
+    if (!pending) return;
+    const operation = draftPersistChain.current.catch(() => {}).then(async () => {
+      mobilePerfMark('draft.persist.start');
+      await persistDraft(pending.hostId, pending.threadId, pending.text);
+      mobilePerfMark('draft.persist.end');
+      mobilePerfMeasure('draft.persist', 'draft.persist.start', 'draft.persist.end');
+    });
+    draftPersistChain.current = operation;
+    try {
+      await operation;
+    } catch {
+      // The in-memory draft remains authoritative until the next flush.
+    }
+  }, []);
+
+  const flushTimelineCache = useCallback(async () => {
+    if (timelineCacheTimer.current) clearTimeout(timelineCacheTimer.current);
+    timelineCacheTimer.current = null;
+    const pending = pendingTimelineCache.current;
+    pendingTimelineCache.current = null;
+    if (!pending) return;
+    const key = `${pending.hostId}:${pending.replica.threadId}:${pending.replica.epoch}:${pending.replica.lastSeq ?? ''}`;
+    if (key === lastTimelineCacheKey.current) return;
+    const operation = timelineCacheChain.current.catch(() => {}).then(async () => {
+      if (key === lastTimelineCacheKey.current) return;
+      await saveTimelineTail(pending.hostId, pageFromReplica(pending.replica));
+      lastTimelineCacheKey.current = key;
+    });
+    timelineCacheChain.current = operation;
+    try {
+      await operation;
+    } catch {
+      // A later authoritative tail refresh can repopulate this bounded cache.
+    }
+  }, []);
+
+  const queueTimelineCache = useCallback((hostId: string, replica: TimelineReplica) => {
+    pendingTimelineCache.current = {hostId, replica};
+    if (timelineCacheTimer.current) clearTimeout(timelineCacheTimer.current);
+    timelineCacheTimer.current = setTimeout(() => void flushTimelineCache(), 500);
+  }, [flushTimelineCache]);
+
+  const refreshBootstrap = useCallback((): Promise<ControlBootstrapV1 | null> => {
+    if (bootstrapRefreshPromise.current) return bootstrapRefreshPromise.current;
+    const request = (async () => {
+      const host = activeHostRef.current;
+      if (!host || !credential.current || !host.lastSuccessfulUrl) return null;
+      const next = await fetchBootstrap(host.lastSuccessfulUrl, credential.current);
+      assertHostIdentity(host.hostId, next.host_id);
+      setBootstrap(current =>
+        current?.appearance?.revision &&
+        current.appearance.revision === next.appearance?.revision
+          ? {...next, appearance: current.appearance}
+          : next,
+      );
+      return next;
+    })();
+    bootstrapRefreshPromise.current = request;
+    void request.finally(() => {
+      if (bootstrapRefreshPromise.current === request) bootstrapRefreshPromise.current = null;
+    });
+    return request;
   }, []);
 
   const refreshTimeline = useCallback(
-    async (mode: 'tail' | 'after' | 'before' = 'after') => {
-      const host = activeHostRef.current;
-      const threadId = selectedThreadRef.current;
-      if (!host?.lastSuccessfulUrl || !credential.current || !threadId) return;
-      const current = timelineRef.current ?? emptyReplica(threadId);
-      if (mode === 'before' && current.firstSeq === null) return;
-      const query = mode === 'before'
-        ? {beforeSeq: current.firstSeq!}
-        : mode === 'after' && current.lastSeq !== null
-          ? {afterSeq: current.lastSeq}
-          : {tail: 150};
-      const page = await fetchTimeline(
-        host.lastSuccessfulUrl,
-        credential.current,
-        threadId,
-        query,
-      );
-      let next = applyTimelinePage(current, page, mode);
-      if (next.needsTailRefresh) {
-        const tail = await fetchTimeline(
+    (mode: 'tail' | 'after' | 'before' = 'after'): Promise<void> => {
+      const existing = timelineRefreshPromises.current[mode];
+      if (existing) return existing;
+      const request = (async () => {
+        const host = activeHostRef.current;
+        const threadId = selectedThreadRef.current;
+        if (!host?.lastSuccessfulUrl || !credential.current || !threadId) return;
+        const current = timelineRef.current ?? emptyReplica(threadId);
+        if (mode === 'before' && current.firstSeq === null) return;
+        const query = mode === 'before'
+          ? {beforeSeq: current.firstSeq!}
+          : mode === 'after' && current.lastSeq !== null
+            ? {afterSeq: current.lastSeq}
+            : {tail: 150};
+        const page = await fetchTimeline(
           host.lastSuccessfulUrl,
           credential.current,
           threadId,
-          {tail: 150},
+          query,
         );
-        next = applyTimelinePage(next, tail, 'tail');
-      }
-      setTimeline(next);
-      timelineRef.current = next;
-      await saveTimelineTail(host.hostId, pageFromReplica(next));
+        let next = applyTimelinePage(current, page, mode);
+        if (next.needsTailRefresh) {
+          const tail = await fetchTimeline(
+            host.lastSuccessfulUrl,
+            credential.current,
+            threadId,
+            {tail: 150},
+          );
+          next = applyTimelinePage(next, tail, 'tail');
+        }
+        if (selectedThreadRef.current !== threadId || activeHostRef.current?.hostId !== host.hostId) return;
+        setTimeline(next);
+        timelineRef.current = next;
+        queueTimelineCache(host.hostId, next);
+      })();
+      timelineRefreshPromises.current[mode] = request;
+      void request.finally(() => {
+        if (timelineRefreshPromises.current[mode] === request) {
+          delete timelineRefreshPromises.current[mode];
+        }
+      });
+      return request;
     },
-    [],
+    [queueTimelineCache],
   );
+
+  const queueControlEvent = useCallback((event: ControlEventV1, expectedHostId: string) => {
+    eventBuffer.current.push(event);
+    if (eventFlushFrame.current !== null) return;
+    eventFlushFrame.current = requestAnimationFrame(() => {
+      eventFlushFrame.current = null;
+      const events = eventBuffer.current.splice(0);
+      const current = timelineRef.current;
+      if (!current || !events.length) return;
+      mobilePerfMark('timeline.flush.start');
+      const next = applyControlEvents(current, events, expectedHostId);
+      if (next !== current) {
+        timelineRef.current = next;
+        setTimeline(next);
+      }
+      mobilePerfMark('timeline.flush.end');
+      mobilePerfMeasure('timeline.flush', 'timeline.flush.start', 'timeline.flush.end');
+      if (next.needsTailRefresh && !current.needsTailRefresh) void refreshTimeline('tail');
+    });
+  }, [refreshTimeline]);
 
   useEffect(() => {
     const host = activeHostRef.current;
@@ -266,15 +369,10 @@ export function useMilimController() {
               setLastError('Ignored an event from a different milim desktop.');
               return;
             }
-            const currentTimeline = timelineRef.current;
-            if (currentTimeline) {
-              const next = applyControlEvent(currentTimeline, event, host.hostId);
-              timelineRef.current = next;
-              setTimeline(next);
-            }
+            queueControlEvent(event, host.hostId);
             if (controlEventInvalidatesBootstrap(event.type)) {
               if (bootstrapRefreshTimer.current) clearTimeout(bootstrapRefreshTimer.current);
-              bootstrapRefreshTimer.current = setTimeout(() => void refreshBootstrap(), 120);
+              bootstrapRefreshTimer.current = setTimeout(() => void refreshBootstrap(), 250);
             }
           },
           () => {
@@ -301,8 +399,11 @@ export function useMilimController() {
       cancelled = true;
       socket.current?.close();
       socket.current = null;
+      eventBuffer.current = [];
+      if (eventFlushFrame.current !== null) cancelAnimationFrame(eventFlushFrame.current);
+      eventFlushFrame.current = null;
     };
-  }, [activeHost?.hostId, appState, connectionRevision, rememberHost, refreshBootstrap, tryBootstrap]);
+  }, [activeHost?.hostId, appState, connectionRevision, queueControlEvent, rememberHost, refreshBootstrap, tryBootstrap]);
 
   const reconnect = useCallback(() => {
     setLastError(null);
@@ -547,12 +648,38 @@ export function useMilimController() {
   const setDraft = useCallback(
     (text: string) => {
       setDraftState(text);
-      if (activeHost && selectedThreadId) {
-        void persistDraft(activeHost.hostId, selectedThreadId, text);
+      const hostId = activeHostRef.current?.hostId;
+      const threadId = selectedThreadRef.current;
+      if (hostId && threadId) {
+        pendingDraft.current = {hostId, threadId, text};
+        if (draftPersistTimer.current) clearTimeout(draftPersistTimer.current);
+        if (!text) void flushDraftPersistence();
+        else draftPersistTimer.current = setTimeout(() => void flushDraftPersistence(), 300);
       }
     },
-    [activeHost, selectedThreadId],
+    [flushDraftPersistence],
   );
+
+  useEffect(() => () => {
+    void flushDraftPersistence();
+  }, [activeHost?.hostId, flushDraftPersistence, selectedThreadId]);
+
+  useEffect(() => {
+    if (appState !== 'active') {
+      void flushDraftPersistence();
+      void flushTimelineCache();
+    }
+  }, [appState, flushDraftPersistence, flushTimelineCache]);
+
+  useEffect(() => () => {
+    if (bootstrapRefreshTimer.current) clearTimeout(bootstrapRefreshTimer.current);
+    if (reconciliationTimer.current) clearTimeout(reconciliationTimer.current);
+    if (draftPersistTimer.current) clearTimeout(draftPersistTimer.current);
+    if (timelineCacheTimer.current) clearTimeout(timelineCacheTimer.current);
+    if (eventFlushFrame.current !== null) cancelAnimationFrame(eventFlushFrame.current);
+    void flushDraftPersistence();
+    void flushTimelineCache();
+  }, [flushDraftPersistence, flushTimelineCache]);
 
   const execute = useCallback(
     async (command: ControlCommandV1): Promise<ControlCommandResultV1> => {
@@ -574,8 +701,11 @@ export function useMilimController() {
       if (result.status === 'failed' || result.status === 'conflict') {
         throw new Error(result.message ?? result.status);
       }
-      await refreshBootstrap();
-      await refreshTimeline('after');
+      if (reconciliationTimer.current) clearTimeout(reconciliationTimer.current);
+      reconciliationTimer.current = setTimeout(() => {
+        reconciliationTimer.current = null;
+        void Promise.allSettled([refreshBootstrap(), refreshTimeline('after')]);
+      }, 250);
       return result;
     },
     [activeHost, refreshBootstrap, refreshTimeline, status],
@@ -627,6 +757,20 @@ export function useMilimController() {
     [activeHost, status],
   );
 
+  const prepareAttachments = useCallback(
+    async (attachments: ControlAttachmentV1[]) => {
+      if (!activeHost?.lastSuccessfulUrl || !credential.current || status !== 'online') {
+        throw new Error('Reconnect to the desktop before uploading attachments.');
+      }
+      return prepareWireAttachments(attachments, {
+        endpoint: activeHost.lastSuccessfulUrl,
+        deviceKey: credential.current,
+        uploads: bootstrap?.capabilities.attachment_uploads === true,
+      });
+    },
+    [activeHost, bootstrap?.capabilities.attachment_uploads, status],
+  );
+
   return {
     hosts,
     activeHost,
@@ -652,6 +796,7 @@ export function useMilimController() {
     command,
     loadRunDetails,
     loadMoreRunEvents,
+    prepareAttachments,
     retryPendingCommand,
   };
 }

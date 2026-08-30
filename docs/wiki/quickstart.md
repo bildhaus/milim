@@ -6,7 +6,7 @@ title: Quickstart
 summary: Connect any model runtime, optionally pick a workspace, keep one canonical thread, switch models inline, and review the result.
 group: Start
 order: 20
-updated: 2026-08-28
+updated: 2026-08-30
 ---
 
 Aim for one safe core loop: connect a runtime, optionally select a workspace, approve one small change, inspect the resulting diff, and continue the same thread with another model. Switching models changes the next turn; it does not reset workspace context or conversation history.
@@ -29,7 +29,7 @@ Onboarding reaches the composer in two advances: Runtime → optional Workspace 
 4. After execution, inspect the changed-files card and select **Review changes** to open the resulting Git diff. This is the diff produced by the approved action, not a virtual patch waiting to be applied. If review is unavailable, use **Retry** or **Open Git**; use **Undo** to restore the pre-turn checkpoint.
 5. On the latest completed answer, choose the permanently visible **Continue with…** action and select a different runtime. Edit the prepared continuation if useful, then send it in the same thread. **Review with…** and **Retry with…** remain in the adjacent menu.
 
-The model chip shows the selected provider/runtime route, setup status, capabilities, favorite state, and reasoning effort where supported. Provider models use Milim tools when workspace or tool context is active; Codex, Claude, OpenCode, and Pi use their account-runtime bridges.
+The closed model chip keeps the selected provider/runtime route visible. Open the picker for setup status, capabilities, favorite state, reasoning effort, and execution-lane details. Provider models use Milim tools when workspace or tool context is active; Codex, Claude, OpenCode, and Pi use their account-runtime bridges.
 
 ## Run the desktop app from source
 

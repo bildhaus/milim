@@ -1,10 +1,12 @@
 import {
   applyControlEvent,
+  applyControlEvents,
   applyTimelinePage,
   controlEventInvalidatesBootstrap,
   emptyReplica,
   projectMessages,
   projectTranscript,
+  projectTranscriptIncrementally,
 } from '../src/control/replica';
 import type {
   ControlEventV1,
@@ -18,6 +20,7 @@ test('model catalog events invalidate bootstrap without entering the timeline', 
   expect(controlEventInvalidatesBootstrap('models.updated')).toBe(true);
   expect(controlEventInvalidatesBootstrap('model_favorites.updated')).toBe(true);
   expect(controlEventInvalidatesBootstrap('appearance.updated')).toBe(true);
+  expect(controlEventInvalidatesBootstrap('timeline.appended')).toBe(false);
   expect(controlEventInvalidatesBootstrap('unrelated.event')).toBe(false);
 });
 
@@ -58,6 +61,50 @@ test('live duplicates are idempotent and assistant deltas project in order', () 
   replica = applyControlEvent(replica, event, 'h');
   expect(replica.items).toHaveLength(2);
   expect(projectMessages(replica.items).at(-1)?.content).toBe('hel');
+});
+
+test('applies a contiguous live-event batch once and flags a later gap', () => {
+  const replica = applyTimelinePage(emptyReplica('t'), page('e1', [item(1)]), 'tail');
+  const event = (seq: number): ControlEventV1 => ({
+    event_id: `ev-${seq}`,
+    host_id: 'h',
+    thread_id: 't',
+    epoch: 'e1',
+    seq,
+    type: 'timeline.appended',
+    data: {item: item(seq)} as unknown as JsonValue,
+  });
+  const appended = applyControlEvents(replica, [event(2), event(3), event(3)], 'h');
+  expect(appended.items.map(entry => entry.seq)).toEqual([1, 2, 3]);
+  expect(appended.items[0]).toBe(replica.items[0]);
+
+  const gap = applyControlEvents(appended, [event(5)], 'h');
+  expect(gap.items).toBe(appended.items);
+  expect(gap.needsTailRefresh).toBe(true);
+
+  const replacement = event(3);
+  replacement.data = {item: item(3, 'message', {role: 'assistant', content: 'replaced'})} as unknown as JsonValue;
+  const replaced = applyControlEvents(appended, [replacement], 'h');
+  expect(replaced.items).toBe(appended.items);
+  expect(replaced.needsTailRefresh).toBe(true);
+});
+
+test('incremental transcript projection matches a full rebuild and preserves completed rows', () => {
+  const initial = [
+    item(1, 'message', {id: 'user-1', role: 'user', content: 'hello'}),
+    {...item(2, 'tool_started', {id: 'tool-1', name: 'read_file'}), run_id: 'run-1'},
+  ];
+  const first = projectTranscriptIncrementally(null, initial);
+  const nextItems = [
+    ...initial,
+    {...item(3, 'assistant_delta', {text: 'working'}), run_id: 'run-1'},
+  ];
+  const next = projectTranscriptIncrementally(first, nextItems);
+
+  expect(next.projected).toEqual(projectTranscript(nextItems));
+  expect(next.projected.find(entry => entry.id === 'user-1')).toBe(
+    first.projected.find(entry => entry.id === 'user-1'),
+  );
 });
 
 test('keeps an applied steer as a distinct labeled user message', () => {
