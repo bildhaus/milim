@@ -18,7 +18,9 @@ use serde_json::{json, Value};
 
 #[cfg(not(target_os = "macos"))]
 use enigo::Keyboard;
-use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Mouse, Settings};
+#[cfg(any(not(target_os = "macos"), test))]
+use enigo::Key;
+use enigo::{Axis, Button, Coordinate, Direction, Enigo, Mouse, Settings};
 use milim_core::{Error, Result};
 use milim_tools::{Tool, ToolEffect};
 
@@ -418,6 +420,7 @@ fn map_button(name: &str) -> Result<Button> {
     }
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn map_key(name: &str) -> Option<Key> {
     let n = name.trim().to_lowercase();
     Some(match n.as_str() {
