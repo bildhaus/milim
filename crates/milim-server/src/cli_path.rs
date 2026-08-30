@@ -75,6 +75,7 @@ fn extra_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
         for suffix in [
+            ".opencode/bin",
             ".local/bin",
             "bin",
             ".bun/bin",
@@ -159,6 +160,7 @@ mod tests {
             assert!(dirs.contains(&inherited), "dropped inherited {inherited:?}");
         }
         if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
+            assert!(dirs.contains(&home.join(".opencode/bin")));
             assert!(dirs.contains(&home.join(".local/bin")));
         }
         assert!(dirs.contains(&PathBuf::from("/opt/homebrew/bin")));
