@@ -168,12 +168,20 @@ pub(crate) fn codex_harness_stream(
             "Codex requires a prompt or at least one image".to_string(),
         )));
     }
-    req.prompt = account_runtime_workspace_prompt(&run_context, &req.prompt, "claude");
-    let (prompt, redactions) =
-        account_runtime_prompt_for_remote(st, &run_context, &req.prompt, "Codex")
-            .map_err(ApiError)?;
+    append_account_runtime_instruction(
+        &mut req.developer_instructions,
+        account_runtime_workspace_instructions(&run_context, "claude"),
+    );
+    let (prompt, developer_instructions, redactions) = account_runtime_codex_inputs_for_remote(
+        st,
+        &run_context,
+        &req.prompt,
+        req.developer_instructions.as_deref(),
+    )
+    .map_err(ApiError)?;
     account_runtime_images_for_remote(&run_context, &req.images, "Codex").map_err(ApiError)?;
     req.prompt = prompt;
+    req.developer_instructions = developer_instructions;
     let endpoint = account_runtime_tool_endpoint(
         st,
         headers,
@@ -182,7 +190,9 @@ pub(crate) fn codex_harness_stream(
         req.model.as_deref().unwrap_or_default(),
         &req.prompt,
     )?;
-    add_account_runtime_preview_instructions(&mut req.prompt, endpoint.as_ref());
+    let mut instructions = req.developer_instructions.take().unwrap_or_default();
+    add_account_runtime_preview_instructions(&mut instructions, endpoint.as_ref());
+    req.developer_instructions = (!instructions.trim().is_empty()).then_some(instructions);
     req.milim_mcp = endpoint.clone();
     let approvals = Some(st.tool_approvals.clone());
     Ok(Box::pin(account_runtime_harness_stream(
@@ -718,10 +728,30 @@ fn account_runtime_workspace_prompt(
     prompt: &str,
     family: &str,
 ) -> String {
-    let context = crate::workspace_context::resolve(run_context.workspace());
-    match crate::workspace_context::formatted(&context, Some(family)) {
+    match account_runtime_workspace_instructions(run_context, family) {
         Some(instructions) => format!("{instructions}\n\nUser request:\n{prompt}"),
         None => prompt.to_string(),
+    }
+}
+
+fn account_runtime_workspace_instructions(
+    run_context: &RunContext,
+    family: &str,
+) -> Option<String> {
+    let context = crate::workspace_context::resolve(run_context.workspace());
+    crate::workspace_context::formatted(&context, Some(family))
+}
+
+fn append_account_runtime_instruction(target: &mut Option<String>, addition: Option<String>) {
+    let Some(addition) = addition.filter(|value| !value.trim().is_empty()) else {
+        return;
+    };
+    match target.as_mut().filter(|value| !value.trim().is_empty()) {
+        Some(current) => {
+            current.push_str("\n\n");
+            current.push_str(&addition);
+        }
+        None => *target = Some(addition),
     }
 }
 
@@ -766,6 +796,53 @@ fn account_runtime_prompt_for_remote(
         PrivacyMode::Redact => {
             let redaction = st.privacy.redact_text(prompt);
             Ok((redaction.text, redaction.map))
+        }
+    }
+}
+
+fn account_runtime_codex_inputs_for_remote(
+    st: &AppState,
+    run_context: &RunContext,
+    prompt: &str,
+    developer_instructions: Option<&str>,
+) -> milim_core::Result<(String, Option<String>, BTreeMap<String, String>)> {
+    match run_context.privacy_mode() {
+        PrivacyMode::Off => Ok((
+            prompt.to_string(),
+            developer_instructions.map(str::to_string),
+            BTreeMap::new(),
+        )),
+        PrivacyMode::Block => {
+            let detections = st
+                .privacy
+                .scan_text(prompt)
+                .into_iter()
+                .chain(
+                    developer_instructions
+                        .into_iter()
+                        .flat_map(|instructions| st.privacy.scan_text(instructions)),
+                )
+                .collect::<Vec<_>>();
+            if detections.is_empty() {
+                Ok((
+                    prompt.to_string(),
+                    developer_instructions.map(str::to_string),
+                    BTreeMap::new(),
+                ))
+            } else {
+                Err(Error::InvalidRequest(format!(
+                    "blocked by the privacy gate: Codex prompt contains {} ({} item(s)). Switch the gate to Redact or Off to send this to Codex.",
+                    kinds_summary(&detections),
+                    detections.len()
+                )))
+            }
+        }
+        PrivacyMode::Redact => {
+            let mut redactor = milim_privacy::Redactor::new();
+            let developer_instructions =
+                developer_instructions.map(|instructions| redactor.redact(instructions));
+            let prompt = redactor.redact(prompt);
+            Ok((prompt, developer_instructions, redactor.into_map()))
         }
     }
 }
@@ -860,5 +937,18 @@ mod tests {
             .0,
             "contact person@example.com"
         );
+
+        let redacted_context = RunContext::from_control(&state, None, "redact").unwrap();
+        let (prompt, instructions, map) = account_runtime_codex_inputs_for_remote(
+            &state,
+            &redacted_context,
+            "reply to second@example.com",
+            Some("Contact first@example.com"),
+        )
+        .unwrap();
+        assert_eq!(instructions.as_deref(), Some("Contact [EMAIL_1]"));
+        assert_eq!(prompt, "reply to [EMAIL_2]");
+        assert_eq!(map["[EMAIL_1]"], "first@example.com");
+        assert_eq!(map["[EMAIL_2]"], "second@example.com");
     }
 }

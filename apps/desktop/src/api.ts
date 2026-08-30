@@ -2616,6 +2616,7 @@ export type HarnessMilimContext = AccountRuntimeMilimContext;
 
 export interface HarnessRunRequest {
   prompt: string;
+  developer_instructions?: string;
   images?: HarnessImageInput[];
   model: string;
   cwd?: string;

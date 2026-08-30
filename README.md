@@ -111,6 +111,8 @@ Desktop history is loaded lazily: startup hydrates thread summaries and the late
 
 While a steer-capable provider run is active, Ctrl/Cmd+Enter sends the composer input to the next model step and immediately adds a separate `Steer · Pending` user bubble to the transcript. Claiming it at the next model boundary removes the pending state while preserving the steer as its own user message without replacing the original prompt; reconnecting clients restore the same pending text from canonical state. The primary busy Send action remains Queue; runtimes without steering keep modifier-Enter as queue submission and never substitute cancellation. Interrupting with a queued message is one server-owned handoff: the current response stops, then the selected durable queue item starts without a client-side stop/resume race.
 
+For Codex-bound chats, frozen Milim global, thread, Agent, workspace, and managed-preview instructions travel through Codex's native developer-instruction channel instead of being repeated inside each visible user message. The native session sync cursor still limits the conversational prompt to intervening messages.
+
 ## Development
 
 Use the smallest relevant check for the area changed:

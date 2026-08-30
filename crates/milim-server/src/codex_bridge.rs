@@ -114,6 +114,8 @@ pub(crate) fn validate_account_images(images: &[AccountImage]) -> Result<()> {
 pub(crate) struct CodexRunRequest {
     pub prompt: String,
     #[serde(default)]
+    pub developer_instructions: Option<String>,
+    #[serde(default)]
     pub images: Vec<AccountImage>,
     #[serde(default)]
     pub model: Option<String>,
@@ -1821,7 +1823,7 @@ fn codex_thread_request(req: &CodexRunRequest, model: &str) -> (&'static str, Va
         "model": model,
         "approvalPolicy": codex_approval_policy(req),
         "sandbox": codex_sandbox_mode(req, cwd.as_deref()),
-        "developerInstructions": codex_developer_instructions(),
+        "developerInstructions": codex_developer_instructions(req.developer_instructions.as_deref()),
     });
     if let Some(cwd) = cwd {
         params["cwd"] = Value::String(cwd);
@@ -2665,12 +2667,16 @@ fn compact(value: &str, limit: usize) -> String {
     }
 }
 
-fn codex_developer_instructions() -> &'static str {
-    concat!(
+fn codex_developer_instructions(additional: Option<&str>) -> String {
+    let base = concat!(
         "You are running inside Milim as a Codex-powered chat runtime. Answer in chat. ",
         "Respect the tool approval and sandbox settings Milim supplies for each turn. ",
         "Milim's in-app Preview inspector is not the OpenAI Browser plugin. When the user asks to open a URL in Milim's in-app browser, use the milim MCP preview_open_url tool; do not use agent.browsers or report that Milim has no browser instance."
-    )
+    );
+    match additional.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(additional) => format!("{base}\n\n{additional}"),
+        None => base.to_string(),
+    }
 }
 
 fn response_id(value: &Value) -> Option<u64> {
@@ -2870,6 +2876,7 @@ mod tests {
     fn codex_turn_materializes_local_images_and_cleans_them_up() {
         let req = CodexRunRequest {
             prompt: String::new(),
+            developer_instructions: None,
             images: vec![AccountImage {
                 media_type: "image/png".to_string(),
                 data: "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGP4z8DAAMIM/4EAAB/uBfsL2WiLAAAAAElFTkSuQmCC".to_string(),
@@ -2917,6 +2924,7 @@ mod tests {
     fn thread_request_resumes_or_starts_with_expected_persistence() {
         let req = CodexRunRequest {
             prompt: "hi".into(),
+            developer_instructions: Some("Milim global instructions:\nBe concise.".into()),
             images: Vec::new(),
             model: None,
             cwd: Some("C:\\repo".into()),
@@ -2938,6 +2946,10 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("preview_open_url"));
+        assert!(params["developerInstructions"]
+            .as_str()
+            .unwrap()
+            .contains("Milim global instructions:\nBe concise."));
         assert!(params.get("sandboxPolicy").is_none());
         assert!(params.get("ephemeral").is_none());
 
@@ -2962,6 +2974,7 @@ mod tests {
     fn maps_milim_tool_modes_to_codex_permissions() {
         let mut req = CodexRunRequest {
             prompt: "hi".into(),
+            developer_instructions: None,
             images: Vec::new(),
             model: None,
             cwd: Some("C:\\repo".into()),

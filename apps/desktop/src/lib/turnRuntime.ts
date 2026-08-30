@@ -414,6 +414,14 @@ export function accountRuntimeInputFromMessages(messages: ChatMessage[]): {
   };
 }
 
+export function codexDeveloperInstructionsFromMessages(messages: ChatMessage[]): string {
+  return messages
+    .filter((message) => message.role === "system" && !message.approval)
+    .map((message) => message.content.trim())
+    .filter(Boolean)
+    .join("\n\n");
+}
+
 function wireRuntimeMessageContent(
   message: ChatMessage,
   selectedImages: Set<ChatAttachment>,
@@ -927,7 +935,14 @@ export async function runAccountRuntimeTurn(
     runRef,
     snapshot,
   });
-  const input = accountRuntimeInputFromMessages(outbound);
+  const developerInstructions = params.kind === "codex"
+    ? codexDeveloperInstructionsFromMessages(outbound)
+    : "";
+  const input = accountRuntimeInputFromMessages(
+    params.kind === "codex"
+      ? outbound.filter((message) => message.role !== "system")
+      : outbound,
+  );
   const interactiveToolApproval =
     toolApproval === "review" && !planMode && !toolApprovalGrant;
   const milimContext: AccountRuntimeMilimContext = {
@@ -954,6 +969,7 @@ export async function runAccountRuntimeTurn(
     {
       model,
       prompt: input.prompt,
+      developer_instructions: developerInstructions || undefined,
       images: input.images,
       cwd: workspace,
       reasoning_effort: reasoningEffort,

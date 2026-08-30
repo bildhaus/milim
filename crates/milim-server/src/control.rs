@@ -4328,18 +4328,15 @@ impl RunManager {
             prompt
         };
         let instructions = [
-            Some(frozen_run_instructions(&accepted.config)).filter(|value| !value.is_empty()),
+            Some(frozen_harness_instructions(&accepted.config)).filter(|value| !value.is_empty()),
             managed_preview_runtime_context(&accepted.preview_runtime),
         ]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>()
         .join("\n\n");
-        let prompt = if instructions.is_empty() {
-            prompt
-        } else {
-            format!("System instructions:\n{instructions}\n\n{prompt}")
-        };
+        let (prompt, developer_instructions) =
+            account_runtime_harness_prompt(&accepted.config.adapter, prompt, instructions);
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::HOST,
@@ -4348,6 +4345,7 @@ impl RunManager {
         );
         let request = crate::routes::HarnessRunRequest {
             prompt,
+            developer_instructions,
             images: control_account_images(&accepted.config.attachments),
             model: accepted.config.model.clone(),
             cwd: accepted.config.workspace.clone(),
@@ -5966,6 +5964,18 @@ fn frozen_run_instructions(config: &FrozenRunConfigV1) -> String {
     )
 }
 
+fn frozen_harness_instructions(config: &FrozenRunConfigV1) -> String {
+    match config.agent.as_ref() {
+        Some(agent) => compose_labeled_instructions(
+            "Milim global instructions",
+            &config.global_instructions,
+            "Agent instructions",
+            &agent.system_prompt,
+        ),
+        None => frozen_run_instructions(config),
+    }
+}
+
 fn compose_labeled_instructions(
     first_label: &str,
     first: &str,
@@ -6829,6 +6839,24 @@ fn account_runtime_prompt(
         .join("\n\n")
 }
 
+fn account_runtime_harness_prompt(
+    adapter: &str,
+    prompt: String,
+    instructions: String,
+) -> (String, Option<String>) {
+    let instructions = instructions.trim();
+    if instructions.is_empty() {
+        return (prompt, None);
+    }
+    if adapter == "codex" {
+        return (prompt, Some(instructions.to_string()));
+    }
+    (
+        format!("System instructions:\n{instructions}\n\n{prompt}"),
+        None,
+    )
+}
+
 fn uppercase_role(role: &str) -> &'static str {
     match role {
         "system" => "System",
@@ -7144,6 +7172,22 @@ mod tests {
             account_runtime_prompt(&messages, None, None, "second"),
             full
         );
+
+        let (prompt, instructions) = account_runtime_harness_prompt(
+            "codex",
+            "User:\nsecond".into(),
+            "Milim global instructions:\nBe concise.".into(),
+        );
+        assert_eq!(prompt, "User:\nsecond");
+        assert_eq!(
+            instructions.as_deref(),
+            Some("Milim global instructions:\nBe concise.")
+        );
+
+        let (prompt, instructions) =
+            account_runtime_harness_prompt("claude", "User:\nsecond".into(), "Be concise.".into());
+        assert!(prompt.starts_with("System instructions:\nBe concise."));
+        assert!(instructions.is_none());
     }
 
     #[test]
@@ -7302,6 +7346,22 @@ mod tests {
                 "Agent instructions",
                 "Review carefully.",
             ),
+            "Milim global instructions:\nAlways write focused tests.\n\nAgent instructions:\nReview carefully."
+        );
+        let mut agent_frozen = frozen.clone();
+        agent_frozen.agent = Some(AgentSnapshotV1 {
+            id: "reviewer".into(),
+            name: "Reviewer".into(),
+            description: String::new(),
+            avatar: String::new(),
+            system_prompt: "Review carefully.".into(),
+            tool_mode: "all".into(),
+            enabled_tools: Vec::new(),
+            skill_mode: "auto".into(),
+            enabled_skills: Vec::new(),
+        });
+        assert_eq!(
+            frozen_harness_instructions(&agent_frozen),
             "Milim global instructions:\nAlways write focused tests.\n\nAgent instructions:\nReview carefully."
         );
     }
