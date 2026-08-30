@@ -14,6 +14,7 @@ import type {
 import {
   accountRuntimeInputFromMessages,
   accountRuntimePromptMessages,
+  codexDeveloperInstructionsFromMessages,
   codexPromptFromMessages,
   createHarnessEventHandler,
   createAgentRunEventHandler,
@@ -139,6 +140,14 @@ assert.deepEqual(
     },
   ]).images,
   [{ media_type: "image/png", data: "AAAA" }],
+);
+assert.equal(
+  codexDeveloperInstructionsFromMessages([
+    { role: "system", content: " Global rule " },
+    { role: "user", content: "Question" },
+    { role: "system", content: "Thread rule" },
+  ]),
+  "Global rule\n\nThread rule",
 );
 
 const turnMetrics = createTurnMetricsCapture();
@@ -740,6 +749,7 @@ const codexResult = await runAccountRuntimeTurn({
     assert.deepEqual(request.milim_context?.enabled_tools, ["milim_skill_search", "milim_skill_read"]);
     assert.equal(request.milim_context?.skill_mode, "custom");
     assert.deepEqual(request.milim_context?.enabled_skills, ["review"]);
+    assert.equal(request.developer_instructions, "System rule");
     codexPrompt = request.prompt;
     onEvent(harnessEnvelope({
       type: "session_established",
@@ -821,7 +831,7 @@ assert.equal(accountSkippedAutoCompaction, true);
 assert.equal(accountPreparedSignal, accountSignal);
 assert.equal(accountStreamSignal, accountSignal);
 assert.equal(codexThreadId, "codex-thread-2");
-assert(codexPrompt.includes("System:\nSystem rule"));
+assert(!codexPrompt.includes("System rule"));
 assert(codexPrompt.includes("User:\nlatest user"));
 assert(!codexPrompt.includes("old assistant"));
 assert.equal(accountMetrics[0].usage?.total_tokens, 2);

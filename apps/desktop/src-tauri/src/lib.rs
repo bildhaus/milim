@@ -362,8 +362,13 @@ fn quit_after_user_state_flush(app: tauri::AppHandle) {
 }
 
 #[tauri::command]
-fn request_desktop_quit(app: tauri::AppHandle) {
-    request_workspace_editor_leave(&app, WorkspaceEditorLeaveAction::Quit);
+fn request_desktop_hide(app: tauri::AppHandle) -> std::result::Result<(), String> {
+    request_workspace_editor_leave(&app, WorkspaceEditorLeaveAction::Hide)
+}
+
+#[tauri::command]
+fn request_desktop_quit(app: tauri::AppHandle) -> std::result::Result<(), String> {
+    request_workspace_editor_leave(&app, WorkspaceEditorLeaveAction::Quit)
 }
 
 #[tauri::command]
@@ -383,9 +388,9 @@ fn complete_workspace_editor_leave(
     app: tauri::AppHandle,
     state: tauri::State<'_, WorkspaceEditorDirty>,
     action: WorkspaceEditorLeaveAction,
-) {
+) -> std::result::Result<(), String> {
     state.0.store(false, Ordering::Release);
-    complete_workspace_editor_leave_action(&app, action);
+    complete_workspace_editor_leave_action(&app, action)
 }
 
 const TAILSCALE_SERVE_PORT: u16 = 10000;
@@ -4553,22 +4558,30 @@ fn request_user_state_flush_then_exit<R: tauri::Runtime>(app: &tauri::AppHandle<
 fn complete_workspace_editor_leave_action<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     action: WorkspaceEditorLeaveAction,
-) {
+) -> std::result::Result<(), String> {
     match action {
         WorkspaceEditorLeaveAction::Hide => {
-            let _ = app.emit(FLUSH_USER_STATE_EVENT, ());
-            if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-                let _ = window.hide();
+            if let Err(error) = app.emit(FLUSH_USER_STATE_EVENT, ()) {
+                tracing::warn!("failed to request user-state flush before hiding: {error}");
             }
+            let window = app
+                .get_webview_window(MAIN_WINDOW_LABEL)
+                .ok_or_else(|| "The main Milim window is unavailable.".to_string())?;
+            window
+                .hide()
+                .map_err(|error| format!("Failed to hide Milim: {error}"))
         }
-        WorkspaceEditorLeaveAction::Quit => request_user_state_flush_then_exit(app),
+        WorkspaceEditorLeaveAction::Quit => {
+            request_user_state_flush_then_exit(app);
+            Ok(())
+        }
     }
 }
 
 fn request_workspace_editor_leave<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     action: WorkspaceEditorLeaveAction,
-) {
+) -> std::result::Result<(), String> {
     if app
         .state::<WorkspaceEditorDirty>()
         .0
@@ -4578,9 +4591,10 @@ fn request_workspace_editor_leave<R: tauri::Runtime>(
             WorkspaceEditorLeaveAction::Hide => "hide",
             WorkspaceEditorLeaveAction::Quit => "quit",
         };
-        let _ = app.emit(WORKSPACE_EDITOR_LEAVE_EVENT, action);
+        app.emit(WORKSPACE_EDITOR_LEAVE_EVENT, action)
+            .map_err(|error| format!("Failed to request workspace editor confirmation: {error}"))
     } else {
-        complete_workspace_editor_leave_action(app, action);
+        complete_workspace_editor_leave_action(app, action)
     }
 }
 
@@ -4592,7 +4606,11 @@ fn handle_app_menu_event<R: tauri::Runtime>(app: &tauri::AppHandle<R>, event: Me
         APP_MENU_DOCUMENTATION_ID => "documentation",
         APP_MENU_DIAGNOSTICS_ID => "diagnostics",
         APP_MENU_QUIT_ID => {
-            request_workspace_editor_leave(app, WorkspaceEditorLeaveAction::Quit);
+            if let Err(error) =
+                request_workspace_editor_leave(app, WorkspaceEditorLeaveAction::Quit)
+            {
+                tracing::warn!("app-menu quit request failed: {error}");
+            }
             return;
         }
         _ => return,
@@ -4692,7 +4710,13 @@ fn setup_tray<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()>
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             TRAY_OPEN_ID => show_main_window(app),
-            TRAY_QUIT_ID => request_workspace_editor_leave(app, WorkspaceEditorLeaveAction::Quit),
+            TRAY_QUIT_ID => {
+                if let Err(error) =
+                    request_workspace_editor_leave(app, WorkspaceEditorLeaveAction::Quit)
+                {
+                    tracing::warn!("tray quit request failed: {error}");
+                }
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| match event {
@@ -5018,10 +5042,12 @@ pub fn run() {
             if window.label() == MAIN_WINDOW_LABEL {
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
-                    request_workspace_editor_leave(
+                    if let Err(error) = request_workspace_editor_leave(
                         window.app_handle(),
                         WorkspaceEditorLeaveAction::Hide,
-                    );
+                    ) {
+                        tracing::warn!("window close-to-tray request failed: {error}");
+                    }
                 }
             }
         })
@@ -5032,6 +5058,7 @@ pub fn run() {
             diagnostics_path,
             restart_app,
             secret_storage_status,
+            request_desktop_hide,
             request_desktop_quit,
             set_sidebar_toggle_enabled,
             set_workspace_editor_dirty,

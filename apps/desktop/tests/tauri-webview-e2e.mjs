@@ -39,6 +39,7 @@ const generationControlsOnly = process.argv.includes("--generation-controls-only
 const harnessHardeningOnly = process.argv.includes("--harness-hardening-only");
 const mediaOnly = process.argv.includes("--media-only");
 const linkedThreadDropOnly = process.argv.includes("--linked-thread-drop-only");
+const windowCloseOnly = process.argv.includes("--window-close-only");
 const mcpAppKinds = ["chart", "diagram", "form", "dashboard", "viewer"];
 const screenshots = {
   avatars: join(tmpdir(), "milim-tauri-webview-agent-avatars.png"),
@@ -140,7 +141,13 @@ try {
   }
   session = await launchTauri(milimHome);
   await resetFrontendStorage(session.page);
-  if (mediaOnly) {
+  if (windowCloseOnly) {
+    const errors = collectErrors(session.page);
+    await session.page.getByTestId("chat-shell").waitFor();
+    await dismissOnboardingIfPresent(session.page);
+    await runWindowCloseToTrayCheck(session);
+    consoleErrors.push(...errors.filter((message) => !message.includes("/codex/models")));
+  } else if (mediaOnly) {
     const errors = collectErrors(session.page);
     await session.page.getByTestId("chat-shell").waitFor();
     await dismissOnboardingIfPresent(session.page);
@@ -1062,10 +1069,8 @@ async function runTurnChangesCheck(page, fixture) {
 
   await page.getByRole("button", { name: "Close Git panel" }).click();
   await gitPanel.waitFor({ state: "hidden" });
-  await page.evaluate(() => {
-    window.confirm = () => true;
-  });
   await card.getByTestId("turn-changes-undo").click();
+  await page.getByTestId("app-confirmation-dialog").getByRole("button", { name: "Undo turn" }).click();
   await card.waitFor({ state: "hidden" });
   await page.getByText("Please update the fixture files", { exact: true }).waitFor();
   await assertHidden(page.getByText("Updated all fixture files.", { exact: true }), "removed assistant response");
@@ -2891,6 +2896,19 @@ Add-Type -TypeDefinition $source
       return { handle, visible: visible === "1", x: Number(x), y: Number(y), width: Number(width), height: Number(height) };
     })
     : [];
+}
+
+async function runWindowCloseToTrayCheck(session) {
+  const views = wryWebviews(session.child.pid);
+  const mainView = views.find((view) => view.visible);
+  if (!mainView) {
+    throw new Error(`The main WebView2 surface was not visible before close. views=${describeWryWebviews(views)}`);
+  }
+  await session.page.getByRole("button", { name: "Close window" }).click();
+  await waitForWryVisibility(session.child.pid, mainView.handle, false);
+  if (session.child.exitCode !== null) {
+    throw new Error(`Close-to-tray exited the desktop process with code ${session.child.exitCode}.`);
+  }
 }
 
 function describeWryWebviews(views) {

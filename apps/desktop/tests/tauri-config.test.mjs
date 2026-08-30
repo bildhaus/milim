@@ -435,7 +435,8 @@ for (const needle of [
   "TrayIconEvent::Click",
   "WindowEvent::CloseRequested",
   "api.prevent_close()",
-  "window.hide()",
+  ".hide()",
+  "request_desktop_hide",
 ]) {
   if (!tauriLib.includes(needle)) {
     throw new Error(`Desktop background tray support must include ${needle}`);
@@ -528,7 +529,9 @@ for (const needle of [
 for (const needle of [
   "minimize",
   "toggleMaximize",
-  "close",
+  "requestDesktopHide",
+  'act("Hiding window", requestDesktopHide)',
+  "pushNotice",
   "isMaximized",
   "onResized",
 ]) {

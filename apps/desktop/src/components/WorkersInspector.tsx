@@ -21,6 +21,7 @@ import type {
 } from "../api";
 import { modelDisplayName } from "../lib/modelPicker";
 import type { SessionWorkerRunRecord } from "../sessions/store";
+import { confirmApp } from "../ui/confirmation";
 import { AgentAvatar } from "./AgentAvatar";
 import { ArrowRight, Check, ChevronDown, Copy, Gear, Refresh, Sidebar, Square, Trash } from "./icons";
 import { ModelPicker } from "./ModelPicker";
@@ -417,7 +418,11 @@ export function WorkersInspector({
     if (
       !selectedRecord ||
       !selectedWorker ||
-      !window.confirm("Apply this worker diff to the active workspace?")
+      !(await confirmApp({
+        title: "Apply worker changes?",
+        message: "Apply this worker diff to the active workspace?",
+        confirmLabel: "Apply changes",
+      }))
     ) return;
     setReviewBusy(true);
     try {

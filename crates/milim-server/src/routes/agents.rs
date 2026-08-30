@@ -2971,6 +2971,23 @@ mod worker_model_tests {
             Some("none")
         );
         assert!(request.prompt.contains("Do not delegate more work"));
+
+        let mut codex_spec = spec;
+        codex_spec.model = "codex:gpt-5.6".to_string();
+        let (adapter, request) = account_worker_harness_request(
+            &codex_spec,
+            &RunContext {
+                workspace: None,
+                privacy_mode: crate::privacy::PrivacyMode::Off,
+            },
+        )
+        .unwrap();
+        assert_eq!(adapter, "codex");
+        assert_eq!(request.prompt, "Find the bug.");
+        assert!(request
+            .developer_instructions
+            .as_deref()
+            .is_some_and(|instructions| instructions.contains("Do not delegate more work")));
     }
 
     #[tokio::test]
@@ -3053,15 +3070,20 @@ fn account_worker_harness_request(
     {
         instructions.insert(0, system_prompt.to_string());
     }
-    let prompt = format!(
-        "System instructions:\n{}\n\n{}",
-        instructions.join("\n\n"),
-        spec.prompt
-    );
+    let instructions = instructions.join("\n\n");
+    let (prompt, developer_instructions) = if adapter == "codex" {
+        (spec.prompt.clone(), Some(instructions))
+    } else {
+        (
+            format!("System instructions:\n{instructions}\n\n{}", spec.prompt),
+            None,
+        )
+    };
     Ok((
         adapter.to_string(),
         HarnessRunRequest {
             prompt,
+            developer_instructions,
             images: Vec::new(),
             model: model.to_string(),
             cwd: spec

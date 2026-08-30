@@ -100,6 +100,16 @@ localStorage.setItem("milim.themeId", customTheme.id);
 const { hydrateThemeFromUserState, useTheme } = await import("../src/theme/store.js");
 const { appearanceSnapshot } = await import("../src/theme/appearanceSnapshot.js");
 const { animatedBackgroundSource, themeCssVariables } = await import("../src/theme/applyTheme.js");
+const { themeContrastIssues } = await import("../src/theme/contrast.js");
+const { BUILTIN_THEMES } = await import("../src/theme/themes.js");
+
+for (const theme of BUILTIN_THEMES) {
+  equal(
+    themeContrastIssues(theme).length,
+    0,
+    `${theme.name} should keep all built-in text roles at accessible contrast`,
+  );
+}
 
 equal(
   animatedBackgroundSource("url(data:image/gif;base64,R0lGODlhAQABAIAAAAUEBA==)"),

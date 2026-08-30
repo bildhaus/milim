@@ -1,5 +1,7 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useState } from "react";
+import { requestDesktopHide } from "../api";
+import { useUiPreferences } from "../ui/store";
 
 const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -23,6 +25,7 @@ function IconClose() {
 
 export function WindowControls() {
   const [maxed, setMaxed] = useState(false);
+  const pushNotice = useUiPreferences((state) => state.pushNotice);
 
   useEffect(() => {
     if (!inTauri) return;
@@ -35,18 +38,20 @@ export function WindowControls() {
     return () => un?.();
   }, []);
 
-  const act = (fn: (w: ReturnType<typeof getCurrentWindow>) => Promise<unknown>) => () => {
+  const act = (label: string, fn: () => Promise<unknown>) => () => {
     if (!inTauri) return;
-    try {
-      void fn(getCurrentWindow());
-    } catch {
-      /* not in tauri */
-    }
+    void Promise.resolve()
+      .then(fn)
+      .catch((error) => {
+        const detail = error instanceof Error ? error.message : String(error);
+        console.error(`${label} failed.`, error);
+        pushNotice({ tone: "error", message: `${label} failed: ${detail}` });
+      });
   };
 
   return (
     <div className="win-controls">
-      <button type="button" className="win-btn" title="Minimize" aria-label="Minimize window" onClick={act((w) => w.minimize())}>
+      <button type="button" className="win-btn" title="Minimize" aria-label="Minimize window" onClick={act("Minimizing window", () => getCurrentWindow().minimize())}>
         <IconMin />
       </button>
       <button
@@ -54,11 +59,11 @@ export function WindowControls() {
         className="win-btn"
         title={maxed ? "Restore" : "Maximize"}
         aria-label={maxed ? "Restore window" : "Maximize window"}
-        onClick={act((w) => w.toggleMaximize())}
+        onClick={act("Changing window size", () => getCurrentWindow().toggleMaximize())}
       >
         {maxed ? <IconRestore /> : <IconMax />}
       </button>
-      <button type="button" className="win-btn win-close" title="Close" aria-label="Close window" onClick={act((w) => w.close())}>
+      <button type="button" className="win-btn win-close" title="Close" aria-label="Close window" onClick={act("Hiding window", requestDesktopHide)}>
         <IconClose />
       </button>
     </div>

@@ -69,10 +69,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: pnpm/action-setup@v5
         with:
-          version: 9
+          version: 9.15.9
       - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
           cache-dependency-path: apps/desktop/pnpm-lock.yaml
       - uses: Swatinem/rust-cache@v2
@@ -85,7 +85,7 @@ jobs:
           MILIM_PERF_ARTIFACT_DIR: ${{ github.workspace }}/apps/desktop/tester-artifacts/runtime-evidence
       - name: Upload runtime evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: runtime-evidence-windows
           path: apps/desktop/tester-artifacts/runtime-evidence
@@ -110,10 +110,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: pnpm/action-setup@v5
         with:
-          version: 9
+          version: 9.15.9
       - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
           cache-dependency-path: apps/desktop/pnpm-lock.yaml
       - uses: Swatinem/rust-cache@v2
@@ -291,7 +291,7 @@ jobs:
         working-directory: apps/desktop
         run: node scripts/verify-release-manifest.mjs
       - name: Upload release manifest artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: release-manifest-${{ matrix.artifact }}
           path: |
@@ -299,7 +299,7 @@ jobs:
             apps/desktop/release-artifacts/SHA256SUMS.txt
           if-no-files-found: error
       - name: Upload updater checksum artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: updater-checksums-${{ matrix.artifact }}
           path: apps/desktop/release-artifacts/updater-checksums/*.sha256
@@ -314,12 +314,12 @@ jobs:
         with:
           ref: ${{ env.MILIM_RELEASE_TAG }}
       - name: Download release manifest artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: release-manifest-*
           path: release-manifests
       - name: Download updater checksum artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: updater-checksums-*
           path: release-checksums

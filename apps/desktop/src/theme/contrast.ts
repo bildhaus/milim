@@ -43,7 +43,10 @@ export function themeContrastIssues(theme: Theme): string[] {
     ["Primary text", theme.colors.primaryText, theme.colors.bgPrimary],
     ["Primary text on panels", theme.colors.primaryText, theme.colors.bgSecondary],
     ["Muted text on panels", theme.colors.secondaryText, theme.colors.bgSecondary],
+    ["Tertiary text", theme.colors.tertiaryText, theme.colors.bgPrimary],
+    ["Tertiary text on panels", theme.colors.tertiaryText, theme.colors.bgSecondary],
     ["Input text", theme.colors.primaryText, theme.colors.inputBg],
+    ["Placeholder text", theme.colors.placeholderText, theme.colors.inputBg],
   ];
   return checks.flatMap(([label, foreground, background]) => {
     const ratio = contrastRatio(foreground, background);

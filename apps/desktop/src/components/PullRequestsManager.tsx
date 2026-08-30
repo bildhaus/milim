@@ -26,6 +26,7 @@ import {
 } from "../lib/pullRequestCache";
 import {
   pullRequestActorAvatarUrls,
+  pullRequestErrorPresentation,
   pullRequestReadiness,
 } from "../lib/pullRequests";
 import { sessionRecencyLabel } from "../lib/sessionRecency";
@@ -155,6 +156,10 @@ export function PullRequestsManager({ onClose }: { onClose: () => void }) {
   const detailsLoading = selected
     ? detailsRefreshing.has(selected.url)
     : false;
+  const errorPresentation = useMemo(
+    () => (error ? pullRequestErrorPresentation(error) : null),
+    [error],
+  );
   const visibleItems = useMemo(() => {
     const needle = query.trim().toLowerCase();
     return items.filter((item) => {
@@ -593,11 +598,11 @@ export function PullRequestsManager({ onClose }: { onClose: () => void }) {
             {!listLoading && !visibleItems.length && (
               <div className="pull-requests-empty">
                 <GitPullRequest size={24} />
-                <strong>No pull requests</strong>
+                <strong>{errorPresentation?.title ?? "No pull requests"}</strong>
                 <span>
-                  {query.trim()
+                  {errorPresentation?.message ?? (query.trim()
                     ? "No pull requests match this search."
-                    : `No ${filter === "all" ? "authored or review-requested" : filter} pull requests are open.`}
+                    : `No ${filter === "all" ? "authored or review-requested" : filter} pull requests are open.`)}
                 </span>
               </div>
             )}
@@ -940,11 +945,26 @@ export function PullRequestsManager({ onClose }: { onClose: () => void }) {
               ) : (
                 <>
                   <GitPullRequest size={28} />
-                  <strong>Select a pull request</strong>
-                  <span>Review details, checks, comments, and changed files here.</span>
+                  <strong>{errorPresentation?.title ?? "Select a pull request"}</strong>
+                  <span>{errorPresentation?.message ?? "Review details, checks, comments, and changed files here."}</span>
                 </>
               )}
-              {error && <span className="error">{error}</span>}
+              {errorPresentation && (
+                <div className="pull-request-error-actions" role="alert">
+                  <button className="btn-accent" type="button" onClick={() => void refreshList()}>
+                    Retry
+                  </button>
+                  {errorPresentation.helpUrl && (
+                    <button className="btn-ghost" type="button" onClick={() => void openExternalUrl(errorPresentation.helpUrl!)}>
+                      {errorPresentation.helpLabel}
+                    </button>
+                  )}
+                  <details>
+                    <summary>Technical details</summary>
+                    <code>{errorPresentation.detail}</code>
+                  </details>
+                </div>
+              )}
             </div>
           )}
         </main>

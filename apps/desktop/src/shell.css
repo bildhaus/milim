@@ -745,6 +745,40 @@
   margin-top: 4px;
 }
 
+.app-confirmation-backdrop {
+  z-index: 1600;
+}
+.app-confirmation-modal {
+  gap: 12px;
+  padding: 16px;
+}
+.app-confirmation-modal > p {
+  margin: 0;
+  color: var(--secondary-text);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+.app-confirmation-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.app-confirmation-confirm.danger {
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid color-mix(in srgb, var(--error) 56%, var(--border-primary));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--error) 18%, var(--bg-primary));
+  color: var(--error);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+}
+.app-confirmation-confirm.danger:hover {
+  background: color-mix(in srgb, var(--error) 26%, var(--bg-primary));
+}
+
 .menu-sep { height: 1px; background: var(--border-primary); margin: 5px 4px; }
 .agent-mono { flex: 1; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .agent-model { max-width: 150px; overflow: hidden; font-size: 11px; color: var(--tertiary-text); font-family: var(--mono); margin-left: 8px; flex: none; text-overflow: ellipsis; white-space: nowrap; }

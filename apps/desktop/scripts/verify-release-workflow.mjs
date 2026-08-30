@@ -54,10 +54,10 @@ for (const needle of [
   "node scripts/stage-portable-release-artifact.mjs",
   "node scripts/generate-release-manifest.mjs",
   "node scripts/verify-release-manifest.mjs",
-  "actions/upload-artifact@v4",
+  "actions/upload-artifact@v6",
   "release-manifest-${{ matrix.artifact }}",
   "updater-checksums-${{ matrix.artifact }}",
-  "actions/download-artifact@v4",
+  "actions/download-artifact@v8",
   "node apps/desktop/scripts/merge-release-manifests.mjs release-manifests release-published",
   "milim-windows-x64-portable.exe",
   "milim-macos-universal.dmg",
@@ -120,6 +120,8 @@ for (const needle of [
   "cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings",
   "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml",
   "pnpm -C apps/desktop verify:frontend",
+  "name: Desktop Windows close-to-tray",
+  "pnpm -C apps/desktop test:tauri-window-close",
 ]) {
   assertIncludes(ciWorkflow, needle, "CI workflow");
 }
@@ -171,14 +173,14 @@ for (const needle of [
   "permissions:\n      contents: read",
   checkoutReleaseTagRef,
   "pnpm -C apps/desktop install --frozen-lockfile",
-  "uses: actions/upload-artifact@v4",
+  "uses: actions/upload-artifact@v6",
 ]) {
   assertIncludes(runtimeEvidenceJob, needle, "runtime evidence job");
 }
 for (const line of [
   "        run: pnpm -C apps/desktop perf:canonical",
   "          MILIM_PERF_ARTIFACT_DIR: ${{ github.workspace }}/apps/desktop/tester-artifacts/runtime-evidence",
-  "        uses: actions/upload-artifact@v4",
+  "        uses: actions/upload-artifact@v6",
   "          name: runtime-evidence-windows",
   "          path: apps/desktop/tester-artifacts/runtime-evidence",
   "          if-no-files-found: error",
@@ -192,7 +194,7 @@ assertNotIncludes(runtimeEvidenceJob, "            . -> target", "runtime eviden
 assertBefore(
   runtimeEvidenceJob,
   "pnpm -C apps/desktop perf:canonical",
-  "actions/upload-artifact@v4",
+  "actions/upload-artifact@v6",
   "runtime evidence job",
 );
 

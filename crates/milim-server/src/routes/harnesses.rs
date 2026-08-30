@@ -17,6 +17,8 @@ fn harness_terminal_drain_timeout(harness_id: &str) -> Option<Duration> {
 pub(crate) struct HarnessRunRequest {
     pub(crate) prompt: String,
     #[serde(default)]
+    pub(crate) developer_instructions: Option<String>,
+    #[serde(default)]
     pub(crate) images: Vec<crate::codex_bridge::AccountImage>,
     pub(crate) model: String,
     #[serde(default)]
@@ -241,6 +243,7 @@ mod tests {
     fn common_request_maps_native_session_and_persistence_fields() {
         let request: HarnessRunRequest = serde_json::from_value(json!({
             "prompt": "hello",
+            "developer_instructions": "Follow the Milim thread rules.",
             "model": "model",
             "native_session_id": "native-1",
             "persist_session": true,
@@ -258,6 +261,10 @@ mod tests {
                 .ok()
                 .unwrap();
         assert_eq!(codex.thread_id.as_deref(), Some("native-1"));
+        assert_eq!(
+            codex.developer_instructions.as_deref(),
+            Some("Follow the Milim thread rules.")
+        );
         assert!(codex.persist_thread);
         assert!(codex.tool_approval_grant);
         assert!(codex.plan_mode);
