@@ -9,6 +9,7 @@ import {
 import { flushDeferredUserStateWrites } from "../persistence/userStateStorage.js";
 import { useSessions, type ThreadSettingsPatch } from "../sessions/store.js";
 import { useUiPreferences } from "../ui/store.js";
+import { confirmApp } from "../ui/confirmation.js";
 import { requestWorkspaceEditorLeave } from "./workspaceEditorGuard.js";
 
 async function sendCreateCommand(command: ControlCommandV1) {
@@ -72,7 +73,11 @@ export async function createInteractiveChat(
     await setWorkspace(folder);
     const status = await getWorkspaceGitStatus();
     if (!status || status.state !== "ready" || !status.is_repo) return id;
-    if (policy === "ask" && !window.confirm("Create this project chat in an isolated worktree?")) return id;
+    if (policy === "ask" && !(await confirmApp({
+      title: "Use an isolated worktree?",
+      message: "Create this project chat in an isolated worktree?",
+      confirmLabel: "Create worktree",
+    }))) return id;
     const result = await runWorkspaceGitAction("create_thread_worktree", { thread_id: id });
     if (!result.ok || !result.worktree) throw new Error(result.message || "Could not create the isolated worktree.");
     useSessions.getState().setThreadWorkspace(id, {

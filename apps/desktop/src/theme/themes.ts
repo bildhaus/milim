@@ -10,8 +10,8 @@ const monoDark: Theme = {
   colors: {
     primaryText: "#ededf0",
     secondaryText: "#a0a0a8",
-    tertiaryText: "#71717a",
-    placeholderText: "#71717a",
+    tertiaryText: "#82828c",
+    placeholderText: "#82828c",
     bgPrimary: "#0d0d0f",
     bgSecondary: "#161618",
     bgTertiary: "#1f1f23",
@@ -43,8 +43,8 @@ const monoLight: Theme = {
   colors: {
     primaryText: "#18181b",
     secondaryText: "#55555c",
-    tertiaryText: "#8a8a92",
-    placeholderText: "#8a8a92",
+    tertiaryText: "#707078",
+    placeholderText: "#707078",
     bgPrimary: "#ffffff",
     bgSecondary: "#f6f6f7",
     bgTertiary: "#ededee",

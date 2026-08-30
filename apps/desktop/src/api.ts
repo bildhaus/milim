@@ -821,6 +821,11 @@ export async function requestDesktopQuit(): Promise<void> {
   await invoke("request_desktop_quit");
 }
 
+export async function requestDesktopHide(): Promise<void> {
+  if (!inTauri) return;
+  await invoke("request_desktop_hide");
+}
+
 export async function setWorkspaceEditorDirty(dirty: boolean): Promise<void> {
   if (!inTauri) return;
   await invoke("set_workspace_editor_dirty", { dirty });

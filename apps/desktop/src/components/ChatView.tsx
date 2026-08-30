@@ -349,6 +349,7 @@ import { requestWorkspaceEditorLeave } from "../lib/workspaceEditorGuard";
 import { isLoopbackProviderEndpoint } from "../lib/providerEndpoint.js";
 import { pendingAttentionKey, playInterfaceSound } from "../ui/sounds";
 import { DEFAULT_PREVIEW_PANEL_WIDTH, useUiPreferences } from "../ui/store";
+import { confirmApp } from "../ui/confirmation";
 import { Composer } from "./Composer";
 import { ComposerSurface } from "./ComposerSurface";
 import { ControlBar } from "./ControlBar";
@@ -4584,7 +4585,11 @@ export function ChatView({
   async function applyRetryWorkspace() {
     const retry = activeSession?.retryWorkspace;
     if (!retry || busy) return;
-    if (!window.confirm(`Apply this retry diff to the original workspace?\n\n${retry.originalFolder}`)) return;
+    if (!(await confirmApp({
+      title: "Apply retry changes?",
+      message: `Apply this retry diff to the original workspace?\n\n${retry.originalFolder}`,
+      confirmLabel: "Apply changes",
+    }))) return;
     try {
       await setWorkspace(retry.originalFolder);
       const result = await runWorkspaceGitAction("apply_retry_worktree", {
@@ -4616,7 +4621,12 @@ export function ChatView({
   async function discardRetryWorkspace() {
     const retry = activeSession?.retryWorkspace;
     if (!retry || busy) return;
-    if (!window.confirm("Discard this retry thread and its isolated worktree?")) return;
+    if (!(await confirmApp({
+      title: "Discard retry worktree?",
+      message: "Discard this retry thread and its isolated worktree?",
+      confirmLabel: "Discard",
+      tone: "danger",
+    }))) return;
     try {
       await setWorkspace(retry.originalFolder);
       const result = await runWorkspaceGitAction("remove_retry_worktree", {
@@ -6245,7 +6255,12 @@ export function ChatView({
         if (!result.confirmation_token) {
           throw new Error("The delete confirmation challenge did not include a token.");
         }
-        if (!window.confirm("Delete this message?\n\nIt will be removed from this chat and future model context.")) {
+        if (!(await confirmApp({
+          title: "Delete this message?",
+          message: "It will be removed from this chat and future model context.",
+          confirmLabel: "Delete message",
+          tone: "danger",
+        }))) {
           return;
         }
         result = await sendControlCommand({
@@ -6279,9 +6294,12 @@ export function ChatView({
   async function restoreWorkspaceCheckpoint(checkpoint: WorkspaceCheckpoint) {
     if (busy) return;
     if (
-      !window.confirm(
-        `Restore workspace files to before this turn?\n\n${checkpoint.folder}`,
-      )
+      !(await confirmApp({
+        title: "Restore workspace files?",
+        message: `Restore workspace files to before this turn?\n\n${checkpoint.folder}`,
+        confirmLabel: "Restore files",
+        tone: "danger",
+      }))
     )
       return;
     try {
@@ -6312,9 +6330,12 @@ export function ChatView({
     const checkpoint = assistant?.workspaceCheckpoint;
     if (!checkpoint || assistant.role !== "assistant") return;
     if (
-      !window.confirm(
-        `Undo this turn's workspace changes and remove its response?\n\n${checkpoint.folder}`,
-      )
+      !(await confirmApp({
+        title: "Undo this turn?",
+        message: `Undo this turn's workspace changes and remove its response?\n\n${checkpoint.folder}`,
+        confirmLabel: "Undo turn",
+        tone: "danger",
+      }))
     )
       return;
     try {

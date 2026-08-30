@@ -72,7 +72,7 @@ def enableProguardInReleaseBuilds = true
  */
 def jscFlavor = 'io.github.react-native-community:jsc-android:2026004.+'
 def milimVersionCode = (System.getenv("MILIM_ANDROID_VERSION_CODE") ?: "1").toInteger()
-def milimVersionName = System.getenv("MILIM_MOBILE_VERSION") ?: "0.2.63"
+def milimVersionName = System.getenv("MILIM_MOBILE_VERSION") ?: "0.2.64"
 
 android {
     ndkVersion rootProject.ext.ndkVersion

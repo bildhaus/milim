@@ -391,6 +391,36 @@
 .pull-request-detail-empty {
   min-height: 0;
 }
+.pull-request-error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  max-width: 480px;
+  margin-top: 6px;
+}
+.pull-request-error-actions details {
+  flex-basis: 100%;
+  margin-top: 3px;
+  color: var(--tertiary-text);
+}
+.pull-request-error-actions summary {
+  cursor: pointer;
+}
+.pull-request-error-actions code {
+  display: block;
+  max-height: 120px;
+  margin-top: 7px;
+  padding: 8px;
+  overflow: auto;
+  border: 1px solid var(--border-primary);
+  border-radius: 7px;
+  background: var(--bg-secondary);
+  color: var(--secondary-text);
+  text-align: left;
+  white-space: pre-wrap;
+}
 .pull-requests-notice {
   margin: 10px 12px 0;
   padding: 8px 10px;

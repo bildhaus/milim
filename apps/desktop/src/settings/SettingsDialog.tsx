@@ -85,6 +85,7 @@ import {
   type PinnedQuickAction,
 } from "../ui/store";
 import { playInterfaceSound } from "../ui/sounds";
+import { confirmApp } from "../ui/confirmation";
 import { Archive, Check, Code, Download, ExternalLink, FileText, FolderOpen, Gear, GitLogo, Pencil, PlusSquare, Refresh, Search, Sidebar, Smartphone, Sun, Trash, Volume2, X } from "../components/icons";
 import { MobileCompanionSettings } from "../components/MobileCompanionSettings";
 import { ThemeEditor } from "../components/ThemeEditor";
@@ -627,7 +628,12 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
       const path = await open({ multiple: false, directory: false, filters: [{ name: "Milim backup", extensions: ["json"] }] });
       if (typeof path !== "string") return;
       const inspection = await inspectMilimBackup(path);
-      const accepted = window.confirm(`Replace local Milim data with this v${inspection.appVersion} backup containing ${inspection.summary.chats} chats and ${inspection.summary.projects} projects? A recovery snapshot will be created first.`);
+      const accepted = await confirmApp({
+        title: "Restore this backup?",
+        message: `Replace local Milim data with this v${inspection.appVersion} backup containing ${inspection.summary.chats} chats and ${inspection.summary.projects} projects? A recovery snapshot will be created first.`,
+        confirmLabel: "Restore backup",
+        tone: "danger",
+      });
       if (!accepted) return;
       await flushDeferredUserStateWrites();
       const recoveryPath = await restoreMilimBackup(path);
@@ -1351,14 +1357,18 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
 
             <SettingsBlock title="AI composer completion" data-setting-id="chat-ai-completion" className={settingHighlightClass("chat-ai-completion").trim()}>
               <div className="setting-stack">
-                <SettingsChoiceGroup value={composerCompletionMode} onChange={(mode) => {
+                <SettingsChoiceGroup value={composerCompletionMode} onChange={(mode) => void (async () => {
                   if (mode === "current" && !remoteCompletionConfirmed) {
-                    const accepted = window.confirm("Remote completion sends only the current composer text to the selected provider and may incur cost. Enable it?");
+                    const accepted = await confirmApp({
+                      title: "Enable remote completion?",
+                      message: "Remote completion sends only the current composer text to the selected provider and may incur cost.",
+                      confirmLabel: "Enable",
+                    });
                     if (!accepted) return;
                     setRemoteCompletionConfirmed(true);
                   }
                   setComposerCompletionMode(mode);
-                }} testIdPrefix="composer-completion" options={[
+                })()} testIdPrefix="composer-completion" options={[
                   { value: "off", label: "Off", detail: "No background completion requests." },
                   { value: "local", label: "Local providers", detail: "Only loopback provider endpoints." },
                   { value: "current", label: "Current provider model", detail: "Provider models only; explicit remote opt-in." },

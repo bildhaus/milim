@@ -1,4 +1,9 @@
 {
+  "0.2.64": {
+    "version": "0.2.64",
+    "summary": "Milim 0.2.64 makes desktop integrations more reliable, keeps Codex guidance out of visible prompts, and clarifies consequential actions.",
+    "items": []
+  },
   "0.2.63": {
     "version": "0.2.63",
     "summary": "Milim 0.2.63 restores OpenCode and Pi launches when the desktop app starts with a minimal system PATH.",

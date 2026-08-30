@@ -172,7 +172,11 @@ export function WorkspaceCodePanel({
     let unlisten: (() => void) | undefined;
     void import("@tauri-apps/api/event").then(({ listen }) => listen<string>("milim://workspace-editor-leave-requested", async ({ payload }) => {
       if (payload !== "hide" && payload !== "quit") return;
-      if (await requestWorkspaceEditorLeave(payload)) await completeWorkspaceEditorLeave(payload);
+      try {
+        if (await requestWorkspaceEditorLeave(payload)) await completeWorkspaceEditorLeave(payload);
+      } catch (error) {
+        setFileError(`Could not ${payload} Milim: ${errorMessage(error)}`);
+      }
     })).then((stop) => {
       if (disposed) void stop();
       else unlisten = stop;

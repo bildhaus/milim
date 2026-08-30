@@ -23,6 +23,73 @@ export interface PullRequestSnapshot {
   error?: string;
 }
 
+export interface PullRequestErrorPresentation {
+  title: string;
+  message: string;
+  detail: string;
+  helpLabel?: string;
+  helpUrl?: string;
+}
+
+export function pullRequestErrorPresentation(error: string): PullRequestErrorPresentation {
+  const detail = Array.from(
+    new Set(error.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)),
+  ).join("\n");
+  const normalized = detail.toLowerCase();
+
+  if (
+    normalized.includes("failed to run github cli") &&
+    (normalized.includes("no such file") ||
+      normalized.includes("os error 2") ||
+      normalized.includes("not found") ||
+      normalized.includes("cannot find"))
+  ) {
+    return {
+      title: "GitHub CLI not found",
+      message: "Install GitHub CLI, then restart Milim so the desktop app can discover it.",
+      detail,
+      helpLabel: "Install GitHub CLI",
+      helpUrl: "https://cli.github.com/",
+    };
+  }
+
+  if (
+    normalized.includes("not authenticated") ||
+    normalized.includes("gh auth login") ||
+    normalized.includes("bad credentials") ||
+    normalized.includes("http 401")
+  ) {
+    return {
+      title: "GitHub sign-in required",
+      message: "Run gh auth login in a terminal, then retry.",
+      detail,
+      helpLabel: "Authentication help",
+      helpUrl: "https://cli.github.com/manual/gh_auth_login",
+    };
+  }
+
+  if (
+    normalized.includes("could not resolve") ||
+    normalized.includes("connection refused") ||
+    normalized.includes("network") ||
+    normalized.includes("timed out") ||
+    normalized.includes("timeout") ||
+    normalized.includes("tls")
+  ) {
+    return {
+      title: "GitHub is unreachable",
+      message: "Check the network connection, VPN, or proxy, then retry.",
+      detail,
+    };
+  }
+
+  return {
+    title: "Pull requests unavailable",
+    message: "Milim couldn't load pull requests. Retry, or open the technical details for the GitHub CLI response.",
+    detail,
+  };
+}
+
 export function pullRequestActorAvatarUrls(actor?: PullRequestActor): string[] {
   const login = actor?.login.trim();
   return Array.from(

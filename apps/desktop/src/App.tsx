@@ -27,6 +27,7 @@ import {
   type ChatMessage,
 } from "./api";
 import { AutoUpdater } from "./components/AutoUpdater";
+import { AppConfirmationHost } from "./components/AppConfirmationHost";
 import { ContextMenuProvider, useContextMenu, type ContextMenuItem } from "./components/ContextMenu";
 import type { GitPanelView } from "./components/GitPanel";
 import { FolderOpen, Gear, Globe, Pencil, Plus, Refresh, Sidebar as SidebarIcon, X } from "./components/icons";
@@ -928,6 +929,7 @@ function AppContent() {
         )}
       </Suspense>
       <AppNoticeHost />
+      <AppConfirmationHost />
       <MobilePairingApprovalPrompt />
       <AutoUpdater />
       <ResizeHandles />

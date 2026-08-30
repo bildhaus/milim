@@ -42,7 +42,7 @@ The desktop app embeds the server and runs as a single instance, so normal use d
 
 ### Run the desktop app from source
 
-From the repository root:
+Use Node 22.13 or newer with the repository-pinned pnpm 9.15.9, then run from the repository root:
 
 ```powershell
 corepack enable
@@ -140,7 +140,7 @@ pnpm -C apps/site build
 
 Platform release work should also follow the [release guide](https://docs.milim.ai/release). The broader packaged-app and Tauri smoke path is available through `pnpm -C apps/desktop verify:tester-ready`.
 
-Pull-request CI splits complete desktop verification between the Rust matrix and the frontend job. Release runs reuse that protected validation and add the canonical Windows runtime benchmark plus packaged-artifact checks.
+Pull-request CI splits complete desktop verification between the Rust matrix, frontend job, and a Windows WebView2 close-to-tray check. Release runs reuse that protected validation and add the canonical Windows runtime benchmark plus packaged-artifact checks.
 
 ## Documentation
 

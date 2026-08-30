@@ -1974,7 +1974,7 @@ fn workspace_git_remove_thread_worktree_action(
 }
 
 fn gh_output(root: &FsPath, args: &[&str]) -> Result<Output, String> {
-    let mut command = Command::new("gh");
+    let mut command = gh_command();
     command.current_dir(root).args(args);
     milim_core::proc::hide_console(&mut command)
         .output()
@@ -1982,7 +1982,7 @@ fn gh_output(root: &FsPath, args: &[&str]) -> Result<Output, String> {
 }
 
 fn gh_output_owned(root: &FsPath, args: &[String]) -> Result<Output, String> {
-    let mut command = Command::new("gh");
+    let mut command = gh_command();
     command.current_dir(root).args(args);
     milim_core::proc::hide_console(&mut command)
         .output()
@@ -1990,11 +1990,22 @@ fn gh_output_owned(root: &FsPath, args: &[String]) -> Result<Output, String> {
 }
 
 fn gh_output_global(args: &[String]) -> Result<Output, String> {
-    let mut command = Command::new("gh");
+    let mut command = gh_command();
     command.args(args);
     milim_core::proc::hide_console(&mut command)
         .output()
         .map_err(|error| format!("Failed to run GitHub CLI: {error}"))
+}
+
+fn gh_command() -> Command {
+    #[cfg(not(windows))]
+    {
+        crate::cli_path::blocking_command("gh")
+    }
+    #[cfg(windows)]
+    {
+        Command::new("gh")
+    }
 }
 
 fn github_repository(value: Option<String>) -> Result<String, String> {

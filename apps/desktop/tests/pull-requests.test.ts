@@ -3,6 +3,7 @@ import type { PullRequestDetails } from "../src/api.js";
 import {
   pullRequestActorAvatarUrls,
   pullRequestAccessibleLabel,
+  pullRequestErrorPresentation,
   pullRequestReadiness,
 } from "../src/lib/pullRequests.js";
 import { upsertPullRequestItems } from "../src/lib/pullRequestCache.js";
@@ -96,6 +97,25 @@ assert.equal(pullRequestReadiness(pullRequest(), true).tone, "stale");
 assert.match(
   pullRequestAccessibleLabel(pullRequest({ reviewDecision: "APPROVED" })),
   /PR #12.*1 of 1 checks passing.*approved/,
+);
+
+assert.deepEqual(
+  pullRequestErrorPresentation("Failed to run GitHub CLI: No such file or directory (os error 2)\nFailed to run GitHub CLI: No such file or directory (os error 2)"),
+  {
+    title: "GitHub CLI not found",
+    message: "Install GitHub CLI, then restart Milim so the desktop app can discover it.",
+    detail: "Failed to run GitHub CLI: No such file or directory (os error 2)",
+    helpLabel: "Install GitHub CLI",
+    helpUrl: "https://cli.github.com/",
+  },
+);
+assert.equal(
+  pullRequestErrorPresentation("GitHub CLI is not authenticated. Run `gh auth login`.").title,
+  "GitHub sign-in required",
+);
+assert.equal(
+  pullRequestErrorPresentation("request timed out while reaching api.github.com").title,
+  "GitHub is unreachable",
 );
 
 const cached = {

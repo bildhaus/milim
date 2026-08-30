@@ -6,7 +6,7 @@ title: Release and verification
 summary: Release artifacts, updater behavior, verification commands, and site build checks.
 group: Reference
 order: 110
-updated: 2026-08-20
+updated: 2026-08-31
 ---
 
 Release work should verify the Rust workspace, desktop app, site docs, and platform artifacts without reintroducing Linux packaging as a release target.
@@ -21,7 +21,7 @@ Release work should verify the Rust workspace, desktop app, site docs, and platf
 | iOS | Protected manual store-delivery job archives a signed IPA and uploads it to TestFlight. |
 | Android | Protected manual store-delivery job produces a signed AAB and uploads it to Play internal testing. |
 
-Pull requests run full desktop verification in CI: the Rust matrix owns workspace and Tauri native checks, Ubuntu verifies the generated control contract, and the frontend job runs the frontend-only suite. Release tags do not repeat that coverage: the Release workflow records a canonical Windows runtime benchmark alongside production packaging, Tauri builds the frontend before compiling each platform artifact, and each packaged binary and manifest is verified. Runtime conformance remains available as a manual release check. macOS release artifacts require the Apple signing secrets and intentionally enable Tauri's macOS private API for transparent preview activity overlay windows. The workflow publishes `manifest.json` plus an aggregate `SHA256SUMS.txt` from the current release run. Updater assets are verified with SHA-256 sidecars and the aggregate checksum file. A rerun may repair an unpublished draft, but every edit and asset upload rechecks draft status; published releases are immutable and require a new version.
+Pull requests run full desktop verification in CI: the Rust matrix owns workspace and Tauri native checks, Ubuntu verifies the generated control contract, the frontend job runs the frontend-only suite, and Windows launches the real WebView2 app to verify that the custom title-bar Close control hides the window without exiting the process. Release tags do not repeat that coverage: the Release workflow records a canonical Windows runtime benchmark alongside production packaging, Tauri builds the frontend before compiling each platform artifact, and each packaged binary and manifest is verified. Desktop workflows use Node 22 and the pinned pnpm 9.15.9 toolchain; artifact transfer actions run on their maintained Node 24 releases. Runtime conformance remains available as a manual release check. macOS release artifacts require the Apple signing secrets and intentionally enable Tauri's macOS private API for transparent preview activity overlay windows. The workflow publishes `manifest.json` plus an aggregate `SHA256SUMS.txt` from the current release run. Updater assets are verified with SHA-256 sidecars and the aggregate checksum file. A rerun may repair an unpublished draft, but every edit and asset upload rechecks draft status; published releases are immutable and require a new version.
 
 ## Updater behavior
 

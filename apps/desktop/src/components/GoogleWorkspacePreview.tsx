@@ -48,6 +48,7 @@ import {
   type GoogleSaveQueueState,
 } from "../lib/googleWorkspace";
 import { useContextMenu } from "./ContextMenu";
+import { confirmApp } from "../ui/confirmation";
 import {
   AlignCenter,
   AlignJustify,
@@ -597,7 +598,7 @@ export function SheetPreview({
     }]);
   }
 
-  function editDimension(
+  async function editDimension(
     action: "insert_rows" | "delete_rows" | "insert_columns" | "delete_columns",
   ) {
     if (activeSheetId === null) return;
@@ -606,7 +607,12 @@ export function SheetPreview({
     const selectedIndex = row
       ? rangeOrigin.row - 1 + selectedRow
       : rangeOrigin.column + selectedColumn;
-    if (deleting && !window.confirm(`Delete ${row ? "row" : "column"} ${row ? rangeOrigin.row + selectedRow : columnLabel(rangeOrigin.column + selectedColumn)}?`)) {
+    if (deleting && !(await confirmApp({
+      title: `Delete ${row ? "row" : "column"}?`,
+      message: `Delete ${row ? "row" : "column"} ${row ? rangeOrigin.row + selectedRow : columnLabel(rangeOrigin.column + selectedColumn)}?`,
+      confirmLabel: "Delete",
+      tone: "danger",
+    }))) {
       return;
     }
     const start = deleting ? selectedIndex : selectedIndex + 1;
@@ -2543,9 +2549,14 @@ export function SlidesPreview({
     }]));
   }
 
-  function deleteSlide(index = selected) {
+  async function deleteSlide(index = selected) {
     const target = visibleSlides[index];
-    if (!target?.objectId || visibleSlides.length <= 1 || !window.confirm(`Delete slide ${index + 1}?`)) return;
+    if (!target?.objectId || visibleSlides.length <= 1 || !(await confirmApp({
+      title: "Delete slide?",
+      message: `Delete slide ${index + 1}?`,
+      confirmLabel: "Delete slide",
+      tone: "danger",
+    }))) return;
     queueSlideText();
     markSlideOptimistic();
     const objectId = target.objectId;
@@ -2784,8 +2795,13 @@ export function SlidesPreview({
     ]));
   }
 
-  function deleteElement() {
-    if (!selectedElement || !window.confirm(`Delete selected ${selectedElement.kind}?`)) return;
+  async function deleteElement() {
+    if (!selectedElement || !(await confirmApp({
+      title: `Delete selected ${selectedElement.kind}?`,
+      message: "This removes the selected element from the slide.",
+      confirmLabel: "Delete element",
+      tone: "danger",
+    }))) return;
     markSlideOptimistic();
     updateCurrentSlide((item) => ({
       ...item,
