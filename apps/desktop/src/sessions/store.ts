@@ -1,4 +1,6 @@
 import { create } from "zustand";
+import { useSyncExternalStore } from "react";
+import { EMPTY_COMPOSER_DRAFT, normalizeComposerDraft, type ComposerDraft } from "../lib/composerDraft.js";
 import { persist, type PersistStorage } from "zustand/middleware";
 import { createChatMessageId } from "../lib/messageIds.js";
 import type {
@@ -65,7 +67,13 @@ import { useSettings } from "../settings/store.js";
 
 const COMPOSER_DRAFTS_KEY = "milim.sessionDrafts";
 const LEGACY_STREAMING_PERSIST_MARKER = "__deferStreamingWrite";
-let sessionComposerDrafts: Record<string, string> = {};
+let sessionComposerDrafts: Record<string, ComposerDraft> = {};
+const changedComposerDrafts = new Set<string>();
+const composerDraftListeners = new Set<() => void>();
+const subscribeComposerDrafts = (listener: () => void) => {
+  composerDraftListeners.add(listener);
+  return () => { composerDraftListeners.delete(listener); };
+};
 let sessionComposerDraftsPersistTimer: ReturnType<typeof setTimeout> | null =
   null;
 
@@ -81,17 +89,31 @@ function persistSessionComposerDrafts(): void {
 }
 
 export function getSessionComposerDraft(sessionId: string): string {
-  return sessionComposerDrafts[sessionId] ?? "";
+  return getSessionComposerState(sessionId).text;
 }
 
 export function setSessionComposerDraft(sessionId: string, draft: string): void {
-  const next = draft.trim() ? draft : "";
-  if (next) sessionComposerDrafts = { ...sessionComposerDrafts, [sessionId]: next };
+  updateSessionComposerState(sessionId, (current) => ({ ...current, text: draft }));
+}
+
+export function getSessionComposerState(sessionId: string): ComposerDraft {
+  return sessionComposerDrafts[sessionId] ?? EMPTY_COMPOSER_DRAFT;
+}
+
+export function useSessionComposerState(sessionId: string): ComposerDraft {
+  return useSyncExternalStore(subscribeComposerDrafts, () => getSessionComposerState(sessionId), () => EMPTY_COMPOSER_DRAFT);
+}
+
+export function updateSessionComposerState(sessionId: string, update: (current: ComposerDraft) => ComposerDraft): void {
+  const next = update(getSessionComposerState(sessionId));
+  changedComposerDrafts.add(sessionId);
+  if (next.text.length || next.attachments.length) sessionComposerDrafts = { ...sessionComposerDrafts, [sessionId]: next };
   else {
     const { [sessionId]: _removed, ...rest } = sessionComposerDrafts;
     sessionComposerDrafts = rest;
   }
   persistSessionComposerDrafts();
+  composerDraftListeners.forEach((listener) => listener());
 }
 
 export async function hydrateSessionComposerDraftsFromUserState(): Promise<void> {
@@ -100,15 +122,21 @@ export async function hydrateSessionComposerDraftsFromUserState(): Promise<void>
   try {
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
-    const next: Record<string, string> = {};
+    const next: Record<string, ComposerDraft> = {};
     for (const [sessionId, draft] of Object.entries(parsed)) {
-      if (typeof draft === "string" && draft.trim()) next[sessionId] = draft;
+      const normalized = normalizeComposerDraft(draft);
+      if (normalized.text.length || normalized.attachments.length) next[sessionId] = normalized;
+    }
+    for (const sessionId of changedComposerDrafts) {
+      if (sessionComposerDrafts[sessionId]) next[sessionId] = sessionComposerDrafts[sessionId];
+      else delete next[sessionId];
     }
     sessionComposerDrafts = next;
+    composerDraftListeners.forEach((listener) => listener());
     if (typeof window !== "undefined")
       window.dispatchEvent(new Event("milim:session-drafts-hydrated"));
   } catch {
-    sessionComposerDrafts = {};
+    // A corrupt persisted draft must not overwrite edits made during startup.
   }
 }
 
@@ -1903,6 +1931,7 @@ interface SessionState {
   getNewUserChatSettings: (settings?: ThreadSettingsPatch) => ThreadSettings;
   newUserChat: (settings?: ThreadSettingsPatch, id?: string) => string;
   forkSession: (id: string, throughMessageIndex?: number) => string | null;
+  installCanonicalSession: (session: Session, activateIfId: string) => void;
   importSession: (
     session: Partial<Omit<Session, "settings">> & {
       settings?: ThreadSettingsPatch;
@@ -2233,11 +2262,29 @@ export const useSessions = create<SessionState>()(
           return get().newChat(get().getNewUserChatSettings(settings), id);
         },
 
+        installCanonicalSession: (session, activateIfId) => set((st) => {
+          const installed: Session = {
+            ...session,
+            settings: normalizeSettings(session.settings, { pauseRunningGoal: true }),
+            messages: session.messages.map(normalizeMessageArtifacts),
+            messagesHydrated: true,
+            messagesLoadedFrom: 0,
+            persistedMessageCount: session.messages.length,
+          };
+          const sessions = [installed, ...st.sessions.filter((item) => item.id !== installed.id)];
+          return {
+            sessions,
+            activeId: st.activeId === activateIfId ? installed.id : st.activeId,
+            projects: upsertProject(st.projects, installed.settings?.folder ?? ""),
+            sidebar: normalizeSidebarState({ ...st.sidebar, sessionOrder: [installed.id, ...st.sidebar.sessionOrder] }, sessions),
+          };
+        }),
+
         forkSession: (id, throughMessageIndex) => {
           let forkId: string | null = null;
           set((st) => {
             const source = st.sessions.find((session) => session.id === id);
-            if (!source) return {};
+            if (!source || source.messagesHydrated === false) return {};
             const end =
               throughMessageIndex == null
                 ? source.messages.length

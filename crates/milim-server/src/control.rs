@@ -1278,6 +1278,7 @@ pub(crate) struct SocketTicket {
 
 pub struct RunManager {
     store: Arc<UserDataStore>,
+    restore_admission: Arc<tokio::sync::RwLock<bool>>,
     host: RwLock<ControlHostRecord>,
     active: Mutex<HashMap<String, ActiveRun>>,
     queue_interrupts: Mutex<HashMap<String, String>>,
@@ -1289,6 +1290,27 @@ pub struct RunManager {
     events: broadcast::Sender<ControlEventV1>,
 }
 
+/// Exclusive restore admission. A failed restore releases the fence; a successful
+/// restore keeps mutation admission closed until the desktop process restarts.
+pub struct RestoreGuard {
+    guard: tokio::sync::OwnedRwLockWriteGuard<bool>,
+    committed: bool,
+}
+
+impl RestoreGuard {
+    pub fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for RestoreGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            *self.guard = false;
+        }
+    }
+}
+
 impl RunManager {
     pub fn new(store: Arc<UserDataStore>, display_name: impl AsRef<str>) -> Result<Arc<Self>> {
         let host = store
@@ -1297,6 +1319,7 @@ impl RunManager {
         let (events, _) = broadcast::channel(CONTROL_EVENT_CAPACITY);
         let manager = Arc::new(Self {
             store,
+            restore_admission: Arc::new(tokio::sync::RwLock::new(false)),
             host: RwLock::new(host),
             active: Mutex::new(HashMap::new()),
             queue_interrupts: Mutex::new(HashMap::new()),
@@ -1861,6 +1884,63 @@ impl RunManager {
                 Err(_) => continue,
             }
         }
+    }
+
+    /// Shared admission for commands and desktop replica writes. Never waits
+    /// behind a restore, so stale clients cannot resume writing after replacement.
+    pub fn mutation_guard(&self) -> Result<tokio::sync::OwnedRwLockReadGuard<bool>> {
+        let guard = self
+            .restore_admission
+            .clone()
+            .try_read_owned()
+            .map_err(|_| {
+                Error::InvalidRequest(
+                    "Backup restore is in progress. Try again after Milim restarts.".into(),
+                )
+            })?;
+        if *guard {
+            return Err(Error::InvalidRequest(
+                "Backup restored. Restart Milim before making more changes.".into(),
+            ));
+        }
+        Ok(guard)
+    }
+
+    pub fn begin_restore(&self) -> Result<RestoreGuard> {
+        let mut guard = self
+            .restore_admission
+            .clone()
+            .try_write_owned()
+            .map_err(|_| {
+                Error::InvalidRequest(
+                    "Milim is processing a change. Wait for it to finish, then restore again."
+                        .into(),
+                )
+            })?;
+        if *guard {
+            return Err(Error::InvalidRequest(
+                "Backup restored. Restart Milim before restoring again.".into(),
+            ));
+        }
+        if !self
+            .active
+            .lock()
+            .expect("control active run store poisoned")
+            .is_empty()
+            || !self.store.control_runs(true)?.is_empty()
+            || !self.store.control_queued_turns(None)?.is_empty()
+            || !self.store.control_pending_inbox(None)?.is_empty()
+        {
+            return Err(Error::InvalidRequest(
+                "Finish or stop active runs and clear queued messages before restoring a backup."
+                    .into(),
+            ));
+        }
+        *guard = true;
+        Ok(RestoreGuard {
+            guard,
+            committed: false,
+        })
     }
 
     pub fn host(&self) -> ControlHostRecord {
@@ -2524,6 +2604,7 @@ impl RunManager {
         device_id: Option<String>,
         mut command: ControlCommandV1,
     ) -> Result<ControlCommandResultV1> {
+        let _admission = self.mutation_guard()?;
         validate_command_id(&command.command_id)?;
         let command_lock = self.lock_for_command(&command.command_id);
         let _command_guard = command_lock.lock().await;
@@ -2684,6 +2765,109 @@ impl RunManager {
             "updatedAt": now,
             "settings": command.payload.get("settings").cloned().unwrap_or_else(|| json!({}))
         });
+        let cloning = command.payload.get("source_thread_id").is_some();
+        if cloning {
+            let source_id = command
+                .payload
+                .get("source_thread_id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .ok_or_else(|| {
+                    Error::InvalidRequest("source_thread_id must identify a thread".into())
+                })?;
+            let source = self.store.session_snapshot(source_id)?;
+            let mut messages = source
+                .get("messages")
+                .and_then(Value::as_array)
+                .cloned()
+                .ok_or_else(|| Error::Other("invalid source messages".into()))?;
+            if let Some(count) = command.payload.get("source_message_count") {
+                if count.as_u64() != Some(0) || command.payload.get("through_message_id").is_some()
+                {
+                    return Err(Error::InvalidRequest("Only source_message_count: 0 is supported; use through_message_id for a branch boundary.".into()));
+                }
+                messages.clear();
+            } else if let Some(boundary) = command.payload.get("through_message_id") {
+                let boundary = boundary.as_str().ok_or_else(|| {
+                    Error::InvalidRequest("through_message_id must be a message ID".into())
+                })?;
+                let index = messages
+                    .iter()
+                    .position(|message| {
+                        message.get("id").and_then(Value::as_str) == Some(boundary)
+                            || message.get("canonicalId").and_then(Value::as_str) == Some(boundary)
+                    })
+                    .ok_or_else(|| {
+                        Error::InvalidRequest(
+                            "The branch message no longer exists. Refresh the source chat.".into(),
+                        )
+                    })?;
+                messages.truncate(index + 1);
+            }
+            for message in &mut messages {
+                let object = message
+                    .as_object_mut()
+                    .ok_or_else(|| Error::Other("invalid source message".into()))?;
+                object.insert("id".into(), json!(Uuid::new_v4().to_string()));
+                for field in [
+                    "canonicalId",
+                    "runId",
+                    "isStreaming",
+                    "streamRenderId",
+                    "workerRunId",
+                    "mailboxOrigin",
+                ] {
+                    object.remove(field);
+                }
+            }
+            if command.payload.get("title").is_none() {
+                session["title"] = json!(format!(
+                    "{} branch",
+                    source
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Chat")
+                ));
+            }
+            let mut settings = source
+                .get("settings")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            if let Some(overrides) = command.payload.get("settings") {
+                let overrides = overrides
+                    .as_object()
+                    .ok_or_else(|| Error::InvalidRequest("settings must be an object".into()))?;
+                let changed_folder = overrides
+                    .get("folder")
+                    .is_some_and(|folder| Some(folder) != settings.get("folder"));
+                settings.extend(overrides.clone());
+                if changed_folder {
+                    settings.insert("toolApproval".into(), json!("review"));
+                }
+            }
+            if let Some(goal) = settings.get_mut("goal").and_then(Value::as_object_mut) {
+                if goal
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .is_some_and(|status| {
+                        matches!(status, "running" | "waiting_for_worker_approval")
+                    })
+                {
+                    goal.insert("status".into(), json!("paused"));
+                }
+            }
+            session["settings"] = Value::Object(settings);
+            session["messages"] = Value::Array(messages);
+            session["parentId"] = json!(source_id);
+            // A branch shares the effective folder, but does not own the
+            // source thread's managed worktree lifecycle.
+            for field in ["virtualFiles", "project"] {
+                if let Some(value) = source.get(field) {
+                    session[field] = value.clone();
+                }
+            }
+        }
         if let Some(project) = command.payload.get("project") {
             session["project"] = project.clone();
         }
@@ -2699,6 +2883,11 @@ impl RunManager {
             &Uuid::new_v4().to_string(),
         )?;
         self.emit_thread_changed(&thread, "thread.created");
+        let data = if cloning {
+            json!({ "session": session })
+        } else {
+            Value::Null
+        };
         Ok(ControlCommandResultV1 {
             command_id: command.command_id.clone(),
             status: ControlCommandStatusV1::Applied,
@@ -2708,7 +2897,7 @@ impl RunManager {
             queue_id: None,
             confirmation_token: None,
             message: None,
-            data: Value::Null,
+            data,
         })
     }
 
@@ -3579,6 +3768,7 @@ impl RunManager {
         thread_id: String,
         mut accepted: AcceptedTurnV1,
     ) -> Result<String> {
+        let _admission = self.mutation_guard()?;
         if let Some(origin) = accepted.mailbox_origin.as_ref() {
             let target = self
                 .store
@@ -3829,8 +4019,9 @@ impl RunManager {
             let _ = journal.commit_failure(0, error);
         }
 
+        let limited = matches!(&outcome, Ok(RunOutcome::Limited));
         let (status, error) = match outcome {
-            Ok(RunOutcome::Completed) => ("completed", None),
+            Ok(RunOutcome::Completed | RunOutcome::Limited) => ("completed", None),
             Ok(RunOutcome::Cancelled) => ("cancelled", None),
             Err(error) => (
                 "failed",
@@ -3872,7 +4063,7 @@ impl RunManager {
             .remove(&thread_id);
         if let Some(queue_id) = interrupt_queue_id {
             let _ = self.start_queued_turn(state, thread_id, &queue_id, true);
-        } else if status != "cancelled" {
+        } else if status != "cancelled" && !limited {
             self.drain_queue(state, thread_id);
         }
     }
@@ -4123,6 +4314,8 @@ impl RunManager {
             accepted.config.linked_thread_grants.clone(),
             reasoning_effort,
             sampling_from_generation(&accepted.config.generation),
+            accepted.config.run_limits.as_ref(),
+            provider_pricing(state, &accepted.config.model).await,
             journal.clone(),
         )?;
         let mut content = String::new();
@@ -4250,7 +4443,11 @@ impl RunManager {
                         resolved_at_ms: None,
                     })?;
                 }
-                milim_agents::AgentEvent::Done { usage, .. } => {
+                milim_agents::AgentEvent::Done {
+                    usage,
+                    stopped_at_limit,
+                    ..
+                } => {
                     flush_deltas(
                         self,
                         thread_id,
@@ -4275,7 +4472,11 @@ impl RunManager {
                         reasoning,
                         Some(metrics),
                     )?;
-                    return Ok(RunOutcome::Completed);
+                    return Ok(if *stopped_at_limit {
+                        RunOutcome::Limited
+                    } else {
+                        RunOutcome::Completed
+                    });
                 }
                 milim_agents::AgentEvent::Error { message } => {
                     flush_deltas(
@@ -5223,6 +5424,7 @@ impl RunManager {
         queue_id: &str,
         emit_resumed: bool,
     ) -> Result<String> {
+        let _admission = self.mutation_guard()?;
         let queued = self
             .store
             .control_queued_turns(Some(&thread_id))?
@@ -5346,6 +5548,7 @@ impl RunManager {
     }
 
     pub fn record_schedule_error(&self, thread_id: &str, message: &str) -> Result<()> {
+        let _admission = self.mutation_guard()?;
         self.persist_and_emit(
             thread_id,
             None,
@@ -5600,6 +5803,25 @@ impl RunManager {
     }
 }
 
+async fn provider_pricing(state: &AppState, model: &str) -> Option<ModelPricing> {
+    let providers = state.providers.as_ref()?.list().await;
+    if let Some((id, raw_model)) = crate::providers::provider_model_route(model) {
+        providers
+            .iter()
+            .find(|provider| provider.id == id)?
+            .pricing
+            .get(&raw_model)
+            .cloned()
+    } else {
+        providers
+            .iter()
+            .find(|provider| provider.models.iter().any(|candidate| candidate == model))?
+            .pricing
+            .get(model)
+            .cloned()
+    }
+}
+
 async fn response_metrics_value(
     state: &AppState,
     store: &UserDataStore,
@@ -5761,6 +5983,7 @@ enum ThreadPatch {
 
 enum RunOutcome {
     Completed,
+    Limited,
     Cancelled,
 }
 
@@ -5935,10 +6158,67 @@ fn resolve_frozen_config(
         native_session_cursor,
         reasoning_effort,
         generation,
+        run_limits: if adapter == "provider" {
+            configured_run_limits(store, settings)?
+        } else {
+            None
+        },
         adapter,
         linked_thread_grants: Vec::new(),
         claimed_mailbox_ids: Vec::new(),
     })
+}
+
+fn configured_run_limits(
+    store: &UserDataStore,
+    settings: Option<&Map<String, Value>>,
+) -> Result<Option<RunLimitsV1>> {
+    let global = store
+        .get_json(MODEL_FAVORITES_SETTINGS_KEY)?
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+    let value = settings
+        .and_then(|settings| settings.get("runLimits"))
+        .or_else(|| global.as_ref()?.get("state")?.get("runLimits"));
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    if !value.is_object() {
+        return Err(Error::InvalidRequest(
+            "Run limits must be an object.".into(),
+        ));
+    }
+    let integer = |key: &str, max: u64| -> Result<Option<u32>> {
+        match value.get(key).filter(|value| !value.is_null()) {
+            None => Ok(None),
+            Some(value) => value
+                .as_u64()
+                .filter(|value| (1..=max).contains(value))
+                .map(|value| Some(value as u32))
+                .ok_or_else(|| {
+                    Error::InvalidRequest(format!(
+                        "{key} must be a whole number between 1 and {max}."
+                    ))
+                }),
+        }
+    };
+    let max_cost_usd = match value.get("maxCostUsd").filter(|value| !value.is_null()) {
+        None => None,
+        Some(value) => Some(
+            value
+                .as_f64()
+                .filter(|value| value.is_finite() && *value > 0.0 && *value <= 1_000_000.0)
+                .ok_or_else(|| {
+                    Error::InvalidRequest(
+                        "Run spend threshold must be positive and at most $1,000,000.".into(),
+                    )
+                })?,
+        ),
+    };
+    Ok(Some(RunLimitsV1 {
+        max_steps: integer("maxSteps", 10_000)?,
+        max_seconds: integer("maxSeconds", 86_400)?,
+        max_cost_usd,
+    }))
 }
 
 fn global_instructions(store: &UserDataStore) -> String {
@@ -6903,6 +7183,41 @@ mod tests {
     use milim_storage::Database;
 
     #[test]
+    fn run_limits_validate_and_thread_overrides_replace_global_defaults() {
+        let (manager, _) = manager_and_state();
+        manager
+            .store
+            .set_json(
+                MODEL_FAVORITES_SETTINGS_KEY,
+                r#"{"state":{"runLimits":{"maxSteps":5,"maxSeconds":60,"maxCostUsd":0.25}}}"#,
+            )
+            .unwrap();
+        let global = configured_run_limits(&manager.store, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(global.max_steps, Some(5));
+        assert_eq!(global.max_seconds, Some(60));
+        assert_eq!(global.max_cost_usd, Some(0.25));
+        let settings = json!({"runLimits": {"maxSteps": 2}});
+        let overridden = configured_run_limits(&manager.store, settings.as_object())
+            .unwrap()
+            .unwrap();
+        assert_eq!(overridden.max_steps, Some(2));
+        assert_eq!(overridden.max_cost_usd, None);
+        for invalid in [
+            json!({"maxSteps": 0}),
+            json!({"maxSeconds": 1.5}),
+            json!({"maxCostUsd": -1}),
+        ] {
+            assert!(configured_run_limits(
+                &manager.store,
+                json!({"runLimits": invalid}).as_object()
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
     fn catalog_cost_estimate_uses_cached_per_token_pricing() {
         let pricing = ModelPricing {
             prompt: Some("0.000001".into()),
@@ -6954,6 +7269,63 @@ mod tests {
             }),
             confirmation_token: None,
         }
+    }
+
+    #[tokio::test]
+    async fn canonical_branch_copies_complete_history_with_fresh_ids_and_stable_boundary() {
+        let (manager, _) = manager_and_state();
+        manager
+            .create_thread(&create_command("source", "test-echo"))
+            .unwrap();
+        for index in 0..250 {
+            manager.store.control_append_message("thread-fixture", &json!({
+                "id": format!("message-{index}"), "role": "user", "content": format!("text {index}"), "runId": "source-run"
+            }).to_string()).unwrap();
+        }
+        let mut command = create_command("clone", "test-echo");
+        command.payload = json!({"id":"clone", "source_thread_id":"thread-fixture"});
+        let cloned = manager.create_thread(&command).unwrap();
+        assert_eq!(
+            cloned.data["session"]["messages"].as_array().unwrap().len(),
+            250
+        );
+        assert_eq!(
+            manager
+                .store
+                .control_projected_messages("clone")
+                .unwrap()
+                .len(),
+            250
+        );
+        assert_ne!(cloned.data["session"]["messages"][0]["id"], "message-0");
+        assert!(cloned.data["session"]["messages"][0].get("runId").is_none());
+        command.payload = json!({"id":"partial", "source_thread_id":"thread-fixture", "through_message_id":"message-119"});
+        assert_eq!(
+            manager.create_thread(&command).unwrap().data["session"]["messages"]
+                .as_array()
+                .unwrap()
+                .len(),
+            120
+        );
+        command.payload = json!({"id":"invalid", "source_thread_id":"thread-fixture", "through_message_id":"deleted"});
+        assert!(manager.create_thread(&command).is_err());
+        assert!(manager.store.control_thread("invalid").unwrap().is_none());
+        command.payload =
+            json!({"id":"empty", "source_thread_id":"thread-fixture", "source_message_count":0});
+        assert!(
+            manager.create_thread(&command).unwrap().data["session"]["messages"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            manager
+                .store
+                .control_messages("thread-fixture")
+                .unwrap()
+                .len(),
+            250
+        );
     }
 
     #[tokio::test]
@@ -9562,5 +9934,46 @@ mod tests {
                 .len(),
             mailbox_count
         );
+    }
+    #[tokio::test]
+    async fn restore_admission_rejects_commands_and_releases_only_failed_restores() {
+        let (manager, state) = manager_and_state();
+        let mutation = manager.mutation_guard().unwrap();
+        assert!(manager.begin_restore().is_err());
+        drop(mutation);
+        let restore = manager.begin_restore().unwrap();
+        assert!(manager.mutation_guard().is_err());
+        assert!(manager
+            .command(
+                state.clone(),
+                None,
+                create_command("during-restore", "test")
+            )
+            .await
+            .is_err());
+        drop(restore);
+        manager
+            .command(state.clone(), None, create_command("after-failure", "test"))
+            .await
+            .unwrap();
+        manager
+            .store
+            .control_enqueue_turn(&milim_storage::ControlQueuedTurnRecord {
+                id: "queued".into(),
+                thread_id: "thread-fixture".into(),
+                command_id: "queue-command".into(),
+                request_json: "{}".into(),
+                accepted_at_ms: 1,
+            })
+            .unwrap();
+        assert!(manager.begin_restore().is_err());
+        manager.store.control_remove_queued_turn("queued").unwrap();
+        manager.begin_restore().unwrap().commit();
+        assert!(manager.mutation_guard().is_err());
+        assert!(manager.begin_restore().is_err());
+        assert!(manager
+            .command(state, None, create_command("after-success", "test"))
+            .await
+            .is_err());
     }
 }

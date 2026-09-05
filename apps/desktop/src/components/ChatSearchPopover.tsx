@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { SheetDialog } from "./SheetDialog";
+import { isComposingKeyEvent } from "../ui/shortcuts";
 import { wireMessageContent } from "../api";
 import {
   searchChatSessions,
@@ -41,6 +43,7 @@ export function CommandPalette({
     ChatSearchResult[] | null
   >(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const listId = useId();
   const searchableSessions = useMemo<SearchableChatSession[]>(
     () => sessions.map((session) => ({
       id: session.id,
@@ -113,6 +116,7 @@ export function CommandPalette({
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.target !== inputRef.current || isComposingKeyEvent(event)) return;
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
@@ -136,8 +140,8 @@ export function CommandPalette({
   }
 
   return (
-    <div className="chat-search-overlay" data-native-preview-blocker="true" role="dialog" aria-modal="true" aria-label="Command palette" onKeyDown={handleKeyDown}>
-      <div className="chat-search-popover">
+    <SheetDialog title="Command palette" overlayClassName="chat-search-overlay" className="chat-search-popover" onClose={onClose}>
+      <div onKeyDown={handleKeyDown}>
         <div className="chat-search-head">
           <Search size={15} />
           <input
@@ -147,13 +151,17 @@ export function CommandPalette({
             onChange={(event) => setQuery(event.currentTarget.value)}
             placeholder="Search commands and chats"
             aria-label="Search commands and chats"
+            role="combobox"
+            aria-expanded="true"
+            aria-controls={listId}
+            aria-activedescendant={resultCount ? `${listId}-${activeIndex}` : undefined}
           />
           <button className="chat-search-close" type="button" aria-label="Close command palette" onClick={onClose}>
             <X size={14} />
           </button>
         </div>
 
-        <div className="chat-search-list" data-testid="command-palette-results" role="listbox" aria-label="Command palette results">
+        <div id={listId} className="chat-search-list" data-testid="command-palette-results" role="listbox" aria-label="Command palette results">
           {resultCount === 0 ? (
             <div className="chat-search-empty">No commands or chats found</div>
           ) : (
@@ -162,12 +170,14 @@ export function CommandPalette({
               {commandResults.map((command, index) => (
                 <button
                   key={command.id}
+                  id={`${listId}-${index}`}
                   className={"chat-search-result command" + (index === activeIndex ? " active" : "")}
                   type="button"
                   role="option"
                   aria-selected={index === activeIndex}
                   data-testid="command-palette-command"
                   onMouseEnter={() => setSelectedIndex(index)}
+                  onFocus={() => setSelectedIndex(index)}
                   onClick={() => {
                     onClose();
                     command.run();
@@ -186,12 +196,14 @@ export function CommandPalette({
                 return (
                   <button
                     key={result.sessionId}
+                    id={`${listId}-${combinedIndex}`}
                     className={"chat-search-result" + (active ? " active" : "") + (result.sessionId === activeId ? " current" : "")}
                     type="button"
                     role="option"
                     aria-selected={active}
                     data-testid="command-palette-chat"
                     onMouseEnter={() => setSelectedIndex(combinedIndex)}
+                    onFocus={() => setSelectedIndex(combinedIndex)}
                     onClick={() => {
                       onSelect(result.sessionId);
                       onClose();
@@ -207,6 +219,6 @@ export function CommandPalette({
           )}
         </div>
       </div>
-    </div>
+    </SheetDialog>
   );
 }

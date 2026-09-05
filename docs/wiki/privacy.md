@@ -6,7 +6,7 @@ title: Privacy and security
 summary: Local and remote data boundaries, Google Workspace access, privacy modes, redaction, blocking, bearer auth, and CORS boundaries.
 group: Local data
 order: 70
-updated: 2026-08-28
+updated: 2026-09-05
 ---
 
 Privacy settings are easiest to reason about as a routing question: what stays local, what goes to a provider, and which gate runs before a remote send.
@@ -20,6 +20,8 @@ Privacy settings are easiest to reason about as a routing question: what stays l
 | `block` | Remote sends containing detected PII fail closed before the provider call. |
 
 The scanner is deterministic regex-based detection for common email, phone, token-like, IP, URL, and secret-looking strings. It does not infer names or sensitive meaning from natural language.
+
+The remote completion gate also covers reasoning text, nested string values in tool-call arguments, tool descriptions and parameter schemas, response-format and tool-choice data, legacy prompt/suffix text, and stop strings. JSON arguments are parsed before scanning or redaction, so escaped text is checked as its decoded value and transformed arguments remain valid JSON. One reversible placeholder map covers the request. Returned tool arguments are buffered separately for each streamed call and restored after complete JSON parsing; malformed private arguments fail before tool dispatch. This text boundary does not inspect image pixels.
 
 New desktop chats default to `off`. The first-send summary shows the selected runtime destination, workspace, Privacy mode, and Review status before a remote turn leaves the composer.
 
@@ -54,6 +56,14 @@ Canonical runs keep a local privacy-processed ledger for their lifetime. The res
 | Mobile companion | Paired phone text, files, and photos travel directly to the user's running desktop over Tailscale, opt-in LAN, or a manual endpoint. Rust accepts the turn with the thread's current privacy configuration and applies the same provider/runtime gate. Milim operates no managed relay or hosted transcript store. |
 | MCP tools | External MCP servers run as configured local child processes or remotes; treat each configured server as its own trust boundary. |
 | MCP Apps | App HTML comes from its configured MCP server, is re-fetched rather than persisted, and runs in an opaque-origin iframe. Validated HTML is held briefly in memory behind a random expiring capability URL; it receives no bearer token. Network access is denied by default and limited to valid `_meta.ui.csp` origins; host calls remain authenticated, same-server, visibility-checked, and approval-gated. |
+
+## Local backups and restore
+
+Settings > Data & privacy exports versioned `.milim-backup.json` files containing chats, projects, drafts, settings, UI preferences, and canonical control history, including the local run ledger. Provider credentials, Google Workspace tokens and selected-file registry, browser profiles, MCP secrets, paired-device tokens, memory databases, generated media, update packages, worktrees, and running jobs are excluded.
+
+Exports and pre-restore recovery snapshots stream JSON to a temporary file beside the destination, flush it to disk, then atomically replace the destination. Inspection and restore use a streaming JSON reader and accept supported backups larger than 64 MiB; this removes the previous file-size rejection without changing the format. Earlier valid JSON backups remain readable. Parsing still materializes the backup state in memory, so available memory and disk space remain practical limits.
+
+Restore validates the schema and nested canonical records before replacement and requires active runs, queued turns, and pending inbox work to be resolved first. While restore holds its exclusive admission guard, new canonical commands and desktop replica writes are rejected rather than waiting to overwrite the restored data. A recovery snapshot is created before one SQLite transaction replaces the selected local state; failure rolls back the replacement and reopens admission. After commit, writes remain blocked until milim restarts. The Settings restore action requests that restart; if restarting fails, restart the app before continuing work. Restore replaces state rather than merging or duplicating it.
 
 ## Google Workspace data
 

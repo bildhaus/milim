@@ -416,6 +416,8 @@ mobilePerfMark('app.render.start');
 type MilimController = ReturnType<typeof useMilimController>;
 type ChatController = Pick<MilimController,
   | 'activeHost'
+  | 'acceptedRetry'
+  | 'pendingRetry'
   | 'bootstrap'
   | 'command'
   | 'draft'
@@ -467,6 +469,8 @@ function App(): React.JSX.Element {
   }, [setSelectedThreadId]);
   const chatController = useMemo<ChatController>(() => ({
     activeHost: controller.activeHost,
+    acceptedRetry: controller.acceptedRetry,
+    pendingRetry: controller.pendingRetry,
     bootstrap: controller.bootstrap,
     command: controller.command,
     draft: controller.draft,
@@ -481,6 +485,8 @@ function App(): React.JSX.Element {
     timeline: controller.timeline,
   }), [
     controller.activeHost,
+    controller.acceptedRetry,
+    controller.pendingRetry,
     controller.bootstrap,
     controller.command,
     controller.draft,
@@ -604,19 +610,19 @@ function App(): React.JSX.Element {
             />
           </View>
         </View>
-        {controller.lastError ? (
+        {controller.pendingRetry || controller.lastError ? (
           <Pressable
             style={styles.errorBanner}
             onPress={controller.pendingRetry
-              ? () => void controller.retryPendingCommand()
+              ? () => void controller.retryPendingCommand().catch(showError)
               : controller.activeHost && controller.status === 'offline'
                 ? controller.reconnect
                 : undefined}>
             <Text style={styles.errorText} numberOfLines={2}>
-              {controller.lastError}
+              {controller.pendingRetry ? 'The desktop may have accepted your last command. Retry to confirm its result.' : controller.lastError}
             </Text>
             {controller.pendingRetry ? (
-              <Text style={styles.retry}>Retry same command</Text>
+              <Text style={styles.retry}>{controller.status === 'online' ? 'Retry same command' : 'Reconnect and retry'}</Text>
             ) : controller.activeHost && controller.status === 'offline' ? (
               <Text style={styles.retry}>Retry connection</Text>
             ) : null}
@@ -1436,6 +1442,21 @@ const ChatScreen = React.memo(function MemoizedChatScreen({controller, openThrea
     [controller.bootstrap?.active_runs, thread?.id],
   );
   const [attachments, setAttachments] = useState<ControlAttachmentV1[]>([]);
+  const handledRetry = useRef<string | null>(null);
+  useEffect(() => {
+    const accepted = controller.acceptedRetry;
+    if (!accepted || !['turn.send', 'turn.steer'].includes(accepted.command.kind) ||
+      accepted.hostId !== controller.activeHost?.hostId ||
+      accepted.command.thread_id !== thread?.id || handledRetry.current === accepted.command.command_id) return;
+    handledRetry.current = accepted.command.command_id;
+    const payload = accepted.command.payload as {attachments?: {id: string}[]};
+    const sentIds = new Set(payload.attachments?.map(item => item.id) ?? []);
+    const sent = attachments.filter(item => sentIds.has(item.id));
+    if (sent.length) {
+      void cleanupAttachments(sent).catch(showError);
+      setAttachments(current => current.filter(item => !sentIds.has(item.id)));
+    }
+  }, [attachments, controller.acceptedRetry, controller.activeHost?.hostId, thread?.id]);
   const [busy, setBusy] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [modelPickerVisible, setModelPickerVisible] = useState(false);
@@ -1871,7 +1892,7 @@ const ChatScreen = React.memo(function MemoizedChatScreen({controller, openThrea
                   icon="bolt"
                   label="Steer next step"
                   tone="quiet"
-                  disabled={busy || (!controller.draft.trim() && !attachments.length)}
+                  disabled={busy || Boolean(controller.pendingRetry) || (!controller.draft.trim() && !attachments.length)}
                   onPress={() => void steer()}
                 />
               ) : null}
@@ -1884,7 +1905,7 @@ const ChatScreen = React.memo(function MemoizedChatScreen({controller, openThrea
             icon="arrow-up"
             label={busy ? 'Sending' : thread.busy ? 'Queue message' : 'Send message'}
             tone="accent"
-            disabled={busy || missingAgent || (!controller.draft.trim() && !attachments.length)}
+            disabled={busy || Boolean(controller.pendingRetry) || missingAgent || (!controller.draft.trim() && !attachments.length)}
             onPress={() => void send()}
           />
         </View>

@@ -6,7 +6,7 @@ title: Desktop app
 summary: Unified threads, projects, composer controls, artifacts, plan mode, goals, search, rendering, settings, and slash commands.
 group: Core
 order: 30
-updated: 2026-08-28
+updated: 2026-09-05
 ---
 
 Milim is your local control plane for coding agents: use your own models and subscriptions, keep one canonical thread, review the diff, and ship.
@@ -30,6 +30,14 @@ Thread messages, reciprocal links, mailbox exchanges, accepted runs, queued turn
 | Mode | Visible surface |
 |---|---|
 | Unified workbench | Chat plus workspace/Git, Agents, skills, MCP, schedules with attached file context and visible result threads, media, sandbox, computer use, and Personal/Project memory. |
+
+Thread export reads one complete SQLite snapshot after pending renderer writes are flushed, so JSON and Markdown exports include older messages that have not been loaded into the window. Branching clones canonical history on the desktop before exposing the new chat. Branch-at-message uses the selected message's stable identity, includes the full history through that message, and gives copied messages new identities; retry branches resolve their starting point against the same complete history. A branch that finishes after you navigate elsewhere does not switch you away from your current chat.
+
+Unsent text and attachments are saved together per thread, including attachment-only drafts. Switching chats preserves both, and a file read finishing after navigation adds to its original chat. Queue and steer acknowledgments clear only the submitted text and attachment identities, preserving anything you typed or attached while waiting. IME composition-confirmation keys do not submit the composer or accept an autocomplete suggestion.
+
+Settings > Models includes optional provider run limits: model steps, elapsed seconds, and a USD spend threshold. New desktop and mobile provider turns freeze these limits when accepted; changing settings does not affect a running turn. Without overrides, the existing 100-step cap remains and time/spend are unlimited. Codex, Claude, OpenCode, and Pi retain their own execution controls.
+
+Time and spend are checked at model/tool boundaries, including after approvals. Started requests and tools finish safely, so these are soft bounds rather than prepaid billing caps. Spend uses provider-reported cost or cached per-token pricing; unavailable cost pauses further work instead of counting it as free. A limited run retains its transcript and leaves queued prompts pending. Send **Continue** for another bounded run, or use **Run** on a queued prompt. Branches share their selected folder without acquiring ownership of a source chat's managed worktree.
 
 ## App map
 

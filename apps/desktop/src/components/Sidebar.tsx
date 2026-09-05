@@ -31,6 +31,7 @@ import {
 import { sessionRecencyLabel } from "../lib/sessionRecency.js";
 import { threadLinkDropDecision } from "../lib/threadLinks.js";
 import { chatExportFilename, sessionExportPayload, sessionMarkdownExport } from "../lib/threadExport";
+import { branchCanonicalSession, completeSessionForExport } from "../lib/threadHistory";
 import { DEFAULT_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, normalizeSidebarWidth, useUiPreferences, type ThreadNavigationPlacement } from "../ui/store";
 import { useTheme } from "../theme/store";
 import type { GitPanelView } from "./GitPanel";
@@ -1298,29 +1299,35 @@ export function Sidebar({
   }
 
   async function branchChat(id: string) {
-    if (id === activeId && !(await requestWorkspaceEditorLeave("navigate"))) return;
-    useSessions.getState().forkSession(id);
-    setConfirmArchiveId(null);
-    focusComposerSoon();
+    try {
+      const forkId = await branchCanonicalSession(id);
+      setConfirmArchiveId(null);
+      if (forkId === useSessions.getState().activeId) focusComposerSoon();
+    } catch (error) {
+      pushNotice({ tone: "error", message: `Could not branch chat: ${error instanceof Error ? error.message : String(error)}` });
+    }
   }
 
-  function exportChat(id: string) {
-    const session = useSessions.getState().sessions.find((item) => item.id === id);
-    if (!session) return;
-    const format = useUiPreferences.getState().threadExportFormat;
-    const blob = new Blob(
-      [format === "markdown" ? sessionMarkdownExport(session) : JSON.stringify(sessionExportPayload(session), null, 2)],
-      { type: format === "markdown" ? "text/markdown" : "application/json" },
-    );
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = chatExportFilename(session.title, format);
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-    setConfirmArchiveId(null);
+  async function exportChat(id: string) {
+    try {
+      const session = await completeSessionForExport(id);
+      const format = useUiPreferences.getState().threadExportFormat;
+      const blob = new Blob(
+        [format === "markdown" ? sessionMarkdownExport(session) : JSON.stringify(sessionExportPayload(session), null, 2)],
+        { type: format === "markdown" ? "text/markdown" : "application/json" },
+      );
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = chatExportFilename(session.title, format);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setConfirmArchiveId(null);
+    } catch (error) {
+      pushNotice({ tone: "error", message: `Could not export chat: ${error instanceof Error ? error.message : String(error)}` });
+    }
   }
 
   async function settleChat(id: string) {

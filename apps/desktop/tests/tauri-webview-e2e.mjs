@@ -4832,6 +4832,28 @@ async function runCommandPaletteCheck(page) {
   }
   await expectFocusedTestId(page, "command-palette-input");
   await page.getByTestId("command-palette-input").fill("open settings");
+  await page.keyboard.press("Tab");
+  const closeFocused = await page.getByRole("button", { name: "Close command palette" }).evaluate((element) => element === document.activeElement);
+  if (!closeFocused) throw new Error("Tab from palette input should focus Close.");
+  await page.keyboard.press("Enter");
+  await page.getByTestId("command-palette-input").waitFor({ state: "hidden" });
+  if (await page.getByTestId("settings-page").isVisible()) throw new Error("Enter on Close must not execute the selected command.");
+
+  await page.keyboard.press("Control+K");
+  await page.getByTestId("command-palette-input").waitFor();
+  await page.keyboard.press("Shift+Tab");
+  const lastFocused = await page.locator(".chat-search-list button").last().evaluate((element) => element === document.activeElement);
+  if (!lastFocused) throw new Error("Shift+Tab must stay inside the command palette.");
+  await page.keyboard.press("Tab");
+  await expectFocusedTestId(page, "command-palette-input");
+  // Focus a non-highlighted command directly: Enter must activate that button.
+  await page.getByTestId("command-palette-command").filter({ hasText: "Open settings" }).focus();
+  await page.keyboard.press("Enter");
+  await page.getByTestId("settings-page").waitFor();
+  await closeSettings(page);
+  await page.keyboard.press("Control+K");
+  await page.getByTestId("command-palette-input").waitFor();
+  await page.getByTestId("command-palette-input").fill("open settings");
   await page.getByTestId("command-palette-command").filter({ hasText: "Open settings" }).waitFor();
   await page.keyboard.press("Enter");
   await page.getByTestId("settings-page").waitFor();

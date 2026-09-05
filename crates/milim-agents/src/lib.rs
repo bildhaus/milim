@@ -5,8 +5,10 @@
 //! tool calls, execute them through the [`ToolRegistry`] and feed the results
 //! back as `tool`-role messages; repeat until the model answers in plain text.
 
+mod limits;
 mod store;
 mod threads;
+pub use limits::AgentRunLimits;
 
 pub use store::{
     normalize_skill_mode, normalize_tool_mode, AgentDef, AgentStore, AGENT_MIGRATIONS,
@@ -61,6 +63,7 @@ pub struct AgentRunConfig {
     /// Sampling controls frozen for the whole agent run. The same values are
     /// reused for every model turn so tool loops cannot silently drift.
     pub sampling: SamplingParams,
+    pub limits: AgentRunLimits,
 }
 
 impl Default for AgentRunConfig {
@@ -73,6 +76,7 @@ impl Default for AgentRunConfig {
             approval_broker: None,
             step_hook: None,
             sampling: SamplingParams::default(),
+            limits: AgentRunLimits::default(),
         }
     }
 }
@@ -640,9 +644,18 @@ pub async fn run_agent_with_config(
     let core_tools = tools_to_core(tools);
     let max_iterations = config.max_iterations();
     let mut steps = Vec::new();
+    let mut budget = limits::RunBudget::new(config.limits.clone());
 
     let mut iteration = 0;
     loop {
+        if let Some(reason) = budget.reason() {
+            return Ok(AgentOutcome {
+                message: ChatMessage::text("assistant", reason),
+                steps,
+                iterations: iteration,
+                stopped_at_limit: true,
+            });
+        }
         let req = CompletionRequest {
             model: model.to_string(),
             messages: messages.clone(),
@@ -656,8 +669,17 @@ pub async fn run_agent_with_config(
         };
         let out = service.complete(req).await?;
         iteration += 1;
+        budget.record(out.usage);
 
         let calls = out.message.tool_calls.clone().unwrap_or_default();
+        if let Some(reason) = budget.reason() {
+            return Ok(AgentOutcome {
+                message: ChatMessage::text("assistant", reason),
+                steps,
+                iterations: iteration,
+                stopped_at_limit: true,
+            });
+        }
         if calls.is_empty() {
             return Ok(AgentOutcome {
                 message: out.message,
@@ -679,6 +701,14 @@ pub async fn run_agent_with_config(
         messages.push(out.message);
         let mut pending_images: Vec<ChatMessage> = Vec::new();
         for call in calls {
+            if let Some(reason) = budget.reason() {
+                return Ok(AgentOutcome {
+                    message: ChatMessage::text("assistant", reason),
+                    steps,
+                    iterations: iteration,
+                    stopped_at_limit: true,
+                });
+            }
             let executed =
                 execute_tool_call(tools, &call.function.name, &call.function.arguments).await;
             let visible = executed.visible;
@@ -834,6 +864,7 @@ pub fn run_agent_stream_with_config(
         let retry_backoff = config.initial_stream_retry_backoff;
         let mut messages = messages;
         let mut total_usage = Usage::default();
+        let mut budget = limits::RunBudget::new(config.limits.clone());
 
         if let Some(hook) = config.step_hook.as_ref() {
             if let Err(e) = hook.commit_tool_catalog(&tools.execution_specs()).await {
@@ -847,6 +878,11 @@ pub fn run_agent_stream_with_config(
         let mut iteration = 0;
         loop {
             let step = iteration + 1;
+            if let Some(reason) = budget.reason() {
+                yield AgentEvent::Token { text: format!("\n\n{reason} Send Continue to start another bounded run in this thread.") };
+                yield AgentEvent::Done { iterations: iteration, stopped_at_limit: true, usage: total_usage };
+                return;
+            }
             if let Some(hook) = config.step_hook.as_ref() {
                 if let Err(e) = hook.prepare_model_step(step, &mut messages).await {
                     yield AgentEvent::Error { message: e.to_string() };
@@ -864,6 +900,11 @@ pub fn run_agent_stream_with_config(
                 sampling: config.sampling.clone(),
                 reasoning_effort,
             };
+            if let Some(reason) = budget.reason() {
+                yield AgentEvent::Token { text: format!("\n\n{reason} Send Continue to start another bounded run in this thread.") };
+                yield AgentEvent::Done { iterations: iteration, stopped_at_limit: true, usage: total_usage };
+                return;
+            }
             if let Some(hook) = config.step_hook.as_ref() {
                 if let Err(e) = hook.commit_model_request(step, &req).await {
                     yield AgentEvent::Error { message: e.to_string() };
@@ -911,6 +952,7 @@ pub fn run_agent_stream_with_config(
                 }
             }
             iteration += 1;
+            budget.record(step_usage);
 
             let calls = tool_acc.finish();
             if let Some(hook) = config.step_hook.as_ref() {
@@ -930,13 +972,17 @@ pub fn run_agent_stream_with_config(
                 }
             }
             if calls.is_empty() {
+                if let Some(reason) = budget.reason() {
+                    yield AgentEvent::Token { text: format!("\n\n{reason} Send Continue to start another bounded run in this thread.") };
+                    yield AgentEvent::Done { iterations: iteration, stopped_at_limit: true, usage: total_usage };
+                    return;
+                }
                 yield AgentEvent::Final { content };
                 yield AgentEvent::Done { iterations: iteration, stopped_at_limit: false, usage: total_usage };
                 return;
             }
-            if iteration >= max_iterations {
-                let content = limit_message_text(max_iterations);
-                yield AgentEvent::Final { content };
+            if let Some(reason) = budget.reason().or_else(|| (iteration >= max_iterations).then(|| limit_message_text(max_iterations))) {
+                yield AgentEvent::Token { text: format!("\n\n{reason} Send Continue to start another bounded run in this thread.") };
                 yield AgentEvent::Done { iterations: iteration, stopped_at_limit: true, usage: total_usage };
                 return;
             }
@@ -964,7 +1010,9 @@ pub fn run_agent_stream_with_config(
                 let environment_policy = tools
                     .environment_policy(&call.function.name)
                     .unwrap_or(ProcessEnvironmentPolicy::HostShellInherited);
-                let approved = if effect != ToolEffect::ReadOnly {
+                let approved = if budget.reason().is_some() {
+                    false
+                } else if effect != ToolEffect::ReadOnly {
                     if let Some(broker) = config.approval_broker.as_ref() {
                         let mut pending = broker.request();
                         yield AgentEvent::ToolApprovalRequired {
@@ -995,12 +1043,19 @@ pub fn run_agent_stream_with_config(
             // Calls enter the fixed registry pipeline in model order. The
             // pipeline's fair exclusive barriers prevent mutating/command/MCP
             // calls from overlapping, while explicitly parallel-safe reads
-            // can use at most four slots. `buffered` preserves result order
+            // can use at most four slots. A time-bounded run uses one slot so
+            // each tool checks its deadline before entering the pipeline.
+            // `buffered` preserves result order
             // and one failure remains an independent model-visible result.
             let executions = futures::stream::iter(prepared_calls.into_iter().map(|(call, approved)| {
                 let tools = tools.clone();
+                let budget = &budget;
                 async move {
-                    let executed = if approved {
+                    let executed = if let Some(reason) = budget.reason() {
+                        let mut skipped = denied_tool_call(tools.as_ref(), &call.function.name);
+                        skipped.visible = json!({ "skipped": true, "error": reason });
+                        skipped
+                    } else if approved {
                         execute_tool_call(
                             tools.as_ref(),
                             &call.function.name,
@@ -1013,7 +1068,7 @@ pub fn run_agent_stream_with_config(
                     (call, executed)
                 }
             }))
-            .buffered(4)
+            .buffered(if config.limits.max_duration.is_some() { 1 } else { 4 })
             .collect::<Vec<_>>()
             .await;
             for (call, executed) in executions {
@@ -1681,6 +1736,7 @@ mod tests {
                 approval_broker: None,
                 step_hook: None,
                 sampling: SamplingParams::default(),
+                limits: AgentRunLimits::default(),
             },
         )
         .await
@@ -1690,6 +1746,130 @@ mod tests {
         assert!(outcome.stopped_at_limit);
         assert_eq!(outcome.steps.len(), 1);
         assert!(outcome.message.text_content().contains("iteration limit"));
+    }
+
+    #[tokio::test]
+    async fn spend_and_step_limits_stop_before_another_tool_is_executed() {
+        for (max_iterations, limits, expected) in [
+            (
+                100,
+                AgentRunLimits {
+                    max_cost_usd: Some(0.01),
+                    ..Default::default()
+                },
+                "no usable price",
+            ),
+            (1, AgentRunLimits::default(), "iteration limit"),
+            (
+                100,
+                AgentRunLimits {
+                    max_cost_usd: Some(0.01),
+                    pricing: Some(milim_core::api::openai::ModelPricing {
+                        prompt: Some("0.01".into()),
+                        completion: Some("0.01".into()),
+                    }),
+                    ..Default::default()
+                },
+                "spend threshold",
+            ),
+        ] {
+            let events = run_agent_stream_with_config(
+                Arc::new(LoopingToolBackend),
+                Arc::new(ToolRegistry::new()),
+                "test-loop".into(),
+                vec![ChatMessage::text("user", "continue")],
+                None,
+                AgentRunConfig {
+                    max_iterations,
+                    limits,
+                    ..Default::default()
+                },
+            )
+            .collect::<Vec<_>>()
+            .await;
+            assert!(!events.iter().any(|event| matches!(
+                event,
+                AgentEvent::ToolCall { .. } | AgentEvent::ToolResult { .. }
+            )));
+            assert!(events.iter().any(
+                |event| matches!(event, AgentEvent::Token { text } if text.contains(expected))
+            ));
+            assert!(matches!(
+                events.last(),
+                Some(AgentEvent::Done {
+                    stopped_at_limit: true,
+                    iterations: 1,
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn time_limit_after_approval_skips_the_tool() {
+        let broker = Arc::new(ToolApprovalBroker::default());
+        let events = run_agent_stream_with_config(
+            Arc::new(LoopingToolBackend),
+            Arc::new(ToolRegistry::new()),
+            "test-loop".into(),
+            vec![ChatMessage::text("user", "continue")],
+            None,
+            AgentRunConfig {
+                approval_broker: Some(broker.clone()),
+                limits: AgentRunLimits {
+                    max_duration: Some(Duration::from_millis(100)),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        futures::pin_mut!(events);
+        let mut skipped = false;
+        while let Some(event) = events.next().await {
+            match event {
+                AgentEvent::ToolApprovalRequired { approval_id, .. } => {
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    broker.resolve(&approval_id, true);
+                }
+                AgentEvent::ToolResult { result, .. } => skipped = result["skipped"] == true,
+                AgentEvent::Done {
+                    stopped_at_limit, ..
+                } => assert!(stopped_at_limit),
+                AgentEvent::Error { message } => panic!("{message}"),
+                _ => {}
+            }
+        }
+        assert!(
+            skipped,
+            "an approval after the deadline must not authorize execution"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_spend_on_a_final_answer_still_marks_the_limit() {
+        let events = run_agent_stream_with_config(
+            Arc::new(TestBackend::new()),
+            Arc::new(ToolRegistry::new()),
+            "test-echo".into(),
+            vec![ChatMessage::text("user", "hello")],
+            None,
+            AgentRunConfig {
+                limits: AgentRunLimits {
+                    max_cost_usd: Some(1.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .collect::<Vec<_>>()
+        .await;
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                stopped_at_limit: true,
+                ..
+            })
+        ));
     }
 
     #[tokio::test]
@@ -1793,6 +1973,7 @@ mod tests {
                 approval_broker: None,
                 step_hook: None,
                 sampling: SamplingParams::default(),
+                limits: AgentRunLimits::default(),
             },
         ));
 
@@ -1917,6 +2098,63 @@ mod tests {
             *observed_tool_ids.lock().unwrap(),
             vec!["call-slow", "call-fast"]
         );
+    }
+
+    #[tokio::test]
+    async fn time_limit_between_tools_finishes_started_work_and_skips_the_next_call() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(DelayTool {
+            name: "slow",
+            delay: Duration::from_millis(150),
+        }));
+        registry.register(Arc::new(DelayTool {
+            name: "fast",
+            delay: Duration::from_millis(1),
+        }));
+        let events = run_agent_stream_with_config(
+            Arc::new(OrderedToolsBackend {
+                calls: Arc::new(AtomicUsize::new(0)),
+                observed_tool_ids: Arc::new(Mutex::new(Vec::new())),
+            }),
+            Arc::new(registry),
+            "ordered-tools".into(),
+            vec![ChatMessage::text("user", "run both")],
+            None,
+            AgentRunConfig {
+                limits: AgentRunLimits {
+                    max_duration: Some(Duration::from_millis(100)),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let results: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ToolResult { name, result, .. } => Some((name.as_str(), result)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, "slow");
+        assert_ne!(
+            results[0].1["skipped"], true,
+            "the started tool must finish normally"
+        );
+        assert_eq!(results[1].0, "fast");
+        assert_eq!(
+            results[1].1["skipped"], true,
+            "the second tool must not execute after the deadline"
+        );
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                stopped_at_limit: true,
+                ..
+            })
+        ));
     }
 
     #[tokio::test]

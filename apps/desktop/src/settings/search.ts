@@ -8,6 +8,7 @@ export type SettingSearchEntry = {
 };
 
 export const SETTINGS_SEARCH_ENTRIES: SettingSearchEntry[] = [
+  { id: "models-run-limits", label: "Provider run limits", section: "models", aliases: ["budget", "spend", "cost", "time limit", "steps"] },
   { id: "app-window-layout", label: "Window and layout", section: "app", aliases: ["app", "general", "always on top", "ui size", "zoom", "account usage", "account quota", "quota", "codex", "claude", "new chat"] },
   { id: "app-thread-navigation", label: "Thread navigation", section: "app", aliases: ["sidebar", "sidebar organization", "thread organization", "top bar", "bottom bar", "placement", "projects", "inbox", "settle", "settled", "finished threads", "recent activity", "folders", "organization"] },
   { id: "chat-composer", label: "Composer", section: "chat", aliases: ["send shortcut", "enter", "density"] },

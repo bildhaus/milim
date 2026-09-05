@@ -5,7 +5,7 @@ import { composerAutocompleteTriggerAt, composerCommandRunsOnSelection, composer
 import { canNavigateComposerHistory, moveComposerHistory, type ComposerHistoryDirection } from "../lib/composerHistory";
 import { clipboardFiles, isDuplicateClipboardPaste, type ClipboardPasteStamp } from "../lib/clipboardFiles";
 import { composerDisplayForText, composerLinkClickAction, composerTokensForText, pasteComposerUrl, type ComposerToken } from "../lib/composerTokens";
-import { composerEnterAction, shortcutLabel } from "../ui/shortcuts";
+import { composerEnterAction, isComposingKeyEvent, shortcutLabel } from "../ui/shortcuts";
 import { useUiPreferences } from "../ui/store";
 import { AgentAvatar } from "./AgentAvatar";
 import { ArrowUp, ChevronDown, Folder, FolderOpen, GitHub, Paperclip, PlusSquare, Square, UserRound, X } from "./icons";
@@ -829,6 +829,7 @@ export function Composer({
           onCopy={(e) => copyRawSelection(e)}
           onCut={(e) => copyRawSelection(e, true)}
           onKeyDown={(e) => {
+            if (imeComposing || isComposingKeyEvent(e)) return;
             if (
               !e.altKey
               && !e.ctrlKey

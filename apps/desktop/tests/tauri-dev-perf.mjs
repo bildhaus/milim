@@ -20,6 +20,7 @@ import { chromium } from "playwright-core";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const binaryMode = process.argv.includes("--binary");
+const auditRegressions = process.argv.includes("--audit-regressions");
 const tauriCli = join(root, "node_modules", "@tauri-apps", "cli", "tauri.js");
 const perfBinary =
   process.env.MILIM_TAURI_PERF_BINARY ||
@@ -65,8 +66,174 @@ if (!binaryMode && (await isPortOpen(cdpPort))) {
 }
 
 mkdirSync(artifactDir, { recursive: true });
-if (binaryMode) await runCanonicalBinaryBenchmark();
+if (auditRegressions && !binaryMode) throw new Error("--audit-regressions requires --binary and a freshly built Tauri binary.");
+if (auditRegressions) await runAuditRegressions();
+else if (binaryMode) await runCanonicalBinaryBenchmark();
 else await runDevBenchmark();
+
+async function runAuditRegressions() {
+  const milimHome = mkdtempSync(join(tmpdir(), "milim-audit-proof-home-"));
+  const workspace = join(milimHome, "audit-workspace");
+  mkdirSync(workspace);
+  const report = { schema_version: 1, runtime: "tauri-binary-webview2", commit_sha: currentCommitSha(), proof: "real-provider-loop-local-http-fixture", checks: {} };
+  const errors = [];
+  let session;
+  let provider;
+  let releaseLimitedResponse;
+  const limitedPrompt = "AUDIT_LIMIT_ONE_STEP";
+  const positivePrompt = "AUDIT_ALLOW_TOOL_WRITE";
+  const queuedPrompt = "AUDIT_QUEUED_MUST_WAIT";
+  const requestsFor = (marker) => provider.completions.filter((request) => request.body?.messages?.some((message) => message.role === "user" && String(message.content).includes(marker)));
+  try {
+    ensure(existsSync(perfBinary), `Tauri binary not found: ${perfBinary}`);
+    ensure(!(await isPortOpen(cdpPort)), `CDP port ${cdpPort} is already in use.`);
+    provider = await startCanonicalFakeProvider({
+      models: ["audit-model"], partialMarker: "AUDIT", terminalMarker: "AUDIT_DONE",
+      onCompletion(res, body) {
+        const messages = body?.messages ?? [];
+        const positive = messages.some((message) => message.role === "user" && String(message.content).includes(positivePrompt));
+        const limited = messages.some((message) => message.role === "user" && String(message.content).includes(limitedPrompt));
+        if ((positive || limited) && !messages.some((message) => message.role === "tool")) {
+          ensure(body.tools?.some((tool) => tool.function?.name === "write_file"), "Real provider request did not advertise write_file.");
+        }
+        if (positive && !messages.some((message) => message.role === "tool")) {
+          finishAuditToolResponse(res, body.model, "positive.txt");
+        } else if (limited && !messages.some((message) => message.role === "tool")) {
+          releaseLimitedResponse = () => finishAuditToolResponse(res, body.model, "must-not-exist.txt");
+        } else {
+          finishCanonicalResponse(res, body?.model ?? "audit-model", "AUDIT_DONE");
+        }
+        return true;
+      },
+    });
+    session = await launchTauriBinary(milimHome, errors);
+    await mockAccountRuntimeDiscovery(session.page);
+    await enablePerfAndBypassOnboarding(session.page);
+    await session.page.unroute("**/*");
+    await configureProvider(session.page, provider.baseUrl, ["audit-model"]);
+    await reloadPage(session.page);
+    await session.page.getByTestId("chat-shell").waitFor();
+    await selectModel(session.page, "audit-model");
+    const selected = await waitForPersistedState(session.page, (state) => {
+      const active = activePersistedSession(state);
+      return active && persistedModelMatches(active.settings?.model, "audit-model") ? active : null;
+    }, "audit model selection");
+    const model = selected.settings.model;
+
+    console.log("[audit] full native snapshot and stable-ID branching beyond resident history");
+    const provisioned = await sendControlTestCommand(session.page, { command_id: "audit-source-create", kind: "thread.create", thread_id: selected.id, payload: { id: selected.id, settings: selected.settings } });
+    ensure(provisioned.status === "applied", "Audit source creation failed.");
+    await writeLargeTranscriptFixture(session.page, selected.id, { threadCount: 1, messagesPerThread: 350 });
+    await reloadPage(session.page);
+    await session.page.getByTestId("chat-shell").waitFor();
+    const source = await session.page.evaluate((sessionId) => window.__TAURI_INTERNALS__.invoke("user_session_snapshot", { sessionId }), selected.id);
+    ensure(source.messages.length === 350, `Full snapshot returned ${source.messages.length} messages.`);
+    const tail = await session.page.evaluate((sessionId) => window.__TAURI_INTERNALS__.invoke("user_session_messages_page", { sessionId, limit: 100 }), selected.id);
+    ensure(tail.messages.length === 100 && tail.first_index === 250, "Fixture must exercise history outside the initial 100-message page.");
+    const boundary = source.messages[270].canonicalId || source.messages[270].id;
+    const cloneCommand = { command_id: "audit-branch-stable-id", kind: "thread.create", thread_id: "audit-branch", payload: { id: "audit-branch", source_thread_id: selected.id, through_message_id: boundary } };
+    const cloned = await sendControlTestCommand(session.page, cloneCommand);
+    ensure(cloned.status === "applied", `Canonical clone failed: ${JSON.stringify(cloned)}`);
+    const branch = cloned.data?.session;
+    ensure(branch?.messages?.length === 271, `Stable-ID branch returned ${branch?.messages?.length} messages instead of 271.`);
+    ensure(branch.messages[0].content === source.messages[0].content && branch.messages[270].content === source.messages[270].content, "Branch must retain the complete inclusive prefix.");
+    const sourceIds = new Set(source.messages.map((message) => message.id));
+    ensure(branch.messages.every((message) => !sourceIds.has(message.id) && !message.canonicalId), "Cloned messages must have independent canonical identities.");
+    const retry = await sendControlTestCommand(session.page, cloneCommand);
+    ensure(retry.status === "applied" && retry.thread_id === branch.id, "Retrying the same branch command must be idempotent.");
+    const projected = await controlTestRequest(session.page, `/control/v1/threads/${branch.id}/timeline?tail=500`);
+    ensure(projected.items.filter((item) => item.type === "message").length === 271, "Canonical timeline must expose all cloned messages to mobile/provider consumers.");
+    const invalid = await sendControlTestCommand(session.page, { command_id: "audit-invalid-boundary", kind: "thread.create", payload: { id: "audit-invalid-branch", source_thread_id: selected.id, through_message_id: "no-such-message" } });
+    ensure(invalid.status !== "applied", "A stale branch boundary must fail rather than truncate silently.");
+    ensure(!(await readControlBootstrap(session.page)).threads.some((thread) => thread.id === "audit-invalid-branch"), "Failed branching must not create an empty canonical thread.");
+    report.checks.history = { sourceMessages: 350, residentPageMessages: 100, branchMessages: 271, stableBoundary: true, independentMessageIds: true, canonicalTimeline: true, retryIdempotent: true };
+
+    console.log("[audit] fractional USD Settings input and persistence");
+    await session.page.getByTestId("open-settings").click();
+    await session.page.getByTestId("settings-section-models").click();
+    const spend = session.page.getByTestId("run-limit-maxCostUsd");
+    await spend.fill("0.25");
+    await session.page.getByTestId("run-limit-maxSteps").click();
+    ensure(await spend.getAttribute("aria-invalid") === "false", "A fractional USD threshold must be accepted.");
+    await waitForCondition(async () => {
+      const raw = await session.page.evaluate(() => window.__TAURI_INTERNALS__.invoke("user_state_get", { key: "milim.settings" }));
+      return raw && JSON.parse(raw).state?.runLimits?.maxCostUsd === 0.25;
+    }, "fractional USD persistence");
+    await spend.fill("");
+    await session.page.getByTestId("run-limit-maxSteps").click();
+    await session.page.getByTestId("close-settings").click();
+    report.checks.fractionalUsd = { persisted: 0.25, accepted: true };
+
+    const runSettings = (steps) => ({ model, folder: workspace, toolApproval: "open", privacy: "off", memory: false, sandbox: false, computerUse: false, runLimits: { maxSteps: steps, maxSeconds: null, maxCostUsd: null } });
+    const start = async (id, text, steps) => {
+      const created = await sendControlTestCommand(session.page, { command_id: `${id}-create`, kind: "thread.create", payload: { id, settings: runSettings(steps) } });
+      ensure(created.status === "applied", `Could not create ${id}.`);
+      const sent = await sendControlTestCommand(session.page, { command_id: `${id}-send`, kind: "turn.send", thread_id: id, payload: { text } });
+      ensure(sent.status === "accepted" && sent.run_id, `Could not start ${id}: ${JSON.stringify(sent)}`);
+      return sent;
+    };
+    const waitTerminal = async (runId) => {
+      let inspection;
+      await waitForCondition(async () => {
+        inspection = await controlTestRequest(session.page, `/control/v1/runs/${runId}`);
+        return ["completed", "failed", "cancelled"].includes(inspection.run?.status);
+      }, `terminal run ${runId}`, 30_000);
+      ensure(inspection.run.status === "completed", `Provider run failed: ${JSON.stringify(inspection.run.error)}`);
+      return inspection;
+    };
+    console.log("[audit] positive control: real provider loop executes write_file");
+    const positive = await start("audit-positive", positivePrompt, 2);
+    await waitTerminal(positive.run_id);
+    ensure(existsSync(join(workspace, "positive.txt")), "Positive control did not execute write_file; a skipped-tool assertion would be inconclusive.");
+    ensure(readFileSync(join(workspace, "positive.txt"), "utf8") === "AUDIT_TOOL_EXECUTED", "Positive-control file contents differ.");
+    ensure(requestsFor(positivePrompt).length === 2, "Positive control should perform one tool step then one final model step.");
+
+    console.log("[audit] one model step blocks tool execution and pauses queued prompts");
+    const limited = await start("audit-limited", limitedPrompt, 1);
+    await waitForCondition(() => typeof releaseLimitedResponse === "function", "held real-provider response");
+    const queued = await sendControlTestCommand(session.page, { command_id: "audit-limit-queue", kind: "turn.send", thread_id: "audit-limited", payload: { text: queuedPrompt } });
+    ensure(queued.status === "queued" && queued.queue_id, `Could not queue while the model was active: ${JSON.stringify(queued)}`);
+    releaseLimitedResponse();
+    const inspection = await waitTerminal(limited.run_id);
+    ensure(inspection.run.adapter === "provider", "Limit proof must exercise the provider adapter, not the mock adapter.");
+    ensure(inspection.run.config.run_limits?.max_steps === 1, "Accepted provider run did not freeze maxSteps=1.");
+    const timeline = await controlTestRequest(session.page, "/control/v1/threads/audit-limited/timeline?tail=100");
+    ensure(timeline.items.some((item) => item.type === "done" && item.data?.stopped_at_limit === true), "Run must finish with an explicit limit marker, not an unrelated completion.");
+    ensure(!existsSync(join(workspace, "must-not-exist.txt")), "The model's tool executed after maxSteps=1.");
+    const assertPaused = async () => {
+      const bootstrap = await readControlBootstrap(session.page);
+      ensure(bootstrap.queued_turns.some((turn) => turn.id === queued.queue_id), "The queued turn disappeared after the run limit.");
+      ensure(!bootstrap.active_runs.some((run) => run.thread_id === "audit-limited"), "A queued run resumed automatically after reaching the limit.");
+      ensure(requestsFor(limitedPrompt).length === 1 && requestsFor(queuedPrompt).length === 0, "A second upstream model request escaped the limit.");
+    };
+    await waitForControlBootstrap(session.page, (bootstrap) => !bootstrap.active_runs.some((run) => run.thread_id === "audit-limited"), "limited run cleanup");
+    for (let index = 0; index < 5; index += 1) { await delay(100); await assertPaused(); }
+    await reloadPage(session.page);
+    await session.page.getByTestId("chat-shell").waitFor();
+    for (let index = 0; index < 5; index += 1) { await delay(100); await assertPaused(); }
+    ensure(!existsSync(join(workspace, "must-not-exist.txt")), "Renderer reload triggered the suppressed tool.");
+    report.checks.providerLimits = { realToolPositiveControl: true, maxSteps: 1, stoppedAtLimit: true, toolSkipped: true, queuedBeforeResponse: true, queuePreservedAfterReload: true, upstreamCalls: requestsFor(limitedPrompt).length };
+    ensure(errors.length === 0, `Native audit console errors: ${errors.join("\n")}`);
+    await session.page.screenshot({ path: join(artifactDir, "audit-regressions.png"), fullPage: false });
+    writeFileSync(join(artifactDir, "audit-regressions.json"), JSON.stringify(report, null, 2));
+    console.log(`auditProof=${join(artifactDir, "audit-regressions.json")}`);
+  } catch (error) {
+    writeFileSync(join(artifactDir, "audit-regressions-failure.json"), JSON.stringify({ ...report, error: String(error), consoleErrors: errors, stdout: session?.stdout, stderr: session?.stderr }, null, 2));
+    await session?.page?.screenshot({ path: join(artifactDir, "audit-regressions-failure.png"), fullPage: false }).catch(() => {});
+    throw error;
+  } finally {
+    provider?.close();
+    if (session) await closeSession(session);
+    rmWithRetry(milimHome);
+  }
+}
+
+function finishAuditToolResponse(res, model, path) {
+  res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
+  const chunk = (delta, finish_reason, usage) => `data: ${JSON.stringify({ id: "audit-tool-response", object: "chat.completion.chunk", created: 0, model, choices: [{ index: 0, delta, finish_reason }], ...(usage ? { usage } : {}) })}\n\n`;
+  res.write(chunk({ role: "assistant", tool_calls: [{ index: 0, id: `audit-${path}`, type: "function", function: { name: "write_file", arguments: JSON.stringify({ path, content: "AUDIT_TOOL_EXECUTED" }) } }] }, null));
+  res.end(chunk({}, "tool_calls", { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20, cost: 0.01 }) + "data: [DONE]\n\n");
+}
 
 async function runDevBenchmark() {
   const milimHome = mkdtempSync(
@@ -866,6 +1033,7 @@ async function startCanonicalFakeProvider({
   models,
   partialMarker,
   terminalMarker,
+  onCompletion,
 }) {
   const requests = [];
   const completions = [];
@@ -906,6 +1074,13 @@ async function startCanonicalFakeProvider({
             url: req.url,
           };
           completions.push(completion);
+          if (onCompletion?.(res, body, completion)) {
+            if (!res.writableEnded) {
+              openResponses.add(res);
+              res.once("close", () => openResponses.delete(res));
+            }
+            return;
+          }
           if (completions.length === 1) {
             openResponses.add(res);
             res.once("close", () => openResponses.delete(res));

@@ -6,6 +6,7 @@ import type {
 } from "zustand/middleware";
 import { incrementPerfCounter, recordPerfMeasure } from "../lib/perf.js";
 import type { ChatSearchResult } from "../lib/chatSearch.js";
+import type { Session } from "../sessions/store.js";
 
 const CANONICAL_USER_STATE_KEYS = [
   "milim.sessions",
@@ -593,6 +594,11 @@ export async function loadSessionMessagePage(
     beforeIndex,
     limit,
   });
+}
+
+/** One native snapshot, so exports never mix pages from different revisions. */
+export async function loadSessionSnapshot(sessionId: string): Promise<Session> {
+  return invokeUserState<Session>("user_session_snapshot", { sessionId });
 }
 
 export async function searchUserChats(

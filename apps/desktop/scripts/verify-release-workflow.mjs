@@ -24,7 +24,7 @@ const expectedArtifacts = [
   { artifact: "windows-x64", os: "windows-latest", args: "" },
 ];
 
-const checkoutReleaseTagRef = "ref: ${{ env.MILIM_RELEASE_TAG }}";
+const checkoutReleaseTagRef = "ref: refs/tags/${{ env.MILIM_RELEASE_TAG }}";
 
 for (const artifact of expectedArtifacts) {
   assertIncludes(releaseWorkflow, matrixRow(artifact), "release workflow matrix");
@@ -94,7 +94,13 @@ assertEveryMutationGuarded(releaseWorkflow, "gh release upload", "--json isDraft
 assertIncludes(siteWorkflow, "on:\n  pull_request:\n  push:", "site workflow pull request trigger");
 assertOccurrences(siteWorkflow, '- "VERSION"', 1, "site workflow version trigger");
 
-assertBefore(releaseWorkflow, "Validate release tag", checkoutReleaseTagRef, "release workflow checkout");
+for (const job of ["create-draft-release", "desktop"]) {
+  const start = releaseWorkflow.indexOf(`\n  ${job}:`);
+  const nextJob = /\n  [a-z][a-z-]*:/.exec(releaseWorkflow.slice(start + 1));
+  const end = nextJob ? start + 1 + nextJob.index : -1;
+  const steps = releaseWorkflow.slice(start, end < 0 ? undefined : end);
+  assertBefore(steps, checkoutReleaseTagRef, "Validate release tag", `${job} checkout before version validation`);
+}
 assertBefore(releaseWorkflow, "Generate release notes", "Create or update draft release", "release workflow notes");
 assertBefore(releaseWorkflow, checkoutReleaseTagRef, "Require macOS signing secrets", "release workflow signing preflight");
 assertBefore(releaseWorkflow, "Require macOS signing secrets", "Build macOS app and DMG", "release workflow signing preflight");

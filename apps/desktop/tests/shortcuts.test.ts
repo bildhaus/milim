@@ -1,6 +1,7 @@
 import {
   APP_SHORTCUT_LABELS,
   composerEnterAction,
+  isComposingKeyEvent,
   DEFAULT_APP_SHORTCUTS,
   globalAcceleratorToShortcut,
   normalizeAppShortcuts,
@@ -31,6 +32,13 @@ function withNavigator(platform: string, userAgent: string, run: () => void): vo
   } finally {
     if (previous) Object.defineProperty(globalThis, "navigator", previous);
     else delete (globalThis as { navigator?: Navigator }).navigator;
+  }
+}
+
+for (const composing of [{ isComposing: true }, { keyCode: 229 }, { nativeEvent: { isComposing: true } }, { nativeEvent: { keyCode: 229 } }]) {
+  equal(isComposingKeyEvent({ key: "Enter", ...composing }), true, "native and React IME events must be recognized before autocomplete");
+  for (const busy of [false, true]) {
+    equal(composerEnterAction({ key: "Enter", ctrlKey: true, ...composing }, { sendShortcut: "enter", busy, canSteer: true, mac: false }), "none", "IME confirmation must never send or steer");
   }
 }
 

@@ -111,7 +111,6 @@ if (assistantMessage.includes("STREAMING_MARKDOWN_CHAR_LIMIT")) {
 const nativePreviewBlockerFiles = [
   ["App.tsx", 2],
   [join("components", "SheetDialog.tsx"), 1],
-  [join("components", "ChatSearchPopover.tsx"), 1],
   [join("components", "ContextMenu.tsx"), 1],
   [join("components", "ChatView.tsx"), 1],
   [join("components", "ModelPicker.tsx"), 1],
@@ -267,6 +266,10 @@ for (const [file, expectedCount] of nativePreviewBlockerFiles) {
   if (count < expectedCount) {
     throw new Error(`${file} must explicitly mark ${expectedCount} native preview blocker(s), found ${count}`);
   }
+}
+
+if (!readFileSync(join(root, "src", "components", "ChatSearchPopover.tsx"), "utf8").includes('<SheetDialog title="Command palette"')) {
+  throw new Error("The command palette must retain SheetDialog's focus trap and native preview blocker");
 }
 
 if (!previewPanel.includes('data-native-preview-blocker="open"')) {

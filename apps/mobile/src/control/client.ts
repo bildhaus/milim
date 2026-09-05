@@ -37,12 +37,18 @@ async function requestJson<T>(
   init?: RequestInit,
 ): Promise<T> {
   const timeoutController = new AbortController();
-  const timeout = setTimeout(() => timeoutController.abort(), CONTROL_REQUEST_TIMEOUT_MS);
-  let response: Response;
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    timeoutController.abort();
+  }, CONTROL_REQUEST_TIMEOUT_MS);
+  const cancel = () => timeoutController.abort();
+  if (init?.signal?.aborted) cancel();
+  else init?.signal?.addEventListener('abort', cancel, {once: true});
   try {
-    response = await fetch(`${normalizeEndpoint(endpoint)}${path}`, {
+    const response = await fetch(`${normalizeEndpoint(endpoint)}${path}`, {
       ...init,
-      signal: init?.signal ?? timeoutController.signal,
+      signal: timeoutController.signal,
       headers: {
         Accept: 'application/json',
         ...(init?.body ? {'Content-Type': 'application/json'} : {}),
@@ -50,21 +56,22 @@ async function requestJson<T>(
         ...init?.headers,
       },
     });
+    const text = await response.text();
+    const body = text ? JSON.parse(text) : null;
+    if (!response.ok) {
+      const message = body?.error?.message ?? body?.message ?? `HTTP ${response.status}`;
+      throw new ControlHttpError(message, response.status);
+    }
+    return body as T;
   } catch (error) {
-    if (timeoutController.signal.aborted) {
+    if (timedOut) {
       throw new Error(`milim did not respond at ${normalizeEndpoint(endpoint)} within 8 seconds.`);
     }
     throw error;
   } finally {
     clearTimeout(timeout);
+    init?.signal?.removeEventListener('abort', cancel);
   }
-  const text = await response.text();
-  const body = text ? JSON.parse(text) : null;
-  if (!response.ok) {
-    const message = body?.error?.message ?? body?.message ?? `HTTP ${response.status}`;
-    throw new ControlHttpError(message, response.status);
-  }
-  return body as T;
 }
 
 export async function claimPairing(

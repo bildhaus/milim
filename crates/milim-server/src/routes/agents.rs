@@ -3927,6 +3927,8 @@ pub(crate) fn control_agent_stream(
     linked_thread_grants: Vec<crate::control::FrozenLinkedThreadGrantV1>,
     reasoning_effort: Option<ReasoningEffort>,
     sampling: SamplingParams,
+    run_limits: Option<&crate::control::RunLimitsV1>,
+    pricing: Option<milim_core::api::openai::ModelPricing>,
     step_hook: Arc<dyn milim_agents::AgentStepHook>,
 ) -> milim_core::Result<ControlAgentStream> {
     let run_context = RunContext::from_control(st, workspace, privacy)?;
@@ -3952,6 +3954,18 @@ pub(crate) fn control_agent_stream(
     }
     agent_config.step_hook = Some(step_hook);
     agent_config.sampling = sampling;
+    if let Some(limits) = run_limits {
+        if let Some(steps) = limits.max_steps {
+            agent_config.max_iterations = steps as usize;
+        }
+        agent_config.limits = milim_agents::AgentRunLimits {
+            max_duration: limits
+                .max_seconds
+                .map(|seconds| std::time::Duration::from_secs(u64::from(seconds))),
+            max_cost_usd: limits.max_cost_usd,
+            pricing,
+        };
+    }
     let query = messages
         .iter()
         .rev()

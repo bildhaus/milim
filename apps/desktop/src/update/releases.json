@@ -1,4 +1,9 @@
 {
+  "0.2.65": {
+    "version": "0.2.65",
+    "summary": "Milim 0.2.65 preserves complete chat history and drafts, strengthens backups and privacy, improves mobile recovery, and adds optional limits for provider runs.",
+    "items": []
+  },
   "0.2.64": {
     "version": "0.2.64",
     "summary": "Milim 0.2.64 makes desktop integrations more reliable, keeps Codex guidance out of visible prompts, and clarifies consequential actions.",

@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { DEFAULT_RUN_LIMITS, normalizeRunLimits, type RunLimits } from "../lib/runLimits.js";
 import { createJSONStorage, persist } from "zustand/middleware";
 import {
   DEFAULT_ACCOUNT_RUNTIME_ENABLEMENT,
@@ -68,6 +69,7 @@ interface SettingsState {
   accountRuntimeEnabled: AccountRuntimeEnablement;
   reasoningEffortByModel: Record<string, ReasoningEffort>;
   globalInstructions: string;
+  runLimits: RunLimits;
   media: MediaSettings;
   newThreadBehavior: NewThreadBehavior;
   configuredThreadDefaults: ConfiguredThreadDefaults;
@@ -81,6 +83,7 @@ interface SettingsState {
   setAccountRuntimeEnabled: (kind: AccountRuntimeKind, enabled: boolean) => void;
   setModelReasoningEffort: (model: string, effort: ReasoningEffort) => void;
   setGlobalInstructions: (instructions: string) => void;
+  setRunLimits: (limits: RunLimits) => void;
   setMediaSettings: (settings: Partial<MediaSettings>) => void;
   setNewThreadBehavior: (behavior: NewThreadBehavior) => void;
   setConfiguredThreadDefaults: (settings: Partial<ConfiguredThreadDefaults>) => void;
@@ -207,6 +210,8 @@ export const useSettings = create<SettingsState>()(
       accountRuntimeEnabled: { ...DEFAULT_ACCOUNT_RUNTIME_ENABLEMENT },
       reasoningEffortByModel: {},
       globalInstructions: "",
+      runLimits: DEFAULT_RUN_LIMITS,
+      setRunLimits: (runLimits) => set({ runLimits: normalizeRunLimits(runLimits) }),
       media: DEFAULT_MEDIA_SETTINGS,
       newThreadBehavior: "inherit",
       configuredThreadDefaults: DEFAULT_CONFIGURED_THREAD_DEFAULTS,
@@ -275,6 +280,7 @@ export const useSettings = create<SettingsState>()(
           accountRuntimeEnabled: normalizeAccountRuntimeEnablement(saved?.accountRuntimeEnabled),
           reasoningEffortByModel: normalizeReasoningEffortByModel(saved?.reasoningEffortByModel),
           globalInstructions: normalizeGlobalInstructions(saved?.globalInstructions),
+          runLimits: normalizeRunLimits(saved?.runLimits),
           media: normalizeMediaSettings(saved?.media),
           newThreadBehavior: saved?.newThreadBehavior === "configured" ? "configured" : "inherit",
           configuredThreadDefaults: normalizeConfiguredThreadDefaults(saved?.configuredThreadDefaults),
@@ -290,6 +296,7 @@ export const useSettings = create<SettingsState>()(
         accountRuntimeEnabled: normalizeAccountRuntimeEnablement(s.accountRuntimeEnabled),
         reasoningEffortByModel: s.reasoningEffortByModel,
         globalInstructions: normalizeGlobalInstructions(s.globalInstructions),
+        runLimits: normalizeRunLimits(s.runLimits),
         media: s.media,
         newThreadBehavior: s.newThreadBehavior,
         configuredThreadDefaults: normalizeConfiguredThreadDefaults(s.configuredThreadDefaults),

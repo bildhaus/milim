@@ -236,6 +236,13 @@ pub struct GenerationSettingsV1 {
     pub thinking_token_budget: Option<u32>,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, TS)]
+pub struct RunLimitsV1 {
+    pub max_steps: Option<u32>,
+    pub max_seconds: Option<u32>,
+    pub max_cost_usd: Option<f64>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 pub struct FrozenRunConfigV1 {
     pub model: String,
@@ -266,6 +273,9 @@ pub struct FrozenRunConfigV1 {
     pub reasoning_effort: Option<String>,
     #[serde(default)]
     pub generation: GenerationSettingsV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub run_limits: Option<RunLimitsV1>,
     pub adapter: String,
     #[serde(default)]
     pub linked_thread_grants: Vec<FrozenLinkedThreadGrantV1>,
