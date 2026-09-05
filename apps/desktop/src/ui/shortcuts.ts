@@ -46,7 +46,14 @@ type KeyboardLike = {
   altKey?: boolean;
   shiftKey?: boolean;
   repeat?: boolean;
+  isComposing?: boolean;
+  keyCode?: number;
+  nativeEvent?: { isComposing?: boolean; keyCode?: number };
 };
+
+export function isComposingKeyEvent(event: KeyboardLike): boolean {
+  return Boolean(event.isComposing || event.keyCode === 229 || event.nativeEvent?.isComposing || event.nativeEvent?.keyCode === 229);
+}
 
 const KEY_ALIASES: Record<string, string> = {
   esc: "Escape",
@@ -189,7 +196,7 @@ export function composerEnterAction(
     mac?: boolean;
   },
 ): ComposerEnterAction {
-  if (normalizeKey(event.key) !== "Enter" || event.shiftKey || event.repeat) return "none";
+  if (isComposingKeyEvent(event) || normalizeKey(event.key) !== "Enter" || event.shiftKey || event.repeat) return "none";
   const modifierEnter = shortcutMatchesEvent("Mod+Enter", event, options.mac ?? isMacPlatform());
   if (options.busy && options.canSteer && modifierEnter) return "steer";
   if (options.sendShortcut === "enter") return "send";

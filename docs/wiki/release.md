@@ -6,7 +6,7 @@ title: Release and verification
 summary: Release artifacts, updater behavior, verification commands, and site build checks.
 group: Reference
 order: 110
-updated: 2026-08-31
+updated: 2026-09-05
 ---
 
 Release work should verify the Rust workspace, desktop app, site docs, and platform artifacts without reintroducing Linux packaging as a release target.
@@ -22,6 +22,8 @@ Release work should verify the Rust workspace, desktop app, site docs, and platf
 | Android | Protected manual store-delivery job produces a signed AAB and uploads it to Play internal testing. |
 
 Pull requests run full desktop verification in CI: the Rust matrix owns workspace and Tauri native checks, Ubuntu verifies the generated control contract, the frontend job runs the frontend-only suite, and Windows launches the real WebView2 app to verify that the custom title-bar Close control hides the window without exiting the process. Release tags do not repeat that coverage: the Release workflow records a canonical Windows runtime benchmark alongside production packaging, Tauri builds the frontend before compiling each platform artifact, and each packaged binary and manifest is verified. Desktop workflows use Node 22 and the pinned pnpm 9.15.9 toolchain; artifact transfer actions run on their maintained Node 24 releases. Runtime conformance remains available as a manual release check. macOS release artifacts require the Apple signing secrets and intentionally enable Tauri's macOS private API for transparent preview activity overlay windows. The workflow publishes `manifest.json` plus an aggregate `SHA256SUMS.txt` from the current release run. Updater assets are verified with SHA-256 sidecars and the aggregate checksum file. A rerun may repair an unpublished draft, but every edit and asset upload rechecks draft status; published releases are immutable and require a new version.
+
+Manual desktop release dispatch checks out the selected `refs/tags/<release_tag>` before comparing the tag with that checkout's package version. An unpublished draft can therefore be repaired even when the default branch has advanced to a newer version. The explicit tag ref prevents a same-named branch from being used; version checks and the refusal to modify published releases still apply.
 
 ## Updater behavior
 
@@ -63,6 +65,8 @@ Runtime conformance is part of protected pull-request verification and remains a
 Two integration tests provide explicit, self-skipping live proof. Set `MILIM_REAL_HARNESS_SMOKE=1` with `MILIM_REAL_HARNESS_BASE_URL`, `MILIM_REAL_HARNESS_API_KEY`, and `MILIM_REAL_HARNESS_MODEL`; optionally set `MILIM_REAL_HARNESS_KIND` to `anthropic` or `gemini` instead of the default `openai_compatible`. The test submits a real turn through `/control/v1`, waits through the authenticated inspection route, and verifies request/response ledger events without exposing the key. Set `MILIM_REAL_ACCOUNT_RUNTIME_SMOKE=1` plus one or more of `MILIM_REAL_CODEX_SMOKE_MODEL`, `MILIM_REAL_CLAUDE_SMOKE_MODEL`, `MILIM_REAL_OPENCODE_SMOKE_MODEL`, and `MILIM_REAL_PI_SMOKE_MODEL` to exercise installed, already-authenticated account CLIs and verify their `harness_boundary` journals. These tests return immediately unless their opt-in flag is set; enabled runs may incur provider usage.
 
 The canonical benchmark builds and launches a Windows Tauri/WebView2 binary. Its timing measurements are advisory and have no pass/fail budgets; functional assertions, invalid layout, console errors, and missing evidence still fail the job.
+
+`apps/desktop/tests/tauri-upgrade-smoke.mjs` exercises the actual Windows portable updater with isolated installation, data, and WebView profiles. Set `MILIM_UPGRADE_PREVIOUS_BINARY` to a downloaded public portable with its `.sha256` sidecar and `MILIM_UPGRADE_CANDIDATE_BINARY` to the staged candidate; set `MILIM_UPGRADE_FROM_VERSION` and `MILIM_UPGRADE_TO_VERSION` to their versions. The test checks native replacement/restart, complete history/settings/draft/attachment preservation, new-backup restoration, and compatibility with the previous version's backup. The candidate is staged locally, so this test does not establish public release discovery or download behavior.
 
 ## Docs site
 

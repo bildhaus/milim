@@ -119,8 +119,10 @@ import { loadSessionMessagePage } from "../persistence/userStateStorage.js";
 import {
   DEFAULT_THREAD_SETTINGS,
   getSessionComposerDraft,
+  getSessionComposerState,
+  updateSessionComposerState,
+  useSessionComposerState,
   inspectorStateForSession,
-  setSessionComposerDraft,
   normalizeVirtualFilePath,
   sessionVirtualProjectFiles,
   useSessions,
@@ -134,6 +136,8 @@ import {
   type NativeSessionMode,
   type ThreadSettingsPatch,
 } from "../sessions/store";
+import { consumeComposerDraft } from "../lib/composerDraft";
+import { branchBoundary, branchCanonicalSession, canonicalMessageIndex, completeSessionForExport } from "../lib/threadHistory";
 import {
   artifactPreviewAutoOpenKey,
   extractLivePreviewArtifactFromContent,
@@ -1499,18 +1503,14 @@ export function ChatView({
   }, []);
   const { openContextMenu } = useContextMenu();
   const messageRowActionsRef = useRef<MessageRowActions | null>(null);
-  const [input, setInputState] = useState(() =>
-    getSessionComposerDraft(useSessions.getState().activeId),
-  );
+  const activeId = useSessions((s) => s.activeId);
+  const { text: input, attachments: pendingAttachments } = useSessionComposerState(activeId);
   const [providersOpen, setProvidersOpen] = useState(false);
   const [mcpOpen, setMcpOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [memoryTarget, setMemoryTarget] = useState<MemoryNotice | null>(null);
   const [attachmentPreview, setAttachmentPreview] = useState<ChatAttachment | null>(null);
   const [editing, setEditing] = useState<number | null>(null);
-  const [pendingAttachments, setPendingAttachments] = useState<
-    ChatAttachment[]
-  >([]);
   const [reviewCommentsBySession, setReviewCommentsBySession] = useState<Record<string, ReviewComment[]>>({});
   const [, setPreviewSelection] =
     useState<PreviewSelection | null>(null);
@@ -1561,7 +1561,6 @@ export function ChatView({
   const [sessionsHydrated, setSessionsHydrated] = useState(() =>
     useSessions.persist.hasHydrated(),
   );
-  const activeId = useSessions((s) => s.activeId);
   useEffect(() => {
     const linkThread = (event: Event) => {
       const detail = (event as CustomEvent<{ sourceThreadId?: string; targetThreadId?: string }>).detail;
@@ -2556,12 +2555,17 @@ export function ChatView({
   }, []);
 
   function setInput(nextInput: SetStateAction<string>) {
-    setInputState((current) => {
-      const next =
-        typeof nextInput === "function" ? nextInput(current) : nextInput;
-      setSessionComposerDraft(activeId, next);
-      return next;
-    });
+    updateSessionComposerState(activeId, (current) => ({
+      ...current,
+      text: typeof nextInput === "function" ? nextInput(current.text) : nextInput,
+    }));
+  }
+
+  function setPendingAttachments(next: SetStateAction<ChatAttachment[]>) {
+    updateSessionComposerState(activeId, (current) => ({
+      ...current,
+      attachments: typeof next === "function" ? next(current.attachments) : next,
+    }));
   }
 
   function clearPreviewCloseTimer() {
@@ -2589,20 +2593,8 @@ export function ChatView({
       activeId,
     );
     const nextDraft = getSessionComposerDraft(activeId);
-    setInputState(nextDraft);
     if (!nextDraft && messages.length === 0) focusComposer();
   }, [activeId, messages.length]);
-
-  useEffect(() => {
-    const syncDraft = () => {
-      if (input) return;
-      const nextDraft = getSessionComposerDraft(activeId);
-      if (nextDraft) setInputState(nextDraft);
-    };
-    window.addEventListener("milim:session-drafts-hydrated", syncDraft);
-    return () =>
-      window.removeEventListener("milim:session-drafts-hydrated", syncDraft);
-  }, [activeId, input]);
 
   useEffect(() => {
     return () => {
@@ -3411,7 +3403,6 @@ export function ChatView({
   }, [activeId, enteringMessageIds.length, messages]);
 
   useEffect(() => {
-    setPendingAttachments([]);
     setChatNotice(null);
   }, [activeId]);
 
@@ -4427,10 +4418,20 @@ export function ChatView({
     targetModel: string,
     messageIndex: number,
   ): Promise<void> {
-    const source = useSessions.getState().sessions.find((item) => item.id === activeId);
-    const assistant = source?.messages[messageIndex];
-    if (!source || assistant?.role !== "assistant") return;
-    let userIndex = messageIndex - 1;
+    const selectedAssistant = messages[messageIndex];
+    if (selectedAssistant?.role !== "assistant") return;
+    let source: Session;
+    let sourceMessageIndex: number;
+    try {
+      source = await completeSessionForExport(activeId);
+      sourceMessageIndex = canonicalMessageIndex(source.messages, selectedAssistant);
+      if (sourceMessageIndex < 0) throw new Error("The selected reply is no longer in this thread. Reload and retry.");
+    } catch (error) {
+      setChatNotice({ tone: "error", message: `Could not prepare retry: ${error instanceof Error ? error.message : String(error)}` });
+      return;
+    }
+    const assistant = source.messages[sourceMessageIndex];
+    let userIndex = sourceMessageIndex - 1;
     while (userIndex >= 0 && source.messages[userIndex].role !== "user") userIndex -= 1;
     const userMessage = source.messages[userIndex];
     if (userIndex < 0 || !userMessage) return;
@@ -4462,12 +4463,17 @@ export function ChatView({
       }
     }
 
-    const forkedId = useSessions.getState().forkSession(activeId, userIndex - 1);
+    let forkedId: string | null;
+    try {
+      forkedId = await branchCanonicalSession(activeId, branchBoundary(source.messages[userIndex - 1]), {
+        model: targetModel,
+        ...(retryFolder ? { folder: retryFolder } : {}),
+      }, activeId);
+    } catch (error) {
+      setChatNotice({ tone: "error", message: `Could not branch retry: ${error instanceof Error ? error.message : String(error)}` });
+      return;
+    }
     if (!forkedId) return;
-    useSessions.getState().updateSettings(forkedId, {
-      model: targetModel,
-      ...(retryFolder ? { folder: retryFolder } : {}),
-    });
     if (retryFolder && assistant.workspaceCheckpoint) {
       useSessions.getState().setRetryWorkspace(forkedId, {
         sourceSessionId: activeId,
@@ -4478,12 +4484,12 @@ export function ChatView({
         createdAt: Date.now(),
       });
     }
-    setSessionComposerDraft(forkedId, userMessage.content);
-    setInputState(userMessage.content);
-    setPendingAttachments(userMessage.attachments ? [...userMessage.attachments] : []);
+    updateSessionComposerState(forkedId, () => ({ text: userMessage.content, attachments: userMessage.attachments ? [...userMessage.attachments] : [] }));
     setBatonRequest(null);
-    setChatNotice({ tone: "info", message: "Retry prepared in an isolated thread." });
-    focusComposer();
+    if (useSessions.getState().activeId === forkedId) {
+      setChatNotice({ tone: "info", message: "Retry prepared in an isolated thread." });
+      focusComposer();
+    }
   }
 
   function commitHotSwap(
@@ -6096,7 +6102,7 @@ export function ChatView({
         next = next.filter((attachment) => !attachment.mime.toLowerCase().startsWith("image/"));
       }
       if (next.length) {
-        const available = Math.max(0, 12 - pendingAttachments.length);
+        const available = Math.max(0, MAX_DESKTOP_ATTACHMENTS - getSessionComposerState(activeId).attachments.length);
         if (next.length > available) {
           setChatNotice({
             tone: "warning",
@@ -6151,36 +6157,37 @@ export function ChatView({
     }
   }
 
-  function exportSessionById(
+  async function exportSessionById(
     sessionId = activeId,
     format: ThreadExportFormat = "json",
   ) {
-    const session = useSessions
-      .getState()
-      .sessions.find((item) => item.id === sessionId);
-    if (!session) return;
-    const content =
-      format === "markdown"
-        ? sessionMarkdownExport(session)
-        : JSON.stringify(sessionExportPayload(session), null, 2);
-    const blob = new Blob([content], {
-      type: format === "markdown" ? "text/markdown" : "application/json",
-    });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = chatExportFilename(session.title, format);
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-    setChatNotice({
-      tone: "info",
-      message:
+    try {
+      const session = await completeSessionForExport(sessionId);
+      const content =
         format === "markdown"
-          ? "Thread exported as Markdown."
-          : "Thread exported.",
-    });
+          ? sessionMarkdownExport(session)
+          : JSON.stringify(sessionExportPayload(session), null, 2);
+      const blob = new Blob([content], {
+        type: format === "markdown" ? "text/markdown" : "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = chatExportFilename(session.title, format);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setChatNotice({
+        tone: "info",
+        message:
+          format === "markdown"
+            ? "Thread exported as Markdown."
+            : "Thread exported.",
+      });
+    } catch (error) {
+      setChatNotice({ tone: "error", message: `Export failed: ${error instanceof Error ? error.message : String(error)}` });
+    }
   }
 
   function importSessionFromFile() {
@@ -6218,13 +6225,19 @@ export function ChatView({
     input.click();
   }
 
-  function forkThreadAt(messageIndex: number) {
+  async function forkThreadAt(messageIndex: number) {
     if (busy) return;
-    const forkedId = useSessions.getState().forkSession(activeId, messageIndex);
-    if (!forkedId) return;
-    setEditing(null);
-    setChatNotice({ tone: "info", message: "Thread branched." });
-    focusComposer();
+    const message = messages[messageIndex];
+    if (!message) return;
+    try {
+      const forkedId = await branchCanonicalSession(activeId, branchBoundary(message));
+      if (!forkedId || useSessions.getState().activeId !== forkedId) return;
+      setEditing(null);
+      setChatNotice({ tone: "info", message: "Thread branched." });
+      focusComposer();
+    } catch (error) {
+      setChatNotice({ tone: "error", message: `Could not branch thread: ${error instanceof Error ? error.message : String(error)}` });
+    }
   }
 
   async function deleteMessageAt(messageIndex: number) {
@@ -7633,10 +7646,8 @@ export function ChatView({
         queuedTurn,
       ]);
       if (text) recordGlobalPrompt(text);
-      setInput((current) => current.trim() === text ? "" : current);
-      const sentIds = new Set(attachments.map((attachment) => attachment.id));
-      setPendingAttachments((current) => current.filter((attachment) => !sentIds.has(attachment.id)));
-      setChatNotice({ tone: "info", message: "Message queued. It will run after the current reply finishes." });
+      updateSessionComposerState(activeId, (current) => consumeComposerDraft(current, { text, attachments }));
+      if (useSessions.getState().activeId === activeId) setChatNotice({ tone: "info", message: "Message queued. It will run after the current reply finishes." });
     } catch (error) {
       setChatNotice({ tone: "error", message: error instanceof Error ? error.message : String(error) });
     }
@@ -7689,9 +7700,8 @@ export function ChatView({
         ]);
       }
       if (text) recordGlobalPrompt(text);
-      setInput("");
-      setPendingAttachments([]);
-      setChatNotice(null);
+      updateSessionComposerState(activeId, (current) => consumeComposerDraft(current, { text, attachments }));
+      if (useSessions.getState().activeId === activeId) setChatNotice(null);
     } catch (error) {
       setChatNotice({ tone: "error", message: error instanceof Error ? error.message : String(error) });
     }

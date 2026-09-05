@@ -27,14 +27,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
-      - name: Validate release tag
-        working-directory: apps/desktop
-        run: node scripts/validate-release-tag.mjs
       - name: Checkout release tag
         uses: actions/checkout@v5
         with:
-          ref: ${{ env.MILIM_RELEASE_TAG }}
+          ref: refs/tags/${{ env.MILIM_RELEASE_TAG }}
+      - name: Validate release tag
+        working-directory: apps/desktop
+        run: node scripts/validate-release-tag.mjs
       - name: Generate release notes
         working-directory: apps/desktop
         run: node scripts/generate-release-notes.mjs --output release-notes.md
@@ -65,7 +64,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ env.MILIM_RELEASE_TAG }}
+          ref: refs/tags/${{ env.MILIM_RELEASE_TAG }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: pnpm/action-setup@v5
         with:
@@ -106,7 +105,10 @@ jobs:
       MILIM_GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.MILIM_GOOGLE_OAUTH_CLIENT_ID }}
       MILIM_GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.MILIM_GOOGLE_OAUTH_CLIENT_SECRET }}
     steps:
-      - uses: actions/checkout@v5
+      - name: Checkout release tag
+        uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ env.MILIM_RELEASE_TAG }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: pnpm/action-setup@v5
         with:
@@ -125,10 +127,6 @@ jobs:
       - name: Validate release tag
         working-directory: apps/desktop
         run: node scripts/validate-release-tag.mjs
-      - name: Checkout release tag
-        uses: actions/checkout@v5
-        with:
-          ref: ${{ env.MILIM_RELEASE_TAG }}
       - name: macOS Rust targets
         if: matrix.os == 'macos-latest'
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
@@ -312,7 +310,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ env.MILIM_RELEASE_TAG }}
+          ref: refs/tags/${{ env.MILIM_RELEASE_TAG }}
       - name: Download release manifest artifacts
         uses: actions/download-artifact@v8
         with:

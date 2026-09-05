@@ -2885,7 +2885,10 @@ public static class MilimWryWebviewProbe {
 Add-Type -TypeDefinition $source
 [MilimWryWebviewProbe]::Find(${pid})
 `;
-  const result = spawnSync("powershell", ["-NoProfile", "-Command", script], { encoding: "utf8", timeout: 5_000 });
+  // Cold PowerShell/Add-Type startup on hosted Windows runners can exceed five
+  // seconds before the probe runs. Keep startup bounded without weakening the
+  // separate visibility and process-liveness assertions.
+  const result = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", timeout: 30_000, windowsHide: true });
   if (result.error) throw result.error;
   if (result.status !== 0) {
     throw new Error(`Native webview probe failed (${result.status}): ${result.stderr || result.stdout}`);
@@ -4831,6 +4834,28 @@ async function runCommandPaletteCheck(page) {
     throw new Error(`Keyboard command palette should open instantly: ${JSON.stringify(searchMotion)}.`);
   }
   await expectFocusedTestId(page, "command-palette-input");
+  await page.getByTestId("command-palette-input").fill("open settings");
+  await page.keyboard.press("Tab");
+  const closeFocused = await page.getByRole("button", { name: "Close command palette" }).evaluate((element) => element === document.activeElement);
+  if (!closeFocused) throw new Error("Tab from palette input should focus Close.");
+  await page.keyboard.press("Enter");
+  await page.getByTestId("command-palette-input").waitFor({ state: "hidden" });
+  if (await page.getByTestId("settings-page").isVisible()) throw new Error("Enter on Close must not execute the selected command.");
+
+  await page.keyboard.press("Control+K");
+  await page.getByTestId("command-palette-input").waitFor();
+  await page.keyboard.press("Shift+Tab");
+  const lastFocused = await page.locator(".chat-search-list button").last().evaluate((element) => element === document.activeElement);
+  if (!lastFocused) throw new Error("Shift+Tab must stay inside the command palette.");
+  await page.keyboard.press("Tab");
+  await expectFocusedTestId(page, "command-palette-input");
+  // Focus a non-highlighted command directly: Enter must activate that button.
+  await page.getByTestId("command-palette-command").filter({ hasText: "Open settings" }).focus();
+  await page.keyboard.press("Enter");
+  await page.getByTestId("settings-page").waitFor();
+  await closeSettings(page);
+  await page.keyboard.press("Control+K");
+  await page.getByTestId("command-palette-input").waitFor();
   await page.getByTestId("command-palette-input").fill("open settings");
   await page.getByTestId("command-palette-command").filter({ hasText: "Open settings" }).waitFor();
   await page.keyboard.press("Enter");

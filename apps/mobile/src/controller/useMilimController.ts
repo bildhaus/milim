@@ -6,6 +6,7 @@ import {
 } from '../appearance';
 import {prepareWireAttachments} from '../attachments';
 import {
+  ControlHttpError,
   cancelPairingRequest,
   claimPairing,
   claimPairingRequest,
@@ -60,6 +61,8 @@ import {
 import {mobilePerfMark, mobilePerfMeasure} from '../performance';
 
 export type ConnectionStatus = 'offline' | 'connecting' | 'online' | 'incompatible';
+type PendingCommand = {hostId: string; command: ControlCommandV1};
+
 export type NearbyPairingStage = 'requesting' | 'waiting' | 'connecting';
 
 function pairingCancelledError(): Error {
@@ -109,9 +112,16 @@ export function useMilimController() {
   const [timeline, setTimeline] = useState<TimelineReplica | null>(null);
   const [draft, setDraftState] = useState('');
   const [status, setStatus] = useState<ConnectionStatus>('offline');
+  const statusRef = useRef(status);
+  statusRef.current = status;
   const [lastError, setLastError] = useState<string | null>(null);
   const [connectionRevision, setConnectionRevision] = useState(0);
-  const [pendingRetry, setPendingRetry] = useState<ControlCommandV1 | null>(null);
+  const [pendingCommands, setPendingCommands] = useState<Record<string, PendingCommand>>({});
+  const pendingCommandsRef = useRef<Record<string, PendingCommand>>({});
+  const commandsInFlight = useRef(new Set<string>());
+  const [acceptedRetry, setAcceptedRetry] = useState<PendingCommand | null>(null);
+  const pendingRetry = activeHost ? pendingCommands[activeHost.hostId] ?? null : null;
+  const reconnectAttempt = useRef(0);
   const [appearanceBackgroundUri, setAppearanceBackgroundUri] = useState<string | null>(null);
   const [appState, setAppState] = useState<AppStateStatus>(
     () => (AppState.currentState || 'active') as AppStateStatus,
@@ -161,7 +171,6 @@ export function useMilimController() {
   const tryBootstrap = useCallback(async (host: SavedHost) => {
     const key = await readDeviceCredential(host.hostId);
     if (!key) throw new Error('This host no longer has a device credential. Pair it again.');
-    credential.current = key;
     const savedCandidates = [host.lastSuccessfulUrl, ...host.candidates].filter(
       (value, index, all): value is string => Boolean(value) && all.indexOf(value) === index,
     );
@@ -170,7 +179,7 @@ export function useMilimController() {
       try {
         const result = await fetchBootstrap(endpoint, key);
         assertHostIdentity(host.hostId, result.host_id);
-        return {endpoint, result};
+        return {endpoint, result, key};
       } catch (error) {
         lastFailure = error;
       }
@@ -183,7 +192,7 @@ export function useMilimController() {
       try {
         const result = await fetchBootstrap(endpoint, key);
         assertHostIdentity(host.hostId, result.host_id);
-        return {endpoint, result};
+        return {endpoint, result, key};
       } catch (error) {
         lastFailure = error;
       }
@@ -245,6 +254,7 @@ export function useMilimController() {
       if (!host || !credential.current || !host.lastSuccessfulUrl) return null;
       const next = await fetchBootstrap(host.lastSuccessfulUrl, credential.current);
       assertHostIdentity(host.hostId, next.host_id);
+      if (activeHostRef.current?.hostId !== host.hostId) return null;
       setBootstrap(current =>
         current?.appearance?.revision &&
         current.appearance.revision === next.appearance?.revision
@@ -254,9 +264,10 @@ export function useMilimController() {
       return next;
     })();
     bootstrapRefreshPromise.current = request;
-    void request.finally(() => {
+    const release = () => {
       if (bootstrapRefreshPromise.current === request) bootstrapRefreshPromise.current = null;
-    });
+    };
+    void request.then(release, release);
     return request;
   }, []);
 
@@ -297,11 +308,12 @@ export function useMilimController() {
         queueTimelineCache(host.hostId, next);
       })();
       timelineRefreshPromises.current[mode] = request;
-      void request.finally(() => {
+      const release = () => {
         if (timelineRefreshPromises.current[mode] === request) {
           delete timelineRefreshPromises.current[mode];
         }
-      });
+      };
+      void request.then(release, release);
       return request;
     },
     [queueTimelineCache],
@@ -328,15 +340,29 @@ export function useMilimController() {
   }, [refreshTimeline]);
 
   useEffect(() => {
+    reconnectAttempt.current = 0;
+  }, [activeHost?.hostId, appState]);
+
+  useEffect(() => {
     const host = activeHostRef.current;
     socket.current?.close();
     socket.current = null;
     setBootstrap(null);
-    setStatus(host ? 'connecting' : 'offline');
+    setStatus(host && appState === 'active' ? 'connecting' : 'offline');
     if (!host || appState !== 'active') return;
     let cancelled = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let stableTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleReconnect = () => {
+      if (cancelled || reconnectTimer || AppState.currentState !== 'active' || reconnectAttempt.current >= 6) return;
+      const delay = Math.min(1_000 * 2 ** reconnectAttempt.current++, 30_000);
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        setConnectionRevision(current => current + 1);
+      }, delay);
+    };
     void tryBootstrap(host)
-      .then(async ({endpoint, result}) => {
+      .then(async ({endpoint, result, key}) => {
         if (cancelled) return;
         if (!isProtocolCompatible(result.protocol)) {
           setStatus('incompatible');
@@ -351,8 +377,11 @@ export function useMilimController() {
           candidates: [endpoint, ...host.candidates.filter(value => value !== endpoint)],
           lastConnectedAt: Date.now(),
         };
-        await rememberHost(connected);
+        await saveHost(connected);
         if (cancelled) return;
+        credential.current = key;
+        setHosts(current => [connected, ...current.filter(item => item.hostId !== connected.hostId)]);
+        setActiveHostState(connected);
         setBootstrap(result);
         setSelectedThreadId(current =>
           current && result.threads.some(thread => thread.id === current)
@@ -361,10 +390,11 @@ export function useMilimController() {
         );
         setStatus('online');
         setLastError(null);
-        socket.current = await connectControlSocket(
+        const connectedSocket = await connectControlSocket(
           endpoint,
-          credential.current!,
+          key,
           event => {
+            if (cancelled) return;
             if (event.host_id !== host.hostId) {
               setLastError('Ignored an event from a different milim desktop.');
               return;
@@ -377,6 +407,8 @@ export function useMilimController() {
           },
           () => {
             if (!cancelled && AppState.currentState === 'active') {
+              if (stableTimer) clearTimeout(stableTimer);
+              scheduleReconnect();
               setStatus('offline');
               setLastError(friendlyConnectionError(
                 [endpoint],
@@ -385,9 +417,16 @@ export function useMilimController() {
             }
           },
         );
+        if (cancelled) {
+          connectedSocket.close();
+          return;
+        }
+        socket.current = connectedSocket;
+        stableTimer = setTimeout(() => { reconnectAttempt.current = 0; }, 30_000);
       })
       .catch(error => {
         if (!cancelled) {
+          scheduleReconnect();
           setStatus('offline');
           setLastError(friendlyConnectionError(
             [host.lastSuccessfulUrl, ...host.candidates],
@@ -397,15 +436,18 @@ export function useMilimController() {
       });
     return () => {
       cancelled = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (stableTimer) clearTimeout(stableTimer);
       socket.current?.close();
       socket.current = null;
       eventBuffer.current = [];
       if (eventFlushFrame.current !== null) cancelAnimationFrame(eventFlushFrame.current);
       eventFlushFrame.current = null;
     };
-  }, [activeHost?.hostId, appState, connectionRevision, queueControlEvent, rememberHost, refreshBootstrap, tryBootstrap]);
+  }, [activeHost?.hostId, appState, connectionRevision, queueControlEvent, refreshBootstrap, tryBootstrap]);
 
   const reconnect = useCallback(() => {
+    reconnectAttempt.current = 0;
     setLastError(null);
     setConnectionRevision(current => current + 1);
   }, []);
@@ -469,16 +511,24 @@ export function useMilimController() {
       timelineRef.current = cached;
       setTimeline(cached);
       setDraftState(savedDraft);
-      if (status === 'online') void refreshTimeline('after');
+      if (statusRef.current === 'online') void refreshTimeline('after').catch(() => {});
     });
     return () => {
       cancelled = true;
     };
-  }, [activeHost?.hostId, refreshTimeline, selectedThreadId, status]);
+  }, [activeHost?.hostId, refreshTimeline, selectedThreadId]);
+
+  useEffect(() => {
+    if (status === 'online') void refreshTimeline('after').catch(() => {});
+  }, [status, refreshTimeline]);
 
   const setActiveHost = useCallback(
     (hostId: string) => {
       const host = hosts.find(item => item.hostId === hostId) ?? null;
+      reconnectAttempt.current = 0;
+      activeHostRef.current = host;
+      credential.current = null;
+      setStatus('connecting');
       setSelectedThreadId(null);
       setActiveHostState(host);
     },
@@ -682,33 +732,79 @@ export function useMilimController() {
   }, [flushDraftPersistence, flushTimelineCache]);
 
   const execute = useCallback(
-    async (command: ControlCommandV1): Promise<ControlCommandResultV1> => {
-      if (!activeHost?.lastSuccessfulUrl || !credential.current || status !== 'online') {
+    async (command: ControlCommandV1, retry = false): Promise<ControlCommandResultV1> => {
+      const host = activeHostRef.current;
+      if (!host) throw new Error('Pair a desktop first.');
+      const pending = pendingCommandsRef.current[host.hostId];
+      if (pending && pending.command.command_id !== command.command_id) {
+        throw new Error('The previous command may have been accepted. Retry that command before sending another.');
+      }
+      if (commandsInFlight.current.has(host.hostId)) throw new Error('A command is already being sent.');
+      if (!retry && (!host.lastSuccessfulUrl || !credential.current || status !== 'online')) {
         throw new Error('The desktop is offline. Prompts and decisions stay local until you reconnect.');
       }
-      let result: ControlCommandResultV1;
+      commandsInFlight.current.add(host.hostId);
+      const clearPending = () => {
+        delete pendingCommandsRef.current[host.hostId];
+        setPendingCommands({...pendingCommandsRef.current});
+      };
       try {
-        result = await sendCommand(
-          activeHost.lastSuccessfulUrl,
-          credential.current,
-          command,
-        );
-      } catch (error) {
-        setPendingRetry(command);
-        throw error;
+        let endpoint = host.lastSuccessfulUrl!;
+        let key = credential.current!;
+        if (retry) {
+          const recovered = await tryBootstrap(host);
+          if (activeHostRef.current?.hostId !== host.hostId || AppState.currentState !== 'active') {
+            throw new Error('Return to the original desktop to retry this command.');
+          }
+          if (!isProtocolCompatible(recovered.result.protocol)) throw new Error('Update the desktop before retrying.');
+          endpoint = recovered.endpoint;
+          key = recovered.key;
+          reconnect();
+        }
+        let result: ControlCommandResultV1;
+        try {
+          result = await sendCommand(endpoint, key, command);
+        } catch (error) {
+          // An HTTP rejection is definitive. Transport/body failures may follow acceptance.
+          if (!(error instanceof ControlHttpError) || error.status >= 500) {
+            pendingCommandsRef.current[host.hostId] = {hostId: host.hostId, command};
+            setPendingCommands({...pendingCommandsRef.current});
+          } else {
+            clearPending();
+          }
+          throw error;
+        }
+        clearPending();
+        if (result.status === 'failed' || result.status === 'conflict') {
+          throw new Error(result.message ?? result.status);
+        }
+        if (retry) {
+          setAcceptedRetry({hostId: host.hostId, command});
+          if (command.thread_id && (command.kind === 'turn.send' || command.kind === 'turn.steer')) {
+            const payload = command.payload as {display_text?: string};
+            await flushDraftPersistence();
+            const saved = await readDraft(host.hostId, command.thread_id);
+            if (saved === payload.display_text) {
+              await persistDraft(host.hostId, command.thread_id, '');
+              if (activeHostRef.current?.hostId === host.hostId && selectedThreadRef.current === command.thread_id) {
+                setDraftState(current => current === payload.display_text ? '' : current);
+              }
+            }
+          }
+        }
+        if (activeHostRef.current?.hostId === host.hostId) {
+          if (reconciliationTimer.current) clearTimeout(reconciliationTimer.current);
+          reconciliationTimer.current = setTimeout(() => {
+            reconciliationTimer.current = null;
+            void Promise.allSettled([refreshBootstrap(), refreshTimeline('after')]);
+          }, 250);
+        }
+        return result;
+      } finally {
+        commandsInFlight.current.delete(host.hostId);
       }
-      setPendingRetry(null);
-      if (result.status === 'failed' || result.status === 'conflict') {
-        throw new Error(result.message ?? result.status);
-      }
-      if (reconciliationTimer.current) clearTimeout(reconciliationTimer.current);
-      reconciliationTimer.current = setTimeout(() => {
-        reconciliationTimer.current = null;
-        void Promise.allSettled([refreshBootstrap(), refreshTimeline('after')]);
-      }, 250);
-      return result;
     },
-    [activeHost, refreshBootstrap, refreshTimeline, status],
+    [flushDraftPersistence, reconnect, refreshBootstrap, refreshTimeline, status, tryBootstrap],
   );
 
   const command = useCallback(
@@ -729,9 +825,11 @@ export function useMilimController() {
   );
 
   const retryPendingCommand = useCallback(async () => {
-    if (!pendingRetry) return null;
-    return execute(pendingRetry);
-  }, [execute, pendingRetry]);
+    const hostId = activeHostRef.current?.hostId;
+    const pending = hostId ? pendingCommandsRef.current[hostId] : null;
+    if (!pending) return null;
+    return execute(pending.command, true);
+  }, [execute]);
 
   const loadRunDetails = useCallback(
     async (runId: string): Promise<{inspection: RunInspectionV1; events: RunEventPageV1}> => {
@@ -781,6 +879,7 @@ export function useMilimController() {
     status,
     lastError,
     pendingRetry,
+    acceptedRetry,
     appearanceBackgroundUri,
     setActiveHost,
     setSelectedThreadId,

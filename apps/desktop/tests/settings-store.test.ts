@@ -73,6 +73,11 @@ assert(!("modelPresets" in useSettings.getState()), "obsolete model presets shou
 assert(!("presetsOnly" in useSettings.getState()), "obsolete presets-only state should not be exposed");
 
 useSettings.getState().setFavoritesOnly(true);
+useSettings.getState().setRunLimits({ maxSteps: 8, maxSeconds: 120, maxCostUsd: 0.25 });
+deepEqual(useSettings.getState().runLimits, { maxSteps: 8, maxSeconds: 120, maxCostUsd: 0.25 }, "fractional spend and integer limits should be accepted");
+assert(localStorage.getItem("milim.settings")?.includes('"maxCostUsd":0.25'), "run limits should persist");
+useSettings.getState().setRunLimits({ maxSteps: 1.5, maxSeconds: -1, maxCostUsd: Infinity });
+deepEqual(useSettings.getState().runLimits, { maxSteps: null, maxSeconds: null, maxCostUsd: null }, "invalid limits should normalize to unset");
 equal(useSettings.getState().favoritesOnly, true, "favorites-only mode should enable");
 useSettings.getState().setFavoritesOnly(false);
 useSettings.getState().toggleFavorite("gpt-5");
@@ -172,10 +177,12 @@ localStorage.setItem("milim.settings", JSON.stringify({
     browserStorageMode: "shared",
     browserSetupSeen: 0,
     globalInstructions: 42,
+    runLimits: { maxSteps: 5, maxSeconds: 86401, maxCostUsd: 0.25 },
   },
   version: 0,
 }));
 await useSettings.persist.rehydrate();
+deepEqual(useSettings.getState().runLimits, { maxSteps: 5, maxSeconds: null, maxCostUsd: 0.25 }, "hydration should retain valid limits and normalize invalid bounds");
 deepEqual(useSettings.getState().collapsedModelGroups, ["OpenAI", "Codex"], "persisted model groups should normalize malformed values");
 deepEqual(
   useSettings.getState().accountRuntimeEnabled,

@@ -79,3 +79,56 @@ describe('nearby pairing request client', () => {
     expect(mockFetch.mock.calls[3][1].method).toBe('DELETE');
   });
 });
+
+describe('request deadlines and cancellation', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    mockFetch.mockReset();
+    Object.assign(globalThis, {fetch: mockFetch});
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+    Object.assign(globalThis, {fetch: originalFetch});
+  });
+
+  test('deadline still aborts fetch when pairing supplies its cancellation signal', async () => {
+    const cancel = new AbortController();
+    let signal: AbortSignal;
+    mockFetch.mockImplementation((_url, init) => new Promise((_resolve, reject) => {
+      signal = init.signal;
+      signal.addEventListener('abort', () => reject(new Error('aborted')));
+    }));
+    const request = createPairingRequest('http://desktop', 'Phone', 'ios', cancel.signal);
+    const failure = request.catch(error => error as Error);
+    jest.advanceTimersByTime(8_000);
+    expect(await failure).toEqual(expect.objectContaining({message: expect.stringContaining('within 8 seconds')}));
+    expect(signal!.aborted).toBe(true);
+    expect(cancel.signal.aborted).toBe(false);
+  });
+
+  test('deadline covers response body reads as well as headers', async () => {
+    mockFetch.mockImplementation(async (_url, init) => ({
+      ok: true,
+      text: () => new Promise((_resolve, reject) => {
+        init.signal.addEventListener('abort', () => reject(new Error('body aborted')));
+      }),
+    }));
+    const request = createPairingRequest('http://desktop', 'Phone', 'ios');
+    const failure = request.catch(error => error as Error);
+    await Promise.resolve();
+    jest.advanceTimersByTime(8_000);
+    expect(await failure).toEqual(expect.objectContaining({message: expect.stringContaining('within 8 seconds')}));
+  });
+
+  test('user cancellation keeps its own error and clears the request deadline', async () => {
+    const cancel = new AbortController();
+    mockFetch.mockImplementation((_url, init) => new Promise((_resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(new Error('user cancelled')));
+    }));
+    const request = createPairingRequest('http://desktop', 'Phone', 'ios', cancel.signal);
+    const failure = request.catch(error => error as Error);
+    cancel.abort();
+    expect(await failure).toEqual(expect.objectContaining({message: 'user cancelled'}));
+    expect(jest.getTimerCount()).toBe(0);
+  });
+});

@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { connectedSourceModel, type ConnectedModelSource } from "../lib/onboardingModel";
 import "../settings.css";
 import {
   accountRuntimeKind,
@@ -157,13 +158,18 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
   const selectedModelReady = Boolean(selectedModelInfo);
   const hostedPreset = PROVIDER_PRESETS.find((preset) => preset.name === hostedPresetName) ?? PROVIDER_PRESETS[0];
 
-  async function refreshModels(selectFirst = false, preferredOwner?: string) {
+  const modelRefreshRevision = useRef(0);
+
+  async function refreshModels(source?: ConnectedModelSource) {
+    const revision = ++modelRefreshRevision.current;
+    const originalSelection = useSessions.getState().getSettings(activeId).model;
     setModelsLoading(true);
     let firstCatalog = true;
     let selected = false;
     let latest: ModelInfo[] = [];
     const firstResult = new Promise<void>((resolve) => {
       void loadStartupModels((next) => {
+        if (revision !== modelRefreshRevision.current) { resolve(); return; }
         latest = next;
         setModels(next);
         if (firstCatalog) {
@@ -171,25 +177,20 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
           setModelsLoading(false);
           resolve();
         }
-        if (!selectFirst || selected) return;
-        const preferred = preferredOwner
-          ? next.find((model) => model.owned_by.toLowerCase() === preferredOwner.toLowerCase())
-          : null;
-        const modelToSelect = preferred ?? (preferredOwner ? null : next[0]);
+        if (!source || selected || useSessions.getState().getSettings(activeId).model !== originalSelection) return;
+        const modelToSelect = connectedSourceModel(next, source);
         if (!modelToSelect) return;
         selected = true;
         updateThreadSettings(activeId, { model: modelToSelect.id });
         onboarding.markStepComplete("model");
       }, accountRuntimeEnabled, models).then(() => {
+        if (revision !== modelRefreshRevision.current) return;
         if (!latest.length) {
           setProviderNotice({ tone: "info", message: "No chat models found. Connect a provider or start a local runtime." });
         }
-        if (selectFirst && !selected && latest[0]) {
-          updateThreadSettings(activeId, { model: latest[0].id });
-          onboarding.markStepComplete("model");
-        }
         void onModelsChanged?.();
       }).catch((error) => {
+        if (revision !== modelRefreshRevision.current) { resolve(); return; }
         setModelsLoading(false);
         setProviderNotice({ tone: "error", message: error instanceof Error ? error.message : "Model refresh failed." });
         if (firstCatalog) resolve();
@@ -202,6 +203,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
     void refreshModels();
     void refreshAccountRuntimes();
     onboarding.start();
+    return () => { modelRefreshRevision.current += 1; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountRuntimeEnabled]);
 
@@ -291,7 +293,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
         ? { tone: "success", message: `${saved.name} connected with ${saved.models.length} model${saved.models.length === 1 ? "" : "s"}.` }
         : { tone: "info", message: `${saved.name} saved, but no models were returned yet.` },
     );
-    await refreshModels(true);
+    await refreshModels({ providerId: saved.id });
   }
 
   async function saveHostedPreset() {
@@ -322,7 +324,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
           ? { tone: "success", message: `${saved.name} connected with ${saved.models.length} model${saved.models.length === 1 ? "" : "s"}.` }
           : { tone: saved.error ? "error" : "info", message: saved.error ?? `${saved.name} saved, but no models were returned.` },
       );
-      await refreshModels(true);
+      await refreshModels({ providerId: saved.id });
     } finally {
       setHostedBusy(false);
     }
@@ -370,7 +372,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
       await refreshAccountRuntimes(true);
       if (completed) {
         setProviderNotice({ tone: "success", message: "Codex connected. Refreshing available models." });
-        await refreshModels(true, "Codex");
+        await refreshModels({ owner: "Codex" });
       } else {
         warning ||= isCliPathWarningMessage(failed);
         setProviderNotice({ tone: warning ? "warning" : "error", message: failed || "Codex login did not complete." });
@@ -648,7 +650,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
                           );
                         })}
                       </div>
-                      <button className="btn-accent" type="button" onClick={() => void refreshAccountRuntimes(true)} disabled={runtimeBusy}>
+                      <button className="btn-accent" type="button" onClick={() => void refreshAccountRuntimes(true).then(() => refreshModels())} disabled={runtimeBusy || modelsLoading}>
                         {runtimeBusy ? "Checking..." : "Refresh agents"}
                       </button>
                     </>

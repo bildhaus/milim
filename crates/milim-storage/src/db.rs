@@ -1248,33 +1248,37 @@ impl UserDataStore {
             .lock()
             .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
         let conn = db.conn();
-        let mut sessions = session_rows(conn)?;
-        if let Some(legacy) = get_json_locked(conn, SESSIONS_STATE_KEY)? {
-            if should_migrate_sessions_snapshot(&legacy, &sessions)? {
-                set_sessions_snapshot_locked(conn, &legacy)?;
-                sessions = session_rows(conn)?;
-            }
-        }
-        let mut root = get_json_locked(conn, SESSIONS_META_KEY)?
-            .as_deref()
-            .map(parse_json)
-            .transpose()?
-            .unwrap_or_else(|| {
-                if sessions.is_empty() {
-                    serde_json::Value::Null
-                } else {
-                    serde_json::json!({ "state": {}, "version": 0 })
-                }
-            });
-        if root.is_null() {
-            return Ok(None);
-        }
-        let state = root
-            .get_mut("state")
-            .and_then(serde_json::Value::as_object_mut)
-            .ok_or_else(|| Error::Other("invalid sessions metadata".into()))?;
-        state.insert("sessions".to_string(), serde_json::Value::Array(sessions));
-        serde_json::to_string(&root).map(Some).map_err(json_error)
+        get_sessions_snapshot_locked(conn)
+    }
+
+    /// One thread and all its persisted messages under a single database lock.
+    pub fn session_snapshot(&self, session_id: &str) -> Result<serde_json::Value> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        let raw = conn
+            .query_row(
+                "SELECT session_json FROM user_sessions WHERE id = ?1",
+                params![session_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(sqlite)?
+            .ok_or_else(|| Error::NotFound(format!("session {session_id}")))?;
+        let mut session = parse_json(&raw)?;
+        let mut stmt = conn.prepare("SELECT message_json FROM user_session_messages WHERE session_id = ?1 ORDER BY message_index ASC").map_err(sqlite)?;
+        let messages = stmt
+            .query_map(params![session_id], |row| row.get::<_, String>(0))
+            .map_err(sqlite)?
+            .map(|row| row.map_err(sqlite).and_then(|raw| parse_json(&raw)))
+            .collect::<Result<Vec<_>>>()?;
+        session
+            .as_object_mut()
+            .ok_or_else(|| Error::Other("invalid session metadata".into()))?
+            .insert("messages".into(), serde_json::Value::Array(messages));
+        Ok(session)
     }
 
     pub fn get_sessions_manifest_snapshot(&self, tail_limit: usize) -> Result<Option<String>> {
@@ -1657,53 +1661,17 @@ impl UserDataStore {
         entries: BTreeMap<String, String>,
         sessions_json: &str,
     ) -> Result<()> {
-        for (key, value) in &entries {
-            serde_json::from_str::<serde_json::Value>(value)
-                .map_err(|e| Error::InvalidRequest(format!("invalid JSON for {key}: {e}")))?;
-        }
-        serde_json::from_str::<serde_json::Value>(sessions_json)
-            .map_err(|e| Error::InvalidRequest(format!("invalid sessions JSON: {e}")))?;
+        validate_backup_state(&entries, sessions_json, None)?;
         let db = self
             .db
             .lock()
             .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
         let conn = db.conn();
         conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
-        let result = (|| -> Result<()> {
-            for key in replace_keys {
-                conn.execute("DELETE FROM user_json_state WHERE key = ?1", params![key])
-                    .map_err(sqlite)?;
-            }
-            for (key, value) in entries {
-                conn.execute(
-                    "INSERT INTO user_json_state (key, value_json, updated_at_ms)
-                     VALUES (?1, ?2, ?3)
-                     ON CONFLICT(key) DO UPDATE SET
-                        value_json = excluded.value_json,
-                        updated_at_ms = excluded.updated_at_ms",
-                    params![key, value, now_ms()],
-                )
-                .map_err(sqlite)?;
-            }
-            conn.execute("DELETE FROM user_session_messages", [])
-                .map_err(sqlite)?;
-            conn.execute("DELETE FROM user_sessions", [])
-                .map_err(sqlite)?;
-            conn.execute(
-                "DELETE FROM user_json_state WHERE key IN (?1, ?2)",
-                params![SESSIONS_STATE_KEY, SESSIONS_META_KEY],
-            )
-            .map_err(sqlite)?;
-            set_sessions_snapshot_locked(conn, sessions_json)?;
-            Ok(())
-        })();
-        match result {
-            Ok(()) => conn.execute_batch("COMMIT").map_err(sqlite),
-            Err(error) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                Err(error)
-            }
-        }
+        finish_control_transaction(
+            conn,
+            replace_backup_state_locked(conn, replace_keys, entries, sessions_json),
+        )
     }
 
     pub fn import_json_entries(&self, entries: BTreeMap<String, String>) -> Result<()> {
@@ -1905,7 +1873,34 @@ impl UserDataStore {
     ) -> Result<ControlThreadRecord> {
         let thread_id = required_control_text(thread_id, "thread id")?;
         let epoch = required_control_text(epoch, "thread epoch")?;
-        validate_control_json(session_json, "thread")?;
+        let mut session: serde_json::Value = serde_json::from_str(session_json)
+            .map_err(|error| Error::InvalidRequest(format!("invalid thread JSON: {error}")))?;
+        let metadata = session
+            .as_object_mut()
+            .ok_or_else(|| Error::InvalidRequest("thread must be an object".into()))?;
+        let messages = match metadata.remove("messages") {
+            None => Vec::new(),
+            Some(serde_json::Value::Array(messages)) => messages,
+            Some(_) => {
+                return Err(Error::InvalidRequest(
+                    "thread messages must be an array".into(),
+                ))
+            }
+        };
+        let mut message_ids = BTreeSet::new();
+        for message in &messages {
+            let id = message
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| {
+                    Error::InvalidRequest("initial thread message requires an id".into())
+                })?;
+            if !message_ids.insert(id) {
+                return Err(Error::InvalidRequest("duplicate initial message id".into()));
+            }
+        }
+        let session_json = session.to_string();
         let db = self
             .db
             .lock()
@@ -1932,6 +1927,18 @@ impl UserDataStore {
                  (thread_id, epoch, revision, next_seq, updated_at_ms)
                  VALUES (?1, ?2, 1, 1, ?3)",
                 params![thread_id, epoch, now],
+            )
+            .map_err(sqlite)?;
+            for (index, message) in messages.iter().enumerate() {
+                let message_json = message.to_string();
+                conn.execute("INSERT INTO user_session_messages (session_id, message_index, message_json) VALUES (?1, ?2, ?3)",
+                    params![thread_id, index as i64, message_json]).map_err(sqlite)?;
+                conn.execute("INSERT INTO user_timeline_events (thread_id, epoch, seq, item_id, run_id, item_type, data_json, created_at_ms) VALUES (?1, ?2, ?3, ?4, NULL, 'message', ?5, ?6)",
+                    params![thread_id, epoch, index as i64 + 1, message["id"].as_str().expect("validated message id"), message_json, message.get("timestamp").and_then(serde_json::Value::as_i64).unwrap_or(now)]).map_err(sqlite)?;
+            }
+            conn.execute(
+                "UPDATE user_thread_control SET next_seq = ?2 WHERE thread_id = ?1",
+                params![thread_id, messages.len() as i64 + 1],
             )
             .map_err(sqlite)?;
             Ok(ControlThreadRecord {
@@ -4061,205 +4068,323 @@ impl UserDataStore {
             .lock()
             .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
         let conn = db.conn();
-        let host = conn
-            .query_row(
-                "SELECT host_id, display_name, created_at_ms, updated_at_ms
+        control_backup_state_locked(conn)
+    }
+
+    /// Snapshot every backup component before any canonical or replica writer can
+    /// change another component. Do not assemble backups from independent reads.
+    pub fn complete_backup_snapshot(
+        &self,
+        keys: &[&str],
+    ) -> Result<(Option<String>, BTreeMap<String, String>, ControlBackupState)> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        let sessions = get_sessions_snapshot_locked(conn)?;
+        let mut entries = BTreeMap::new();
+        for key in keys {
+            if let Some(value) = get_json_locked(conn, key)? {
+                entries.insert((*key).to_string(), value);
+            }
+        }
+        Ok((sessions, entries, control_backup_state_locked(conn)?))
+    }
+
+    pub fn replace_control_backup_state(&self, backup: &ControlBackupState) -> Result<()> {
+        validate_control_backup_state(backup)?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
+        let result = (|| {
+            replace_control_backup_state_locked(conn, backup)?;
+            reconcile_control_startup_locked(conn)?;
+            Ok(())
+        })();
+        finish_control_transaction(conn, result)
+    }
+
+    /// Validate a backup without changing the authoritative database.
+    pub fn validate_backup_state(
+        entries: &BTreeMap<String, String>,
+        sessions_json: &str,
+        control: Option<&ControlBackupState>,
+    ) -> Result<()> {
+        validate_backup_state(entries, sessions_json, control)
+    }
+
+    /// Replace replica state, canonical records and restart reconciliation atomically.
+    pub fn replace_complete_backup_state(
+        &self,
+        replace_keys: &[String],
+        entries: BTreeMap<String, String>,
+        sessions_json: &str,
+        control: Option<&ControlBackupState>,
+    ) -> Result<()> {
+        validate_backup_state(&entries, sessions_json, control)?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
+        let result = (|| {
+            replace_backup_state_locked(conn, replace_keys, entries, sessions_json)?;
+            if let Some(control) = control {
+                replace_control_backup_state_locked(conn, control)?;
+            }
+            reconcile_control_startup_locked(conn)?;
+            Ok(())
+        })();
+        finish_control_transaction(conn, result)
+    }
+
+    /// Mark work that cannot survive a process restart as interrupted before
+    /// any client can observe bootstrap state.
+    pub fn reconcile_control_startup(&self) -> Result<(usize, usize)> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
+        finish_control_transaction(conn, reconcile_control_startup_locked(conn))
+    }
+}
+
+fn get_sessions_snapshot_locked(conn: &Connection) -> Result<Option<String>> {
+    let mut sessions = session_rows(conn)?;
+    if let Some(legacy) = get_json_locked(conn, SESSIONS_STATE_KEY)? {
+        if should_migrate_sessions_snapshot(&legacy, &sessions)? {
+            set_sessions_snapshot_locked(conn, &legacy)?;
+            sessions = session_rows(conn)?;
+        }
+    }
+    let mut root = get_json_locked(conn, SESSIONS_META_KEY)?
+        .as_deref()
+        .map(parse_json)
+        .transpose()?
+        .unwrap_or_else(|| {
+            if sessions.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!({ "state": {}, "version": 0 })
+            }
+        });
+    if root.is_null() {
+        return Ok(None);
+    }
+    let state = root
+        .get_mut("state")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| Error::Other("invalid sessions metadata".into()))?;
+    state.insert("sessions".to_string(), serde_json::Value::Array(sessions));
+    serde_json::to_string(&root).map(Some).map_err(json_error)
+}
+
+fn control_backup_state_locked(conn: &Connection) -> Result<ControlBackupState> {
+    let host = conn
+        .query_row(
+            "SELECT host_id, display_name, created_at_ms, updated_at_ms
                  FROM user_control_host WHERE singleton = 1",
-                [],
-                |row| {
-                    Ok(ControlHostRecord {
-                        host_id: row.get(0)?,
-                        display_name: row.get(1)?,
-                        created_at_ms: row.get(2)?,
-                        updated_at_ms: row.get(3)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(sqlite)?;
-        let threads = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT s.id, s.session_json, c.revision, c.epoch, s.updated_at_ms
+            [],
+            |row| {
+                Ok(ControlHostRecord {
+                    host_id: row.get(0)?,
+                    display_name: row.get(1)?,
+                    created_at_ms: row.get(2)?,
+                    updated_at_ms: row.get(3)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(sqlite)?;
+    let threads = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT s.id, s.session_json, c.revision, c.epoch, s.updated_at_ms
                      FROM user_sessions s JOIN user_thread_control c ON c.thread_id = s.id
                      ORDER BY s.sort_order ASC, s.updated_at_ms DESC",
-                )
-                .map_err(sqlite)?;
-            let rows = stmt
-                .query_map([], control_thread_from_row)
-                .map_err(sqlite)?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(sqlite)?;
-            rows
-        };
-        let runs = {
-            let mut stmt = conn
+            )
+            .map_err(sqlite)?;
+        let rows = stmt
+            .query_map([], control_thread_from_row)
+            .map_err(sqlite)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sqlite)?;
+        rows
+    };
+    let runs = {
+        let mut stmt = conn
                 .prepare(
                     "SELECT id, thread_id, status, adapter, request_json, agent_snapshot_json,
                             native_session_json, created_at_ms, updated_at_ms, completed_at_ms, error_json
                      FROM user_runs ORDER BY created_at_ms ASC",
                 )
                 .map_err(sqlite)?;
-            let rows = stmt
-                .query_map([], control_run_from_row)
-                .map_err(sqlite)?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(sqlite)?;
-            rows
-        };
-        let timeline = query_timeline_rows(
-            conn,
-            "SELECT thread_id, epoch, seq, item_id, run_id, item_type, data_json, created_at_ms
+        let rows = stmt
+            .query_map([], control_run_from_row)
+            .map_err(sqlite)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sqlite)?;
+        rows
+    };
+    let timeline = query_timeline_rows(
+        conn,
+        "SELECT thread_id, epoch, seq, item_id, run_id, item_type, data_json, created_at_ms
              FROM user_timeline_events ORDER BY thread_id, epoch, seq",
-            [],
-        )?;
-        let queued_turns = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, thread_id, COALESCE(command_id, id), payload_json, created_at_ms
+        [],
+    )?;
+    let queued_turns = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, thread_id, COALESCE(command_id, id), payload_json, created_at_ms
                      FROM user_run_inbox
                      WHERE kind = 'followup' AND state = 'pending'
                      ORDER BY created_at_ms, id",
-                )
-                .map_err(sqlite)?;
-            let rows = stmt
-                .query_map([], control_queued_turn_from_row)
-                .map_err(sqlite)?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(sqlite)?;
-            rows
-        };
-        let command_receipts = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT command_id, device_id, thread_id, command_kind,
+            )
+            .map_err(sqlite)?;
+        let rows = stmt
+            .query_map([], control_queued_turn_from_row)
+            .map_err(sqlite)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sqlite)?;
+        rows
+    };
+    let command_receipts = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT command_id, device_id, thread_id, command_kind,
                             request_json, result_json, created_at_ms
                      FROM user_command_receipts ORDER BY created_at_ms, command_id",
-                )
-                .map_err(sqlite)?;
-            let rows = stmt
-                .query_map([], control_command_receipt_from_row)
-                .map_err(sqlite)?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(sqlite)?;
-            rows
-        };
-        let approvals = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, run_id, thread_id, kind, request_json, status,
+            )
+            .map_err(sqlite)?;
+        let rows = stmt
+            .query_map([], control_command_receipt_from_row)
+            .map_err(sqlite)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sqlite)?;
+        rows
+    };
+    let approvals = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, run_id, thread_id, kind, request_json, status,
                             decision_json, created_at_ms, resolved_at_ms
                      FROM user_pending_approvals ORDER BY created_at_ms, id",
-                )
-                .map_err(sqlite)?;
-            let rows = stmt
-                .query_map([], control_approval_from_row)
-                .map_err(sqlite)?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(sqlite)?;
-            rows
-        };
-        let run_events = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT run_id, seq, event_id, step_id, event_type, data_json, created_at_ms
+            )
+            .map_err(sqlite)?;
+        let rows = stmt
+            .query_map([], control_approval_from_row)
+            .map_err(sqlite)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sqlite)?;
+        rows
+    };
+    let run_events = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT run_id, seq, event_id, step_id, event_type, data_json, created_at_ms
                      FROM user_run_events ORDER BY run_id, seq",
-                )
-                .map_err(sqlite)?;
-            let rows = stmt
-                .query_map([], control_run_event_from_row)
-                .map_err(sqlite)?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(sqlite)?;
-            rows
-        };
-        let run_artifacts = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT refs.run_id, refs.digest, refs.kind, refs.created_at_ms, blobs.byte_len
+            )
+            .map_err(sqlite)?;
+        let rows = stmt
+            .query_map([], control_run_event_from_row)
+            .map_err(sqlite)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sqlite)?;
+        rows
+    };
+    let run_artifacts = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT refs.run_id, refs.digest, refs.kind, refs.created_at_ms, blobs.byte_len
                      FROM user_run_artifact_refs AS refs
                      JOIN user_run_artifact_blobs AS blobs USING (digest)
                      ORDER BY refs.run_id, refs.created_at_ms, refs.digest",
-                )
-                .map_err(sqlite)?;
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, i64>(4)?,
-                    ))
-                })
-                .map_err(sqlite)?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(sqlite)?;
-            drop(stmt);
-            let mut artifacts = Vec::with_capacity(rows.len());
-            let mut migrated = BTreeSet::new();
-            for (run_id, digest, kind, created_at_ms, byte_len) in rows {
-                let data = decode_run_artifact_blob_locked(conn, &digest, 0)?;
-                migrated.insert((run_id.clone(), digest.clone()));
-                artifacts.push(ControlRunArtifactRecord {
-                    run_id,
-                    digest,
-                    kind,
-                    data_json: String::from_utf8(data).map_err(|error| {
-                        Error::Other(format!("decode run artifact JSON: {error}"))
-                    })?,
-                    byte_len: u64::try_from(byte_len)
-                        .map_err(|_| Error::Other("run artifact byte length is negative".into()))?,
-                    created_at_ms,
-                });
-            }
-            let mut legacy = conn
-                .prepare(
-                    "SELECT run_id, digest, kind, data_json, byte_len, created_at_ms
+            )
+            .map_err(sqlite)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })
+            .map_err(sqlite)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sqlite)?;
+        drop(stmt);
+        let mut artifacts = Vec::with_capacity(rows.len());
+        let mut migrated = BTreeSet::new();
+        for (run_id, digest, kind, created_at_ms, byte_len) in rows {
+            let data = decode_run_artifact_blob_locked(conn, &digest, 0)?;
+            migrated.insert((run_id.clone(), digest.clone()));
+            artifacts.push(ControlRunArtifactRecord {
+                run_id,
+                digest,
+                kind,
+                data_json: String::from_utf8(data)
+                    .map_err(|error| Error::Other(format!("decode run artifact JSON: {error}")))?,
+                byte_len: u64::try_from(byte_len)
+                    .map_err(|_| Error::Other("run artifact byte length is negative".into()))?,
+                created_at_ms,
+            });
+        }
+        let mut legacy = conn
+            .prepare(
+                "SELECT run_id, digest, kind, data_json, byte_len, created_at_ms
                      FROM user_run_artifacts ORDER BY run_id, created_at_ms, digest",
-                )
-                .map_err(sqlite)?;
-            let rows = legacy
-                .query_map([], control_run_artifact_from_row)
-                .map_err(sqlite)?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(sqlite)?;
-            artifacts.extend(rows.into_iter().filter(|artifact| {
-                !migrated.contains(&(artifact.run_id.clone(), artifact.digest.clone()))
-            }));
-            artifacts
-        };
-        let inbox = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, thread_id, target_run_id, command_id, kind, state, payload_json,
+            )
+            .map_err(sqlite)?;
+        let rows = legacy
+            .query_map([], control_run_artifact_from_row)
+            .map_err(sqlite)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sqlite)?;
+        artifacts.extend(rows.into_iter().filter(|artifact| {
+            !migrated.contains(&(artifact.run_id.clone(), artifact.digest.clone()))
+        }));
+        artifacts
+    };
+    let inbox = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, thread_id, target_run_id, command_id, kind, state, payload_json,
                             created_at_ms, claimed_at_ms, resolved_at_ms
                      FROM user_run_inbox ORDER BY created_at_ms, id",
-                )
-                .map_err(sqlite)?;
-            let rows = stmt
-                .query_map([], control_inbox_from_row)
-                .map_err(sqlite)?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(sqlite)?;
-            rows
-        };
-        let thread_links = {
-            let mut stmt = conn
+            )
+            .map_err(sqlite)?;
+        let rows = stmt
+            .query_map([], control_inbox_from_row)
+            .map_err(sqlite)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sqlite)?;
+        rows
+    };
+    let thread_links = {
+        let mut stmt = conn
                 .prepare(
                     "SELECT owner_thread_id, target_thread_id, created_at_ms
                      FROM user_thread_links ORDER BY owner_thread_id, created_at_ms, target_thread_id",
                 )
                 .map_err(sqlite)?;
-            let rows = stmt
-                .query_map([], control_thread_link_from_row)
-                .map_err(sqlite)?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(sqlite)?;
-            rows
-        };
-        let mailbox = {
-            let mut stmt = conn
+        let rows = stmt
+            .query_map([], control_thread_link_from_row)
+            .map_err(sqlite)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sqlite)?;
+        rows
+    };
+    let mailbox = {
+        let mut stmt = conn
                 .prepare(
                     "SELECT id, origin_thread_id, target_thread_id, origin_run_id, target_run_id,
                             status, request_json, reply_json, created_at_ms, updated_at_ms, consumed_at_ms,
@@ -4267,79 +4392,70 @@ impl UserDataStore {
                      FROM user_thread_mailbox ORDER BY created_at_ms, id",
                 )
                 .map_err(sqlite)?;
-            let rows = stmt
-                .query_map([], control_mailbox_from_row)
-                .map_err(sqlite)?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(sqlite)?;
-            rows
-        };
-        Ok(ControlBackupState {
-            schema_version: 3,
-            host,
-            threads,
-            runs,
-            timeline,
-            queued_turns,
-            command_receipts,
-            approvals,
-            run_events,
-            run_artifacts,
-            inbox,
-            thread_links,
-            mailbox,
-        })
-    }
+        let rows = stmt
+            .query_map([], control_mailbox_from_row)
+            .map_err(sqlite)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sqlite)?;
+        rows
+    };
+    Ok(ControlBackupState {
+        schema_version: 3,
+        host,
+        threads,
+        runs,
+        timeline,
+        queued_turns,
+        command_receipts,
+        approvals,
+        run_events,
+        run_artifacts,
+        inbox,
+        thread_links,
+        mailbox,
+    })
+}
 
-    pub fn replace_control_backup_state(&self, backup: &ControlBackupState) -> Result<()> {
-        if !matches!(backup.schema_version, 1..=3) {
-            return Err(Error::InvalidRequest(format!(
-                "unsupported control backup version {}",
-                backup.schema_version
-            )));
-        }
-        for run in &backup.runs {
-            validate_control_json(&run.request_json, "run request")?;
-            validate_optional_control_json(run.agent_snapshot_json.as_deref(), "agent snapshot")?;
-            validate_optional_control_json(run.native_session_json.as_deref(), "native session")?;
-            validate_optional_control_json(run.error_json.as_deref(), "run error")?;
-        }
-        for item in &backup.timeline {
-            validate_control_json(&item.data_json, "timeline data")?;
-        }
-        for turn in &backup.queued_turns {
-            validate_control_json(&turn.request_json, "queued turn request")?;
-        }
-        for receipt in &backup.command_receipts {
-            validate_control_json(&receipt.request_json, "command request")?;
-            validate_control_json(&receipt.result_json, "command result")?;
-        }
-        for approval in &backup.approvals {
-            validate_control_json(&approval.request_json, "approval request")?;
-            validate_optional_control_json(approval.decision_json.as_deref(), "approval decision")?;
-        }
-        for event in &backup.run_events {
-            validate_control_json(&event.data_json, "run event")?;
-        }
-        for artifact in &backup.run_artifacts {
-            validate_control_json(&artifact.data_json, "run artifact")?;
-        }
-        for item in &backup.inbox {
-            validate_control_json(&item.payload_json, "inbox payload")?;
-        }
-        for item in &backup.mailbox {
-            validate_control_json(&item.request_json, "mailbox request")?;
-            validate_optional_control_json(item.reply_json.as_deref(), "mailbox reply")?;
-        }
-        let db = self
-            .db
-            .lock()
-            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
-        let conn = db.conn();
-        conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
-        let result = (|| -> Result<()> {
-            conn.execute_batch(
-                "DELETE FROM user_run_events;
+fn replace_backup_state_locked(
+    conn: &Connection,
+    replace_keys: &[String],
+    entries: BTreeMap<String, String>,
+    sessions_json: &str,
+) -> Result<()> {
+    for key in replace_keys {
+        conn.execute("DELETE FROM user_json_state WHERE key = ?1", params![key])
+            .map_err(sqlite)?;
+    }
+    for (key, value) in entries {
+        conn.execute(
+            "INSERT INTO user_json_state (key, value_json, updated_at_ms)
+                     VALUES (?1, ?2, ?3)
+                     ON CONFLICT(key) DO UPDATE SET
+                        value_json = excluded.value_json,
+                        updated_at_ms = excluded.updated_at_ms",
+            params![key, value, now_ms()],
+        )
+        .map_err(sqlite)?;
+    }
+    conn.execute("DELETE FROM user_session_messages", [])
+        .map_err(sqlite)?;
+    conn.execute("DELETE FROM user_sessions", [])
+        .map_err(sqlite)?;
+    conn.execute(
+        "DELETE FROM user_json_state WHERE key IN (?1, ?2)",
+        params![SESSIONS_STATE_KEY, SESSIONS_META_KEY],
+    )
+    .map_err(sqlite)?;
+    set_sessions_snapshot_locked(conn, sessions_json)?;
+    Ok(())
+}
+
+fn replace_control_backup_state_locked(
+    conn: &Connection,
+    backup: &ControlBackupState,
+) -> Result<()> {
+    conn.execute_batch(
+        "DELETE FROM user_run_events;
                  DELETE FROM user_run_artifact_refs;
                  DELETE FROM user_run_artifact_blobs;
                  DELETE FROM user_run_artifacts;
@@ -4352,47 +4468,47 @@ impl UserDataStore {
                  DELETE FROM user_runs;
                  DELETE FROM user_thread_control;
                  DELETE FROM user_control_host;",
-            )
-            .map_err(sqlite)?;
-            if let Some(host) = &backup.host {
-                conn.execute(
-                    "INSERT INTO user_control_host
+    )
+    .map_err(sqlite)?;
+    if let Some(host) = &backup.host {
+        conn.execute(
+            "INSERT INTO user_control_host
                      (singleton, host_id, display_name, created_at_ms, updated_at_ms)
                      VALUES (1, ?1, ?2, ?3, ?4)",
-                    params![
-                        host.host_id,
-                        host.display_name,
-                        host.created_at_ms,
-                        host.updated_at_ms
-                    ],
-                )
-                .map_err(sqlite)?;
-            }
-            for thread in &backup.threads {
-                let next_seq = backup
-                    .timeline
-                    .iter()
-                    .filter(|item| item.thread_id == thread.id && item.epoch == thread.epoch)
-                    .map(|item| item.seq)
-                    .max()
-                    .unwrap_or(0)
-                    .saturating_add(1);
-                conn.execute(
-                    "INSERT INTO user_thread_control
+            params![
+                host.host_id,
+                host.display_name,
+                host.created_at_ms,
+                host.updated_at_ms
+            ],
+        )
+        .map_err(sqlite)?;
+    }
+    for thread in &backup.threads {
+        let next_seq = backup
+            .timeline
+            .iter()
+            .filter(|item| item.thread_id == thread.id && item.epoch == thread.epoch)
+            .map(|item| item.seq)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        conn.execute(
+            "INSERT INTO user_thread_control
                      (thread_id, epoch, revision, next_seq, updated_at_ms)
                      VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![
-                        thread.id,
-                        thread.epoch,
-                        u64_to_i64(thread.revision)?,
-                        u64_to_i64(next_seq)?,
-                        thread.updated_at_ms,
-                    ],
-                )
-                .map_err(sqlite)?;
-            }
-            for run in &backup.runs {
-                conn.execute(
+            params![
+                thread.id,
+                thread.epoch,
+                u64_to_i64(thread.revision)?,
+                u64_to_i64(next_seq)?,
+                thread.updated_at_ms,
+            ],
+        )
+        .map_err(sqlite)?;
+    }
+    for run in &backup.runs {
+        conn.execute(
                     "INSERT INTO user_runs
                      (id, thread_id, status, adapter, request_json, agent_snapshot_json,
                       native_session_json, created_at_ms, updated_at_ms, completed_at_ms, error_json)
@@ -4402,81 +4518,81 @@ impl UserDataStore {
                         run.updated_at_ms, run.completed_at_ms, run.error_json],
                 )
                 .map_err(sqlite)?;
-            }
-            for item in &backup.timeline {
-                conn.execute(
-                    "INSERT INTO user_timeline_events
+    }
+    for item in &backup.timeline {
+        conn.execute(
+            "INSERT INTO user_timeline_events
                      (thread_id, epoch, seq, item_id, run_id, item_type, data_json, created_at_ms)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![
-                        item.thread_id,
-                        item.epoch,
-                        u64_to_i64(item.seq)?,
-                        item.item_id,
-                        item.run_id,
-                        item.item_type,
-                        item.data_json,
-                        item.created_at_ms
-                    ],
-                )
-                .map_err(sqlite)?;
-            }
-            let inbox = if backup.inbox.is_empty() {
-                backup
-                    .queued_turns
-                    .iter()
-                    .map(|turn| ControlInboxRecord {
-                        id: turn.id.clone(),
-                        thread_id: turn.thread_id.clone(),
-                        target_run_id: None,
-                        command_id: Some(turn.command_id.clone()),
-                        kind: "followup".into(),
-                        state: "pending".into(),
-                        payload_json: turn.request_json.clone(),
-                        created_at_ms: turn.accepted_at_ms,
-                        claimed_at_ms: None,
-                        resolved_at_ms: None,
-                    })
-                    .collect::<Vec<_>>()
-            } else {
-                backup.inbox.clone()
-            };
-            for item in &inbox {
-                conn.execute(
-                    "INSERT INTO user_run_inbox
+            params![
+                item.thread_id,
+                item.epoch,
+                u64_to_i64(item.seq)?,
+                item.item_id,
+                item.run_id,
+                item.item_type,
+                item.data_json,
+                item.created_at_ms
+            ],
+        )
+        .map_err(sqlite)?;
+    }
+    let inbox = if backup.inbox.is_empty() {
+        backup
+            .queued_turns
+            .iter()
+            .map(|turn| ControlInboxRecord {
+                id: turn.id.clone(),
+                thread_id: turn.thread_id.clone(),
+                target_run_id: None,
+                command_id: Some(turn.command_id.clone()),
+                kind: "followup".into(),
+                state: "pending".into(),
+                payload_json: turn.request_json.clone(),
+                created_at_ms: turn.accepted_at_ms,
+                claimed_at_ms: None,
+                resolved_at_ms: None,
+            })
+            .collect::<Vec<_>>()
+    } else {
+        backup.inbox.clone()
+    };
+    for item in &inbox {
+        conn.execute(
+            "INSERT INTO user_run_inbox
                      (id, thread_id, target_run_id, command_id, kind, state, payload_json,
                       created_at_ms, claimed_at_ms, resolved_at_ms)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                    params![
-                        item.id,
-                        item.thread_id,
-                        item.target_run_id,
-                        item.command_id,
-                        item.kind,
-                        item.state,
-                        item.payload_json,
-                        item.created_at_ms,
-                        item.claimed_at_ms,
-                        item.resolved_at_ms
-                    ],
-                )
-                .map_err(sqlite)?;
-            }
-            for item in &backup.thread_links {
-                for (owner_thread_id, target_thread_id) in [
-                    (&item.owner_thread_id, &item.target_thread_id),
-                    (&item.target_thread_id, &item.owner_thread_id),
-                ] {
-                    conn.execute(
-                        "INSERT OR IGNORE INTO user_thread_links
+            params![
+                item.id,
+                item.thread_id,
+                item.target_run_id,
+                item.command_id,
+                item.kind,
+                item.state,
+                item.payload_json,
+                item.created_at_ms,
+                item.claimed_at_ms,
+                item.resolved_at_ms
+            ],
+        )
+        .map_err(sqlite)?;
+    }
+    for item in &backup.thread_links {
+        for (owner_thread_id, target_thread_id) in [
+            (&item.owner_thread_id, &item.target_thread_id),
+            (&item.target_thread_id, &item.owner_thread_id),
+        ] {
+            conn.execute(
+                "INSERT OR IGNORE INTO user_thread_links
                          (owner_thread_id, target_thread_id, created_at_ms) VALUES (?1, ?2, ?3)",
-                        params![owner_thread_id, target_thread_id, item.created_at_ms],
-                    )
-                    .map_err(sqlite)?;
-                }
-            }
-            for item in &backup.mailbox {
-                conn.execute(
+                params![owner_thread_id, target_thread_id, item.created_at_ms],
+            )
+            .map_err(sqlite)?;
+        }
+    }
+    for item in &backup.mailbox {
+        conn.execute(
                     "INSERT INTO user_thread_mailbox
                      (id, origin_thread_id, target_thread_id, origin_run_id, target_run_id,
                       status, request_json, reply_json, created_at_ms, updated_at_ms, consumed_at_ms,
@@ -4498,9 +4614,9 @@ impl UserDataStore {
                     ],
                 )
                 .map_err(sqlite)?;
-            }
-            for receipt in &backup.command_receipts {
-                conn.execute(
+    }
+    for receipt in &backup.command_receipts {
+        conn.execute(
                     "INSERT INTO user_command_receipts
                      (command_id, device_id, thread_id, command_kind, request_json, result_json, created_at_ms)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -4509,67 +4625,53 @@ impl UserDataStore {
                         receipt.created_at_ms],
                 )
                 .map_err(sqlite)?;
-            }
-            for approval in &backup.approvals {
-                conn.execute(
-                    "INSERT INTO user_pending_approvals
+    }
+    for approval in &backup.approvals {
+        conn.execute(
+            "INSERT INTO user_pending_approvals
                      (id, run_id, thread_id, kind, request_json, status, decision_json,
                       created_at_ms, resolved_at_ms)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                    params![
-                        approval.id,
-                        approval.run_id,
-                        approval.thread_id,
-                        approval.kind,
-                        approval.request_json,
-                        approval.status,
-                        approval.decision_json,
-                        approval.created_at_ms,
-                        approval.resolved_at_ms
-                    ],
-                )
-                .map_err(sqlite)?;
-            }
-            for artifact in &backup.run_artifacts {
-                put_run_artifact_locked(conn, artifact)?;
-            }
-            for event in &backup.run_events {
-                conn.execute(
-                    "INSERT INTO user_run_events
+            params![
+                approval.id,
+                approval.run_id,
+                approval.thread_id,
+                approval.kind,
+                approval.request_json,
+                approval.status,
+                approval.decision_json,
+                approval.created_at_ms,
+                approval.resolved_at_ms
+            ],
+        )
+        .map_err(sqlite)?;
+    }
+    for artifact in &backup.run_artifacts {
+        put_run_artifact_locked(conn, artifact)?;
+    }
+    for event in &backup.run_events {
+        conn.execute(
+            "INSERT INTO user_run_events
                      (run_id, seq, event_id, step_id, event_type, data_json, created_at_ms)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![
-                        event.run_id,
-                        u64_to_i64(event.seq)?,
-                        event.event_id,
-                        event.step_id,
-                        event.event_type,
-                        event.data_json,
-                        event.created_at_ms
-                    ],
-                )
-                .map_err(sqlite)?;
-            }
-            Ok(())
-        })();
-        finish_control_transaction(conn, result)?;
-        drop(db);
-        self.reconcile_control_startup()?;
-        Ok(())
+            params![
+                event.run_id,
+                u64_to_i64(event.seq)?,
+                event.event_id,
+                event.step_id,
+                event.event_type,
+                event.data_json,
+                event.created_at_ms
+            ],
+        )
+        .map_err(sqlite)?;
     }
+    Ok(())
+}
 
-    /// Mark work that cannot survive a process restart as interrupted before
-    /// any client can observe bootstrap state.
-    pub fn reconcile_control_startup(&self) -> Result<(usize, usize)> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
-        let conn = db.conn();
-        conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
-        let result = (|| -> Result<(usize, usize)> {
-            let now = now_ms();
-            let runs = conn
+fn reconcile_control_startup_locked(conn: &Connection) -> Result<(usize, usize)> {
+    let now = now_ms();
+    let runs = conn
                 .execute(
                     "UPDATE user_runs
                      SET status = 'interrupted', updated_at_ms = ?1, completed_at_ms = ?1,
@@ -4578,24 +4680,24 @@ impl UserDataStore {
                     params![now],
                 )
                 .map_err(sqlite)?;
-            let approvals = conn
-                .execute(
-                    "UPDATE user_pending_approvals
+    let approvals = conn
+        .execute(
+            "UPDATE user_pending_approvals
                      SET status = 'interrupted', resolved_at_ms = ?1
                      WHERE status = 'pending'",
-                    params![now],
-                )
-                .map_err(sqlite)?;
-            conn.execute(
-                "UPDATE user_run_inbox
+            params![now],
+        )
+        .map_err(sqlite)?;
+    conn.execute(
+        "UPDATE user_run_inbox
                  SET kind = 'followup', target_run_id = NULL
                  WHERE kind = 'steer' AND state = 'pending'
                    AND target_run_id IN (SELECT id FROM user_runs WHERE status = 'interrupted')",
-                [],
-            )
-            .map_err(sqlite)?;
-            conn.execute(
-                "UPDATE user_thread_mailbox
+        [],
+    )
+    .map_err(sqlite)?;
+    conn.execute(
+        "UPDATE user_thread_mailbox
                  SET status = 'failed', updated_at_ms = ?1,
                      reply_json = COALESCE(reply_json, json_object(
                         'content', '',
@@ -4604,13 +4706,108 @@ impl UserDataStore {
                      ))
                  WHERE status = 'running' AND target_run_id IN
                     (SELECT id FROM user_runs WHERE status = 'interrupted')",
-                params![now],
-            )
-            .map_err(sqlite)?;
-            Ok((runs, approvals))
-        })();
-        finish_control_transaction(conn, result)
+        params![now],
+    )
+    .map_err(sqlite)?;
+    Ok((runs, approvals))
+}
+
+fn validate_backup_state(
+    entries: &BTreeMap<String, String>,
+    sessions_json: &str,
+    control: Option<&ControlBackupState>,
+) -> Result<()> {
+    for (key, value) in entries {
+        serde_json::from_str::<serde_json::Value>(value)
+            .map_err(|e| Error::InvalidRequest(format!("invalid JSON for {key}: {e}")))?;
     }
+    let sessions: serde_json::Value = serde_json::from_str(sessions_json)
+        .map_err(|error| Error::InvalidRequest(format!("invalid sessions JSON: {error}")))?;
+    let sessions = sessions
+        .get("state")
+        .and_then(|state| state.get("sessions"))
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            Error::InvalidRequest("backup sessions must contain a state.sessions array".into())
+        })?;
+    let mut ids = BTreeSet::new();
+    for session in sessions {
+        let id = session
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| Error::InvalidRequest("backup session requires an id".into()))?;
+        if !ids.insert(id) {
+            return Err(Error::InvalidRequest("duplicate backup session id".into()));
+        }
+        if !session
+            .get("messages")
+            .is_some_and(serde_json::Value::is_array)
+        {
+            return Err(Error::InvalidRequest(
+                "backup session requires a messages array".into(),
+            ));
+        }
+    }
+    if let Some(control) = control {
+        validate_control_backup_state(control)?;
+        if control
+            .threads
+            .iter()
+            .any(|thread| !ids.contains(thread.id.as_str()))
+        {
+            return Err(Error::InvalidRequest(
+                "canonical backup thread is missing from sessions".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_control_backup_state(backup: &ControlBackupState) -> Result<()> {
+    if !matches!(backup.schema_version, 1..=3) {
+        return Err(Error::InvalidRequest(format!(
+            "unsupported control backup version {}",
+            backup.schema_version
+        )));
+    }
+    for run in &backup.runs {
+        validate_control_json(&run.request_json, "run request")?;
+        validate_optional_control_json(run.agent_snapshot_json.as_deref(), "agent snapshot")?;
+        validate_optional_control_json(run.native_session_json.as_deref(), "native session")?;
+        validate_optional_control_json(run.error_json.as_deref(), "run error")?;
+    }
+    for item in &backup.timeline {
+        validate_control_json(&item.data_json, "timeline data")?;
+    }
+    for turn in &backup.queued_turns {
+        validate_control_json(&turn.request_json, "queued turn request")?;
+    }
+    for receipt in &backup.command_receipts {
+        validate_control_json(&receipt.request_json, "command request")?;
+        validate_control_json(&receipt.result_json, "command result")?;
+    }
+    for approval in &backup.approvals {
+        validate_control_json(&approval.request_json, "approval request")?;
+        validate_optional_control_json(approval.decision_json.as_deref(), "approval decision")?;
+    }
+    for event in &backup.run_events {
+        validate_control_json(&event.data_json, "run event")?;
+    }
+    for artifact in &backup.run_artifacts {
+        validate_control_json(&artifact.data_json, "run artifact")?;
+    }
+    for item in &backup.inbox {
+        validate_control_json(&item.payload_json, "inbox payload")?;
+    }
+    for item in &backup.mailbox {
+        validate_control_json(&item.request_json, "mailbox request")?;
+        validate_optional_control_json(item.reply_json.as_deref(), "mailbox reply")?;
+    }
+    for thread in &backup.threads {
+        validate_control_json(&thread.session_json, "thread session")?;
+    }
+    Ok(())
 }
 
 fn required_control_text<'a>(value: &'a str, label: &str) -> Result<&'a str> {
@@ -4644,7 +4841,10 @@ fn finish_control_transaction<T>(conn: &Connection, result: Result<T>) -> Result
     match result {
         Ok(value) => {
             let started = Instant::now();
-            conn.execute_batch("COMMIT").map_err(sqlite)?;
+            if let Err(error) = conn.execute_batch("COMMIT") {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(sqlite(error));
+            }
             TRANSACTION_COUNT.fetch_add(1, Ordering::Relaxed);
             TRANSACTION_COMMIT_NS.fetch_add(
                 u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
@@ -5937,6 +6137,24 @@ fn sqlite(e: rusqlite::Error) -> Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn failed_commit_rolls_back_and_allows_the_next_transaction() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON; CREATE TABLE parent(id INTEGER PRIMARY KEY); CREATE TABLE child(parent_id INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED); BEGIN; INSERT INTO child VALUES(1);").unwrap();
+        assert!(super::finish_control_transaction(&conn, Ok(())).is_err());
+        assert!(
+            conn.is_autocommit(),
+            "a failed commit must release the transaction"
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM child", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        conn.execute_batch("BEGIN; INSERT INTO parent VALUES(1); INSERT INTO child VALUES(1);")
+            .unwrap();
+        super::finish_control_transaction(&conn, Ok(())).unwrap();
+    }
     use super::*;
     use std::sync::Arc;
 
@@ -8193,5 +8411,86 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("process_restarted"));
+    }
+    #[test]
+    fn complete_backup_restore_rolls_back_invalid_nested_payloads_and_sql_failures() {
+        let store = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        let snapshot = r#"{"state":{"sessions":[{"id":"original","messages":[{"id":"m1","content":"keep"}]}]},"version":0}"#;
+        store.set_sessions_snapshot(snapshot).unwrap();
+        store
+            .set_json("milim.settings", r#"{"value":"original"}"#)
+            .unwrap();
+        store.control_thread("original").unwrap();
+        let before = store.get_sessions_snapshot().unwrap();
+        let control_before = store.control_backup_state().unwrap();
+        let replacement =
+            r#"{"state":{"sessions":[{"id":"replacement","messages":[]}]},"version":0}"#;
+        let mut control = ControlBackupState {
+            schema_version: 99,
+            ..Default::default()
+        };
+        let entries =
+            BTreeMap::from([("milim.settings".into(), r#"{"value":"replacement"}"#.into())]);
+        let keys = vec!["milim.settings".into()];
+        assert!(store
+            .replace_complete_backup_state(&keys, entries.clone(), replacement, Some(&control))
+            .is_err());
+        control.schema_version = 3;
+        control.threads.push(ControlThreadRecord {
+            id: "replacement".into(),
+            session_json: "{}".into(),
+            revision: u64::MAX,
+            epoch: "epoch".into(),
+            updated_at_ms: 0,
+        });
+        // The integer failure occurs after the settings/session replacement starts.
+        assert!(store
+            .replace_complete_backup_state(&keys, entries.clone(), replacement, Some(&control))
+            .is_err());
+        assert_eq!(store.get_sessions_snapshot().unwrap(), before);
+        assert_eq!(store.control_backup_state().unwrap(), control_before);
+        assert_eq!(
+            store.get_json("milim.settings").unwrap().as_deref(),
+            Some(r#"{"value":"original"}"#)
+        );
+        control.threads[0].revision = 1;
+        control.threads[0].session_json = "malformed".into();
+        assert!(
+            UserDataStore::validate_backup_state(&entries, replacement, Some(&control)).is_err()
+        );
+        control.threads[0].session_json = "{}".into();
+        store
+            .replace_complete_backup_state(&keys, entries, replacement, Some(&control))
+            .unwrap();
+        assert_eq!(
+            store.session_snapshot("replacement").unwrap()["messages"],
+            serde_json::json!([])
+        );
+        assert!(store.session_snapshot("original").is_err());
+    }
+
+    #[test]
+    fn initial_thread_messages_and_full_snapshot_are_atomic_and_unbounded_by_page_size() {
+        let store = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        let messages = (0..550).map(|index| serde_json::json!({"id":format!("m-{index}"),"content":format!("message {index}"),"role":"user"})).collect::<Vec<_>>();
+        let session = serde_json::json!({"id":"fork","title":"Fork","messages":messages});
+        let thread = store
+            .control_create_thread("fork", &session.to_string(), "epoch")
+            .unwrap();
+        assert!(parse_json(&thread.session_json)
+            .unwrap()
+            .get("messages")
+            .is_none());
+        assert_eq!(store.session_snapshot("fork").unwrap(), session);
+        assert_eq!(store.control_projected_messages("fork").unwrap().len(), 550);
+        let event = store
+            .control_append_timeline("fork", "next", None, "runtime_notice", "{}")
+            .unwrap();
+        assert_eq!(event.seq, 551);
+        assert!(store
+            .control_create_thread("invalid", r#"{"id":"invalid","messages":[null]}"#, "epoch")
+            .is_err());
+        assert!(store.control_thread("invalid").unwrap().is_none());
+        assert!(store.control_messages("invalid").unwrap().is_empty());
     }
 }

@@ -125,6 +125,7 @@ fn generated_contract() -> String {
         ControlAttachmentV1,
         GenerationSettingsV1,
         FrozenRunConfigV1,
+        RunLimitsV1,
         RunCapabilitiesV1,
         RunSnapshotV1,
         PendingApprovalV1,
