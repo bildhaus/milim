@@ -2885,7 +2885,10 @@ public static class MilimWryWebviewProbe {
 Add-Type -TypeDefinition $source
 [MilimWryWebviewProbe]::Find(${pid})
 `;
-  const result = spawnSync("powershell", ["-NoProfile", "-Command", script], { encoding: "utf8", timeout: 5_000 });
+  // Cold PowerShell/Add-Type startup on hosted Windows runners can exceed five
+  // seconds before the probe runs. Keep startup bounded without weakening the
+  // separate visibility and process-liveness assertions.
+  const result = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", timeout: 30_000, windowsHide: true });
   if (result.error) throw result.error;
   if (result.status !== 0) {
     throw new Error(`Native webview probe failed (${result.status}): ${result.stderr || result.stdout}`);
