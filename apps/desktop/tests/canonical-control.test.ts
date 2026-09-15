@@ -13,6 +13,7 @@ import {
   projectControlRunMessages,
   shouldReconcileControlRunProjection,
   shouldQueueCanonicalFollowup,
+  streamPlaceholderMessageId,
 } from "../src/lib/canonicalControl.js";
 import type { ControlPendingInputV1, ControlQueuedTurnV1, ControlTimelineItemV1 } from "../src/api.js";
 
@@ -349,6 +350,24 @@ assert.deepEqual(
   afterAssistantDeletion.map((message) => message.id),
   ["user-kept"],
   "deleting a completed assistant message must not resurrect its streamed placeholder",
+);
+
+const afterPlaceholderDeletion = projectControlRunMessages(
+  [
+    item(1, "message", { id: "user-kept", role: "user", content: "keep me" }),
+    item(2, "assistant_delta", { text: "partial", reasoning: "" }),
+    item(3, "run_status", { run_id: "run-1", status: "failed", error: { message: "boom" } }),
+    {
+      ...item(4, "message_deleted", { message_id: streamPlaceholderMessageId("run-1") }),
+      run_id: null,
+    },
+  ],
+  "run-1",
+);
+assert.deepEqual(
+  afterPlaceholderDeletion.map((message) => message.id),
+  ["user-kept"],
+  "a failed run's stream placeholder must stay gone once its tombstone is recorded",
 );
 
 const completedWithOrderedWork = projectControlRunMessages(

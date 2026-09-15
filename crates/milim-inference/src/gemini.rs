@@ -536,16 +536,109 @@ fn gemini_tools(tools: &[Tool]) -> Vec<Value> {
                     Value::String(description.clone()),
                 );
             }
-            tool.insert(
-                "parameters".to_string(),
-                t.function
-                    .parameters
-                    .clone()
-                    .unwrap_or_else(|| json!({"type":"object"})),
-            );
+            let mut parameters = t
+                .function
+                .parameters
+                .clone()
+                .unwrap_or_else(|| json!({"type":"object"}));
+            sanitize_gemini_schema(&mut parameters);
+            tool.insert("parameters".to_string(), parameters);
             Value::Object(tool)
         })
         .collect()
+}
+
+/// Gemini's `parameters` is a strict OpenAPI 3.0 `Schema` proto, not full JSON
+/// Schema: unknown keywords are a 400 and `type` must be a single value.
+/// Strip what the proto cannot represent and fold nullable type unions into
+/// `nullable: true`.
+fn sanitize_gemini_schema(schema: &mut Value) {
+    const UNSUPPORTED: &[&str] = &[
+        "$schema",
+        "$id",
+        "$comment",
+        "additionalProperties",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "multipleOf",
+        "const",
+        "examples",
+        "default",
+        "patternProperties",
+        "prefixItems",
+        "unevaluatedProperties",
+        "dependencies",
+        "dependentRequired",
+        "dependentSchemas",
+        "contentMediaType",
+        "contentEncoding",
+        "definitions",
+        "$defs",
+        "$ref",
+        "not",
+        "if",
+        "then",
+        "else",
+        "allOf",
+        "oneOf",
+        "readOnly",
+        "writeOnly",
+        "deprecated",
+    ];
+
+    match schema {
+        Value::Object(map) => {
+            for key in UNSUPPORTED {
+                map.remove(*key);
+            }
+            if let Some(Value::Array(types)) = map.get("type") {
+                let mut non_null: Vec<Value> = types
+                    .iter()
+                    .filter(|t| t.as_str() != Some("null"))
+                    .cloned()
+                    .collect();
+                let nullable = non_null.len() != types.len();
+                let ty = if non_null.is_empty() {
+                    Value::String("string".to_string())
+                } else {
+                    non_null.remove(0)
+                };
+                map.insert("type".to_string(), ty);
+                if nullable {
+                    map.insert("nullable".to_string(), Value::Bool(true));
+                }
+            }
+            if let Some(Value::Object(props)) = map.get_mut("properties") {
+                for prop in props.values_mut() {
+                    sanitize_gemini_schema(prop);
+                }
+            }
+            if let Some(items) = map.get_mut("items") {
+                match items {
+                    // JSON Schema allows tuple-style `items: [..]`; the proto wants one schema.
+                    Value::Array(list) => {
+                        let mut first = list.first().cloned().unwrap_or_else(|| json!({}));
+                        sanitize_gemini_schema(&mut first);
+                        *items = first;
+                    }
+                    other => sanitize_gemini_schema(other),
+                }
+            }
+            if let Some(Value::Array(variants)) = map.get_mut("anyOf") {
+                for variant in variants.iter_mut() {
+                    sanitize_gemini_schema(variant);
+                }
+            }
+            // A property that carried only unsupported keywords (or came from
+            // `additionalProperties: true`) needs a type to be a valid proto.
+            if !map.contains_key("type") && !map.contains_key("anyOf") {
+                map.insert("type".to_string(), Value::String("object".to_string()));
+            }
+        }
+        // `true`/`false` schemas appear in generated tool definitions.
+        Value::Bool(_) => *schema = json!({"type": "object"}),
+        _ => {}
+    }
 }
 
 fn gemini_tool_config(choice: Option<&Value>) -> Option<Value> {
@@ -633,5 +726,73 @@ mod image_tests {
             value["file_data"]["file_uri"],
             "https://generativelanguage.googleapis.com/v1beta/files/abc123"
         );
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    #[test]
+    fn strips_keywords_gemini_rejects_and_folds_null_types() {
+        // Mirrors the shapes from a real upstream 400: additionalProperties at
+        // every level, exclusiveMinimum, and `type: [.., "null"]` unions.
+        let mut schema = json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "count": { "type": "integer", "exclusiveMinimum": 0 },
+                "name": { "type": ["string", "null"] },
+                "tags": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": { "id": { "type": ["null", "string"] } }
+                    }
+                },
+                "extra": { "type": "object", "additionalProperties": true },
+                "anything": true,
+                "choice": { "anyOf": [
+                    { "type": "string", "const": "a" },
+                    { "type": "number", "exclusiveMaximum": 5 }
+                ]}
+            }
+        });
+        sanitize_gemini_schema(&mut schema);
+
+        assert!(schema.get("$schema").is_none());
+        assert!(schema.get("additionalProperties").is_none());
+        let props = &schema["properties"];
+        assert_eq!(props["count"], json!({"type": "integer"}));
+        assert_eq!(props["name"], json!({"type": "string", "nullable": true}));
+        let items = &props["tags"]["items"];
+        assert!(items.get("additionalProperties").is_none());
+        assert_eq!(
+            items["properties"]["id"],
+            json!({"type": "string", "nullable": true})
+        );
+        assert_eq!(props["extra"], json!({"type": "object"}));
+        assert_eq!(props["anything"], json!({"type": "object"}));
+        assert_eq!(
+            props["choice"]["anyOf"],
+            json!([{"type": "string"}, {"type": "number"}])
+        );
+    }
+
+    #[test]
+    fn gemini_tools_use_sanitized_parameters() {
+        use milim_core::api::openai::ToolFunction;
+        let tool = Tool {
+            kind: "function".to_string(),
+            function: ToolFunction {
+                name: "t".to_string(),
+                description: None,
+                parameters: Some(json!({"type": "object", "additionalProperties": false})),
+            },
+        };
+        let out = gemini_tools(&[tool]);
+        assert_eq!(out[0]["parameters"], json!({"type": "object"}));
     }
 }

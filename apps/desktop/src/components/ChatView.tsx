@@ -6768,6 +6768,11 @@ export function ChatView({
         throw new Error(command.message || `Control command ${command.status}.`);
       }
       accepted = true;
+      if (options.canonicalAction === "regenerate") {
+        // The server has retired the previous reply (persisted or a failed
+        // run's placeholder); drop it locally so the new run replaces it.
+        setMessages(sessionId, convo, { autoTitle: false });
+      }
       const runId = command.run_id;
       activeRunId = runId;
       canonicalRunIdsRef.current.set(sessionId, runId);
