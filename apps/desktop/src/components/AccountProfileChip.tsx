@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   AUTO_ACCOUNT_PROFILE_ID,
   DEFAULT_ACCOUNT_PROFILE_ID,
@@ -7,7 +8,11 @@ import {
 } from "../api";
 import { accountProfileRuntimeForModel } from "../lib/accountProfiles";
 import { formatCooldown, peakUsagePercent } from "./AccountProfiles";
-import { Check, ChevronDown, UserRound } from "./icons";
+import { Check, ChevronDown } from "./icons";
+import { ProviderIcon } from "./ProviderIcon";
+
+/** Kept in sync with `.account-profile-menu` width in chat.css. */
+const MENU_WIDTH = 300;
 
 function optionDetail(profile: AccountProfile, now: number): string {
   const cooldown = formatCooldown(profile.cooled_until_ms, now);
@@ -36,7 +41,10 @@ export function AccountProfileChip({
   const [autoSelection, setAutoSelection] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  const [position, setPosition] = useState<{ left: number; top: number }>();
   const wrapRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!runtime) {
@@ -61,11 +69,20 @@ export function AccountProfileChip({
     setNow(Date.now());
     const closeOnOutside = (event: MouseEvent) => {
       const target = event.target;
-      if (target instanceof Node && wrapRef.current?.contains(target)) return;
+      if (!(target instanceof Node)) return;
+      // The menu is portalled out of the chip, so it is not a DOM descendant.
+      if (wrapRef.current?.contains(target) || menuRef.current?.contains(target)) return;
       setOpen(false);
     };
+    const close = () => setOpen(false);
     document.addEventListener("mousedown", closeOnOutside);
-    return () => document.removeEventListener("mousedown", closeOnOutside);
+    window.addEventListener("resize", close);
+    window.addEventListener("scroll", close, true);
+    return () => {
+      document.removeEventListener("mousedown", closeOnOutside);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("scroll", close, true);
+    };
   }, [open]);
 
   const current = useMemo(() => {
@@ -88,13 +105,33 @@ export function AccountProfileChip({
     onSelect(profileId);
   }
 
+  /// The chip sits inside clipped, lower-stacked composer chrome, so the menu
+  /// is portalled to the body and positioned against the trigger instead.
+  function toggleMenu() {
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    const rect = triggerRef.current?.getBoundingClientRect();
+    if (rect) {
+      const width = MENU_WIDTH;
+      const estimatedHeight = 108 + profiles.length * 44;
+      const left = Math.max(8, Math.min(window.innerWidth - width - 8, rect.right - width));
+      const top =
+        rect.top - estimatedHeight - 6 >= 8 ? rect.top - estimatedHeight - 6 : rect.bottom + 6;
+      setPosition({ left, top });
+    }
+    setOpen(true);
+  }
+
   return (
     <div className="chip-wrap" ref={wrapRef}>
       <button
+        ref={triggerRef}
         type="button"
         className={"chip" + (current && formatCooldown(current.cooled_until_ms, now) ? " chip-warn" : "")}
         data-testid="account-profile-chip"
-        onClick={() => setOpen((value) => !value)}
+        onClick={toggleMenu}
         title={
           isAuto
             ? `Auto picks the ${runtime} account with the most room left${autoProfile ? `; currently ${autoProfile.label}` : ""}`
@@ -104,13 +141,20 @@ export function AccountProfileChip({
         aria-haspopup="menu"
         aria-expanded={open}
       >
-        <UserRound size={13} />
+        <ProviderIcon brand={runtime} size={13} />
         <span className="chip-label">{label}</span>
         {detail && <span className="chip-detail">{detail}</span>}
         <ChevronDown size={12} className="chip-chev" />
       </button>
-      {open && (
-        <div className="context-menu account-profile-menu" role="menu">
+      {open && createPortal(
+        <div
+          ref={menuRef}
+          className="context-menu account-profile-menu message-popover-layer"
+          role="menu"
+          aria-label={`Account for this chat`}
+          data-native-preview-blocker="true"
+          style={position}
+        >
           <button
             className={"context-row" + (isAuto ? " context-on" : "")}
             type="button"
@@ -155,7 +199,8 @@ export function AccountProfileChip({
             Milim replays the conversation so far; the other account keeps its
             own session.
           </p>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
