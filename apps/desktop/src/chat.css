@@ -4348,6 +4348,15 @@ body.thread-link-target-active [data-thread-link-drop-target]::after {
 .chip-warn { border-color: color-mix(in srgb, var(--error) 45%, transparent); }
 .chip-warn .chip-label { color: var(--error); }
 
+/* Portalled to <body> to escape the composer's clipping and stacking context,
+   so it is positioned against the trigger rather than its (absent) parent. */
+.account-profile-menu {
+  position: fixed;
+  right: auto;
+  bottom: auto;
+  width: 300px;
+  max-width: calc(100vw - 16px);
+}
 .account-profile-menu .context-text {
   min-width: 0;
   display: grid;

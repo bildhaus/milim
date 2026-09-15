@@ -91,6 +91,10 @@
   grid-template-columns: minmax(132px, 0.55fr) minmax(0, 1.85fr);
   align-items: center;
   gap: 28px;
+  /* The card is a fixed-height box and this is its `minmax(0, 1fr)` row. A
+     centred item is sized by its content, so without this a long card grew
+     past the row and painted over the footer instead of scrolling. */
+  min-height: 0;
 }
 
 .update-card-visual {
@@ -229,6 +233,13 @@
 
 .update-card-copy {
   min-width: 0;
+  /* Bound the text column to the row and let it scroll, so an over-long card
+     stays inside the card instead of colliding with the footer. The visual
+     column keeps its own centred placement. */
+  min-height: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .update-card-eyebrow {

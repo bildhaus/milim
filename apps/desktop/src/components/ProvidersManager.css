@@ -57,6 +57,12 @@
 }
 
 .providers-body {
+  /* Direct child of the fixed-height, overflow-hidden `.sheet` column. Without
+     both of these the default `min-height: auto` keeps this item from
+     shrinking, so it grows past the sheet, gets clipped, and the rail and
+     detail scroll containers below never receive a bounded height. */
+  flex: 1;
+  min-height: 0;
   display: grid;
   grid-template-columns: 264px minmax(0, 1fr);
   gap: 18px;

@@ -2766,6 +2766,14 @@
   align-content: center;
   align-items: center;
   gap: 28px;
+  /* Fill the bounded content box exactly rather than growing with the right
+     column, so the hero on the left stays centred while only the right column
+     scrolls. Both columns need `min-height: 0` to be allowed to shrink. */
+  height: 100%;
+  min-height: 0;
+}
+.onboarding-overlay .onboarding-split-panel > * {
+  min-height: 0;
 }
 .onboarding-overlay .onboarding-model-panel {
   align-content: center;
@@ -2833,7 +2841,10 @@
 }
 .onboarding-overlay .onboarding-model-panel .onboarding-step-body {
   align-content: start;
-  overflow: visible;
+  min-height: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding-right: 6px;
 }
 .onboarding-overlay .onboarding-panel-head {
@@ -3105,6 +3116,12 @@
     grid-template-columns: 1fr;
     align-content: start;
     gap: 0;
+    /* One column with the hero hidden: the panel scrolls as a whole again. */
+    height: auto;
+  }
+  .onboarding-overlay .onboarding-model-panel .onboarding-step-body {
+    max-height: none;
+    overflow: visible;
   }
   .onboarding-overlay .onboarding-story {
     display: none;
