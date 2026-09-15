@@ -132,7 +132,7 @@ if (!packageJson.scripts?.tauri?.includes("--env-file-if-exists=../../.env.local
   throw new Error("Tauri commands must load the ignored repo-root .env.local when present");
 }
 
-if (!packageJson.scripts?.["tauri:dev"]?.includes("--additional-watch-folders ../../crates")) {
+if (!packageJson.scripts?.["tauri:dev"]?.includes("--additional-watch-folders ../../../crates")) {
   throw new Error("Tauri dev must rebuild when workspace Rust crates change");
 }
 

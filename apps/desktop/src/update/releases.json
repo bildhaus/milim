@@ -1,4 +1,9 @@
 {
+  "0.2.66": {
+    "version": "0.2.66",
+    "summary": "Milim 0.2.66 makes Gemini models usable with tools again and lets you retry or delete a failed reply cleanly.",
+    "items": []
+  },
   "0.2.65": {
     "version": "0.2.65",
     "summary": "Milim 0.2.65 preserves complete chat history and drafts, strengthens backups and privacy, improves mobile recovery, and adds optional limits for provider runs.",
