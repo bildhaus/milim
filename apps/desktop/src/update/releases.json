@@ -1,4 +1,38 @@
 {
+  "0.2.68": {
+    "version": "0.2.68",
+    "summary": "Milim 0.2.68 fixes panel scrolling and cropping so connecting several Codex or Claude accounts works end to end.",
+    "items": [
+      {
+        "id": "multiple-account-runtime-logins",
+        "eyebrow": "Accounts and providers",
+        "title": "Connect more than one account",
+        "description": "Keep several signed-in Codex or Claude accounts available at once.",
+        "details": [
+          "Add a second Codex or Claude account in Providers",
+          "Each account keeps its own folder, settings, and history",
+          "Milim points the CLI at the folder, never at a credential",
+          "See each account’s usage and any rate-limit cooldown"
+        ],
+        "accent": "var(--accent)",
+        "icon": "plug"
+      },
+      {
+        "id": "per-chat-account-selection",
+        "eyebrow": "Chat routing",
+        "title": "Pick an account per chat",
+        "description": "Pin an account to a chat, or let Auto choose before every turn.",
+        "details": [
+          "Choose an account from the chat’s account chip",
+          "Auto prefers whichever account has the most room left",
+          "Auto skips an account that is currently rate limited",
+          "Switching accounts replays the conversation so far"
+        ],
+        "accent": "var(--accent)",
+        "icon": "file-text"
+      }
+    ]
+  },
   "0.2.67": {
     "version": "0.2.67",
     "summary": "Milim 0.2.67 lets you connect more than one Codex or Claude account and moves each chat to whichever one has room left.",
