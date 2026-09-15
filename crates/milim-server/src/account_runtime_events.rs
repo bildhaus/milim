@@ -44,6 +44,14 @@ impl HarnessEvent {
         Self { kind, fields }
     }
 
+    pub(crate) fn kind(&self) -> HarnessEventKind {
+        self.kind
+    }
+
+    pub(crate) fn field(&self, key: &str) -> Option<&Value> {
+        self.fields.get(key)
+    }
+
     pub(crate) fn is_terminal(&self) -> bool {
         matches!(
             self.kind,

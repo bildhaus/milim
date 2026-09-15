@@ -170,6 +170,10 @@ mod legacy_control_contract {
         #[serde(default)]
         pub generation: GenerationSettingsV1,
         pub adapter: String,
+        #[serde(default = "default_account_profile_id")]
+        pub account_profile_id: String,
+        #[serde(default)]
+        pub account_profile_label: String,
     }
 
     #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -1906,6 +1910,33 @@ impl RunManager {
         Ok(guard)
     }
 
+    /// Which account of `adapter` a thread is set to use, resolved through
+    /// Auto. Managed Workers read it so a delegated run bills the same
+    /// subscription as the parent turn that asked for it.
+    pub fn thread_account_profile(&self, thread_id: &str, adapter: &str) -> String {
+        let selected = self
+            .store
+            .control_thread(thread_id)
+            .ok()
+            .flatten()
+            .and_then(|thread| serde_json::from_str::<Value>(&thread.session_json).ok())
+            .and_then(|value| {
+                value
+                    .get("settings")?
+                    .get("accountProfiles")?
+                    .get(adapter)?
+                    .as_str()
+                    .map(str::to_string)
+            });
+        crate::account_profiles::resolve(Some(&self.store), adapter, selected.as_deref()).id
+    }
+
+    /// Canonical user-data store. Surfaces that persist their own settings
+    /// beside canonical thread state (account profiles) read it through here.
+    pub fn store(&self) -> &Arc<UserDataStore> {
+        &self.store
+    }
+
     pub fn begin_restore(&self) -> Result<RestoreGuard> {
         let mut guard = self
             .restore_admission
@@ -2687,6 +2718,9 @@ impl RunManager {
             ControlCommandKindV1::ThreadSetExecutionSettings => {
                 self.patch_thread(&command, ThreadPatch::Execution)
             }
+            ControlCommandKindV1::ThreadSetAccountProfile => {
+                self.patch_thread(&command, ThreadPatch::AccountProfile)
+            }
             ControlCommandKindV1::ThreadLinkAdd => self.link_thread(&command, true),
             ControlCommandKindV1::ThreadLinkRemove => self.link_thread(&command, false),
             ControlCommandKindV1::MessageDelete => self.delete_message(&command),
@@ -3048,6 +3082,59 @@ impl RunManager {
                     ));
                 }
                 settings_object(object)?.insert("activeAgentId".into(), agent);
+            }
+            // Which signed-in account of one runtime this thread uses. The
+            // value is stored, not resolved: `auto` stays `auto` so each turn
+            // re-picks with current usage, and an id names one account.
+            ThreadPatch::AccountProfile => {
+                let payload = command.payload.as_object().ok_or_else(|| {
+                    Error::InvalidRequest("account profile payload must be an object".into())
+                })?;
+                let runtime = payload
+                    .get("runtime")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| Error::InvalidRequest("runtime is required".into()))?;
+                if !crate::account_profiles::PROFILE_RUNTIMES.contains(&runtime) {
+                    return Err(Error::InvalidRequest(format!(
+                        "{runtime} does not support account profiles"
+                    )));
+                }
+                let profile = match payload.get("profile_id") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(value)) => {
+                        let value = value.trim();
+                        if value.is_empty() {
+                            return Err(Error::InvalidRequest(
+                                "profile_id must not be empty".into(),
+                            ));
+                        }
+                        Some(value.to_string())
+                    }
+                    Some(_) => {
+                        return Err(Error::InvalidRequest(
+                            "profile_id must be a string or null".into(),
+                        ))
+                    }
+                };
+                let settings = settings_object(object)?;
+                let profiles = settings
+                    .entry("accountProfiles")
+                    .or_insert_with(|| Value::Object(Map::new()))
+                    .as_object_mut()
+                    .ok_or_else(|| {
+                        Error::InvalidRequest("accountProfiles must be an object".into())
+                    })?;
+                match profile {
+                    // Clearing returns the thread to the runtime's own account.
+                    None => {
+                        profiles.remove(runtime);
+                    }
+                    Some(profile) => {
+                        profiles.insert(runtime.to_string(), Value::String(profile));
+                    }
+                }
             }
             ThreadPatch::Execution => {
                 const ALLOWED: &[&str] = &[
@@ -4608,6 +4695,7 @@ impl RunManager {
             interactive_tool_approval: accepted.config.approval_mode == "review",
             plan_mode: accepted.config.plan_mode,
             allow_session_recovery: false,
+            account_profile_id: Some(accepted.config.account_profile_id.clone()),
             milim_context: Some(json!({
                 "tool_context": {
                     "parent_model": format!("{}:{}", accepted.config.adapter, accepted.config.model),
@@ -4650,6 +4738,7 @@ impl RunManager {
             "reasoning_effort": request.reasoning_effort,
             "native_session_id": request.native_session_id,
             "persist_session": request.persist_session,
+            "account_profile_id": accepted.config.account_profile_id,
             "environment_policy": "AccountRuntimeInherited",
             "images": request.images.iter().map(|image| json!({
                 "media_type": image.media_type,
@@ -4751,6 +4840,7 @@ impl RunManager {
                     bound_session_id = self.clear_native_session_binding(
                         thread_id,
                         &accepted.config.adapter,
+                        &accepted.config.account_profile_id,
                         expected,
                     )?;
                 }
@@ -4767,6 +4857,7 @@ impl RunManager {
                             thread_id,
                             run_id,
                             &accepted.config.adapter,
+                            &accepted.config.account_profile_id,
                             bound_session_id.as_deref(),
                             native_session_id,
                         )?;
@@ -4895,6 +4986,7 @@ impl RunManager {
                         self.persist_native_session_cursor(
                             thread_id,
                             &accepted.config.adapter,
+                            &accepted.config.account_profile_id,
                             native_session_id,
                             &assistant_message_id,
                         )?;
@@ -5677,11 +5769,11 @@ impl RunManager {
         Ok(record)
     }
 
-    fn preallocate_claude_session(&self, thread_id: &str) -> Result<String> {
+    fn preallocate_claude_session(&self, thread_id: &str, profile_id: &str) -> Result<String> {
         let session_id = Uuid::new_v4().to_string();
         if let Some(updated) = self.store.control_compare_and_set_runtime_session(
             thread_id,
-            runtime_session_field("claude")?,
+            &runtime_session_field("claude", profile_id)?,
             None,
             Some(&session_id),
             None,
@@ -5689,7 +5781,7 @@ impl RunManager {
             self.emit_thread_changed(&updated, "thread.updated");
             return Ok(session_id);
         }
-        current_runtime_session(&self.store, thread_id, "claude")?.ok_or_else(|| {
+        current_runtime_session(&self.store, thread_id, "claude", profile_id)?.ok_or_else(|| {
             Error::Other("Claude session binding changed but is no longer available".into())
         })
     }
@@ -5699,15 +5791,17 @@ impl RunManager {
         thread_id: &str,
         config: &mut FrozenRunConfigV1,
     ) -> Result<()> {
-        if runtime_session_field(&config.adapter).is_err() {
+        if runtime_session_field_base(&config.adapter).is_err() {
             return Ok(());
         }
+        let profile_id = config.account_profile_id.clone();
         config.native_session_id =
-            current_runtime_session(&self.store, thread_id, &config.adapter)?;
+            current_runtime_session(&self.store, thread_id, &config.adapter, &profile_id)?;
         config.native_session_cursor =
-            current_runtime_cursor(&self.store, thread_id, &config.adapter)?;
+            current_runtime_cursor(&self.store, thread_id, &config.adapter, &profile_id)?;
         if config.adapter == "claude" && config.native_session_id.is_none() {
-            config.native_session_id = Some(self.preallocate_claude_session(thread_id)?);
+            config.native_session_id =
+                Some(self.preallocate_claude_session(thread_id, &profile_id)?);
             config.native_session_cursor = Some(NATIVE_SESSION_FULL_TRANSCRIPT_CURSOR.into());
         }
         Ok(())
@@ -5718,6 +5812,7 @@ impl RunManager {
         thread_id: &str,
         run_id: &str,
         adapter: &str,
+        profile_id: &str,
         expected_session_id: Option<&str>,
         native_session_id: &str,
     ) -> Result<Option<String>> {
@@ -5735,7 +5830,7 @@ impl RunManager {
         }
         if let Some(updated) = self.store.control_compare_and_set_runtime_session(
             thread_id,
-            runtime_session_field(adapter)?,
+            &runtime_session_field(adapter, profile_id)?,
             expected_session_id,
             Some(native_session_id),
             None,
@@ -5743,18 +5838,19 @@ impl RunManager {
             self.emit_thread_changed(&updated, "thread.updated");
             return Ok(Some(native_session_id.to_string()));
         }
-        current_runtime_session(&self.store, thread_id, adapter)
+        current_runtime_session(&self.store, thread_id, adapter, profile_id)
     }
 
     fn clear_native_session_binding(
         &self,
         thread_id: &str,
         adapter: &str,
+        profile_id: &str,
         expected_session_id: &str,
     ) -> Result<Option<String>> {
         if let Some(updated) = self.store.control_compare_and_set_runtime_session(
             thread_id,
-            runtime_session_field(adapter)?,
+            &runtime_session_field(adapter, profile_id)?,
             Some(expected_session_id),
             None,
             None,
@@ -5762,19 +5858,20 @@ impl RunManager {
             self.emit_thread_changed(&updated, "thread.updated");
             return Ok(None);
         }
-        current_runtime_session(&self.store, thread_id, adapter)
+        current_runtime_session(&self.store, thread_id, adapter, profile_id)
     }
 
     fn persist_native_session_cursor(
         &self,
         thread_id: &str,
         adapter: &str,
+        profile_id: &str,
         native_session_id: &str,
         message_id: &str,
     ) -> Result<()> {
         if let Some(updated) = self.store.control_compare_and_set_runtime_session(
             thread_id,
-            runtime_session_field(adapter)?,
+            &runtime_session_field(adapter, profile_id)?,
             Some(native_session_id),
             Some(native_session_id),
             Some(message_id),
@@ -6029,6 +6126,7 @@ enum ThreadPatch {
     Model,
     Agent,
     Execution,
+    AccountProfile,
 }
 
 enum RunOutcome {
@@ -6136,27 +6234,26 @@ fn resolve_frozen_config(
         });
     let adapter = runtime_adapter(&selected_model).to_string();
     let model = runtime_model(&selected_model).to_string();
+    // The account this turn runs as. `auto` is resolved here, at acceptance,
+    // so the run is frozen against one account even if another finishes a
+    // cooldown while the turn is in flight.
+    let selected_profile = settings
+        .and_then(|settings| settings.get("accountProfiles"))
+        .and_then(Value::as_object)
+        .and_then(|profiles| profiles.get(&adapter))
+        .and_then(Value::as_str);
+    let account_profile = crate::account_profiles::resolve(Some(store), &adapter, selected_profile);
     let account_runtime = value.get("accountRuntime").and_then(Value::as_object);
-    let native_session_id = account_runtime
-        .and_then(|runtime| match adapter.as_str() {
-            "codex" => runtime.get("codexThreadId"),
-            "claude" => runtime.get("claudeSessionId"),
-            "opencode" => runtime.get("opencodeSessionId"),
-            "pi" => runtime.get("piSessionId"),
-            _ => None,
-        })
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let native_session_cursor = account_runtime
-        .and_then(|runtime| match adapter.as_str() {
-            "codex" => runtime.get("codexLastSyncedMessageId"),
-            "claude" => runtime.get("claudeLastSyncedMessageId"),
-            "opencode" => runtime.get("opencodeLastSyncedMessageId"),
-            "pi" => runtime.get("piLastSyncedMessageId"),
-            _ => None,
-        })
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    // A native session lives inside one account's configuration home, so only
+    // the binding recorded for this account is resumable. Another account's
+    // binding is left untouched and this turn starts a fresh native session
+    // with the thread's full visible history.
+    let native_session_id = runtime_session_field(&adapter, &account_profile.id)
+        .ok()
+        .and_then(|field| account_runtime?.get(&field)?.as_str().map(str::to_string));
+    let native_session_cursor = runtime_cursor_field(&adapter, &account_profile.id)
+        .ok()
+        .and_then(|field| account_runtime?.get(&field)?.as_str().map(str::to_string));
     let reasoning_effort = settings
         .and_then(|settings| settings.get("reasoningEffortOverrides"))
         .and_then(Value::as_object)
@@ -6214,6 +6311,8 @@ fn resolve_frozen_config(
             None
         },
         adapter,
+        account_profile_id: account_profile.id,
+        account_profile_label: account_profile.label,
         linked_thread_grants: Vec::new(),
         claimed_mailbox_ids: Vec::new(),
     })
@@ -6424,7 +6523,7 @@ fn runtime_adapter(model: &str) -> &str {
     }
 }
 
-fn runtime_session_field(adapter: &str) -> Result<&'static str> {
+fn runtime_session_field_base(adapter: &str) -> Result<&'static str> {
     match adapter {
         "codex" => Ok("codexThreadId"),
         "claude" => Ok("claudeSessionId"),
@@ -6436,7 +6535,7 @@ fn runtime_session_field(adapter: &str) -> Result<&'static str> {
     }
 }
 
-fn runtime_cursor_field(adapter: &str) -> Result<&'static str> {
+fn runtime_cursor_field_base(adapter: &str) -> Result<&'static str> {
     match adapter {
         "codex" => Ok("codexLastSyncedMessageId"),
         "claude" => Ok("claudeLastSyncedMessageId"),
@@ -6448,10 +6547,37 @@ fn runtime_cursor_field(adapter: &str) -> Result<&'static str> {
     }
 }
 
+/// A native session lives inside one account's configuration home, so a thread
+/// holds one binding per account rather than one per runtime. The default
+/// account keeps the unsuffixed field, so threads that predate account
+/// profiles resume exactly as before.
+fn scoped_binding_field(base: &str, profile_id: &str) -> String {
+    if profile_id.is_empty() || profile_id == crate::account_profiles::DEFAULT_PROFILE_ID {
+        base.to_string()
+    } else {
+        format!("{base}:{profile_id}")
+    }
+}
+
+fn runtime_session_field(adapter: &str, profile_id: &str) -> Result<String> {
+    Ok(scoped_binding_field(
+        runtime_session_field_base(adapter)?,
+        profile_id,
+    ))
+}
+
+fn runtime_cursor_field(adapter: &str, profile_id: &str) -> Result<String> {
+    Ok(scoped_binding_field(
+        runtime_cursor_field_base(adapter)?,
+        profile_id,
+    ))
+}
+
 fn current_runtime_session(
     store: &UserDataStore,
     thread_id: &str,
     adapter: &str,
+    profile_id: &str,
 ) -> Result<Option<String>> {
     let Some(thread) = store.control_thread(thread_id)? else {
         return Err(Error::NotFound(format!("thread {thread_id}")));
@@ -6461,7 +6587,7 @@ fn current_runtime_session(
     Ok(value
         .get("accountRuntime")
         .and_then(Value::as_object)
-        .and_then(|runtime| runtime.get(runtime_session_field(adapter).ok()?))
+        .and_then(|runtime| runtime.get(&runtime_session_field(adapter, profile_id).ok()?))
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -6472,6 +6598,7 @@ fn current_runtime_cursor(
     store: &UserDataStore,
     thread_id: &str,
     adapter: &str,
+    profile_id: &str,
 ) -> Result<Option<String>> {
     let Some(thread) = store.control_thread(thread_id)? else {
         return Err(Error::NotFound(format!("thread {thread_id}")));
@@ -6481,7 +6608,7 @@ fn current_runtime_cursor(
     Ok(value
         .get("accountRuntime")
         .and_then(Value::as_object)
-        .and_then(|runtime| runtime.get(runtime_cursor_field(adapter).ok()?))
+        .and_then(|runtime| runtime.get(&runtime_cursor_field(adapter, profile_id).ok()?))
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -7480,14 +7607,16 @@ mod tests {
             let mut stale_terminal_writer = store.control_run(&run_id).unwrap().unwrap();
             assert_eq!(
                 manager
-                    .persist_native_session_binding(&thread_id, &run_id, adapter, None, session_id,)
+                    .persist_native_session_binding(
+                        &thread_id, &run_id, adapter, "default", None, session_id,
+                    )
                     .unwrap()
                     .as_deref(),
                 Some(session_id)
             );
             let cursor = format!("assistant-{adapter}");
             manager
-                .persist_native_session_cursor(&thread_id, adapter, session_id, &cursor)
+                .persist_native_session_cursor(&thread_id, adapter, "default", session_id, &cursor)
                 .unwrap();
             stale_terminal_writer.status = "completed".into();
             stale_terminal_writer.updated_at_ms = 2;
@@ -7546,6 +7675,7 @@ mod tests {
             .persist_native_session_cursor(
                 "thread-claude",
                 "claude",
+                "default",
                 &claude_session,
                 "assistant-claude",
             )
@@ -7572,6 +7702,115 @@ mod tests {
                 Some(expected_cursor)
             );
         }
+    }
+
+    /// A native session lives inside one account's configuration home, so a
+    /// thread that switches accounts must start fresh there instead of
+    /// resuming a session id the new account has never seen.
+    #[test]
+    fn switching_accounts_starts_a_fresh_native_session_and_keeps_the_other_binding() {
+        let (manager, state) = manager_and_state();
+        let store = manager.store.clone();
+        let profile_dir =
+            std::env::temp_dir().join(format!("milim-control-profile-{}", Uuid::new_v4()));
+        crate::account_profiles::create(
+            &store,
+            "claude",
+            "Work",
+            Some(profile_dir.to_string_lossy().as_ref()),
+        )
+        .unwrap();
+
+        let thread = store
+            .control_create_thread(
+                "thread-profiles",
+                &json!({
+                    "id": "thread-profiles",
+                    "settings": { "model": "claude:sonnet" }
+                })
+                .to_string(),
+                "epoch-profiles",
+            )
+            .unwrap();
+
+        // The default account establishes and advances its own binding.
+        let mut default_config = resolve_frozen_config(&state, &store, &thread, vec![]).unwrap();
+        assert_eq!(default_config.account_profile_id, "default");
+        manager
+            .refresh_native_session_for_start("thread-profiles", &mut default_config)
+            .unwrap();
+        let default_session = default_config.native_session_id.clone().unwrap();
+        manager
+            .persist_native_session_cursor(
+                "thread-profiles",
+                "claude",
+                "default",
+                &default_session,
+                "assistant-1",
+            )
+            .unwrap();
+
+        // Pinning the thread to another account must not resume that session.
+        let switched = store
+            .control_create_thread(
+                "thread-profiles-2",
+                &json!({
+                    "id": "thread-profiles-2",
+                    "settings": {
+                        "model": "claude:sonnet",
+                        "accountProfiles": { "claude": "work" }
+                    }
+                })
+                .to_string(),
+                "epoch-profiles-2",
+            )
+            .unwrap();
+        let mut work_config = resolve_frozen_config(&state, &store, &switched, vec![]).unwrap();
+        assert_eq!(work_config.account_profile_id, "work");
+        assert_eq!(work_config.account_profile_label, "Work");
+        assert!(work_config.native_session_id.is_none());
+        assert!(work_config.native_session_cursor.is_none());
+
+        // A fresh binding for the second account leaves the first intact.
+        manager
+            .refresh_native_session_for_start("thread-profiles-2", &mut work_config)
+            .unwrap();
+        let work_session = work_config.native_session_id.clone().unwrap();
+        assert_ne!(work_session, default_session);
+        assert_eq!(
+            work_config.native_session_cursor.as_deref(),
+            Some(NATIVE_SESSION_FULL_TRANSCRIPT_CURSOR),
+            "a new account has none of the thread's history, so it receives all of it"
+        );
+        assert_eq!(
+            current_runtime_session(&store, "thread-profiles", "claude", "default").unwrap(),
+            Some(default_session)
+        );
+        let _ = std::fs::remove_dir_all(&profile_dir);
+    }
+
+    /// A thread pinned to a profile the user later removed keeps working on
+    /// the runtime's own account rather than failing its next turn.
+    #[test]
+    fn a_removed_profile_falls_back_to_the_default_account() {
+        let (manager, state) = manager_and_state();
+        let store = manager.store.clone();
+        let thread = store
+            .control_create_thread(
+                "thread-missing-profile",
+                &json!({
+                    "id": "thread-missing-profile",
+                    "settings": {
+                        "model": "codex:gpt-5.6",
+                        "accountProfiles": { "codex": "deleted" }
+                    }
+                })
+                .to_string(),
+                "epoch-missing-profile",
+            )
+            .unwrap();
+        let config = resolve_frozen_config(&state, &store, &thread, vec![]).unwrap();
+        assert_eq!(config.account_profile_id, "default");
     }
 
     #[test]
@@ -7643,12 +7882,17 @@ mod tests {
 
         assert_eq!(
             manager
-                .clear_native_session_binding("thread-runtime-recovery", "codex", "codex-old",)
+                .clear_native_session_binding(
+                    "thread-runtime-recovery",
+                    "codex",
+                    "default",
+                    "codex-old",
+                )
                 .unwrap(),
             None
         );
         assert_eq!(
-            current_runtime_session(&store, "thread-runtime-recovery", "claude")
+            current_runtime_session(&store, "thread-runtime-recovery", "claude", "default")
                 .unwrap()
                 .as_deref(),
             Some("claude-keep")
@@ -7656,7 +7900,7 @@ mod tests {
         store
             .control_compare_and_set_runtime_session(
                 "thread-runtime-recovery",
-                runtime_session_field("codex").unwrap(),
+                &runtime_session_field("codex", "default").unwrap(),
                 None,
                 Some("codex-new"),
                 None,
@@ -7664,7 +7908,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             manager
-                .clear_native_session_binding("thread-runtime-recovery", "codex", "codex-old",)
+                .clear_native_session_binding(
+                    "thread-runtime-recovery",
+                    "codex",
+                    "default",
+                    "codex-old",
+                )
                 .unwrap()
                 .as_deref(),
             Some("codex-new")

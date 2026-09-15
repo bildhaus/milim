@@ -6,7 +6,10 @@ import { flushDeferredUserStateWrites } from "../persistence/userStateStorage.js
 
 async function syncThreadMutation(
   sessionId: string,
-  kind: "thread.set_agent" | "thread.set_execution_settings",
+  kind:
+    | "thread.set_agent"
+    | "thread.set_execution_settings"
+    | "thread.set_account_profile",
   payload: Record<string, string | boolean | null>,
   label: string,
 ): Promise<void> {
@@ -31,6 +34,23 @@ export function syncCanonicalExecutionSettings(
     "thread.set_execution_settings",
     payload,
     "Execution setting",
+  );
+}
+
+/**
+ * Which signed-in account of one runtime a thread uses. `null` returns the
+ * thread to the runtime's own configuration home; `auto` re-picks per turn.
+ */
+export function syncCanonicalAccountProfile(
+  sessionId: string,
+  runtime: string,
+  profileId: string | null,
+): Promise<void> {
+  return syncThreadMutation(
+    sessionId,
+    "thread.set_account_profile",
+    { runtime, profile_id: profileId },
+    "Account",
   );
 }
 

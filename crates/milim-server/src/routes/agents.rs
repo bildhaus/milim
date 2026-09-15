@@ -2938,6 +2938,7 @@ mod worker_model_tests {
             runtime: milim_agents::WorkerRuntime::Managed,
             access: milim_agents::WorkerAccess::ReadOnly,
             worktree_path: None,
+            account_profile_id: Some("work".to_string()),
         };
         let (adapter, request) = account_worker_harness_request(
             &spec,
@@ -3044,6 +3045,7 @@ fn worker_specs(
                 runtime: run.runtime,
                 access: task.access,
                 worktree_path: None,
+                account_profile_id: None,
             }
         })
         .collect()
@@ -3098,6 +3100,7 @@ fn account_worker_harness_request(
             interactive_tool_approval: false,
             plan_mode: false,
             allow_session_recovery: false,
+            account_profile_id: spec.account_profile_id.clone(),
             milim_context: Some(json!({
                 "tool_context": {
                     "parent_model": spec.model,
@@ -3292,6 +3295,12 @@ pub(crate) async fn start_managed_worker_run(
         .ok_or_else(|| Error::ModelNotFound(format!("worker run {}", run.id)))?;
     let mut workers = Vec::with_capacity(running.tasks.len());
     for mut spec in worker_specs(&running, prompts) {
+        if let Some((adapter, _)) = account_runtime_worker_target(&spec.model) {
+            spec.account_profile_id = state
+                .control
+                .as_ref()
+                .map(|control| control.thread_account_profile(&spec.parent_id, adapter));
+        }
         let worker_tools = if spec.access == milim_agents::WorkerAccess::WriteReview {
             match create_worker_worktree(run_context.workspace.clone()).await {
                 Some(path) => {

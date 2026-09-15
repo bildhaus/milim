@@ -24,7 +24,17 @@ export type ControlAttachmentV1 = { id: string, name: string, mime: string, size
 
 export type GenerationSettingsV1 = { max_tokens: number | null, temperature: number | null, top_p: number | null, seed: number | null, stop: Array<string>, frequency_penalty: number | null, presence_penalty: number | null, top_k: number | null, min_p: number | null, repetition_penalty: number | null, thinking_token_budget: number | null, };
 
-export type FrozenRunConfigV1 = { model: string, global_instructions: string, instructions: string, workspace: string | null, privacy: string, approval_mode: string, plan_mode: boolean, sandbox: boolean, computer_use: boolean, memory: boolean, delegation_policy: string, worker_model: string, agent: AgentSnapshotV1 | null, tool_mode: string, enabled_tools: Array<string>, skill_mode: string, enabled_skills: Array<string>, attachments: Array<ControlAttachmentV1>, native_session_id: string | null, native_session_cursor: string | null, reasoning_effort: string | null, generation: GenerationSettingsV1, run_limits?: RunLimitsV1, adapter: string, linked_thread_grants: Array<FrozenLinkedThreadGrantV1>, claimed_mailbox_ids: Array<string>, };
+export type FrozenRunConfigV1 = { model: string, global_instructions: string, instructions: string, workspace: string | null, privacy: string, approval_mode: string, plan_mode: boolean, sandbox: boolean, computer_use: boolean, memory: boolean, delegation_policy: string, worker_model: string, agent: AgentSnapshotV1 | null, tool_mode: string, enabled_tools: Array<string>, skill_mode: string, enabled_skills: Array<string>, attachments: Array<ControlAttachmentV1>, native_session_id: string | null, native_session_cursor: string | null, reasoning_effort: string | null, generation: GenerationSettingsV1, run_limits?: RunLimitsV1, adapter: string,
+/**
+ * Which signed-in account of `adapter` this turn runs as. `default` is
+ * the runtime's own configuration home; other values name a profile.
+ */
+account_profile_id: string,
+/**
+ * Display name for `account_profile_id`, frozen so a later rename does
+ * not rewrite what an accepted run reported.
+ */
+account_profile_label: string, linked_thread_grants: Array<FrozenLinkedThreadGrantV1>, claimed_mailbox_ids: Array<string>, };
 
 export type RunLimitsV1 = { max_steps: number | null, max_seconds: number | null, max_cost_usd: number | null, };
 
@@ -60,7 +70,7 @@ export type ControlEventV1 = { event_id: string, host_id: string, thread_id?: st
 
 export type ControlCommandStatusV1 = "applied" | "accepted" | "queued" | "needs_confirmation" | "conflict" | "failed";
 
-export type ControlCommandKindV1 = "thread.create" | "thread.rename" | "thread.archive" | "thread.delete" | "thread.set_model" | "thread.set_agent" | "thread.set_execution_settings" | "thread.link.add" | "thread.link.remove" | "message.delete" | "model_favorites.set" | "turn.send" | "turn.steer" | "context.inject" | "turn.inbox_delete" | "turn.stop" | "turn.regenerate" | "turn.queue_resume" | "turn.queue_move" | "turn.queue_delete" | "approval.resolve" | "worker.start" | "worker.continue_solo" | "worker.stop";
+export type ControlCommandKindV1 = "thread.create" | "thread.rename" | "thread.archive" | "thread.delete" | "thread.set_model" | "thread.set_agent" | "thread.set_execution_settings" | "thread.set_account_profile" | "thread.link.add" | "thread.link.remove" | "message.delete" | "model_favorites.set" | "turn.send" | "turn.steer" | "context.inject" | "turn.inbox_delete" | "turn.stop" | "turn.regenerate" | "turn.queue_resume" | "turn.queue_move" | "turn.queue_delete" | "approval.resolve" | "worker.start" | "worker.continue_solo" | "worker.stop";
 
 export type ControlCommandV1 = { command_id: string, kind: ControlCommandKindV1, thread_id?: string, expected_revision?: number, payload: JsonValue, confirmation_token?: string, };
 

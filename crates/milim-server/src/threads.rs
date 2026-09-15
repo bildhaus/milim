@@ -54,6 +54,9 @@ pub struct ChildRunSpec {
     pub runtime: WorkerRuntime,
     pub access: WorkerAccess,
     pub worktree_path: Option<String>,
+    /// Account profile inherited from the parent thread, so a delegated run
+    /// uses the same subscription. `None` keeps the runtime's default account.
+    pub account_profile_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -760,6 +763,7 @@ mod tests {
                     runtime: WorkerRuntime::Managed,
                     access: WorkerAccess::ReadOnly,
                     worktree_path: None,
+                    account_profile_id: None,
                 },
             )
             .unwrap();

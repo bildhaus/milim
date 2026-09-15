@@ -87,12 +87,24 @@ Codex, the installed Claude CLI, OpenCode, and Pi are separate from saved provid
 
 Provider settings checks installed account runtimes for newer versions. You can update an enabled runtime individually or use **Update all** to apply every detected update in sequence; both paths ask you to finish active runtime turns and confirm before changing an installed CLI.
 
+### Several accounts for one runtime
+
+Codex and Claude can hold more than one signed-in account. Each account is a named profile backed by its own configuration folder, which Milim points the CLI at through `CODEX_HOME` or `CLAUDE_CONFIG_DIR`. Milim never reads, copies, or stores a credential to do this; the CLI keeps owning whatever it writes into that folder. OpenCode and Pi do not relocate their configuration this way and keep a single account.
+
+Add accounts under Providers. Milim creates an empty folder and shows the command that signs it in; run it in a terminal, then refresh. Removing an account forgets it in Milim and leaves the folder, and its credentials, on disk.
+
+Chats pick an account with the account chip, which appears once a second account exists. **Auto** re-picks before each turn, preferring the enabled account with the most room left and skipping any that is rate limited; a named account pins the chat to it. The choice is frozen per turn, and managed Workers inherit their parent chat's account.
+
+Switching a chat to another account starts a fresh native session there, because a session lives inside one account's folder. Milim replays the conversation so far, and the previous account keeps its own session untouched.
+
+Codex reports its 5-hour and weekly usage up front, so Auto can prefer the account with the most room before a turn. Claude reports a limit only once a turn reaches one, so its accounts show usage after a capped turn and a rejected turn ends with a notice naming the account Auto will use next.
+
 Each account runtime keeps its native skill catalog. Milim does not copy all enabled skill bodies into every turn: it supplies compact ranked candidates and read-only lazy search/read tools through the authenticated per-turn gateway. Explicitly tagged Milim skills are resolved immediately, while a saved Agent's Custom skill selection acts as an allowlist.
 
 | Runtime | Setup | Session behavior |
 |---|---|---|
-| Codex | Use `/codex/login/device`, `/codex/login/chatgpt-device`, or `/codex/login/api-key`. | Milim stores the returned Codex thread id on the Milim chat when persistence is enabled. |
-| Installed Claude CLI | Install Anthropic's official `claude` CLI separately and run `claude auth login` outside Milim. | Milim stores one Claude session id per Milim chat, uses `--session-id` for new native sessions and `--resume` for existing project transcripts, and can stop only a matching local Claude CLI process if Claude reports the session is already in use. Review and Guarded ask first; Open authorizes recovery immediately. Milim waits for the recorded owner to exit before removing only the matching registry entry and retrying once. |
+| Codex | Use `/codex/login/device`, `/codex/login/chatgpt-device`, or `/codex/login/api-key`. | Milim stores the returned Codex thread id on the Milim chat when persistence is enabled, per signed-in account. |
+| Installed Claude CLI | Install Anthropic's official `claude` CLI separately and run `claude auth login` outside Milim, once per account. | Milim stores one Claude session id per Milim chat and account, uses `--session-id` for new native sessions and `--resume` for existing project transcripts, and can stop only a matching local Claude CLI process if Claude reports the session is already in use. Review and Guarded ask first; Open authorizes recovery immediately. Milim waits for the recorded owner to exit before removing only the matching registry entry and retrying once. |
 | OpenCode | Install and configure OpenCode separately. | Milim stores the native ACP session id and applies its approval overlay; no-folder chats use a private managed ACP directory without native filesystem tools. |
 | Pi | Install Pi separately and authenticate with Pi's `/login`; catalog discovery confirms configuration, while the first turn verifies the current credential. | Milim stores one Pi session id and sync cursor per chat; side calls use `--no-session`. Embedded runs disable discovered extensions, while normal Pi context, prompt, and skill discovery remains active. |
 

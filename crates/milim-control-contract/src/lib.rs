@@ -277,10 +277,22 @@ pub struct FrozenRunConfigV1 {
     #[ts(optional)]
     pub run_limits: Option<RunLimitsV1>,
     pub adapter: String,
+    /// Which signed-in account of `adapter` this turn runs as. `default` is
+    /// the runtime's own configuration home; other values name a profile.
+    #[serde(default = "default_account_profile_id")]
+    pub account_profile_id: String,
+    /// Display name for `account_profile_id`, frozen so a later rename does
+    /// not rewrite what an accepted run reported.
+    #[serde(default)]
+    pub account_profile_label: String,
     #[serde(default)]
     pub linked_thread_grants: Vec<FrozenLinkedThreadGrantV1>,
     #[serde(default)]
     pub claimed_mailbox_ids: Vec<String>,
+}
+
+fn default_account_profile_id() -> String {
+    "default".into()
 }
 
 fn default_control_tool_mode() -> String {
@@ -611,6 +623,9 @@ pub enum ControlCommandKindV1 {
     #[serde(rename = "thread.set_execution_settings")]
     #[ts(rename = "thread.set_execution_settings")]
     ThreadSetExecutionSettings,
+    #[serde(rename = "thread.set_account_profile")]
+    #[ts(rename = "thread.set_account_profile")]
+    ThreadSetAccountProfile,
     #[serde(rename = "thread.link.add")]
     #[ts(rename = "thread.link.add")]
     ThreadLinkAdd,
@@ -674,6 +689,7 @@ impl ControlCommandKindV1 {
             Self::ThreadSetModel => "thread.set_model",
             Self::ThreadSetAgent => "thread.set_agent",
             Self::ThreadSetExecutionSettings => "thread.set_execution_settings",
+            Self::ThreadSetAccountProfile => "thread.set_account_profile",
             Self::ThreadLinkAdd => "thread.link.add",
             Self::ThreadLinkRemove => "thread.link.remove",
             Self::MessageDelete => "message.delete",

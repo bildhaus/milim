@@ -44,6 +44,7 @@ import { useSettings } from "../settings/store";
 import { Check, ChevronDown, Folder, Plus, Refresh, Search, X } from "./icons";
 import { ProviderIcon, providerBrandForProvider, type ProviderBrand } from "./ProviderIcon";
 import { SheetDialog } from "./SheetDialog";
+import { AccountProfilesPanel } from "./AccountProfiles";
 import { Select, Toggle } from "./ui";
 import "./ProvidersManager.css";
 
@@ -1088,6 +1089,11 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                   />
                 </div>
               </div>
+              <AccountProfilesPanel
+                runtime="codex"
+                disabled={!accountRuntimeEnabled.codex}
+                onChanged={() => void refreshCodexAccount()}
+              />
               <div className={"provider-account-card " + (openCodeReady ? "ready" : "off")}>
                 <div className="provider-account-main">
                   <span
@@ -1190,6 +1196,11 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                   />
                 </div>
               </div>
+              <AccountProfilesPanel
+                runtime="claude"
+                disabled={!accountRuntimeEnabled.claude}
+                onChanged={() => void refreshClaudeStatus(true)}
+              />
               <div className={"provider-account-card " + (piReady ? "ready" : "off")}>
                 <div className="provider-account-main">
                   <span

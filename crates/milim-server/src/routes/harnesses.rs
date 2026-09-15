@@ -39,6 +39,10 @@ pub(crate) struct HarnessRunRequest {
     pub(crate) plan_mode: bool,
     #[serde(default)]
     pub(crate) allow_session_recovery: bool,
+    /// Which signed-in account of the harness to run as: a profile id, `auto`,
+    /// or absent for the runtime's own configuration home.
+    #[serde(default)]
+    pub(crate) account_profile_id: Option<String>,
     #[serde(default)]
     pub(crate) milim_context: Option<Value>,
 }

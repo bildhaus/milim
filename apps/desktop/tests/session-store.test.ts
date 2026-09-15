@@ -569,6 +569,36 @@ equal(
   "codex-thread-1",
   "clearing Pi should preserve Codex",
 );
+// A native session lives inside one account's configuration folder, so Rust
+// keeps one binding per account. The renderer must carry those through rather
+// than normalizing every account except the default one away.
+useSessions.getState().setAccountRuntime(first, {
+  "claudeSessionId:work": "claude-work-1",
+  "claudeLastSyncedMessageId:work": "assistant-work-1",
+});
+equal(
+  useSessions.getState().sessions.find((session) => session.id === first)
+    ?.accountRuntime?.["claudeSessionId:work"],
+  "claude-work-1",
+  "per-account native bindings should survive normalization",
+);
+equal(
+  useSessions.getState().sessions.find((session) => session.id === first)
+    ?.accountRuntime?.["claudeLastSyncedMessageId:work"],
+  "assistant-work-1",
+  "a per-account cursor should survive alongside its session id",
+);
+equal(
+  useSessions.getState().sessions.find((session) => session.id === first)
+    ?.accountRuntime?.codexThreadId,
+  "codex-thread-1",
+  "a per-account binding should not disturb the default account's binding",
+);
+assert(
+  localStorage.getItem("milim.sessions")?.includes("claude-work-1"),
+  "per-account native bindings should persist in session storage",
+);
+
 useSessions.getState().setPendingHotSwap(first, {
   fromModel: "model-a",
   toModel: "model-b",
