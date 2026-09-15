@@ -333,6 +333,15 @@ function appendStreamEvent(
     : part;
 }
 
+/**
+ * Id of the assistant turn projected purely from a run's stream events when
+ * the run persisted no assistant message (it failed or was cancelled). The
+ * server recognises this id in `message.delete` and `turn.regenerate`.
+ */
+export function streamPlaceholderMessageId(runId: string): string {
+  return `control-stream-${runId}`;
+}
+
 /** Fold the authoritative items for one run into its user-visible turns. */
 export function projectControlRunMessages(
   items: ControlTimelineItemV1[],
@@ -423,16 +432,18 @@ export function projectControlRunMessages(
     const part = eventPart(item);
     if (part) appendStreamEvent(streamParts, part);
   }
+  const placeholderId = streamPlaceholderMessageId(runId);
   if (
     !assistant
     && !deletedRoles.has("assistant")
+    && !deletedIds.has(placeholderId)
     && (streamingText || streamingReasoning || streamParts.length)
   ) {
     const firstStreamSeq = items.find(
       (item) => item.run_id === runId && item.type === "assistant_delta",
     )?.seq;
     assistant = {
-      id: `control-stream-${runId}`,
+      id: placeholderId,
       role: "assistant",
       content: streamingText,
       runId,

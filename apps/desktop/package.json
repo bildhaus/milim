@@ -12,7 +12,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "node --env-file-if-exists=../../.env.local node_modules/@tauri-apps/cli/tauri.js",
-    "tauri:dev": "node --env-file-if-exists=../../.env.local node_modules/@tauri-apps/cli/tauri.js dev --additional-watch-folders ../../crates",
+    "tauri:dev": "node --env-file-if-exists=../../.env.local node_modules/@tauri-apps/cli/tauri.js dev --additional-watch-folders ../../../crates",
     "test:copy": "node tests/copy-lint.test.mjs",
     "test:brand-cleanup": "node tests/brand-cleanup.test.mjs",
     "test:selectors": "node tests/zustand-selector-lint.test.mjs",

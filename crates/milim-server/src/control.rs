@@ -3331,7 +3331,9 @@ impl RunManager {
             ));
         }
         let message_id = required_payload_string(&command.payload, "message_id")?;
-        if !self.store.control_delete_message(thread_id, &message_id)? {
+        if !self.store.control_delete_message(thread_id, &message_id)?
+            && !self.is_stream_placeholder_for_thread(thread_id, &message_id)?
+        {
             return Err(Error::NotFound(format!("message {message_id}")));
         }
         self.persist_and_emit(
@@ -3710,6 +3712,26 @@ impl RunManager {
                 )?;
             }
         }
+        // A failed or cancelled run persists no assistant message; the renderer
+        // shows its error from stream events under a placeholder id. Retire that
+        // placeholder too so the regenerated reply replaces it after reload.
+        if let Some(last_run_id) = self.last_run_id_in_timeline(&thread_id)? {
+            let has_assistant = messages.iter().any(|message| {
+                message.get("role").and_then(Value::as_str) == Some("assistant")
+                    && message.get("runId").and_then(Value::as_str) == Some(last_run_id.as_str())
+            });
+            if !has_assistant {
+                self.persist_and_emit(
+                    &thread_id,
+                    None,
+                    "message_deleted",
+                    json!({
+                        "message_id": stream_placeholder_message_id(&last_run_id),
+                        "reason": "regenerate",
+                    }),
+                )?;
+            }
+        }
         let mut config = resolve_frozen_config(&state, &self.store, &thread, attachments)?;
         config.linked_thread_grants = self.freeze_linked_thread_grants(&thread_id)?;
         if let Some(policy) = delegation_policy {
@@ -3760,6 +3782,34 @@ impl RunManager {
                 "native_session_id": native_session_id,
             }),
         })
+    }
+
+    /// The run id of the most recent run recorded in a thread's timeline.
+    fn last_run_id_in_timeline(&self, thread_id: &str) -> Result<Option<String>> {
+        let Some(page) = self
+            .store
+            .control_timeline_page(thread_id, None, None, true, 100)?
+        else {
+            return Ok(None);
+        };
+        Ok(page
+            .items
+            .iter()
+            .rev()
+            .find(|item| item.item_type == "run_status")
+            .and_then(|item| item.run_id.clone()))
+    }
+
+    /// Whether `message_id` names the renderer's stream placeholder for a
+    /// finished run that belongs to `thread_id`.
+    fn is_stream_placeholder_for_thread(&self, thread_id: &str, message_id: &str) -> Result<bool> {
+        let Some(run_id) = message_id.strip_prefix(STREAM_PLACEHOLDER_PREFIX) else {
+            return Ok(false);
+        };
+        Ok(self
+            .store
+            .control_run(run_id)?
+            .is_some_and(|run| run.thread_id == thread_id && run.completed_at_ms.is_some()))
     }
 
     fn start_turn(
@@ -6957,6 +7007,14 @@ fn command_for_receipt(command: &ControlCommandV1) -> ControlCommandV1 {
     sanitized
 }
 
+/// Prefix of the id the renderer assigns to an assistant turn it projects
+/// purely from stream events (a run that persisted no assistant message).
+const STREAM_PLACEHOLDER_PREFIX: &str = "control-stream-";
+
+fn stream_placeholder_message_id(run_id: &str) -> String {
+    format!("{STREAM_PLACEHOLDER_PREFIX}{run_id}")
+}
+
 fn required_thread_id(command: &ControlCommandV1) -> Result<&str> {
     command
         .thread_id
@@ -7898,6 +7956,76 @@ mod tests {
             item.item_type == "message_deleted"
                 && item.data["message_id"] == "message-delete-fixture"
         }));
+    }
+
+    #[tokio::test]
+    async fn message_delete_accepts_a_failed_runs_stream_placeholder() {
+        let (manager, state) = manager_and_state();
+        manager
+            .command(
+                state.clone(),
+                None,
+                create_command("create-placeholder", "mock-echo"),
+            )
+            .await
+            .unwrap();
+        manager
+            .store
+            .control_put_run(&ControlRunRecord {
+                id: "run-failed".into(),
+                thread_id: "thread-fixture".into(),
+                status: "failed".into(),
+                adapter: "provider".into(),
+                request_json: r#"{"text":"fixture"}"#.into(),
+                agent_snapshot_json: None,
+                native_session_json: None,
+                created_at_ms: 1,
+                updated_at_ms: 2,
+                completed_at_ms: Some(2),
+                error_json: Some(r#"{"message":"upstream 400"}"#.into()),
+            })
+            .unwrap();
+
+        let placeholder = stream_placeholder_message_id("run-failed");
+        let mut command = ControlCommandV1 {
+            command_id: "delete-placeholder".into(),
+            kind: ControlCommandKindV1::MessageDelete,
+            thread_id: Some("thread-fixture".into()),
+            expected_revision: None,
+            payload: json!({ "message_id": placeholder }),
+            confirmation_token: None,
+        };
+        let challenge = manager
+            .command(state.clone(), None, command.clone())
+            .await
+            .unwrap();
+        command.confirmation_token = challenge.confirmation_token;
+        let result = manager.command(state.clone(), None, command).await.unwrap();
+        assert_eq!(result.status, ControlCommandStatusV1::Applied);
+        let page = manager
+            .timeline_page("thread-fixture", None, None, true, 20)
+            .unwrap()
+            .unwrap();
+        assert!(page.items.iter().any(|item| {
+            item.item_type == "message_deleted" && item.data["message_id"] == placeholder
+        }));
+
+        // A placeholder for a run that belongs to another thread is still not found.
+        let mut foreign = ControlCommandV1 {
+            command_id: "delete-foreign-placeholder".into(),
+            kind: ControlCommandKindV1::MessageDelete,
+            thread_id: Some("thread-fixture".into()),
+            expected_revision: None,
+            payload: json!({ "message_id": stream_placeholder_message_id("run-unknown") }),
+            confirmation_token: None,
+        };
+        let challenge = manager
+            .command(state.clone(), None, foreign.clone())
+            .await
+            .unwrap();
+        foreign.confirmation_token = challenge.confirmation_token;
+        let result = manager.command(state, None, foreign).await.unwrap();
+        assert_eq!(result.status, ControlCommandStatusV1::Failed);
     }
 
     #[tokio::test]
