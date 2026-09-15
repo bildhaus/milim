@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
+use crate::account_profiles::ResolvedAccountProfile;
 use crate::account_runtime_events::{
     canonicalize_runtime_stream, serialize_runtime_event, HarnessEvent,
 };
@@ -135,10 +136,28 @@ pub(crate) struct CodexRunRequest {
     pub interactive_tool_approval: bool,
     #[serde(default)]
     pub plan_mode: bool,
+    /// Which signed-in Codex account to use: a profile id, `auto`, or absent
+    /// for the CLI's own `CODEX_HOME`.
+    #[serde(default)]
+    pub account_profile_id: Option<String>,
+    /// Resolved from `account_profile_id` at the route layer, where the
+    /// canonical profile store is reachable.
+    #[serde(skip)]
+    pub account_profile: Option<ResolvedAccountProfile>,
     #[serde(default)]
     pub milim_context: Option<crate::routes::AccountRuntimeMilimContext>,
     #[serde(skip)]
     pub milim_mcp: Option<crate::routes::AccountRuntimeToolEndpoint>,
+}
+
+impl CodexRunRequest {
+    /// The account this turn runs as. Requests that never mention a profile
+    /// keep the Codex CLI's own `CODEX_HOME`.
+    pub(crate) fn profile(&self) -> ResolvedAccountProfile {
+        self.account_profile
+            .clone()
+            .unwrap_or_else(|| ResolvedAccountProfile::default_for("codex"))
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -412,8 +431,11 @@ enum CodexLoginEvent {
     },
 }
 
-pub(crate) async fn account(refresh_token: bool) -> Result<Value> {
-    let mut proc = CodexProcess::start().await?;
+pub(crate) async fn account(
+    profile: &ResolvedAccountProfile,
+    refresh_token: bool,
+) -> Result<Value> {
+    let mut proc = CodexProcess::start(profile).await?;
     proc.request(
         "account/read",
         Some(json!({ "refreshToken": refresh_token })),
@@ -421,18 +443,18 @@ pub(crate) async fn account(refresh_token: bool) -> Result<Value> {
     .await
 }
 
-pub(crate) async fn logout() -> Result<Value> {
-    let mut proc = CodexProcess::start().await?;
+pub(crate) async fn logout(profile: &ResolvedAccountProfile) -> Result<Value> {
+    let mut proc = CodexProcess::start(profile).await?;
     proc.request("account/logout", None).await
 }
 
-pub(crate) async fn rate_limits() -> Result<Value> {
-    let mut proc = CodexProcess::start().await?;
+pub(crate) async fn rate_limits(profile: &ResolvedAccountProfile) -> Result<Value> {
+    let mut proc = CodexProcess::start(profile).await?;
     proc.request("account/rateLimits/read", None).await
 }
 
-pub(crate) async fn models() -> Result<Value> {
-    let mut proc = CodexProcess::start().await?;
+pub(crate) async fn models(profile: &ResolvedAccountProfile) -> Result<Value> {
+    let mut proc = CodexProcess::start(profile).await?;
     proc.request(
         "model/list",
         Some(json!({ "includeHidden": false, "limit": 100 })),
@@ -441,12 +463,13 @@ pub(crate) async fn models() -> Result<Value> {
 }
 
 pub(crate) async fn threads(
+    profile: &ResolvedAccountProfile,
     cursor: Option<String>,
     search: Option<String>,
     archived: bool,
     all: bool,
 ) -> Result<CodexThreadPage> {
-    let mut proc = CodexProcess::start().await?;
+    let mut proc = CodexProcess::start(profile).await?;
     let search = clean_optional(search.as_deref());
     let mut cursor = clean_optional(cursor.as_deref());
     let mut seen_cursors = cursor.iter().cloned().collect::<HashSet<_>>();
@@ -490,14 +513,17 @@ pub(crate) async fn threads(
     }
 }
 
-pub(crate) async fn recover_thread(thread_id: &str) -> Result<CodexRecoveredThread> {
+pub(crate) async fn recover_thread(
+    profile: &ResolvedAccountProfile,
+    thread_id: &str,
+) -> Result<CodexRecoveredThread> {
     let thread_id = thread_id.trim();
     if thread_id.is_empty() {
         return Err(Error::InvalidRequest(
             "Codex thread id is required".to_string(),
         ));
     }
-    let mut proc = CodexProcess::start().await?;
+    let mut proc = CodexProcess::start(profile).await?;
     let result = match proc
         .request(
             "thread/read",
@@ -513,7 +539,7 @@ pub(crate) async fn recover_thread(thread_id: &str) -> Result<CodexRecoveredThre
                     Some(json!({ "threadId": thread_id, "includeTurns": false })),
                 )
                 .await?;
-            let turns = experimental_thread_turns(thread_id).await?;
+            let turns = experimental_thread_turns(profile, thread_id).await?;
             let mut thread = metadata.get("thread").cloned().ok_or_else(|| {
                 Error::Upstream("Codex did not return thread metadata".to_string())
             })?;
@@ -525,8 +551,11 @@ pub(crate) async fn recover_thread(thread_id: &str) -> Result<CodexRecoveredThre
     recovered_thread_from_result(&result)
 }
 
-async fn experimental_thread_turns(thread_id: &str) -> Result<Vec<Value>> {
-    let mut proc = CodexProcess::start_experimental().await?;
+async fn experimental_thread_turns(
+    profile: &ResolvedAccountProfile,
+    thread_id: &str,
+) -> Result<Vec<Value>> {
+    let mut proc = CodexProcess::start_experimental(profile).await?;
     let mut cursor: Option<String> = None;
     let mut turns = Vec::new();
     loop {
@@ -555,14 +584,17 @@ async fn experimental_thread_turns(thread_id: &str) -> Result<Vec<Value>> {
     Ok(turns)
 }
 
-pub(crate) async fn login_api_key(api_key: String) -> Result<Value> {
+pub(crate) async fn login_api_key(
+    profile: &ResolvedAccountProfile,
+    api_key: String,
+) -> Result<Value> {
     let api_key = api_key.trim();
     if api_key.is_empty() {
         return Err(Error::InvalidRequest(
             "Codex API key is required".to_string(),
         ));
     }
-    let mut proc = CodexProcess::start().await?;
+    let mut proc = CodexProcess::start(profile).await?;
     proc.request(
         "account/login/start",
         Some(json!({ "type": "apiKey", "apiKey": api_key })),
@@ -570,20 +602,24 @@ pub(crate) async fn login_api_key(api_key: String) -> Result<Value> {
     .await
 }
 
-pub(crate) fn login_device_stream() -> impl Stream<Item = std::result::Result<Event, Infallible>> {
-    login_stream("chatgpt")
+pub(crate) fn login_device_stream(
+    profile: ResolvedAccountProfile,
+) -> impl Stream<Item = std::result::Result<Event, Infallible>> {
+    login_stream(profile, "chatgpt")
 }
 
 pub(crate) fn login_chatgpt_device_code_stream(
+    profile: ResolvedAccountProfile,
 ) -> impl Stream<Item = std::result::Result<Event, Infallible>> {
-    login_stream("chatgptDeviceCode")
+    login_stream(profile, "chatgptDeviceCode")
 }
 
 fn login_stream(
+    profile: ResolvedAccountProfile,
     login_type: &'static str,
 ) -> impl Stream<Item = std::result::Result<Event, Infallible>> {
     async_stream::stream! {
-        let mut proc = match CodexProcess::start().await {
+        let mut proc = match CodexProcess::start(&profile).await {
             Ok(proc) => proc,
             Err(e) => {
                 let message = e.to_string();
@@ -763,7 +799,7 @@ fn run_stream_with_worker_events(
                 return;
             }
         };
-        let mut proc = match CodexProcess::start().await {
+        let mut proc = match CodexProcess::start(&req.profile()).await {
             Ok(proc) => proc,
             Err(e) => {
                 let message = e.to_string();
@@ -1493,16 +1529,19 @@ impl CodexTurnNotificationGate {
 }
 
 impl CodexProcess {
-    async fn start() -> Result<Self> {
-        Self::start_with_experimental(false).await
+    async fn start(profile: &ResolvedAccountProfile) -> Result<Self> {
+        Self::start_with_experimental(profile, false).await
     }
 
-    async fn start_experimental() -> Result<Self> {
-        Self::start_with_experimental(true).await
+    async fn start_experimental(profile: &ResolvedAccountProfile) -> Result<Self> {
+        Self::start_with_experimental(profile, true).await
     }
 
-    async fn start_with_experimental(experimental: bool) -> Result<Self> {
-        let mut command = codex_command();
+    async fn start_with_experimental(
+        profile: &ResolvedAccountProfile,
+        experimental: bool,
+    ) -> Result<Self> {
+        let mut command = codex_command(profile);
         command
             .arg("app-server")
             .stdin(Stdio::piped())
@@ -1624,7 +1663,7 @@ impl CodexProcess {
 }
 
 #[cfg(windows)]
-fn codex_command() -> Command {
+fn codex_command(profile: &ResolvedAccountProfile) -> Command {
     let command = if let Some(path) = crate::child_process::find_on_path("codex.cmd") {
         if let Some(command) = codex_npm_command(&path) {
             command
@@ -1638,12 +1677,17 @@ fn codex_command() -> Command {
     } else {
         Command::new("codex.exe")
     };
-    crate::child_process::account_runtime_inherited(command)
+    let mut command = crate::child_process::account_runtime_inherited(command);
+    profile.apply(&mut command);
+    command
 }
 
 #[cfg(not(windows))]
-fn codex_command() -> Command {
-    crate::child_process::account_runtime_inherited(crate::cli_path::command("codex"))
+fn codex_command(profile: &ResolvedAccountProfile) -> Command {
+    let mut command =
+        crate::child_process::account_runtime_inherited(crate::cli_path::command("codex"));
+    profile.apply(&mut command);
+    command
 }
 
 #[cfg(windows)]
@@ -2890,6 +2934,8 @@ mod tests {
             tool_approval_grant: false,
             interactive_tool_approval: false,
             plan_mode: false,
+            account_profile_id: None,
+            account_profile: None,
             milim_context: None,
             milim_mcp: None,
         };
@@ -2935,6 +2981,8 @@ mod tests {
             tool_approval_grant: true,
             interactive_tool_approval: false,
             plan_mode: false,
+            account_profile_id: None,
+            account_profile: None,
             milim_context: None,
             milim_mcp: None,
         };
@@ -2985,6 +3033,8 @@ mod tests {
             tool_approval_grant: false,
             interactive_tool_approval: false,
             plan_mode: false,
+            account_profile_id: None,
+            account_profile: None,
             milim_context: None,
             milim_mcp: None,
         };
@@ -3322,7 +3372,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires an installed and authenticated Codex CLI"]
     async fn codex_app_server_smoke() {
-        let mut proc = CodexProcess::start()
+        let mut proc = CodexProcess::start(&ResolvedAccountProfile::default_for("codex"))
             .await
             .expect("start stable app-server");
         let models = proc

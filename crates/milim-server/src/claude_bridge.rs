@@ -18,6 +18,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
+use crate::account_profiles::ResolvedAccountProfile;
 use crate::account_runtime_events::{
     canonicalize_runtime_stream, serialize_runtime_event, HarnessEvent,
 };
@@ -56,6 +57,14 @@ pub(crate) struct ClaudeRunRequest {
     pub plan_mode: bool,
     #[serde(default)]
     pub allow_session_recovery: bool,
+    /// Which signed-in Claude account to use: a profile id, `auto`, or absent
+    /// for the CLI's own configuration home.
+    #[serde(default)]
+    pub account_profile_id: Option<String>,
+    /// Resolved from `account_profile_id` at the route layer, where the
+    /// canonical profile store is reachable.
+    #[serde(skip)]
+    pub account_profile: Option<ResolvedAccountProfile>,
     #[serde(default)]
     pub milim_context: Option<crate::routes::AccountRuntimeMilimContext>,
     #[serde(skip)]
@@ -68,6 +77,16 @@ pub(crate) struct ClaudeRunRequest {
     pub approval_mcp_authorization: Option<String>,
     #[serde(skip)]
     approval_mcp_config: Option<PathBuf>,
+}
+
+impl ClaudeRunRequest {
+    /// The account this turn runs as. Requests that never mention a profile
+    /// keep the Claude CLI's own configuration home.
+    pub(crate) fn profile(&self) -> ResolvedAccountProfile {
+        self.account_profile
+            .clone()
+            .unwrap_or_else(|| ResolvedAccountProfile::default_for("claude"))
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -173,16 +192,20 @@ struct ClaudeTranscriptNode {
 }
 
 pub(crate) async fn threads(
+    profile: ResolvedAccountProfile,
     cursor: Option<String>,
     search: Option<String>,
     all: bool,
 ) -> Result<ClaudeThreadPage> {
-    tokio::task::spawn_blocking(move || claude_threads_sync(cursor, search, all))
+    tokio::task::spawn_blocking(move || claude_threads_sync(&profile, cursor, search, all))
         .await
         .map_err(|error| Error::Other(format!("Claude chat listing task failed: {error}")))?
 }
 
-pub(crate) async fn import_thread(session_id: &str) -> Result<ClaudeImportedThread> {
+pub(crate) async fn import_thread(
+    profile: ResolvedAccountProfile,
+    session_id: &str,
+) -> Result<ClaudeImportedThread> {
     let session_id = session_id.trim().to_string();
     if uuid::Uuid::parse_str(&session_id).is_err() {
         return Err(Error::InvalidRequest(
@@ -190,7 +213,7 @@ pub(crate) async fn import_thread(session_id: &str) -> Result<ClaudeImportedThre
         ));
     }
     tokio::task::spawn_blocking(move || {
-        let transcript = claude_transcript_files()
+        let transcript = claude_transcript_files(&profile)
             .into_iter()
             .find(|file| file.id == session_id)
             .ok_or_else(|| Error::ModelNotFound("Claude chat not found".to_string()))?;
@@ -201,6 +224,7 @@ pub(crate) async fn import_thread(session_id: &str) -> Result<ClaudeImportedThre
 }
 
 fn claude_threads_sync(
+    profile: &ResolvedAccountProfile,
     cursor: Option<String>,
     search: Option<String>,
     all: bool,
@@ -212,7 +236,7 @@ fn claude_threads_sync(
         None => 0,
     };
     let search = clean_optional(search.as_deref()).map(|value| value.to_lowercase());
-    let summaries = claude_transcript_files()
+    let summaries = claude_transcript_files(profile)
         .iter()
         .map(claude_thread_summary)
         .collect::<Result<Vec<_>>>()?
@@ -269,9 +293,9 @@ fn page_claude_threads(
     }
 }
 
-fn claude_transcript_files() -> Vec<ClaudeTranscriptFile> {
+fn claude_transcript_files(profile: &ResolvedAccountProfile) -> Vec<ClaudeTranscriptFile> {
     let mut by_id = HashMap::<String, ClaudeTranscriptFile>::new();
-    for projects_dir in claude_projects_dirs() {
+    for projects_dir in claude_projects_dirs(profile) {
         for file in claude_transcript_files_in(&projects_dir) {
             let replace = by_id
                 .get(&file.id)
@@ -731,8 +755,8 @@ struct ClaudeToolState {
     detail: Option<String>,
 }
 
-pub(crate) async fn status() -> Result<Value> {
-    let mut command = claude_command();
+pub(crate) async fn status(profile: ResolvedAccountProfile) -> Result<Value> {
+    let mut command = claude_command(&profile);
     command.arg("auth").arg("status");
     #[cfg(windows)]
     command.creation_flags(milim_core::proc::CREATE_NO_WINDOW);
@@ -747,6 +771,8 @@ pub(crate) async fn status() -> Result<Value> {
                 return Ok(json!({
                     "available": false,
                     "authenticated": false,
+                    "profile_id": profile.id,
+                    "profile_label": profile.label,
                     "models": [],
                     "error": error,
                     "warning": warning
@@ -756,6 +782,8 @@ pub(crate) async fn status() -> Result<Value> {
                 return Ok(json!({
                     "available": true,
                     "authenticated": false,
+                    "profile_id": profile.id,
+                    "profile_label": profile.label,
                     "models": [],
                     "error": "`claude auth status` timed out"
                 }));
@@ -773,6 +801,9 @@ pub(crate) async fn status() -> Result<Value> {
     Ok(json!({
         "available": true,
         "authenticated": authenticated,
+        "profile_id": profile.id,
+        "profile_label": profile.label,
+        "login_hint": crate::account_profiles::login_hint(&profile),
         "auth": auth,
         "models": if authenticated { CLAUDE_MODEL_ALIASES } else { &[] as &[&str] },
         "model_capabilities": if authenticated {
@@ -960,7 +991,7 @@ fn run_stream_with_worker_events(
     async_stream::stream! {
         let mut retried_locked_session = false;
         loop {
-            let mut command = claude_command();
+            let mut command = claude_command(&req.profile());
             for arg in claude_run_args(&req) {
                 command.arg(arg);
             }
@@ -1198,7 +1229,7 @@ async fn maybe_recover_locked_session(
     let Some(session_id) = clean_optional(req.session_id.as_deref()) else {
         return false;
     };
-    if terminate_claude_session_processes(&session_id).await {
+    if terminate_claude_session_processes(&req.profile(), &session_id).await {
         *retried_locked_session = true;
         true
     } else {
@@ -1620,19 +1651,22 @@ fn process_matches_claude_session(name: &str, command_line: &str, session_id: &s
         && command_line.contains(session_id)
 }
 
-async fn terminate_claude_session_processes(session_id: &str) -> bool {
+async fn terminate_claude_session_processes(
+    profile: &ResolvedAccountProfile,
+    session_id: &str,
+) -> bool {
     let Some(session_id) = safe_session_id_for_process_match(session_id) else {
         return false;
     };
-    let removed_stale_registry = remove_stale_claude_session_registry(session_id);
+    let removed_stale_registry = remove_stale_claude_session_registry(profile, session_id);
     let killed_from_command_line = terminate_claude_session_processes_impl(session_id).await;
     if killed_from_command_line {
-        if let Some(entry) = find_claude_session_registry_entry(session_id) {
+        if let Some(entry) = find_claude_session_registry_entry(profile, session_id) {
             let _ = wait_for_process_exit(entry.pid).await;
         }
-        remove_stale_claude_session_registry(session_id);
+        remove_stale_claude_session_registry(profile, session_id);
     }
-    removed_stale_registry || find_claude_session_registry_entry(session_id).is_none()
+    removed_stale_registry || find_claude_session_registry_entry(profile, session_id).is_none()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1641,8 +1675,11 @@ struct ClaudeSessionRegistryEntry {
     path: PathBuf,
 }
 
-fn remove_stale_claude_session_registry(session_id: &str) -> bool {
-    let Some(entry) = find_claude_session_registry_entry(session_id) else {
+fn remove_stale_claude_session_registry(
+    profile: &ResolvedAccountProfile,
+    session_id: &str,
+) -> bool {
+    let Some(entry) = find_claude_session_registry_entry(profile, session_id) else {
         return false;
     };
     remove_stale_claude_session_registry_entry(&entry)
@@ -1658,8 +1695,11 @@ fn remove_stale_claude_session_registry_entry(entry: &ClaudeSessionRegistryEntry
     }
 }
 
-fn find_claude_session_registry_entry(session_id: &str) -> Option<ClaudeSessionRegistryEntry> {
-    for dir in claude_session_registry_dirs() {
+fn find_claude_session_registry_entry(
+    profile: &ResolvedAccountProfile,
+    session_id: &str,
+) -> Option<ClaudeSessionRegistryEntry> {
+    for dir in claude_session_registry_dirs(profile) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             continue;
         };
@@ -1698,8 +1738,8 @@ fn claude_session_registry_entry_from_value(
     Some(ClaudeSessionRegistryEntry { pid, path })
 }
 
-fn claude_session_registry_dirs() -> Vec<PathBuf> {
-    claude_home_dirs()
+fn claude_session_registry_dirs(profile: &ResolvedAccountProfile) -> Vec<PathBuf> {
+    claude_home_dirs(profile)
         .into_iter()
         .map(|dir| dir.join("sessions"))
         .collect()
@@ -1942,7 +1982,7 @@ fn claude_project_session_exists(req: &ClaudeRunRequest, session_id: &str) -> bo
     let Some(cwd) = claude_session_cwd(req) else {
         return false;
     };
-    for projects_dir in claude_projects_dirs() {
+    for projects_dir in claude_projects_dirs(&req.profile()) {
         let project_name = claude_project_dir_name(cwd.to_string_lossy().as_ref());
         let session_file = projects_dir
             .join(&project_name)
@@ -2012,25 +2052,15 @@ fn claude_project_dir_name(cwd: &str) -> String {
     normalized
 }
 
-fn claude_projects_dirs() -> Vec<PathBuf> {
-    claude_home_dirs()
+fn claude_projects_dirs(profile: &ResolvedAccountProfile) -> Vec<PathBuf> {
+    claude_home_dirs(profile)
         .into_iter()
         .map(|dir| dir.join("projects"))
         .collect()
 }
 
-fn claude_home_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Some(profile) = std::env::var_os("USERPROFILE") {
-        dirs.push(PathBuf::from(profile).join(".claude"));
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        let dir = PathBuf::from(home).join(".claude");
-        if !dirs.iter().any(|existing| existing == &dir) {
-            dirs.push(dir);
-        }
-    }
-    dirs
+fn claude_home_dirs(profile: &ResolvedAccountProfile) -> Vec<PathBuf> {
+    profile.home_dirs(".claude")
 }
 
 fn account_runtime_policy(value: Option<&str>) -> &str {
@@ -2158,13 +2188,18 @@ fn opt_u32(value: &Value, key: &str) -> Option<u32> {
 }
 
 #[cfg(windows)]
-fn claude_command() -> Command {
-    crate::child_process::account_runtime_inherited(Command::new("claude"))
+fn claude_command(profile: &ResolvedAccountProfile) -> Command {
+    let mut command = crate::child_process::account_runtime_inherited(Command::new("claude"));
+    profile.apply(&mut command);
+    command
 }
 
 #[cfg(not(windows))]
-fn claude_command() -> Command {
-    crate::child_process::account_runtime_inherited(crate::cli_path::command("claude"))
+fn claude_command(profile: &ResolvedAccountProfile) -> Command {
+    let mut command =
+        crate::child_process::account_runtime_inherited(crate::cli_path::command("claude"));
+    profile.apply(&mut command);
+    command
 }
 
 #[cfg(test)]
@@ -2662,6 +2697,8 @@ not json
             interactive_tool_approval: false,
             plan_mode: false,
             allow_session_recovery: false,
+            account_profile_id: None,
+            account_profile: None,
             milim_context: None,
             milim_mcp: None,
             approval_run_id: None,
@@ -2691,6 +2728,8 @@ not json
             interactive_tool_approval: false,
             plan_mode: false,
             allow_session_recovery: false,
+            account_profile_id: None,
+            account_profile: None,
             milim_context: None,
             milim_mcp: None,
             approval_run_id: None,
@@ -2722,6 +2761,8 @@ not json
             interactive_tool_approval: false,
             plan_mode: false,
             allow_session_recovery: false,
+            account_profile_id: None,
+            account_profile: None,
             milim_context: None,
             milim_mcp: None,
             approval_run_id: None,
@@ -2773,6 +2814,8 @@ not json
             interactive_tool_approval: false,
             plan_mode: false,
             allow_session_recovery: false,
+            account_profile_id: None,
+            account_profile: None,
             milim_context: None,
             milim_mcp: None,
             approval_run_id: None,

@@ -6082,6 +6082,7 @@ async fn thread_supervisor_runs_child_with_test_backend() {
                 runtime: milim_agents::WorkerRuntime::Legacy,
                 access: milim_agents::WorkerAccess::ReadOnly,
                 worktree_path: None,
+                account_profile_id: None,
             },
         )
         .unwrap();
@@ -6129,6 +6130,7 @@ async fn thread_events_stream_supervisor_updates() {
                 runtime: milim_agents::WorkerRuntime::Legacy,
                 access: milim_agents::WorkerAccess::ReadOnly,
                 worktree_path: None,
+                account_profile_id: None,
             },
         )
         .unwrap();

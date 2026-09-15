@@ -4,12 +4,38 @@ pub(crate) type AccountHarnessStream = std::pin::Pin<
     Box<dyn futures::Stream<Item = crate::account_runtime_events::HarnessEvent> + Send>,
 >;
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct AccountProfileQuery {
+    /// Profile id, `auto`, or absent for the runtime's own configuration home.
+    profile: Option<String>,
+}
+
+/// An owned handle to the canonical store for a stream that outlives the
+/// request. A standalone server has none, and simply records nothing.
+fn profile_store(st: &AppState) -> Option<std::sync::Arc<milim_storage::UserDataStore>> {
+    st.control.as_ref().map(|control| control.store().clone())
+}
+
+/// Name the account a runtime response describes, so a client that asked for
+/// `auto` learns which profile actually answered.
+fn annotate_profile(value: &mut Value, profile: &crate::account_profiles::ResolvedAccountProfile) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    object.insert("profile_id".into(), Value::String(profile.id.clone()));
+    object.insert("profile_label".into(), Value::String(profile.label.clone()));
+    if let Some(hint) = crate::account_profiles::login_hint(profile) {
+        object.insert("login_hint".into(), hint);
+    }
+}
+
 // ----- Codex app-server bridge -----
 
 #[derive(Deserialize)]
 pub(crate) struct CodexAccountQuery {
     #[serde(default)]
     refresh: bool,
+    profile: Option<String>,
 }
 
 /// `GET /codex/account` - current Codex-managed auth state.
@@ -20,20 +46,24 @@ pub(crate) async fn codex_account(
     Query(query): Query<CodexAccountQuery>,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
-    let account = crate::codex_bridge::account(query.refresh)
+    let profile = crate::account_profiles::resolve_for(&st, "codex", query.profile.as_deref());
+    let mut account = crate::codex_bridge::account(&profile, query.refresh)
         .await
         .map_err(ApiError)?;
+    annotate_profile(&mut account, &profile);
     Ok(Json(account).into_response())
 }
 
 /// `POST /codex/login/device` - start ChatGPT login and stream completion.
 pub(crate) async fn codex_login_device(
     State(st): State<AppState>,
+    Query(query): Query<AccountProfileQuery>,
     headers: HeaderMap,
     peer: Peer,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
-    Ok(Sse::new(crate::codex_bridge::login_device_stream())
+    let profile = crate::account_profiles::resolve_for(&st, "codex", query.profile.as_deref());
+    Ok(Sse::new(crate::codex_bridge::login_device_stream(profile))
         .keep_alive(KeepAlive::default())
         .into_response())
 }
@@ -41,26 +71,32 @@ pub(crate) async fn codex_login_device(
 /// `POST /codex/login/chatgpt-device` - start ChatGPT device-code login.
 pub(crate) async fn codex_login_chatgpt_device(
     State(st): State<AppState>,
+    Query(query): Query<AccountProfileQuery>,
     headers: HeaderMap,
     peer: Peer,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
+    let profile = crate::account_profiles::resolve_for(&st, "codex", query.profile.as_deref());
     Ok(
-        Sse::new(crate::codex_bridge::login_chatgpt_device_code_stream())
-            .keep_alive(KeepAlive::default())
-            .into_response(),
+        Sse::new(crate::codex_bridge::login_chatgpt_device_code_stream(
+            profile,
+        ))
+        .keep_alive(KeepAlive::default())
+        .into_response(),
     )
 }
 
 /// `POST /codex/login/api-key` - sign Codex in with an OpenAI API key.
 pub(crate) async fn codex_login_api_key(
     State(st): State<AppState>,
+    Query(query): Query<AccountProfileQuery>,
     headers: HeaderMap,
     peer: Peer,
     Json(req): Json<crate::codex_bridge::CodexApiKeyLoginRequest>,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
-    let result = crate::codex_bridge::login_api_key(req.api_key)
+    let profile = crate::account_profiles::resolve_for(&st, "codex", query.profile.as_deref());
+    let result = crate::codex_bridge::login_api_key(&profile, req.api_key)
         .await
         .map_err(ApiError)?;
     Ok(Json(result).into_response())
@@ -69,33 +105,59 @@ pub(crate) async fn codex_login_api_key(
 /// `POST /codex/logout` - clear Codex-managed auth.
 pub(crate) async fn codex_logout(
     State(st): State<AppState>,
+    Query(query): Query<AccountProfileQuery>,
     headers: HeaderMap,
     peer: Peer,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
-    let result = crate::codex_bridge::logout().await.map_err(ApiError)?;
+    let profile = crate::account_profiles::resolve_for(&st, "codex", query.profile.as_deref());
+    let result = crate::codex_bridge::logout(&profile)
+        .await
+        .map_err(ApiError)?;
     Ok(Json(result).into_response())
 }
 
 /// `GET /codex/rate-limits` - read Codex account usage buckets.
 pub(crate) async fn codex_rate_limits(
     State(st): State<AppState>,
+    Query(query): Query<AccountProfileQuery>,
     headers: HeaderMap,
     peer: Peer,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
-    let result = crate::codex_bridge::rate_limits().await.map_err(ApiError)?;
+    let profile = crate::account_profiles::resolve_for(&st, "codex", query.profile.as_deref());
+    let mut result = crate::codex_bridge::rate_limits(&profile)
+        .await
+        .map_err(ApiError)?;
+    // Codex publishes its own window percentages, so Auto can prefer the
+    // account with the most headroom before a turn rather than after a refusal.
+    if let Some(store) = crate::account_profiles::store_of(&st) {
+        let (short, long, resets_at_ms) = crate::account_profiles::codex_usage(&result);
+        let _ = crate::account_profiles::record_usage(
+            store,
+            "codex",
+            &profile.id,
+            short,
+            long,
+            resets_at_ms,
+        );
+    }
+    annotate_profile(&mut result, &profile);
     Ok(Json(result).into_response())
 }
 
 /// `GET /codex/models` - list models exposed by the installed Codex app-server.
 pub(crate) async fn codex_models(
     State(st): State<AppState>,
+    Query(query): Query<AccountProfileQuery>,
     headers: HeaderMap,
     peer: Peer,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
-    let result = crate::codex_bridge::models().await.map_err(ApiError)?;
+    let profile = crate::account_profiles::resolve_for(&st, "codex", query.profile.as_deref());
+    let result = crate::codex_bridge::models(&profile)
+        .await
+        .map_err(ApiError)?;
     Ok(Json(result).into_response())
 }
 
@@ -107,6 +169,7 @@ pub(crate) struct CodexThreadsQuery {
     archived: bool,
     #[serde(default)]
     all: bool,
+    profile: Option<String>,
 }
 
 /// `GET /codex/threads` - page through recoverable Codex app-server threads.
@@ -117,10 +180,16 @@ pub(crate) async fn codex_threads(
     peer: Peer,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
-    let result =
-        crate::codex_bridge::threads(query.cursor, query.search, query.archived, query.all)
-            .await
-            .map_err(ApiError)?;
+    let profile = crate::account_profiles::resolve_for(&st, "codex", query.profile.as_deref());
+    let result = crate::codex_bridge::threads(
+        &profile,
+        query.cursor,
+        query.search,
+        query.archived,
+        query.all,
+    )
+    .await
+    .map_err(ApiError)?;
     Ok(Json(result).into_response())
 }
 
@@ -128,11 +197,13 @@ pub(crate) async fn codex_threads(
 pub(crate) async fn codex_thread_recover(
     State(st): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<AccountProfileQuery>,
     headers: HeaderMap,
     peer: Peer,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
-    let result = crate::codex_bridge::recover_thread(&id)
+    let profile = crate::account_profiles::resolve_for(&st, "codex", query.profile.as_deref());
+    let result = crate::codex_bridge::recover_thread(&profile, &id)
         .await
         .map_err(ApiError)?;
     Ok(Json(result).into_response())
@@ -194,9 +265,17 @@ pub(crate) fn codex_harness_stream(
     add_account_runtime_preview_instructions(&mut instructions, endpoint.as_ref());
     req.developer_instructions = (!instructions.trim().is_empty()).then_some(instructions);
     req.milim_mcp = endpoint.clone();
+    let profile =
+        crate::account_profiles::resolve_for(st, "codex", req.account_profile_id.as_deref());
+    req.account_profile = Some(profile.clone());
     let approvals = Some(st.tool_approvals.clone());
     Ok(Box::pin(account_runtime_harness_stream(
-        crate::codex_bridge::run_stream(req, redactions, approvals),
+        crate::account_profiles::observe_limits(
+            crate::codex_bridge::run_stream(req, redactions, approvals),
+            profile_store(st),
+            "codex",
+            &profile.id,
+        ),
         st,
         endpoint.as_ref(),
         true,
@@ -206,11 +285,15 @@ pub(crate) fn codex_harness_stream(
 /// `GET /claude/status` - current installed Claude CLI auth/runtime state.
 pub(crate) async fn claude_status(
     State(st): State<AppState>,
+    Query(query): Query<AccountProfileQuery>,
     headers: HeaderMap,
     peer: Peer,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
-    let status = crate::claude_bridge::status().await.map_err(ApiError)?;
+    let profile = crate::account_profiles::resolve_for(&st, "claude", query.profile.as_deref());
+    let status = crate::claude_bridge::status(profile)
+        .await
+        .map_err(ApiError)?;
     Ok(Json(status).into_response())
 }
 
@@ -220,6 +303,7 @@ pub(crate) struct ClaudeThreadsQuery {
     search: Option<String>,
     #[serde(default)]
     all: bool,
+    profile: Option<String>,
 }
 
 /// `GET /claude/threads` - page through locally retained Claude CLI chats.
@@ -230,7 +314,8 @@ pub(crate) async fn claude_threads(
     peer: Peer,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
-    let result = crate::claude_bridge::threads(query.cursor, query.search, query.all)
+    let profile = crate::account_profiles::resolve_for(&st, "claude", query.profile.as_deref());
+    let result = crate::claude_bridge::threads(profile, query.cursor, query.search, query.all)
         .await
         .map_err(ApiError)?;
     Ok(Json(result).into_response())
@@ -240,11 +325,13 @@ pub(crate) async fn claude_threads(
 pub(crate) async fn claude_thread_import(
     State(st): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<AccountProfileQuery>,
     headers: HeaderMap,
     peer: Peer,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
-    let result = crate::claude_bridge::import_thread(&id)
+    let profile = crate::account_profiles::resolve_for(&st, "claude", query.profile.as_deref());
+    let result = crate::claude_bridge::import_thread(profile, &id)
         .await
         .map_err(ApiError)?;
     Ok(Json(result).into_response())
@@ -425,6 +512,139 @@ pub(crate) async fn account_runtime_update(
     .into_response())
 }
 
+// ----- Account profiles (multiple signed-in accounts per runtime) -----
+
+/// The canonical store, or an error explaining why profiles are unavailable.
+fn require_profile_store(st: &AppState) -> Result<&milim_storage::UserDataStore, ApiError> {
+    crate::account_profiles::store_of(st).ok_or_else(|| {
+        ApiError(Error::InvalidRequest(
+            "Account profiles require the desktop's canonical store.".into(),
+        ))
+    })
+}
+
+fn require_profile_runtime(runtime: &str) -> Result<&str, ApiError> {
+    crate::account_profiles::PROFILE_RUNTIMES
+        .iter()
+        .find(|supported| **supported == runtime)
+        .copied()
+        .ok_or_else(|| {
+            ApiError(Error::InvalidRequest(format!(
+                "{runtime} does not support account profiles."
+            )))
+        })
+}
+
+/// `GET /account-runtimes/{runtime}/profiles` - every account for one runtime.
+pub(crate) async fn account_profiles_list(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: Peer,
+    Path(runtime): Path<String>,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    let runtime = require_profile_runtime(&runtime)?;
+    let store = require_profile_store(&st)?;
+    // Expired cooldowns would otherwise linger as stale timers in the UI.
+    let _ = crate::account_profiles::clear_expired_cooldowns(store);
+    let profiles = crate::account_profiles::list(store, runtime);
+    let selected = crate::account_profiles::select(store, runtime);
+    Ok(Json(json!({
+        "runtime": runtime,
+        "profiles": profiles,
+        "auto_selection": selected.id,
+    }))
+    .into_response())
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct AccountProfileCreateRequest {
+    label: String,
+    /// Optional absolute folder. Defaults to a Milim-owned directory.
+    #[serde(default)]
+    config_dir: Option<String>,
+}
+
+/// `POST /account-runtimes/{runtime}/profiles` - add an account.
+///
+/// This creates an empty configuration home and returns the command that signs
+/// it in. Milim never handles the resulting credential: the runtime's own
+/// login writes it inside that folder.
+pub(crate) async fn account_profiles_create(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: Peer,
+    Path(runtime): Path<String>,
+    Json(req): Json<AccountProfileCreateRequest>,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    let runtime = require_profile_runtime(&runtime)?;
+    let store = require_profile_store(&st)?;
+    let record =
+        crate::account_profiles::create(store, runtime, &req.label, req.config_dir.as_deref())
+            .map_err(ApiError)?;
+    let profile = crate::account_profiles::resolve(Some(store), runtime, Some(&record.id));
+    Ok(Json(json!({
+        "profile": record,
+        "login_hint": crate::account_profiles::login_hint(&profile),
+    }))
+    .into_response())
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct AccountProfileUpdateRequest {
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    priority: Option<i32>,
+}
+
+/// `PATCH /account-runtimes/{runtime}/profiles/{id}` - rename or pause one.
+pub(crate) async fn account_profiles_update(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: Peer,
+    Path((runtime, id)): Path<(String, String)>,
+    Json(req): Json<AccountProfileUpdateRequest>,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    let runtime = require_profile_runtime(&runtime)?;
+    let store = require_profile_store(&st)?;
+    let record = crate::account_profiles::update(
+        store,
+        runtime,
+        &id,
+        req.label.as_deref(),
+        req.enabled,
+        req.priority,
+    )
+    .map_err(ApiError)?;
+    Ok(Json(json!({ "profile": record })).into_response())
+}
+
+/// `DELETE /account-runtimes/{runtime}/profiles/{id}` - forget one.
+///
+/// The configuration folder is left on disk: it holds the runtime's own
+/// credentials and native transcripts, which are not Milim's to delete.
+pub(crate) async fn account_profiles_delete(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: Peer,
+    Path((runtime, id)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    let runtime = require_profile_runtime(&runtime)?;
+    let store = require_profile_store(&st)?;
+    let removed = crate::account_profiles::remove(store, runtime, &id).map_err(ApiError)?;
+    Ok(Json(json!({
+        "removed": removed.is_some(),
+        "retained_folder": removed,
+    }))
+    .into_response())
+}
+
 /// `POST /claude/run` - run an installed Claude CLI turn as a separate account runtime.
 pub(crate) async fn claude_run(
     State(st): State<AppState>,
@@ -462,6 +682,9 @@ pub(crate) fn claude_harness_stream(
     account_runtime_images_for_remote(&run_context, &req.images, "Claude").map_err(ApiError)?;
     req.prompt = prompt;
     req.interactive_tool_approval = crate::claude_bridge::claude_interactive_tool_approval(&req);
+    let profile =
+        crate::account_profiles::resolve_for(st, "claude", req.account_profile_id.as_deref());
+    req.account_profile = Some(profile.clone());
     let endpoint = account_runtime_tool_endpoint(
         st,
         headers,
@@ -499,7 +722,12 @@ pub(crate) fn claude_harness_stream(
         None
     };
     Ok(Box::pin(account_runtime_harness_stream(
-        crate::claude_bridge::run_stream(req, redactions, approvals),
+        crate::account_profiles::observe_limits(
+            crate::claude_bridge::run_stream(req, redactions, approvals),
+            profile_store(st),
+            "claude",
+            &profile.id,
+        ),
         st,
         endpoint.as_ref(),
         false,

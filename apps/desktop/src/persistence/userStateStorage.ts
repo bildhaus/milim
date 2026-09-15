@@ -134,6 +134,22 @@ const ACCOUNT_RUNTIME_FIELDS = [
   ["pi", "piSessionId", "piLastSyncedMessageId"],
 ] as const;
 
+/// A binding field for one runtime: the base name, or the same name scoped to
+/// one account profile (`claudeSessionId:work`).
+function bindingFields(
+  previousRuntime: Record<string, unknown> | null | undefined,
+  nextRuntime: Record<string, unknown> | null | undefined,
+  base: string,
+): string[] {
+  const fields = new Set<string>();
+  for (const runtime of [previousRuntime, nextRuntime]) {
+    for (const field of Object.keys(runtime ?? {})) {
+      if (field === base || field.startsWith(`${base}:`)) fields.add(field);
+    }
+  }
+  return [...fields];
+}
+
 function runtimeBindingChanges(
   previous: Record<string, unknown> | undefined,
   next: Record<string, unknown>,
@@ -141,8 +157,11 @@ function runtimeBindingChanges(
   const previousRuntime = asRecord(previous?.accountRuntime);
   const nextRuntime = asRecord(next.accountRuntime);
   return ACCOUNT_RUNTIME_FIELDS.flatMap(([kind, idField, cursorField]) =>
-    previousRuntime?.[idField] === nextRuntime?.[idField]
-      && previousRuntime?.[cursorField] === nextRuntime?.[cursorField]
+    [idField, cursorField].every((base) =>
+        bindingFields(previousRuntime, nextRuntime, base).every(
+          (field) => previousRuntime?.[field] === nextRuntime?.[field],
+        ),
+      )
       ? []
       : [kind],
   );

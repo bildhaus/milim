@@ -2038,17 +2038,11 @@ impl UserDataStore {
         next_synced_message_id: Option<&str>,
     ) -> Result<Option<ControlThreadRecord>> {
         let thread_id = required_control_text(thread_id, "thread id")?;
-        let last_synced_field = match runtime_field {
-            "codexThreadId" => "codexLastSyncedMessageId",
-            "claudeSessionId" => "claudeLastSyncedMessageId",
-            "opencodeSessionId" => "opencodeLastSyncedMessageId",
-            "piSessionId" => "piLastSyncedMessageId",
-            _ => {
-                return Err(Error::InvalidRequest(format!(
-                    "unsupported account runtime session field: {runtime_field}"
-                )))
-            }
-        };
+        let last_synced_field = runtime_last_synced_field(runtime_field).ok_or_else(|| {
+            Error::InvalidRequest(format!(
+                "unsupported account runtime session field: {runtime_field}"
+            ))
+        })?;
         let expected_session_id = expected_session_id
             .map(str::trim)
             .filter(|value| !value.is_empty());
@@ -2100,7 +2094,7 @@ impl UserDataStore {
             let existing_cursor = root
                 .get("accountRuntime")
                 .and_then(serde_json::Value::as_object)
-                .and_then(|runtime| runtime.get(last_synced_field))
+                .and_then(|runtime| runtime.get(&last_synced_field))
                 .and_then(serde_json::Value::as_str)
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
@@ -2127,14 +2121,14 @@ impl UserDataStore {
                         serde_json::Value::String(cursor.to_string()),
                     );
                 } else if existing.as_deref() != next_session_id {
-                    runtime.remove(last_synced_field);
+                    runtime.remove(&last_synced_field);
                 }
             } else if let Some(runtime) = root
                 .get_mut("accountRuntime")
                 .and_then(serde_json::Value::as_object_mut)
             {
                 runtime.remove(runtime_field);
-                runtime.remove(last_synced_field);
+                runtime.remove(&last_synced_field);
                 if runtime.is_empty() {
                     root.remove("accountRuntime");
                 }
@@ -5583,6 +5577,37 @@ fn should_ignore_default_sessions_snapshot(
     Ok(messages == 0 && title == "New chat")
 }
 
+/// The cursor field paired with one session-binding field, including the
+/// per-account-profile form (`claudeSessionId:work` ->
+/// `claudeLastSyncedMessageId:work`). Returns `None` for anything that is not
+/// a canonical binding field.
+fn runtime_last_synced_field(runtime_field: &str) -> Option<String> {
+    let (session_base, cursor_base) = [
+        ("codexThreadId", "codexLastSyncedMessageId"),
+        ("claudeSessionId", "claudeLastSyncedMessageId"),
+        ("opencodeSessionId", "opencodeLastSyncedMessageId"),
+        ("piSessionId", "piLastSyncedMessageId"),
+    ]
+    .into_iter()
+    .find(|(session_base, _)| is_runtime_binding_field(runtime_field, session_base))?;
+    let profile = runtime_field.strip_prefix(session_base)?;
+    // A profile id is a single path-free segment, so a suffix carrying a
+    // separator is not a binding this method may write.
+    if profile.contains(['/', '\\', '"']) {
+        return None;
+    }
+    Some(format!("{cursor_base}{profile}"))
+}
+
+/// A canonical binding field: the base name, or the same name scoped to one
+/// account profile (`claudeSessionId:work`).
+fn is_runtime_binding_field(field: &str, base: &str) -> bool {
+    field == base
+        || field
+            .strip_prefix(base)
+            .is_some_and(|suffix| suffix.starts_with(':'))
+}
+
 fn merge_canonical_account_runtime(
     current: &str,
     incoming: &str,
@@ -5631,11 +5656,28 @@ fn merge_canonical_account_runtime(
         {
             continue;
         }
-        for field in [id_field, cursor_field] {
-            if let Some(value) = current_runtime.and_then(|runtime| runtime.get(field)) {
-                next_runtime_object.insert(field.to_string(), value.clone());
+        // An account runtime with several signed-in accounts suffixes its
+        // binding per profile (`claudeSessionId:work`). Those belong to the
+        // same kind and are server-owned in exactly the same way, so the
+        // unchanged-kind rule has to cover every field under the base name
+        // rather than only the default account's two.
+        let mut fields: Vec<String> = current_runtime
+            .into_iter()
+            .flat_map(|runtime| runtime.keys())
+            .chain(next_runtime_object.keys())
+            .filter(|field| {
+                is_runtime_binding_field(field, id_field)
+                    || is_runtime_binding_field(field, cursor_field)
+            })
+            .cloned()
+            .collect();
+        fields.sort();
+        fields.dedup();
+        for field in fields {
+            if let Some(value) = current_runtime.and_then(|runtime| runtime.get(&field)) {
+                next_runtime_object.insert(field, value.clone());
             } else {
-                next_runtime_object.remove(field);
+                next_runtime_object.remove(&field);
             }
         }
     }
@@ -7357,6 +7399,108 @@ mod tests {
                 expected_codex
             );
             assert_eq!(value["accountRuntime"]["claudeSessionId"], "claude-keep");
+        }
+    }
+
+    /// A runtime with several signed-in accounts holds one binding per
+    /// account. Those are server-owned in the same way as the default
+    /// account's, so an unchanged kind must protect every account's binding,
+    /// not only the unsuffixed pair.
+    #[test]
+    fn renderer_session_writes_cannot_clobber_a_per_account_binding() {
+        let store = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        store
+            .control_create_thread("thread-1", r#"{"id":"thread-1"}"#, "epoch-1")
+            .unwrap();
+        for (field, value) in [
+            ("claudeSessionId", "claude-default"),
+            ("claudeSessionId:work", "claude-work"),
+        ] {
+            store
+                .control_compare_and_set_runtime_session(
+                    "thread-1",
+                    field,
+                    None,
+                    Some(value),
+                    Some("assistant-1"),
+                )
+                .unwrap()
+                .unwrap();
+        }
+
+        // A renderer write that omits the bindings entirely must not drop them.
+        store
+            .apply_sessions_delta(SessionsDelta {
+                meta_json: r#"{"state":{"activeId":"thread-1"},"version":0}"#.into(),
+                session_order: vec!["thread-1".into()],
+                upserts: vec![SessionDelta {
+                    id: "thread-1".into(),
+                    session_json: Some(r#"{"id":"thread-1","title":"Renderer"}"#.into()),
+                    runtime_binding_changes: Vec::new(),
+                    base_message_count: 0,
+                    message_count: 0,
+                    preserve_messages: true,
+                    messages: Vec::new(),
+                }],
+                deleted_session_ids: Vec::new(),
+            })
+            .unwrap();
+
+        let thread = store.control_thread("thread-1").unwrap().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&thread.session_json).unwrap();
+        let runtime = &value["accountRuntime"];
+        assert_eq!(runtime["claudeSessionId"], "claude-default");
+        assert_eq!(runtime["claudeSessionId:work"], "claude-work");
+        assert_eq!(runtime["claudeLastSyncedMessageId:work"], "assistant-1");
+
+        // Clearing one account leaves the other account's binding intact.
+        store
+            .control_compare_and_set_runtime_session(
+                "thread-1",
+                "claudeSessionId:work",
+                Some("claude-work"),
+                None,
+                None,
+            )
+            .unwrap()
+            .unwrap();
+        let thread = store.control_thread("thread-1").unwrap().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&thread.session_json).unwrap();
+        assert_eq!(value["accountRuntime"]["claudeSessionId"], "claude-default");
+        assert!(value["accountRuntime"]
+            .get("claudeSessionId:work")
+            .is_none());
+        assert!(value["accountRuntime"]
+            .get("claudeLastSyncedMessageId:work")
+            .is_none());
+    }
+
+    /// Binding field names reach SQLite as JSON keys, so only canonical
+    /// shapes are writable.
+    #[test]
+    fn unrecognized_binding_fields_are_refused() {
+        let store = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        store
+            .control_create_thread("thread-1", r#"{"id":"thread-1"}"#, "epoch-1")
+            .unwrap();
+        for field in [
+            "claudeSessionIdWork",
+            "somethingElse",
+            "claudeSessionId:../escape",
+            r#"claudeSessionId:a"b"#,
+        ] {
+            assert!(
+                store
+                    .control_compare_and_set_runtime_session(
+                        "thread-1",
+                        field,
+                        None,
+                        Some("value"),
+                        None,
+                    )
+                    .is_err(),
+                "{field} must not be writable"
+            );
         }
     }
 

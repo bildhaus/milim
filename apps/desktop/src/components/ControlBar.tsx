@@ -14,6 +14,7 @@ import { REASONING_EFFORT_LABEL, reasoningEffortForThread } from "../lib/reasoni
 import { ChevronDown, Cube, Lightbulb, Pin, Sliders } from "./icons";
 import { ModelPicker, type ModelPickerSelection } from "./ModelPicker";
 import { ProviderIcon, providerBrandForModel } from "./ProviderIcon";
+import { AccountProfileChip } from "./AccountProfileChip";
 import { RunTimeline } from "./RunTimeline";
 
 function Shield({ size = 13 }: { size?: number }) {
@@ -105,6 +106,8 @@ export function ControlBar({
   onToggleMemory,
   planMode,
   onTogglePlanMode,
+  accountProfile,
+  onAccountProfile,
   privacy,
   onPrivacy,
   toolApproval,
@@ -137,6 +140,9 @@ export function ControlBar({
   onToggleMemory: () => void;
   planMode: boolean;
   onTogglePlanMode: () => void;
+  /** Selected account for the active account runtime: `auto`, an id, or none. */
+  accountProfile?: string;
+  onAccountProfile?: (profileId: string | undefined) => void;
   privacy: PrivacyMode;
   onPrivacy: (privacy: PrivacyMode) => void;
   toolApproval: ToolApprovalMode;
@@ -312,6 +318,14 @@ export function ControlBar({
             <span className="chip-label">Plan</span>
             <span className="chip-detail">Read-only</span>
           </button>
+        )}
+
+        {onAccountProfile && (
+          <AccountProfileChip
+            model={model}
+            selected={accountProfile}
+            onSelect={onAccountProfile}
+          />
         )}
 
         <div className="context-cluster">

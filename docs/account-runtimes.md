@@ -10,7 +10,26 @@ On macOS and Linux, Finder, Dock, and desktop-entry launches do not inherit the 
 
 The Providers panel shows each detected CLI version and compares it with the latest stable version published for that CLI. An available update enables and highlights the Update action; a current runtime shows a disabled Up to date action. If the release check is unavailable, the action remains neutral and usable. Updating requires a second confirmation, then invokes that runtime's own updater (`codex update`, `claude update`, `opencode upgrade --pure`, or `pi update self --no-approve`) and rechecks the installed version. Finish active turns first. Milim does not replace these tools' installers, credentials, or standalone configuration.
 
-Each Milim thread owns a separate native binding and last-synced message cursor for Codex, Claude, OpenCode, and Pi. Rust preallocates Claude's UUID before its first turn and durably persists IDs established by Codex, OpenCode, or Pi into canonical thread state and the current run record. Later turns—including queued turns accepted before the prior ID arrived and the first turn after an app restart—refresh and resume that adapter's binding. A resumed adapter receives only messages added after its cursor, so switching runtimes preserves intervening Milim context without replaying content the native session already owns. Switching adapters also preserves the other bindings. Manual `/compact` still creates a visible Milim checkpoint, but its summary call is ephemeral and clears only the selected runtime's stored native id afterward.
+## Multiple accounts per runtime
+
+Codex and Claude keep their credentials, settings, and native transcripts inside one configuration home, and each reads an environment variable that relocates it: `CODEX_HOME` and `CLAUDE_CONFIG_DIR`. An account profile is a named alternate home. Selecting one points that CLI at a different signed-in account for a turn. Milim does not read, copy, move, or store any credential to do this; it supplies only the directory, and the CLI continues to own whatever it keeps there. OpenCode and Pi do not relocate their configuration this way and are unaffected.
+
+Every runtime starts with one implicit **Default** profile, which is its own home with no override applied. An install that never adds a profile behaves exactly as it did before. Adding a profile in Providers creates an empty folder under Milim's runtime data and shows the command that signs it in (`CLAUDE_CONFIG_DIR="..." claude auth login`, `CODEX_HOME="..." codex login`); that sign-in happens in the user's own terminal or through Codex's existing login flow scoped to the profile. Removing a profile forgets it in Milim and leaves the folder on disk, because it holds that account's credentials and history.
+
+Because account-runtime children inherit the user's environment, selecting the Default profile also clears an inherited `CODEX_HOME` or `CLAUDE_CONFIG_DIR` from Milim's own process, so the default account cannot be silently routed into another account's home.
+
+Each chat selects an account per runtime from the account chip, which appears only once a second account exists. The choice is one of:
+
+- **Auto** re-picks before every turn, preferring the enabled account with the most reported headroom and skipping any that is currently rate limited. With nothing measured it stays on Default, so Auto never drifts on a fresh install.
+- **A named account** pins every turn in that chat to it, including an account excluded from Auto.
+
+The selected account is frozen into the run configuration at acceptance alongside model, workspace, privacy, and approval mode, so an account finishing a cooldown mid-turn cannot move a run that is already in flight. Managed Workers inherit their parent thread's account, so a delegated run bills the same subscription. Ephemeral side calls such as `/compact` summaries use the chat's account rather than the runtime default.
+
+What Milim knows about an account's limits is only what that runtime reports, since Milim holds no credential for it. Codex publishes its own 5-hour and weekly percentages through `account/rateLimits/read`, so Auto can prefer the account with the most room before a turn starts. Claude reports a limit only when a turn reaches one, so its accounts show usage after a capped turn: Milim records the reported reset instant as a cooldown, and a turn that Claude rejects ends with a nonterminal notice naming the account Auto will use next. Milim does not retry the rejected turn on another account: that turn's prompt was built for a native session belonging to the exhausted account, and the next account holds none of that history. The following turn resolves Auto again and rebuilds its prompt for whichever account it picks.
+
+Account profiles require the desktop's canonical store. A standalone `milim serve` has no canonical user data, so every runtime there uses its own configuration home.
+
+Each Milim thread owns a separate native binding and last-synced message cursor for Codex, Claude, OpenCode, and Pi. Rust preallocates Claude's UUID before its first turn and durably persists IDs established by Codex, OpenCode, or Pi into canonical thread state and the current run record. Later turns—including queued turns accepted before the prior ID arrived and the first turn after an app restart—refresh and resume that adapter's binding. A resumed adapter receives only messages added after its cursor, so switching runtimes preserves intervening Milim context without replaying content the native session already owns. Switching adapters also preserves the other bindings. A native session also lives inside one account's configuration home, so bindings are held per account as well as per adapter: a chat that switches accounts starts a fresh native session there and receives the thread's full visible history, while the previous account keeps its own session and cursor untouched. The default account keeps the unsuffixed binding field, so threads that predate account profiles resume exactly as before. Manual `/compact` still creates a visible Milim checkpoint, but its summary call is ephemeral and clears only the selected runtime's stored native id afterward.
 
 Every account-runtime turn must report an explicit completion, error, or intentional terminal notice. If a runtime exits or closes its stream without one, Milim shows a runtime error instead of treating an empty response as success.
 
@@ -66,13 +85,13 @@ Codex uses the installed Codex CLI app-server.
 
 | Surface | Behavior |
 |---|---|
-| `GET /codex/account` | Reads the current Codex account state. |
+| `GET /codex/account` | Reads the current Codex account state. Accepts `?profile=`; every Codex surface below takes the same parameter. |
 | `POST /codex/login/device` | Starts the ChatGPT browser login flow. This is what the desktop Providers UI uses. |
 | `POST /codex/login/chatgpt-device` | Starts the ChatGPT device-code login flow. |
 | `POST /codex/login/api-key` | Passes `{ "api_key": "..." }` to Codex app-server login. Milim does not store this key. |
 | `POST /codex/logout` | Logs out through Codex app-server. |
 | `GET /codex/models` | Lists Codex models and forwards Codex model metadata to the picker. |
-| `GET /codex/rate-limits` | Reads Codex account rate-limit state. |
+| `GET /codex/rate-limits` | Reads Codex account rate-limit state. Accepts `?profile=`, and records the reported window percentages for that account. |
 | `GET /codex/threads` | Lists active or archived interactive Codex threads in cursor-based pages of 25, with optional `search`; `all=true` drains the matching catalog into one response. |
 | `GET /codex/threads/{id}` | Reads one importable user/assistant transcript without changing or deleting the Codex thread. |
 | `POST /codex/run` | Starts or resumes a Codex app-server thread with Milim's selected tool approval and sandbox policy. |
@@ -113,7 +132,7 @@ Claude CLI integration boundaries:
 - Milim uses Claude's documented `claude -p` stream-JSON interface and matches each structured `tool_result` to its `tool_use_id`.
 - Milim does not bundle Claude Code, proxy Claude access, or sell Claude access.
 - Authentication and direct Anthropic communication are handled by the official Claude CLI; Milim does not offer Claude.ai login.
-- Milim does not manage, store, or receive Claude credentials.
+- Milim does not manage, store, or receive Claude credentials. Account profiles select a configuration folder for the CLI; the CLI still owns whatever credential it keeps there.
 - Claude CLI usage remains subject to Anthropic's terms.
 - Anthropic documents API-key or supported cloud-provider authentication as the unambiguous path for third-party and commercial integrations; Milim does not represent subscription compatibility as an Anthropic partnership or entitlement.
 - Some permission modes may allow Claude to run local tools and commands.
@@ -121,7 +140,7 @@ Claude CLI integration boundaries:
 
 | Surface | Behavior |
 |---|---|
-| `GET /claude/status` | Checks installed CLI availability, auth state, account metadata, model aliases, and optional per-alias image capability metadata. |
+| `GET /claude/status` | Checks installed CLI availability, auth state, account metadata, model aliases, and optional per-alias image capability metadata. Accepts `?profile=` to read one account profile. |
 | `GET /claude/threads` | Lists locally retained top-level Claude chats in cursor-based pages of 25, with optional `search`; `all=true` returns the complete matching catalog. |
 | `GET /claude/threads/{id}` | Reads the selected chat's active importable user/assistant branch without changing its Claude transcript. |
 | `POST /claude/run` | Runs `claude -p --input-format stream-json --output-format stream-json` with Milim's selected tool approval mode. |

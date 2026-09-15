@@ -31,6 +31,10 @@ import type {
   WorkerRunRecord,
 } from "../api";
 import {
+  DEFAULT_ACCOUNT_PROFILE_ID,
+  isAccountProfileRuntime,
+} from "../api.js";
+import {
   extractArtifactsFromMessage,
   normalizeArtifactDisposition,
   normalizeArtifactBrowserUrl,
@@ -170,6 +174,12 @@ export interface ThreadSettings {
   reasoningEffortOverrides?: Record<string, ReasoningEffort>;
   /** Per-model provider sampling overrides; absent values inherit model/server defaults. */
   generationOverrides?: GenerationOverrides;
+  /**
+   * Which signed-in account of an account runtime this thread uses, keyed by
+   * runtime. `auto` re-picks per turn; an id pins one account; an absent
+   * runtime uses the CLI's own configuration home.
+   */
+  accountProfiles?: Record<string, string>;
   goal: GoalSettings;
 }
 
@@ -215,6 +225,12 @@ export interface Session {
   previewRuntime?: SessionPreviewRuntime;
   settings?: ThreadSettings;
   threadWorkspace?: ThreadWorkspace;
+  /**
+   * Native session bindings owned by Rust. Runtimes with several signed-in
+   * accounts additionally carry one binding per account, suffixed with its
+   * profile id (`claudeSessionId:work`); the unsuffixed field is the default
+   * account's.
+   */
   accountRuntime?: {
     codexThreadId?: string;
     codexLastSyncedMessageId?: string;
@@ -224,6 +240,7 @@ export interface Session {
     opencodeLastSyncedMessageId?: string;
     piSessionId?: string;
     piLastSyncedMessageId?: string;
+    [scopedBinding: string]: string | undefined;
   };
   pendingHotSwap?: PendingHotSwap;
   retryWorkspace?: RetryWorkspace;
@@ -459,7 +476,13 @@ function normalizeAccountRuntime(
     raw.piLastSyncedMessageId.trim()
       ? raw.piLastSyncedMessageId.trim()
       : undefined;
-  return codexThreadId || claudeSessionId || opencodeSessionId || piSessionId
+  // Bindings for non-default accounts are suffixed with their profile id.
+  // Rust owns them; carry them through rather than dropping every account
+  // except the default one on each normalization.
+  const scoped = scopedRuntimeBindings(raw);
+  const hasDefaultBinding =
+    codexThreadId || claudeSessionId || opencodeSessionId || piSessionId;
+  return hasDefaultBinding || Object.keys(scoped).length
     ? {
         codexThreadId,
         codexLastSyncedMessageId,
@@ -469,8 +492,43 @@ function normalizeAccountRuntime(
         opencodeLastSyncedMessageId,
         piSessionId,
         piLastSyncedMessageId,
+        ...scoped,
       }
     : undefined;
+}
+
+const RUNTIME_SESSION_FIELDS = [
+  ["codexThreadId", "codexLastSyncedMessageId"],
+  ["claudeSessionId", "claudeLastSyncedMessageId"],
+  ["opencodeSessionId", "opencodeLastSyncedMessageId"],
+  ["piSessionId", "piLastSyncedMessageId"],
+] as const;
+
+/**
+ * Per-account bindings: `<field>:<profileId>`. A cursor is kept only when its
+ * own session id is present, matching how the default account's pair behaves.
+ */
+function scopedRuntimeBindings(
+  raw: Record<string, unknown>,
+): Record<string, string> {
+  const text = (key: string): string | undefined => {
+    const value = raw[key];
+    return typeof value === "string" && value.trim() ? value.trim() : undefined;
+  };
+  const out: Record<string, string> = {};
+  for (const [sessionBase, cursorBase] of RUNTIME_SESSION_FIELDS) {
+    const prefix = `${sessionBase}:`;
+    for (const key of Object.keys(raw)) {
+      if (!key.startsWith(prefix)) continue;
+      const session = text(key);
+      if (!session) continue;
+      out[key] = session;
+      const profile = key.slice(prefix.length);
+      const cursor = text(`${cursorBase}:${profile}`);
+      if (cursor) out[`${cursorBase}:${profile}`] = cursor;
+    }
+  }
+  return out;
 }
 
 function normalizePendingHotSwap(value: unknown): PendingHotSwap | undefined {
@@ -756,6 +814,9 @@ function normalizeSettings(
   const generationOverrides = normalizeGenerationOverrides(next.generationOverrides);
   if (Object.keys(generationOverrides).length) next.generationOverrides = generationOverrides;
   else delete next.generationOverrides;
+  const accountProfiles = normalizeAccountProfiles(next.accountProfiles);
+  if (Object.keys(accountProfiles).length) next.accountProfiles = accountProfiles;
+  else delete next.accountProfiles;
   if (
     next.delegationPolicy !== "off" &&
     next.delegationPolicy !== "ask" &&
@@ -767,6 +828,21 @@ function normalizeSettings(
     next.workerModel = DEFAULT_THREAD_SETTINGS.workerModel;
   }
   return next;
+}
+
+/** Keep only non-empty selections for runtimes that support accounts. */
+function normalizeAccountProfiles(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out: Record<string, string> = {};
+  for (const [runtime, profile] of Object.entries(value as Record<string, unknown>)) {
+    if (!isAccountProfileRuntime(runtime)) continue;
+    if (typeof profile !== "string") continue;
+    const id = profile.trim();
+    // An explicit "default" is the same as no selection at all.
+    if (!id || id === DEFAULT_ACCOUNT_PROFILE_ID) continue;
+    out[runtime] = id;
+  }
+  return out;
 }
 
 function sameThreadOrigin(a: Session["origin"], b: Session["origin"]): boolean {

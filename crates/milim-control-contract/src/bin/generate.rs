@@ -55,6 +55,7 @@ fn generated_fixture() -> String {
         ControlCommandKindV1::ThreadSetModel,
         ControlCommandKindV1::ThreadSetAgent,
         ControlCommandKindV1::ThreadSetExecutionSettings,
+        ControlCommandKindV1::ThreadSetAccountProfile,
         ControlCommandKindV1::ThreadLinkAdd,
         ControlCommandKindV1::ThreadLinkRemove,
         ControlCommandKindV1::MessageDelete,
@@ -108,7 +109,9 @@ fn generated_contract() -> String {
             let declaration = <$ty as TS>::decl()
                 .replacen("type ", "export type ", 1)
                 .replace("bigint", "number");
-            output.push_str(&declaration);
+            // ts-rs leaves a trailing space where a doc comment splits a
+            // field list, which `git diff --check` rejects.
+            output.push_str(&trim_line_ends(&declaration));
             output.push_str("\n\n");
         })+};
     }
@@ -155,6 +158,15 @@ fn generated_contract() -> String {
     output.truncate(output.trim_end().len());
     output.push('\n');
     output
+}
+
+/// Strip trailing horizontal whitespace from every line, keeping line breaks.
+fn trim_line_ends(value: &str) -> String {
+    value
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn write(path: &Path, output: &str) {

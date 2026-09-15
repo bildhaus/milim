@@ -2050,6 +2050,126 @@ export const PI_MODEL_PREFIX = "pi:";
 export type AccountRuntimeKind = "codex" | "claude" | "opencode" | "pi";
 export type AccountRuntimeEnablement = Record<AccountRuntimeKind, boolean>;
 
+/**
+ * Runtimes that keep their whole account state in one relocatable folder, so
+ * Milim can point them at a second signed-in account without touching a
+ * credential.
+ */
+export type AccountProfileRuntime = "claude" | "codex";
+export const ACCOUNT_PROFILE_RUNTIMES: readonly AccountProfileRuntime[] = [
+  "claude",
+  "codex",
+];
+/** The runtime's own configuration home. */
+export const DEFAULT_ACCOUNT_PROFILE_ID = "default";
+/** Let Milim pick the account with the most headroom for each turn. */
+export const AUTO_ACCOUNT_PROFILE_ID = "auto";
+
+export function isAccountProfileRuntime(
+  value: string,
+): value is AccountProfileRuntime {
+  return (ACCOUNT_PROFILE_RUNTIMES as readonly string[]).includes(value);
+}
+
+/** The shell command that signs a profile in, per platform. */
+export interface AccountProfileLoginHint {
+  variable: string;
+  directory: string;
+  posix: string;
+  powershell: string;
+}
+
+export interface AccountProfile {
+  id: string;
+  runtime: AccountProfileRuntime;
+  label: string;
+  /** Absent for the runtime's own configuration home. */
+  config_dir?: string;
+  is_default: boolean;
+  enabled: boolean;
+  priority: number;
+  /** Unix ms until which this account is known to be rate limited. */
+  cooled_until_ms?: number;
+  cooldown_kind?: string;
+  short_window_percent?: number;
+  long_window_percent?: number;
+  updated_at_ms?: number;
+}
+
+export interface AccountProfileList {
+  runtime: AccountProfileRuntime;
+  profiles: AccountProfile[];
+  /** The profile Auto would choose right now. */
+  auto_selection: string;
+}
+
+export async function listAccountProfiles(
+  runtime: AccountProfileRuntime,
+  signal?: AbortSignal,
+): Promise<AccountProfileList> {
+  return await parseJsonResponse<AccountProfileList>(
+    await authFetch(
+      `${BASE}/account-runtimes/${runtime}/profiles`,
+      signal ? { signal } : undefined,
+    ),
+    `${runtime} account list failed`,
+  );
+}
+
+export async function createAccountProfile(
+  runtime: AccountProfileRuntime,
+  label: string,
+  configDir?: string,
+): Promise<{ profile: AccountProfile; login_hint?: AccountProfileLoginHint }> {
+  return await parseJsonResponse(
+    await authFetch(`${BASE}/account-runtimes/${runtime}/profiles`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label, config_dir: configDir }),
+    }),
+    `Adding a ${runtime} account failed`,
+  );
+}
+
+export async function updateAccountProfile(
+  runtime: AccountProfileRuntime,
+  id: string,
+  patch: { label?: string; enabled?: boolean; priority?: number },
+): Promise<{ profile: AccountProfile }> {
+  return await parseJsonResponse(
+    await authFetch(`${BASE}/account-runtimes/${runtime}/profiles/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    }),
+    `Updating the ${runtime} account failed`,
+  );
+}
+
+/**
+ * Forget an account. Its folder stays on disk: it holds the runtime's own
+ * credentials and native transcripts, which are not Milim's to delete.
+ */
+export async function deleteAccountProfile(
+  runtime: AccountProfileRuntime,
+  id: string,
+): Promise<{ removed: boolean; retained_folder?: string }> {
+  return await parseJsonResponse(
+    await authFetch(`${BASE}/account-runtimes/${runtime}/profiles/${id}`, {
+      method: "DELETE",
+    }),
+    `Removing the ${runtime} account failed`,
+  );
+}
+
+/** `?profile=` for a runtime call, omitted for the default account. */
+function accountProfileQuery(profileId?: string): string {
+  const id = profileId?.trim();
+  return id && id !== DEFAULT_ACCOUNT_PROFILE_ID
+    ? `?profile=${encodeURIComponent(id)}`
+    : "";
+}
+
 export const DEFAULT_ACCOUNT_RUNTIME_ENABLEMENT: AccountRuntimeEnablement = {
   codex: true,
   claude: true,
@@ -2473,6 +2593,10 @@ export interface CodexAccountResponse {
     email?: string;
     planType?: string;
   } | null;
+  /** Which account this response describes. */
+  profile_id?: string;
+  profile_label?: string;
+  login_hint?: AccountProfileLoginHint;
 }
 
 export interface CodexThreadSummary {
@@ -2530,6 +2654,10 @@ export interface ClaudeStatusResponse {
   available: boolean;
   authenticated: boolean;
   warning?: boolean;
+  /** Which account this status describes. */
+  profile_id?: string;
+  profile_label?: string;
+  login_hint?: AccountProfileLoginHint;
   auth?: {
     loggedIn?: boolean;
     authMethod?: string;
@@ -2633,6 +2761,11 @@ export interface HarnessRunRequest {
   interactive_tool_approval?: boolean;
   plan_mode?: boolean;
   allow_session_recovery?: boolean;
+  /**
+   * Which signed-in account of the harness to run as: a profile id, `auto`, or
+   * absent for the runtime's own configuration home.
+   */
+  account_profile_id?: string;
   milim_context?: HarnessMilimContext;
 }
 
@@ -2794,23 +2927,41 @@ export function isCliPathWarningMessage(message?: string | null): boolean {
 export async function getCodexAccount(
   refresh = false,
   signal?: AbortSignal,
+  profileId?: string,
 ): Promise<CodexAccountResponse> {
   const url = new URL(`${BASE}/codex/account`);
   if (refresh) url.searchParams.set("refresh", "true");
+  if (profileId && profileId !== DEFAULT_ACCOUNT_PROFILE_ID) {
+    url.searchParams.set("profile", profileId);
+  }
   return await parseJsonResponse<CodexAccountResponse>(
     await authFetch(url, signal ? { signal } : undefined),
     "Codex account check failed",
   );
 }
 
-export async function logoutCodex(): Promise<void> {
+export async function logoutCodex(profileId?: string): Promise<void> {
   await parseJsonResponse<unknown>(
-    await authFetch(`${BASE}/codex/logout`, { method: "POST" }),
+    await authFetch(`${BASE}/codex/logout${accountProfileQuery(profileId)}`, {
+      method: "POST",
+    }),
     "Codex logout failed",
   );
 }
 
-export async function getCodexRateLimits(force = false): Promise<unknown> {
+export async function getCodexRateLimits(
+  force = false,
+  profileId?: string,
+): Promise<unknown> {
+  // The cache is keyed to the default account only; an explicit profile read
+  // always goes to Codex so a per-account usage refresh is never stale.
+  const query = accountProfileQuery(profileId);
+  if (query) {
+    return parseJsonResponse<unknown>(
+      await authFetch(`${BASE}/codex/rate-limits${query}`),
+      "Codex rate limit check failed",
+    );
+  }
   if (!force && codexRateLimitCache && codexRateLimitCache.expiresAt > Date.now()) {
     return codexRateLimitCache.value;
   }
@@ -2986,9 +3137,13 @@ async function discoverAccountRuntimeModels(
 
 export async function getClaudeStatus(
   signal?: AbortSignal,
+  profileId?: string,
 ): Promise<ClaudeStatusResponse> {
   return await parseJsonResponse<ClaudeStatusResponse>(
-    await authFetch(`${BASE}/claude/status`, signal ? { signal } : undefined),
+    await authFetch(
+      `${BASE}/claude/status${accountProfileQuery(profileId)}`,
+      signal ? { signal } : undefined,
+    ),
     "Claude CLI status check failed",
   );
 }
@@ -3034,12 +3189,16 @@ export async function streamCodexDeviceLogin(
   onEvent: (ev: CodexLoginEvent) => void,
   signal?: AbortSignal,
   method: "chatgpt" | "chatgpt_device_code" = "chatgpt",
+  profileId?: string,
 ): Promise<void> {
   const path =
     method === "chatgpt_device_code"
       ? "/codex/login/chatgpt-device"
       : "/codex/login/device";
-  const resp = await authFetch(`${BASE}${path}`, { method: "POST", signal });
+  const resp = await authFetch(
+    `${BASE}${path}${accountProfileQuery(profileId)}`,
+    { method: "POST", signal },
+  );
   if (!resp.ok || !resp.body)
     throw new Error(
       await responseErrorMessage(resp, `Codex login HTTP ${resp.status}`),

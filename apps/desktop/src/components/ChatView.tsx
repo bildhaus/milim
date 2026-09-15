@@ -195,6 +195,11 @@ import {
   GIT_STATUS_REFRESH_INTERVAL_MS,
   shouldRefreshGitStatus,
 } from "../lib/gitRefresh";
+import {
+  accountProfileForModel,
+  accountProfileRuntimeForModel,
+  withAccountProfile,
+} from "../lib/accountProfiles";
 import { reasoningEffortForThread, reasoningEffortOverridesWithSelection } from "../lib/reasoningEffort";
 import { managedPreviewRuntimeForTurn, type ManagedPreviewRuntimeContext } from "../lib/managedPreviewRuntime";
 import {
@@ -340,6 +345,7 @@ import {
 } from "../lib/canonicalControl.js";
 import { createChatMessageId } from "../lib/messageIds.js";
 import {
+  syncCanonicalAccountProfile,
   syncCanonicalExecutionSettings,
   syncCanonicalThreadAgent,
 } from "../lib/canonicalThreadMutations.js";
@@ -1876,6 +1882,7 @@ export function ChatView({
     planMode,
     reasoningEffortOverrides,
     generationOverrides,
+    accountProfiles,
     goal,
   } = threadSettings;
   const visibleApprovalPrompts = useMemo(
@@ -5010,6 +5017,42 @@ export function ChatView({
     await promise;
   }
 
+  /**
+   * Which signed-in account of one account runtime this thread uses. The
+   * canonical store owns it, so the thread's next turn resolves against the
+   * value Rust accepted rather than an optimistic local one.
+   */
+  async function writeCanonicalAccountProfile(
+    sessionId: string,
+    runtime: string,
+    profileId: string | null,
+  ): Promise<void> {
+    const previous = canonicalThreadMutationWritesRef.current.get(sessionId)?.catch(() => undefined)
+      ?? Promise.resolve();
+    const promise = previous.then(async () => {
+      await syncCanonicalAccountProfile(sessionId, runtime, profileId);
+      updateThreadSettings(sessionId, {
+        accountProfiles: withAccountProfile(
+          useSessions.getState().sessions.find((s) => s.id === sessionId)?.settings
+            ?.accountProfiles,
+          runtime,
+          profileId,
+        ),
+      });
+    }).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      setChatNotice({ tone: "error", message });
+      throw error;
+    });
+    canonicalThreadMutationWritesRef.current.set(sessionId, promise);
+    void promise.finally(() => {
+      if (canonicalThreadMutationWritesRef.current.get(sessionId) === promise) {
+        canonicalThreadMutationWritesRef.current.delete(sessionId);
+      }
+    }).catch(() => {});
+    await promise;
+  }
+
   async function writeCanonicalThreadAgent(
     sessionId: string,
     agentId: string | null,
@@ -5328,6 +5371,9 @@ export function ChatView({
         reasoning_effort: reasoningEffort,
         images: runtimeInput.images,
         persist_session: false,
+        // A side call bills a subscription, so it uses the same account as
+        // this chat's turns rather than the runtime's default.
+        account_profile_id: accountProfileForModel(accountProfiles, model),
         tool_approval_policy: "guarded",
         tool_approval_grant: false,
         plan_mode: true,
@@ -5359,6 +5405,9 @@ export function ChatView({
         reasoning_effort: reasoningEffort,
         images: runtimeInput.images,
         persist_session: false,
+        // A side call bills a subscription, so it uses the same account as
+        // this chat's turns rather than the runtime's default.
+        account_profile_id: accountProfileForModel(accountProfiles, model),
         tool_approval_policy: "guarded",
         tool_approval_grant: false,
         plan_mode: true,
@@ -8811,6 +8860,16 @@ export function ChatView({
                 }
                 planMode={planMode}
                 onTogglePlanMode={() => setPlanModeActive(!planMode)}
+                accountProfile={accountProfileForModel(accountProfiles, model)}
+                onAccountProfile={(profileId) => {
+                  const runtime = accountProfileRuntimeForModel(model);
+                  if (!runtime) return;
+                  void writeCanonicalAccountProfile(
+                    activeId,
+                    runtime,
+                    profileId ?? null,
+                  ).catch(() => {});
+                }}
                 privacy={privacy}
                 onPrivacy={(next) =>
                   void writeCanonicalExecutionSettings(

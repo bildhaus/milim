@@ -6,6 +6,7 @@
 //! unchanged: streamed and non-streamed chat completions, model listing, and
 //! embeddings, with bearer auth + loopback trust, CORS, and a body-size cap.
 
+mod account_profiles;
 mod account_runtime_events;
 mod account_runtime_update;
 mod auth;
@@ -36,7 +37,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::routing::{delete, get, post, put};
+use axum::routing::{delete, get, patch, post, put};
 use axum::Router;
 
 use milim_control_contract::{
@@ -294,6 +295,15 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/account-runtimes/{runtime}/update",
             post(routes::account_runtime_update),
+        )
+        // Multiple signed-in accounts per account runtime
+        .route(
+            "/account-runtimes/{runtime}/profiles",
+            get(routes::account_profiles_list).post(routes::account_profiles_create),
+        )
+        .route(
+            "/account-runtimes/{runtime}/profiles/{id}",
+            patch(routes::account_profiles_update).delete(routes::account_profiles_delete),
         )
         .route(
             "/internal/claude-approvals/{run_id}/mcp",
