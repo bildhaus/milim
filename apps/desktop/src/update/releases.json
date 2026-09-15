@@ -1,4 +1,38 @@
 {
+  "0.2.67": {
+    "version": "0.2.67",
+    "summary": "Milim 0.2.67 lets you connect more than one Codex or Claude account and moves each chat to whichever one has room left.",
+    "items": [
+      {
+        "id": "multiple-account-runtime-logins",
+        "eyebrow": "Accounts and providers",
+        "title": "Connect more than one Codex or Claude account",
+        "description": "Add a second signed-in Codex or Claude account in Providers and keep both available, each with its own folder, settings, and chat history.",
+        "details": [
+          "Add an account in Providers, then run the sign-in command Milim shows for it in your terminal",
+          "Keep each account's credentials inside its own folder; Milim points the CLI at the folder and never reads or stores a credential",
+          "See each account's reported usage and any active rate-limit cooldown beside it",
+          "Forget an account in Milim without deleting its folder, credentials, or history from disk"
+        ],
+        "accent": "var(--accent)",
+        "icon": "plug"
+      },
+      {
+        "id": "per-chat-account-selection",
+        "eyebrow": "Chat routing",
+        "title": "Pick an account per chat, or let Milim choose",
+        "description": "Each chat pins a specific account or leaves it on Auto, which prefers whichever account has the most room left and steps around one that is rate limited.",
+        "details": [
+          "Choose an account from the chat's account chip, which appears once a second account exists",
+          "Let Auto re-pick before every turn, skipping an account that is currently rate limited",
+          "Start a fresh session with full conversation history when a chat moves to another account, leaving the previous account's session untouched",
+          "Keep delegated Worker runs and compaction summaries on the same account as the chat that started them"
+        ],
+        "accent": "var(--accent)",
+        "icon": "file-text"
+      }
+    ]
+  },
   "0.2.66": {
     "version": "0.2.66",
     "summary": "Milim 0.2.66 makes Gemini models usable with tools again and lets you retry or delete a failed reply cleanly.",
