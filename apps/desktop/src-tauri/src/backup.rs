@@ -19,8 +19,12 @@ const BACKUP_STATE_KEYS: &[&str] = &[
     APPEARANCE_STATE_KEY,
     "milim.window.alwaysOnTop",
     "milim.sessionDrafts",
-    "milim.mobile.lan",
 ];
+/// Settings that open network listeners. They are never exported, and older
+/// backups that carry them are accepted but the values are dropped, so a
+/// restore cannot silently expose this desktop on the LAN. The current device
+/// setting is left untouched.
+const BACKUP_NETWORK_EXPOSURE_KEYS: &[&str] = &["milim.mobile.lan"];
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -152,8 +156,12 @@ fn build_backup(store: &milim_storage::UserDataStore) -> std::result::Result<Mil
 fn read_backup(path: &Path) -> std::result::Result<(MilimBackup, u64), String> {
     let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
     let file = File::open(path).map_err(|error| error.to_string())?;
-    let backup: MilimBackup = serde_json::from_reader(BufReader::new(file))
+    let mut backup: MilimBackup = serde_json::from_reader(BufReader::new(file))
         .map_err(|error| format!("Malformed backup JSON: {error}"))?;
+    backup
+        .state
+        .entries
+        .retain(|key, _| !BACKUP_NETWORK_EXPOSURE_KEYS.contains(&key.as_str()));
     if backup.schema_version != BACKUP_SCHEMA_VERSION {
         return Err(format!(
             "Unsupported backup schema version {}.",
@@ -386,6 +394,32 @@ mod tests {
             store.get_json("milim.settings").unwrap().unwrap().len(),
             65 * 1024 * 1024 + 2
         );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn restore_never_carries_network_exposure_settings() {
+        assert!(BACKUP_NETWORK_EXPOSURE_KEYS
+            .iter()
+            .all(|key| !BACKUP_STATE_KEYS.contains(key)));
+        let path = std::env::temp_dir().join(format!(
+            "milim-backup-lan-test-{}-{}.json",
+            std::process::id(),
+            now_timestamp_ms()
+        ));
+        let mut backup = empty_backup();
+        backup
+            .state
+            .entries
+            .insert("milim.mobile.lan".into(), Value::Bool(true));
+        backup
+            .state
+            .entries
+            .insert("milim.settings".into(), serde_json::json!({}));
+        write_backup(&path, &backup).unwrap();
+        let (restored, _) = read_backup(&path).unwrap();
+        assert!(!restored.state.entries.contains_key("milim.mobile.lan"));
+        assert!(restored.state.entries.contains_key("milim.settings"));
         fs::remove_file(path).unwrap();
     }
 
