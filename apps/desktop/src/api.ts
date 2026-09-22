@@ -1108,22 +1108,46 @@ async function openControlEventSocket(
   });
 }
 
+const CONTROL_SOCKET_MIN_RETRY_MS = 250;
+const CONTROL_SOCKET_MAX_RETRY_MS = 15_000;
+/** A connection that lasted this long without delivering an event still counts as healthy. */
+const CONTROL_SOCKET_HEALTHY_MS = 5_000;
+
 /** Resumable canonical event transport. Timeline cursors recover every gap. */
 export async function streamControlEvents(
   signal: AbortSignal,
   onEvent: (event: ControlEventV1) => void,
 ): Promise<void> {
-  let retryMs = 250;
+  let retryMs = CONTROL_SOCKET_MIN_RETRY_MS;
   while (!signal.aborted) {
+    const openedAt = Date.now();
+    let received = false;
     try {
-      await openControlEventSocket(signal, onEvent);
-      retryMs = 250;
+      await openControlEventSocket(signal, (event) => {
+        received = true;
+        onEvent(event);
+      });
     } catch {
       // Reconnect below; callers retain their timeline cursor.
     }
     if (signal.aborted) return;
-    await new Promise<void>((resolve) => window.setTimeout(resolve, retryMs));
-    retryMs = Math.min(4_000, retryMs * 2);
+    // Only a connection that actually worked resets backoff; a socket that
+    // opens and immediately closes must not reconnect in a tight loop.
+    if (received || Date.now() - openedAt >= CONTROL_SOCKET_HEALTHY_MS) {
+      retryMs = CONTROL_SOCKET_MIN_RETRY_MS;
+    }
+    // Jitter in [retryMs / 2, retryMs) spreads reconnects after a server restart.
+    const delayMs = retryMs / 2 + Math.random() * (retryMs / 2);
+    await new Promise<void>((resolve) => {
+      const timer = window.setTimeout(done, delayMs);
+      function done() {
+        window.clearTimeout(timer);
+        signal.removeEventListener("abort", done);
+        resolve();
+      }
+      signal.addEventListener("abort", done, { once: true });
+    });
+    retryMs = Math.min(CONTROL_SOCKET_MAX_RETRY_MS, retryMs * 2);
   }
 }
 
