@@ -183,3 +183,31 @@ export function relativeConnectionTime(timestamp: number | null, now = Date.now(
   if (days < 7) return `Connected ${days}d ago`;
   return `Connected ${new Date(timestamp).toLocaleDateString()}`;
 }
+
+// A thread is unread when the desktop changed it after this phone last had it
+// open. Threads never opened here compare against the host baseline, so pairing
+// does not mark the whole history unread.
+export function unreadThreadIds(
+  threads: readonly Pick<ThreadSummaryV1, 'id' | 'updated_at_ms' | 'archived_at_ms'>[],
+  reads: {baselineMs: number; seen: Readonly<Record<string, number>>} | null,
+  selectedThreadId: string | null,
+): Set<string> {
+  const unread = new Set<string>();
+  if (!reads) return unread;
+  for (const thread of threads) {
+    if (thread.id === selectedThreadId || thread.archived_at_ms) continue;
+    if (thread.updated_at_ms > (reads.seen[thread.id] ?? reads.baselineMs)) unread.add(thread.id);
+  }
+  return unread;
+}
+
+export function filterThreadsByQuery<T extends Pick<ThreadSummaryV1, 'title' | 'workspace'>>(
+  threads: readonly T[],
+  query: string,
+): T[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return [...threads];
+  return threads.filter(thread =>
+    thread.title.toLowerCase().includes(needle) ||
+    (thread.workspace ?? '').toLowerCase().includes(needle));
+}

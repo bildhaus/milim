@@ -59,6 +59,7 @@ import {
   saveDeviceCredential,
 } from '../storage/secure';
 import {mobilePerfMark, mobilePerfMeasure} from '../performance';
+import {createHotStore} from './hotStore';
 
 export type ConnectionStatus = 'offline' | 'connecting' | 'online' | 'incompatible';
 type PendingCommand = {hostId: string; command: ControlCommandV1};
@@ -104,13 +105,14 @@ function pageFromReplica(replica: TimelineReplica) {
   };
 }
 
+export type MilimController = ReturnType<typeof useMilimController>;
+
 export function useMilimController() {
   const [hosts, setHosts] = useState<SavedHost[]>([]);
   const [activeHost, setActiveHostState] = useState<SavedHost | null>(null);
   const [bootstrap, setBootstrap] = useState<ControlBootstrapV1 | null>(null);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
-  const [timeline, setTimeline] = useState<TimelineReplica | null>(null);
-  const [draft, setDraftState] = useState('');
+  const [hot] = useState(createHotStore);
   const [status, setStatus] = useState<ConnectionStatus>('offline');
   const statusRef = useRef(status);
   statusRef.current = status;
@@ -156,9 +158,6 @@ export function useMilimController() {
     return () => subscription.remove();
   }, []);
 
-  useEffect(() => {
-    timelineRef.current = timeline;
-  }, [timeline]);
   activeHostRef.current = activeHost;
   selectedThreadRef.current = selectedThreadId;
 
@@ -303,8 +302,8 @@ export function useMilimController() {
           next = applyTimelinePage(next, tail, 'tail');
         }
         if (selectedThreadRef.current !== threadId || activeHostRef.current?.hostId !== host.hostId) return;
-        setTimeline(next);
         timelineRef.current = next;
+        hot.set({timeline: next});
         queueTimelineCache(host.hostId, next);
       })();
       timelineRefreshPromises.current[mode] = request;
@@ -316,7 +315,7 @@ export function useMilimController() {
       void request.then(release, release);
       return request;
     },
-    [queueTimelineCache],
+    [hot, queueTimelineCache],
   );
 
   const queueControlEvent = useCallback((event: ControlEventV1, expectedHostId: string) => {
@@ -331,13 +330,13 @@ export function useMilimController() {
       const next = applyControlEvents(current, events, expectedHostId);
       if (next !== current) {
         timelineRef.current = next;
-        setTimeline(next);
+        hot.set({timeline: next});
       }
       mobilePerfMark('timeline.flush.end');
       mobilePerfMeasure('timeline.flush', 'timeline.flush.start', 'timeline.flush.end');
       if (next.needsTailRefresh && !current.needsTailRefresh) void refreshTimeline('tail');
     });
-  }, [refreshTimeline]);
+  }, [hot, refreshTimeline]);
 
   useEffect(() => {
     reconnectAttempt.current = 0;
@@ -495,8 +494,8 @@ export function useMilimController() {
   useEffect(() => {
     const host = activeHostRef.current;
     if (!host || !selectedThreadId) {
-      setTimeline(null);
-      setDraftState('');
+      timelineRef.current = null;
+      hot.set({timeline: null, draft: ''});
       return;
     }
     let cancelled = false;
@@ -509,14 +508,13 @@ export function useMilimController() {
         ? applyTimelinePage(emptyReplica(selectedThreadId), page, 'tail')
         : emptyReplica(selectedThreadId);
       timelineRef.current = cached;
-      setTimeline(cached);
-      setDraftState(savedDraft);
+      hot.set({timeline: cached, draft: savedDraft});
       if (statusRef.current === 'online') void refreshTimeline('after').catch(() => {});
     });
     return () => {
       cancelled = true;
     };
-  }, [activeHost?.hostId, refreshTimeline, selectedThreadId]);
+  }, [activeHost?.hostId, hot, refreshTimeline, selectedThreadId]);
 
   useEffect(() => {
     if (status === 'online') void refreshTimeline('after').catch(() => {});
@@ -697,7 +695,7 @@ export function useMilimController() {
 
   const setDraft = useCallback(
     (text: string) => {
-      setDraftState(text);
+      hot.set({draft: text});
       const hostId = activeHostRef.current?.hostId;
       const threadId = selectedThreadRef.current;
       if (hostId && threadId) {
@@ -707,7 +705,7 @@ export function useMilimController() {
         else draftPersistTimer.current = setTimeout(() => void flushDraftPersistence(), 300);
       }
     },
-    [flushDraftPersistence],
+    [flushDraftPersistence, hot],
   );
 
   useEffect(() => () => {
@@ -787,7 +785,7 @@ export function useMilimController() {
             if (saved === payload.display_text) {
               await persistDraft(host.hostId, command.thread_id, '');
               if (activeHostRef.current?.hostId === host.hostId && selectedThreadRef.current === command.thread_id) {
-                setDraftState(current => current === payload.display_text ? '' : current);
+                if (hot.get().draft === payload.display_text) hot.set({draft: ''});
               }
             }
           }
@@ -804,7 +802,7 @@ export function useMilimController() {
         commandsInFlight.current.delete(host.hostId);
       }
     },
-    [flushDraftPersistence, reconnect, refreshBootstrap, refreshTimeline, status, tryBootstrap],
+    [flushDraftPersistence, hot, reconnect, refreshBootstrap, refreshTimeline, status, tryBootstrap],
   );
 
   const command = useCallback(
@@ -874,8 +872,7 @@ export function useMilimController() {
     activeHost,
     bootstrap,
     selectedThreadId,
-    timeline,
-    draft,
+    hot,
     status,
     lastError,
     pendingRetry,

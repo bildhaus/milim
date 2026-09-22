@@ -60,7 +60,8 @@ test('mobile app identifiers and versions match the release-ready configuration'
   expect(application).toContain('package com.omershatz.milim');
   expect(occurrences(project, `MARKETING_VERSION = ${version};`)).toBe(2);
   expect(occurrences(project, 'CURRENT_PROJECT_VERSION = 1;')).toBe(2);
-  expect(occurrences(project, 'PRODUCT_BUNDLE_IDENTIFIER = "com.omershatz.milim";')).toBe(2);
+  // Xcode and CocoaPods rewrite this value without quotes; both spellings are the same setting.
+  expect(project.match(/PRODUCT_BUNDLE_IDENTIFIER = "?com\.omershatz\.milim"?;/g)).toHaveLength(2);
   expect(occurrences(project, 'TARGETED_DEVICE_FAMILY = 1;')).toBe(2);
   expect(project).not.toContain('TARGETED_DEVICE_FAMILY = "1,2";');
 });
@@ -150,29 +151,37 @@ test('iOS launch screen bundles a smaller transparent milim mark', () => {
 });
 
 test('iOS picker and drawer source keep one reasoning sparkle and modal-safe insets', () => {
-  const app = read('App.tsx');
+  const app = [
+    read('src', 'pickers', 'ModelPickerSheet.tsx'),
+    read('src', 'drawer', 'ThreadDrawer.tsx'),
+    read('src', 'ui', 'styles.ts'),
+  ].join('\n');
   expect(app).toContain("capability !== 'reasoning'");
   expect(app).toContain("pickerRowMeta: {flexDirection: 'row', alignItems: 'center', gap: 6, minHeight: 14}");
   expect(app).toContain("capability === 'fast' && styles.pickerCapabilityFastIcon");
   expect(app).toContain('pickerCapabilityFastIcon: {transform: [{translateY: -1}]}');
-  expect(app).toMatch(/<Modal visible=\{visible\}[\s\S]*<SafeAreaProvider>[\s\S]*<SafeAreaView style=\{styles\.drawerSafe\} edges=\{\['top', 'left', 'bottom'\]\}>/);
-  expect(app).toContain('styles.drawerEdgeFade, {opacity: edgeOpacity}');
+  expect(app).toContain("<SafeAreaView style={styles.drawerSafe} edges={['top', 'left', 'bottom']}>");
+  expect(app).toContain('styles.drawerEdgeFade, edgeFadeStyle');
 });
 
 test('mobile threads follow the native keyboard without losing the latest message', () => {
-  const app = read('App.tsx');
-  expect(app).toContain("Keyboard.addListener('keyboardWillShow', show)");
-  expect(app).toContain("Keyboard.addListener('keyboardWillHide', hide)");
-  expect(app).toContain('duration: 120');
-  expect(app).toContain('endCoordinates.height - safeBottom');
-  expect(app).toContain('behavior="height"');
+  const app = [
+    read('src', 'ui', 'ThreadKeyboardAvoidingView.tsx'),
+    read('src', 'transcript', 'Transcript.tsx'),
+  ].join('\n');
+  expect(app).toContain("from 'react-native-keyboard-controller'");
+  expect(app).toContain('behavior="padding"');
   expect(app).toContain("Keyboard.addListener('keyboardDidShow', keepLatestVisible)");
   expect(app).toContain("Keyboard.addListener('keyboardDidHide', keepLatestVisible)");
   expect(app).toContain('if (!followingLatest.current) return;');
 });
 
 test('mobile chat chrome stays quiet and compact', () => {
-  const app = read('App.tsx');
+  const app = [
+    read('src', 'drawer', 'ThreadDrawer.tsx'),
+    read('src', 'screens', 'ChatScreen.tsx'),
+    read('src', 'ui', 'styles.ts'),
+  ].join('\n');
   const avatar = read('src', 'ui', 'AgentAvatar.tsx');
 
   expect(app).not.toContain('styles.threadStatus');

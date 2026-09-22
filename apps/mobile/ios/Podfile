@@ -32,5 +32,17 @@ target 'MilimMobile' do
       :mac_catalyst_enabled => false,
       # :ccache_enabled => true
     )
+
+    # Some pods and their resource bundles still declare iOS 9-12. Newer Xcode
+    # releases refuse to build below their supported floor, so lift those to the
+    # app's own minimum; nothing is ever lowered.
+    minimum = Gem::Version.new(min_ios_version_supported)
+    installer.pods_project.targets.each do |pod_target|
+      pod_target.build_configurations.each do |build_configuration|
+        declared = build_configuration.build_settings['IPHONEOS_DEPLOYMENT_TARGET']
+        next if declared.nil? || Gem::Version.new(declared) >= minimum
+        build_configuration.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = min_ios_version_supported
+      end
+    end
   end
 end
