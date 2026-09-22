@@ -6,7 +6,7 @@ title: Privacy and security
 summary: Local and remote data boundaries, Google Workspace access, privacy modes, redaction, blocking, bearer auth, and CORS boundaries.
 group: Local data
 order: 70
-updated: 2026-09-05
+updated: 2026-09-23
 ---
 
 Privacy settings are easiest to reason about as a routing question: what stays local, what goes to a provider, and which gate runs before a remote send.
@@ -80,6 +80,8 @@ Milim's use and transfer of information received from Google APIs adheres to the
 ## Auth and CORS
 
 The desktop app disables loopback trust and uses a per-launch bearer token for its embedded server. Standalone server auth supports static bearer tokens or `msk-v1` access keys when configured. Empty CORS allow-list means no browser origins are allowed; configured origins are explicit.
+
+Inside the desktop app, Tauri's access control governs every native command. Only the main app webview holds a capability; the preview control overlay window and native URL/App preview webviews cannot call app or window commands, and previews refuse Milim's own app origins. Model-run host-shell commands do not inherit Milim's secret-named `MILIM_*` variables. Restoring a backup never turns on the LAN mobile listener.
 
 The mobile listener exposes only a host identity probe, pairing and device authentication, and `/control/v1`; it cannot reach the full desktop/provider API and serves no legacy browser relay. Pairing creates a revocable per-device credential stored by the phone in Keychain or Keystore. A pairing secret is consumed by its first successful claim, and the native client verifies that the endpoint's stable host identity matches the scanned claim before submitting it. WebSockets use short-lived, single-use tickets, and revocation invalidates HTTP access, unused tickets, and live sockets. Optional LAN exposure is off by default and advertises only the isolated listener; plain HTTP carries an explicit trusted-network warning.
 
