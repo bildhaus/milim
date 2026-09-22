@@ -199,6 +199,12 @@ export function PullRequestsManager({ onClose }: { onClose: () => void }) {
       setListLoading(false);
       setCacheHydrated(true);
       void refreshList(cache.items.length === 0, cache.items.length > 0);
+    }).catch((error) => {
+      if (!active) return;
+      setNotice(`Couldn't restore saved pull requests: ${error instanceof Error ? error.message : String(error)}`);
+      setListLoading(false);
+      setCacheHydrated(true);
+      void refreshList(true, false);
     });
     return () => {
       active = false;

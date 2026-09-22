@@ -204,7 +204,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
     void refreshAccountRuntimes();
     onboarding.start();
     return () => { modelRefreshRevision.current += 1; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Re-run only when runtime enablement changes; the refresh helpers read current state.
   }, [accountRuntimeEnabled]);
 
   useEffect(() => {

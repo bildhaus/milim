@@ -20,6 +20,7 @@ import {
   type ToolInfo,
 } from "../api";
 import { useSessions } from "../sessions/store";
+import { useUiPreferences } from "../ui/store";
 import { createCanonicalChat } from "../lib/newChatCoordinator";
 import { AgentAvatar } from "./AgentAvatar";
 import { Calendar, Copy, Plus, Sparkles, Trash, X } from "./icons";
@@ -517,7 +518,14 @@ export function AgentsManager({ onClose }: { onClose: () => void }) {
   }
 
   function startChat(agent: Agent) {
-    void createCanonicalChat({ activeAgentId: agent.id }).then(onClose);
+    void createCanonicalChat({ activeAgentId: agent.id })
+      .then(onClose)
+      .catch((error) =>
+        useUiPreferences.getState().pushNotice({
+          tone: "error",
+          message: `Couldn't start a chat with ${agent.name}: ${error instanceof Error ? error.message : String(error)}`,
+        }),
+      );
   }
 
   const toggleTool = (t: string) =>

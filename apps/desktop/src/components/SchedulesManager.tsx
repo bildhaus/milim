@@ -17,6 +17,7 @@ import {
   MAX_DESKTOP_ATTACHMENTS,
 } from "../lib/attachmentInput";
 import { useSessions } from "../sessions/store";
+import { useUiPreferences } from "../ui/store";
 import { Calendar, Paperclip, Plus, Trash, X } from "./icons";
 import { AgentAvatar } from "./AgentAvatar";
 import { SheetDialog } from "./SheetDialog";
@@ -462,8 +463,15 @@ export function SchedulesManager({ onClose }: { onClose: () => void }) {
         setLoadError(null);
       })
       .catch((error) => setLoadError(error instanceof Error ? error.message : String(error)));
-    void listModels().then((items) => setModels(items.filter((item) => !isAccountRuntimeModel(item))));
-    void refreshAgents();
+    const notifyLoadFailure = (subject: string) => (error: unknown) =>
+      useUiPreferences.getState().pushNotice({
+        tone: "error",
+        message: `Couldn't load ${subject}: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    void listModels()
+      .then((items) => setModels(items.filter((item) => !isAccountRuntimeModel(item))))
+      .catch(notifyLoadFailure("models"));
+    void refreshAgents().catch(notifyLoadFailure("agents"));
   }, [refreshAgents]);
 
   useEffect(() => {
