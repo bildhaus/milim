@@ -49,7 +49,7 @@ impl HostPolicy {
         let Some(host) = normalized_host(host_header) else {
             return false;
         };
-        if host == "localhost" || extra_allowed_hosts().iter().any(|name| *name == host) {
+        if host == "localhost" || extra_allowed_hosts().contains(&host) {
             return true;
         }
         if let Ok(ip) = host.parse::<IpAddr>() {
@@ -63,7 +63,7 @@ impl HostPolicy {
             Self::Network => {
                 host.ends_with(".local")
                     || host.ends_with(".ts.net")
-                    || machine_host_names().iter().any(|name| *name == host)
+                    || machine_host_names().contains(&host)
             }
         }
     }
