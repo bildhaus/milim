@@ -162,7 +162,7 @@ import {
   workerRunSynthesisId,
 } from "../lib/workerRuns";
 import {
-  browserAttachment,
+  browserFileAttachment,
   MAX_DESKTOP_ATTACHMENTS,
 } from "../lib/attachmentInput";
 import {
@@ -761,11 +761,6 @@ const APP_SESSION_ID = crypto.randomUUID();
 
 function attachmentId(): string {
   return crypto.randomUUID();
-}
-
-async function browserFileAttachment(file: File): Promise<ChatAttachment> {
-  const mime = file.type || inferAttachmentMime(file.name);
-  return browserAttachment(file, mime, attachmentId());
 }
 
 function previewArtifactsForMessage(

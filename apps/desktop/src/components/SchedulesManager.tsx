@@ -4,7 +4,6 @@ import {
   inTauri,
   createSchedule,
   deleteSchedule,
-  inferAttachmentMime,
   isAccountRuntimeModel,
   listModels,
   listSchedulesStrict,
@@ -14,9 +13,10 @@ import {
   type ScheduleInfo,
 } from "../api";
 import {
-  browserAttachment,
+  browserFileAttachment,
   MAX_DESKTOP_ATTACHMENTS,
 } from "../lib/attachmentInput";
+import { formatBytes as attachmentSizeLabel } from "../lib/artifacts";
 import { useSessions } from "../sessions/store";
 import { useUiPreferences } from "../ui/store";
 import { Calendar, Paperclip, Plus, Trash, X } from "./icons";
@@ -127,12 +127,6 @@ function attachmentId(): string {
   return crypto.randomUUID();
 }
 
-function attachmentSizeLabel(size: number): string {
-  if (size >= 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`;
-  if (size >= 1024) return `${Math.round(size / 1024)} KB`;
-  return `${size} B`;
-}
-
 function attachmentSummary(attachments: ChatAttachment[] | undefined): string {
   const count = attachments?.length ?? 0;
   return count ? plural(count, "attachment") : "No attachments";
@@ -153,11 +147,6 @@ function attachmentFingerprint(attachments: ChatAttachment[]): string {
       sourcePath: attachment.sourcePath ?? "",
     })),
   );
-}
-
-async function browserFileAttachment(file: File): Promise<ChatAttachment> {
-  const mime = file.type || inferAttachmentMime(file.name);
-  return browserAttachment(file, mime, attachmentId());
 }
 
 function lastRunLabel(lastRun: number | null | undefined): string {

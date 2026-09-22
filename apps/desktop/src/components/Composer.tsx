@@ -9,6 +9,7 @@ import { composerEnterAction, isComposingKeyEvent, shortcutLabel } from "../ui/s
 import { useUiPreferences } from "../ui/store";
 import { AgentAvatar } from "./AgentAvatar";
 import { ArrowUp, ChevronDown, Folder, FolderOpen, GitHub, Paperclip, PlusSquare, Square, UserRound, X } from "./icons";
+import { formatBytes as attachmentSizeLabel } from "../lib/artifacts";
 import { folderLabel } from "../lib/projectColors";
 const COMPOSER_HISTORY_NOTICE_MS = 1800;
 
@@ -65,12 +66,6 @@ function parseSlashInput(value: string): { id: string; argument: string } | null
   const match = value.trim().match(/^\/([a-z-]+)(?:\s+(.*))?$/i);
   if (!match) return null;
   return { id: match[1].toLowerCase(), argument: match[2]?.trim() ?? "" };
-}
-
-function attachmentSizeLabel(size: number): string {
-  if (size >= 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`;
-  if (size >= 1024) return `${Math.round(size / 1024)} KB`;
-  return `${size} B`;
 }
 
 function isGithubLinkToken(token: ComposerToken): boolean {

@@ -35,7 +35,7 @@ import {
   type PreparedTurnOutbound,
   type PrepareTurnOutboundOptions,
 } from "./turnContext.js";
-import { reviewCommentsToPromptContext } from "./attachmentWire.js";
+import { attachmentsToPromptContext, reviewCommentsToPromptContext } from "./attachmentWire.js";
 import { estimateMessagesTokens, estimateTextTokens, messagesForModelContext, modelContextBudget } from "./contextCompaction.js";
 import {
   accountRuntimeToolPart,
@@ -51,9 +51,6 @@ import {
   workspaceRuleMessagesForRuntime,
   type TurnPromptContext,
 } from "./turnPrompt.js";
-
-// ponytail: local copy avoids importing browser/Tauri API code into pure turn-runtime tests.
-const MAX_ATTACHMENT_BYTES = 128 * 1024;
 
 function fixedContextCategories(
   context: TurnPromptContext,
@@ -429,44 +426,16 @@ function wireRuntimeMessageContent(
   if (message.approval) return "";
   const attachmentContext = attachmentsToPromptContext(
     message.attachments,
-    selectedImages,
+    (attachment) =>
+      selectedImages.has(attachment)
+        ? "[Image attached as multimodal input.]"
+        : OMITTED_IMAGE_NOTE,
   );
   return [
     message.content,
     attachmentContext,
     reviewCommentsToPromptContext(message.reviewComments),
   ].filter(Boolean).join("\n\n");
-}
-
-function attachmentsToPromptContext(
-  attachments: ChatMessage["attachments"],
-  selectedImages: Set<ChatAttachment>,
-): string {
-  if (!attachments?.length) return "";
-  const blocks = attachments.map((attachment) => {
-    const meta = [
-      `name=${attachment.name}`,
-      `mime=${attachment.mime || "application/octet-stream"}`,
-      `size=${attachment.size}`,
-      attachment.truncated ? `truncated_at=${MAX_ATTACHMENT_BYTES}` : null,
-      attachment.sourcePath ? `path=${attachment.sourcePath}` : null,
-    ]
-      .filter(Boolean)
-      .join(" ");
-    const content = attachment.content?.trimEnd();
-    const imageNote = attachment.dataUrl
-      ? selectedImages.has(attachment)
-        ? "[Image attached as multimodal input.]"
-        : OMITTED_IMAGE_NOTE
-      : "";
-    return [
-      `--- attachment ${meta} ---`,
-      [content, imageNote].filter(Boolean).join("\n") ||
-        "[No text content available for this attachment.]",
-      "--- end attachment ---",
-    ].join("\n");
-  });
-  return ["[Attached files]", ...blocks, "[/Attached files]"].join("\n");
 }
 
 export function accountRuntimePromptMessages(

@@ -8,6 +8,7 @@ import type {
   RunTrace,
   TokenUsage,
 } from "../api";
+import { latestCompactionIndex } from "./contextCompaction.js";
 import { providerOwnsModel, rawModelId } from "./modelPicker.js";
 
 const USAGE_MONTH_COUNT = 12;
@@ -475,13 +476,6 @@ export function formatThreadMetricsBreakdown(
     label,
     title: titleLines.join("\n"),
   };
-}
-
-function latestCompactionIndex(messages: ChatMessage[]): number {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (messages[index].compaction?.kind === "checkpoint") return index;
-  }
-  return -1;
 }
 
 function addCompactionSummaryMetrics(

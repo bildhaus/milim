@@ -3,7 +3,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { qualifyDuplicateProviderModels } from "./lib/modelPicker.js";
 import { wireMessages } from "./lib/attachmentWire.js";
-import { assertValidImageAttachment } from "./lib/attachmentInput.js";
+import { assertValidImageAttachment, inferAttachmentMime } from "./lib/attachmentInput.js";
 import { assertDesktopRequestBodyFits } from "./lib/requestBody.js";
 import type { GoogleRevocationStatus } from "./lib/googleWorkspace.js";
 import type { AppearanceSnapshotV1 } from "./theme/appearanceSnapshot.js";
@@ -894,52 +894,8 @@ export async function setActivePreviewTarget(
   });
 }
 
-export function inferAttachmentMime(name: string): string {
-  const ext = name.split(".").pop()?.toLowerCase();
-  switch (ext) {
-    case "png":
-      return "image/png";
-    case "jpg":
-    case "jpeg":
-      return "image/jpeg";
-    case "webp":
-      return "image/webp";
-    case "gif":
-      return "image/gif";
-    case "md":
-    case "markdown":
-      return "text/markdown";
-    case "json":
-      return "application/json";
-    case "csv":
-      return "text/csv";
-    case "html":
-    case "htm":
-      return "text/html";
-    case "css":
-      return "text/css";
-    case "js":
-    case "jsx":
-    case "ts":
-    case "tsx":
-    case "rs":
-    case "py":
-    case "go":
-    case "java":
-    case "c":
-    case "cpp":
-    case "h":
-    case "hpp":
-    case "toml":
-    case "yaml":
-    case "yml":
-    case "xml":
-    case "txt":
-      return "text/plain";
-    default:
-      return "application/octet-stream";
-  }
-}
+/** Kept on the API surface; the pure implementation lives with attachment input. */
+export { inferAttachmentMime };
 
 async function authFetch(
   input: RequestInfo | URL,
