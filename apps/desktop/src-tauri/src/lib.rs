@@ -672,24 +672,36 @@ fn mobile_lan_status(runtime: tauri::State<'_, DesktopServerRuntime>) -> MobileL
 }
 
 #[tauri::command]
-fn set_mobile_lan_enabled(
+async fn set_mobile_lan_enabled(
     runtime: tauri::State<'_, DesktopServerRuntime>,
     user_data: tauri::State<'_, UserDataState>,
     enabled: bool,
 ) -> std::result::Result<MobileLanStatus, String> {
-    let _admission = runtime.0.control.as_ref()
-        .map(|control| control.mutation_guard())
-        .transpose().map_err(|error| error.to_string())?;
-    let status = if enabled {
-        runtime.0.enable_lan()?
-    } else {
-        runtime.0.disable_lan()
-    };
-    user_data
+    let _admission = runtime
         .0
-        .set_json("milim.mobile.lan", if enabled { "true" } else { "false" })
+        .control
+        .as_ref()
+        .map(|control| control.mutation_guard())
+        .transpose()
         .map_err(|error| error.to_string())?;
-    Ok(status)
+    let runtime = runtime.0.clone();
+    let store = user_data.0.clone();
+    // Binding the listener, starting mDNS, and persisting the preference all
+    // block, so keep them off the async IPC worker.
+    tokio::task::spawn_blocking(move || {
+        let _write_admission = _admission;
+        let status = if enabled {
+            runtime.enable_lan()?
+        } else {
+            runtime.disable_lan()
+        };
+        store
+            .set_json("milim.mobile.lan", if enabled { "true" } else { "false" })
+            .map_err(|error| error.to_string())?;
+        Ok(status)
+    })
+    .await
+    .map_err(|error| format!("LAN toggle task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -697,11 +709,17 @@ async fn user_state_get(
     state: tauri::State<'_, UserDataState>,
     key: String,
 ) -> std::result::Result<Option<String>, String> {
-    if key == "milim.sessions" {
-        state.0.get_sessions_snapshot().map_err(|e| e.to_string())
-    } else {
-        state.0.get_json(&key).map_err(|e| e.to_string())
-    }
+    let store = state.0.clone();
+    tokio::task::spawn_blocking(move || {
+        if key == "milim.sessions" {
+            store.get_sessions_snapshot()
+        } else {
+            store.get_json(&key)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -718,14 +736,19 @@ async fn user_state_set(
         .map(|control| control.mutation_guard())
         .transpose()
         .map_err(|error| error.to_string())?;
-    let result = if key == "milim.sessions" {
-        state
-            .0
-            .set_sessions_snapshot(&value)
-            .map_err(|e| e.to_string())
-    } else {
-        state.0.set_json(&key, &value).map_err(|e| e.to_string())
-    };
+    let store = state.0.clone();
+    let write_key = key.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let _write_admission = _admission;
+        if write_key == "milim.sessions" {
+            store.set_sessions_snapshot(&value)
+        } else {
+            store.set_json(&write_key, &value)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string());
     if result.is_ok() && key == APPEARANCE_STATE_KEY {
         if let Some(control) = runtime.0.control.as_ref() {
             control.publish_appearance();
@@ -757,14 +780,19 @@ async fn user_state_delete(
         .map(|control| control.mutation_guard())
         .transpose()
         .map_err(|error| error.to_string())?;
-    let result = if key == "milim.sessions" {
-        state
-            .0
-            .delete_sessions_snapshot()
-            .map_err(|e| e.to_string())
-    } else {
-        state.0.delete_json(&key).map_err(|e| e.to_string())
-    };
+    let store = state.0.clone();
+    let delete_key = key.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let _write_admission = _admission;
+        if delete_key == "milim.sessions" {
+            store.delete_sessions_snapshot()
+        } else {
+            store.delete_json(&delete_key)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string());
     if matches!(result, Ok(true)) && key == APPEARANCE_STATE_KEY {
         if let Some(control) = runtime.0.control.as_ref() {
             control.publish_appearance();
@@ -929,10 +957,14 @@ async fn user_sessions_delete(
         .map(|control| control.mutation_guard())
         .transpose()
         .map_err(|error| error.to_string())?;
-    state
-        .0
-        .delete_sessions_snapshot()
-        .map_err(|e| e.to_string())
+    let store = state.0.clone();
+    tokio::task::spawn_blocking(move || {
+        let _write_admission = _admission;
+        store.delete_sessions_snapshot()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
