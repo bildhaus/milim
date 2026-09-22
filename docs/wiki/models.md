@@ -6,7 +6,7 @@ title: Models and providers
 summary: Model-agnostic dev chat routing across provider APIs, local runtimes, Codex, Claude, OpenCode, and Pi bridges.
 group: Core
 order: 40
-updated: 2026-08-30
+updated: 2026-09-23
 ---
 
 Model routing is provider-agnostic and centered on the active dev thread. The provider registry stores enabled remotes and their model metadata, then the desktop model picker merges local API runtime models, provider models, account runtime models, and media-capable models. Duplicate provider model ids stay provider-scoped in the picker and route back to the selected provider; provider sections with fewer visible models appear first.
@@ -101,11 +101,15 @@ Codex reports its 5-hour and weekly usage up front, so Auto can prefer the accou
 
 Each account runtime keeps its native skill catalog. Milim does not copy all enabled skill bodies into every turn: it supplies compact ranked candidates and read-only lazy search/read tools through the authenticated per-turn gateway. Explicitly tagged Milim skills are resolved immediately, while a saved Agent's Custom skill selection acts as an allowlist.
 
+### Sign in to an account runtime
+
+Each CLI signs in with its own tooling; Milim never handles those credentials. In onboarding, the **Coding CLIs** path offers **Connect** for Codex and **Sign-in help** for Claude, OpenCode, and Pi, which opens this section. After signing in, choose **Refresh CLIs** in onboarding or refresh the runtime in Providers.
+
 | Runtime | Setup | Session behavior |
 |---|---|---|
 | Codex | Use `/codex/login/device`, `/codex/login/chatgpt-device`, or `/codex/login/api-key`. | Milim stores the returned Codex thread id on the Milim chat when persistence is enabled, per signed-in account. |
 | Installed Claude CLI | Install Anthropic's official `claude` CLI separately and run `claude auth login` outside Milim, once per account. | Milim stores one Claude session id per Milim chat and account, uses `--session-id` for new native sessions and `--resume` for existing project transcripts, and can stop only a matching local Claude CLI process if Claude reports the session is already in use. Review and Guarded ask first; Open authorizes recovery immediately. Milim waits for the recorded owner to exit before removing only the matching registry entry and retrying once. |
-| OpenCode | Install and configure OpenCode separately. | Milim stores the native ACP session id and applies its approval overlay; no-folder chats use a private managed ACP directory without native filesystem tools. |
+| OpenCode | Install OpenCode separately and configure a provider, for example with `opencode auth login`. | Milim stores the native ACP session id and applies its approval overlay; no-folder chats use a private managed ACP directory without native filesystem tools. |
 | Pi | Install Pi separately and authenticate with Pi's `/login`; catalog discovery confirms configuration, while the first turn verifies the current credential. | Milim stores one Pi session id and sync cursor per chat; side calls use `--no-session`. Embedded runs disable discovered extensions, while normal Pi context, prompt, and skill discovery remains active. |
 
 Codex model metadata is authoritative when `inputModalities` is present. Claude aliases advertise image input. For OpenAI, Anthropic, Gemini, and Groq families without explicit metadata, the picker uses conservative current-family Vision labels; custom compatible servers with unknown metadata are allowed to attempt standard `image_url` parts but cannot be guaranteed.
