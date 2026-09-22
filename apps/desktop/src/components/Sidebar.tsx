@@ -21,6 +21,7 @@ import { markPerfRender } from "../lib/perf";
 import { previewRuntimeKeyForThread } from "../lib/previewRuntimeKeys";
 import {
   effectiveProjectColor,
+  folderLabel,
   normalizeProjectColor,
 } from "../lib/projectColors";
 import {
@@ -174,10 +175,6 @@ type SessionGroup<T extends SidebarSessionLike = SidebarSession> = {
   inbox?: boolean;
   settled?: boolean;
 };
-
-function folderLabel(folder: string): string {
-  return folder.split(/[\\/]/).filter(Boolean).pop() || folder || "Project";
-}
 
 function folderFromSectionId(sectionId: string): string {
   if (isSidebarProjectSectionId(sectionId)) {

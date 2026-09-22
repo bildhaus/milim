@@ -91,6 +91,7 @@ import { Archive, Check, Code, Download, ExternalLink, FileText, FolderOpen, Gea
 import { MobileCompanionSettings } from "../components/MobileCompanionSettings";
 import { ThemeEditor } from "../components/ThemeEditor";
 import { Select, Slider, Toggle } from "../components/ui";
+import { folderLabel } from "../lib/projectColors";
 
 type SettingsSection = {
   id: SettingsSectionId;
@@ -204,10 +205,6 @@ function timestampLabel(value: number | undefined): string {
 function archiveDeleteLabel(archivedAt: number | undefined, retentionDays: ArchiveRetentionDays): string {
   if (!archivedAt) return "Not scheduled";
   return new Date(archivedAt + retentionDays * DAY_MS).toLocaleDateString();
-}
-
-function folderLabel(folder: string): string {
-  return folder.split(/[\\/]/).filter(Boolean).pop() || folder || "Project";
 }
 
 function googleFileTypeLabel(mimeType: string): string {

@@ -17,6 +17,14 @@ type ProjectColorTheme = {
 type Rgb = { r: number; g: number; b: number };
 type Hsl = { h: number; s: number; l: number };
 
+/**
+ * Display name for a workspace folder: its last path segment. Separator-only
+ * paths fall back to the raw folder and an empty folder to `fallback`.
+ */
+export function folderLabel(folder: string, fallback = "Project"): string {
+  return folder.split(/[\\/]/).filter(Boolean).pop() || folder || fallback;
+}
+
 export function normalizeProjectColor(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   let hex = value.trim().replace(/^#/, "");

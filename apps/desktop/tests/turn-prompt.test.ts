@@ -3,7 +3,8 @@ import type { ChatMessage, PreviewSurfaceTarget } from "../src/api.js";
 import { estimateTextTokens } from "../src/lib/contextCompaction.js";
 import { managedPreviewRuntimeForTurn } from "../src/lib/managedPreviewRuntime.js";
 import { previewRuntimeKeyForThread } from "../src/lib/previewRuntimeKeys.js";
-import { buildTurnPromptContext, contextMessagesForTurn, folderLabel, memoryScopes, prepareTurnPromptContext, resolveTurnToolApproval, workspaceRuleMessagesForRuntime, type MemoryHit } from "../src/lib/turnPrompt.js";
+import { folderLabel } from "../src/lib/projectColors.js";
+import { buildTurnPromptContext, contextMessagesForTurn, memoryScopes, prepareTurnPromptContext, resolveTurnToolApproval, workspaceRuleMessagesForRuntime, type MemoryHit } from "../src/lib/turnPrompt.js";
 
 function user(content: string): ChatMessage {
   return { role: "user", content };

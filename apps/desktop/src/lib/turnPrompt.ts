@@ -5,6 +5,7 @@ import { goalInstructionMessage, type GoalSettings } from "./goals.js";
 import type { ManagedPreviewRuntimeContext } from "./managedPreviewRuntime.js";
 import { previewRuntimeKeyForThread } from "./previewRuntimeKeys.js";
 import { skillDiscoveryMessage, skillInstructionMessage } from "./skills.js";
+import { folderLabel } from "./projectColors.js";
 
 const MEMORY_RECALL_CANDIDATES = 20;
 const MEMORY_CONTEXT_MAX_ITEMS = 5;
@@ -61,10 +62,6 @@ type TurnPromptAgent = {
   skill_mode?: string;
   enabled_skills?: string[];
 };
-
-export function folderLabel(folder: string): string {
-  return folder.split(/[\\/]/).filter(Boolean).pop() || folder || "Project";
-}
 
 export function memoryScopes(threadId: string, folder: string, workspace?: WorkspaceContext | null): MemoryScopeRef[] {
   const scopes: MemoryScopeRef[] = [{ kind: "global", locator: "personal" }];

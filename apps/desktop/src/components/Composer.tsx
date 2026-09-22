@@ -9,6 +9,7 @@ import { composerEnterAction, isComposingKeyEvent, shortcutLabel } from "../ui/s
 import { useUiPreferences } from "../ui/store";
 import { AgentAvatar } from "./AgentAvatar";
 import { ArrowUp, ChevronDown, Folder, FolderOpen, GitHub, Paperclip, PlusSquare, Square, UserRound, X } from "./icons";
+import { folderLabel } from "../lib/projectColors";
 const COMPOSER_HISTORY_NOTICE_MS = 1800;
 
 
@@ -70,10 +71,6 @@ function attachmentSizeLabel(size: number): string {
   if (size >= 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`;
   if (size >= 1024) return `${Math.round(size / 1024)} KB`;
   return `${size} B`;
-}
-
-function folderLabel(folder: string): string {
-  return folder.split(/[\\/]/).filter(Boolean).pop() || folder || "No project";
 }
 
 function isGithubLinkToken(token: ComposerToken): boolean {
@@ -217,7 +214,7 @@ export function Composer({
   const hasInstr = instructions.trim().length > 0;
   const activeWorkspaceFolder = workspaceFolder.trim();
   const activeWorkspaceLabel = activeWorkspaceFolder
-    ? workspaceProjects.find((project) => project.folder === activeWorkspaceFolder)?.name ?? folderLabel(activeWorkspaceFolder)
+    ? workspaceProjects.find((project) => project.folder === activeWorkspaceFolder)?.name ?? folderLabel(activeWorkspaceFolder, "No project")
     : "No project";
   const workspaceControlLabel = workspaceChangeStartsNewChat
     ? "Start new chat in..."
