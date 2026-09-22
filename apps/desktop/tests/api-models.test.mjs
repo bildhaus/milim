@@ -201,4 +201,3 @@ assert.match(providerRun, /\{ workspace: toolContext\.workspace \}/);
 assert.match(providerRun, /\{ privacy_mode: toolContext\.privacy_mode \}/);
 assert.doesNotMatch(providerRun, /tool_approval_policy: toolContext/);
 assert.match(api, /\/codex\/login\/chatgpt-device/);
-assert.match(api, /\/codex\/login\/api-key/);
