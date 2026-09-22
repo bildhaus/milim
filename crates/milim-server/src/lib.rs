@@ -19,6 +19,7 @@ pub mod companion;
 pub mod control;
 mod error;
 pub mod google_workspace;
+pub mod host_guard;
 pub mod mcp_bridge;
 pub mod media_library;
 mod opencode_bridge;
@@ -49,10 +50,25 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 
+pub use host_guard::HostPolicy;
 pub use state::AppState;
 
-/// Assemble the application router with all routes and middleware.
+/// Assemble the application router with all routes and middleware. The
+/// accepted `Host` names follow `expose_to_network`; listeners served through
+/// [`serve_listener`] derive them from the bound address instead.
 pub fn build_router(state: AppState) -> Router {
+    let policy = if state.config.expose_to_network {
+        HostPolicy::Network
+    } else {
+        HostPolicy::Loopback
+    };
+    build_router_with_host_policy(state, policy)
+}
+
+/// Assemble the application router, accepting only `Host` names allowed by
+/// `host_policy` (DNS-rebinding protection).
+pub fn build_router_with_host_policy(state: AppState, host_policy: HostPolicy) -> Router {
+    host_policy.warm();
     let body_limit = state.config.max_request_body_bytes;
     let cors = build_cors(&state.config.allowed_origins);
 
@@ -442,16 +458,23 @@ pub fn build_router(state: AppState) -> Router {
         .route("/embeddings", post(routes::openai_embeddings))
         .route("/api/embed", post(routes::ollama_embeddings))
         .route("/api/embeddings", post(routes::ollama_embeddings))
-        // Middleware (applied outermost-first)
+        // Middleware (the last layer runs first)
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .layer(RequestBodyLimitLayer::new(body_limit))
+        .layer(axum::middleware::from_fn_with_state(
+            host_policy,
+            host_guard::validate_host,
+        ))
         .with_state(state)
 }
 
 /// Assemble the phone-facing companion router only. This is intentionally
 /// narrower than the local API so it can be exposed through Tailscale Serve.
+/// It always accepts LAN and Tailscale `Host` names ([`HostPolicy::Network`]).
 pub fn build_mobile_companion_router(state: AppState) -> Router {
+    let host_policy = HostPolicy::Network;
+    host_policy.warm();
     let body_limit = state.config.max_request_body_bytes;
     let mut state = state;
     state.mobile_control_only = true;
@@ -516,6 +539,10 @@ pub fn build_mobile_companion_router(state: AppState) -> Router {
         .route("/control/v1/ws", get(routes::control_socket))
         .layer(TraceLayer::new_for_http())
         .layer(RequestBodyLimitLayer::new(body_limit))
+        .layer(axum::middleware::from_fn_with_state(
+            host_policy,
+            host_guard::validate_host,
+        ))
         .with_state(state)
 }
 
@@ -542,7 +569,8 @@ pub async fn serve_listener_with_graceful_shutdown<S>(
 where
     S: Future<Output = ()> + Send + 'static,
 {
-    let app = build_router(state.clone());
+    let host_policy = HostPolicy::for_bound_address(listener.local_addr()?);
+    let app = build_router_with_host_policy(state.clone(), host_policy);
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

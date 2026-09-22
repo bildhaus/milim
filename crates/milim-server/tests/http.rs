@@ -738,6 +738,101 @@ async fn mobile_phone_router_exposes_native_control_only() {
         );
     }
 }
+/// Send one raw HTTP/1.1 request with an explicit `Host` header (or none) and
+/// return the response status code.
+async fn raw_status(base: &str, path: &str, host: Option<&str>) -> u16 {
+    let addr = base.trim_start_matches("http://");
+    let mut socket = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let host_line = host
+        .map(|host| format!("Host: {host}\r\n"))
+        .unwrap_or_default();
+    socket
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\n{host_line}Connection: close\r\n\r\n").as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    socket.read_to_end(&mut response).await.unwrap();
+    let response = String::from_utf8_lossy(&response);
+    response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or_else(|| panic!("malformed response: {response}"))
+}
+
+#[tokio::test]
+async fn loopback_router_rejects_dns_rebinding_hosts() {
+    let base = spawn(test_state()).await;
+    let port = base.rsplit(':').next().unwrap();
+
+    for host in [
+        format!("127.0.0.1:{port}"),
+        format!("localhost:{port}"),
+        format!("[::1]:{port}"),
+        "localhost".to_string(),
+    ] {
+        assert_eq!(
+            raw_status(&base, "/health", Some(&host)).await,
+            200,
+            "{host}"
+        );
+    }
+    for host in [
+        format!("attacker.example:{port}"),
+        "attacker.example".to_string(),
+        format!("localhost.attacker.example:{port}"),
+        format!("192.168.1.20:{port}"),
+        format!("desk.local:{port}"),
+    ] {
+        assert_eq!(
+            raw_status(&base, "/health", Some(&host)).await,
+            403,
+            "{host}"
+        );
+    }
+    assert_eq!(
+        raw_status(&base, "/v1/models", Some("attacker.example")).await,
+        403
+    );
+
+    // reqwest addresses the listener by IP literal and keeps working.
+    let response = reqwest::get(format!("{base}/health")).await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn mobile_router_accepts_lan_and_tailscale_hosts_only() {
+    let base = spawn_mobile(control_mobile_test_state()).await;
+
+    for host in [
+        "192.168.1.20:49152",
+        "100.101.102.103",
+        "[fd7a:115c:a1e0::1]:443",
+        "milim-abc123.local.:49152",
+        "desk.tailnet-1234.ts.net",
+        "localhost:49152",
+    ] {
+        assert_eq!(
+            raw_status(&base, "/mobile", Some(host)).await,
+            200,
+            "{host}"
+        );
+    }
+    for host in [
+        "attacker.example",
+        "attacker.example:49152",
+        "ts.net.attacker.example",
+    ] {
+        assert_eq!(
+            raw_status(&base, "/mobile", Some(host)).await,
+            403,
+            "{host}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn mobile_control_router_is_device_authenticated_and_isolated() {
     let state = control_mobile_test_state();
