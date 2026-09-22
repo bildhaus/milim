@@ -15,6 +15,7 @@ const macosInfoPlist = readFileSync(
   "utf8",
 );
 const tauriLib = readFileSync(join(root, "src-tauri", "src", "lib.rs"), "utf8");
+const tauriBuildScript = readFileSync(join(root, "src-tauri", "build.rs"), "utf8");
 const repoVersion = readFileSync(
   join(root, "..", "..", "VERSION"),
   "utf8",
@@ -467,7 +468,6 @@ for (const needle of [
 
 for (const permission of [
   "core:window:allow-close",
-  "core:window:allow-create",
   "core:window:allow-hide",
   "core:window:allow-is-always-on-top",
   "core:window:allow-is-maximized",
@@ -484,7 +484,6 @@ for (const permission of [
   "core:window:allow-start-dragging",
   "core:window:allow-start-resize-dragging",
   "core:window:allow-toggle-maximize",
-  "core:webview:allow-create-webview",
   "core:webview:allow-create-webview-window",
   "core:webview:allow-set-webview-position",
   "core:webview:allow-set-webview-size",
@@ -493,6 +492,50 @@ for (const permission of [
 ]) {
   if (!capabilities.permissions.includes(permission)) {
     throw new Error(`Default Tauri capabilities must include ${permission}`);
+  }
+}
+
+// Only the main app webview gets app and core commands. Child preview
+// webviews share the main window, so the capability must match the webview
+// label rather than the window label.
+if (
+  JSON.stringify(capabilities.webviews) !== JSON.stringify(["main"]) ||
+  capabilities.windows !== undefined ||
+  capabilities.remote !== undefined
+) {
+  throw new Error("Default Tauri capability must target only the main webview");
+}
+for (const permission of [
+  "core:window:allow-create",
+  "core:webview:allow-create-webview",
+]) {
+  if (capabilities.permissions.includes(permission)) {
+    throw new Error(`Default Tauri capabilities must not include unused ${permission}`);
+  }
+}
+
+const handlerBody = tauriLib.match(/generate_handler!\[([\s\S]*?)\]\)/)?.[1];
+if (!handlerBody) throw new Error("lib.rs must register commands with generate_handler!");
+const registeredCommands = handlerBody
+  .split(",")
+  .map((entry) => entry.trim().split("::").pop())
+  .filter(Boolean);
+const manifestBody = tauriBuildScript.match(/APP_COMMANDS: &\[&str\] = &\[([\s\S]*?)\];/)?.[1];
+if (!manifestBody) throw new Error("build.rs must declare APP_COMMANDS for the Tauri app manifest");
+const manifestCommands = [...manifestBody.matchAll(/"([a-z0-9_]+)"/g)].map((match) => match[1]);
+if (
+  JSON.stringify([...registeredCommands].sort()) !==
+  JSON.stringify([...manifestCommands].sort())
+) {
+  throw new Error("build.rs APP_COMMANDS must list exactly the commands in generate_handler!");
+}
+if (!tauriBuildScript.includes(".app_manifest(tauri_build::AppManifest::new().commands(APP_COMMANDS))")) {
+  throw new Error("build.rs must pass APP_COMMANDS to the Tauri app manifest");
+}
+for (const command of registeredCommands) {
+  const permission = `allow-${command.replaceAll("_", "-")}`;
+  if (!capabilities.permissions.includes(permission)) {
+    throw new Error(`Main capability must grant ${permission}`);
   }
 }
 

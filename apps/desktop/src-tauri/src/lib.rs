@@ -672,24 +672,36 @@ fn mobile_lan_status(runtime: tauri::State<'_, DesktopServerRuntime>) -> MobileL
 }
 
 #[tauri::command]
-fn set_mobile_lan_enabled(
+async fn set_mobile_lan_enabled(
     runtime: tauri::State<'_, DesktopServerRuntime>,
     user_data: tauri::State<'_, UserDataState>,
     enabled: bool,
 ) -> std::result::Result<MobileLanStatus, String> {
-    let _admission = runtime.0.control.as_ref()
-        .map(|control| control.mutation_guard())
-        .transpose().map_err(|error| error.to_string())?;
-    let status = if enabled {
-        runtime.0.enable_lan()?
-    } else {
-        runtime.0.disable_lan()
-    };
-    user_data
+    let _admission = runtime
         .0
-        .set_json("milim.mobile.lan", if enabled { "true" } else { "false" })
+        .control
+        .as_ref()
+        .map(|control| control.mutation_guard())
+        .transpose()
         .map_err(|error| error.to_string())?;
-    Ok(status)
+    let runtime = runtime.0.clone();
+    let store = user_data.0.clone();
+    // Binding the listener, starting mDNS, and persisting the preference all
+    // block, so keep them off the async IPC worker.
+    tokio::task::spawn_blocking(move || {
+        let _write_admission = _admission;
+        let status = if enabled {
+            runtime.enable_lan()?
+        } else {
+            runtime.disable_lan()
+        };
+        store
+            .set_json("milim.mobile.lan", if enabled { "true" } else { "false" })
+            .map_err(|error| error.to_string())?;
+        Ok(status)
+    })
+    .await
+    .map_err(|error| format!("LAN toggle task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -697,11 +709,17 @@ async fn user_state_get(
     state: tauri::State<'_, UserDataState>,
     key: String,
 ) -> std::result::Result<Option<String>, String> {
-    if key == "milim.sessions" {
-        state.0.get_sessions_snapshot().map_err(|e| e.to_string())
-    } else {
-        state.0.get_json(&key).map_err(|e| e.to_string())
-    }
+    let store = state.0.clone();
+    tokio::task::spawn_blocking(move || {
+        if key == "milim.sessions" {
+            store.get_sessions_snapshot()
+        } else {
+            store.get_json(&key)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -718,14 +736,19 @@ async fn user_state_set(
         .map(|control| control.mutation_guard())
         .transpose()
         .map_err(|error| error.to_string())?;
-    let result = if key == "milim.sessions" {
-        state
-            .0
-            .set_sessions_snapshot(&value)
-            .map_err(|e| e.to_string())
-    } else {
-        state.0.set_json(&key, &value).map_err(|e| e.to_string())
-    };
+    let store = state.0.clone();
+    let write_key = key.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let _write_admission = _admission;
+        if write_key == "milim.sessions" {
+            store.set_sessions_snapshot(&value)
+        } else {
+            store.set_json(&write_key, &value)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string());
     if result.is_ok() && key == APPEARANCE_STATE_KEY {
         if let Some(control) = runtime.0.control.as_ref() {
             control.publish_appearance();
@@ -757,14 +780,19 @@ async fn user_state_delete(
         .map(|control| control.mutation_guard())
         .transpose()
         .map_err(|error| error.to_string())?;
-    let result = if key == "milim.sessions" {
-        state
-            .0
-            .delete_sessions_snapshot()
-            .map_err(|e| e.to_string())
-    } else {
-        state.0.delete_json(&key).map_err(|e| e.to_string())
-    };
+    let store = state.0.clone();
+    let delete_key = key.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let _write_admission = _admission;
+        if delete_key == "milim.sessions" {
+            store.delete_sessions_snapshot()
+        } else {
+            store.delete_json(&delete_key)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string());
     if matches!(result, Ok(true)) && key == APPEARANCE_STATE_KEY {
         if let Some(control) = runtime.0.control.as_ref() {
             control.publish_appearance();
@@ -929,10 +957,14 @@ async fn user_sessions_delete(
         .map(|control| control.mutation_guard())
         .transpose()
         .map_err(|error| error.to_string())?;
-    state
-        .0
-        .delete_sessions_snapshot()
-        .map_err(|e| e.to_string())
+    let store = state.0.clone();
+    tokio::task::spawn_blocking(move || {
+        let _write_admission = _admission;
+        store.delete_sessions_snapshot()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1859,7 +1891,10 @@ fn save_artifact_file_blocking(
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create artifact directory: {e}"))?;
     }
-    std::fs::write(&target, content.as_bytes())
+    // Re-resolve after creating parents so a symlink raced into the new
+    // directory chain cannot redirect the write outside the workspace.
+    let target = resolve_artifact_target(&workspace, &path)?;
+    atomic_write(&target, content.as_bytes())
         .map_err(|e| format!("failed to write artifact file: {e}"))?;
     Ok(SavedArtifactFilePayload {
         path: target.to_string_lossy().to_string(),
@@ -1868,18 +1903,14 @@ fn save_artifact_file_blocking(
     })
 }
 
+/// Resolve an artifact path inside the workspace with the same symlink and
+/// junction rules as the workspace file tools, so a link inside the workspace
+/// cannot redirect saves or previews to files outside it.
 fn resolve_artifact_target(workspace: &str, path: &str) -> std::result::Result<PathBuf, String> {
-    let workspace = PathBuf::from(workspace.trim());
-    if workspace.as_os_str().is_empty() {
-        return Err("no working folder selected".to_string());
-    }
-    let metadata = std::fs::metadata(&workspace)
-        .map_err(|e| format!("failed to read working folder metadata: {e}"))?;
-    if !metadata.is_dir() {
-        return Err("working folder is not a directory".to_string());
-    }
-
-    Ok(workspace.join(safe_artifact_relative_path(path)?))
+    let workspace = workspace_root(workspace)?;
+    let relative = safe_artifact_relative_path(path)?;
+    resolve_workspace_path(&workspace, &relative.to_string_lossy())
+        .map_err(|error| error.to_string())
 }
 
 fn safe_artifact_relative_path(path: &str) -> std::result::Result<PathBuf, String> {
@@ -2240,9 +2271,10 @@ fn artifact_file_status_blocking(
 async fn open_artifact_location(
     path: String,
     target: Option<String>,
+    root: Option<String>,
 ) -> std::result::Result<(), String> {
     tokio::task::spawn_blocking(move || {
-        open_artifact_location_blocking(path, target.unwrap_or_else(|| "file".to_string()))
+        open_artifact_location_blocking(path, target.unwrap_or_else(|| "file".to_string()), root)
     })
     .await
     .map_err(|e| format!("artifact open task failed: {e}"))?
@@ -2251,8 +2283,12 @@ async fn open_artifact_location(
 fn open_artifact_location_blocking(
     path: String,
     target: String,
+    root: Option<String>,
 ) -> std::result::Result<(), String> {
     let path = validate_artifact_open_path(Path::new(path.trim()))?;
+    if let Some(root) = root.as_deref().filter(|root| !root.trim().is_empty()) {
+        validate_artifact_open_root(&path, root)?;
+    }
     let target = parse_artifact_open_target(&target)?;
     let spec = artifact_open_command(&path, target)?;
     record_subprocess_launch();
@@ -2728,7 +2764,78 @@ fn validate_artifact_open_path(path: &Path) -> std::result::Result<PathBuf, Stri
     if !metadata.is_file() && !metadata.is_dir() {
         return Err("artifact path must be a file or directory".to_string());
     }
-    Ok(path.to_path_buf())
+    // Resolve links so the launch checks below see the real target, not a
+    // harmless-looking name that points at an app or script.
+    canonical_shell_path(path).map_err(|e| format!("artifact path is not available: {e}"))
+}
+
+/// Canonicalize a path for handing to the platform shell. Windows verbatim
+/// prefixes are stripped because Explorer does not accept them.
+fn canonical_shell_path(path: &Path) -> io::Result<PathBuf> {
+    let canonical = std::fs::canonicalize(path)?;
+    if cfg!(windows) {
+        let raw = canonical.to_string_lossy();
+        if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
+            return Ok(PathBuf::from(format!(r"\\{unc}")));
+        }
+        if let Some(local) = raw.strip_prefix(r"\\?\") {
+            return Ok(PathBuf::from(local));
+        }
+    }
+    Ok(canonical)
+}
+
+/// Require an already-canonical artifact path to live inside `root` when the
+/// caller knows which workspace produced it.
+fn validate_artifact_open_root(path: &Path, root: &str) -> std::result::Result<(), String> {
+    let root = canonical_shell_path(Path::new(root.trim()))
+        .map_err(|e| format!("artifact root is not available: {e}"))?;
+    if !path.starts_with(&root) {
+        return Err("artifact path is outside the working folder".to_string());
+    }
+    Ok(())
+}
+
+/// Extensions the OS would run, install, or follow to another target instead
+/// of opening as a document. Opening these could execute model- or
+/// attachment-supplied code, so they are revealed in the file manager.
+#[rustfmt::skip]
+const ARTIFACT_LAUNCHABLE_EXTENSIONS: &[&str] = &[
+    // macOS bundles, scripts, and launch shortcuts.
+    "app", "action", "appex", "applescript", "bundle", "command", "fileloc", "inetloc",
+    "kext", "mpkg", "pkg", "plugin", "prefpane", "saver", "scpt", "scptd", "terminal",
+    "tool", "webloc", "workflow", "xpc",
+    // Windows executables, installers, scripts, and shortcuts.
+    "appref-ms", "application", "bat", "cmd", "com", "cpl", "exe", "gadget", "hta", "inf",
+    "jse", "lnk", "msc", "msi", "msix", "msp", "pif", "ps1", "psm1", "reg", "scf", "scr",
+    "url", "vb", "vbe", "vbs", "ws", "wsc", "wsf", "wsh",
+    // Cross-platform interpreters and Linux launchers.
+    "appimage", "bash", "csh", "desktop", "fish", "jar", "js", "ksh", "pl", "py", "pyw",
+    "rb", "run", "sh", "zsh",
+];
+
+fn artifact_path_is_launchable(path: &Path) -> bool {
+    let launchable_extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| {
+            let value = value.to_ascii_lowercase();
+            ARTIFACT_LAUNCHABLE_EXTENSIONS.contains(&value.as_str())
+        })
+        .unwrap_or(false);
+    if launchable_extension {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = std::fs::metadata(path) {
+            if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn parse_artifact_open_target(target: &str) -> std::result::Result<ArtifactOpenTarget, String> {
@@ -2743,6 +2850,9 @@ fn artifact_open_command(
     path: &Path,
     target: ArtifactOpenTarget,
 ) -> std::result::Result<ArtifactOpenCommandSpec, String> {
+    if artifact_path_is_launchable(path) {
+        return Ok(artifact_reveal_command(path));
+    }
     let path_string = path.to_string_lossy().to_string();
     if cfg!(windows) {
         let args = match target {
@@ -2783,6 +2893,31 @@ fn artifact_open_command(
         program: "xdg-open".to_string(),
         args: vec![target_path.to_string_lossy().to_string()],
     })
+}
+
+/// Select the item in the platform file manager without opening it.
+fn artifact_reveal_command(path: &Path) -> ArtifactOpenCommandSpec {
+    let path_string = path.to_string_lossy().to_string();
+    if cfg!(windows) {
+        return ArtifactOpenCommandSpec {
+            program: "explorer".to_string(),
+            args: vec![format!("/select,{path_string}")],
+        };
+    }
+    if cfg!(target_os = "macos") {
+        return ArtifactOpenCommandSpec {
+            program: "open".to_string(),
+            args: vec!["-R".to_string(), path_string],
+        };
+    }
+    let parent = path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| path.to_path_buf());
+    ArtifactOpenCommandSpec {
+        program: "xdg-open".to_string(),
+        args: vec![parent.to_string_lossy().to_string()],
+    }
 }
 
 fn validate_workspace_launcher_root(workspace: &str) -> std::result::Result<PathBuf, String> {
@@ -3241,6 +3376,9 @@ const UPDATE_RECOVERY_ERROR_NAME: &str = "install-error.txt";
 const MAX_UPDATE_PACKAGE_BYTES: usize = 512 * 1024 * 1024;
 const MAX_UPDATE_CHECKSUM_BYTES: usize = 1024 * 1024;
 const UPDATE_PROGRESS_UNKNOWN_STEP_BYTES: u64 = 1024 * 1024;
+/// Updates and their checksums may only come from this repository's releases.
+const UPDATE_RELEASE_DOWNLOAD_PATH_PREFIX: &str = "/bildhaus/milim/releases/download/";
+const UPDATE_RELEASE_API_PATH_PREFIX: &str = "/repos/bildhaus/milim/releases/";
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -3421,10 +3559,21 @@ fn validate_update_download_url(url: &str, label: &str) -> std::result::Result<S
     if parsed.scheme() != "https" {
         return Err(format!("{label} must use https."));
     }
-    match parsed.host_str() {
-        Some("github.com" | "api.github.com") => Ok(parsed.to_string()),
-        _ => Err(format!("{label} must be a GitHub release URL.")),
+    if !parsed.username().is_empty() || parsed.password().is_some() || parsed.port().is_some() {
+        return Err(format!("{label} must be a milim GitHub release URL."));
     }
+    // The URL parser has already resolved dot segments, so a prefix check
+    // cannot be escaped with `..`.
+    let path = parsed.path();
+    let pinned = match parsed.host_str() {
+        Some("github.com") => path.starts_with(UPDATE_RELEASE_DOWNLOAD_PATH_PREFIX),
+        Some("api.github.com") => path.starts_with(UPDATE_RELEASE_API_PATH_PREFIX),
+        _ => false,
+    };
+    if !pinned {
+        return Err(format!("{label} must be a milim GitHub release URL."));
+    }
+    Ok(parsed.to_string())
 }
 
 fn first_sha256_hex(line: &str) -> Option<String> {
@@ -3768,8 +3917,71 @@ fn escape_bash_literal(value: &str) -> String {
     value.replace('\'', "'\\''")
 }
 
+/// Read the Team ID a bundle is signed with from `codesign -dv` output.
+/// Unsigned and ad-hoc signed code have no Team ID.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn parse_codesign_team_id(output: &str) -> Option<String> {
+    output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("TeamIdentifier="))
+        .map(str::trim)
+        .filter(|team| !team.is_empty() && *team != "not set")
+        .map(str::to_string)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_codesign_team_id(bundle: &Path) -> std::result::Result<Option<String>, String> {
+    record_subprocess_launch();
+    let output = Command::new("codesign")
+        .args(["-dv", "--verbose=2"])
+        .arg(bundle)
+        .output()
+        .map_err(|e| format!("Could not run codesign: {e}"))?;
+    if !output.status.success() {
+        // `codesign -dv` fails for code that is not signed at all.
+        return Ok(None);
+    }
+    // codesign writes its display output to stderr.
+    Ok(parse_codesign_team_id(&String::from_utf8_lossy(
+        &output.stderr,
+    )))
+}
+
+/// Refuse to install a macOS update unless it passes a strict deep signature
+/// check and is signed by the same Apple team as the running app. Unsigned or
+/// ad-hoc signed dev builds keep the checksum-only flow.
+#[cfg(target_os = "macos")]
+fn verify_macos_update_signature(
+    current_bundle: &Path,
+    update_bundle: &Path,
+) -> std::result::Result<(), String> {
+    let Some(expected_team) = macos_codesign_team_id(current_bundle)? else {
+        tracing::warn!("running app has no Team ID; skipping update signature pinning");
+        return Ok(());
+    };
+    record_subprocess_launch();
+    let verify = Command::new("codesign")
+        .args(["--verify", "--deep", "--strict"])
+        .arg(update_bundle)
+        .output()
+        .map_err(|e| format!("Could not run codesign: {e}"))?;
+    if !verify.status.success() {
+        return Err(format!(
+            "The downloaded update failed code-signature verification: {}",
+            String::from_utf8_lossy(&verify.stderr).trim()
+        ));
+    }
+    match macos_codesign_team_id(update_bundle)? {
+        Some(team) if team == expected_team => Ok(()),
+        _ => Err("The downloaded update is not signed by the milim developer team.".to_string()),
+    }
+}
+
 #[tauri::command]
-fn apply_update(app: tauri::AppHandle, update_path: String) -> std::result::Result<(), String> {
+async fn apply_update(
+    app: tauri::AppHandle,
+    update_path: String,
+) -> std::result::Result<(), String> {
     if cfg!(debug_assertions) {
         return Err("Auto-update is disabled in dev builds.".to_string());
     }
@@ -3782,62 +3994,83 @@ fn apply_update(app: tauri::AppHandle, update_path: String) -> std::result::Resu
 
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
-        let update_file = canonical_update_source(&app, &update_path)?;
-        let current_exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let pid = std::process::id();
+        // Signature checks and installer launch block, so keep them off the
+        // IPC worker; shutdown is only requested once the installer is running.
+        let install_app = app.clone();
+        tokio::task::spawn_blocking(move || launch_update_installer(&install_app, &update_path))
+            .await
+            .map_err(|e| format!("update install task failed: {e}"))??;
+        exit_after_server_shutdown(app);
+        Ok(())
+    }
+}
 
-        #[cfg(target_os = "windows")]
-        {
-            let update_root = update_dir(&app)?;
-            fs::create_dir_all(&update_root).map_err(|e| e.to_string())?;
-            let replacement = windows_update_replacement_path(&current_exe);
-            let backup = windows_update_backup_path(&current_exe);
-            let log = update_root.join("install.log");
-            let error_marker = update_root.join(UPDATE_RECOVERY_ERROR_NAME);
-            let script_path = update_root.join("apply-update.ps1");
-            let script = build_windows_update_script(
-                pid,
-                WindowsUpdateScriptPaths {
-                    source: &update_file,
-                    replacement: &replacement,
-                    target: &current_exe,
-                    backup: &backup,
-                    log: &log,
-                    error_marker: &error_marker,
-                    script: &script_path,
-                },
-            );
-            fs::write(&script_path, script).map_err(|e| e.to_string())?;
-            record_subprocess_launch();
-            Command::new("powershell.exe")
-                .args([
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-WindowStyle",
-                    "Hidden",
-                    "-File",
-                    &script_path.to_string_lossy(),
-                ])
-                .creation_flags(CREATE_NO_WINDOW)
-                .spawn()
-                .map_err(|e| e.to_string())?;
-        }
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn launch_update_installer(
+    app: &tauri::AppHandle,
+    update_path: &str,
+) -> std::result::Result<(), String> {
+    let update_file = canonical_update_source(app, update_path)?;
+    let current_exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let pid = std::process::id();
 
-        #[cfg(target_os = "macos")]
-        {
-            let update_root = update_dir(&app)?;
-            fs::create_dir_all(&update_root).map_err(|e| e.to_string())?;
-            let error_marker = update_root.join(UPDATE_RECOVERY_ERROR_NAME);
-            let app_bundle = current_exe
-                .parent()
-                .and_then(Path::parent)
-                .and_then(Path::parent)
-                .ok_or("Could not determine app bundle path")?;
-            let backup = app_bundle.with_extension("app.previous");
-            let script = format!(
-                r#"set -e
+    // Windows release builds are not Authenticode-signed, so there is no
+    // publisher identity to pin. Integrity there rests on the SHA-256
+    // checksum published with the pinned bildhaus/milim release and
+    // verified in `download_update_file`.
+    #[cfg(target_os = "windows")]
+    {
+        let update_root = update_dir(app)?;
+        fs::create_dir_all(&update_root).map_err(|e| e.to_string())?;
+        let replacement = windows_update_replacement_path(&current_exe);
+        let backup = windows_update_backup_path(&current_exe);
+        let log = update_root.join("install.log");
+        let error_marker = update_root.join(UPDATE_RECOVERY_ERROR_NAME);
+        let script_path = update_root.join("apply-update.ps1");
+        let script = build_windows_update_script(
+            pid,
+            WindowsUpdateScriptPaths {
+                source: &update_file,
+                replacement: &replacement,
+                target: &current_exe,
+                backup: &backup,
+                log: &log,
+                error_marker: &error_marker,
+                script: &script_path,
+            },
+        );
+        fs::write(&script_path, script).map_err(|e| e.to_string())?;
+        record_subprocess_launch();
+        Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-WindowStyle",
+                "Hidden",
+                "-File",
+                &script_path.to_string_lossy(),
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let update_root = update_dir(app)?;
+        fs::create_dir_all(&update_root).map_err(|e| e.to_string())?;
+        let error_marker = update_root.join(UPDATE_RECOVERY_ERROR_NAME);
+        let app_bundle = current_exe
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .ok_or("Could not determine app bundle path")?;
+        verify_macos_update_signature(app_bundle, &update_file)?;
+        let backup = app_bundle.with_extension("app.previous");
+        let script = format!(
+            r#"set -e
 pid={}
 source='{}'
 target='{}'
@@ -3851,28 +4084,39 @@ mv "$source" "$target"
 open "$target"
 rm -rf "$backup"
 "#,
-                pid,
-                escape_bash_literal(&update_file.to_string_lossy()),
-                escape_bash_literal(&app_bundle.to_string_lossy()),
-                escape_bash_literal(&backup.to_string_lossy()),
-                escape_bash_literal(&error_marker.to_string_lossy()),
-            );
-            record_subprocess_launch();
-            Command::new("bash")
-                .args(["-c", &script])
-                .spawn()
-                .map_err(|e| e.to_string())?;
-        }
-
-        exit_after_server_shutdown(app);
-        Ok(())
+            pid,
+            escape_bash_literal(&update_file.to_string_lossy()),
+            escape_bash_literal(&app_bundle.to_string_lossy()),
+            escape_bash_literal(&backup.to_string_lossy()),
+            escape_bash_literal(&error_marker.to_string_lossy()),
+        );
+        record_subprocess_launch();
+        Command::new("bash")
+            .args(["-c", &script])
+            .spawn()
+            .map_err(|e| e.to_string())?;
     }
+
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
 #[tauri::command]
-fn extract_app_zip(app: tauri::AppHandle, zip_path: String) -> std::result::Result<String, String> {
-    let zip_file = canonical_update_archive(&app, &zip_path)?;
+async fn extract_app_zip(
+    app: tauri::AppHandle,
+    zip_path: String,
+) -> std::result::Result<String, String> {
+    tokio::task::spawn_blocking(move || extract_app_zip_blocking(&app, &zip_path))
+        .await
+        .map_err(|e| format!("update extract task failed: {e}"))?
+}
+
+#[cfg(target_os = "macos")]
+fn extract_app_zip_blocking(
+    app: &tauri::AppHandle,
+    zip_path: &str,
+) -> std::result::Result<String, String> {
+    let zip_file = canonical_update_archive(app, zip_path)?;
     let parent = zip_file.parent().ok_or("Invalid zip path")?;
     let app_path = parent.join("milim.app");
     if app_path.exists() {
@@ -3897,7 +4141,7 @@ fn extract_app_zip(app: tauri::AppHandle, zip_path: String) -> std::result::Resu
 
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
-fn extract_app_zip(_zip_path: String) -> std::result::Result<String, String> {
+async fn extract_app_zip(_zip_path: String) -> std::result::Result<String, String> {
     Err("This command is only available on macOS".to_string())
 }
 
@@ -4116,7 +4360,11 @@ fn build_state(
     );
     let desktop_name = desktop_control_display_name();
     let control = milim_server::control::RunManager::new(user_data.clone(), &desktop_name)
-        .expect("initialize canonical control runtime");
+        .unwrap_or_else(|error| {
+            diagnostics::fatal_startup_error(&format!(
+                "The chat runtime could not be initialized: {error}"
+            ))
+        });
     migrate_desktop_control_name(&user_data, &control, &desktop_name);
     let service: SharedService = registry
         .as_ref()
@@ -4450,7 +4698,7 @@ fn set_sidebar_toggle_enabled(
 
 #[cfg(target_os = "macos")]
 fn setup_native_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
-    let settings = MenuItem::with_id(app, APP_MENU_SETTINGS_ID, "Settings", true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, APP_MENU_SETTINGS_ID, "Settings", true, Some("Cmd+,"))?;
     let quit = MenuItem::with_id(app, APP_MENU_QUIT_ID, "Quit Milim", true, Some("Cmd+Q"))?;
     let app_menu = SubmenuBuilder::new(app, "Milim")
         .about(None)
@@ -4636,7 +4884,12 @@ pub fn run() {
     let preview_tools_state = Arc::new(preview_tools::PreviewToolState::default());
     let secret_storage = secret_storage::initialize(Paths::resolve().root());
     let storage_status = secret_storage.status.clone();
-    let user_data = open_user_data_store().expect("initialize user data store");
+    let user_data = open_user_data_store().unwrap_or_else(|error| {
+        diagnostics::fatal_startup_error(&format!(
+            "The local database at {} could not be opened: {error}",
+            Paths::resolve().user_db_file().display()
+        ))
+    });
     native_perf_mark("database_open_migrations_completed");
     let (mut state, preferred_addr, mcp, providers) = build_state(
         api_key.clone(),
@@ -4646,7 +4899,11 @@ pub fn run() {
     );
     native_perf_mark("control_reconciliation_completed");
     let (server_listener, addr) =
-        bind_desktop_server_listener(preferred_addr).expect("bind embedded milim server");
+        bind_desktop_server_listener(preferred_addr).unwrap_or_else(|error| {
+            diagnostics::fatal_startup_error(&format!(
+                "The embedded milim server could not listen on {preferred_addr}: {error}"
+            ))
+        });
     // Account-runtime tool endpoints must point at the actual listener. The
     // preferred port may already be occupied, in which case binding falls
     // back to an ephemeral loopback port.
@@ -4658,7 +4915,11 @@ pub fn run() {
             .parse()
             .expect("valid mobile control loopback address"),
     )
-    .expect("bind embedded mobile control server");
+    .unwrap_or_else(|error| {
+        diagnostics::fatal_startup_error(&format!(
+            "The embedded mobile control server could not listen on loopback: {error}"
+        ))
+    });
     native_perf_mark("servers_listening");
     let api_base = format!("http://{addr}");
     let mobile_local_target = format!("http://{mobile_addr}");
@@ -4933,7 +5194,9 @@ pub fn run() {
             preview_webview::preview_webview_diagnostics
         ])
         .run(tauri::generate_context!())
-        .expect("error while running milim desktop");
+        .unwrap_or_else(|error| {
+            diagnostics::fatal_startup_error(&format!("The desktop window could not start: {error}"))
+        });
 }
 
 #[cfg(test)]
@@ -5349,6 +5612,42 @@ mod artifact_save_tests {
             "Update download URL"
         )
         .is_err());
+        for url in [
+            "https://github.com/attacker/milim/releases/download/v0.1.1/milim.exe",
+            "https://github.com/bildhaus/milim-fork/releases/download/v0.1.1/milim.exe",
+            "https://github.com/bildhaus/milim/raw/main/milim.exe",
+            "https://github.com/bildhaus/milim/releases/download/../../../attacker/milim/releases/download/v1/milim.exe",
+            "https://api.github.com/repos/attacker/milim/releases/assets/1",
+            "https://api.github.com/repos/bildhaus/milimx/releases/assets/1",
+            "https://user@github.com/bildhaus/milim/releases/download/v0.1.1/milim.exe",
+            "https://github.com:8443/bildhaus/milim/releases/download/v0.1.1/milim.exe",
+            "https://objects.githubusercontent.com/bildhaus/milim/releases/download/v1/milim.exe",
+        ] {
+            assert!(
+                validate_update_download_url(url, "Update download URL").is_err(),
+                "{url} must be rejected"
+            );
+        }
+        assert!(validate_update_download_url(
+            "https://github.com/bildhaus/milim/releases/download/v0.2.68/SHA256SUMS.txt",
+            "Checksum download URL"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn updater_reads_codesign_team_ids() {
+        let signed = "Executable=/Applications/milim.app/Contents/MacOS/milim\nIdentifier=com.omershatz.milim\nAuthority=Developer ID Application: Example (ABCDE12345)\nTeamIdentifier=ABCDE12345\n";
+        assert_eq!(
+            parse_codesign_team_id(signed).as_deref(),
+            Some("ABCDE12345")
+        );
+        let adhoc = "Identifier=milim\nSignature=adhoc\nTeamIdentifier=not set\n";
+        assert_eq!(parse_codesign_team_id(adhoc), None);
+        assert_eq!(
+            parse_codesign_team_id("code object is not signed at all"),
+            None
+        );
     }
 
     #[test]
@@ -5728,6 +6027,127 @@ args=['mcp-obsidian']
             spec.args.iter().any(|arg| arg.contains("open-target.txt")),
             "open command must pass the file path as a process argument"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn artifact_open_reveals_executables_instead_of_launching() {
+        let root = std::env::temp_dir().join(format!(
+            "milim-open-launchable-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("Evil.app")).unwrap();
+        for name in [
+            "run.command",
+            "setup.EXE",
+            "install.sh",
+            "link.lnk",
+            "tool.jar",
+        ] {
+            std::fs::write(root.join(name), "x").unwrap();
+            assert!(artifact_path_is_launchable(&root.join(name)), "{name}");
+        }
+        assert!(artifact_path_is_launchable(&root.join("Evil.app")));
+        std::fs::write(root.join("notes.txt"), "x").unwrap();
+        assert!(!artifact_path_is_launchable(&root.join("notes.txt")));
+
+        let spec =
+            artifact_open_command(&root.join("run.command"), ArtifactOpenTarget::File).unwrap();
+        let expected = artifact_reveal_command(&root.join("run.command"));
+        assert_eq!(spec.program, expected.program);
+        assert_eq!(spec.args, expected.args);
+        let spec =
+            artifact_open_command(&root.join("Evil.app"), ArtifactOpenTarget::Folder).unwrap();
+        assert_eq!(
+            spec.args,
+            artifact_reveal_command(&root.join("Evil.app")).args
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script = root.join("no-extension");
+            std::fs::write(&script, "#!/bin/sh\n").unwrap();
+            assert!(!artifact_path_is_launchable(&script));
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(artifact_path_is_launchable(&script));
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn artifact_open_requires_path_inside_known_root() {
+        let root = std::env::temp_dir().join(format!(
+            "milim-open-root-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("workspace")).unwrap();
+        std::fs::write(root.join("workspace").join("inside.txt"), "x").unwrap();
+        std::fs::write(root.join("outside.txt"), "x").unwrap();
+        let workspace = root.join("workspace").to_string_lossy().to_string();
+
+        let inside =
+            validate_artifact_open_path(&root.join("workspace").join("inside.txt")).unwrap();
+        assert!(validate_artifact_open_root(&inside, &workspace).is_ok());
+        let outside = validate_artifact_open_path(&root.join("outside.txt")).unwrap();
+        assert!(validate_artifact_open_root(&outside, &workspace).is_err());
+
+        #[cfg(unix)]
+        {
+            let link = root.join("workspace").join("link.txt");
+            std::os::unix::fs::symlink(root.join("outside.txt"), &link).unwrap();
+            let resolved = validate_artifact_open_path(&link).unwrap();
+            assert!(validate_artifact_open_root(&resolved, &workspace).is_err());
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_save_and_preview_reject_symlink_escapes() {
+        let root = std::env::temp_dir().join(format!(
+            "milim-artifact-symlink-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "secret").unwrap();
+        std::os::unix::fs::symlink(&outside, workspace.join("escape")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.txt"), workspace.join("secret.txt"))
+            .unwrap();
+        let workspace_arg = workspace.to_string_lossy().to_string();
+
+        for path in ["escape/new.txt", "escape/secret.txt", "secret.txt"] {
+            assert!(save_artifact_file_blocking(
+                workspace_arg.clone(),
+                path.to_string(),
+                "pwned".to_string(),
+                true,
+            )
+            .is_err());
+            assert!(preview_artifact_file_blocking(
+                workspace_arg.clone(),
+                path.to_string(),
+                "pwned".to_string(),
+            )
+            .is_err());
+        }
+        assert_eq!(
+            std::fs::read_to_string(outside.join("secret.txt")).unwrap(),
+            "secret"
+        );
+        assert!(!outside.join("new.txt").exists());
         let _ = std::fs::remove_dir_all(root);
     }
 

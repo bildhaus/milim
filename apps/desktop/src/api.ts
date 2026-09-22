@@ -756,15 +756,21 @@ export async function artifactFileStatus(
   return await invoke<ArtifactFileStatus>("artifact_file_status", { path });
 }
 
+/**
+ * Open a file or folder with the OS. Launchable files (apps, scripts,
+ * executables, shortcuts) are revealed in the file manager instead. Pass
+ * `root` when the path must stay inside a known working folder.
+ */
 export async function openArtifactLocation(
   path: string,
   target: ArtifactOpenTarget = "file",
+  root?: string,
 ): Promise<void> {
   if (!inTauri)
     throw new Error(
       "Opening saved artifacts is only available in the desktop app.",
     );
-  await invoke("open_artifact_location", { path, target });
+  await invoke("open_artifact_location", { path, target, root });
 }
 
 export async function recordFrontendError(

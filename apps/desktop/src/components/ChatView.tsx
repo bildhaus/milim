@@ -6059,7 +6059,7 @@ export function ChatView({
         });
       return;
     }
-    await openArtifactLocation(saved.path, target);
+    await openArtifactLocation(saved.path, target, folder);
   }
 
   async function handleCheckArtifact(

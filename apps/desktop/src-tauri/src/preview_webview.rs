@@ -34,6 +34,9 @@ static NEXT_BROWSER_WINDOW_ID: AtomicU64 = AtomicU64::new(1);
 static PREVIEW_SURFACES: OnceLock<Mutex<HashMap<String, PreviewSurfaceState>>> = OnceLock::new();
 static PREVIEW_LIFECYCLE_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 static PRIVATE_PROFILE_LEASE: OnceLock<Mutex<Option<PrivateProfileLease>>> = OnceLock::new();
+/// Dev builds serve the app from `build.devUrl`, and Tauri treats that origin
+/// as the local frontend with full IPC. Previews must never load it.
+static APP_DEV_URL: OnceLock<Url> = OnceLock::new();
 
 #[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -157,6 +160,14 @@ pub fn handle_page_load(webview: &Webview, payload: &PageLoadPayload<'_>) {
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
     scavenge_private_browser_profiles();
     Builder::new("preview-webview-navigation")
+        .setup(|app, _api| {
+            if tauri::is_dev() {
+                if let Some(dev_url) = app.config().build.dev_url.clone() {
+                    let _ = APP_DEV_URL.set(dev_url);
+                }
+            }
+            Ok(())
+        })
         .on_navigation(|webview, url| {
             if !is_preview_pool_label(webview.label()) {
                 return true;
@@ -982,8 +993,27 @@ fn preview_audio_mute_script(muted: bool) -> String {
 }
 
 fn preview_url_allowed(url: &Url) -> bool {
+    if preview_url_targets_app(url, APP_DEV_URL.get()) {
+        return false;
+    }
     url.scheme() == "https"
         || (url.scheme() == "http" && is_loopback_host(url.host_str().unwrap_or_default()))
+}
+
+/// True for origins Tauri may treat as the app's own frontend: the dev server
+/// (on any loopback alias of its port) and `*.localhost` names such as
+/// `tauri.localhost`, which Windows uses for bundled assets and app protocols.
+fn preview_url_targets_app(url: &Url, dev_url: Option<&Url>) -> bool {
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    if host.ends_with(".localhost") {
+        return true;
+    }
+    dev_url.is_some_and(|dev_url| {
+        let dev_host = dev_url.host_str().unwrap_or_default();
+        dev_url.port_or_known_default() == url.port_or_known_default()
+            && (dev_host.eq_ignore_ascii_case(&host)
+                || (is_loopback_host(dev_host) && is_loopback_host(&host)))
+    })
 }
 
 fn preview_reload_bypasses_cache(url: &Url) -> bool {
@@ -1170,6 +1200,31 @@ mod tests {
         assert!(!preview_url_allowed(
             &Url::parse("http://example.com/redirected").unwrap()
         ));
+        let dev_url = Url::parse("http://localhost:5180").unwrap();
+        for app_url in [
+            "http://localhost:5180/",
+            "http://127.0.0.1:5180/settings",
+            "http://[::1]:5180/",
+            "https://localhost:5180/",
+        ] {
+            assert!(
+                preview_url_targets_app(&Url::parse(app_url).unwrap(), Some(&dev_url)),
+                "{app_url} must be treated as the app origin"
+            );
+        }
+        assert!(!preview_url_targets_app(
+            &Url::parse("http://localhost:5173/").unwrap(),
+            Some(&dev_url)
+        ));
+        assert!(!preview_url_targets_app(
+            &Url::parse("https://example.com/").unwrap(),
+            Some(&dev_url)
+        ));
+        assert!(preview_url_targets_app(
+            &Url::parse("https://tauri.localhost/").unwrap(),
+            None
+        ));
+        assert!(allowed_preview_url("https://tauri.localhost/index.html").is_err());
         assert!(is_preview_pool_label(PREVIEW_APP_PRIVATE_LABEL));
         assert!(is_preview_pool_label(PREVIEW_URL_PRIVATE_LABEL));
         assert!(is_preview_pool_label(PREVIEW_URL_PERSISTENT_LABEL));
