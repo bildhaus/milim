@@ -178,7 +178,7 @@ function cargoCheck(id, args) {
 }
 
 function desktopCheck(id, tests) {
-  return nodeCheck(id, ["tests/run-ts-test.mjs", ...tests]);
+  return nodeCheck(id, ["tests/run-tests.mjs", ...tests]);
 }
 
 function nodeCheck(id, args) {

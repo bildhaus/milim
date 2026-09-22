@@ -160,9 +160,8 @@ assertEqual(
   "canonical benchmark script",
 );
 assertEqual(desktopPackage.scripts["perf:tauri-dev"], "node tests/tauri-dev-perf.mjs", "Tauri dev benchmark script");
-assertIncludes(desktopPackage.scripts["verify:frontend"], "test:media:frontend", "frontend verification");
-assertIncludes(desktopPackage.scripts["verify:frontend"], "test:mobile-companion:frontend", "frontend verification");
-assertIncludes(desktopPackage.scripts["verify:frontend"], "test:artifacts:frontend", "frontend verification");
+assertEqual(desktopPackage.scripts.test, "node tests/run-tests.mjs", "desktop test discovery script");
+assertIncludes(desktopPackage.scripts["verify:frontend"], "npm run test &&", "frontend verification");
 assertNotIncludes(desktopPackage.scripts["verify:frontend"], "cargo", "frontend verification");
 assertNotIncludes(desktopPackage.scripts["verify:frontend"], "test:computer-use", "frontend verification");
 assertEqual(
