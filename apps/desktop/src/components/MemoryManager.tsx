@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   archiveMemoryNode,
   deleteMemoryNode,
@@ -98,6 +98,9 @@ export function MemoryManager({
   const [draft, setDraft] = useState<MemoryDraft>({ title: "", content: "" });
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
+  // Bumped by every list/search request so a slower, older response cannot
+  // overwrite the results for the current tab, scope, or query.
+  const listRevision = useRef(0);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [workspaceContext, setWorkspaceContext] = useState<WorkspaceContext | null>(null);
 
@@ -120,22 +123,33 @@ export function MemoryManager({
   }, [folder]);
 
   useEffect(() => {
+    // `load` reads exactly these inputs; reload whenever the visible scope changes.
     void load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId, folder, includeArchived, tab, workspaceContext]);
 
   useEffect(() => {
+    let cancelled = false;
     void listMemoryNodes({ scope: { kind: "thread", locator: activeId }, limit: 300 })
-      .then((legacy) => setLegacyCount(legacy.length));
+      .then((legacy) => {
+        if (!cancelled) setLegacyCount(legacy.length);
+      })
+      .catch((error) => {
+        if (!cancelled) setNote(`Couldn't check legacy thread memories: ${errorMessage(error)}`);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [activeId]);
 
   async function load(selectId?: string | null) {
     const scopes = tabScopes(tab, activeId, folder, workspaceContext);
     if (scopes.length === 0) return;
+    const revision = ++listRevision.current;
     setBusy(true);
     setNote(null);
     try {
       const lists = await Promise.all(scopes.map((scope) => listMemoryNodes({ scope, includeArchived, limit: 300 })));
+      if (revision !== listRevision.current) return;
       const next = [...new Map(lists.flat().map((node) => [node.id, node])).values()];
       next.sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at));
       setNodes(next);
@@ -145,8 +159,10 @@ export function MemoryManager({
         return next[0]?.id ?? null;
       });
       setMode("view");
+    } catch (error) {
+      if (revision === listRevision.current) setNote(`Couldn't load memories: ${errorMessage(error)}`);
     } finally {
-      setBusy(false);
+      if (revision === listRevision.current) setBusy(false);
     }
   }
 
@@ -158,15 +174,19 @@ export function MemoryManager({
     }
     const scopes = tabScopes(tab, activeId, folder, workspaceContext);
     if (scopes.length === 0) return;
+    const revision = ++listRevision.current;
     setBusy(true);
     setNote(null);
     try {
       const hits = await searchGraphMemory(text, scopes, 100, model || undefined, includeArchived);
+      if (revision !== listRevision.current) return;
       setNodes([...new Map(hits.map((hit) => [hit.node.id, hit.node])).values()]);
       setSelectedId(hits[0]?.node.id ?? null);
       setMode("view");
+    } catch (error) {
+      if (revision === listRevision.current) setNote(`Memory search failed: ${errorMessage(error)}`);
     } finally {
-      setBusy(false);
+      if (revision === listRevision.current) setBusy(false);
     }
   }
 
@@ -432,4 +452,8 @@ function MemoryForm({ title, draft, onChange, busy, onCancel, onSave, saveLabel,
     <label className="field"><span>Content</span><textarea className="instr-input mem-content-input" value={draft.content} onChange={(event) => onChange({ ...draft, content: event.target.value })} autoFocus /></label>
     <div className="mem-actions"><button className="btn-ghost" type="button" disabled={busy} onClick={onCancel}>Cancel</button><span className="spacer" /><button className="btn-accent mem-icon-action" type="button" disabled={busy || !canSave} onClick={onSave}><Check size={14} /> {saveLabel}</button></div>
   </>;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

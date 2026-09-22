@@ -9,6 +9,7 @@ import {
 } from "../lib/onboardingModel";
 import "../settings.css";
 import {
+  isTauriRuntime,
   accountRuntimeKind,
   discoverLocalProviders,
   getClaudeStatus,
@@ -104,9 +105,6 @@ function OnboardingStory({
   );
 }
 
-function inTauriRuntime(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
 
 function runtimeReady(kind: AccountRuntimeKind, statuses: RuntimeStatuses): boolean {
   if (kind === "codex") return Boolean(statuses.codex && (statuses.codex.account || !statuses.codex.requiresOpenaiAuth));
@@ -215,7 +213,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
     void refreshAccountRuntimes();
     onboarding.start();
     return () => { modelRefreshRevision.current += 1; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Re-run only when runtime enablement changes; the refresh helpers read current state.
   }, [accountRuntimeEnabled]);
 
   useEffect(() => {
@@ -407,7 +405,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
   }
 
   async function pickFolder() {
-    if (!inTauriRuntime()) return;
+    if (!isTauriRuntime()) return;
     setFolderNotice(null);
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
@@ -737,7 +735,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
                         onBlur={() => updateThreadSettings(activeId, { folder: folderDraft.trim() })}
                         placeholder={workspaceFolderPlaceholder(typeof navigator === "undefined" ? "" : `${navigator.platform} ${navigator.userAgent}`)}
                       />
-                      <button className="btn-ghost" type="button" onClick={() => void pickFolder()} disabled={!inTauriRuntime()}>
+                      <button className="btn-ghost" type="button" onClick={() => void pickFolder()} disabled={!isTauriRuntime()}>
                         Choose
                       </button>
                     </span>

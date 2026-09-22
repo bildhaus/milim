@@ -109,8 +109,48 @@ function estimateTextTokensFallback(text: string): number {
   return total + newlineTokens;
 }
 
+interface MessageTokenEstimate {
+  content: string;
+  attachments: ChatAttachment[] | undefined;
+  control: boolean;
+  /** Whether the count came from the tokenizer rather than the pre-load fallback. */
+  exact: boolean;
+  tokens: number;
+}
+
+/**
+ * Per-message token counts. Store updates replace changed messages, so an
+ * unchanged message object keeps its count and a streaming flush only
+ * re-tokenizes the message that grew. The entry also records the inputs it
+ * was computed from, so an in-place edit is still recounted.
+ */
+const messageTokenEstimates = new WeakMap<ChatMessage, MessageTokenEstimate>();
+
+function estimateMessageTokens(message: ChatMessage): number {
+  const control = isTranscriptControlMessage(message);
+  const cached = messageTokenEstimates.get(message);
+  if (
+    cached
+    && cached.content === message.content
+    && cached.attachments === message.attachments
+    && cached.control === control
+    && (cached.exact || !defaultTokenizer)
+  ) {
+    return cached.tokens;
+  }
+  const tokens = estimateTextTokens(messageContentForEstimate(message));
+  messageTokenEstimates.set(message, {
+    content: message.content,
+    attachments: message.attachments,
+    control,
+    exact: Boolean(defaultTokenizer),
+    tokens,
+  });
+  return tokens;
+}
+
 export function estimateMessagesTokens(messages: readonly ChatMessage[]): number {
-  return messages.reduce((total, message) => total + estimateTextTokens(messageContentForEstimate(message)), 0);
+  return messages.reduce((total, message) => total + estimateMessageTokens(message), 0);
 }
 
 export function modelContextBudget(model: string, models: readonly ModelInfo[]): ModelContextBudget | null {
@@ -163,7 +203,7 @@ export function compactMessagesForModel(
   const suffixTarget = Math.max(latestTokens, target - setupTokens - summaryBudget);
   for (let i = conversation.length - 1; i >= 0; i--) {
     const message = conversation[i];
-    const nextTokens = estimateTextTokens(messageContentForEstimate(message));
+    const nextTokens = estimateMessageTokens(message);
     if (suffix.length > 0 && suffixTokens + nextTokens > suffixTarget) break;
     suffix.unshift(message);
     suffixTokens += nextTokens;

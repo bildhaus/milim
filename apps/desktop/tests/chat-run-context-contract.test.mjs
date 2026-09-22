@@ -55,8 +55,8 @@ assert.match(compaction, /toolContext: AgentToolContext/);
 assert.match(compaction, /toolContext: options\.toolContext/);
 assert.ok(
   (compaction.match(/milim_context: utilityAccountRuntimeMilimContext/g) ?? [])
-    .length >= 2,
-  "OpenCode and Pi compaction must carry the captured run context",
+    .length >= 1 && /summary = await summarizeWithHarness\(/.test(compaction),
+  "every account-runtime compaction must share the call that carries the captured run context",
 );
 
 const goalDecision = section(

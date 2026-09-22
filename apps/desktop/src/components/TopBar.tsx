@@ -2,7 +2,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { MouseEvent, ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { getCodexRateLimits, isClaudeModel, isCodexModel } from "../api";
+import { inTauri, getCodexRateLimits, isClaudeModel, isCodexModel } from "../api";
 import {
   codexLimitsFromRateLimitPayload,
   formatCompactProviderLimits,
@@ -27,7 +27,6 @@ import { UpdateProgress } from "../update/UpdateProgress";
 import { Download, Pin, Refresh } from "./icons";
 import { WindowControls } from "./WindowControls";
 
-const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const PINNED_KEY = "milim.window.alwaysOnTop";
 const ZOOM_CHIP_IDLE_MS = 3000;
 

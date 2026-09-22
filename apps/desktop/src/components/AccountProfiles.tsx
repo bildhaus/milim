@@ -1,7 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
 import {
-  AUTO_ACCOUNT_PROFILE_ID,
-  DEFAULT_ACCOUNT_PROFILE_ID,
   createAccountProfile,
   deleteAccountProfile,
   listAccountProfiles,
@@ -332,8 +330,3 @@ export function AccountProfilesPanel({
     </div>
   );
 }
-
-export const ACCOUNT_PROFILE_SENTINELS = {
-  auto: AUTO_ACCOUNT_PROFILE_ID,
-  default: DEFAULT_ACCOUNT_PROFILE_ID,
-};

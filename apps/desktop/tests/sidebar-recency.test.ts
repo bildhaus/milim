@@ -34,9 +34,16 @@ assert(
   "collapsed working loaders should preserve a stable per-thread animation phase",
 );
 assert(
-  sidebarSource.includes('aria-current={session.id === activeId ? "page" : undefined}') &&
-    (sidebarSource.match(/aria-current=\{s\.id === activeId \? "page" : undefined\}/g)?.length ?? 0) === 2,
+  sidebarSource.includes('aria-current={active ? "page" : undefined}') &&
+    sidebarSource.includes("active={session.id === activeId}") &&
+    (sidebarSource.match(/active=\{s\.id === activeId\}/g)?.length ?? 0) === 2,
   "every active thread row should expose its current-page state",
+);
+assert(
+  (sidebarSource.match(/<SessionRow\b/g)?.length ?? 0) === 3 &&
+    /role="button"\s+tabIndex=\{tabbable && !editing \? 0 : -1\}/.test(sidebarSource) &&
+    /event\.key === "Enter" \|\| event\.key === " "/.test(sidebarSource),
+  "every thread row should render through the shared keyboard-operable SessionRow",
 );
 assert(
   sidebarSource.includes('role="img"') && sidebarSource.includes('aria-label={indicator.label}'),

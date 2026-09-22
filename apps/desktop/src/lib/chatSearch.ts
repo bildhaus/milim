@@ -1,3 +1,5 @@
+import { folderLabel } from "./projectColors.js";
+
 export interface SearchableChatMessage {
   role?: string;
   content: string;
@@ -145,7 +147,7 @@ function scoreSession(
   const titleLower = title.toLowerCase();
   const folder = session.settings?.folder?.trim() ?? "";
   const projectName = folder ? projectByFolder.get(folder) ?? "" : "";
-  const metadataText = [projectName, folderLabel(folder), folder, session.settings?.model].filter(Boolean).join(" ");
+  const metadataText = [projectName, folderLabel(folder, ""), folder, session.settings?.model].filter(Boolean).join(" ");
   const metadataLower = metadataText.toLowerCase();
 
   let score = 0;
@@ -202,7 +204,7 @@ function buildResult(
 ): ChatSearchResult {
   const folder = session.settings?.folder?.trim() ?? "";
   const projectName = folder ? projectByFolder.get(folder) ?? "" : "";
-  const projectLabel = projectName || folderLabel(folder);
+  const projectLabel = projectName || folderLabel(folder, "");
   const metadata = [projectLabel, session.settings?.model].filter(Boolean).join(" | ");
   return {
     sessionId: session.id,
@@ -226,10 +228,6 @@ function countMatches(text: string, terms: readonly string[]): number {
 
 function compactText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
-}
-
-function folderLabel(folder: string): string {
-  return folder.split(/[\\/]/).filter(Boolean).pop() || "";
 }
 
 function rolePrefix(role?: string): string {

@@ -2,6 +2,7 @@ import {
   lazy,
   Suspense,
   useCallback,
+  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -15,6 +16,7 @@ import {
 } from "react";
 import { useAgents } from "../agents/store";
 import {
+  inTauri,
   artifactFileStatus,
   applyWorkerDiff,
   claudeRuntimeModel,
@@ -95,8 +97,6 @@ import {
   type DelegationPolicy,
   type CodexLoginEvent,
   type HarnessEvent,
-  type HarnessEventEnvelope,
-  type HarnessRunRequest,
   type MediaGenerationResult,
   type MemoryNotice,
   type ModelInfo,
@@ -162,7 +162,7 @@ import {
   workerRunSynthesisId,
 } from "../lib/workerRuns";
 import {
-  browserAttachment,
+  browserFileAttachment,
   MAX_DESKTOP_ATTACHMENTS,
 } from "../lib/attachmentInput";
 import {
@@ -200,6 +200,11 @@ import {
   accountProfileRuntimeForModel,
   withAccountProfile,
 } from "../lib/accountProfiles";
+import {
+  collectHarnessUtilityRun,
+  utilityHarnessForModel,
+  type UtilityHarness,
+} from "../lib/harnessUtility";
 import { reasoningEffortForThread, reasoningEffortOverridesWithSelection } from "../lib/reasoningEffort";
 import { managedPreviewRuntimeForTurn, type ManagedPreviewRuntimeContext } from "../lib/managedPreviewRuntime";
 import {
@@ -452,8 +457,6 @@ const WorkersSummary = lazy(() =>
     ([, mod]) => ({ default: mod.WorkersSummary }),
   ),
 );
-const inTauri =
-  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const MAX_MOUNTED_MESSAGE_ROWS = 200;
 const MESSAGE_WINDOW_SHIFT = 100;
 const DEFAULT_MESSAGE_ROW_HEIGHT = 180;
@@ -585,48 +588,39 @@ type CompactionSummaryResult = {
   finishReason?: string;
 };
 
-async function collectHarnessUtilityRun(
-  harnessId: "codex" | "claude" | "opencode" | "pi",
-  request: HarnessRunRequest,
-  signal?: AbortSignal,
-): Promise<CompactionSummaryResult> {
-  let content = "";
-  let warning: string | null = null;
-  let error: string | null = null;
-  let usage: TokenUsage | undefined;
-  let costUsd: number | undefined;
-  let costSource: "provider" | undefined;
-  await streamHarnessRun(
-    harnessId,
-    request,
-    (envelope: HarnessEventEnvelope) => {
-      const event = envelope.event;
-      if (event.type === "text_delta" && event.text) {
-        content += event.text;
-      } else if (event.type === "runtime_notice") {
-        if (event.level === "error") error = event.message;
-        else if (event.code === "runtime_warning") warning = event.message;
-      } else if (
-        event.type === "turn_failed" ||
-        event.type === "turn_cancelled"
-      ) {
-        error = event.message ?? "Harness turn was cancelled.";
-      } else if (
-        event.type === "usage_updated" ||
-        event.type === "turn_completed"
-      ) {
-        if (event.usage) usage = event.usage;
-        if (typeof event.cost_usd === "number" && event.cost_usd >= 0) {
-          costUsd = event.cost_usd;
-          costSource = "provider";
-        }
-      }
-    },
-    signal,
+const UTILITY_HARNESS_PROVIDER_LABELS: Record<UtilityHarness["id"], string> = {
+  codex: "Codex",
+  claude: "Local Claude CLI",
+  opencode: "Local OpenCode CLI",
+  pi: "Local Pi CLI",
+};
+
+/**
+ * `messages` without its last entry, keeping the previous array reference
+ * while every prefix message is unchanged. Store updates preserve untouched
+ * message objects, so this stays stable across stream flushes of the tail.
+ */
+function useSettledMessagePrefix(messages: ChatMessage[]): ChatMessage[] {
+  const settledRef = useRef<ChatMessage[]>(EMPTY);
+  const previous = settledRef.current;
+  const length = Math.max(0, messages.length - 1);
+  let unchanged = previous.length === length;
+  for (let index = 0; unchanged && index < length; index += 1) {
+    unchanged = previous[index] === messages[index];
+  }
+  if (!unchanged) settledRef.current = messages.slice(0, length);
+  return settledRef.current;
+}
+
+/** Whether a message holds anything the approval and attention scans read. */
+function messageHasApprovalActivity(message: ChatMessage | undefined): boolean {
+  if (!message) return false;
+  if (message.approval) return true;
+  if (message.run?.steps.some((step) => step.approval)) return true;
+  return (message.streamParts ?? []).some(
+    (part) =>
+      part.kind === "event" && Boolean(part.approvalId || part.approvalStatus),
   );
-  if (error) throw new Error(error);
-  if (warning) throw new Error(warning);
-  return { content, usage, costUsd, costSource };
 }
 
 function mergeTokenUsage(
@@ -770,11 +764,6 @@ const APP_SESSION_ID = crypto.randomUUID();
 
 function attachmentId(): string {
   return crypto.randomUUID();
-}
-
-async function browserFileAttachment(file: File): Promise<ChatAttachment> {
-  const mime = file.type || inferAttachmentMime(file.name);
-  return browserAttachment(file, mime, attachmentId());
 }
 
 function previewArtifactsForMessage(
@@ -1683,13 +1672,28 @@ export function ChatView({
     messages.length,
     messageWindowStart + MAX_MOUNTED_MESSAGE_ROWS,
   );
+  // Stream flushes replace only the tail message. Whole-thread scans run over
+  // the stable settled prefix unless the tail carries data the scan reads, so
+  // streamed text alone does not rescan the thread.
+  const settledMessages = useSettledMessagePrefix(messages);
+  const tailMessage =
+    messages.length > settledMessages.length
+      ? messages[messages.length - 1]
+      : undefined;
+  const approvalScanMessages = messageHasApprovalActivity(tailMessage)
+    ? messages
+    : settledMessages;
   const pendingApprovals = useMemo(
-    () => pendingToolApprovals(messages),
-    [messages],
+    () => pendingToolApprovals(approvalScanMessages),
+    [approvalScanMessages],
   );
+  const artifactScanMessages =
+    tailMessage?.role === "assistant" && tailMessage.artifacts?.length
+      ? messages
+      : settledMessages;
   const artifactRevisionGroupsForThread = useMemo(
-    () => artifactRevisionGroups(messages),
-    [messages],
+    () => artifactRevisionGroups(artifactScanMessages),
+    [artifactScanMessages],
   );
   const artifactRevisionsByOccurrence = useMemo(
     () => artifactRevisionChoiceByOccurrence(artifactRevisionGroupsForThread),
@@ -1698,13 +1702,17 @@ export function ChatView({
   const promptHistoryScope = useUiPreferences((s) => s.promptHistoryScope);
   const globalPromptHistory = useUiPreferences((s) => s.globalPromptHistory);
   const recordGlobalPrompt = useUiPreferences((s) => s.recordGlobalPrompt);
+  const tailUserPrompt =
+    tailMessage?.role === "user" ? tailMessage.content.trim() : "";
   const sentHistory = useMemo(() => {
     if (promptHistoryScope === "off") return [];
     if (promptHistoryScope === "global") return globalPromptHistory.slice().reverse();
-    return messages
+    const history = settledMessages
       .filter((message) => message.role === "user" && message.content.trim())
       .map((message) => message.content.trim());
-  }, [globalPromptHistory, messages, promptHistoryScope]);
+    if (tailUserPrompt) history.push(tailUserPrompt);
+    return history;
+  }, [globalPromptHistory, promptHistoryScope, settledMessages, tailUserPrompt]);
   const activeTitle = useSessions(
     (s) =>
       s.sessions.find((x) => x.id === s.activeId)?.title ?? "Current thread",
@@ -1712,8 +1720,19 @@ export function ChatView({
   const activeWorker = useSessions(
     (s) => s.sessions.find((x) => x.id === s.activeId)?.worker,
   );
-  const activeSession = useSessions(
-    (s) => s.sessions.find((x) => x.id === s.activeId),
+  // Narrow slices of the active session: subscribing to the whole session
+  // object re-rendered on every stream flush.
+  const activeBrowserSession = useSessions(
+    (s) => s.sessions.find((x) => x.id === s.activeId)?.browserSession,
+  );
+  const activeRetryWorkspace = useSessions(
+    (s) => s.sessions.find((x) => x.id === s.activeId)?.retryWorkspace,
+  );
+  const activeSessionExists = useSessions((s) =>
+    s.sessions.some((x) => x.id === s.activeId),
+  );
+  const activeSettledAt = useSessions(
+    (s) => s.sessions.find((x) => x.id === s.activeId)?.settledAt,
   );
   const workerRuns = useSessions((s) => s.workerRuns);
   const activeWorkerRuns = useMemo(
@@ -1728,12 +1747,11 @@ export function ChatView({
   );
   const activeWorkerRun = activeWorkerRuns[0];
   const announcedAttentionKeysRef = useRef(new Set<string>());
+  const proposedWorkerRunId =
+    activeWorkerRun?.run.status === "proposed" ? activeWorkerRun.run.id : undefined;
   const attentionKey = useMemo(
-    () => pendingAttentionKey(
-      messages,
-      activeWorkerRun?.run.status === "proposed" ? activeWorkerRun.run.id : undefined,
-    ),
-    [activeWorkerRun?.run.id, activeWorkerRun?.run.status, messages],
+    () => pendingAttentionKey(approvalScanMessages, proposedWorkerRunId),
+    [approvalScanMessages, proposedWorkerRunId],
   );
   useEffect(() => {
     if (!attentionKey || announcedAttentionKeysRef.current.has(attentionKey)) return;
@@ -2929,9 +2947,27 @@ export function ChatView({
       const latest = useSessions
         .getState()
         .workerRuns.find((item) => item.run.id === record.run.id);
-      void maybeResumeAfterWorkerRun(latest ?? record);
+      void workerRunHandlersRef.current.maybeResumeAfterWorkerRun(
+        latest ?? record,
+      );
     }, 500 * 2 ** attempts);
   }
+
+  // Worker event streams and reconciliation timers outlive the render that
+  // started them; they call through this ref so a resumed turn uses the
+  // current providers, models, and settings instead of a stale closure.
+  const workerRunHandlersRef = useRef({
+    applyWorkerRunEvent,
+    maybeResumeAfterWorkerRun,
+    startWorkerRunEvents,
+  });
+  useLayoutEffect(() => {
+    workerRunHandlersRef.current = {
+      applyWorkerRunEvent,
+      maybeResumeAfterWorkerRun,
+      startWorkerRunEvents,
+    };
+  });
 
   function startWorkerRunEvents(record: WorkerRunRecord) {
     const run = record.run;
@@ -2965,7 +3001,7 @@ export function ChatView({
               if (event.event?.seq)
                 afterSeq = Math.max(afterSeq, event.event.seq);
               retry = 0;
-              applyWorkerRunEvent(event);
+              workerRunHandlersRef.current.applyWorkerRunEvent(event);
               terminalEvent = Boolean(
                 event.run &&
                   ["done", "partial", "stopped", "error"].includes(
@@ -2985,7 +3021,9 @@ export function ChatView({
         try {
           const canonical = await getWorkerRun(run.id);
           useSessions.getState().upsertWorkerRun(canonical);
-          await maybeResumeAfterWorkerRun(canonical);
+          await workerRunHandlersRef.current.maybeResumeAfterWorkerRun(
+            canonical,
+          );
           if (
             ["done", "partial", "stopped", "error"].includes(
               canonical.run.status,
@@ -3021,9 +3059,9 @@ export function ChatView({
           store.upsertWorkerRun(record);
           if (pending.has(record.run.id)) {
             approvedWorkerRunsRef.current.add(record.run.id);
-            void maybeResumeAfterWorkerRun(record);
+            void workerRunHandlersRef.current.maybeResumeAfterWorkerRun(record);
           }
-          startWorkerRunEvents(record);
+          workerRunHandlersRef.current.startWorkerRunEvents(record);
         }
       })
       .catch(() => {
@@ -3032,15 +3070,11 @@ export function ChatView({
     return () => {
       cancelled = true;
     };
-  }, [
-    activeId,
-    activeSession?.browserSession,
-    sessionsHydrated,
-    setSessionBrowserSession,
-  ]);
+  }, [activeId, sessionsHydrated]);
 
   useEffect(() => {
-    for (const record of activeWorkerRuns) startWorkerRunEvents(record);
+    for (const record of activeWorkerRuns)
+      workerRunHandlersRef.current.startWorkerRunEvents(record);
   }, [activeWorkerRuns]);
 
   useEffect(() => {
@@ -3261,6 +3295,9 @@ export function ChatView({
   }, [activeId, autoTitleChats, sessionsHydrated, setMessages, updateCanonicalActiveRun]);
 
   async function loadOlderMessages() {
+    const activeSession = useSessions
+      .getState()
+      .sessions.find((session) => session.id === activeId);
     const beforeIndex = activeSession?.messagesLoadedFrom ?? 0;
     if (
       !inTauri ||
@@ -3588,18 +3625,35 @@ export function ChatView({
     return true;
   }
 
+  // The context meter is advisory, so it trails stream flushes and typing
+  // instead of re-estimating on the urgent render path.
+  const tokenEstimateMessages = useDeferredValue(messages);
+  const tokenEstimateInput = useDeferredValue(input);
   const tokens = useMemo(() => {
     const fixed: ChatMessage[] = [globalInstructions, instructions]
       .map((content) => content.trim())
       .filter(Boolean)
       .map((content): ChatMessage => ({ role: "system", content }));
-    const draft: ChatMessage[] = input.trim() || pendingAttachments.length
-      ? [{ role: "user", content: input, attachments: pendingAttachments }]
-      : [];
+    const draft: ChatMessage[] =
+      tokenEstimateInput.trim() || pendingAttachments.length
+        ? [
+            {
+              role: "user",
+              content: tokenEstimateInput,
+              attachments: pendingAttachments,
+            },
+          ]
+        : [];
     return estimateMessagesTokens(
-      messagesForModelContext(fixed, [...messages, ...draft]),
+      messagesForModelContext(fixed, [...tokenEstimateMessages, ...draft]),
     );
-  }, [messages, input, globalInstructions, instructions, pendingAttachments]);
+  }, [
+    tokenEstimateMessages,
+    tokenEstimateInput,
+    globalInstructions,
+    instructions,
+    pendingAttachments,
+  ]);
   const activeContextBudget = useMemo(
     () => modelContextBudget(effectiveModel.trim(), pickerModels),
     [effectiveModel, pickerModels],
@@ -3704,7 +3758,7 @@ export function ChatView({
         ? "app"
         : "url");
   const activeInspectorBrowserSession =
-    activeSession?.browserSession ?? emptyBrowserSession();
+    activeBrowserSession ?? emptyBrowserSession();
   const activeInspectorAppBrowserSession = useSessions(
     (state) => state.previewBrowserSessionsByKey[activePreviewRuntimeKey],
   );
@@ -3737,9 +3791,8 @@ export function ChatView({
     if (restoredArtifact)
       artifactSelectionsByThreadRef.current.set(activeId, restoredArtifact);
     setPreviewSelection(restoredArtifact);
-    const restoredBrowser =
-      activeSession?.browserSession ?? emptyBrowserSession();
-    if (!activeSession?.browserSession)
+    const restoredBrowser = activeBrowserSession ?? emptyBrowserSession();
+    if (!activeBrowserSession)
       setSessionBrowserSession(activeId, restoredBrowser);
     const restoredSource =
       previewSourcesByThreadRef.current.get(activeId) ??
@@ -4419,7 +4472,12 @@ export function ChatView({
       target,
       models: pickerModels,
       providers,
-      session: activeSession ?? { messages, accountRuntime: undefined },
+      session: useSessions
+        .getState()
+        .sessions.find((session) => session.id === activeId) ?? {
+        messages,
+        accountRuntime: undefined,
+      },
       toolRequired: contextualModelToolIntent || Boolean(activeAgentId && activeAgent?.tool_mode !== "none"),
     });
   }
@@ -4599,7 +4657,7 @@ export function ChatView({
   }
 
   async function applyRetryWorkspace() {
-    const retry = activeSession?.retryWorkspace;
+    const retry = activeRetryWorkspace;
     if (!retry || busy) return;
     if (!(await confirmApp({
       title: "Apply retry changes?",
@@ -4635,7 +4693,7 @@ export function ChatView({
   }
 
   async function discardRetryWorkspace() {
-    const retry = activeSession?.retryWorkspace;
+    const retry = activeRetryWorkspace;
     if (!retry || busy) return;
     if (!(await confirmApp({
       title: "Discard retry worktree?",
@@ -5198,7 +5256,7 @@ export function ChatView({
   }
 
   async function createCompactionCheckpoint(
-    _sessionId: string,
+    sessionId: string,
     sourceMessages: ChatMessage[],
     model: string,
     options: {
@@ -5214,23 +5272,18 @@ export function ChatView({
       throw new Error("There is no thread context to compact.");
     }
     const baseline = summarizeThreadMetricsBreakdown(sourceMessages).lifetime;
-    const codexModel = codexRuntimeModel(model);
-    const claudeModel = claudeRuntimeModel(model);
-    const opencodeModel = opencodeRuntimeModel(model);
-    const piModel = piRuntimeModel(model);
+    const harness = utilityHarnessForModel(model);
+    const accountProfileId = accountProfileForModel(
+      useSessions.getState().getSettings(sessionId).accountProfiles,
+      model,
+    );
     const summaryStartedAt = Date.now();
     const selectedProvider = providers.find(
       (item) => providerOwnsModel(item, model),
     );
-    const provider = codexModel
-      ? "Codex"
-      : claudeModel
-        ? "Local Claude CLI"
-        : opencodeModel
-          ? "Local OpenCode CLI"
-          : piModel
-            ? "Local Pi CLI"
-        : selectedProvider?.name;
+    const provider = harness
+      ? UTILITY_HARNESS_PROVIDER_LABELS[harness.id]
+      : selectedProvider?.name;
     const summaryReasoningEffort =
       compactionSummaryReasoningEffort(selectedProvider);
     let usage: TokenUsage | undefined;
@@ -5252,47 +5305,16 @@ export function ChatView({
         { retry, outputCapTokens },
       );
       let summary: CompactionSummaryResult;
-      if (codexModel) {
-        const ready = await ensureCodexAccount();
+      if (harness) {
+        const ready = await ensureAccountRuntime(harness.id);
         if (!ready.ok) throw new Error(ready.message);
-        summary = await summarizeWithCodex(
-          codexModel,
+        summary = await summarizeWithHarness(
+          harness,
           promptMessages,
           options.folder,
           options.reasoningEffort,
           options.toolContext,
-          options.signal,
-        );
-      } else if (claudeModel) {
-        const ready = await ensureClaudeAccount();
-        if (!ready.ok) throw new Error(ready.message);
-        summary = await summarizeWithClaude(
-          claudeModel,
-          promptMessages,
-          options.folder,
-          options.reasoningEffort,
-          options.toolContext,
-          options.signal,
-        );
-      } else if (opencodeModel) {
-        const ready = await ensureOpenCodeAccount();
-        if (!ready.ok) throw new Error(ready.message);
-        summary = await summarizeWithOpenCode(
-          opencodeModel,
-          promptMessages,
-          options.folder,
-          options.toolContext,
-          options.signal,
-        );
-      } else if (piModel) {
-        const ready = await ensurePiAccount();
-        if (!ready.ok) throw new Error(ready.message);
-        summary = await summarizeWithPi(
-          piModel,
-          promptMessages,
-          options.folder,
-          options.reasoningEffort,
-          options.toolContext,
+          accountProfileId,
           options.signal,
         );
       } else {
@@ -5356,88 +5378,41 @@ export function ChatView({
     throw new Error(lastError);
   }
 
-  async function summarizeWithCodex(
-    model: string,
+  function ensureAccountRuntime(
+    id: UtilityHarness["id"],
+  ): Promise<AccountRuntimeReady> {
+    switch (id) {
+      case "codex":
+        return ensureCodexAccount();
+      case "claude":
+        return ensureClaudeAccount();
+      case "opencode":
+        return ensureOpenCodeAccount();
+      case "pi":
+        return ensurePiAccount();
+    }
+  }
+
+  async function summarizeWithHarness(
+    harness: UtilityHarness,
     promptMessages: ChatMessage[],
     folder: string,
     reasoningEffort: ReasoningEffort,
     toolContext: AgentToolContext,
+    accountProfileId: string | undefined,
     signal?: AbortSignal,
   ): Promise<CompactionSummaryResult> {
     const runtimeInput = accountRuntimeInputFromMessages(promptMessages);
     return await collectHarnessUtilityRun(
-      "codex",
+      harness.id,
       {
-        model,
+        model: harness.model,
         prompt: runtimeInput.prompt,
         cwd: folder.trim() || undefined,
-        reasoning_effort: reasoningEffort,
-        images: runtimeInput.images,
-        persist_session: false,
-        // A side call bills a subscription, so it uses the same account as
-        // this chat's turns rather than the runtime's default.
-        account_profile_id: accountProfileForModel(accountProfiles, model),
-        tool_approval_policy: "guarded",
-        tool_approval_grant: false,
-        plan_mode: true,
-        milim_context: utilityAccountRuntimeMilimContext({
-          toolContext,
-          toolApproval: "guarded",
-          planMode: true,
-        }),
-      },
-      signal,
-    );
-  }
-
-  async function summarizeWithClaude(
-    model: string,
-    promptMessages: ChatMessage[],
-    folder: string,
-    reasoningEffort: ReasoningEffort,
-    toolContext: AgentToolContext,
-    signal?: AbortSignal,
-  ): Promise<CompactionSummaryResult> {
-    const runtimeInput = accountRuntimeInputFromMessages(promptMessages);
-    return await collectHarnessUtilityRun(
-      "claude",
-      {
-        model,
-        prompt: runtimeInput.prompt,
-        cwd: folder.trim() || undefined,
-        reasoning_effort: reasoningEffort,
-        images: runtimeInput.images,
-        persist_session: false,
-        // A side call bills a subscription, so it uses the same account as
-        // this chat's turns rather than the runtime's default.
-        account_profile_id: accountProfileForModel(accountProfiles, model),
-        tool_approval_policy: "guarded",
-        tool_approval_grant: false,
-        plan_mode: true,
-        milim_context: utilityAccountRuntimeMilimContext({
-          toolContext,
-          toolApproval: "guarded",
-          planMode: true,
-        }),
-      },
-      signal,
-    );
-  }
-
-  async function summarizeWithOpenCode(
-    model: string,
-    promptMessages: ChatMessage[],
-    folder: string,
-    toolContext: AgentToolContext,
-    signal?: AbortSignal,
-  ): Promise<CompactionSummaryResult> {
-    const runtimeInput = accountRuntimeInputFromMessages(promptMessages);
-    return await collectHarnessUtilityRun(
-      "opencode",
-      {
-        model,
-        prompt: runtimeInput.prompt,
-        cwd: folder.trim() || undefined,
+        // OpenCode has no reasoning-effort control.
+        ...(harness.id === "opencode"
+          ? {}
+          : { reasoning_effort: reasoningEffort }),
         images: runtimeInput.images,
         persist_session: false,
         tool_approval_policy: "guarded",
@@ -5449,38 +5424,9 @@ export function ChatView({
           planMode: true,
         }),
       },
-      signal,
-    );
-  }
-
-  async function summarizeWithPi(
-    model: string,
-    promptMessages: ChatMessage[],
-    folder: string,
-    reasoningEffort: ReasoningEffort,
-    toolContext: AgentToolContext,
-    signal?: AbortSignal,
-  ): Promise<CompactionSummaryResult> {
-    const runtimeInput = accountRuntimeInputFromMessages(promptMessages);
-    return await collectHarnessUtilityRun(
-      "pi",
-      {
-        model,
-        prompt: runtimeInput.prompt,
-        cwd: folder.trim() || undefined,
-        images: runtimeInput.images,
-        reasoning_effort: reasoningEffort,
-        persist_session: false,
-        tool_approval_policy: "guarded",
-        tool_approval_grant: false,
-        plan_mode: true,
-        milim_context: utilityAccountRuntimeMilimContext({
-          toolContext,
-          toolApproval: "guarded",
-          planMode: true,
-        }),
-      },
-      signal,
+      // A side call bills a subscription, so it uses the same account as
+      // this chat's turns rather than the runtime's default.
+      { accountProfileId, signal },
     );
   }
 
@@ -5725,21 +5671,9 @@ export function ChatView({
         turnModel,
         pickerModels,
       );
-      const codexModel = codexRuntimeModel(turnModel);
-      const claudeModel = claudeRuntimeModel(turnModel);
-      const opencodeModel = opencodeRuntimeModel(turnModel);
-      const piModel = piRuntimeModel(turnModel);
       const runtimeInput = accountRuntimeInputFromMessages(decisionMessages);
       let content = "";
-      const selectedHarness = codexModel
-        ? { id: "codex" as const, model: codexModel }
-        : claudeModel
-          ? { id: "claude" as const, model: claudeModel }
-          : opencodeModel
-            ? { id: "opencode" as const, model: opencodeModel }
-            : piModel
-              ? { id: "pi" as const, model: piModel }
-              : null;
+      const selectedHarness = utilityHarnessForModel(turnModel);
       if (selectedHarness) {
         const guarded = selectedHarness.id === "pi";
         const result = await collectHarnessUtilityRun(
@@ -5764,7 +5698,13 @@ export function ChatView({
                 })
               : decisionMilimContext,
           },
-          controller.signal,
+          {
+            accountProfileId: accountProfileForModel(
+              decisionSettings.accountProfiles,
+              turnModel,
+            ),
+            signal: controller.signal,
+          },
         );
         content = result.content;
       } else {
@@ -7991,9 +7931,9 @@ export function ChatView({
 
   const themeIsDark = useTheme((s) => s.theme.isDark);
   const settledThreadsEnabled = useUiPreferences((s) => s.settledThreadsEnabled);
-  const threadActionsAvailable = Boolean(activeSession && messages.length > 0);
+  const threadActionsAvailable = activeSessionExists && messages.length > 0;
   const archiveAvailable =
-    threadActionsAvailable && (!settledThreadsEnabled || Boolean(activeSession?.settledAt));
+    threadActionsAvailable && (!settledThreadsEnabled || Boolean(activeSettledAt));
   const gitPanelOpen = sidePanelVisible && inspectorTab === "git";
   const previewPanelOpen = sidePanelVisible && inspectorTab === "preview";
   const codePanelOpen = sidePanelVisible && inspectorTab === "code";
@@ -8032,13 +7972,17 @@ export function ChatView({
     if (next) theme.setTheme(next.id);
   }
 
+  function sessionTitle(id: string): string {
+    return useSessions.getState().sessions.find((x) => x.id === id)?.title ?? "";
+  }
+
   async function renameActiveThreadFromCommand() {
     const id = activeId;
     const title = await promptApp({
       title: "Rename chat",
       message: "Choose a new name for this chat.",
       confirmLabel: "Rename",
-      input: { label: "Chat name", defaultValue: activeSession?.title ?? "" },
+      input: { label: "Chat name", defaultValue: sessionTitle(id) },
     });
     if (title == null) return;
     useSessions.getState().rename(id, title.trim());
@@ -8058,7 +8002,7 @@ export function ChatView({
   async function archiveActiveThreadFromCommand() {
     if (!archiveAvailable) return;
     const id = activeId;
-    const title = activeSession?.title?.trim() || "this chat";
+    const title = sessionTitle(id).trim() || "this chat";
     if (!(await confirmApp({
       title: "Archive chat?",
       message: `Archive "${title}"? Archived chats can be restored from Settings > Data & privacy.`,
@@ -8132,8 +8076,13 @@ export function ChatView({
     );
   }
 
-  useEffect(() => {
-    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+  // The listener is registered once and calls the latest render's handler,
+  // so shortcuts such as Stop never act on a stale `stop`/`busy` closure.
+  const shortcutKeyDownRef = useRef<
+    (event: globalThis.KeyboardEvent) => void
+  >(() => {});
+  useLayoutEffect(() => {
+    shortcutKeyDownRef.current = (event: globalThis.KeyboardEvent) => {
       if (event.defaultPrevented || shortcutTargetBlocked(event.target)) return;
       if (recentThreadSwitcher && event.key === "Escape") {
         event.preventDefault();
@@ -8184,27 +8133,13 @@ export function ChatView({
         stopFromShortcut();
       }
     };
+  });
+  useEffect(() => {
+    const onKeyDown = (event: globalThis.KeyboardEvent) =>
+      shortcutKeyDownRef.current(event);
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [
-    activeId,
-    activeSession,
-    appShortcuts,
-    archiveAvailable,
-    busy,
-    canOpenGitPanel,
-    folder,
-    gitPanelOpen,
-    planMode,
-    previewPanelOpen,
-    projects,
-    recentThreadSwitcher,
-    sessionSummaries,
-    switchToSession,
-    threadSettings,
-    threadNavigationPlacement,
-    toggleSidebar,
-  ]);
+  }, []);
 
   function promoteQueuedMessage(messageId: string) {
     const first =
@@ -9255,12 +9190,12 @@ export function ChatView({
                 onClose={closeGitPanel}
                 modeSwitcher={inspectorTabSwitcher}
                 headerNotice={
-                  activeSession?.retryWorkspace ? (
+                  activeRetryWorkspace ? (
                     <div className="hot-swap-retry-banner">
                       <div>
                         <strong>Isolated Hot Swap retry</strong>
                         <span>
-                          {activeSession.retryWorkspace.adoptedAt
+                          {activeRetryWorkspace.adoptedAt
                             ? "Applied to the original workspace; the retry remains available."
                             : "Review this diff before applying it to the original workspace."}
                         </span>

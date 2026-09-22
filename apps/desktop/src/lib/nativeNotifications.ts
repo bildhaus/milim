@@ -4,6 +4,7 @@ import {
   type Session,
 } from "../sessions/store.js";
 import { pendingAttentionKey } from "../ui/sounds.js";
+import { isTauriRuntime } from "../api.js";
 
 export type NativeNotificationKind = "finished" | "attention";
 
@@ -21,9 +22,6 @@ type NativeBadgeState = {
 
 type NativeBadgeWriter = (count: number) => Promise<void>;
 
-function isTauriRuntime(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
 
 export async function ensureNativeNotificationPermission(): Promise<boolean> {
   if (!isTauriRuntime()) return false;

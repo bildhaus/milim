@@ -1,6 +1,6 @@
 import { Children, isValidElement, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ChatArtifact } from "../api";
-import { isPreviewableArtifact } from "../lib/artifacts";
+import { formatBytes, isPreviewableArtifact } from "../lib/artifacts";
 import { Code, Copy, Eye } from "./icons";
 
 function codeText(children: ReactNode): string {
@@ -11,12 +11,6 @@ function codeText(children: ReactNode): string {
       return codeText((child.props as { children?: ReactNode }).children);
     })
     .join("");
-}
-
-function formatBytes(size: number): string {
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
-  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 /** A fenced code block with a copy button. `children` is react-markdown's

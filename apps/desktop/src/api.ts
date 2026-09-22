@@ -3,7 +3,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { qualifyDuplicateProviderModels } from "./lib/modelPicker.js";
 import { wireMessages } from "./lib/attachmentWire.js";
-import { assertValidImageAttachment } from "./lib/attachmentInput.js";
+import { assertValidImageAttachment, inferAttachmentMime } from "./lib/attachmentInput.js";
 import { assertDesktopRequestBodyFits } from "./lib/requestBody.js";
 import type { GoogleRevocationStatus } from "./lib/googleWorkspace.js";
 import type { AppearanceSnapshotV1 } from "./theme/appearanceSnapshot.js";
@@ -484,8 +484,16 @@ const BASE = DEFAULT_BASE;
 const STARTUP_PROVIDER_PICKER_TIMEOUT_MS = 900;
 const ACCOUNT_RUNTIME_PICKER_TIMEOUT_MS = 8_000;
 const ACCOUNT_RUNTIME_PICKER_RETRY_DELAY_MS = 500;
-const inTauri =
-  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+/**
+ * Whether the page runs inside the Tauri webview. Evaluated per call, so code
+ * that runs after startup (and tests that stub `window`) see the live value.
+ */
+export function isTauriRuntime(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+/** `isTauriRuntime()` sampled once at module load, for render-time checks. */
+export const inTauri = isTauriRuntime();
 
 let tokenPromise: Promise<string | null> | null = null;
 let apiBasePromise: Promise<string> | null = null;
@@ -521,38 +529,6 @@ export function refreshProviderModelsAtStartup(): Promise<boolean> {
     "refresh_provider_models",
   ).catch(() => true);
   return startupProviderRefreshPromise;
-}
-
-export interface HarnessMcpCandidate {
-  harness: string;
-  name: string;
-  command: string;
-  args: string[];
-  cwd?: string | null;
-  env?: McpEnvVar[];
-  warnings?: string[];
-  source_path: string;
-}
-
-export interface HarnessSkillCandidate {
-  harness: string;
-  name: string;
-  path: string;
-  skill_md: string;
-}
-
-export interface HarnessImportPreview {
-  mcps: HarnessMcpCandidate[];
-  skills: HarnessSkillCandidate[];
-}
-
-export async function discoverHarnessImports(): Promise<HarnessImportPreview> {
-  if (!inTauri) return { mcps: [], skills: [] };
-  try {
-    return await invoke<HarnessImportPreview>("discover_harness_imports");
-  } catch {
-    return { mcps: [], skills: [] };
-  }
 }
 
 async function resolveApiInput(
@@ -892,52 +868,8 @@ export async function setActivePreviewTarget(
   });
 }
 
-export function inferAttachmentMime(name: string): string {
-  const ext = name.split(".").pop()?.toLowerCase();
-  switch (ext) {
-    case "png":
-      return "image/png";
-    case "jpg":
-    case "jpeg":
-      return "image/jpeg";
-    case "webp":
-      return "image/webp";
-    case "gif":
-      return "image/gif";
-    case "md":
-    case "markdown":
-      return "text/markdown";
-    case "json":
-      return "application/json";
-    case "csv":
-      return "text/csv";
-    case "html":
-    case "htm":
-      return "text/html";
-    case "css":
-      return "text/css";
-    case "js":
-    case "jsx":
-    case "ts":
-    case "tsx":
-    case "rs":
-    case "py":
-    case "go":
-    case "java":
-    case "c":
-    case "cpp":
-    case "h":
-    case "hpp":
-    case "toml":
-    case "yaml":
-    case "yml":
-    case "xml":
-    case "txt":
-      return "text/plain";
-    default:
-      return "application/octet-stream";
-  }
-}
+/** Kept on the API surface; the pure implementation lives with attachment input. */
+export { inferAttachmentMime };
 
 async function authFetch(
   input: RequestInfo | URL,
@@ -1114,22 +1046,46 @@ async function openControlEventSocket(
   });
 }
 
+const CONTROL_SOCKET_MIN_RETRY_MS = 250;
+const CONTROL_SOCKET_MAX_RETRY_MS = 15_000;
+/** A connection that lasted this long without delivering an event still counts as healthy. */
+const CONTROL_SOCKET_HEALTHY_MS = 5_000;
+
 /** Resumable canonical event transport. Timeline cursors recover every gap. */
 export async function streamControlEvents(
   signal: AbortSignal,
   onEvent: (event: ControlEventV1) => void,
 ): Promise<void> {
-  let retryMs = 250;
+  let retryMs = CONTROL_SOCKET_MIN_RETRY_MS;
   while (!signal.aborted) {
+    const openedAt = Date.now();
+    let received = false;
     try {
-      await openControlEventSocket(signal, onEvent);
-      retryMs = 250;
+      await openControlEventSocket(signal, (event) => {
+        received = true;
+        onEvent(event);
+      });
     } catch {
       // Reconnect below; callers retain their timeline cursor.
     }
     if (signal.aborted) return;
-    await new Promise<void>((resolve) => window.setTimeout(resolve, retryMs));
-    retryMs = Math.min(4_000, retryMs * 2);
+    // Only a connection that actually worked resets backoff; a socket that
+    // opens and immediately closes must not reconnect in a tight loop.
+    if (received || Date.now() - openedAt >= CONTROL_SOCKET_HEALTHY_MS) {
+      retryMs = CONTROL_SOCKET_MIN_RETRY_MS;
+    }
+    // Jitter in [retryMs / 2, retryMs) spreads reconnects after a server restart.
+    const delayMs = retryMs / 2 + Math.random() * (retryMs / 2);
+    await new Promise<void>((resolve) => {
+      const timer = window.setTimeout(done, delayMs);
+      function done() {
+        window.clearTimeout(timer);
+        signal.removeEventListener("abort", done);
+        resolve();
+      }
+      signal.addEventListener("abort", done, { once: true });
+    });
+    retryMs = Math.min(CONTROL_SOCKET_MAX_RETRY_MS, retryMs * 2);
   }
 }
 
@@ -1550,12 +1506,6 @@ export interface PreviewStaticStartOptions {
   entry_path: string;
 }
 
-export interface PreviewAppLogs {
-  logs: PreviewAppLog[];
-  next_seq: number;
-  truncated: boolean;
-}
-
 function previewAppUrl(threadId: string, suffix = ""): string {
   return `${BASE}/preview-apps/${encodeURIComponent(threadId)}${suffix}`;
 }
@@ -1676,20 +1626,6 @@ export async function restartPreviewApp(
   );
 }
 
-export async function getPreviewAppLogs(
-  threadId: string,
-  afterSeq?: number,
-): Promise<PreviewAppLogs> {
-  const query =
-    typeof afterSeq === "number" && Number.isFinite(afterSeq)
-      ? `?after_seq=${encodeURIComponent(String(Math.max(0, Math.floor(afterSeq))))}`
-      : "";
-  return await parseJsonResponse<PreviewAppLogs>(
-    await authFetch(previewAppUrl(threadId, `/logs${query}`)),
-    "preview app logs failed",
-  );
-}
-
 export async function getMobileCompanionStatus(): Promise<MobileCompanionStatus> {
   return await parseJsonResponse<MobileCompanionStatus>(
     await authFetch(`${BASE}/mobile/status`),
@@ -1697,10 +1633,13 @@ export async function getMobileCompanionStatus(): Promise<MobileCompanionStatus>
   );
 }
 
+/** Window event carrying the latest `MobileCompanionStatus` after an enable toggle. */
+export const MOBILE_COMPANION_STATUS_EVENT = "milim:mobile-companion-status";
+
 export async function setMobileCompanionEnabled(
   enabled: boolean,
 ): Promise<MobileCompanionStatus> {
-  return await parseJsonResponse<MobileCompanionStatus>(
+  const status = await parseJsonResponse<MobileCompanionStatus>(
     await authFetch(`${BASE}/mobile/enabled`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1708,6 +1647,12 @@ export async function setMobileCompanionEnabled(
     }),
     "mobile companion update failed",
   );
+  window.dispatchEvent(
+    new CustomEvent<MobileCompanionStatus>(MOBILE_COMPANION_STATUS_EVENT, {
+      detail: status,
+    }),
+  );
+  return status;
 }
 
 export async function startMobileCompanionPairing(): Promise<MobileCompanionPairing> {
@@ -1771,19 +1716,6 @@ export async function configureMobileTailscale(): Promise<MobileTailscaleStatus>
   return await invoke<MobileTailscaleStatus>(
     "configure_mobile_tailscale",
   );
-}
-
-export async function disableMobileTailscale(): Promise<MobileTailscaleStatus> {
-  if (!inTauri) {
-    return {
-      installed: false,
-      logged_in: false,
-      serve_configured: false,
-      local_target: "",
-      message: "Tailscale setup is available in the desktop app.",
-    };
-  }
-  return await invoke<MobileTailscaleStatus>("disable_mobile_tailscale");
 }
 
 export async function getMobileLanStatus(): Promise<MobileLanStatus> {
@@ -3212,17 +3144,6 @@ export async function streamCodexDeviceLogin(
   await streamJsonSse(resp, onEvent);
 }
 
-export async function loginCodexApiKey(apiKey: string): Promise<unknown> {
-  return await parseJsonResponse<unknown>(
-    await authFetch(`${BASE}/codex/login/api-key`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ api_key: apiKey }),
-    }),
-    "Codex API-key login failed",
-  );
-}
-
 const HARNESS_EVENT_TYPES = new Set<HarnessEvent["type"]>([
   "session_established",
   "turn_started",
@@ -3799,24 +3720,6 @@ export interface WorkerRunRecord {
   workers: Worker[];
 }
 
-export interface CreateWorkerRunRequest {
-  parent_thread_id: string;
-  parent_turn_id?: string;
-  workspace?: string | null;
-  privacy_mode?: PrivacyMode;
-  policy?: WorkerRunPolicy;
-  runtime?: Exclude<WorkerRunRuntime, "legacy">;
-  model?: string;
-  tasks: Array<{
-    title?: string;
-    prompt: string;
-    role?: string;
-    agent_id?: string;
-    model?: string;
-    access?: WorkerAccess;
-  }>;
-}
-
 export interface ThreadEvent {
   id: string;
   thread_id: string;
@@ -3864,21 +3767,6 @@ function workerRunRecord(data: {
   workers?: Worker[];
 }): WorkerRunRecord {
   return { run: data.run, workers: data.workers ?? [] };
-}
-
-export async function createWorkerRun(
-  request: CreateWorkerRunRequest,
-): Promise<WorkerRunRecord> {
-  return workerRunRecord(
-    await parseJsonResponse<{ run: WorkerRun; workers?: Worker[] }>(
-      await authFetch(`${BASE}/worker-runs`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(request),
-      }),
-      "worker run create HTTP failed",
-    ),
-  );
 }
 
 export async function listWorkerRuns(
@@ -4969,13 +4857,6 @@ export interface ToolApprovalSnapshot {
   updated_at_ms: number;
 }
 
-export async function getToolApproval(approvalId: string): Promise<ToolApprovalSnapshot> {
-  return parseJsonResponse<ToolApprovalSnapshot>(
-    await authFetch(`${BASE}/tool-approvals/${encodeURIComponent(approvalId)}`),
-    "Tool approval status failed",
-  );
-}
-
 export async function runWorkspaceGitAction(
   action: WorkspaceGitAction,
   options: {
@@ -5044,20 +4925,6 @@ export async function setComputerUse(enabled: boolean): Promise<boolean> {
  *  Local models are never scanned. */
 export type PrivacyMode = "off" | "redact" | "block";
 
-export interface PrivacyDetection {
-  kind: string;
-  value: string;
-  start: number;
-  end: number;
-}
-
-export interface PrivacyScanResult {
-  clean: boolean;
-  detections: PrivacyDetection[];
-  redacted: string;
-  map: Record<string, string>;
-}
-
 export async function getPrivacyMode(): Promise<PrivacyMode> {
   const r = await authFetch(`${BASE}/privacy/mode`);
   if (!r.ok) {
@@ -5092,22 +4959,6 @@ async function responseErrorMessage(
   } catch {
     return text.trim();
   }
-}
-
-export async function scanPrivacyText(
-  text: string,
-): Promise<PrivacyScanResult> {
-  const r = await authFetch(`${BASE}/privacy/scan`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
-  });
-  if (!r.ok) {
-    throw new Error(
-      await responseErrorMessage(r, `privacy scan HTTP ${r.status}`),
-    );
-  }
-  return (await r.json()) as PrivacyScanResult;
 }
 
 // ----- Memory / RAG -----
@@ -5157,29 +5008,6 @@ export interface MemoryNotice {
 export interface MemoryGraphHit {
   node: MemoryNode;
   score: number;
-}
-
-export interface MemoryBenchmarkCase {
-  name?: string;
-  query: string;
-  relevant_node_ids: string[];
-  scopes?: MemoryScopeRef[];
-}
-
-export interface MemoryBenchmarkReport {
-  top_k: number;
-  case_count: number;
-  recall_at_k: number;
-  mean_reciprocal_rank: number;
-  cases: Array<{
-    name: string;
-    query: string;
-    relevant_node_ids: string[];
-    retrieved_node_ids: string[];
-    first_relevant_rank?: number | null;
-    recall_at_k: number;
-    reciprocal_rank: number;
-  }>;
 }
 
 export interface RegisterMemoryInput {
@@ -5287,28 +5115,6 @@ export async function searchGraphMemory(
   } catch {
     return [];
   }
-}
-
-export async function benchmarkGraphMemory(
-  cases: MemoryBenchmarkCase[],
-  topK = 5,
-  model?: string,
-  includeArchived = false,
-): Promise<MemoryBenchmarkReport> {
-  const memoryModel = model && isUsableChatModel(model) ? model : "default";
-  return await parseJsonResponse<MemoryBenchmarkReport>(
-    await authFetch(`${BASE}/memory/benchmark`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: memoryModel,
-        cases,
-        top_k: topK,
-        include_archived: includeArchived,
-      }),
-    }),
-    "memory benchmark failed",
-  );
 }
 
 export async function updateMemoryNode(
@@ -5597,18 +5403,6 @@ export async function testMcpServer(s: {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(s),
-    });
-    if (!r.ok) return null;
-    return (await r.json()) as McpTestResult;
-  } catch {
-    return null;
-  }
-}
-
-export async function testSavedMcpServer(id: string): Promise<McpTestResult | null> {
-  try {
-    const r = await authFetch(`${BASE}/mcp/servers/${encodeURIComponent(id)}/test`, {
-      method: "POST",
     });
     if (!r.ok) return null;
     return (await r.json()) as McpTestResult;

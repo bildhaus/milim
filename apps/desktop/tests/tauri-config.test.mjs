@@ -115,7 +115,6 @@ const nativePreviewBlockerFiles = [
   [join("components", "ContextMenu.tsx"), 1],
   [join("components", "ChatView.tsx"), 1],
   [join("components", "ModelPicker.tsx"), 1],
-  [join("components", "GitPanel.tsx"), 3],
   [join("components", "TopBar.tsx"), 1],
   [join("settings", "SettingsSurface.tsx"), 1],
 ];
@@ -259,6 +258,13 @@ if (previewPanel.includes("URL.createObjectURL(new Blob([previewDocument.source]
   throw new Error(
     "Artifact previews must not use blob object URLs for iframe HTML",
   );
+}
+
+// GitPanel modals inherit the blocker marker from SheetDialog.
+const gitPanelSheets =
+  readFileSync(join(root, "src", "components", "GitPanel.tsx"), "utf8").match(/<SheetDialog\b/g)?.length ?? 0;
+if (gitPanelSheets < 3) {
+  throw new Error(`components/GitPanel.tsx must render its modals through SheetDialog, found ${gitPanelSheets}`);
 }
 
 for (const [file, expectedCount] of nativePreviewBlockerFiles) {

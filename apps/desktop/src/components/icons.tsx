@@ -45,12 +45,6 @@ export const Pencil = (p: P) => (
 export const Paperclip = (p: P) => (
   <Svg {...p}><path d="M21 11.5 12.5 20a4.5 4.5 0 0 1-6.4-6.4l8.5-8.5a3 3 0 0 1 4.3 4.3l-8.6 8.5a1.5 1.5 0 0 1-2.1-2.1l7.8-7.8" /></Svg>
 );
-export const Slash = (p: P) => (
-  <Svg {...p}><path d="M9 20 15 4" /></Svg>
-);
-export const Mic = (p: P) => (
-  <Svg {...p}><rect x="9" y="2" width="6" height="11" rx="3" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3" /></Svg>
-);
 export const UserRound = (p: P) => (
   <Svg {...p}><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0" /></Svg>
 );

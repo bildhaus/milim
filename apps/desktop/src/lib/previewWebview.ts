@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { inTauri } from "../api.js";
 
 export const PREVIEW_WEBVIEW_NAVIGATION_EVENT =
   "milim://preview-webview-navigation";
@@ -65,8 +66,6 @@ export interface PreviewWebviewCreateResult {
   navigated: boolean;
 }
 
-const IS_TAURI =
-  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 export async function createPreviewWebview(
   label: string,
@@ -75,12 +74,12 @@ export async function createPreviewWebview(
   storageMode: PreviewBrowserStorageMode,
   profileId: string,
 ): Promise<PreviewWebviewCreateResult | null> {
-  if (!IS_TAURI) return null;
+  if (!inTauri) return null;
   return await invoke<PreviewWebviewCreateResult>("preview_webview_create", { label, url, bounds, storageMode, profileId });
 }
 
 export async function clearPreviewWebviewData(): Promise<void> {
-  if (!IS_TAURI) return;
+  if (!inTauri) return;
   await invoke("preview_webview_clear_data");
 }
 
@@ -90,7 +89,7 @@ export async function setPreviewWebviewVisibility(
   visible: boolean,
   muted: boolean,
 ): Promise<boolean> {
-  if (!IS_TAURI) return false;
+  if (!inTauri) return false;
   return await invoke<boolean>("preview_webview_set_visibility", { label, claimToken, visible, muted });
 }
 
@@ -99,12 +98,12 @@ export async function navigatePreviewWebview(
   claimToken: number,
   url: string,
 ): Promise<void> {
-  if (!IS_TAURI) return;
+  if (!inTauri) return;
   await invoke("preview_webview_navigate", { label, claimToken, url });
 }
 
 export async function reloadPreviewWebview(label: string, claimToken: number): Promise<void> {
-  if (!IS_TAURI) return;
+  if (!inTauri) return;
   await invoke("preview_webview_reload", { label, claimToken });
 }
 
@@ -113,7 +112,7 @@ export async function setPreviewWebviewMuted(
   claimToken: number,
   muted: boolean,
 ): Promise<void> {
-  if (!IS_TAURI) return;
+  if (!inTauri) return;
   await invoke("preview_webview_set_muted", { label, claimToken, muted });
 }
 
@@ -122,7 +121,7 @@ export async function setPreviewWebviewZoom(
   claimToken: number,
   scaleFactor: number,
 ): Promise<void> {
-  if (!IS_TAURI) return;
+  if (!inTauri) return;
   await invoke("preview_webview_set_zoom", { label, claimToken, scaleFactor });
 }
 
@@ -131,14 +130,14 @@ export async function setPreviewWebviewBounds(
   claimToken: number,
   bounds: PreviewWebviewBounds,
 ): Promise<void> {
-  if (!IS_TAURI) return;
+  if (!inTauri) return;
   await invoke("preview_webview_set_bounds", { label, claimToken, bounds });
 }
 
 export async function listenForPreviewWebviewNavigation(
   handler: (navigation: PreviewWebviewNavigation) => void,
 ): Promise<UnlistenFn> {
-  if (!IS_TAURI) return () => undefined;
+  if (!inTauri) return () => undefined;
   return await listen<PreviewWebviewNavigation>(
     PREVIEW_WEBVIEW_NAVIGATION_EVENT,
     (event) => handler(event.payload),
@@ -148,7 +147,7 @@ export async function listenForPreviewWebviewNavigation(
 export async function listenForPreviewWebviewNewTab(
   handler: (request: PreviewWebviewNewTab) => void,
 ): Promise<UnlistenFn> {
-  if (!IS_TAURI) return () => undefined;
+  if (!inTauri) return () => undefined;
   return await listen<PreviewWebviewNewTab>(
     PREVIEW_WEBVIEW_NEW_TAB_EVENT,
     (event) => handler(event.payload),
@@ -158,7 +157,7 @@ export async function listenForPreviewWebviewNewTab(
 export async function listenForPreviewWebviewShortcut(
   handler: (shortcut: PreviewWebviewShortcut) => void,
 ): Promise<UnlistenFn> {
-  if (!IS_TAURI) return () => undefined;
+  if (!inTauri) return () => undefined;
   return await listen<PreviewWebviewShortcut>(
     PREVIEW_WEBVIEW_SHORTCUT_EVENT,
     (event) => handler(event.payload),
@@ -168,7 +167,7 @@ export async function listenForPreviewWebviewShortcut(
 export async function listenForPreviewWebviewTitle(
   handler: (title: PreviewWebviewTitle) => void,
 ): Promise<UnlistenFn> {
-  if (!IS_TAURI) return () => undefined;
+  if (!inTauri) return () => undefined;
   return await listen<PreviewWebviewTitle>(
     PREVIEW_WEBVIEW_TITLE_EVENT,
     (event) => handler(event.payload),
@@ -178,7 +177,7 @@ export async function listenForPreviewWebviewTitle(
 export async function listenForPreviewOpenUrl(
   handler: (request: PreviewOpenUrl) => void,
 ): Promise<UnlistenFn> {
-  if (!IS_TAURI) return () => undefined;
+  if (!inTauri) return () => undefined;
   return await listen<PreviewOpenUrl>(PREVIEW_OPEN_URL_EVENT, (event) =>
     handler(event.payload),
   );

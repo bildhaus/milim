@@ -48,7 +48,7 @@ assert.match(
   /current\?\.thread_id === activePreviewRuntimeKey[\s\S]*?\{ \.\.\.current, stale: true \}/,
 );
 assert.match(chatView, /artifactSelectionsByThreadRef\.current\.get\(activeId\)/);
-assert.match(chatView, /activeSession\?\.browserSession \?\? emptyBrowserSession\(\)/);
+assert.match(chatView, /activeBrowserSession \?\? emptyBrowserSession\(\)/);
 assert.match(chatView, /setSessionBrowserSession\(activeId, restoredBrowser\)/);
 assert.match(chatView, /openUrl\(request\.threadId, request\.url\)/);
 assert.match(chatView, /setSessionBrowserSession\(threadId, next\)/);
@@ -95,7 +95,6 @@ assert.ok(chatView.includes('[data-testid="open-artifact-browser"]'));
 
 assert.match(api, /previewAppUrl\(threadId, "\/preflight"\)/);
 assert.match(api, /source_fingerprint/);
-assert.match(api, /after_seq=/);
 assert.match(store, /inspectorOpen\?: boolean/);
 assert.match(store, /inspectorTab\?: SessionInspectorTab/);
 assert.match(store, /inspectorByKey: Record<string, SessionInspectorState>/);

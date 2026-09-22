@@ -1,3 +1,5 @@
+import { isTauriRuntime } from "../api.js";
+
 export type GitHubReleaseAsset = {
   name: string;
   url?: string;
@@ -36,9 +38,6 @@ export const AUTO_UPDATE_INTERVAL_MS = 12 * 60 * 60 * 1000;
 export const STARTUP_UPDATE_INTERVAL_MS = 120 * 60 * 1000;
 const GITHUB_REPO = "bildhaus/milim";
 
-function isTauriRuntime(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
 
 function isDevBuild(): boolean {
   return Boolean((import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV);

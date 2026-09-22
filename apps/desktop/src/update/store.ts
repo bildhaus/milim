@@ -11,6 +11,7 @@ import {
   type UpdateDownloadProgress,
   type UpdateInfo,
 } from "./service.js";
+import { isTauriRuntime } from "../api.js";
 
 export type UpdateStatus =
   | "idle"
@@ -47,9 +48,6 @@ interface UpdateState {
 const LOCAL_UPDATE_STATE_KEY = "milim.local.updates";
 const UPDATE_STATE_VERSION = 1;
 
-function isTauriRuntime(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
 
 function isDevBuild(): boolean {
   return Boolean((import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV);

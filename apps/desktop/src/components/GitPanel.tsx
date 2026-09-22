@@ -13,10 +13,6 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import {
-  claudeRuntimeModel,
-  codexRuntimeModel,
-  opencodeRuntimeModel,
-  piRuntimeModel,
   completeChat,
   getWorkspaceGitStatus,
   isAccountRuntimeEnabled,
@@ -25,10 +21,7 @@ import {
   openExternalUrl,
   runWorkspaceGitAction,
   setWorkspace,
-  streamHarnessRun,
   type AccountRuntimeEnablement,
-  type HarnessEventEnvelope,
-  type HarnessRunRequest,
   type PullRequestDetails,
   type ReviewComment,
   type WorkspaceGitAction,
@@ -38,7 +31,13 @@ import {
   type WorkspaceGitBranch,
   type WorkspaceGitFileChange,
 } from "../api";
+import { accountProfileForModel } from "../lib/accountProfiles";
 import { commitMessageModelCandidates } from "../lib/gitCommitMessageModels";
+import {
+  collectHarnessUtilityRun,
+  utilityHarnessForModel,
+  type UtilityHarness,
+} from "../lib/harnessUtility";
 import {
   diffHunks,
   diffRows,
@@ -74,6 +73,7 @@ import {
   GitHunkActions,
 } from "./GitStagingControls";
 import { PaneResizeHandle } from "./PaneResizeHandle";
+import { SheetDialog } from "./SheetDialog";
 import {
   ArrowUp,
   ArrowRight,
@@ -509,62 +509,42 @@ async function generateAccountRuntimeCommitMessage(
   status: WorkspaceGitStatus,
   diff: string,
   accountRuntimeEnabled: Readonly<AccountRuntimeEnablement>,
+  accountProfileId: string | undefined,
 ): Promise<string | null> {
-  const codexModel = codexRuntimeModel(preferredModel);
-  const claudeModel = claudeRuntimeModel(preferredModel);
-  const opencodeModel = opencodeRuntimeModel(preferredModel);
-  const piModel = piRuntimeModel(preferredModel);
-  if (!codexModel && !claudeModel && !opencodeModel && !piModel) return null;
+  const harness = utilityHarnessForModel(preferredModel);
+  if (!harness) return null;
   if (!isAccountRuntimeEnabled(preferredModel, accountRuntimeEnabled))
     return null;
 
-  let response = "";
-  let runtimeError = "";
-  let runtimeWarning = "";
-  const prompt = `${COMMIT_MESSAGE_SYSTEM_PROMPT}\n\n${commitMessageContext(status, diff)}`;
-  const onEvent = (envelope: HarnessEventEnvelope) => {
-    const event = envelope.event;
-    if (event.type === "text_delta" && event.text) response += event.text;
-    else if (event.type === "runtime_notice") {
-      if (event.level === "error") runtimeError = event.message;
-      else if (event.code === "runtime_warning")
-        runtimeWarning = event.message;
-    } else if (
-      event.type === "turn_failed" ||
-      event.type === "turn_cancelled"
-    ) {
-      runtimeError = event.message ?? "Harness turn was cancelled.";
-    }
-  };
+  const { content } = await collectHarnessUtilityRun(
+    harness.id,
+    {
+      model: harness.model,
+      prompt: `${COMMIT_MESSAGE_SYSTEM_PROMPT}\n\n${commitMessageContext(status, diff)}`,
+      cwd: folder.trim() || undefined,
+      persist_session: false,
+      tool_approval_policy: "review",
+      tool_approval_grant: false,
+      plan_mode: true,
+    },
+    // Bill the chat's selected account, like every other side call.
+    { accountProfileId },
+  );
 
-  const harness = codexModel
-    ? { id: "codex" as const, model: codexModel }
-    : claudeModel
-      ? { id: "claude" as const, model: claudeModel }
-      : opencodeModel
-        ? { id: "opencode" as const, model: opencodeModel }
-        : { id: "pi" as const, model: piModel! };
-  const request: HarnessRunRequest = {
-    model: harness.model,
-    prompt,
-    cwd: folder.trim() || undefined,
-    persist_session: false,
-    tool_approval_policy: "review",
-    tool_approval_grant: false,
-    plan_mode: true,
-  };
-  await streamHarnessRun(harness.id, request, onEvent);
-
-  if (runtimeWarning) throw new Error(runtimeWarning);
-  if (runtimeError) throw new Error(runtimeError);
-
-  const message = cleanGeneratedCommitMessage(response);
+  const message = cleanGeneratedCommitMessage(content);
   if (!message)
     throw new Error(
-      `${codexModel ? "Codex" : claudeModel ? "Claude CLI" : opencodeModel ? "OpenCode CLI" : "Pi CLI"} returned an empty commit message.`,
+      `${COMMIT_MESSAGE_RUNTIME_LABELS[harness.id]} returned an empty commit message.`,
     );
   return message;
 }
+
+const COMMIT_MESSAGE_RUNTIME_LABELS: Record<UtilityHarness["id"], string> = {
+  codex: "Codex",
+  claude: "Claude CLI",
+  opencode: "OpenCode CLI",
+  pi: "Pi CLI",
+};
 
 async function generateCommitMessageWithFallback(
   preferredModel: string,
@@ -572,6 +552,7 @@ async function generateCommitMessageWithFallback(
   status: WorkspaceGitStatus,
   diff: string,
   accountRuntimeEnabled: Readonly<AccountRuntimeEnablement>,
+  accountProfileId: string | undefined,
 ): Promise<string> {
   let lastError = "";
   try {
@@ -581,6 +562,7 @@ async function generateCommitMessageWithFallback(
       status,
       diff,
       accountRuntimeEnabled,
+      accountProfileId,
     );
     if (accountRuntimeMessage) return accountRuntimeMessage;
   } catch (error) {
@@ -2397,6 +2379,12 @@ export function GitPanel({
           readyStatus,
           output,
           accountRuntimeEnabled,
+          sessionId
+            ? accountProfileForModel(
+                useSessions.getState().getSettings(sessionId).accountProfiles,
+                model,
+              )
+            : undefined,
         );
         setCommitMessage(message);
       } catch (error) {
@@ -2445,20 +2433,12 @@ export function GitPanel({
           reviewDialogOpen &&
           pullRequest &&
           createPortal(
-            <div
-              className="git-modal-backdrop"
-              data-native-preview-blocker="true"
-              onMouseDown={(event) =>
-                event.target === event.currentTarget &&
-                setReviewDialogOpen(false)
-              }
+            <SheetDialog
+              title="Review pull request"
+              className="git-modal git-pr-dialog"
+              overlayClassName="git-modal-backdrop"
+              onClose={() => setReviewDialogOpen(false)}
             >
-              <section
-                className="git-modal git-pr-dialog"
-                role="dialog"
-                aria-modal="true"
-                aria-label="Review pull request"
-              >
                 <div className="git-modal-head">
                   <strong>Review PR #{pullRequest.number}</strong>
                   <button
@@ -2518,28 +2498,19 @@ export function GitPanel({
                       : "Submit review"}
                   </button>
                 </div>
-              </section>
-            </div>,
+            </SheetDialog>,
             document.body,
           )}
         {typeof document !== "undefined" &&
           mergeDialogOpen &&
           pullRequest &&
           createPortal(
-            <div
-              className="git-modal-backdrop"
-              data-native-preview-blocker="true"
-              onMouseDown={(event) =>
-                event.target === event.currentTarget &&
-                setMergeDialogOpen(false)
-              }
+            <SheetDialog
+              title="Merge pull request"
+              className="git-modal git-pr-dialog"
+              overlayClassName="git-modal-backdrop"
+              onClose={() => setMergeDialogOpen(false)}
             >
-              <section
-                className="git-modal git-pr-dialog"
-                role="dialog"
-                aria-modal="true"
-                aria-label="Merge pull request"
-              >
                 <div className="git-modal-head">
                   <strong>Merge PR #{pullRequest.number}</strong>
                   <button
@@ -2589,8 +2560,7 @@ export function GitPanel({
                     {commandBusy === "pr_merge" ? "Merging..." : "Confirm merge"}
                   </button>
                 </div>
-              </section>
-            </div>,
+            </SheetDialog>,
             document.body,
           )}
       </>
@@ -2922,19 +2892,12 @@ export function GitPanel({
       {typeof document !== "undefined" &&
         branchMenuOpen &&
         createPortal(
-          <div
-            className="git-modal-backdrop"
-            data-native-preview-blocker="true"
-            onMouseDown={(event) =>
-              event.target === event.currentTarget && setBranchMenuOpen(false)
-            }
+          <SheetDialog
+            title="Switch branch"
+            className="git-modal git-branch-modal"
+            overlayClassName="git-modal-backdrop"
+            onClose={() => setBranchMenuOpen(false)}
           >
-            <section
-              className="git-modal git-branch-modal"
-              role="dialog"
-              aria-modal="true"
-              aria-label="Switch branch"
-            >
               <div className="git-modal-head">
                 <span>
                   <GitBranch size={13} />
@@ -3022,26 +2985,18 @@ export function GitPanel({
                   {notice}
                 </div>
               )}
-            </section>
-          </div>,
+          </SheetDialog>,
           document.body,
         )}
       {typeof document !== "undefined" &&
         commandMenu &&
         createPortal(
-          <div
-            className="git-modal-backdrop"
-            data-native-preview-blocker="true"
-            onMouseDown={(event) =>
-              event.target === event.currentTarget && setCommandMenu(null)
-            }
+          <SheetDialog
+            title={`${actionLabel(commandMenu)} command`}
+            className="git-modal git-command-modal"
+            overlayClassName="git-modal-backdrop"
+            onClose={() => setCommandMenu(null)}
           >
-            <section
-              className="git-modal git-command-modal"
-              role="dialog"
-              aria-modal="true"
-              aria-label={`${actionLabel(commandMenu)} command`}
-            >
               <div className="git-modal-head">
                 <span>
                   <GitBranch size={13} />
@@ -3170,27 +3125,19 @@ export function GitPanel({
                   </div>
                 </>
               )}
-            </section>
-          </div>,
+          </SheetDialog>,
           document.body,
         )}
       {typeof document !== "undefined" &&
         diffResult &&
         !forceExpanded &&
         createPortal(
-          <div
-            className="git-modal-backdrop"
-            data-native-preview-blocker="true"
-            onMouseDown={(event) =>
-              event.target === event.currentTarget && setDiffResult(null)
-            }
+          <SheetDialog
+            title="Git diff"
+            className={`git-modal git-diff-panel ${diffResult.ok ? "" : "error"}`}
+            overlayClassName="git-modal-backdrop"
+            onClose={() => setDiffResult(null)}
           >
-            <section
-              className={`git-modal git-diff-panel ${diffResult.ok ? "" : "error"}`}
-              role="dialog"
-              aria-modal="true"
-              aria-label="Git diff"
-            >
               <div className="git-modal-head">
                 <span>
                   <Code size={13} />
@@ -3335,8 +3282,7 @@ export function GitPanel({
               ) : (
                 <div className="git-diff-empty">No diff output.</div>
               )}
-            </section>
-          </div>,
+          </SheetDialog>,
           document.body,
         )}
     </>

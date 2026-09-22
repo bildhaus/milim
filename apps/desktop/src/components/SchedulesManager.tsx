@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useAgents } from "../agents/store";
 import {
+  inTauri,
   createSchedule,
   deleteSchedule,
-  inferAttachmentMime,
   isAccountRuntimeModel,
   listModels,
   listSchedulesStrict,
@@ -13,10 +13,12 @@ import {
   type ScheduleInfo,
 } from "../api";
 import {
-  browserAttachment,
+  browserFileAttachment,
   MAX_DESKTOP_ATTACHMENTS,
 } from "../lib/attachmentInput";
+import { formatBytes as attachmentSizeLabel } from "../lib/artifacts";
 import { useSessions } from "../sessions/store";
+import { useUiPreferences } from "../ui/store";
 import { Calendar, Paperclip, Plus, Trash, X } from "./icons";
 import { AgentAvatar } from "./AgentAvatar";
 import { SheetDialog } from "./SheetDialog";
@@ -42,7 +44,6 @@ type CronStatus = {
 
 const DEFAULT_CRON = "0 0 9 * * Mon-Fri";
 const MAX_SCHEDULE_ATTACHMENTS = MAX_DESKTOP_ATTACHMENTS;
-const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 const QUICK_CREATE_PRESETS: SchedulePreset[] = [
   {
@@ -126,12 +127,6 @@ function attachmentId(): string {
   return crypto.randomUUID();
 }
 
-function attachmentSizeLabel(size: number): string {
-  if (size >= 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`;
-  if (size >= 1024) return `${Math.round(size / 1024)} KB`;
-  return `${size} B`;
-}
-
 function attachmentSummary(attachments: ChatAttachment[] | undefined): string {
   const count = attachments?.length ?? 0;
   return count ? plural(count, "attachment") : "No attachments";
@@ -152,11 +147,6 @@ function attachmentFingerprint(attachments: ChatAttachment[]): string {
       sourcePath: attachment.sourcePath ?? "",
     })),
   );
-}
-
-async function browserFileAttachment(file: File): Promise<ChatAttachment> {
-  const mime = file.type || inferAttachmentMime(file.name);
-  return browserAttachment(file, mime, attachmentId());
 }
 
 function lastRunLabel(lastRun: number | null | undefined): string {
@@ -462,8 +452,15 @@ export function SchedulesManager({ onClose }: { onClose: () => void }) {
         setLoadError(null);
       })
       .catch((error) => setLoadError(error instanceof Error ? error.message : String(error)));
-    void listModels().then((items) => setModels(items.filter((item) => !isAccountRuntimeModel(item))));
-    void refreshAgents();
+    const notifyLoadFailure = (subject: string) => (error: unknown) =>
+      useUiPreferences.getState().pushNotice({
+        tone: "error",
+        message: `Couldn't load ${subject}: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    void listModels()
+      .then((items) => setModels(items.filter((item) => !isAccountRuntimeModel(item))))
+      .catch(notifyLoadFailure("models"));
+    void refreshAgents().catch(notifyLoadFailure("agents"));
   }, [refreshAgents]);
 
   useEffect(() => {
@@ -529,7 +526,7 @@ export function SchedulesManager({ onClose }: { onClose: () => void }) {
       let next: ChatAttachment[] = [];
       if (files?.length) {
         next = await Promise.all(files.map(browserFileAttachment));
-      } else if (isTauri) {
+      } else if (inTauri) {
         next = (await pickAttachmentFiles()).map((attachment) => ({
           id: attachmentId(),
           ...attachment,

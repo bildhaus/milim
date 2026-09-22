@@ -53,7 +53,7 @@ import {
   legacyPreviewRuntimeKeyForThread,
   previewRuntimeKeyForThread,
 } from "../lib/previewRuntimeKeys.js";
-import { normalizeProjectColor } from "../lib/projectColors.js";
+import { folderLabel, normalizeProjectColor } from "../lib/projectColors.js";
 import type { PullRequestSnapshot } from "../lib/pullRequests.js";
 import {
   normalizeQuickSummarySectionIds,
@@ -865,10 +865,6 @@ function resetApprovalForFolderChange(
     normalizeProjectFolder(settings.folder)
     ? settings
     : { ...settings, toolApproval: DEFAULT_THREAD_SETTINGS.toolApproval };
-}
-
-function folderLabel(folder: string): string {
-  return folder.split(/[\\/]/).filter(Boolean).pop() || folder || "Project";
 }
 
 function normalizeProjectIcon(value: unknown): ProjectIconId | undefined {

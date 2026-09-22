@@ -1,5 +1,5 @@
 import { type ClipboardEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { openExternalUrl, type Agent, type ChatAttachment, type MediaKind, type SkillInfo, type ToolInfo } from "../api";
+import { isTauriRuntime, openExternalUrl, type Agent, type ChatAttachment, type MediaKind, type SkillInfo, type ToolInfo } from "../api";
 import type { WorkspaceFileSuggestion } from "../api";
 import { composerAutocompleteTriggerAt, composerCommandRunsOnSelection, composerSuggestionMatchScore, mcpToolTagCompletion, replaceComposerAutocompleteTrigger, skillTagCompletion } from "../lib/composerAutocomplete";
 import { canNavigateComposerHistory, moveComposerHistory, type ComposerHistoryDirection } from "../lib/composerHistory";
@@ -10,11 +10,10 @@ import { useUiPreferences } from "../ui/store";
 import { SLASH_COMMANDS, type SlashCommand } from "../lib/slashCommands";
 import { AgentAvatar } from "./AgentAvatar";
 import { ArrowUp, ChevronDown, Folder, FolderOpen, GitHub, Paperclip, PlusSquare, Square, UserRound, X } from "./icons";
+import { formatBytes as attachmentSizeLabel } from "../lib/artifacts";
+import { folderLabel } from "../lib/projectColors";
 const COMPOSER_HISTORY_NOTICE_MS = 1800;
 
-function isTauriRuntime(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
 
 function agentMenuDetail(agent: Agent): string {
   const mode = agent.tool_mode ?? ((agent.enabled_tools ?? []).length === 0 ? "all" : "custom");
@@ -40,16 +39,6 @@ function parseSlashInput(value: string): { id: string; argument: string } | null
   const match = value.trim().match(/^\/([a-z-]+)(?:\s+(.*))?$/i);
   if (!match) return null;
   return { id: match[1].toLowerCase(), argument: match[2]?.trim() ?? "" };
-}
-
-function attachmentSizeLabel(size: number): string {
-  if (size >= 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`;
-  if (size >= 1024) return `${Math.round(size / 1024)} KB`;
-  return `${size} B`;
-}
-
-function folderLabel(folder: string): string {
-  return folder.split(/[\\/]/).filter(Boolean).pop() || folder || "No project";
 }
 
 function isGithubLinkToken(token: ComposerToken): boolean {
@@ -193,7 +182,7 @@ export function Composer({
   const hasInstr = instructions.trim().length > 0;
   const activeWorkspaceFolder = workspaceFolder.trim();
   const activeWorkspaceLabel = activeWorkspaceFolder
-    ? workspaceProjects.find((project) => project.folder === activeWorkspaceFolder)?.name ?? folderLabel(activeWorkspaceFolder)
+    ? workspaceProjects.find((project) => project.folder === activeWorkspaceFolder)?.name ?? folderLabel(activeWorkspaceFolder, "No project")
     : "No project";
   const workspaceControlLabel = workspaceChangeStartsNewChat
     ? "Start new chat in..."

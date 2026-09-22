@@ -13,7 +13,7 @@ import {
   type SessionPreviewRuntime,
   type SessionSidebarState,
 } from "../sessions/store";
-import { openWorkspaceLauncher, runWorkspaceGitAction } from "../api";
+import { inTauri, openWorkspaceLauncher, runWorkspaceGitAction } from "../api";
 import { createInteractiveChat } from "../lib/newChatCoordinator";
 import { requestWorkspaceEditorLeave } from "../lib/workspaceEditorGuard";
 import { GIT_STATUS_REFRESH_INTERVAL_MS } from "../lib/gitRefresh";
@@ -22,6 +22,7 @@ import { markPerfRender } from "../lib/perf";
 import { previewRuntimeKeyForThread } from "../lib/previewRuntimeKeys";
 import {
   effectiveProjectColor,
+  folderLabel,
   normalizeProjectColor,
 } from "../lib/projectColors";
 import {
@@ -55,7 +56,6 @@ const SIDEBAR_DRAG_THRESHOLD = 5;
 const SIDEBAR_SECTION_PREVIEW_LIMIT = 5;
 const SIDEBAR_INBOX_SECTION_ID = "inbox";
 const SIDEBAR_SETTLED_SECTION_ID = "settled";
-const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 function sidebarSectionShownCount(totalSessions: number, visibleLimit: number, activeIndex: number): number {
   const baseCount = Math.max(0, Math.min(visibleLimit, totalSessions));
@@ -177,10 +177,6 @@ type SessionGroup<T extends SidebarSessionLike = SidebarSession> = {
   inbox?: boolean;
   settled?: boolean;
 };
-
-function folderLabel(folder: string): string {
-  return folder.split(/[\\/]/).filter(Boolean).pop() || folder || "Project";
-}
 
 function folderFromSectionId(sectionId: string): string {
   if (isSidebarProjectSectionId(sectionId)) {
@@ -710,6 +706,302 @@ export function sidebarRuntimeIndicator(runtime?: SessionPreviewRuntime): Sideba
     return { state: "transitioning", label: "App preview active, not ready" };
   }
   return null;
+}
+
+type SessionRowProps = {
+  session: SidebarSession;
+  sectionId: string;
+  active: boolean;
+  /** Layout modifier such as `thread-bar-session` or `inbox-session-item`. */
+  variantClassName?: string;
+  settled?: boolean;
+  tierChild?: boolean;
+  projectColored?: boolean;
+  dragging?: boolean;
+  dropPosition?: string;
+  style?: CSSProperties;
+  /** False while the row sits in a collapsed section. */
+  tabbable?: boolean;
+  editing: boolean;
+  runtimeIndicator: SidebarRuntimeIndicator | null;
+  /** Inbox rows show project and branch metadata under the title. */
+  inboxLayout: boolean;
+  projectLabel?: string;
+  showScheduleMarker?: boolean;
+  sideWide: boolean;
+  pullRequestIndicator: { tone: string; label: string } | null;
+  generating: boolean;
+  unread: boolean;
+  statusLabel: string;
+  pinned: boolean;
+  archivePending: boolean;
+  onActivate: () => void;
+  /** Swallows the click that ends a pointer drag. */
+  shouldIgnoreClick?: () => boolean;
+  isInteractiveTarget: (target: EventTarget | null) => boolean;
+  onPointerDown?: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  onContextMenu: (event: ReactMouseEvent) => void;
+  onBeginRename: () => void;
+  onRename: (title: string) => void;
+  onCancelRename: () => void;
+  onOpenPullRequest: () => void;
+  onUnsettle?: () => void;
+  onTogglePin?: () => void;
+  onSettle?: () => void;
+  settleDisabled?: boolean;
+  onArchive?: () => void;
+};
+
+/** One thread row, shared by the sidebar, the thread bar, and the inbox. */
+function SessionRow({
+  session,
+  sectionId,
+  active,
+  variantClassName,
+  settled = false,
+  tierChild = false,
+  projectColored = false,
+  dragging = false,
+  dropPosition,
+  style,
+  tabbable = true,
+  editing,
+  runtimeIndicator,
+  inboxLayout,
+  projectLabel = "",
+  showScheduleMarker = false,
+  sideWide,
+  pullRequestIndicator,
+  generating,
+  unread,
+  statusLabel,
+  pinned,
+  archivePending,
+  onActivate,
+  shouldIgnoreClick,
+  isInteractiveTarget,
+  onPointerDown,
+  onContextMenu,
+  onBeginRename,
+  onRename,
+  onCancelRename,
+  onOpenPullRequest,
+  onUnsettle,
+  onTogglePin,
+  onSettle,
+  settleDisabled = false,
+  onArchive,
+}: SessionRowProps) {
+  const className = [
+    "session-item",
+    variantClassName,
+    settled && "settled-session-item",
+    tierChild && "child-session",
+    active && "active",
+    generating && "generating",
+    pinned && "pinned",
+    projectColored && "project-colored",
+    archivePending && "delete-pending",
+    dragging && "dragging",
+    dropPosition && `drag-over drop-${dropPosition}`,
+  ].filter(Boolean).join(" ");
+  const branchLabel = session.threadWorkspace?.branch || "Branch";
+  return (
+    <div
+      data-sidebar-session-id={session.id}
+      data-sidebar-session-section-id={sectionId}
+      role="button"
+      tabIndex={tabbable && !editing ? 0 : -1}
+      aria-current={active ? "page" : undefined}
+      className={className}
+      style={style}
+      onPointerDown={onPointerDown}
+      onContextMenu={onContextMenu}
+      onClick={(event) => {
+        if (isInteractiveTarget(event.target) || shouldIgnoreClick?.()) return;
+        onActivate();
+      }}
+      onDoubleClick={(event) => {
+        if (isInteractiveTarget(event.target)) return;
+        onBeginRename();
+      }}
+      onKeyDown={(event) => {
+        // Only the row itself; nested buttons and the rename input handle their own keys.
+        if (event.target !== event.currentTarget) return;
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onActivate();
+        } else if (event.key === "F2") {
+          event.preventDefault();
+          onBeginRename();
+        }
+      }}
+      title={session.title}
+    >
+      <RuntimePreviewMarker indicator={runtimeIndicator} />
+      {editing ? (
+        <input
+          className="session-rename"
+          defaultValue={session.title}
+          autoFocus
+          onClick={(event) => event.stopPropagation()}
+          onBlur={(event) => onRename(event.target.value.trim())}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") (event.target as HTMLInputElement).blur();
+            if (event.key === "Escape") onCancelRename();
+          }}
+        />
+      ) : (
+        <>
+          <span className={inboxLayout ? "session-copy inbox-session-copy" : "session-copy"}>
+            {showScheduleMarker && session.origin?.kind === "schedule" && (
+              <span className="session-origin-marker" title="Scheduled run" aria-label="Scheduled run">
+                <Calendar size={10} />
+              </span>
+            )}
+            <HoverScrollText
+              className="session-title"
+              innerClassName={generating ? "shiny-text" : undefined}
+              text={session.title}
+            />
+            {inboxLayout && (projectLabel || session.parentId) && (
+              <span className="inbox-session-metadata">
+                {projectLabel && (
+                  <span className="inbox-session-project" title={projectLabel} aria-label={`Project: ${projectLabel}`}>
+                    {projectLabel}
+                  </span>
+                )}
+                {session.parentId && (
+                  <span className="inbox-session-branch" title={branchLabel} aria-label={branchLabel}>
+                    <GitBranch size={9} />
+                    <span>{branchLabel}</span>
+                  </span>
+                )}
+              </span>
+            )}
+          </span>
+          <div className={"session-side" + (sideWide ? " session-side-wide" : "")}>
+            {pullRequestIndicator && (
+              <button
+                type="button"
+                className={`session-side-indicator session-pr-state ${pullRequestIndicator.tone}`}
+                title={pullRequestIndicator.label}
+                aria-label={pullRequestIndicator.label}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onOpenPullRequest();
+                }}
+              >
+                <GitPullRequest size={13} />
+                <span aria-hidden="true" />
+              </button>
+            )}
+            {generating ? (
+              <WorkingSessionLoader
+                className="session-side-indicator"
+                phaseKey={session.id}
+                data-testid="session-loader"
+                role="img"
+                title={statusLabel}
+                aria-label={statusLabel}
+              />
+            ) : unread ? (
+              <UnreadSessionLoader
+                className="session-side-indicator"
+                data-testid="session-loader"
+                role="img"
+                title={statusLabel}
+                aria-label={statusLabel}
+              />
+            ) : (
+              <span
+                className="session-side-indicator session-recency"
+                data-testid="session-recency"
+                title={`Updated ${new Date(session.updatedAt).toLocaleString()}`}
+              >
+                {sessionRecencyLabel(session.updatedAt)}
+              </span>
+            )}
+            <div className="session-side-actions" aria-label="Thread actions">
+              {onUnsettle ? (
+                <button
+                  className="session-side-btn"
+                  type="button"
+                  aria-label={`Unsettle ${session.title}`}
+                  title="Unsettle chat"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onUnsettle();
+                  }}
+                >
+                  <ArrowUp size={12} />
+                </button>
+              ) : (
+                <>
+                  {onTogglePin && (
+                    <button
+                      className={"session-side-btn" + (pinned ? " active" : "")}
+                      type="button"
+                      aria-label={pinned ? `Unpin ${session.title}` : `Pin ${session.title}`}
+                      title={pinned ? "Unpin chat" : "Pin chat"}
+                      aria-pressed={pinned}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onTogglePin();
+                      }}
+                    >
+                      <Pin size={12} />
+                    </button>
+                  )}
+                  {onSettle && (
+                    <button
+                      className="session-side-btn"
+                      type="button"
+                      aria-label={`Settle ${session.title}`}
+                      title={settleDisabled ? "Thread still active" : "Settle chat"}
+                      disabled={settleDisabled}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onSettle();
+                      }}
+                    >
+                      <Check size={12} />
+                    </button>
+                  )}
+                </>
+              )}
+              {onArchive && (
+                <button
+                  className={"session-side-btn danger" + (archivePending ? " confirm" : "")}
+                  type="button"
+                  aria-label={archivePending ? `Confirm archive ${session.title}` : `Archive ${session.title}`}
+                  title={archivePending ? "Click again to archive" : "Archive chat"}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onArchive();
+                  }}
+                >
+                  <Archive size={12} />
+                </button>
+              )}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function sessionStatusLabel(
+  parentWorkersRunning: boolean,
+  worker: SidebarSession["worker"],
+  generating: boolean,
+  unread: boolean,
+): string {
+  if (parentWorkersRunning) return "Workers running";
+  if (worker) return `Worker ${worker.status}`;
+  if (generating) return "Working";
+  return unread ? "Unread update" : "Ready";
 }
 
 function RuntimePreviewMarker({ indicator }: { indicator: SidebarRuntimeIndicator | null }) {
@@ -1963,15 +2255,7 @@ export function Sidebar({
     const generating = generatingSessions.has(session.id) || workerRunning;
     const unread = unreadSessions.has(session.id);
     const runtimeIndicator = group.settled || group.projectId ? null : runtimePreviewSidebarIndicator(session);
-    const statusLabel = parentWorkersRunning
-      ? "Workers running"
-      : session.worker
-        ? `Worker ${session.worker.status}`
-        : generating
-          ? "Working"
-          : unread
-            ? "Unread update"
-            : "Ready";
+    const statusLabel = sessionStatusLabel(parentWorkersRunning, session.worker, generating, unread);
     const pullRequestOwner = group.settled
       ? undefined
       : group.inbox
@@ -1983,207 +2267,73 @@ export function Sidebar({
       ? pullRequestReadiness(pullRequest, pullRequestSnapshot?.stale)
       : null;
     const sessionDragOver = dragOver?.type === "session" && dragOver.id === session.id;
-    const sessionDropClass = sessionDragOver ? ` drag-over drop-${dragOver.position}` : "";
     const sessionDragging = dragging?.type === "session" && dragging.id === session.id;
     const tierChild = Boolean(session.parentId && group.sessions.some((item) => item.id === session.parentId));
     const settleDisabled = generating || unread;
 
     return (
-      <div
+      <SessionRow
         key={session.id}
-        data-sidebar-session-id={session.id}
-        data-sidebar-session-section-id={group.id}
-        aria-current={session.id === activeId ? "page" : undefined}
-        className={
-          "session-item thread-bar-session" +
-          (group.inbox ? " inbox-session-item" : "") +
-          (group.settled ? " settled-session-item" : "") +
-          (tierChild ? " child-session" : "") +
-          (session.id === activeId ? " active" : "") +
-          (generating ? " generating" : "") +
-          (pinned ? " pinned" : "") +
-          (projectColor ? " project-colored" : "") +
-          (confirmArchiveId === session.id ? " delete-pending" : "") +
-          (sessionDragging ? " dragging" : "") +
-          sessionDropClass
-        }
+        session={session}
+        sectionId={group.id}
+        active={session.id === activeId}
+        variantClassName={"thread-bar-session" + (group.inbox ? " inbox-session-item" : "")}
+        settled={group.settled}
+        tierChild={tierChild}
+        projectColored={Boolean(projectColor)}
+        dragging={sessionDragging}
+        dropPosition={sessionDragOver ? dragOver.position : undefined}
         style={projectStyle}
+        editing={editing === session.id}
+        runtimeIndicator={runtimeIndicator}
+        inboxLayout={Boolean(group.inbox)}
+        projectLabel={projectLabel}
+        showScheduleMarker
+        sideWide
+        pullRequestIndicator={pullRequest && pullRequestState
+          ? { tone: pullRequestState.tone, label: pullRequestAccessibleLabel(pullRequest, pullRequestSnapshot?.stale) }
+          : null}
+        generating={generating}
+        unread={unread}
+        statusLabel={statusLabel}
+        pinned={pinned}
+        archivePending={confirmArchiveId === session.id}
+        isInteractiveTarget={isSidebarDragInteractiveTarget}
+        shouldIgnoreClick={consumeSuppressedClick}
+        onActivate={() => {
+          setConfirmArchiveId(null);
+          void switchVisibleSession(session.id).then(closeThreadBar);
+        }}
         onPointerDown={!settledThreadsEnabled && !session.parentId
           ? (event) => startPointerDrag(event, { type: "session", id: session.id }, "y")
           : undefined}
         onContextMenu={(event) => openSessionContextMenu(event, session, pinned)}
-        onClick={(event) => {
-          if (isSidebarDragInteractiveTarget(event.target) || consumeSuppressedClick()) return;
-          setConfirmArchiveId(null);
-          void switchVisibleSession(session.id).then(closeThreadBar);
+        onBeginRename={() => beginRename(session.id)}
+        onRename={(title) => {
+          rename(session.id, title);
+          setEditing(null);
         }}
-        onDoubleClick={(event) => {
-          if (isSidebarDragInteractiveTarget(event.target)) return;
-          beginRename(session.id);
+        onCancelRename={() => setEditing(null)}
+        onOpenPullRequest={() => {
+          void switchVisibleSession(session.id);
+          onOpenGitPanel(session.id, "pull_request");
         }}
-        title={session.title}
-      >
-        <RuntimePreviewMarker indicator={runtimeIndicator} />
-        {editing === session.id ? (
-          <input
-            className="session-rename"
-            defaultValue={session.title}
-            autoFocus
-            onClick={(event) => event.stopPropagation()}
-            onBlur={(event) => {
-              rename(session.id, event.target.value.trim());
-              setEditing(null);
-            }}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") (event.target as HTMLInputElement).blur();
-              if (event.key === "Escape") setEditing(null);
-            }}
-          />
-        ) : (
-          <>
-            <span className={group.inbox ? "session-copy inbox-session-copy" : "session-copy"}>
-              {session.origin?.kind === "schedule" && (
-                <span className="session-origin-marker" title="Scheduled run" aria-label="Scheduled run">
-                  <Calendar size={10} />
-                </span>
-              )}
-              <HoverScrollText
-                className="session-title"
-                innerClassName={generating ? "shiny-text" : undefined}
-                text={session.title}
-              />
-              {group.inbox && (projectLabel || session.parentId) && (
-                <span className="inbox-session-metadata">
-                  {projectLabel && (
-                    <span className="inbox-session-project" title={projectLabel} aria-label={`Project: ${projectLabel}`}>
-                      {projectLabel}
-                    </span>
-                  )}
-                  {session.parentId && (
-                    <span
-                      className="inbox-session-branch"
-                      title={session.threadWorkspace?.branch || "Branch"}
-                      aria-label={session.threadWorkspace?.branch || "Branch"}
-                    >
-                      <GitBranch size={9} />
-                      <span>{session.threadWorkspace?.branch || "Branch"}</span>
-                    </span>
-                  )}
-                </span>
-              )}
-            </span>
-            <div className="session-side session-side-wide">
-              {pullRequest && pullRequestState && (
-                <button
-                  type="button"
-                  className={`session-side-indicator session-pr-state ${pullRequestState.tone}`}
-                  title={pullRequestAccessibleLabel(pullRequest, pullRequestSnapshot?.stale)}
-                  aria-label={pullRequestAccessibleLabel(pullRequest, pullRequestSnapshot?.stale)}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    void switchVisibleSession(session.id);
-                    onOpenGitPanel(session.id, "pull_request");
-                  }}
-                >
-                  <GitPullRequest size={13} />
-                  <span aria-hidden="true" />
-                </button>
-              )}
-              {generating ? (
-                <WorkingSessionLoader
-                  className="session-side-indicator"
-                  phaseKey={session.id}
-                  data-testid="session-loader"
-                  role="img"
-                  title={statusLabel}
-                  aria-label={statusLabel}
-                />
-              ) : unread ? (
-                <UnreadSessionLoader
-                  className="session-side-indicator"
-                  data-testid="session-loader"
-                  role="img"
-                  title={statusLabel}
-                  aria-label={statusLabel}
-                />
-              ) : (
-                <span
-                  className="session-side-indicator session-recency"
-                  data-testid="session-recency"
-                  title={`Updated ${new Date(session.updatedAt).toLocaleString()}`}
-                >
-                  {sessionRecencyLabel(session.updatedAt)}
-                </span>
-              )}
-              <div className="session-side-actions" aria-label="Thread actions">
-                {group.settled ? (
-                  <button
-                    className="session-side-btn"
-                    type="button"
-                    aria-label={`Unsettle ${session.title}`}
-                    title="Unsettle chat"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      unsettleSession(session.id);
-                      setConfirmArchiveId(null);
-                    }}
-                  >
-                    <ArrowUp size={12} />
-                  </button>
-                ) : (
-                  <>
-                    {!session.parentId && (
-                      <button
-                        className={"session-side-btn" + (pinned ? " active" : "")}
-                        type="button"
-                        aria-label={pinned ? `Unpin ${session.title}` : `Pin ${session.title}`}
-                        title={pinned ? "Unpin chat" : "Pin chat"}
-                        aria-pressed={pinned}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          setConfirmArchiveId(null);
-                          toggleSessionPinned(session.id);
-                        }}
-                      >
-                        <Pin size={12} />
-                      </button>
-                    )}
-                    {group.inbox && (
-                      <button
-                        className="session-side-btn"
-                        type="button"
-                        aria-label={`Settle ${session.title}`}
-                        title={settleDisabled ? "Thread still active" : "Settle chat"}
-                        disabled={settleDisabled}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          void settleChat(session.id);
-                        }}
-                      >
-                        <Check size={12} />
-                      </button>
-                    )}
-                  </>
-                )}
-                {(!group.inbox || group.settled) && (
-                  <button
-                    className={"session-side-btn danger" + (confirmArchiveId === session.id ? " confirm" : "")}
-                    type="button"
-                    aria-label={confirmArchiveId === session.id ? `Confirm archive ${session.title}` : `Archive ${session.title}`}
-                    title={confirmArchiveId === session.id ? "Click again to archive" : "Archive chat"}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      void archiveChat(session.id);
-                    }}
-                  >
-                    <Archive size={12} />
-                  </button>
-                )}
-              </div>
-            </div>
-          </>
-        )}
-      </div>
+        onUnsettle={group.settled
+          ? () => {
+              unsettleSession(session.id);
+              setConfirmArchiveId(null);
+            }
+          : undefined}
+        onTogglePin={!session.parentId
+          ? () => {
+              setConfirmArchiveId(null);
+              toggleSessionPinned(session.id);
+            }
+          : undefined}
+        onSettle={group.inbox ? () => void settleChat(session.id) : undefined}
+        settleDisabled={settleDisabled}
+        onArchive={!group.inbox || group.settled ? () => void archiveChat(session.id) : undefined}
+      />
     );
   }
 
@@ -2688,15 +2838,12 @@ export function Sidebar({
                         const runtimeIndicator = settledSection
                           ? null
                           : runtimePreviewSidebarIndicator(s);
-                        const statusLabel = parentWorkersRunning
-                          ? "Workers running"
-                          : s.worker
-                            ? `Worker ${s.worker.status}`
-                            : generating
-                              ? "Working"
-                              : unread
-                                ? "Unread update"
-                                : "Ready";
+                        const statusLabel = sessionStatusLabel(
+                          parentWorkersRunning,
+                          s.worker,
+                          generating,
+                          unread,
+                        );
                         const threadPullRequestOwner = settledSection
                           ? undefined
                           : sidebarInboxPullRequestOwner(
@@ -2713,250 +2860,69 @@ export function Sidebar({
                               pullRequestSnapshot?.stale,
                             )
                           : null;
-                        const branchLabel =
-                          s.threadWorkspace?.branch || "Branch";
                         const settleDisabled =
                           generating || unread;
-                        const rowClass =
-                          "session-item inbox-session-item" +
-                          (settledSection
-                            ? " settled-session-item"
-                            : "") +
-                          (s.id === activeId ? " active" : "") +
-                          (generating ? " generating" : "") +
-                          (pinned ? " pinned" : "") +
-                          (confirmArchiveId === s.id
-                            ? " delete-pending"
-                            : "");
                         return (
-                          <div
+                          <SessionRow
                             key={s.id}
-                            data-sidebar-session-id={s.id}
-                            data-sidebar-session-section-id={group.id}
-                            aria-current={s.id === activeId ? "page" : undefined}
-                            className={rowClass}
+                            session={s}
+                            sectionId={group.id}
+                            active={s.id === activeId}
+                            variantClassName="inbox-session-item"
+                            settled={settledSection}
                             style={projectStyle}
-                            onContextMenu={(event) =>
-                              openSessionContextMenu(event, s, pinned)}
-                            onClick={(event) => {
-                              if (isSidebarDragInteractiveTarget(event.target))
-                                return;
+                            editing={editing === s.id}
+                            runtimeIndicator={runtimeIndicator}
+                            inboxLayout
+                            projectLabel={projectLabel}
+                            sideWide={!settledSection}
+                            pullRequestIndicator={pullRequest && pullRequestState
+                              ? {
+                                  tone: pullRequestState.tone,
+                                  label: pullRequestAccessibleLabel(
+                                    pullRequest,
+                                    pullRequestSnapshot?.stale,
+                                  ),
+                                }
+                              : null}
+                            generating={generating}
+                            unread={unread}
+                            statusLabel={statusLabel}
+                            pinned={pinned}
+                            archivePending={confirmArchiveId === s.id}
+                            isInteractiveTarget={isSidebarDragInteractiveTarget}
+                            onActivate={() => {
                               setConfirmArchiveId(null);
                               switchVisibleSession(s.id);
                             }}
-                            onDoubleClick={(event) => {
-                              if (isSidebarDragInteractiveTarget(event.target))
-                                return;
-                              beginRename(s.id);
+                            onContextMenu={(event) =>
+                              openSessionContextMenu(event, s, pinned)}
+                            onBeginRename={() => beginRename(s.id)}
+                            onRename={(title) => {
+                              rename(s.id, title);
+                              setEditing(null);
                             }}
-                            title={s.title}
-                          >
-                            <RuntimePreviewMarker indicator={runtimeIndicator} />
-                            {editing === s.id ? (
-                              <input
-                                className="session-rename"
-                                defaultValue={s.title}
-                                autoFocus
-                                onClick={(event) => event.stopPropagation()}
-                                onBlur={(event) => {
-                                  rename(s.id, event.target.value.trim());
-                                  setEditing(null);
-                                }}
-                                onKeyDown={(event) => {
-                                  if (event.key === "Enter")
-                                    (event.target as HTMLInputElement).blur();
-                                  if (event.key === "Escape") setEditing(null);
-                                }}
-                              />
-                            ) : (
-                              <>
-                                <span className="session-copy inbox-session-copy">
-                                  <HoverScrollText
-                                    className="session-title"
-                                    innerClassName={
-                                      generating ? "shiny-text" : undefined
-                                    }
-                                    text={s.title}
-                                  />
-                                  {(projectLabel || s.parentId) && (
-                                  <span className="inbox-session-metadata">
-                                    {projectLabel && (
-                                      <span
-                                        className="inbox-session-project"
-                                        title={projectLabel}
-                                        aria-label={`Project: ${projectLabel}`}
-                                      >
-                                        {projectLabel}
-                                      </span>
-                                    )}
-                                    {s.parentId && (
-                                      <span
-                                        className="inbox-session-branch"
-                                        title={branchLabel}
-                                        aria-label={branchLabel}
-                                      >
-                                        <GitBranch size={9} />
-                                        <span>{branchLabel}</span>
-                                      </span>
-                                    )}
-                                  </span>
-                                  )}
-                                </span>
-                                <div
-                                  className={
-                                    "session-side" +
-                                    (!settledSection
-                                      ? " session-side-wide"
-                                      : "")
-                                  }
-                                >
-                                  {pullRequest && pullRequestState && (
-                                    <button
-                                      type="button"
-                                      className={`session-side-indicator session-pr-state ${pullRequestState.tone}`}
-                                      title={pullRequestAccessibleLabel(
-                                        pullRequest,
-                                        pullRequestSnapshot?.stale,
-                                      )}
-                                      aria-label={pullRequestAccessibleLabel(
-                                        pullRequest,
-                                        pullRequestSnapshot?.stale,
-                                      )}
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        switchVisibleSession(s.id);
-                                        onOpenGitPanel(
-                                          s.id,
-                                          "pull_request",
-                                        );
-                                      }}
-                                    >
-                                      <GitPullRequest size={13} />
-                                      <span aria-hidden="true" />
-                                    </button>
-                                  )}
-                                  {generating ? (
-                                    <WorkingSessionLoader
-                                      className="session-side-indicator"
-                                      phaseKey={s.id}
-                                      data-testid="session-loader"
-                                      role="img"
-                                      title={statusLabel}
-                                      aria-label={statusLabel}
-                                    />
-                                  ) : unread ? (
-                                    <UnreadSessionLoader
-                                      className="session-side-indicator"
-                                      data-testid="session-loader"
-                                      role="img"
-                                      title={statusLabel}
-                                      aria-label={statusLabel}
-                                    />
-                                  ) : (
-                                    <span
-                                      className="session-side-indicator session-recency"
-                                      data-testid="session-recency"
-                                      title={`Updated ${new Date(s.updatedAt).toLocaleString()}`}
-                                    >
-                                      {sessionRecencyLabel(s.updatedAt)}
-                                    </span>
-                                  )}
-                                  <div
-                                    className="session-side-actions"
-                                    aria-label="Thread actions"
-                                  >
-                                    {settledSection ? (
-                                      <button
-                                        className="session-side-btn"
-                                        type="button"
-                                        aria-label={`Unsettle ${s.title}`}
-                                        title="Unsettle chat"
-                                        onClick={(event) => {
-                                          event.stopPropagation();
-                                          unsettleSession(s.id);
-                                          setConfirmArchiveId(null);
-                                        }}
-                                      >
-                                        <ArrowUp size={12} />
-                                      </button>
-                                    ) : (
-                                      <>
-                                        {!s.parentId && (
-                                          <button
-                                            className={
-                                              "session-side-btn" +
-                                              (pinned ? " active" : "")
-                                            }
-                                            type="button"
-                                            aria-label={
-                                              pinned
-                                                ? `Unpin ${s.title}`
-                                                : `Pin ${s.title}`
-                                            }
-                                            title={
-                                              pinned
-                                                ? "Unpin chat"
-                                                : "Pin chat"
-                                            }
-                                            aria-pressed={pinned}
-                                            onClick={(event) => {
-                                              event.stopPropagation();
-                                              setConfirmArchiveId(null);
-                                              toggleSessionPinned(s.id);
-                                            }}
-                                          >
-                                            <Pin size={12} />
-                                          </button>
-                                        )}
-                                        <button
-                                          className="session-side-btn"
-                                          type="button"
-                                          aria-label={`Settle ${s.title}`}
-                                          title={
-                                            settleDisabled
-                                              ? "Thread still active"
-                                              : "Settle chat"
-                                          }
-                                          disabled={settleDisabled}
-                                          onClick={(event) => {
-                                            event.stopPropagation();
-                                            settleChat(s.id);
-                                          }}
-                                        >
-                                          <Check size={12} />
-                                        </button>
-                                      </>
-                                    )}
-                                    {settledSection && <button
-                                      className={
-                                        "session-side-btn danger" +
-                                        (confirmArchiveId === s.id
-                                          ? " confirm"
-                                          : "")
-                                      }
-                                      type="button"
-                                      aria-label={
-                                        confirmArchiveId === s.id
-                                          ? `Confirm archive ${s.title}`
-                                          : `Archive ${s.title}`
-                                      }
-                                      title={
-                                        confirmArchiveId === s.id
-                                          ? "Click again to archive"
-                                          : "Archive chat"
-                                      }
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        archiveChat(s.id);
-                                      }}
-                                    >
-                                      <Archive size={12} />
-                                    </button>}
-                                  </div>
-                                </div>
-                              </>
-                            )}
-                          </div>
+                            onCancelRename={() => setEditing(null)}
+                            onOpenPullRequest={() => {
+                              switchVisibleSession(s.id);
+                              onOpenGitPanel(s.id, "pull_request");
+                            }}
+                            onUnsettle={settledSection
+                              ? () => {
+                                  unsettleSession(s.id);
+                                  setConfirmArchiveId(null);
+                                }
+                              : undefined}
+                            onTogglePin={!s.parentId
+                              ? () => {
+                                  setConfirmArchiveId(null);
+                                  toggleSessionPinned(s.id);
+                                }
+                              : undefined}
+                            onSettle={() => settleChat(s.id)}
+                            settleDisabled={settleDisabled}
+                            onArchive={settledSection ? () => archiveChat(s.id) : undefined}
+                          />
                         );
                       })}
                       {(canShowMore || canShowLess) && (
@@ -3086,7 +3052,7 @@ export function Sidebar({
                   const sessionProjectStyle = sessionProjectColor
                     ? { "--project-color": sessionProjectColor } as CSSProperties
                     : undefined;
-                  const statusLabel = parentWorkersRunning ? "Workers running" : s.worker ? `Worker ${s.worker.status}` : generating ? "Working" : unread ? "Unread update" : "Ready";
+                  const statusLabel = sessionStatusLabel(parentWorkersRunning, s.worker, generating, unread);
                   const threadPullRequestOwner = sidebarThreadPullRequestOwner(
                     s,
                     pullRequestsBySession,
@@ -3100,178 +3066,73 @@ export function Sidebar({
                       )
                     : null;
                   const sessionDragOver = dragOver?.type === "session" && dragOver.id === s.id;
-                  const sessionDropClass = sessionDragOver ? ` drag-over drop-${dragOver.position}` : "";
                   const sessionDragging = dragging?.type === "session" && dragging.id === s.id;
                   const tierChild = Boolean(
                     s.parentId && groupSessionIds.has(s.parentId),
                   );
                   return (
-                    <div
+                    <SessionRow
                       key={s.id}
-                      data-sidebar-session-id={s.id}
-                      data-sidebar-session-section-id={group.id}
-                      aria-current={s.id === activeId ? "page" : undefined}
-                      className={
-                        "session-item" +
-                        (tierChild ? " child-session" : "") +
-                        (s.id === activeId ? " active" : "") +
-                        (generating ? " generating" : "") +
-                        (pinned ? " pinned" : "") +
-                        (sessionProjectColor ? " project-colored" : "") +
-                        (confirmArchiveId === s.id ? " delete-pending" : "") +
-                        (sessionDragging ? " dragging" : "") +
-                        sessionDropClass
-                      }
+                      session={s}
+                      sectionId={group.id}
+                      active={s.id === activeId}
+                      tierChild={tierChild}
+                      projectColored={Boolean(sessionProjectColor)}
+                      dragging={sessionDragging}
+                      dropPosition={sessionDragOver ? dragOver.position : undefined}
                       style={sessionProjectStyle}
-                      onPointerDown={s.parentId ? undefined : (event) => startPointerDrag(event, { type: "session", id: s.id })}
-                      onContextMenu={(event) => openSessionContextMenu(event, s, pinned)}
-                      onClick={(event) => {
-                        if (isSidebarDragInteractiveTarget(event.target)) return;
-                        if (consumeSuppressedClick()) return;
+                      tabbable={!collapsed}
+                      editing={editing === s.id}
+                      runtimeIndicator={runtimeIndicator}
+                      inboxLayout={false}
+                      sideWide={settledThreadsEnabled && !s.parentId}
+                      pullRequestIndicator={pullRequest && pullRequestState
+                        ? {
+                            tone: pullRequestState.tone,
+                            label: pullRequestAccessibleLabel(
+                              pullRequest,
+                              pullRequestSnapshot?.stale,
+                            ),
+                          }
+                        : null}
+                      generating={generating}
+                      unread={unread}
+                      statusLabel={statusLabel}
+                      pinned={pinned}
+                      archivePending={confirmArchiveId === s.id}
+                      isInteractiveTarget={isSidebarDragInteractiveTarget}
+                      shouldIgnoreClick={consumeSuppressedClick}
+                      onActivate={() => {
                         setConfirmArchiveId(null);
                         switchVisibleSession(s.id);
                       }}
-                      onDoubleClick={(event) => {
-                        if (isSidebarDragInteractiveTarget(event.target)) return;
-                        beginRename(s.id);
+                      onPointerDown={s.parentId ? undefined : (event) => startPointerDrag(event, { type: "session", id: s.id })}
+                      onContextMenu={(event) => openSessionContextMenu(event, s, pinned)}
+                      onBeginRename={() => beginRename(s.id)}
+                      onRename={(title) => {
+                        rename(s.id, title);
+                        setEditing(null);
                       }}
-                      title={s.title}
-                    >
-                      <RuntimePreviewMarker indicator={runtimeIndicator} />
-                      {editing === s.id ? (
-                        <input
-                          className="session-rename"
-                          defaultValue={s.title}
-                          autoFocus
-                          onClick={(e) => e.stopPropagation()}
-                          onBlur={(e) => {
-                            rename(s.id, e.target.value.trim());
-                            setEditing(null);
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                            if (e.key === "Escape") setEditing(null);
-                          }}
-                        />
-                      ) : (
-                        <>
-                          <span className="session-copy">
-                            <HoverScrollText
-                              className="session-title"
-                              innerClassName={generating ? "shiny-text" : undefined}
-                              text={s.title}
-                            />
-                          </span>
-                          <div
-                            className={
-                              "session-side" +
-                              (settledThreadsEnabled && !s.parentId
-                                ? " session-side-wide"
-                                : "")
-                            }
-                          >
-                            {pullRequest && pullRequestState && (
-                              <button
-                                type="button"
-                                className={`session-side-indicator session-pr-state ${pullRequestState.tone}`}
-                                title={pullRequestAccessibleLabel(
-                                  pullRequest,
-                                  pullRequestSnapshot?.stale,
-                                )}
-                                aria-label={pullRequestAccessibleLabel(
-                                  pullRequest,
-                                  pullRequestSnapshot?.stale,
-                                )}
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  switchVisibleSession(s.id);
-                                  onOpenGitPanel(s.id, "pull_request");
-                                }}
-                              >
-                                <GitPullRequest size={13} />
-                                <span aria-hidden="true" />
-                              </button>
-                            )}
-                            {generating ? (
-                              <WorkingSessionLoader
-                                className="session-side-indicator"
-                                phaseKey={s.id}
-                                data-testid="session-loader"
-                                role="img"
-                                title={statusLabel}
-                                aria-label={statusLabel}
-                              />
-                            ) : unread ? (
-                              <UnreadSessionLoader
-                                className="session-side-indicator"
-                                data-testid="session-loader"
-                                role="img"
-                                title={statusLabel}
-                                aria-label={statusLabel}
-                              />
-                            ) : (
-                              <span
-                                className="session-side-indicator session-recency"
-                                data-testid="session-recency"
-                                title={`Updated ${new Date(s.updatedAt).toLocaleString()}`}
-                              >
-                                {sessionRecencyLabel(s.updatedAt)}
-                              </span>
-                            )}
-                            <div className="session-side-actions" aria-label="Thread actions">
-                              {!s.parentId && (
-                                <button
-                                  className={"session-side-btn" + (pinned ? " active" : "")}
-                                  type="button"
-                                  aria-label={pinned ? `Unpin ${s.title}` : `Pin ${s.title}`}
-                                  title={pinned ? "Unpin chat" : "Pin chat"}
-                                  aria-pressed={pinned}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    setConfirmArchiveId(null);
-                                    toggleSessionPinned(s.id);
-                                  }}
-                                >
-                                  <Pin size={12} />
-                                </button>
-                              )}
-                              {settledThreadsEnabled && (
-                                <button
-                                  className="session-side-btn"
-                                  type="button"
-                                  aria-label={`Settle ${s.title}`}
-                                  title={
-                                    generating || unread
-                                      ? "Thread still active"
-                                      : "Settle chat"
-                                  }
-                                  disabled={generating || unread}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    settleSession(s.id);
-                                    setConfirmArchiveId(null);
-                                  }}
-                                >
-                                  <Check size={12} />
-                                </button>
-                              )}
-                              <button
-                                className={"session-side-btn danger" + (confirmArchiveId === s.id ? " confirm" : "")}
-                                type="button"
-                                aria-label={confirmArchiveId === s.id ? `Confirm archive ${s.title}` : `Archive ${s.title}`}
-                                title={confirmArchiveId === s.id ? "Click again to archive" : "Archive chat"}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  archiveChat(s.id);
-                                }}
-                              >
-                                <Archive size={12} />
-                              </button>
-                            </div>
-                          </div>
-                        </>
-                      )}
-                    </div>
+                      onCancelRename={() => setEditing(null)}
+                      onOpenPullRequest={() => {
+                        switchVisibleSession(s.id);
+                        onOpenGitPanel(s.id, "pull_request");
+                      }}
+                      onTogglePin={!s.parentId
+                        ? () => {
+                            setConfirmArchiveId(null);
+                            toggleSessionPinned(s.id);
+                          }
+                        : undefined}
+                      onSettle={settledThreadsEnabled
+                        ? () => {
+                            settleSession(s.id);
+                            setConfirmArchiveId(null);
+                          }
+                        : undefined}
+                      settleDisabled={generating || unread}
+                      onArchive={() => archiveChat(s.id)}
+                    />
                   );
                 })}
                   {(canShowMore || canShowLess) && (
