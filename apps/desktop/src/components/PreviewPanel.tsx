@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { cancelPreviewPicker, openExternalUrl, setActivePreviewTarget, startPreviewPicker, takePreviewPicker, type ChatArtifact, type PreviewAppPreflight, type PreviewAppStatus, type PreviewSurfaceCapability, type PreviewSurfaceKind, type PreviewSurfaceTarget } from "../api";
+import { inTauri, cancelPreviewPicker, openExternalUrl, setActivePreviewTarget, startPreviewPicker, takePreviewPicker, type ChatArtifact, type PreviewAppPreflight, type PreviewAppStatus, type PreviewSurfaceCapability, type PreviewSurfaceKind, type PreviewSurfaceTarget } from "../api";
 import type { ArtifactRevision, ArtifactRevisionGroup } from "../lib/artifactRevisions";
 import { buildArtifactPreviewDocument, previewKindForArtifact } from "../lib/artifactPreview";
 import { isFileArtifact, isPreviewableArtifact, normalizeArtifactBrowserUrl, resolveArtifactBrowserInput } from "../lib/artifacts";
@@ -87,7 +87,6 @@ const PREVIEW_PANEL_IDS: Record<PreviewTab, string> = {
   preview: "inspector-panel-preview",
   code: "inspector-panel-code",
 };
-const IS_TAURI = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const APP_FLOATING_UI_SELECTOR = '[data-native-preview-blocker="true"], [data-native-preview-blocker="open"][open]';
 const DOM_PREVIEW_CAPABILITIES: PreviewSurfaceCapability[] = ["dom_snapshot", "click", "type", "key", "scroll", "logs", "annotate", "source"];
 
@@ -655,7 +654,7 @@ export function PreviewPanel({
     setBrowserError(null);
     const nextHistory = browserHistory.slice(0, Math.max(browserHistoryIndex + 1, 0));
     if (nextHistory[nextHistory.length - 1] !== url) nextHistory.push(url);
-    if (IS_TAURI && nativeBrowserClaimsRef.current.has(activeBrowserPage.id)) {
+    if (inTauri && nativeBrowserClaimsRef.current.has(activeBrowserPage.id)) {
       pendingNativeUrlRef.current.set(activeBrowserPage.id, url);
     }
     updateBrowserPage({
@@ -775,7 +774,7 @@ export function PreviewPanel({
   function reloadBrowser() {
     if (!browserUrl) return;
     const claim = nativeBrowserClaimsRef.current.get(activeBrowserPage.id);
-    if (IS_TAURI && claim) {
+    if (inTauri && claim) {
       void reloadPreviewWebview(claim.label, claim.claimToken).catch((error) => setBrowserError(error instanceof Error ? error.message : String(error)));
       return;
     }
@@ -785,7 +784,7 @@ export function PreviewPanel({
   function reloadBrowserTab(tab: PreviewBrowserPage) {
     if (!tab.url) return;
     const claim = nativeBrowserClaimsRef.current.get(tab.id);
-    if (IS_TAURI && claim) {
+    if (inTauri && claim) {
       void reloadPreviewWebview(claim.label, claim.claimToken).catch((error) => setBrowserError(error instanceof Error ? error.message : String(error)));
       return;
     }
@@ -1925,7 +1924,7 @@ function NativeArtifactBrowser({
 
   useEffect(() => {
     if (!mounted) return;
-    if (!IS_TAURI) return;
+    if (!inTauri) return;
 
     let cancelled = false;
     let resizeObserver: ResizeObserver | null = null;
@@ -2145,7 +2144,7 @@ function NativeArtifactBrowser({
   }, [mounted, nativeLabel, profileId, storageMode, surfaceKind]);
 
   useEffect(() => {
-    if (!IS_TAURI) return;
+    if (!inTauri) return;
     const claim = claimRef.current;
     if (!claim) return;
     void setPreviewWebviewZoom(claim.label, claim.claimToken, zoomPercent / 100).catch((error) => {
@@ -2154,7 +2153,7 @@ function NativeArtifactBrowser({
   }, [zoomPercent]);
 
   useEffect(() => {
-    if (!IS_TAURI) return;
+    if (!inTauri) return;
     const claim = claimRef.current;
     if (!claim) return;
     void setPreviewWebviewMuted(claim.label, claim.claimToken, muted).catch((error) => {
@@ -2163,13 +2162,13 @@ function NativeArtifactBrowser({
   }, [muted, nativeNavigation.label, nativeNavigation.state]);
 
   useEffect(() => {
-    if (!IS_TAURI) return;
+    if (!inTauri) return;
     void queueNativeVisibility();
   }, [visible]);
 
   useEffect(() => {
     const claim = claimRef.current;
-    if (!IS_TAURI || !claim || currentNativeUrlRef.current === url) return;
+    if (!inTauri || !claim || currentNativeUrlRef.current === url) return;
     setNativeNavigation((current) => ({ ...current, url, state: "loading" }));
     void navigatePreviewWebview(claim.label, claim.claimToken, url).catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
@@ -2180,7 +2179,7 @@ function NativeArtifactBrowser({
 
   useEffect(() => {
     const claim = claimRef.current;
-    if (!IS_TAURI || !claim) {
+    if (!inTauri || !claim) {
       previousFrameKeyRef.current = frameKey;
       return;
     }
@@ -2196,7 +2195,7 @@ function NativeArtifactBrowser({
 
   useEffect(() => {
     if (!visible) return;
-    if (!IS_TAURI) {
+    if (!inTauri) {
       void publishPreviewSurface({
         kind: surfaceKind,
         title,
@@ -2226,7 +2225,7 @@ function NativeArtifactBrowser({
   }, [visible, nativeError, nativeNavigation, onSurfaceChange, surfaceError, surfaceKind, surfaceReady, threadId, title]);
 
   useEffect(() => {
-    if (!visible || !controlActivity || !IS_TAURI) return;
+    if (!visible || !controlActivity || !inTauri) return;
     let cancelled = false;
     const owner = ++previewControlOverlayOwner;
     overlayOwnerRef.current = owner;
@@ -2330,7 +2329,7 @@ function NativeArtifactBrowser({
 
   return (
     <div ref={hostRef} className="preview-native-browser" data-testid="preview-native-browser" aria-label={title}>
-      {!IS_TAURI && (
+      {!inTauri && (
         <iframe
           key={`${url}:${frameKey}`}
           className="preview-frame"

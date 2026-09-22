@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { SheetDialog } from "./SheetDialog";
 import { isComposingKeyEvent } from "../ui/shortcuts";
-import { wireMessageContent } from "../api";
+import { inTauri, wireMessageContent } from "../api";
 import {
   searchChatSessions,
   type ChatSearchResult,
@@ -20,8 +20,6 @@ export interface RuntimeCommand extends CommandPaletteItem {
   run: () => void;
 }
 
-const inTauri =
-  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 export function CommandPalette({
   projects,

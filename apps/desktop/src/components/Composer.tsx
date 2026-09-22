@@ -1,5 +1,5 @@
 import { type ClipboardEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { openExternalUrl, type Agent, type ChatAttachment, type MediaKind, type SkillInfo, type ToolInfo } from "../api";
+import { isTauriRuntime, openExternalUrl, type Agent, type ChatAttachment, type MediaKind, type SkillInfo, type ToolInfo } from "../api";
 import type { WorkspaceFileSuggestion } from "../api";
 import { composerAutocompleteTriggerAt, composerCommandRunsOnSelection, composerSuggestionMatchScore, mcpToolTagCompletion, replaceComposerAutocompleteTrigger, skillTagCompletion } from "../lib/composerAutocomplete";
 import { canNavigateComposerHistory, moveComposerHistory, type ComposerHistoryDirection } from "../lib/composerHistory";
@@ -11,9 +11,6 @@ import { AgentAvatar } from "./AgentAvatar";
 import { ArrowUp, ChevronDown, Folder, FolderOpen, GitHub, Paperclip, PlusSquare, Square, UserRound, X } from "./icons";
 const COMPOSER_HISTORY_NOTICE_MS = 1800;
 
-function isTauriRuntime(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
 
 type SlashCommand = {
   id: string;

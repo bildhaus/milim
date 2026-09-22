@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { connectedSourceModel, type ConnectedModelSource } from "../lib/onboardingModel";
 import "../settings.css";
 import {
+  isTauriRuntime,
   accountRuntimeKind,
   discoverLocalProviders,
   getClaudeStatus,
@@ -97,9 +98,6 @@ function OnboardingStory({
   );
 }
 
-function inTauriRuntime(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
 
 function runtimeReady(kind: AccountRuntimeKind, statuses: RuntimeStatuses): boolean {
   if (kind === "codex") return Boolean(statuses.codex && (statuses.codex.account || !statuses.codex.requiresOpenaiAuth));
@@ -386,7 +384,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
   }
 
   async function pickFolder() {
-    if (!inTauriRuntime()) return;
+    if (!isTauriRuntime()) return;
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
       const selected = await open({ directory: true, multiple: false });
@@ -705,7 +703,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
                         onBlur={() => updateThreadSettings(activeId, { folder: folderDraft.trim() })}
                         placeholder="C:/path/to/project"
                       />
-                      <button className="btn-ghost" type="button" onClick={() => void pickFolder()} disabled={!inTauriRuntime()}>
+                      <button className="btn-ghost" type="button" onClick={() => void pickFolder()} disabled={!isTauriRuntime()}>
                         Choose
                       </button>
                     </span>

@@ -16,6 +16,7 @@ import {
 } from "react";
 import { useAgents } from "../agents/store";
 import {
+  inTauri,
   artifactFileStatus,
   applyWorkerDiff,
   claudeRuntimeModel,
@@ -453,8 +454,6 @@ const WorkersSummary = lazy(() =>
     ([, mod]) => ({ default: mod.WorkersSummary }),
   ),
 );
-const inTauri =
-  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const MAX_MOUNTED_MESSAGE_ROWS = 200;
 const MESSAGE_WINDOW_SHIFT = 100;
 const DEFAULT_MESSAGE_ROW_HEIGHT = 180;

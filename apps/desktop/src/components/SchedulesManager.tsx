@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useAgents } from "../agents/store";
 import {
+  inTauri,
   createSchedule,
   deleteSchedule,
   inferAttachmentMime,
@@ -43,7 +44,6 @@ type CronStatus = {
 
 const DEFAULT_CRON = "0 0 9 * * Mon-Fri";
 const MAX_SCHEDULE_ATTACHMENTS = MAX_DESKTOP_ATTACHMENTS;
-const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 const QUICK_CREATE_PRESETS: SchedulePreset[] = [
   {
@@ -537,7 +537,7 @@ export function SchedulesManager({ onClose }: { onClose: () => void }) {
       let next: ChatAttachment[] = [];
       if (files?.length) {
         next = await Promise.all(files.map(browserFileAttachment));
-      } else if (isTauri) {
+      } else if (inTauri) {
         next = (await pickAttachmentFiles()).map((attachment) => ({
           id: attachmentId(),
           ...attachment,

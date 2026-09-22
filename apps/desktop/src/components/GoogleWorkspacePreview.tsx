@@ -18,6 +18,7 @@ import {
 import { createPortal } from "react-dom";
 
 import {
+  isTauriRuntime,
   chooseGoogleWorkspaceFiles,
   editGoogleDoc,
   editGoogleSheet,
@@ -2318,7 +2319,7 @@ export function SlidesPreview({
     } | null = null;
     let changedFullscreen = false;
     void (async () => {
-      if (!("__TAURI_INTERNALS__" in window)) return;
+      if (!isTauriRuntime()) return;
       try {
         const { getCurrentWindow } = await import("@tauri-apps/api/window");
         fullscreenWindow = getCurrentWindow();

@@ -16,6 +16,7 @@ import {
 } from "react";
 import { useAgents } from "./agents/store";
 import {
+  inTauri,
   deleteThreadTree,
   listModelsDetailed,
   loadStartupModels,
@@ -111,8 +112,6 @@ const OnboardingFlow = lazy(() =>
     default: mod.OnboardingFlow,
   })),
 );
-const inTauri =
-  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const DOCS_URL = "https://docs.milim.ai/";
 const APP_MENU_EVENT = "milim://menu-action";
 const MODEL_FAVORITES_UPDATED_EVENT = "milim://model-favorites-updated";

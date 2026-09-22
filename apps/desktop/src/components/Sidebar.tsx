@@ -13,7 +13,7 @@ import {
   type SessionPreviewRuntime,
   type SessionSidebarState,
 } from "../sessions/store";
-import { openWorkspaceLauncher, runWorkspaceGitAction } from "../api";
+import { inTauri, openWorkspaceLauncher, runWorkspaceGitAction } from "../api";
 import { createInteractiveChat } from "../lib/newChatCoordinator";
 import { requestWorkspaceEditorLeave } from "../lib/workspaceEditorGuard";
 import { GIT_STATUS_REFRESH_INTERVAL_MS } from "../lib/gitRefresh";
@@ -53,7 +53,6 @@ const SIDEBAR_DRAG_THRESHOLD = 5;
 const SIDEBAR_SECTION_PREVIEW_LIMIT = 5;
 const SIDEBAR_INBOX_SECTION_ID = "inbox";
 const SIDEBAR_SETTLED_SECTION_ID = "settled";
-const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 function sidebarSectionShownCount(totalSessions: number, visibleLimit: number, activeIndex: number): number {
   const baseCount = Math.max(0, Math.min(visibleLimit, totalSessions));

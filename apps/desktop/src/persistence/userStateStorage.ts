@@ -7,6 +7,7 @@ import type {
 import { incrementPerfCounter, recordPerfMeasure } from "../lib/perf.js";
 import type { ChatSearchResult } from "../lib/chatSearch.js";
 import type { Session } from "../sessions/store.js";
+import { isTauriRuntime } from "../api.js";
 
 const CANONICAL_USER_STATE_KEYS = [
   "milim.sessions",
@@ -84,9 +85,6 @@ let deferredSessionWrite: DeferredSessionWrite | null = null;
 let sessionFlushPromise: Promise<void> | null = null;
 let lifecycleFlushHandlersInstalled = false;
 
-function inTauri(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
 
 function getLocalStorage(): Storage | null {
   try {
@@ -535,7 +533,7 @@ export function installUserStateFlushHandlers(): void {
         console.warn("Failed to flush user state before exit:", error),
       )
       .finally(() => {
-        if (inTauri())
+        if (isTauriRuntime())
           void invokeUserState<void>("quit_after_user_state_flush").catch(
             () => {},
           );
@@ -548,7 +546,7 @@ export function installUserStateFlushHandlers(): void {
   window.addEventListener("pagehide", flush);
   window.addEventListener("beforeunload", flush);
 
-  if (inTauri()) {
+  if (isTauriRuntime()) {
     void import("@tauri-apps/api/event")
       .then(({ listen }) =>
         Promise.all([
@@ -571,7 +569,7 @@ function legacyEntries(): Record<string, string> {
 }
 
 export function importLegacyLocalStorageOnce(): Promise<void> {
-  if (!inTauri()) return Promise.resolve();
+  if (!isTauriRuntime()) return Promise.resolve();
   if (!legacyImportPromise) {
     legacyImportPromise = invokeUserState<void>("user_state_import_legacy", {
       entries: legacyEntries(),
@@ -587,7 +585,7 @@ function readSessionStorageValue():
   | SessionStorageValue
   | null
   | Promise<SessionStorageValue | null> {
-  if (!inTauri()) {
+  if (!isTauriRuntime()) {
     const value = localGetItem(SESSIONS_KEY);
     committedSessionValue = value ? parseSessionStorageValue(value) : null;
     return committedSessionValue;
@@ -633,7 +631,7 @@ export async function searchUserChats(
 function writeSessionStorageValue(
   value: SessionStorageValue,
 ): void | Promise<void> {
-  if (!inTauri()) {
+  if (!isTauriRuntime()) {
     const serialized = JSON.stringify(value);
     if (localGetItem(SESSIONS_KEY) === serialized) return undefined;
     incrementPerfCounter(`persist.${SESSIONS_KEY}.write`);
@@ -658,7 +656,7 @@ function writeSessionStorageValue(
 
 function deleteSessionStorageValue(): void | Promise<boolean> {
   cancelDeferredSessionWrite();
-  if (!inTauri()) {
+  if (!isTauriRuntime()) {
     committedSessionValue = null;
     localRemoveItem(SESSIONS_KEY);
     return undefined;
@@ -682,7 +680,7 @@ export function readUserStateKey(
         ? JSON.stringify(value)
         : null;
   }
-  if (!inTauri()) {
+  if (!isTauriRuntime()) {
     const sanitized = sanitizeUserStateValue(key, localGetItem(key));
     return sanitized === null ? null : userStateReadValue(key, sanitized);
   }
@@ -710,7 +708,7 @@ export function writeUserStateKey(
   if (key === SESSIONS_KEY) {
     return writeSessionStorageValue(parseSessionStorageValue(sanitized));
   }
-  if (!inTauri()) {
+  if (!isTauriRuntime()) {
     if (localGetItem(key) === sanitized) return undefined;
     incrementPerfCounter(`persist.${key}.write`);
     recordPerfMeasure(`persist.${key}.bytes`, sanitized.length);
@@ -736,7 +734,7 @@ export function writeUserStateKey(
 export function deleteUserStateKey(key: UserStateKey): void | Promise<boolean> {
   if (key === SESSIONS_KEY) return deleteSessionStorageValue();
   lastWrittenValues.delete(key);
-  if (!inTauri()) {
+  if (!isTauriRuntime()) {
     localRemoveItem(key);
     return undefined;
   }

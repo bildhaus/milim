@@ -1,9 +1,8 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useState } from "react";
-import { requestDesktopHide } from "../api";
+import { inTauri, requestDesktopHide } from "../api";
 import { useUiPreferences } from "../ui/store";
 
-const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 function IconMin() {
   return <svg width="11" height="11" viewBox="0 0 16 16"><path d="M3 8h10" stroke="currentColor" strokeWidth="1.3" /></svg>;

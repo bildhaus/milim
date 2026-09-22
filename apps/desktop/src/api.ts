@@ -484,8 +484,16 @@ const BASE = DEFAULT_BASE;
 const STARTUP_PROVIDER_PICKER_TIMEOUT_MS = 900;
 const ACCOUNT_RUNTIME_PICKER_TIMEOUT_MS = 8_000;
 const ACCOUNT_RUNTIME_PICKER_RETRY_DELAY_MS = 500;
-const inTauri =
-  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+/**
+ * Whether the page runs inside the Tauri webview. Evaluated per call, so code
+ * that runs after startup (and tests that stub `window`) see the live value.
+ */
+export function isTauriRuntime(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+/** `isTauriRuntime()` sampled once at module load, for render-time checks. */
+export const inTauri = isTauriRuntime();
 
 let tokenPromise: Promise<string | null> | null = null;
 let apiBasePromise: Promise<string> | null = null;
