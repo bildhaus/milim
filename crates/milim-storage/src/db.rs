@@ -17,6 +17,9 @@ use sha2::{Digest, Sha256};
 
 use crate::crypto::EncryptedStore;
 
+mod usage;
+pub use usage::{UsageBucket, UsageSummary, UsageTotals, USAGE_MAX_DAYS};
+
 /// Per-connection `prepare_cached` capacity; covers the hot control-ledger
 /// statements without evicting them on every timeline read.
 const PREPARED_STATEMENT_CACHE_CAPACITY: usize = 64;
@@ -702,6 +705,16 @@ const USER_DATA_MIGRATIONS: &[Migration] = &[
             WHERE item_type IN ('message', 'message_deleted');
         CREATE INDEX IF NOT EXISTS idx_user_command_receipts_created
             ON user_command_receipts(created_at_ms);",
+    },
+    Migration {
+        version: 12,
+        name: "usage_ledger_indexes",
+        sql: "CREATE INDEX IF NOT EXISTS idx_user_session_messages_metrics_ended
+            ON user_session_messages(json_extract(message_json, '$.metrics.endedAt'))
+            WHERE json_extract(message_json, '$.metrics.endedAt') IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_user_session_messages_compaction_created
+            ON user_session_messages(json_extract(message_json, '$.compaction.createdAt'))
+            WHERE json_extract(message_json, '$.compaction.summary') IS NOT NULL;",
     },
 ];
 

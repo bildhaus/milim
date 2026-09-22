@@ -4726,6 +4726,10 @@ export interface WorkspaceContext {
 export interface WorkspaceGitFileChange {
   status: string;
   path: string;
+  /** Index column changed. Absent from backends older than per-file staging. */
+  staged?: boolean;
+  /** Worktree column changed, including untracked files. */
+  unstaged?: boolean;
 }
 
 export interface WorkspaceGitBranch {
@@ -4765,7 +4769,13 @@ export type WorkspaceGitAction =
   | "pr_ready"
   | "pr_comment"
   | "pr_review"
-  | "pr_merge";
+  | "pr_merge"
+  | "stage_file"
+  | "unstage_file"
+  | "discard_file"
+  | "stage_hunk"
+  | "unstage_hunk"
+  | "discard_hunk";
 
 export type WorkspaceGitDiffScope =
   | "all"
@@ -4883,6 +4893,50 @@ export async function getWorkspaceGitStatus(): Promise<WorkspaceGitStatus | null
   }
 }
 
+export interface UsageTotals {
+  responses: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  /** Every known cost, reported plus estimated. */
+  cost_usd: number;
+  /** Billed cost reported by a provider or account runtime. */
+  reported_cost_usd: number;
+  /** Cost estimated from cached per-token pricing. */
+  estimated_cost_usd: number;
+  /** Responses that used tokens without a recorded cost. */
+  unpriced_responses: number;
+}
+
+export interface UsageBucket extends UsageTotals {
+  key: string;
+  label: string;
+}
+
+export interface UsageSummary {
+  days: number;
+  since_ms: number;
+  until_ms: number;
+  tz_offset_minutes: number;
+  totals: UsageTotals;
+  by_day: UsageBucket[];
+  by_model: UsageBucket[];
+  by_provider: UsageBucket[];
+  by_project: UsageBucket[];
+}
+
+/** Usage aggregated by the backend over canonical message metrics. */
+export async function getUsageSummary(days: number): Promise<UsageSummary> {
+  const params = new URLSearchParams({
+    days: String(days),
+    tz_offset_minutes: String(new Date().getTimezoneOffset()),
+  });
+  return await parseJsonResponse<UsageSummary>(
+    await authFetch(`${BASE}/usage/summary?${params}`),
+    "usage summary HTTP failed",
+  );
+}
+
 export async function getWorkspaceContext(): Promise<WorkspaceContext | null> {
   try {
     const r = await authFetch(`${BASE}/workspace/context`);
@@ -4945,6 +4999,10 @@ export async function runWorkspaceGitAction(
     merge_method?: "merge" | "squash" | "rebase";
     expected_head?: string;
     repository?: string;
+    /** Porcelain path for per-file and per-hunk staging actions. */
+    path?: string;
+    /** Exact hunk text (header and body) the server re-validates before applying. */
+    hunk?: string;
   } = {},
 ): Promise<WorkspaceGitActionResult> {
   const r = await authFetch(`${BASE}/workspace/git/action`, {

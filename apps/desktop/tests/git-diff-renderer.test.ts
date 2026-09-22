@@ -1,6 +1,15 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { diffRows, diffSections, diffStats, findDiffSectionIndex, gitFileTree, shouldCollapseDiffSection } from "../src/lib/gitDiffRows.js";
+import type { WorkspaceGitStatus } from "../src/api.js";
+import { diffHunks, diffRows, diffSections, diffStats, findDiffSectionIndex, gitFileTree, shouldCollapseDiffSection } from "../src/lib/gitDiffRows.js";
+import {
+  defaultCommitStageAll,
+  gitCommitScope,
+  gitDiscardConfirmation,
+  gitFileStaging,
+  gitFileStagingActions,
+  gitHunkStagingActions,
+} from "../src/lib/gitStaging.js";
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -54,6 +63,65 @@ const fileTree = gitFileTree([
 assert(fileTree[0].name === "apps/desktop/src", "single-child folders should be compacted");
 assert(fileTree[0].children.map((node) => node.name).join(",") === "components,lib", "folders should preserve the file hierarchy");
 assert(fileTree[1].name === "README.md" && fileTree[1].fileIndex === 2, "root files should remain navigable");
+
+const hunkDiff = [
+  "diff --git a/notes.txt b/notes.txt",
+  "index 1111111..2222222 100644",
+  "--- a/notes.txt",
+  "+++ b/notes.txt",
+  "@@ -1,3 +1,3 @@",
+  " one",
+  "-two",
+  "+TWO",
+  "@@ -20,2 +20,3 @@ fn tail",
+  " twenty",
+  "+twenty-one",
+  "\\ No newline at end of file",
+  "",
+  "diff --git a/fresh.txt b/fresh.txt",
+  "new file mode 100644",
+  "--- /dev/null",
+  "+++ b/fresh.txt",
+  "@@ -0,0 +1 @@",
+  "+new",
+  "",
+].join("\n");
+const hunks = diffHunks(hunkDiff);
+const hunkRows = diffRows(hunkDiff).filter((row) => row.kind === "hunk");
+assert(hunks.length === 3 && hunkRows.length === 3, "every hunk row should map to one raw hunk");
+assert(hunks[0].path === "notes.txt" && hunks[0].text === "@@ -1,3 +1,3 @@\n one\n-two\n+TWO", "hunk text should keep header and body exactly");
+assert(hunks[1].text.endsWith("+twenty-one\n\\ No newline at end of file"), "no-newline markers belong to their hunk and trailing blanks are trimmed");
+assert(hunks[2].path === "fresh.txt" && hunks[2].text === "@@ -0,0 +1 @@\n+new", "file metadata should never leak into the previous hunk");
+
+const staged = gitFileStaging({ status: "M", path: "a.ts", staged: true, unstaged: false });
+const both = gitFileStaging({ status: "MM", path: "b.ts", staged: true, unstaged: true });
+const untracked = gitFileStaging({ status: "??", path: "c.ts", staged: false, unstaged: true });
+const conflicted = gitFileStaging({ status: "UU", path: "d.ts", staged: true, unstaged: true });
+const legacy = gitFileStaging({ status: "M", path: "e.ts" });
+assert(gitFileStagingActions(staged).join() === "unstage_file", "staged-only files can only be unstaged");
+assert(gitFileStagingActions(both).join() === "stage_file,unstage_file,discard_file", "partially staged files expose every action");
+assert(gitFileStagingActions(untracked).join() === "stage_file,discard_file", "untracked files can be staged or deleted");
+assert(gitFileStagingActions(conflicted).join() === "stage_file", "conflicts can only be staged to mark them resolved");
+assert(gitFileStagingActions(legacy).join() === "stage_file,discard_file", "ambiguous legacy statuses never offer unstage");
+assert(gitHunkStagingActions("unstaged", both).join() === "stage_hunk,discard_hunk", "unstaged diffs stage or discard hunks");
+assert(gitHunkStagingActions("staged", both).join() === "unstage_hunk", "staged diffs unstage hunks");
+assert(gitHunkStagingActions("all", both).length === 0, "combined HEAD diffs cannot map hunks to one side of the index");
+assert(gitHunkStagingActions("unstaged", untracked).length === 0, "untracked files are staged as a whole");
+assert(gitDiscardConfirmation("c.ts", untracked, "file").confirmLabel === "Delete file", "untracked discard must say it deletes the file");
+assert(gitDiscardConfirmation("b.ts", both, "file").message.includes("Staged changes are kept"), "tracked discard should explain what survives");
+
+const commitStatus = {
+  staged: 1,
+  changed_files: [
+    { status: "M", path: "a.ts", staged: true, unstaged: false },
+    { status: "MM", path: "b.ts", staged: true, unstaged: true },
+    { status: "??", path: "c.ts", staged: false, unstaged: true },
+  ],
+} as unknown as WorkspaceGitStatus;
+const commitScope = gitCommitScope(commitStatus);
+assert(commitScope.stagedFiles.length === 2 && commitScope.unstagedFiles.length === 2, "commit scope should split staged and unstaged files");
+assert(!defaultCommitStageAll(commitStatus), "a staged index should default to committing only staged changes");
+assert(defaultCommitStageAll({ ...commitStatus, staged: 0 }), "an empty index should default to staging everything");
 
 const gitPanelSource = readFileSync(resolve(process.cwd(), "src/components/GitPanel.tsx"), "utf8");
 const styles = readFileSync(

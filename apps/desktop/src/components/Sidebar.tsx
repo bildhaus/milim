@@ -42,7 +42,7 @@ import { HoverScrollText } from "./HoverScrollText";
 import { PaneResizeHandle } from "./PaneResizeHandle";
 import { SheetDialog } from "./SheetDialog";
 import { ColorField } from "./ui";
-import { Archive, ArrowUp, Bolt, Calendar, Check, ChevronDown, Code, Cube, Download, FileText, Folder, FolderOpen, Gear, GitBranch, GitPullRequest, Globe, Image, Lightbulb, Memory, MoreHorizontal, Pin, Plug, Plus, Search, Sidebar as PanelIcon, Smartphone, Star, Terminal, UserRound } from "./icons";
+import { Archive, ArrowUp, BarChart, Bolt, Calendar, Check, ChevronDown, Code, Cube, Download, FileText, Folder, FolderOpen, Gear, GitBranch, GitPullRequest, Globe, Image, Lightbulb, Memory, MoreHorizontal, Pin, Plug, Plus, Search, Sidebar as PanelIcon, Smartphone, Star, Terminal, UserRound } from "./icons";
 
 const GitPanel = lazy(() =>
   import("./GitPanel").then((mod) => ({ default: mod.GitPanel })),
@@ -783,6 +783,7 @@ function managerIcon(id: ManagerId, size: number) {
     case "schedules": return <Calendar size={size} />;
     case "media": return <Image size={size} />;
     case "pull-requests": return <GitPullRequest size={size} />;
+    case "usage": return <BarChart size={size} />;
     case "google-workspace": return <FileText size={size} />;
     case "mobile": return <Smartphone size={size} />;
   }

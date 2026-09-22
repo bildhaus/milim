@@ -82,7 +82,7 @@ equal(
 );
 
 // Managers registry
-const expectedManagers = ["providers", "agents", "memory", "mcp", "skills", "schedules", "media", "pull-requests", "google-workspace", "mobile"];
+const expectedManagers = ["providers", "agents", "memory", "mcp", "skills", "schedules", "media", "pull-requests", "usage", "google-workspace", "mobile"];
 equal(MANAGERS.map((entry) => entry.id).join(","), expectedManagers.join(","), "every manager should be registered once in hub order");
 equal(
   managersByGroup().flatMap((group) => group.managers).length,

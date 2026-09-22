@@ -17,6 +17,7 @@ pub use db::{
     ControlRunRecord, ControlThreadLinkRecord, ControlThreadRecord, ControlTimelinePage,
     ControlTimelineRecord, Database, DatabaseOptions, JournalMode, Migration,
     RunArtifactMigrationProgress, SecretKv, SessionMessagesPage, SessionsDelta,
-    StoragePerformanceSnapshot, UserChatSearchResult, UserDataStore, SECRETS_MIGRATIONS,
+    StoragePerformanceSnapshot, UsageBucket, UsageSummary, UsageTotals, UserChatSearchResult,
+    UserDataStore, SECRETS_MIGRATIONS, USAGE_MAX_DAYS,
 };
 pub use private_file::create_private_file;

@@ -15,6 +15,7 @@ export type ManagerId =
   | "schedules"
   | "media"
   | "pull-requests"
+  | "usage"
   | "google-workspace"
   | "mobile";
 
@@ -64,7 +65,6 @@ export const MANAGERS: readonly ManagerEntry[] = [
     description: "Personal and project memory",
     keywords: ["memories", "remember", "personal", "project", "notes"],
   },
-  // Usage manager: another change adds it to the "models" group during merge.
   {
     id: "mcp",
     label: "MCP Servers",
@@ -99,6 +99,13 @@ export const MANAGERS: readonly ManagerEntry[] = [
     group: "work",
     description: "GitHub pull requests authored by you or awaiting your review",
     keywords: ["github", "pr", "prs", "review", "pull request"],
+  },
+  {
+    id: "usage",
+    label: "Usage",
+    group: "work",
+    description: "Tokens and spend by day, model, provider, and project",
+    keywords: ["usage", "cost", "spend", "tokens", "billing", "budget", "dashboard", "metrics"],
   },
   {
     id: "google-workspace",

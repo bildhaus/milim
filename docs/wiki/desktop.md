@@ -199,6 +199,16 @@ Tool-enabled turns with a selected Git workspace create a Git worktree checkpoin
 
 The Git side panel appears only for selected folders that are Git repositories. Its branch selector lists local branches, can checkout another local branch, and can create a new branch from the current `HEAD`; checkout failures are reported from Git without changing the worktree.
 
+Each changed file in the review rail has hover actions to stage, unstage, or discard it. A partially staged file offers all three; a conflicted file can only be staged, which marks it resolved. Discarding a tracked file restores its unstaged edits from the index and keeps staged changes. Discarding an untracked file deletes it from disk, and its confirmation says so explicitly. The **Staged** and **Unstaged** diff scopes show their file counts and add per-hunk actions on each hunk header: stage or discard a hunk in **Unstaged**, or unstage it in **Staged**. **All changes** compares against `HEAD` and therefore has no hunk actions. Before applying a hunk, the backend rebuilds its patch from a fresh `git diff` and requires an exact match, so a hunk that changed after the diff loaded is rejected with a refresh prompt instead of being applied. Renamed, binary, and untracked files are staged as whole files. Every action runs inside the validated repository with literal pathspecs and rejects absolute paths, `..` segments, and `.git` internals. Discards require an explicit confirmation.
+
+The commit dialog makes the index explicit. **Staged changes only** commits what is staged and reports how many unstaged files it leaves out. **Stage all and commit** runs `git add -A` first. The dialog defaults to staged changes when anything is staged and otherwise to staging everything. Its command preview shows the exact Git commands.
+
+## Usage
+
+**Usage** in the sidebar Tools launcher opens a dashboard of tokens and spend for the last 7, 30, or 90 days. Totals cover tokens (input and output), spend, responses, active days, and a daily average. A daily bar chart switches between tokens and spend, and tables break the same range down by model, by provider or account runtime, and by project. Days follow your local calendar. Isolated worktree and retry threads count toward their original project.
+
+The backend aggregates canonical SQLite messages through `GET /usage/summary?days=<1-366>&tz_offset_minutes=<offset>` instead of loading sessions into the window. It counts completed assistant responses and compaction summaries that recorded metrics, and uses partial indexes on their timestamps. Every figure keeps its cost provenance. Reported costs come from the provider or account runtime. `est.` marks a total that includes costs estimated from cached per-token pricing, and `~` marks a total that is incomplete because some responses used tokens without a recorded cost. The dashboard shows the reported and estimated amounts separately. Archived chats are included. Deleted chats and turns without recorded metrics are not.
+
 ## Plan mode
 
 Plan mode injects a system instruction that allows read-only inspection and blocks edits, writes, shell commands, computer control, schedule creation, memory registration, and other mutations. The assistant returns a concrete implementation plan. The UI exposes an Execute plan action that sends the approved plan back as a normal run.

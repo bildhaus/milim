@@ -222,6 +222,8 @@ pub fn build_router_with_host_policy(state: AppState, host_policy: HostPolicy) -
             get(routes::media_library_content),
         )
         .route("/media/library/{id}", delete(routes::media_library_delete))
+        // Usage dashboard aggregates over canonical message metrics
+        .route("/usage/summary", get(routes::usage_summary))
         // Host working folder (drives the filesystem/shell tools)
         .route(
             "/workspace",

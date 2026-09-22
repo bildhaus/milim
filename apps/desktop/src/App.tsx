@@ -108,6 +108,11 @@ const PullRequestsManager = lazy(() =>
     import("./components/PullRequestsManager"),
   ]).then(([, mod]) => ({ default: mod.PullRequestsManager })),
 );
+const UsageManager = lazy(() =>
+  import("./components/UsageManager").then((mod) => ({
+    default: mod.UsageManager,
+  })),
+);
 const OnboardingFlow = lazy(() =>
   import("./components/OnboardingFlow").then((mod) => ({
     default: mod.OnboardingFlow,
@@ -573,6 +578,7 @@ function AppContent() {
   const [schedulesOpen, setSchedulesOpen] = useState(false);
   const [mediaOpen, setMediaOpen] = useState(false);
   const [pullRequestsOpen, setPullRequestsOpen] = useState(false);
+  const [usageOpen, setUsageOpen] = useState(false);
   const [mcpManagerRequest, setMcpManagerRequest] = useState(0);
   const [chatSearchRequest, setChatSearchRequest] = useState(0);
   const [composerDraft, setComposerDraft] = useState<{
@@ -707,6 +713,7 @@ function AppContent() {
       else if (id === "schedules") setSchedulesOpen(true);
       else if (id === "media") setMediaOpen(true);
       else if (id === "pull-requests") setPullRequestsOpen(true);
+      else if (id === "usage") setUsageOpen(true);
       else if (id === "mcp") setMcpManagerRequest((value) => value + 1);
     };
     window.addEventListener(OPEN_MANAGER_EVENT, onOpenManager);
@@ -965,6 +972,7 @@ function AppContent() {
         {pullRequestsOpen && (
           <PullRequestsManager onClose={() => setPullRequestsOpen(false)} />
         )}
+        {usageOpen && <UsageManager onClose={() => setUsageOpen(false)} />}
       </Suspense>
       <AppNoticeHost />
       <AppConfirmationHost />

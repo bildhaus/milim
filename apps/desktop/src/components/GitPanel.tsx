@@ -40,6 +40,7 @@ import {
 } from "../api";
 import { commitMessageModelCandidates } from "../lib/gitCommitMessageModels";
 import {
+  diffHunks,
   diffRows,
   diffSections,
   diffStats,
@@ -51,6 +52,13 @@ import {
   type GitFileTreeNode,
 } from "../lib/gitDiffRows";
 import { shouldRefreshGitStatus } from "../lib/gitRefresh";
+import {
+  defaultCommitStageAll,
+  gitDiscardConfirmation,
+  gitFileStaging,
+  gitHunkStagingActions,
+  type GitStagingAction,
+} from "../lib/gitStaging";
 import { gitRemoteWebUrl } from "../lib/gitRemote";
 import {
   pullRequestReadiness,
@@ -58,7 +66,13 @@ import {
 import { useSessions } from "../sessions/store";
 import { useUiPreferences } from "../ui/store";
 import { useSettings } from "../settings/store";
+import { confirmApp } from "../ui/confirmation";
 import { useContextMenu } from "./ContextMenu";
+import {
+  GitCommitScopeChoice,
+  GitFileStageActions,
+  GitHunkActions,
+} from "./GitStagingControls";
 import { PaneResizeHandle } from "./PaneResizeHandle";
 import {
   ArrowUp,
@@ -1042,16 +1056,23 @@ export function GitPanel({
           sectionId: section.id,
           status,
           title: `${status} ${section.path}`,
+          change,
         };
       })
     : readyStatus.changed_files.map((change, index) => ({
         index,
         key: `${change.status}:${change.path}`,
         path: cleanGitPath(change.path),
-        sectionId: null,
+        sectionId: null as string | null,
         status: gitStatusLabel(change.status),
         title: changedFileTitle(change),
+        change: change as WorkspaceGitFileChange | undefined,
       }));
+  const renderedDiffHunks = diffOutput ? diffHunks(diffOutput) : [];
+  const hunkOrdinalByRow = new Map<number, number>();
+  renderedDiffRows.forEach((row, index) => {
+    if (row.kind === "hunk") hunkOrdinalByRow.set(index, hunkOrdinalByRow.size);
+  });
   const navigableFileTree = gitFileTree(
     navigableFiles.map((file) => file.path),
   );
@@ -1399,6 +1420,12 @@ export function GitPanel({
       DIFF_SCOPE_OPTIONS.map((option) => ({
         id: option.value,
         label: option.label,
+        detail:
+          option.value === "staged"
+            ? String(readyStatus.staged)
+            : option.value === "unstaged"
+              ? String(readyStatus.unstaged + readyStatus.untracked)
+              : undefined,
         checked: option.value === diffScope,
         disabled:
           commandBusy === "diff" ||
@@ -1596,6 +1623,19 @@ export function GitPanel({
             diffReviewDraft.index === index
               ? diffReviewDraft
               : null;
+          const hunkOrdinal = hunkOrdinalByRow.get(index);
+          const hunk =
+            hunkOrdinal == null ? undefined : renderedDiffHunks[hunkOrdinal];
+          const hunkChange = hunk
+            ? navigableFiles[sectionIndex]?.change
+            : undefined;
+          const hunkActions =
+            hunk && diffResult?.ok
+              ? gitHunkStagingActions(
+                  diffScope,
+                  hunkChange ? gitFileStaging(hunkChange) : null,
+                )
+              : [];
           return (
             <div
               className={`git-diff-row ${row.kind}${searchActive ? " search-active" : ""}`}
@@ -1612,18 +1652,30 @@ export function GitPanel({
                 }
               }}
             >
-              <span
-                className="git-diff-gutter old"
-                aria-label={row.oldNo ? `Old line ${row.oldNo}` : undefined}
-              >
-                {row.oldNo}
-              </span>
-              <span
-                className="git-diff-gutter new"
-                aria-label={row.newNo ? `New line ${row.newNo}` : undefined}
-              >
-                {row.newNo}
-              </span>
+              {hunk && hunkActions.length ? (
+                <GitHunkActions
+                  actions={hunkActions}
+                  busy={Boolean(commandBusy)}
+                  onAction={(action) =>
+                    void runStagingAction(action, hunkChange, hunk.path, hunk.text)
+                  }
+                />
+              ) : (
+                <>
+                  <span
+                    className="git-diff-gutter old"
+                    aria-label={row.oldNo ? `Old line ${row.oldNo}` : undefined}
+                  >
+                    {row.oldNo}
+                  </span>
+                  <span
+                    className="git-diff-gutter new"
+                    aria-label={row.newNo ? `New line ${row.newNo}` : undefined}
+                  >
+                    {row.newNo}
+                  </span>
+                </>
+              )}
               <span className="git-diff-marker" aria-hidden="true">
                 {row.marker}
               </span>
@@ -1742,7 +1794,7 @@ export function GitPanel({
 
       const file = navigableFiles[node.fileIndex];
       if (!file) return null;
-      return (
+      const fileRow = (
         <button
           className="git-file-row"
           type="button"
@@ -1759,6 +1811,20 @@ export function GitPanel({
           <span className="git-file-status">{file.status}</span>
           <span className="git-file-path">{node.name}</span>
         </button>
+      );
+      const change = file.change;
+      if (!change) return fileRow;
+      return (
+        <div className="git-file-stage-row" role="none" key={file.key}>
+          {fileRow}
+          <GitFileStageActions
+            change={change}
+            busy={Boolean(commandBusy)}
+            onAction={(action) =>
+              void runStagingAction(action, change, file.path)
+            }
+          />
+        </div>
       );
     });
   }
@@ -1908,6 +1974,52 @@ export function GitPanel({
       setNotice(error instanceof Error ? error.message : "Git command failed");
     } finally {
       setCommandBusy(null);
+    }
+  }
+
+  async function runStagingAction(
+    action: GitStagingAction,
+    change: WorkspaceGitFileChange | undefined,
+    fallbackPath: string,
+    hunk?: string,
+  ) {
+    if (commandBusy) return;
+    const discard = action === "discard_file" || action === "discard_hunk";
+    if (discard) {
+      const accepted = await confirmApp({
+        ...gitDiscardConfirmation(
+          change ? cleanGitPath(change.path) : fallbackPath,
+          change ? gitFileStaging(change) : null,
+          action === "discard_hunk" ? "hunk" : "file",
+        ),
+        tone: "danger",
+      });
+      if (!accepted) return;
+    }
+    setCommandBusy(action);
+    setNotice(null);
+    try {
+      const result = await runWorkspaceGitAction(action, {
+        path: change?.path ?? fallbackPath,
+        hunk,
+        force: discard,
+      });
+      setCommandResult(result);
+      if (!result.ok) setNotice(result.message);
+      if (diffResult) {
+        setDiffResult(
+          await runWorkspaceGitAction("diff", {
+            diff_scope: diffScope,
+            diff_base: diffBase || undefined,
+          }),
+        );
+      }
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Git command failed");
+    } finally {
+      setCommandBusy(null);
+      lastGitStatusRunAtRef.current = Date.now();
+      setRefreshKey((value) => value + 1);
     }
   }
 
@@ -2259,6 +2371,8 @@ export function GitPanel({
 
   function openCommandMenu(action: WorkspaceGitAction) {
     if (commandBusy) return;
+    if (action === "commit" && commandMenu !== "commit")
+      setStageAll(defaultCommitStageAll(readyStatus));
     setCommandMenu((current) => (current === action ? null : action));
     setNotice(null);
   }
@@ -2960,17 +3074,12 @@ export function GitPanel({
                       setCommitMessage(event.currentTarget.value)
                     }
                   />
-                  <label className="git-check-row">
-                    <input
-                      type="checkbox"
-                      checked={stageAll}
-                      disabled={Boolean(commandBusy) || generatingCommitMessage}
-                      onChange={(event) =>
-                        setStageAll(event.currentTarget.checked)
-                      }
-                    />
-                    <span>Include unstaged changes</span>
-                  </label>
+                  <GitCommitScopeChoice
+                    status={readyStatus}
+                    stageAll={stageAll}
+                    disabled={Boolean(commandBusy) || generatingCommitMessage}
+                    onChange={setStageAll}
+                  />
                   <code className="git-command-preview">
                     {commandPreview(
                       "commit",

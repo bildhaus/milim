@@ -7,6 +7,7 @@ import type {
   ResponseMetrics,
   RunTrace,
   TokenUsage,
+  UsageTotals,
 } from "../api";
 import { providerOwnsModel, rawModelId } from "./modelPicker.js";
 
@@ -400,6 +401,40 @@ export function summarizeMilimUsage(
     costPartial: accumulated.costPartial || undefined,
     hasUsage: activeDayCount > 0,
   };
+}
+
+/** Provenance of a backend usage aggregate's dollar total. */
+export function usageCostSource(
+  totals: UsageTotals,
+): CostAggregation | undefined {
+  const reported = totals.reported_cost_usd > 0;
+  const estimated = totals.estimated_cost_usd > 0;
+  if (reported && estimated) return "mixed";
+  if (estimated) return "estimate";
+  if (reported || totals.responses > totals.unpriced_responses) return "provider";
+  return undefined;
+}
+
+/** Spend label for a usage aggregate: `est.` marks estimates, `~` missing costs. */
+export function formatUsageCost(totals: UsageTotals): string {
+  const priced = totals.responses > totals.unpriced_responses;
+  if (!priced) return totals.unpriced_responses ? "Unpriced" : "-";
+  return (
+    formatCostLabel(
+      totals.cost_usd,
+      usageCostSource(totals),
+      totals.unpriced_responses > 0,
+    ) ?? "-"
+  );
+}
+
+export function formatUsageCount(value: number): string {
+  return formatCompactCount(Math.max(0, Math.round(value)));
+}
+
+/** Model id without provider routing or account-runtime prefixes. */
+export function usageModelLabel(model: string): string {
+  return rawModelId(model).replace(/^(?:codex|claude|opencode|pi):/, "").trim() || model;
 }
 
 export function formatResponseMetrics(
