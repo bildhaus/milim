@@ -10,6 +10,7 @@ mod account_profiles;
 mod account_runtime_events;
 mod account_runtime_update;
 mod auth;
+mod blocking;
 mod child_process;
 mod claude_bridge;
 #[cfg(not(windows))]

@@ -2208,8 +2208,18 @@ impl RunManager {
     }
 
     pub async fn bootstrap(&self, state: &AppState) -> Result<ControlBootstrapV1> {
-        let threads = self.store.control_threads()?;
-        let queued = self.store.control_queued_turns(None)?;
+        let store = self.store.clone();
+        let (threads, queued, links, runs, inbox, approvals) = crate::blocking::run(move || {
+            Ok((
+                store.control_threads()?,
+                store.control_queued_turns(None)?,
+                store.control_thread_links(None)?,
+                store.control_runs(true)?,
+                store.control_pending_inbox(None)?,
+                store.control_pending_approvals()?,
+            ))
+        })
+        .await?;
         let queued_counts = queued
             .iter()
             .fold(HashMap::<String, usize>::new(), |mut map, item| {
@@ -2232,7 +2242,6 @@ impl RunManager {
                 })
                 .collect::<Result<Vec<_>>>()?
         };
-        let links = self.store.control_thread_links(None)?;
         let summary_by_id = thread_summaries
             .iter()
             .map(|thread| (thread.id.clone(), thread.clone()))
@@ -2300,9 +2309,7 @@ impl RunManager {
                 enabled_skill_count: agent.enabled_skills.len(),
             })
             .collect();
-        let active_runs = self
-            .store
-            .control_runs(true)?
+        let active_runs = runs
             .into_iter()
             .map(run_snapshot)
             .collect::<Result<Vec<_>>>()?;
@@ -2310,16 +2317,12 @@ impl RunManager {
             .into_iter()
             .map(queued_turn)
             .collect::<Result<Vec<_>>>()?;
-        let pending_inputs = self
-            .store
-            .control_pending_inbox(None)?
+        let pending_inputs = inbox
             .into_iter()
             .filter(|item| item.kind != "followup")
             .map(pending_input)
             .collect::<Result<Vec<_>>>()?;
-        let pending_approvals = self
-            .store
-            .control_pending_approvals()?
+        let pending_approvals = approvals
             .into_iter()
             .map(pending_approval)
             .collect::<Result<Vec<_>>>()?;
@@ -2642,7 +2645,10 @@ impl RunManager {
         validate_command_id(&command.command_id)?;
         let command_lock = self.lock_for_command(&command.command_id);
         let _command_guard = command_lock.lock().await;
-        if let Some(receipt) = self.store.control_command_receipt(&command.command_id)? {
+        let (store, command_id) = (self.store.clone(), command.command_id.clone());
+        let receipt =
+            crate::blocking::run(move || store.control_command_receipt(&command_id)).await?;
+        if let Some(receipt) = receipt {
             return serde_json::from_str(&receipt.result_json).map_err(|error| {
                 Error::Other(format!("stored control command result is invalid: {error}"))
             });
@@ -2683,16 +2689,17 @@ impl RunManager {
         let result = self.apply_command(state, command.clone()).await;
         let result_json = serde_json::to_string(&result)
             .map_err(|error| Error::Other(format!("serialize control result: {error}")))?;
-        self.store
-            .control_put_command_receipt(&ControlCommandReceiptRecord {
-                command_id: command.command_id,
-                device_id,
-                thread_id: result.thread_id.clone(),
-                command_kind: command.kind.as_str().to_string(),
-                request_json,
-                result_json,
-                created_at_ms: now_ms(),
-            })?;
+        let receipt = ControlCommandReceiptRecord {
+            command_id: command.command_id,
+            device_id,
+            thread_id: result.thread_id.clone(),
+            command_kind: command.kind.as_str().to_string(),
+            request_json,
+            result_json,
+            created_at_ms: now_ms(),
+        };
+        let store = self.store.clone();
+        crate::blocking::run(move || store.control_put_command_receipt(&receipt)).await?;
         if matches!(
             result.status,
             ControlCommandStatusV1::Accepted
@@ -5667,13 +5674,17 @@ impl RunManager {
         item_type: &str,
         data: Value,
     ) -> Result<ControlTimelineRecord> {
-        let record = self.store.control_append_timeline(
-            thread_id,
-            &Uuid::new_v4().to_string(),
-            run_id,
-            item_type,
-            &data.to_string(),
-        )?;
+        // Streaming loops append deltas synchronously; keep the SQLite write
+        // from stalling the other tasks scheduled on this worker.
+        let record = crate::blocking::in_place(|| {
+            self.store.control_append_timeline(
+                thread_id,
+                &Uuid::new_v4().to_string(),
+                run_id,
+                item_type,
+                &data.to_string(),
+            )
+        })?;
         self.emit(
             "timeline.appended",
             Some(thread_id),
@@ -9259,7 +9270,8 @@ mod tests {
         assert!(error.to_string().contains("expired"));
     }
 
-    #[tokio::test]
+    // Multi-threaded so streamed delta appends exercise `block_in_place`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mock_turn_is_server_owned_durable_and_idempotent() {
         let (manager, state) = manager_and_state();
         let created = manager
