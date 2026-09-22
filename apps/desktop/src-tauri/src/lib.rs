@@ -3379,6 +3379,9 @@ const UPDATE_RECOVERY_ERROR_NAME: &str = "install-error.txt";
 const MAX_UPDATE_PACKAGE_BYTES: usize = 512 * 1024 * 1024;
 const MAX_UPDATE_CHECKSUM_BYTES: usize = 1024 * 1024;
 const UPDATE_PROGRESS_UNKNOWN_STEP_BYTES: u64 = 1024 * 1024;
+/// Updates and their checksums may only come from this repository's releases.
+const UPDATE_RELEASE_DOWNLOAD_PATH_PREFIX: &str = "/bildhaus/milim/releases/download/";
+const UPDATE_RELEASE_API_PATH_PREFIX: &str = "/repos/bildhaus/milim/releases/";
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -3559,10 +3562,21 @@ fn validate_update_download_url(url: &str, label: &str) -> std::result::Result<S
     if parsed.scheme() != "https" {
         return Err(format!("{label} must use https."));
     }
-    match parsed.host_str() {
-        Some("github.com" | "api.github.com") => Ok(parsed.to_string()),
-        _ => Err(format!("{label} must be a GitHub release URL.")),
+    if !parsed.username().is_empty() || parsed.password().is_some() || parsed.port().is_some() {
+        return Err(format!("{label} must be a milim GitHub release URL."));
     }
+    // The URL parser has already resolved dot segments, so a prefix check
+    // cannot be escaped with `..`.
+    let path = parsed.path();
+    let pinned = match parsed.host_str() {
+        Some("github.com") => path.starts_with(UPDATE_RELEASE_DOWNLOAD_PATH_PREFIX),
+        Some("api.github.com") => path.starts_with(UPDATE_RELEASE_API_PATH_PREFIX),
+        _ => false,
+    };
+    if !pinned {
+        return Err(format!("{label} must be a milim GitHub release URL."));
+    }
+    Ok(parsed.to_string())
 }
 
 fn first_sha256_hex(line: &str) -> Option<String> {
@@ -3906,8 +3920,66 @@ fn escape_bash_literal(value: &str) -> String {
     value.replace('\'', "'\\''")
 }
 
+/// Read the Team ID a bundle is signed with from `codesign -dv` output.
+/// Unsigned and ad-hoc signed code have no Team ID.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn parse_codesign_team_id(output: &str) -> Option<String> {
+    output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("TeamIdentifier="))
+        .map(str::trim)
+        .filter(|team| !team.is_empty() && *team != "not set")
+        .map(str::to_string)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_codesign_team_id(bundle: &Path) -> std::result::Result<Option<String>, String> {
+    record_subprocess_launch();
+    let output = Command::new("codesign")
+        .args(["-dv", "--verbose=2"])
+        .arg(bundle)
+        .output()
+        .map_err(|e| format!("Could not run codesign: {e}"))?;
+    if !output.status.success() {
+        // `codesign -dv` fails for code that is not signed at all.
+        return Ok(None);
+    }
+    // codesign writes its display output to stderr.
+    Ok(parse_codesign_team_id(&String::from_utf8_lossy(&output.stderr)))
+}
+
+/// Refuse to install a macOS update unless it passes a strict deep signature
+/// check and is signed by the same Apple team as the running app. Unsigned or
+/// ad-hoc signed dev builds keep the checksum-only flow.
+#[cfg(target_os = "macos")]
+fn verify_macos_update_signature(
+    current_bundle: &Path,
+    update_bundle: &Path,
+) -> std::result::Result<(), String> {
+    let Some(expected_team) = macos_codesign_team_id(current_bundle)? else {
+        tracing::warn!("running app has no Team ID; skipping update signature pinning");
+        return Ok(());
+    };
+    record_subprocess_launch();
+    let verify = Command::new("codesign")
+        .args(["--verify", "--deep", "--strict"])
+        .arg(update_bundle)
+        .output()
+        .map_err(|e| format!("Could not run codesign: {e}"))?;
+    if !verify.status.success() {
+        return Err(format!(
+            "The downloaded update failed code-signature verification: {}",
+            String::from_utf8_lossy(&verify.stderr).trim()
+        ));
+    }
+    match macos_codesign_team_id(update_bundle)? {
+        Some(team) if team == expected_team => Ok(()),
+        _ => Err("The downloaded update is not signed by the milim developer team.".to_string()),
+    }
+}
+
 #[tauri::command]
-fn apply_update(app: tauri::AppHandle, update_path: String) -> std::result::Result<(), String> {
+async fn apply_update(app: tauri::AppHandle, update_path: String) -> std::result::Result<(), String> {
     if cfg!(debug_assertions) {
         return Err("Auto-update is disabled in dev builds.".to_string());
     }
@@ -3920,62 +3992,83 @@ fn apply_update(app: tauri::AppHandle, update_path: String) -> std::result::Resu
 
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
-        let update_file = canonical_update_source(&app, &update_path)?;
-        let current_exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let pid = std::process::id();
+        // Signature checks and installer launch block, so keep them off the
+        // IPC worker; shutdown is only requested once the installer is running.
+        let install_app = app.clone();
+        tokio::task::spawn_blocking(move || launch_update_installer(&install_app, &update_path))
+            .await
+            .map_err(|e| format!("update install task failed: {e}"))??;
+        exit_after_server_shutdown(app);
+        Ok(())
+    }
+}
 
-        #[cfg(target_os = "windows")]
-        {
-            let update_root = update_dir(&app)?;
-            fs::create_dir_all(&update_root).map_err(|e| e.to_string())?;
-            let replacement = windows_update_replacement_path(&current_exe);
-            let backup = windows_update_backup_path(&current_exe);
-            let log = update_root.join("install.log");
-            let error_marker = update_root.join(UPDATE_RECOVERY_ERROR_NAME);
-            let script_path = update_root.join("apply-update.ps1");
-            let script = build_windows_update_script(
-                pid,
-                WindowsUpdateScriptPaths {
-                    source: &update_file,
-                    replacement: &replacement,
-                    target: &current_exe,
-                    backup: &backup,
-                    log: &log,
-                    error_marker: &error_marker,
-                    script: &script_path,
-                },
-            );
-            fs::write(&script_path, script).map_err(|e| e.to_string())?;
-            record_subprocess_launch();
-            Command::new("powershell.exe")
-                .args([
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-WindowStyle",
-                    "Hidden",
-                    "-File",
-                    &script_path.to_string_lossy(),
-                ])
-                .creation_flags(CREATE_NO_WINDOW)
-                .spawn()
-                .map_err(|e| e.to_string())?;
-        }
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn launch_update_installer(
+    app: &tauri::AppHandle,
+    update_path: &str,
+) -> std::result::Result<(), String> {
+    let update_file = canonical_update_source(app, update_path)?;
+    let current_exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let pid = std::process::id();
 
-        #[cfg(target_os = "macos")]
-        {
-            let update_root = update_dir(&app)?;
-            fs::create_dir_all(&update_root).map_err(|e| e.to_string())?;
-            let error_marker = update_root.join(UPDATE_RECOVERY_ERROR_NAME);
-            let app_bundle = current_exe
-                .parent()
-                .and_then(Path::parent)
-                .and_then(Path::parent)
-                .ok_or("Could not determine app bundle path")?;
-            let backup = app_bundle.with_extension("app.previous");
-            let script = format!(
-                r#"set -e
+    // Windows release builds are not Authenticode-signed, so there is no
+    // publisher identity to pin. Integrity there rests on the SHA-256
+    // checksum published with the pinned bildhaus/milim release and
+    // verified in `download_update_file`.
+    #[cfg(target_os = "windows")]
+    {
+        let update_root = update_dir(app)?;
+        fs::create_dir_all(&update_root).map_err(|e| e.to_string())?;
+        let replacement = windows_update_replacement_path(&current_exe);
+        let backup = windows_update_backup_path(&current_exe);
+        let log = update_root.join("install.log");
+        let error_marker = update_root.join(UPDATE_RECOVERY_ERROR_NAME);
+        let script_path = update_root.join("apply-update.ps1");
+        let script = build_windows_update_script(
+            pid,
+            WindowsUpdateScriptPaths {
+                source: &update_file,
+                replacement: &replacement,
+                target: &current_exe,
+                backup: &backup,
+                log: &log,
+                error_marker: &error_marker,
+                script: &script_path,
+            },
+        );
+        fs::write(&script_path, script).map_err(|e| e.to_string())?;
+        record_subprocess_launch();
+        Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-WindowStyle",
+                "Hidden",
+                "-File",
+                &script_path.to_string_lossy(),
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let update_root = update_dir(app)?;
+        fs::create_dir_all(&update_root).map_err(|e| e.to_string())?;
+        let error_marker = update_root.join(UPDATE_RECOVERY_ERROR_NAME);
+        let app_bundle = current_exe
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .ok_or("Could not determine app bundle path")?;
+        verify_macos_update_signature(app_bundle, &update_file)?;
+        let backup = app_bundle.with_extension("app.previous");
+        let script = format!(
+            r#"set -e
 pid={}
 source='{}'
 target='{}'
@@ -3989,28 +4082,39 @@ mv "$source" "$target"
 open "$target"
 rm -rf "$backup"
 "#,
-                pid,
-                escape_bash_literal(&update_file.to_string_lossy()),
-                escape_bash_literal(&app_bundle.to_string_lossy()),
-                escape_bash_literal(&backup.to_string_lossy()),
-                escape_bash_literal(&error_marker.to_string_lossy()),
-            );
-            record_subprocess_launch();
-            Command::new("bash")
-                .args(["-c", &script])
-                .spawn()
-                .map_err(|e| e.to_string())?;
-        }
-
-        exit_after_server_shutdown(app);
-        Ok(())
+            pid,
+            escape_bash_literal(&update_file.to_string_lossy()),
+            escape_bash_literal(&app_bundle.to_string_lossy()),
+            escape_bash_literal(&backup.to_string_lossy()),
+            escape_bash_literal(&error_marker.to_string_lossy()),
+        );
+        record_subprocess_launch();
+        Command::new("bash")
+            .args(["-c", &script])
+            .spawn()
+            .map_err(|e| e.to_string())?;
     }
+
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
 #[tauri::command]
-fn extract_app_zip(app: tauri::AppHandle, zip_path: String) -> std::result::Result<String, String> {
-    let zip_file = canonical_update_archive(&app, &zip_path)?;
+async fn extract_app_zip(
+    app: tauri::AppHandle,
+    zip_path: String,
+) -> std::result::Result<String, String> {
+    tokio::task::spawn_blocking(move || extract_app_zip_blocking(&app, &zip_path))
+        .await
+        .map_err(|e| format!("update extract task failed: {e}"))?
+}
+
+#[cfg(target_os = "macos")]
+fn extract_app_zip_blocking(
+    app: &tauri::AppHandle,
+    zip_path: &str,
+) -> std::result::Result<String, String> {
+    let zip_file = canonical_update_archive(app, zip_path)?;
     let parent = zip_file.parent().ok_or("Invalid zip path")?;
     let app_path = parent.join("milim.app");
     if app_path.exists() {
@@ -4035,7 +4139,7 @@ fn extract_app_zip(app: tauri::AppHandle, zip_path: String) -> std::result::Resu
 
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
-fn extract_app_zip(_zip_path: String) -> std::result::Result<String, String> {
+async fn extract_app_zip(_zip_path: String) -> std::result::Result<String, String> {
     Err("This command is only available on macOS".to_string())
 }
 
@@ -5487,6 +5591,36 @@ mod artifact_save_tests {
             "Update download URL"
         )
         .is_err());
+        for url in [
+            "https://github.com/attacker/milim/releases/download/v0.1.1/milim.exe",
+            "https://github.com/bildhaus/milim-fork/releases/download/v0.1.1/milim.exe",
+            "https://github.com/bildhaus/milim/raw/main/milim.exe",
+            "https://github.com/bildhaus/milim/releases/download/../../../attacker/milim/releases/download/v1/milim.exe",
+            "https://api.github.com/repos/attacker/milim/releases/assets/1",
+            "https://api.github.com/repos/bildhaus/milimx/releases/assets/1",
+            "https://user@github.com/bildhaus/milim/releases/download/v0.1.1/milim.exe",
+            "https://github.com:8443/bildhaus/milim/releases/download/v0.1.1/milim.exe",
+            "https://objects.githubusercontent.com/bildhaus/milim/releases/download/v1/milim.exe",
+        ] {
+            assert!(
+                validate_update_download_url(url, "Update download URL").is_err(),
+                "{url} must be rejected"
+            );
+        }
+        assert!(validate_update_download_url(
+            "https://github.com/bildhaus/milim/releases/download/v0.2.68/SHA256SUMS.txt",
+            "Checksum download URL"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn updater_reads_codesign_team_ids() {
+        let signed = "Executable=/Applications/milim.app/Contents/MacOS/milim\nIdentifier=com.omershatz.milim\nAuthority=Developer ID Application: Example (ABCDE12345)\nTeamIdentifier=ABCDE12345\n";
+        assert_eq!(parse_codesign_team_id(signed).as_deref(), Some("ABCDE12345"));
+        let adhoc = "Identifier=milim\nSignature=adhoc\nTeamIdentifier=not set\n";
+        assert_eq!(parse_codesign_team_id(adhoc), None);
+        assert_eq!(parse_codesign_team_id("code object is not signed at all"), None);
     }
 
     #[test]
