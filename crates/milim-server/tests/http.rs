@@ -4697,6 +4697,130 @@ async fn workspace_git_branch_actions_checkout_and_create() {
 }
 
 #[tokio::test]
+async fn workspace_git_staging_actions_stage_hunks_and_guard_discards() {
+    if Command::new("git").arg("--version").output().is_err() {
+        return;
+    }
+    let run = |root: &PathBuf, args: &[&str]| -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).to_string()
+    };
+    let root = unique_temp_path("milim-git-staging");
+    fs::create_dir_all(&root).unwrap();
+    run(&root, &["init", "-q"]);
+    run(&root, &["config", "user.email", "test@example.com"]);
+    run(&root, &["config", "user.name", "Test User"]);
+    let original: Vec<String> = (1..=30).map(|n| format!("line {n}")).collect();
+    fs::write(root.join("note.txt"), original.join("\n") + "\n").unwrap();
+    run(&root, &["add", "note.txt"]);
+    run(&root, &["commit", "-q", "-m", "initial"]);
+    let edited: Vec<String> = (1..=30)
+        .map(|n| match n {
+            2 => "line two".to_string(),
+            29 => "line twenty-nine".to_string(),
+            n => format!("line {n}"),
+        })
+        .collect();
+    fs::write(root.join("note.txt"), edited.join("\n") + "\n").unwrap();
+    fs::write(root.join("scratch.txt"), "temporary\n").unwrap();
+
+    let base = spawn(test_state()).await;
+    let client = reqwest::Client::new();
+    client
+        .post(format!("{base}/workspace"))
+        .json(&json!({ "folder": root }))
+        .send()
+        .await
+        .unwrap();
+    let action = |body: Value| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            client
+                .post(format!("{base}/workspace/git/action"))
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        }
+    };
+
+    let diff = action(json!({ "action": "diff", "diff_scope": "unstaged" })).await;
+    let stdout = diff["stdout"].as_str().unwrap();
+    let first_hunk = stdout
+        .split("\n@@")
+        .nth(1)
+        .map(|hunk| format!("@@{}", hunk))
+        .unwrap();
+    let staged = action(json!({
+        "action": "stage_hunk",
+        "path": "note.txt",
+        "hunk": first_hunk,
+    }))
+    .await;
+    assert_eq!(staged["ok"], true, "{staged}");
+    let cached = run(&root, &["diff", "--cached"]);
+    assert!(cached.contains("+line two"));
+    assert!(!cached.contains("twenty-nine"));
+
+    let status: Value = client
+        .get(format!("{base}/workspace/git"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let note = status["changed_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|file| file["path"] == "note.txt")
+        .unwrap();
+    assert_eq!(note["staged"], true);
+    assert_eq!(note["unstaged"], true);
+
+    let escape = action(json!({ "action": "stage_file", "path": "../note.txt" })).await;
+    assert_eq!(escape["ok"], false);
+
+    let unconfirmed = action(json!({ "action": "discard_file", "path": "scratch.txt" })).await;
+    assert_eq!(unconfirmed["ok"], false);
+    assert!(root.join("scratch.txt").exists());
+    let deleted = action(json!({
+        "action": "discard_file",
+        "path": "scratch.txt",
+        "force": true,
+    }))
+    .await;
+    assert_eq!(deleted["ok"], true, "{deleted}");
+    assert!(!root.join("scratch.txt").exists());
+
+    let commit = action(json!({
+        "action": "commit",
+        "message": "stage one hunk",
+        "stage_all": false,
+    }))
+    .await;
+    assert_eq!(commit["ok"], true, "{commit}");
+    assert!(run(&root, &["diff"]).contains("+line twenty-nine"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn workspace_git_action_diff_reports_patch() {
     if Command::new("git").arg("--version").output().is_err() {
         return;

@@ -3362,6 +3362,101 @@ button.git-row:hover svg {
   margin: 0;
   accent-color: var(--accent);
 }
+.git-commit-scope {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.git-commit-scope legend {
+  padding: 0 0 3px;
+  color: var(--tertiary-text);
+  font-size: 10.5px;
+  font-weight: 650;
+  text-transform: uppercase;
+}
+.git-commit-scope-option {
+  display: grid;
+  grid-template-columns: 13px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid color-mix(in srgb, var(--border-primary) 62%, transparent);
+  border-radius: 7px;
+  color: var(--secondary-text);
+  font-size: 11.5px;
+  line-height: 1.25;
+  cursor: pointer;
+}
+.git-commit-scope-option.active {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-primary));
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  color: var(--primary-text);
+}
+.git-commit-scope-option:has(input:disabled) {
+  cursor: default;
+  opacity: 0.6;
+}
+.git-commit-scope-option input {
+  width: 13px;
+  height: 13px;
+  margin: 1px 0 0;
+  accent-color: var(--accent);
+}
+.git-commit-scope-option span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.git-commit-scope-option small {
+  overflow: hidden;
+  color: var(--tertiary-text);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.git-file-stage-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  min-width: 0;
+}
+.git-stage-actions,
+.git-hunk-actions {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+}
+.git-stage-actions {
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.git-file-stage-row:hover .git-stage-actions,
+.git-file-stage-row:focus-within .git-stage-actions {
+  opacity: 1;
+}
+.git-hunk-actions {
+  grid-column: 1 / 3;
+  justify-content: flex-end;
+  padding-inline: 3px;
+}
+.git-stage-btn.git-icon-btn {
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+}
+.git-stage-btn.danger:hover {
+  color: var(--error);
+}
+@media (hover: none) {
+  .git-stage-actions {
+    opacity: 1;
+  }
+}
 .git-command-preview {
   display: block;
   min-width: 0;

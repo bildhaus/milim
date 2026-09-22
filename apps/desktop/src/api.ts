@@ -4720,6 +4720,10 @@ export interface WorkspaceContext {
 export interface WorkspaceGitFileChange {
   status: string;
   path: string;
+  /** Index column changed. Absent from backends older than per-file staging. */
+  staged?: boolean;
+  /** Worktree column changed, including untracked files. */
+  unstaged?: boolean;
 }
 
 export interface WorkspaceGitBranch {
@@ -4759,7 +4763,13 @@ export type WorkspaceGitAction =
   | "pr_ready"
   | "pr_comment"
   | "pr_review"
-  | "pr_merge";
+  | "pr_merge"
+  | "stage_file"
+  | "unstage_file"
+  | "discard_file"
+  | "stage_hunk"
+  | "unstage_hunk"
+  | "discard_hunk";
 
 export type WorkspaceGitDiffScope =
   | "all"
@@ -4939,6 +4949,10 @@ export async function runWorkspaceGitAction(
     merge_method?: "merge" | "squash" | "rebase";
     expected_head?: string;
     repository?: string;
+    /** Porcelain path for per-file and per-hunk staging actions. */
+    path?: string;
+    /** Exact hunk text (header and body) the server re-validates before applying. */
+    hunk?: string;
   } = {},
 ): Promise<WorkspaceGitActionResult> {
   const r = await authFetch(`${BASE}/workspace/git/action`, {

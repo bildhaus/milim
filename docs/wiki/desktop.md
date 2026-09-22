@@ -199,6 +199,10 @@ Tool-enabled turns with a selected Git workspace create a Git worktree checkpoin
 
 The Git side panel appears only for selected folders that are Git repositories. Its branch selector lists local branches, can checkout another local branch, and can create a new branch from the current `HEAD`; checkout failures are reported from Git without changing the worktree.
 
+Each changed file in the review rail has hover actions to stage, unstage, or discard it. A partially staged file offers all three; a conflicted file can only be staged, which marks it resolved. Discarding a tracked file restores its unstaged edits from the index and keeps staged changes. Discarding an untracked file deletes it from disk, and its confirmation says so explicitly. The **Staged** and **Unstaged** diff scopes show their file counts and add per-hunk actions on each hunk header: stage or discard a hunk in **Unstaged**, or unstage it in **Staged**. **All changes** compares against `HEAD` and therefore has no hunk actions. Before applying a hunk, the backend rebuilds its patch from a fresh `git diff` and requires an exact match, so a hunk that changed after the diff loaded is rejected with a refresh prompt instead of being applied. Renamed, binary, and untracked files are staged as whole files. Every action runs inside the validated repository with literal pathspecs and rejects absolute paths, `..` segments, and `.git` internals. Discards require an explicit confirmation.
+
+The commit dialog makes the index explicit. **Staged changes only** commits what is staged and reports how many unstaged files it leaves out. **Stage all and commit** runs `git add -A` first. The dialog defaults to staged changes when anything is staged and otherwise to staging everything. Its command preview shows the exact Git commands.
+
 ## Plan mode
 
 Plan mode injects a system instruction that allows read-only inspection and blocks edits, writes, shell commands, computer control, schedule creation, memory registration, and other mutations. The assistant returns a concrete implementation plan. The UI exposes an Execute plan action that sends the approved plan back as a normal run.

@@ -141,6 +141,9 @@ export const PlusSquare = (p: P) => (
 export const Plus = (p: P) => (
   <Svg {...p}><path d="M12 5v14M5 12h14" /></Svg>
 );
+export const Minus = (p: P) => (
+  <Svg {...p}><path d="M5 12h14" /></Svg>
+);
 export const Trash = (p: P) => (
   <Svg {...p}><path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13" /></Svg>
 );
@@ -176,6 +179,9 @@ export const Copy = (p: P) => (
 );
 export const Refresh = (p: P) => (
   <Svg {...p}><path d="M21 12a9 9 0 1 1-2.6-6.4M21 4v5h-5" /></Svg>
+);
+export const Undo = (p: P) => (
+  <Svg {...p}><path d="M9 14 4 9l5-5" /><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" /></Svg>
 );
 export const GitBranch = (p: P) => (
   <Svg {...p}><circle cx="6" cy="5" r="2" /><circle cx="18" cy="6" r="2" /><circle cx="6" cy="19" r="2" /><path d="M6 7v10M8 19h3a7 7 0 0 0 7-7V8" /></Svg>
