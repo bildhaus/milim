@@ -2274,11 +2274,7 @@ async fn open_artifact_location(
     root: Option<String>,
 ) -> std::result::Result<(), String> {
     tokio::task::spawn_blocking(move || {
-        open_artifact_location_blocking(
-            path,
-            target.unwrap_or_else(|| "file".to_string()),
-            root,
-        )
+        open_artifact_location_blocking(path, target.unwrap_or_else(|| "file".to_string()), root)
     })
     .await
     .map_err(|e| format!("artifact open task failed: {e}"))?
@@ -2803,6 +2799,7 @@ fn validate_artifact_open_root(path: &Path, root: &str) -> std::result::Result<(
 /// Extensions the OS would run, install, or follow to another target instead
 /// of opening as a document. Opening these could execute model- or
 /// attachment-supplied code, so they are revealed in the file manager.
+#[rustfmt::skip]
 const ARTIFACT_LAUNCHABLE_EXTENSIONS: &[&str] = &[
     // macOS bundles, scripts, and launch shortcuts.
     "app", "action", "appex", "applescript", "bundle", "command", "fileloc", "inetloc",
@@ -3945,7 +3942,9 @@ fn macos_codesign_team_id(bundle: &Path) -> std::result::Result<Option<String>, 
         return Ok(None);
     }
     // codesign writes its display output to stderr.
-    Ok(parse_codesign_team_id(&String::from_utf8_lossy(&output.stderr)))
+    Ok(parse_codesign_team_id(&String::from_utf8_lossy(
+        &output.stderr,
+    )))
 }
 
 /// Refuse to install a macOS update unless it passes a strict deep signature
@@ -3979,7 +3978,10 @@ fn verify_macos_update_signature(
 }
 
 #[tauri::command]
-async fn apply_update(app: tauri::AppHandle, update_path: String) -> std::result::Result<(), String> {
+async fn apply_update(
+    app: tauri::AppHandle,
+    update_path: String,
+) -> std::result::Result<(), String> {
     if cfg!(debug_assertions) {
         return Err("Auto-update is disabled in dev builds.".to_string());
     }
@@ -5636,10 +5638,16 @@ mod artifact_save_tests {
     #[test]
     fn updater_reads_codesign_team_ids() {
         let signed = "Executable=/Applications/milim.app/Contents/MacOS/milim\nIdentifier=com.omershatz.milim\nAuthority=Developer ID Application: Example (ABCDE12345)\nTeamIdentifier=ABCDE12345\n";
-        assert_eq!(parse_codesign_team_id(signed).as_deref(), Some("ABCDE12345"));
+        assert_eq!(
+            parse_codesign_team_id(signed).as_deref(),
+            Some("ABCDE12345")
+        );
         let adhoc = "Identifier=milim\nSignature=adhoc\nTeamIdentifier=not set\n";
         assert_eq!(parse_codesign_team_id(adhoc), None);
-        assert_eq!(parse_codesign_team_id("code object is not signed at all"), None);
+        assert_eq!(
+            parse_codesign_team_id("code object is not signed at all"),
+            None
+        );
     }
 
     #[test]
@@ -6032,7 +6040,13 @@ args=['mcp-obsidian']
                 .as_nanos()
         ));
         std::fs::create_dir_all(root.join("Evil.app")).unwrap();
-        for name in ["run.command", "setup.EXE", "install.sh", "link.lnk", "tool.jar"] {
+        for name in [
+            "run.command",
+            "setup.EXE",
+            "install.sh",
+            "link.lnk",
+            "tool.jar",
+        ] {
             std::fs::write(root.join(name), "x").unwrap();
             assert!(artifact_path_is_launchable(&root.join(name)), "{name}");
         }
@@ -6047,7 +6061,10 @@ args=['mcp-obsidian']
         assert_eq!(spec.args, expected.args);
         let spec =
             artifact_open_command(&root.join("Evil.app"), ArtifactOpenTarget::Folder).unwrap();
-        assert_eq!(spec.args, artifact_reveal_command(&root.join("Evil.app")).args);
+        assert_eq!(
+            spec.args,
+            artifact_reveal_command(&root.join("Evil.app")).args
+        );
 
         #[cfg(unix)]
         {

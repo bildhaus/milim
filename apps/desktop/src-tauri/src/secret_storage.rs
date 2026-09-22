@@ -327,7 +327,9 @@ fn secrets_equal(left: &[u8], right: &[u8]) -> bool {
     let difference = left
         .iter()
         .zip(right)
-        .fold(0_u8, |difference, (left, right)| difference | (left ^ right));
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        });
     std::hint::black_box(difference) == 0
 }
 
