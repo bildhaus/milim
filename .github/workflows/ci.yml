@@ -2,6 +2,8 @@ name: CI
 
 on:
   pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -36,6 +38,47 @@ jobs:
       - name: Tauri native credential backend
         if: matrix.os != 'ubuntu-latest'
         run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features
+
+  msrv:
+    name: Rust MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Read declared rust-version
+        id: msrv
+        run: echo "version=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Check workspace on declared rust-version
+        run: cargo check --workspace --all-targets --locked
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    env:
+      CARGO_AUDIT_VERSION: 0.22.2
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo-audit
+        id: cargo-audit-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}-${{ env.CARGO_AUDIT_VERSION }}
+      - name: Install cargo-audit
+        if: steps.cargo-audit-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-audit --locked --version "$CARGO_AUDIT_VERSION"
+      # Vulnerabilities fail the job; unmaintained, unsound, and yanked
+      # advisories are printed as warnings only.
+      - name: Audit root Cargo.lock
+        run: cargo audit --file Cargo.lock
+      - name: Audit Tauri Cargo.lock
+        run: cargo audit --file apps/desktop/src-tauri/Cargo.lock
+      - name: Shared milim-* dependency versions match across lockfiles
+        run: node apps/desktop/scripts/verify-lockfile-drift.mjs
 
   frontend:
     name: Desktop frontend

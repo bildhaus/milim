@@ -57,6 +57,7 @@
     "verify:release": "npm run package:release && npm run release:portable && npm run release:manifest && npm run verify:release-manifest && npm run verify:release-launch",
     "verify:release-launch": "node scripts/smoke-release-binary.mjs",
     "verify:bundle-size": "node scripts/verify-bundle-size.mjs",
+    "verify:lockfile-drift": "node scripts/verify-lockfile-drift.mjs",
     "verify:frontend": "npm run build && npm run verify:bundle-size && npm run test && npm run verify:release-notes && npm run verify:release-workflow",
     "verify:native-tests": "cargo test --manifest-path ../../Cargo.toml -p milim-server media_ && cargo test --manifest-path ../../Cargo.toml -p milim-server mobile_companion && node tests/run-tauri-rust-test.mjs artifact_ && node tests/run-tauri-rust-test.mjs backup::tests && npm run test:computer-use",
     "verify": "npm run verify:control-contract && npm run verify:frontend && npm run verify:native-tests",
