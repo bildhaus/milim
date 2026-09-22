@@ -1715,10 +1715,13 @@ export async function getMobileCompanionStatus(): Promise<MobileCompanionStatus>
   );
 }
 
+/** Window event carrying the latest `MobileCompanionStatus` after an enable toggle. */
+export const MOBILE_COMPANION_STATUS_EVENT = "milim:mobile-companion-status";
+
 export async function setMobileCompanionEnabled(
   enabled: boolean,
 ): Promise<MobileCompanionStatus> {
-  return await parseJsonResponse<MobileCompanionStatus>(
+  const status = await parseJsonResponse<MobileCompanionStatus>(
     await authFetch(`${BASE}/mobile/enabled`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1726,6 +1729,12 @@ export async function setMobileCompanionEnabled(
     }),
     "mobile companion update failed",
   );
+  window.dispatchEvent(
+    new CustomEvent<MobileCompanionStatus>(MOBILE_COMPANION_STATUS_EVENT, {
+      detail: status,
+    }),
+  );
+  return status;
 }
 
 export async function startMobileCompanionPairing(): Promise<MobileCompanionPairing> {
