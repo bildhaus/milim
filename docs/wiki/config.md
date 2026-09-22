@@ -6,7 +6,7 @@ title: Config, storage, and build flags
 summary: Milim home, runtime asset directory, server config, persisted databases, provider records, desktop state, and native build variants.
 group: Reference
 order: 100
-updated: 2026-07-13
+updated: 2026-09-23
 ---
 
 Configuration is intentionally local. The desktop app embeds the server, encrypts provider, Google, MCP, and mobile-companion credentials with a master key held in the OS credential vault, and keeps optional native runtimes behind explicit build flags. macOS also retains a matching owner-only recovery key so encrypted state survives local app rebuilds whose Keychain access identity changes. Settings > Data & privacy reports whenever this permission-restricted local key is present.
@@ -28,7 +28,7 @@ Configuration is intentionally local. The desktop app embeds the server, encrypt
 
 The desktop UI hydrates through the canonical `milim.sessions` user-state key, but the Tauri store persists each chat session as a `user_sessions` SQLite row and each transcript message as a `user_session_messages` row keyed by session id and message index. Normal saves send a transactional delta containing only changed session metadata and message indices; full snapshots remain for hydration, legacy import, and recovery. Non-session metadata such as the active id, queued messages, sidebar organization, and archive retention stays in a small `milim.sessions.meta` JSON entry. Worker Runs are not duplicated there: `threads.db` remains their durable authority and the UI reloads them through the server API. Legacy `milim.sessions` blobs are migrated into rows on first session read. During active generation, desktop session persistence defers writes and flushes the final state when the turn ends; unsent composer drafts use the separate tiny `milim.sessionDrafts` user-state key.
 
-The shared `milim.db` profile database uses verified SQLite WAL mode with foreign keys and a five-second busy timeout. WAL lets session and memory readers overlap with a writer; writes to one SQLite file are still serialized. Live backup or future sync must use SQLite's backup/checkpoint mechanisms rather than copying only `milim.db` while the app is running.
+The shared `milim.db` profile database uses verified SQLite WAL mode with `synchronous=NORMAL`, foreign keys, and a five-second busy timeout. With WAL, NORMAL keeps every commit atomic and the file consistent across app crashes; only an OS crash or power loss can roll back the most recent commits. WAL lets session and memory readers overlap with a writer; writes to one SQLite file are still serialized, and control timeline reads take any idle pooled reader before waiting. Control command receipts, which make `/control/v1/commands` retries idempotent, are pruned 30 days after creation. Live backup or future sync must use SQLite's backup/checkpoint mechanisms rather than copying only `milim.db` while the app is running.
 
 The remaining storage work is:
 
@@ -43,6 +43,7 @@ The remaining storage work is:
 |---|---|
 | Port | Standalone server defaults to `7377`; desktop discovers its embedded loopback port through Tauri. |
 | Expose | `milim serve --expose` binds beyond loopback and auto-enables `msk-v1` auth when no auth is configured. |
+| Host names | Every listener rejects requests whose `Host` header it was not meant to serve (DNS-rebinding protection) with `403`. A loopback listener accepts `localhost` and loopback IP literals; an exposed or mobile listener also accepts any IP literal, `*.local`, `*.ts.net`, and this machine's host name. Set `MILIM_ALLOWED_HOSTS` to a comma-separated list to add names, for example a reverse proxy's DNS name. |
 | CORS | Empty allow-list means no browser origins are allowed. |
 | Auth | `authRequired: true` accepts locally minted `msk-v1` keys; `apiKeys` accepts static bearer secrets; `accessKeyIssuers` trusts additional signed-key issuers. |
 
