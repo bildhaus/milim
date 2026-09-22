@@ -95,8 +95,6 @@ import {
   type DelegationPolicy,
   type CodexLoginEvent,
   type HarnessEvent,
-  type HarnessEventEnvelope,
-  type HarnessRunRequest,
   type MediaGenerationResult,
   type MemoryNotice,
   type ModelInfo,
@@ -200,6 +198,11 @@ import {
   accountProfileRuntimeForModel,
   withAccountProfile,
 } from "../lib/accountProfiles";
+import {
+  collectHarnessUtilityRun,
+  utilityHarnessForModel,
+  type UtilityHarness,
+} from "../lib/harnessUtility";
 import { reasoningEffortForThread, reasoningEffortOverridesWithSelection } from "../lib/reasoningEffort";
 import { managedPreviewRuntimeForTurn, type ManagedPreviewRuntimeContext } from "../lib/managedPreviewRuntime";
 import {
@@ -582,49 +585,12 @@ type CompactionSummaryResult = {
   finishReason?: string;
 };
 
-async function collectHarnessUtilityRun(
-  harnessId: "codex" | "claude" | "opencode" | "pi",
-  request: HarnessRunRequest,
-  signal?: AbortSignal,
-): Promise<CompactionSummaryResult> {
-  let content = "";
-  let warning: string | null = null;
-  let error: string | null = null;
-  let usage: TokenUsage | undefined;
-  let costUsd: number | undefined;
-  let costSource: "provider" | undefined;
-  await streamHarnessRun(
-    harnessId,
-    request,
-    (envelope: HarnessEventEnvelope) => {
-      const event = envelope.event;
-      if (event.type === "text_delta" && event.text) {
-        content += event.text;
-      } else if (event.type === "runtime_notice") {
-        if (event.level === "error") error = event.message;
-        else if (event.code === "runtime_warning") warning = event.message;
-      } else if (
-        event.type === "turn_failed" ||
-        event.type === "turn_cancelled"
-      ) {
-        error = event.message ?? "Harness turn was cancelled.";
-      } else if (
-        event.type === "usage_updated" ||
-        event.type === "turn_completed"
-      ) {
-        if (event.usage) usage = event.usage;
-        if (typeof event.cost_usd === "number" && event.cost_usd >= 0) {
-          costUsd = event.cost_usd;
-          costSource = "provider";
-        }
-      }
-    },
-    signal,
-  );
-  if (error) throw new Error(error);
-  if (warning) throw new Error(warning);
-  return { content, usage, costUsd, costSource };
-}
+const UTILITY_HARNESS_PROVIDER_LABELS: Record<UtilityHarness["id"], string> = {
+  codex: "Codex",
+  claude: "Local Claude CLI",
+  opencode: "Local OpenCode CLI",
+  pi: "Local Pi CLI",
+};
 
 function mergeTokenUsage(
   left?: TokenUsage,
@@ -5195,7 +5161,7 @@ export function ChatView({
   }
 
   async function createCompactionCheckpoint(
-    _sessionId: string,
+    sessionId: string,
     sourceMessages: ChatMessage[],
     model: string,
     options: {
@@ -5211,23 +5177,18 @@ export function ChatView({
       throw new Error("There is no thread context to compact.");
     }
     const baseline = summarizeThreadMetricsBreakdown(sourceMessages).lifetime;
-    const codexModel = codexRuntimeModel(model);
-    const claudeModel = claudeRuntimeModel(model);
-    const opencodeModel = opencodeRuntimeModel(model);
-    const piModel = piRuntimeModel(model);
+    const harness = utilityHarnessForModel(model);
+    const accountProfileId = accountProfileForModel(
+      useSessions.getState().getSettings(sessionId).accountProfiles,
+      model,
+    );
     const summaryStartedAt = Date.now();
     const selectedProvider = providers.find(
       (item) => providerOwnsModel(item, model),
     );
-    const provider = codexModel
-      ? "Codex"
-      : claudeModel
-        ? "Local Claude CLI"
-        : opencodeModel
-          ? "Local OpenCode CLI"
-          : piModel
-            ? "Local Pi CLI"
-        : selectedProvider?.name;
+    const provider = harness
+      ? UTILITY_HARNESS_PROVIDER_LABELS[harness.id]
+      : selectedProvider?.name;
     const summaryReasoningEffort =
       compactionSummaryReasoningEffort(selectedProvider);
     let usage: TokenUsage | undefined;
@@ -5249,47 +5210,16 @@ export function ChatView({
         { retry, outputCapTokens },
       );
       let summary: CompactionSummaryResult;
-      if (codexModel) {
-        const ready = await ensureCodexAccount();
+      if (harness) {
+        const ready = await ensureAccountRuntime(harness.id);
         if (!ready.ok) throw new Error(ready.message);
-        summary = await summarizeWithCodex(
-          codexModel,
+        summary = await summarizeWithHarness(
+          harness,
           promptMessages,
           options.folder,
           options.reasoningEffort,
           options.toolContext,
-          options.signal,
-        );
-      } else if (claudeModel) {
-        const ready = await ensureClaudeAccount();
-        if (!ready.ok) throw new Error(ready.message);
-        summary = await summarizeWithClaude(
-          claudeModel,
-          promptMessages,
-          options.folder,
-          options.reasoningEffort,
-          options.toolContext,
-          options.signal,
-        );
-      } else if (opencodeModel) {
-        const ready = await ensureOpenCodeAccount();
-        if (!ready.ok) throw new Error(ready.message);
-        summary = await summarizeWithOpenCode(
-          opencodeModel,
-          promptMessages,
-          options.folder,
-          options.toolContext,
-          options.signal,
-        );
-      } else if (piModel) {
-        const ready = await ensurePiAccount();
-        if (!ready.ok) throw new Error(ready.message);
-        summary = await summarizeWithPi(
-          piModel,
-          promptMessages,
-          options.folder,
-          options.reasoningEffort,
-          options.toolContext,
+          accountProfileId,
           options.signal,
         );
       } else {
@@ -5353,88 +5283,41 @@ export function ChatView({
     throw new Error(lastError);
   }
 
-  async function summarizeWithCodex(
-    model: string,
+  function ensureAccountRuntime(
+    id: UtilityHarness["id"],
+  ): Promise<AccountRuntimeReady> {
+    switch (id) {
+      case "codex":
+        return ensureCodexAccount();
+      case "claude":
+        return ensureClaudeAccount();
+      case "opencode":
+        return ensureOpenCodeAccount();
+      case "pi":
+        return ensurePiAccount();
+    }
+  }
+
+  async function summarizeWithHarness(
+    harness: UtilityHarness,
     promptMessages: ChatMessage[],
     folder: string,
     reasoningEffort: ReasoningEffort,
     toolContext: AgentToolContext,
+    accountProfileId: string | undefined,
     signal?: AbortSignal,
   ): Promise<CompactionSummaryResult> {
     const runtimeInput = accountRuntimeInputFromMessages(promptMessages);
     return await collectHarnessUtilityRun(
-      "codex",
+      harness.id,
       {
-        model,
+        model: harness.model,
         prompt: runtimeInput.prompt,
         cwd: folder.trim() || undefined,
-        reasoning_effort: reasoningEffort,
-        images: runtimeInput.images,
-        persist_session: false,
-        // A side call bills a subscription, so it uses the same account as
-        // this chat's turns rather than the runtime's default.
-        account_profile_id: accountProfileForModel(accountProfiles, model),
-        tool_approval_policy: "guarded",
-        tool_approval_grant: false,
-        plan_mode: true,
-        milim_context: utilityAccountRuntimeMilimContext({
-          toolContext,
-          toolApproval: "guarded",
-          planMode: true,
-        }),
-      },
-      signal,
-    );
-  }
-
-  async function summarizeWithClaude(
-    model: string,
-    promptMessages: ChatMessage[],
-    folder: string,
-    reasoningEffort: ReasoningEffort,
-    toolContext: AgentToolContext,
-    signal?: AbortSignal,
-  ): Promise<CompactionSummaryResult> {
-    const runtimeInput = accountRuntimeInputFromMessages(promptMessages);
-    return await collectHarnessUtilityRun(
-      "claude",
-      {
-        model,
-        prompt: runtimeInput.prompt,
-        cwd: folder.trim() || undefined,
-        reasoning_effort: reasoningEffort,
-        images: runtimeInput.images,
-        persist_session: false,
-        // A side call bills a subscription, so it uses the same account as
-        // this chat's turns rather than the runtime's default.
-        account_profile_id: accountProfileForModel(accountProfiles, model),
-        tool_approval_policy: "guarded",
-        tool_approval_grant: false,
-        plan_mode: true,
-        milim_context: utilityAccountRuntimeMilimContext({
-          toolContext,
-          toolApproval: "guarded",
-          planMode: true,
-        }),
-      },
-      signal,
-    );
-  }
-
-  async function summarizeWithOpenCode(
-    model: string,
-    promptMessages: ChatMessage[],
-    folder: string,
-    toolContext: AgentToolContext,
-    signal?: AbortSignal,
-  ): Promise<CompactionSummaryResult> {
-    const runtimeInput = accountRuntimeInputFromMessages(promptMessages);
-    return await collectHarnessUtilityRun(
-      "opencode",
-      {
-        model,
-        prompt: runtimeInput.prompt,
-        cwd: folder.trim() || undefined,
+        // OpenCode has no reasoning-effort control.
+        ...(harness.id === "opencode"
+          ? {}
+          : { reasoning_effort: reasoningEffort }),
         images: runtimeInput.images,
         persist_session: false,
         tool_approval_policy: "guarded",
@@ -5446,38 +5329,9 @@ export function ChatView({
           planMode: true,
         }),
       },
-      signal,
-    );
-  }
-
-  async function summarizeWithPi(
-    model: string,
-    promptMessages: ChatMessage[],
-    folder: string,
-    reasoningEffort: ReasoningEffort,
-    toolContext: AgentToolContext,
-    signal?: AbortSignal,
-  ): Promise<CompactionSummaryResult> {
-    const runtimeInput = accountRuntimeInputFromMessages(promptMessages);
-    return await collectHarnessUtilityRun(
-      "pi",
-      {
-        model,
-        prompt: runtimeInput.prompt,
-        cwd: folder.trim() || undefined,
-        images: runtimeInput.images,
-        reasoning_effort: reasoningEffort,
-        persist_session: false,
-        tool_approval_policy: "guarded",
-        tool_approval_grant: false,
-        plan_mode: true,
-        milim_context: utilityAccountRuntimeMilimContext({
-          toolContext,
-          toolApproval: "guarded",
-          planMode: true,
-        }),
-      },
-      signal,
+      // A side call bills a subscription, so it uses the same account as
+      // this chat's turns rather than the runtime's default.
+      { accountProfileId, signal },
     );
   }
 
@@ -5722,21 +5576,9 @@ export function ChatView({
         turnModel,
         pickerModels,
       );
-      const codexModel = codexRuntimeModel(turnModel);
-      const claudeModel = claudeRuntimeModel(turnModel);
-      const opencodeModel = opencodeRuntimeModel(turnModel);
-      const piModel = piRuntimeModel(turnModel);
       const runtimeInput = accountRuntimeInputFromMessages(decisionMessages);
       let content = "";
-      const selectedHarness = codexModel
-        ? { id: "codex" as const, model: codexModel }
-        : claudeModel
-          ? { id: "claude" as const, model: claudeModel }
-          : opencodeModel
-            ? { id: "opencode" as const, model: opencodeModel }
-            : piModel
-              ? { id: "pi" as const, model: piModel }
-              : null;
+      const selectedHarness = utilityHarnessForModel(turnModel);
       if (selectedHarness) {
         const guarded = selectedHarness.id === "pi";
         const result = await collectHarnessUtilityRun(
@@ -5761,7 +5603,13 @@ export function ChatView({
                 })
               : decisionMilimContext,
           },
-          controller.signal,
+          {
+            accountProfileId: accountProfileForModel(
+              decisionSettings.accountProfiles,
+              turnModel,
+            ),
+            signal: controller.signal,
+          },
         );
         content = result.content;
       } else {
