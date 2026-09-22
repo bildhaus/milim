@@ -18,7 +18,9 @@ const screenshots = {
 };
 
 if (process.platform !== "win32") {
-  console.log("Skipping Tauri dev onboarding E2E: this test currently targets Windows WebView2.");
+  console.log(
+    `SKIPPED: Tauri dev onboarding E2E did not run on ${process.platform}; it requires Windows WebView2. Exit 0 is not a pass.`,
+  );
   process.exit(0);
 }
 
