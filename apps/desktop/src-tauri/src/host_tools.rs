@@ -673,6 +673,22 @@ impl Tool for ShellTool {
     }
 }
 
+/// Milim's own credentials (remote API keys, OAuth client secrets, API
+/// tokens) must not reach model-run commands. Only `MILIM_*` variables whose
+/// names look secret are withheld; non-secret settings such as `MILIM_HOME`
+/// and the user's unrelated environment stay inherited.
+fn milim_secret_env_keys() -> Vec<std::ffi::OsString> {
+    std::env::vars_os()
+        .filter_map(|(key, _)| {
+            let name = key.to_str()?;
+            let milim_owned = name
+                .get(..6)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("MILIM_"));
+            (milim_owned && milim_mcp_client::secret_env_key(name)).then_some(key)
+        })
+        .collect()
+}
+
 async fn run_shell(cwd: &Path, command: &str) -> Result<Value> {
     use std::process::Stdio;
     use tokio::io::AsyncReadExt;
@@ -692,6 +708,9 @@ async fn run_shell(cwd: &Path, command: &str) -> Result<Value> {
         cmd.args(["-c", command]).current_dir(cwd);
         cmd
     };
+    for key in milim_secret_env_keys() {
+        cmd.env_remove(key);
+    }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -978,6 +997,27 @@ mod tests {
         std::env::remove_var(&key);
         assert_eq!(result["stdout"], value);
         assert_eq!(result["exit_code"], 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn host_shell_withholds_milim_secrets() {
+        let root = temp_workspace();
+        let tools = host_tools(Arc::new(RwLock::new(Some(root.clone()))));
+        let shell = tool(&tools, "shell");
+        let secret_key = format!("MILIM_TEST_SHELL_API_KEY_{}", std::process::id());
+        let user_key = format!("USER_TEST_SHELL_API_KEY_{}", std::process::id());
+        std::env::set_var(&secret_key, "milim-secret");
+        std::env::set_var(&user_key, "user-owned");
+        let command = if cfg!(windows) {
+            format!("[Console]::Write(\"$env:{secret_key}|$env:{user_key}\")")
+        } else {
+            format!("printf '%s|%s' \"${secret_key}\" \"${user_key}\"")
+        };
+        let result = block_on(shell.invoke(json!({"command": command}))).unwrap();
+        std::env::remove_var(&secret_key);
+        std::env::remove_var(&user_key);
+        assert_eq!(result["stdout"], "|user-owned");
         let _ = std::fs::remove_dir_all(root);
     }
 }
