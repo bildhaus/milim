@@ -593,6 +593,34 @@ const UTILITY_HARNESS_PROVIDER_LABELS: Record<UtilityHarness["id"], string> = {
   pi: "Local Pi CLI",
 };
 
+/**
+ * `messages` without its last entry, keeping the previous array reference
+ * while every prefix message is unchanged. Store updates preserve untouched
+ * message objects, so this stays stable across stream flushes of the tail.
+ */
+function useSettledMessagePrefix(messages: ChatMessage[]): ChatMessage[] {
+  const settledRef = useRef<ChatMessage[]>(EMPTY);
+  const previous = settledRef.current;
+  const length = Math.max(0, messages.length - 1);
+  let unchanged = previous.length === length;
+  for (let index = 0; unchanged && index < length; index += 1) {
+    unchanged = previous[index] === messages[index];
+  }
+  if (!unchanged) settledRef.current = messages.slice(0, length);
+  return settledRef.current;
+}
+
+/** Whether a message holds anything the approval and attention scans read. */
+function messageHasApprovalActivity(message: ChatMessage | undefined): boolean {
+  if (!message) return false;
+  if (message.approval) return true;
+  if (message.run?.steps.some((step) => step.approval)) return true;
+  return (message.streamParts ?? []).some(
+    (part) =>
+      part.kind === "event" && Boolean(part.approvalId || part.approvalStatus),
+  );
+}
+
 function mergeTokenUsage(
   left?: TokenUsage,
   right?: TokenUsage,
@@ -1647,13 +1675,28 @@ export function ChatView({
     messages.length,
     messageWindowStart + MAX_MOUNTED_MESSAGE_ROWS,
   );
+  // Stream flushes replace only the tail message. Whole-thread scans run over
+  // the stable settled prefix unless the tail carries data the scan reads, so
+  // streamed text alone does not rescan the thread.
+  const settledMessages = useSettledMessagePrefix(messages);
+  const tailMessage =
+    messages.length > settledMessages.length
+      ? messages[messages.length - 1]
+      : undefined;
+  const approvalScanMessages = messageHasApprovalActivity(tailMessage)
+    ? messages
+    : settledMessages;
   const pendingApprovals = useMemo(
-    () => pendingToolApprovals(messages),
-    [messages],
+    () => pendingToolApprovals(approvalScanMessages),
+    [approvalScanMessages],
   );
+  const artifactScanMessages =
+    tailMessage?.role === "assistant" && tailMessage.artifacts?.length
+      ? messages
+      : settledMessages;
   const artifactRevisionGroupsForThread = useMemo(
-    () => artifactRevisionGroups(messages),
-    [messages],
+    () => artifactRevisionGroups(artifactScanMessages),
+    [artifactScanMessages],
   );
   const artifactRevisionsByOccurrence = useMemo(
     () => artifactRevisionChoiceByOccurrence(artifactRevisionGroupsForThread),
@@ -1662,13 +1705,17 @@ export function ChatView({
   const promptHistoryScope = useUiPreferences((s) => s.promptHistoryScope);
   const globalPromptHistory = useUiPreferences((s) => s.globalPromptHistory);
   const recordGlobalPrompt = useUiPreferences((s) => s.recordGlobalPrompt);
+  const tailUserPrompt =
+    tailMessage?.role === "user" ? tailMessage.content.trim() : "";
   const sentHistory = useMemo(() => {
     if (promptHistoryScope === "off") return [];
     if (promptHistoryScope === "global") return globalPromptHistory.slice().reverse();
-    return messages
+    const history = settledMessages
       .filter((message) => message.role === "user" && message.content.trim())
       .map((message) => message.content.trim());
-  }, [globalPromptHistory, messages, promptHistoryScope]);
+    if (tailUserPrompt) history.push(tailUserPrompt);
+    return history;
+  }, [globalPromptHistory, promptHistoryScope, settledMessages, tailUserPrompt]);
   const activeTitle = useSessions(
     (s) =>
       s.sessions.find((x) => x.id === s.activeId)?.title ?? "Current thread",
@@ -1676,8 +1723,13 @@ export function ChatView({
   const activeWorker = useSessions(
     (s) => s.sessions.find((x) => x.id === s.activeId)?.worker,
   );
-  const activeSession = useSessions(
-    (s) => s.sessions.find((x) => x.id === s.activeId),
+  // Narrow slices of the active session: subscribing to the whole session
+  // object re-rendered on every stream flush.
+  const activeBrowserSession = useSessions(
+    (s) => s.sessions.find((x) => x.id === s.activeId)?.browserSession,
+  );
+  const activeRetryWorkspace = useSessions(
+    (s) => s.sessions.find((x) => x.id === s.activeId)?.retryWorkspace,
   );
   const workerRuns = useSessions((s) => s.workerRuns);
   const activeWorkerRuns = useMemo(
@@ -1692,12 +1744,11 @@ export function ChatView({
   );
   const activeWorkerRun = activeWorkerRuns[0];
   const announcedAttentionKeysRef = useRef(new Set<string>());
+  const proposedWorkerRunId =
+    activeWorkerRun?.run.status === "proposed" ? activeWorkerRun.run.id : undefined;
   const attentionKey = useMemo(
-    () => pendingAttentionKey(
-      messages,
-      activeWorkerRun?.run.status === "proposed" ? activeWorkerRun.run.id : undefined,
-    ),
-    [activeWorkerRun?.run.id, activeWorkerRun?.run.status, messages],
+    () => pendingAttentionKey(approvalScanMessages, proposedWorkerRunId),
+    [approvalScanMessages, proposedWorkerRunId],
   );
   useEffect(() => {
     if (!attentionKey || announcedAttentionKeysRef.current.has(attentionKey)) return;
@@ -2893,9 +2944,27 @@ export function ChatView({
       const latest = useSessions
         .getState()
         .workerRuns.find((item) => item.run.id === record.run.id);
-      void maybeResumeAfterWorkerRun(latest ?? record);
+      void workerRunHandlersRef.current.maybeResumeAfterWorkerRun(
+        latest ?? record,
+      );
     }, 500 * 2 ** attempts);
   }
+
+  // Worker event streams and reconciliation timers outlive the render that
+  // started them; they call through this ref so a resumed turn uses the
+  // current providers, models, and settings instead of a stale closure.
+  const workerRunHandlersRef = useRef({
+    applyWorkerRunEvent,
+    maybeResumeAfterWorkerRun,
+    startWorkerRunEvents,
+  });
+  useLayoutEffect(() => {
+    workerRunHandlersRef.current = {
+      applyWorkerRunEvent,
+      maybeResumeAfterWorkerRun,
+      startWorkerRunEvents,
+    };
+  });
 
   function startWorkerRunEvents(record: WorkerRunRecord) {
     const run = record.run;
@@ -2929,7 +2998,7 @@ export function ChatView({
               if (event.event?.seq)
                 afterSeq = Math.max(afterSeq, event.event.seq);
               retry = 0;
-              applyWorkerRunEvent(event);
+              workerRunHandlersRef.current.applyWorkerRunEvent(event);
               terminalEvent = Boolean(
                 event.run &&
                   ["done", "partial", "stopped", "error"].includes(
@@ -2949,7 +3018,9 @@ export function ChatView({
         try {
           const canonical = await getWorkerRun(run.id);
           useSessions.getState().upsertWorkerRun(canonical);
-          await maybeResumeAfterWorkerRun(canonical);
+          await workerRunHandlersRef.current.maybeResumeAfterWorkerRun(
+            canonical,
+          );
           if (
             ["done", "partial", "stopped", "error"].includes(
               canonical.run.status,
@@ -2985,9 +3056,9 @@ export function ChatView({
           store.upsertWorkerRun(record);
           if (pending.has(record.run.id)) {
             approvedWorkerRunsRef.current.add(record.run.id);
-            void maybeResumeAfterWorkerRun(record);
+            void workerRunHandlersRef.current.maybeResumeAfterWorkerRun(record);
           }
-          startWorkerRunEvents(record);
+          workerRunHandlersRef.current.startWorkerRunEvents(record);
         }
       })
       .catch(() => {
@@ -2996,15 +3067,11 @@ export function ChatView({
     return () => {
       cancelled = true;
     };
-  }, [
-    activeId,
-    activeSession?.browserSession,
-    sessionsHydrated,
-    setSessionBrowserSession,
-  ]);
+  }, [activeId, sessionsHydrated]);
 
   useEffect(() => {
-    for (const record of activeWorkerRuns) startWorkerRunEvents(record);
+    for (const record of activeWorkerRuns)
+      workerRunHandlersRef.current.startWorkerRunEvents(record);
   }, [activeWorkerRuns]);
 
   useEffect(() => {
@@ -3225,6 +3292,9 @@ export function ChatView({
   }, [activeId, autoTitleChats, sessionsHydrated, setMessages, updateCanonicalActiveRun]);
 
   async function loadOlderMessages() {
+    const activeSession = useSessions
+      .getState()
+      .sessions.find((session) => session.id === activeId);
     const beforeIndex = activeSession?.messagesLoadedFrom ?? 0;
     if (
       !inTauri ||
@@ -3685,7 +3755,7 @@ export function ChatView({
         ? "app"
         : "url");
   const activeInspectorBrowserSession =
-    activeSession?.browserSession ?? emptyBrowserSession();
+    activeBrowserSession ?? emptyBrowserSession();
   const activeInspectorAppBrowserSession = useSessions(
     (state) => state.previewBrowserSessionsByKey[activePreviewRuntimeKey],
   );
@@ -3718,9 +3788,8 @@ export function ChatView({
     if (restoredArtifact)
       artifactSelectionsByThreadRef.current.set(activeId, restoredArtifact);
     setPreviewSelection(restoredArtifact);
-    const restoredBrowser =
-      activeSession?.browserSession ?? emptyBrowserSession();
-    if (!activeSession?.browserSession)
+    const restoredBrowser = activeBrowserSession ?? emptyBrowserSession();
+    if (!activeBrowserSession)
       setSessionBrowserSession(activeId, restoredBrowser);
     const restoredSource =
       previewSourcesByThreadRef.current.get(activeId) ??
@@ -4400,7 +4469,12 @@ export function ChatView({
       target,
       models: pickerModels,
       providers,
-      session: activeSession ?? { messages, accountRuntime: undefined },
+      session: useSessions
+        .getState()
+        .sessions.find((session) => session.id === activeId) ?? {
+        messages,
+        accountRuntime: undefined,
+      },
       toolRequired: contextualModelToolIntent || Boolean(activeAgentId && activeAgent?.tool_mode !== "none"),
     });
   }
@@ -4580,7 +4654,7 @@ export function ChatView({
   }
 
   async function applyRetryWorkspace() {
-    const retry = activeSession?.retryWorkspace;
+    const retry = activeRetryWorkspace;
     if (!retry || busy) return;
     if (!(await confirmApp({
       title: "Apply retry changes?",
@@ -4616,7 +4690,7 @@ export function ChatView({
   }
 
   async function discardRetryWorkspace() {
-    const retry = activeSession?.retryWorkspace;
+    const retry = activeRetryWorkspace;
     if (!retry || busy) return;
     if (!(await confirmApp({
       title: "Discard retry worktree?",
@@ -7927,8 +8001,13 @@ export function ChatView({
     );
   }
 
-  useEffect(() => {
-    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+  // The listener is registered once and calls the latest render's handler,
+  // so shortcuts such as Stop never act on a stale `stop`/`busy` closure.
+  const shortcutKeyDownRef = useRef<
+    (event: globalThis.KeyboardEvent) => void
+  >(() => {});
+  useLayoutEffect(() => {
+    shortcutKeyDownRef.current = (event: globalThis.KeyboardEvent) => {
       if (event.defaultPrevented || shortcutTargetBlocked(event.target)) return;
       if (recentThreadSwitcher && event.key === "Escape") {
         event.preventDefault();
@@ -7961,20 +8040,13 @@ export function ChatView({
         stopFromShortcut();
       }
     };
+  });
+  useEffect(() => {
+    const onKeyDown = (event: globalThis.KeyboardEvent) =>
+      shortcutKeyDownRef.current(event);
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [
-    activeId,
-    appShortcuts,
-    busy,
-    projects,
-    recentThreadSwitcher,
-    sessionSummaries,
-    switchToSession,
-    threadSettings,
-    threadNavigationPlacement,
-    toggleSidebar,
-  ]);
+  }, []);
 
   function promoteQueuedMessage(messageId: string) {
     const first =
@@ -9025,12 +9097,12 @@ export function ChatView({
                 onClose={closeGitPanel}
                 modeSwitcher={inspectorTabSwitcher}
                 headerNotice={
-                  activeSession?.retryWorkspace ? (
+                  activeRetryWorkspace ? (
                     <div className="hot-swap-retry-banner">
                       <div>
                         <strong>Isolated Hot Swap retry</strong>
                         <span>
-                          {activeSession.retryWorkspace.adoptedAt
+                          {activeRetryWorkspace.adoptedAt
                             ? "Applied to the original workspace; the retry remains available."
                             : "Review this diff before applying it to the original workspace."}
                         </span>
