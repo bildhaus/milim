@@ -54,6 +54,9 @@ export const Mic = (p: P) => (
 export const UserRound = (p: P) => (
   <Svg {...p}><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0" /></Svg>
 );
+export const Memory = (p: P) => (
+  <Svg strokeWidth={1.7} {...p}><ellipse cx="12" cy="5" rx="7" ry="3" /><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6" /></Svg>
+);
 export const Smartphone = (p: P) => (
   <Svg {...p}><rect x="7" y="2" width="10" height="20" rx="2" /><path d="M11 18h2" /></Svg>
 );

@@ -69,6 +69,8 @@ import {
 import { useUiPreferences } from "./ui/store";
 import { dataTransferCarriesFiles, WINDOW_ATTACH_FILES_EVENT } from "./lib/windowFileDrop";
 import { markPerfStage } from "./lib/perf";
+import { managerEntry, managerIdFromEvent, OPEN_MANAGER_EVENT, requestOpenManager, type ManagerId } from "./lib/managers";
+import type { SettingsSectionId } from "./settings/search";
 
 const SettingsPage = lazy(() =>
   import("./settings/SettingsDialog").then((mod) => ({
@@ -561,6 +563,7 @@ function AppContent() {
   }, []);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<SettingsSectionId | undefined>();
   const mainRef = useRef<HTMLDivElement>(null);
   const settingsReturnFocusRef = useRef<HTMLElement | null>(null);
   const [runtimeFailed, setRuntimeFailed] = useState(false);
@@ -662,20 +665,53 @@ function AppContent() {
   }
 
   function openSettings() {
+    openSettingsSection(undefined);
+  }
+
+  function openSettingsSection(section: SettingsSectionId | undefined) {
     if (!settingsReturnFocusRef.current && document.activeElement instanceof HTMLElement) {
       settingsReturnFocusRef.current = document.activeElement;
     }
+    setSettingsSection(section);
     setSettingsOpen(true);
   }
 
-  function closeSettings() {
+  function closeSettings(options: { restoreFocus?: boolean } = {}) {
     const returnTarget = settingsReturnFocusRef.current;
     settingsReturnFocusRef.current = null;
     setSettingsOpen(false);
+    if (options.restoreFocus === false) return;
     window.requestAnimationFrame(() => {
       if (returnTarget?.isConnected) returnTarget.focus({ preventScroll: true });
     });
   }
+
+  function openManagerFromSettings(id: ManagerId) {
+    // The opened manager takes focus, so Settings does not restore its invoker.
+    closeSettings({ restoreFocus: false });
+    requestOpenManager(id);
+  }
+
+  // Providers and Memory are owned by ChatView, which listens for the same event.
+  useEffect(() => {
+    const onOpenManager = (event: Event) => {
+      const id = managerIdFromEvent(event);
+      if (!id) return;
+      const section = managerEntry(id).settingsSection;
+      if (section) {
+        openSettingsSection(section);
+        return;
+      }
+      if (id === "agents") setAgentsOpen(true);
+      else if (id === "skills") setSkillsOpen(true);
+      else if (id === "schedules") setSchedulesOpen(true);
+      else if (id === "media") setMediaOpen(true);
+      else if (id === "pull-requests") setPullRequestsOpen(true);
+      else if (id === "mcp") setMcpManagerRequest((value) => value + 1);
+    };
+    window.addEventListener(OPEN_MANAGER_EVENT, onOpenManager);
+    return () => window.removeEventListener(OPEN_MANAGER_EVENT, onOpenManager);
+  }, []);
 
   function startNewChat() {
     void createInteractiveChat();
@@ -846,11 +882,7 @@ function AppContent() {
       onToggle={toggleSidebar}
       onSearchChats={() => setChatSearchRequest((value) => value + 1)}
       onOpenSettings={openSettings}
-      onManageSkills={() => setSkillsOpen(true)}
-      onManageSchedules={() => setSchedulesOpen(true)}
-      onManageMedia={() => setMediaOpen(true)}
-      onManagePullRequests={() => setPullRequestsOpen(true)}
-      onManageMcp={() => setMcpManagerRequest((value) => value + 1)}
+      onOpenManager={requestOpenManager}
       onGitAction={(text) => setComposerDraft({ id: Date.now(), text })}
       onOpenGitPanel={(sessionId, view = "changes") =>
         setGitPanelRequest({ id: Date.now(), sessionId, view })
@@ -908,7 +940,13 @@ function AppContent() {
       </div>
       <Suspense fallback={null}>
         <OnboardingGate />
-        {settingsOpen && <SettingsPage onClose={closeSettings} />}
+        {settingsOpen && (
+          <SettingsPage
+            initialSection={settingsSection}
+            onClose={() => closeSettings()}
+            onOpenManager={openManagerFromSettings}
+          />
+        )}
         {agentsOpen && <AgentsManager onClose={() => setAgentsOpen(false)} />}
         {skillsOpen && (
           <SkillsManager

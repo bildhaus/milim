@@ -39,6 +39,7 @@ import {
   type SettingSearchEntry,
   type SettingsSectionId,
 } from "./search";
+import { matchingManagers, type ManagerId } from "../lib/managers";
 import {
   SettingsBlock,
   SettingsChoiceGroup,
@@ -230,7 +231,16 @@ function updateStatusLabel(status: UpdateStatus): string {
   return "Not checked";
 }
 
-export function SettingsPage({ onClose }: { onClose: () => void }) {
+export function SettingsPage({
+  onClose,
+  initialSection,
+  onOpenManager,
+}: {
+  onClose: () => void;
+  initialSection?: SettingsSectionId;
+  /** Closes Settings and opens a Tools manager, such as Providers for "API key". */
+  onOpenManager?: (id: ManagerId) => void;
+}) {
   const themes = useTheme((s) => s.themes);
   const custom = useTheme((s) => s.custom);
   const themeId = useTheme((s) => s.themeId);
@@ -388,7 +398,10 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
   const refreshAgents = useAgents((s) => s.refresh);
 
   const [editing, setEditing] = useState<{ base: Theme; isNew: boolean } | null>(null);
-  const [activeSection, setActiveSection] = useState<SettingsSectionId>(lastSettingsSection);
+  const [activeSection, setActiveSection] = useState<SettingsSectionId>(() => {
+    if (initialSection) lastSettingsSection = initialSection;
+    return lastSettingsSection;
+  });
   const [settingsQuery, setSettingsQuery] = useState("");
   const [highlightedSettingId, setHighlightedSettingId] = useState<string | null>(null);
   const [confirmArchiveDelete, setConfirmArchiveDelete] = useState<string | null>(null);
@@ -435,6 +448,12 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
   const settingsSearchResults = useMemo(
     () => matchingSettingsEntries(settingsQuery),
     [settingsQuery],
+  );
+  const managerSearchResults = useMemo(
+    () => onOpenManager
+      ? matchingManagers(settingsQuery).filter((entry) => !entry.settingsSection)
+      : [],
+    [onOpenManager, settingsQuery],
   );
 
   useEffect(() => {
@@ -926,6 +945,18 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
             </div>
             {settingsQuery.trim() ? (
               <div className="settings-search-results" aria-label="Matching settings">
+                {managerSearchResults.map((entry) => (
+                  <button
+                    key={`manager-${entry.id}`}
+                    className="settings-search-result"
+                    type="button"
+                    data-testid={`settings-search-manager-${entry.id}`}
+                    onClick={() => onOpenManager?.(entry.id)}
+                  >
+                    <span>{entry.label}</span>
+                    <small>Open in Tools</small>
+                  </button>
+                ))}
                 {settingsSearchResults.length ? settingsSearchResults.map((entry) => {
                   const section = SETTINGS_SECTIONS.find((item) => item.id === entry.section);
                   return (
@@ -939,7 +970,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                       <small>{section?.label ?? entry.section}</small>
                     </button>
                   );
-                }) : <div className="settings-nav-empty">No settings match.</div>}
+                }) : managerSearchResults.length ? null : <div className="settings-nav-empty">No settings match.</div>}
               </div>
             ) : (
               <div className="settings-nav-list" role="tablist" aria-label="Settings sections">
@@ -1117,7 +1148,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                   <div className="shortcut-recorder-row" key={action}>
                     <div>
                       <strong>{APP_SHORTCUT_LABELS[action]}</strong>
-                      <span>{recordingShortcut === action ? "Press a key combination..." : shortcutLabel(appShortcuts[action])}</span>
+                      <span>{recordingShortcut === action ? "Press a key combination..." : shortcutLabel(appShortcuts[action]) || "Not set"}</span>
                     </div>
                     <button
                       className={"btn-ghost shortcut-recorder-button" + (recordingShortcut === action ? " active" : "")}
@@ -1131,6 +1162,12 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                     </button>
                   </div>
                 ))}
+                <div className="shortcut-recorder-row">
+                  <div>
+                    <strong>Jump to sidebar chat 1-9</strong>
+                    <span>{shortcutLabel("Mod+1")} to {shortcutLabel("Mod+9")} (fixed)</span>
+                  </div>
+                </div>
                 <div className="settings-action-row">
                   <div>
                     <strong>Shortcut defaults</strong>
