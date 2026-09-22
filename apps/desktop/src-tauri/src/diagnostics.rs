@@ -63,6 +63,65 @@ pub fn record_frontend_error(message: &str, detail: Option<&str>) {
     );
 }
 
+const STARTUP_ERROR_TITLE: &str = "milim could not start";
+
+/// Record a fatal startup error, show it in a native alert, and exit.
+///
+/// Startup runs before Tauri owns a window, so the dialog plugin is not
+/// available yet. The alert uses tools that ship with the OS, and the message
+/// is passed as an argument or environment value rather than spliced into a
+/// script.
+pub fn fatal_startup_error(message: &str) -> ! {
+    let message = capped(message, MESSAGE_LIMIT_BYTES);
+    tracing::error!(target: "milim_desktop::startup", error = %message, "desktop startup failed");
+    eprintln!("{STARTUP_ERROR_TITLE}: {message}");
+    let body = format!(
+        "{message}\n\nDetails are in the diagnostics log at {}.",
+        log_dir().display()
+    );
+    show_native_alert(&body);
+    std::process::exit(1);
+}
+
+fn show_native_alert(body: &str) {
+    let mut command = if cfg!(target_os = "macos") {
+        let mut command = std::process::Command::new("osascript");
+        command.args([
+            "-e",
+            "on run argv",
+            "-e",
+            &format!(
+                "display alert \"{STARTUP_ERROR_TITLE}\" message (item 1 of argv) as critical"
+            ),
+            "-e",
+            "end run",
+            body,
+        ]);
+        command
+    } else if cfg!(windows) {
+        let mut command = std::process::Command::new("powershell.exe");
+        command
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &format!(
+                    "Add-Type -AssemblyName PresentationFramework; [void][System.Windows.MessageBox]::Show($env:MILIM_STARTUP_ERROR, '{STARTUP_ERROR_TITLE}', 'OK', 'Error')"
+                ),
+            ])
+            .env("MILIM_STARTUP_ERROR", body);
+        milim_core::proc::hide_console(&mut command);
+        command
+    } else {
+        let mut command = std::process::Command::new("zenity");
+        command.args(["--error", "--title", STARTUP_ERROR_TITLE, "--text", body]);
+        command
+    };
+    if let Err(error) = command.status() {
+        eprintln!("could not show the startup error dialog: {error}");
+    }
+}
+
 fn capped(value: &str, limit: usize) -> String {
     if value.len() <= limit {
         return value.to_string();

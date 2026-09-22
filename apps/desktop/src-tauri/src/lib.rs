@@ -4358,7 +4358,11 @@ fn build_state(
     );
     let desktop_name = desktop_control_display_name();
     let control = milim_server::control::RunManager::new(user_data.clone(), &desktop_name)
-        .expect("initialize canonical control runtime");
+        .unwrap_or_else(|error| {
+            diagnostics::fatal_startup_error(&format!(
+                "The chat runtime could not be initialized: {error}"
+            ))
+        });
     migrate_desktop_control_name(&user_data, &control, &desktop_name);
     let service: SharedService = registry
         .as_ref()
@@ -4878,7 +4882,12 @@ pub fn run() {
     let preview_tools_state = Arc::new(preview_tools::PreviewToolState::default());
     let secret_storage = secret_storage::initialize(Paths::resolve().root());
     let storage_status = secret_storage.status.clone();
-    let user_data = open_user_data_store().expect("initialize user data store");
+    let user_data = open_user_data_store().unwrap_or_else(|error| {
+        diagnostics::fatal_startup_error(&format!(
+            "The local database at {} could not be opened: {error}",
+            Paths::resolve().user_db_file().display()
+        ))
+    });
     native_perf_mark("database_open_migrations_completed");
     let (mut state, preferred_addr, mcp, providers) = build_state(
         api_key.clone(),
@@ -4888,7 +4897,11 @@ pub fn run() {
     );
     native_perf_mark("control_reconciliation_completed");
     let (server_listener, addr) =
-        bind_desktop_server_listener(preferred_addr).expect("bind embedded milim server");
+        bind_desktop_server_listener(preferred_addr).unwrap_or_else(|error| {
+            diagnostics::fatal_startup_error(&format!(
+                "The embedded milim server could not listen on {preferred_addr}: {error}"
+            ))
+        });
     // Account-runtime tool endpoints must point at the actual listener. The
     // preferred port may already be occupied, in which case binding falls
     // back to an ephemeral loopback port.
@@ -4900,7 +4913,11 @@ pub fn run() {
             .parse()
             .expect("valid mobile control loopback address"),
     )
-    .expect("bind embedded mobile control server");
+    .unwrap_or_else(|error| {
+        diagnostics::fatal_startup_error(&format!(
+            "The embedded mobile control server could not listen on loopback: {error}"
+        ))
+    });
     native_perf_mark("servers_listening");
     let api_base = format!("http://{addr}");
     let mobile_local_target = format!("http://{mobile_addr}");
@@ -5175,7 +5192,9 @@ pub fn run() {
             preview_webview::preview_webview_diagnostics
         ])
         .run(tauri::generate_context!())
-        .expect("error while running milim desktop");
+        .unwrap_or_else(|error| {
+            diagnostics::fatal_startup_error(&format!("The desktop window could not start: {error}"))
+        });
 }
 
 #[cfg(test)]
