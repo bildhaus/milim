@@ -359,10 +359,13 @@ import { requestWorkspaceEditorLeave } from "../lib/workspaceEditorGuard";
 import { isLoopbackProviderEndpoint } from "../lib/providerEndpoint.js";
 import { pendingAttentionKey, playInterfaceSound } from "../ui/sounds";
 import { DEFAULT_PREVIEW_PANEL_WIDTH, useUiPreferences } from "../ui/store";
-import { confirmApp } from "../ui/confirmation";
+import { useTheme } from "../theme/store";
+import { confirmApp, promptApp } from "../ui/confirmation";
 import { Composer } from "./Composer";
 import { ComposerSurface } from "./ComposerSurface";
-import { ControlBar } from "./ControlBar";
+import { ControlBar, requestOpenModelPicker } from "./ControlBar";
+import { buildCommandRegistry } from "../lib/commandRegistry";
+import { managerIdFromEvent, OPEN_MANAGER_EVENT, requestOpenManager } from "../lib/managers";
 import { AssistantMessage } from "./AssistantMessage";
 import type { ModelPickerSelection } from "./ModelPicker";
 import { GoalPanel, type GoalPanelDraft } from "./GoalPanel";
@@ -2216,7 +2219,7 @@ export function ChatView({
       : composerNoticeAction(composerNotice.message)
     : null;
   const composerActionLabel = composerAction === "manage_models"
-    ? "Manage models"
+    ? "Open Providers"
     : composerAction === "choose_folder"
       ? "Choose folder"
       : composerAction === "privacy_settings"
@@ -7986,64 +7989,117 @@ export function ChatView({
     }, 2000);
   }
 
-  const paletteCommands: RuntimeCommand[] = [
-    {
-      id: "chat.new",
-      label: "New chat",
-      keywords: ["thread", "conversation"],
-      shortcut: shortcutLabel(appShortcuts.newChat),
-      run: startShortcutNewChat,
+  const themeIsDark = useTheme((s) => s.theme.isDark);
+  const settledThreadsEnabled = useUiPreferences((s) => s.settledThreadsEnabled);
+  const threadActionsAvailable = Boolean(activeSession && messages.length > 0);
+  const archiveAvailable =
+    threadActionsAvailable && (!settledThreadsEnabled || Boolean(activeSession?.settledAt));
+  const gitPanelOpen = sidePanelVisible && inspectorTab === "git";
+  const previewPanelOpen = sidePanelVisible && inspectorTab === "preview";
+  const codePanelOpen = sidePanelVisible && inspectorTab === "code";
+
+  useEffect(() => {
+    const onOpenManager = (event: Event) => {
+      const id = managerIdFromEvent(event);
+      if (id === "providers") setProvidersOpen(true);
+      else if (id === "memory") {
+        setMemoryTarget(null);
+        setMemoryOpen(true);
+      }
+    };
+    window.addEventListener(OPEN_MANAGER_EVENT, onOpenManager);
+    return () => window.removeEventListener(OPEN_MANAGER_EVENT, onOpenManager);
+  }, []);
+
+  function toggleGitPanelFromCommand() {
+    if (gitPanelOpen) closeGitPanel();
+    else void openGitPanel();
+  }
+
+  function togglePreviewPanelFromCommand() {
+    if (previewPanelOpen) void closePreview();
+    else void openPreviewInspector();
+  }
+
+  function toggleCodePanelFromCommand() {
+    if (codePanelOpen) void closePreview();
+    else void openArtifactSidePanel("code");
+  }
+
+  function toggleThemeFromCommand() {
+    const theme = useTheme.getState();
+    const next = theme.builtins.find((item) => item.isDark !== theme.theme.isDark);
+    if (next) theme.setTheme(next.id);
+  }
+
+  async function renameActiveThreadFromCommand() {
+    const id = activeId;
+    const title = await promptApp({
+      title: "Rename chat",
+      message: "Choose a new name for this chat.",
+      confirmLabel: "Rename",
+      input: { label: "Chat name", defaultValue: activeSession?.title ?? "" },
+    });
+    if (title == null) return;
+    useSessions.getState().rename(id, title.trim());
+  }
+
+  async function branchActiveThreadFromCommand() {
+    try {
+      const forkedId = await branchCanonicalSession(activeId);
+      if (!forkedId || useSessions.getState().activeId !== forkedId) return;
+      setChatNotice({ tone: "info", message: "Thread branched." });
+      focusComposer();
+    } catch (error) {
+      setChatNotice({ tone: "error", message: `Could not branch thread: ${error instanceof Error ? error.message : String(error)}` });
+    }
+  }
+
+  async function archiveActiveThreadFromCommand() {
+    if (!archiveAvailable) return;
+    const id = activeId;
+    const title = activeSession?.title?.trim() || "this chat";
+    if (!(await confirmApp({
+      title: "Archive chat?",
+      message: `Archive "${title}"? Archived chats can be restored from Settings > Data & privacy.`,
+      confirmLabel: "Archive",
+    }))) return;
+    if (!(await requestWorkspaceEditorLeave("navigate"))) return;
+    useSessions.getState().archiveSession(id);
+  }
+
+  function prefillSlashCommandFromPalette(id: string) {
+    setInput((current) => (current.trim() ? `/${id} ${current}` : `/${id} `));
+    focusComposerInput();
+  }
+
+  const paletteCommands: RuntimeCommand[] = buildCommandRegistry({
+    shortcuts: appShortcuts,
+    state: {
+      busy,
+      inTauri,
+      sidebarPlacement: threadNavigationPlacement === "sidebar",
+      sidebarOpen,
+      threadCount: sessionSummaries.length,
+      threadActionsAvailable,
+      archiveAvailable,
+      gitAvailable: Boolean(folder.trim() && canOpenGitPanel),
+      gitOpen: gitPanelOpen,
+      previewOpen: previewPanelOpen,
+      codeAvailable: Boolean(activeArtifactSelection || folder.trim()),
+      codeOpen: codePanelOpen,
+      planMode,
+      darkTheme: themeIsDark,
     },
-    {
-      id: "composer.focus",
-      label: "Focus composer",
-      keywords: ["prompt", "input"],
-      shortcut: shortcutLabel(appShortcuts.focusComposer),
-      run: focusComposer,
-    },
-    {
-      id: "composer.suggestions",
-      label: "Open composer suggestions",
-      keywords: ["autocomplete", "commands", "skills", "files"],
-      shortcut: shortcutLabel(appShortcuts.openComposerSuggestions),
-      run: () => window.dispatchEvent(new Event("milim:open-composer-suggestions")),
-    },
-    {
-      id: "sidebar.toggle",
-      label: sidebarOpen ? "Hide sidebar" : "Show sidebar",
-      keywords: ["toggle", "navigation"],
-      shortcut: shortcutLabel(appShortcuts.toggleSidebar),
-      available: threadNavigationPlacement === "sidebar",
-      run: toggleSidebar,
-    },
-    {
-      id: "thread.previous",
-      label: "Previous thread",
-      keywords: ["chat", "recent", "switch"],
-      shortcut: shortcutLabel(appShortcuts.previousThread),
-      available: sessionSummaries.length > 1,
-      run: switchToPreviousThread,
-    },
-    {
-      id: "generation.stop",
-      label: "Stop generation",
-      keywords: ["cancel", "abort"],
-      shortcut: shortcutLabel(appShortcuts.stopGeneration),
-      available: busy,
-      run: stop,
-    },
-    {
-      id: "settings.open",
-      label: "Open settings",
-      keywords: ["preferences", "configuration"],
-      run: onOpenSettings,
-    },
-    {
-      id: "diagnostics.open",
-      label: "Open diagnostics",
-      keywords: ["logs", "recovery", "debug"],
-      available: inTauri,
-      run: () => {
+    actions: {
+      newChat: startShortcutNewChat,
+      focusComposer,
+      openComposerSuggestions: () => window.dispatchEvent(new Event("milim:open-composer-suggestions")),
+      toggleSidebar,
+      previousThread: switchToPreviousThread,
+      stopGeneration: stop,
+      openSettings: onOpenSettings,
+      openDiagnostics: () => {
         void openDiagnosticsFolder().catch((error) =>
           setChatNotice({
             tone: "error",
@@ -8051,8 +8107,23 @@ export function ChatView({
           }),
         );
       },
+      openManager: requestOpenManager,
+      openModelPicker: requestOpenModelPicker,
+      toggleGitPanel: toggleGitPanelFromCommand,
+      togglePreviewPanel: togglePreviewPanelFromCommand,
+      toggleCodePanel: toggleCodePanelFromCommand,
+      togglePlanMode: () => setPlanModeActive(!planMode),
+      toggleTheme: toggleThemeFromCommand,
+      renameThread: () => void renameActiveThreadFromCommand(),
+      branchThread: () => void branchActiveThreadFromCommand(),
+      exportThread: () => void exportSessionById(activeId, threadExportFormat),
+      archiveThread: () => void archiveActiveThreadFromCommand(),
+      runSlashCommand: (id, argument = "") => {
+        runSlashCommand(id, argument);
+      },
+      prefillSlashCommand: prefillSlashCommandFromPalette,
     },
-  ];
+  });
 
   function shortcutTargetBlocked(target: EventTarget | null): boolean {
     if (!(target instanceof HTMLElement)) return false;
@@ -8090,6 +8161,24 @@ export function ChatView({
       } else if (shortcutMatchesEvent(appShortcuts.previousThread, event)) {
         event.preventDefault();
         switchToPreviousThread();
+      } else if (shortcutMatchesEvent(appShortcuts.openSettings, event)) {
+        event.preventDefault();
+        onOpenSettings();
+      } else if (shortcutMatchesEvent(appShortcuts.openModelPicker, event)) {
+        event.preventDefault();
+        requestOpenModelPicker();
+      } else if (shortcutMatchesEvent(appShortcuts.toggleGitPanel, event)) {
+        event.preventDefault();
+        if (gitPanelOpen || (folder.trim() && canOpenGitPanel)) toggleGitPanelFromCommand();
+      } else if (shortcutMatchesEvent(appShortcuts.togglePreviewPanel, event)) {
+        event.preventDefault();
+        togglePreviewPanelFromCommand();
+      } else if (shortcutMatchesEvent(appShortcuts.togglePlanMode, event)) {
+        event.preventDefault();
+        setPlanModeActive(!planMode);
+      } else if (shortcutMatchesEvent(appShortcuts.archiveThread, event)) {
+        event.preventDefault();
+        void archiveActiveThreadFromCommand();
       } else if (shortcutMatchesEvent(appShortcuts.stopGeneration, event)) {
         event.preventDefault();
         stopFromShortcut();
@@ -8099,8 +8188,15 @@ export function ChatView({
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [
     activeId,
+    activeSession,
     appShortcuts,
+    archiveAvailable,
     busy,
+    canOpenGitPanel,
+    folder,
+    gitPanelOpen,
+    planMode,
+    previewPanelOpen,
     projects,
     recentThreadSwitcher,
     sessionSummaries,

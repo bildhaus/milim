@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   confirmApp,
+  promptApp,
   resolveAppConfirmation,
   useAppConfirmation,
 } from "../src/ui/confirmation.js";
@@ -22,6 +23,19 @@ const active = confirmApp({ title: "Second", message: "Second request" });
 assert.equal(await superseded, false, "a newer confirmation should safely cancel the older request");
 resolveAppConfirmation(false);
 assert.equal(await active, false);
+
+const renamed = promptApp({
+  title: "Rename chat",
+  message: "Choose a new name.",
+  input: { label: "Chat name", defaultValue: "Old" },
+});
+assert.equal(useAppConfirmation.getState().request?.input?.defaultValue, "Old");
+resolveAppConfirmation(true, "New name");
+assert.equal(await renamed, "New name");
+
+const cancelledPrompt = promptApp({ title: "Rename chat", message: "Choose a new name.", input: { label: "Chat name" } });
+resolveAppConfirmation(false);
+assert.equal(await cancelledPrompt, null, "a cancelled prompt should resolve to null");
 
 for (const file of [
   "src/components/ChatView.tsx",
