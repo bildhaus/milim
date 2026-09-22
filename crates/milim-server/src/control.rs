@@ -5650,22 +5650,14 @@ impl RunManager {
         }
     }
 
-    fn lock_for_command(&self, command_id: &str) -> Arc<AsyncMutex<()>> {
-        self.command_locks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .entry(command_id.to_string())
-            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
-            .clone()
+    /// The lease removes the command's entry once the command and any
+    /// concurrent same-id retry have finished.
+    fn lock_for_command(&self, command_id: &str) -> crate::keyed_lock::KeyedLockLease<'_> {
+        crate::keyed_lock::KeyedLockLease::acquire(&self.command_locks, command_id)
     }
 
-    fn lock_for_thread(&self, thread_id: &str) -> Arc<AsyncMutex<()>> {
-        self.thread_locks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .entry(thread_id.to_string())
-            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
-            .clone()
+    fn lock_for_thread(&self, thread_id: &str) -> crate::keyed_lock::KeyedLockLease<'_> {
+        crate::keyed_lock::KeyedLockLease::acquire(&self.thread_locks, thread_id)
     }
 
     fn persist_and_emit(
@@ -8141,6 +8133,10 @@ mod tests {
         let bootstrap = manager.bootstrap(&state).await.unwrap();
         assert_eq!(bootstrap.threads.len(), 1);
         assert_eq!(bootstrap.threads[0].model.as_deref(), Some("openai:gpt-5"));
+        assert!(
+            manager.command_locks.lock().unwrap().is_empty(),
+            "finished commands must release their idempotency locks"
+        );
     }
 
     #[tokio::test]

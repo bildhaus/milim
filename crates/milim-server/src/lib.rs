@@ -20,6 +20,7 @@ pub mod control;
 mod error;
 pub mod google_workspace;
 pub mod host_guard;
+mod keyed_lock;
 pub mod mcp_bridge;
 pub mod media_library;
 mod opencode_bridge;
