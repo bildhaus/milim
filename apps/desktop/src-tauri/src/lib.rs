@@ -4696,7 +4696,7 @@ fn set_sidebar_toggle_enabled(
 
 #[cfg(target_os = "macos")]
 fn setup_native_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
-    let settings = MenuItem::with_id(app, APP_MENU_SETTINGS_ID, "Settings", true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, APP_MENU_SETTINGS_ID, "Settings", true, Some("Cmd+,"))?;
     let quit = MenuItem::with_id(app, APP_MENU_QUIT_ID, "Quit Milim", true, Some("Cmd+Q"))?;
     let app_menu = SubmenuBuilder::new(app, "Milim")
         .about(None)
