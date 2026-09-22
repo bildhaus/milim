@@ -5,7 +5,7 @@ import {
   type MediaModelSchema,
   type MediaSchemaControl,
   type ProviderInfo,
-} from "../api";
+} from "../api.js";
 
 const MODEL_PRESETS: Record<string, string> = {
   replicate: "black-forest-labs/flux-schnell",

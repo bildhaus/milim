@@ -52,6 +52,14 @@ const TOOL_APPROVAL_DESCRIPTION: Record<ToolApprovalMode, string> = {
   open: "Run without approval in trusted workspaces.",
 };
 
+const OPEN_MODEL_PICKER_EVENT = "milim:open-model-picker";
+
+/** Opens the thread model picker from the command palette or its shortcut. */
+export function requestOpenModelPicker(): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new Event(OPEN_MODEL_PICKER_EVENT));
+}
+
 export function modelPickerPlacement(
   triggerTop: number,
   triggerBottom: number,
@@ -183,6 +191,18 @@ export function ControlBar({
       window.removeEventListener("resize", closeOnResize);
     };
   }, [menu]);
+
+  useEffect(() => {
+    const openModelPicker = () => {
+      const trigger = modelTriggerRef.current;
+      if (!trigger) return;
+      const rect = trigger.getBoundingClientRect();
+      setModelPickerStyle(modelPickerPlacement(rect.top, rect.bottom, window.innerHeight));
+      setMenu("model");
+    };
+    window.addEventListener(OPEN_MODEL_PICKER_EVENT, openModelPicker);
+    return () => window.removeEventListener(OPEN_MODEL_PICKER_EVENT, openModelPicker);
+  }, []);
 
   const contextAccessibleLabel = `Session controls, Docker sandbox ${sandbox ? "on" : "off"}, Computer ${computerUse ? "on" : "off"}, Memory ${memory ? "on" : "off"}, Privacy ${PRIVACY_LABEL[privacy]}, Tool approval ${TOOL_APPROVAL_LABEL[toolApproval]}`;
   const showGoalChip = Boolean(goalMode) || goalChipVisible(goal);

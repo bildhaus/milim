@@ -893,7 +893,7 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
     >
       <div className="sheet-header providers-header">
         <div className="providers-title">
-          <h2>Connection Center</h2>
+          <h2>Providers</h2>
           <p className="sheet-sub providers-subtitle">
             Connect chat, media, local, Codex, and bring-your-own Claude CLI
             runtimes. Provider keys stay encrypted on this device.

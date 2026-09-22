@@ -11,7 +11,7 @@ updated: 2026-09-23
 
 Start with the current base URL and selected model. Most local issues are either a missing provider, a workspace folder that was never selected, or an optional runtime that is not running yet.
 
-Desktop diagnostics are local-only under `<MILIM_HOME>/logs` (normally `~/.milim/logs`). Milim retains `desktop.log` and one 5 MiB previous log, never uploads them automatically, and exposes the folder from **Settings → About → Diagnostics** and the recovery screen.
+Desktop diagnostics are local-only under `<MILIM_HOME>/logs` (normally `~/.milim/logs`). Milim retains `desktop.log` and one 5 MiB previous log, never uploads them automatically, and exposes the folder from **Settings → About & updates → Diagnostics** and the recovery screen.
 
 ## Diagnostic order
 
@@ -37,7 +37,7 @@ Desktop diagnostics are local-only under `<MILIM_HOME>/logs` (normally `~/.milim
 | Preview says disconnected or stale | Status polling failed. Milim keeps the last-known runtime and URL instead of clearing the inspector; confirm the embedded server is reachable, then retry or reopen the inspector. |
 | URL preview controls stay disabled | Wait for the native child webview's real page-load-ready event. Only public HTTPS and loopback HTTP URLs are accepted; creation, navigation, and load errors appear in the inspector. |
 | Computer use is unavailable | Build with the `computer-use` feature and enable the `/computer` gate. |
-| MCP tools disappeared | Check `/mcp/servers` or the MCP Servers sheet. Imported servers stay disabled and secret-looking env values become required placeholders; fill them and use Test connection before enabling. |
+| MCP tools disappeared | Open **Tools → MCP Servers** (or search the command palette for "MCP") and check each server's status. Imported servers stay disabled and secret-looking env values become required placeholders; fill them and use Test connection before enabling. |
 | Privacy block error | The server detected PII before a remote send. Use Redact, Off, or a local runtime. |
 | Desktop port is busy | The embedded server falls back to a free loopback port and the UI asks Tauri for the actual API base URL. |
 | Milim shows "milim could not start" | Startup could not open the local database, bind its loopback servers, or initialize the chat runtime. The alert names the failure; details are in the diagnostics log. Fix the reported cause, then relaunch. |

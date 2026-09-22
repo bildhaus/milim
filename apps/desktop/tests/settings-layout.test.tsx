@@ -15,7 +15,7 @@ function equal<T>(actual: T, expected: T, message: string): void {
 const source = readFileSync(resolve(process.cwd(), "src/settings/SettingsDialog.tsx"), "utf8");
 const surfaceSource = readFileSync(resolve(process.cwd(), "src/settings/SettingsSurface.tsx"), "utf8");
 const stylesSource = readFileSync(resolve(process.cwd(), "src/settings.css"), "utf8");
-assert(source.includes("export function SettingsPage({ onClose }"), "Settings should expose the full-window page contract");
+assert(/export function SettingsPage\(\{\s+onClose,/.test(source), "Settings should expose the full-window page contract");
 assert(source.includes('testId="settings-page"'), "Settings should expose the page test identifier");
 assert(source.includes('backLabel="Back to app"'), "Settings should provide dedicated back navigation");
 assert(source.includes("<SettingsSurface"), "Settings should use the shared full-window surface");

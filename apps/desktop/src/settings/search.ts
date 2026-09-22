@@ -40,7 +40,7 @@ export const SETTINGS_SEARCH_ENTRIES: SettingSearchEntry[] = [
   { id: "app-update-policy", label: "Update policy", section: "about", aliases: ["automatic check", "automatic download"] },
   { id: "mobile-companion", label: "Mobile companion", section: "mobile", aliases: ["phone", "pairing", "qr", "tailscale"] },
   { id: "system-secret-storage", label: "Credential storage", section: "history", aliases: ["keychain", "credential manager", "secrets", "encryption", "fallback"] },
-  { id: "system-shortcuts", label: "Keyboard shortcuts", section: "app", aliases: ["hotkey", "command", "reset"] },
+  { id: "system-shortcuts", label: "Keyboard shortcuts", section: "app", aliases: ["hotkey", "command", "reset", "command palette", "model picker", "git panel", "preview panel", "plan mode", "archive", "jump to chat"] },
   { id: "about-version", label: "Version", section: "about", aliases: ["current", "latest"] },
   { id: "about-updates", label: "Updates", section: "about", aliases: ["github release", "download", "restart"] },
   { id: "about-diagnostics", label: "Diagnostics", section: "about", aliases: ["logs", "recovery", "debug"] },

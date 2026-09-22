@@ -1,4 +1,5 @@
 import {
+  APP_SHORTCUT_ACTIONS,
   APP_SHORTCUT_LABELS,
   composerEnterAction,
   isComposingKeyEvent,
@@ -12,6 +13,7 @@ import {
   shortcutMatchesEvent,
   shortcutToGlobalAccelerator,
   shortcutValidationIssue,
+  threadJumpIndexFromEvent,
   uiSizeShortcutDelta,
 } from "../src/ui/shortcuts.js";
 
@@ -162,5 +164,49 @@ equal(normalized.previousThread, "Ctrl+Tab", "old previous thread default should
 equal(shortcutConflict(DEFAULT_APP_SHORTCUTS, "newChat", "Mod+K"), "focusSearch", "conflict lookup should name the existing action");
 equal(shortcutConflict(DEFAULT_APP_SHORTCUTS, "newChat", "Ctrl+Tab"), "previousThread", "conflict lookup should find thread shortcut");
 equal(APP_SHORTCUT_LABELS.focusSearch, "Command palette", "persisted focusSearch action should label the palette");
+
+// New configurable actions and punctuation keys
+equal(normalizeShortcut("Mod+,"), "Mod+,", "comma shortcuts should parse");
+equal(normalizeShortcut("Mod+/"), "Mod+/", "slash shortcuts should parse so Open composer suggestions matches");
+equal(normalizeShortcut("Mod+-"), null, "UI size keys stay reserved");
+equal(shortcutMatchesEvent("Mod+,", { key: ",", metaKey: true }, true), true, "Cmd+, should open settings on macOS");
+equal(shortcutMatchesEvent("Mod+,", { key: ",", ctrlKey: true }, false), true, "Ctrl+, should open settings on Windows");
+equal(shortcutMatchesEvent("Mod+/", { key: "/", ctrlKey: true }, false), true, "Ctrl+/ should open composer suggestions");
+equal(shortcutMatchesEvent("Mod+Shift+G", { key: "G", metaKey: true, shiftKey: true }, true), true, "shifted letters should match");
+equal(shortcutFromKeyboardEvent({ key: ",", metaKey: true }, true), "Mod+,", "recording should capture punctuation");
+equal(shortcutMatchesEvent("", { key: "a", metaKey: true, shiftKey: true }, true), false, "an unbound action should never match");
+equal(shortcutLabel(""), "", "an unbound action should have no label");
+
+const defaults = new Set<string>();
+for (const action of APP_SHORTCUT_ACTIONS) {
+  const shortcut = DEFAULT_APP_SHORTCUTS[action];
+  equal(Boolean(APP_SHORTCUT_LABELS[action]), true, `${action} should have a label`);
+  equal(normalizeShortcut(shortcut), shortcut, `${action} default should already be normalized`);
+  equal(shortcutValidationIssue(shortcut), null, `${action} default should be valid`);
+  equal(defaults.has(shortcut), false, `${action} default should not collide with another default`);
+  defaults.add(shortcut);
+}
+for (const reserved of ["Mod+W", "Mod+T", "Mod+S", "Mod+F", "Mod+Z", "Mod+C", "Mod+V", "Mod+X", "Mod+A", "Mod+Q", "Mod+M", "Mod+H", "Mod+Shift+Z", "Mod+Shift+V", "Mod+Shift+R", "Mod+Enter"]) {
+  equal(defaults.has(reserved), false, `${reserved} is a platform or editor default and must not be an app default`);
+}
+
+// Mod+1..9 jump to sidebar chats and cannot be rebound
+equal(threadJumpIndexFromEvent({ key: "1", metaKey: true }, true), 0, "Cmd+1 should jump to the first chat");
+equal(threadJumpIndexFromEvent({ key: "9", ctrlKey: true }, false), 8, "Ctrl+9 should jump to the ninth chat");
+equal(threadJumpIndexFromEvent({ key: "0", ctrlKey: true }, false), null, "Ctrl+0 is not a thread jump");
+equal(threadJumpIndexFromEvent({ key: "1", ctrlKey: true, shiftKey: true }, false), null, "Shift should not jump");
+equal(threadJumpIndexFromEvent({ key: "1", ctrlKey: true }, true), null, "literal Ctrl+1 should not jump on macOS");
+equal(threadJumpIndexFromEvent({ key: "1", metaKey: true, repeat: true }, true), null, "repeats should not jump again");
+equal(shortcutValidationIssue("Mod+3") !== null, true, "Mod+3 should be reserved for thread jumps");
+equal(shortcutValidationIssue("Mod+Shift+3"), null, "Mod+Shift+3 remains available");
+
+const migrated = normalizeAppShortcuts({
+  newChat: "Mod+Shift+G",
+  focusSearch: "Mod+4",
+});
+equal(migrated.newChat, "Mod+Shift+G", "a saved custom binding should keep priority over a new default");
+equal(migrated.toggleGitPanel, "", "a new default already claimed by a saved binding should stay unbound");
+equal(migrated.focusSearch, DEFAULT_APP_SHORTCUTS.focusSearch, "a saved reserved thread-jump binding should fall back");
+equal(migrated.openSettings, "Mod+,", "new actions should receive their defaults");
 
 export {};

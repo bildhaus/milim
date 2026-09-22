@@ -6,7 +6,7 @@ title: Quickstart
 summary: Connect any model runtime, optionally pick a workspace, keep one canonical thread, switch models inline, and review the result.
 group: Start
 order: 20
-updated: 2026-08-30
+updated: 2026-09-23
 ---
 
 Aim for one safe core loop: connect a runtime, optionally select a workspace, approve one small change, inspect the resulting diff, and continue the same thread with another model. Switching models changes the next turn; it does not reset workspace context or conversation history.
@@ -16,7 +16,7 @@ Aim for one safe core loop: connect a runtime, optionally select a workspace, ap
 | Step | What to check |
 |---|---|
 | Install or run | Use a release build for normal use. Use `pnpm -C apps/desktop tauri:dev` only when working on the app. |
-| Runtime | The searchable picker detects hosted providers, Ollama, LM Studio, Codex, Claude, OpenCode, and Pi. Cached provider models appear first; slower runtime results join as they arrive. Select any reachable model, then choose **Continue**. **Continue without a model** is available, but chat stays disabled until **Manage models** above the composer is used to connect one. |
+| Runtime | The searchable picker detects hosted providers, Ollama, LM Studio, Codex, Claude, OpenCode, and Pi. Cached provider models appear first; slower runtime results join as they arrive. Only chat-capable models are listed; media generators such as Replicate and fal are added later in Providers. Codex connects from the **Coding CLIs** path, while Claude, OpenCode, and Pi link to their [sign-in steps](models#sign-in-to-an-account-runtime). Select any reachable model, then choose **Continue**. **Continue without a model** is available, but chat stays disabled until you connect one from **Tools > Providers** or the **Open Providers** action above the composer. |
 | Workspace | A folder is optional for chat and required for repository work. Choose one or skip it, then select **Open Milim**. The composer receives focus and no task is sent automatically. |
 
 Onboarding reaches the composer in two advances: Runtime → optional Workspace → app. Provider, privacy, approval, and workspace choices remain editable from the thread.
@@ -41,7 +41,7 @@ pnpm -C apps/desktop tauri:dev
 
 The desktop app embeds the server in-process. There is no separate `milim serve` process for normal desktop use.
 
-Memory, sandbox, computer use, imports, Agents, Workers, Skills, MCP, Schedules, Media, and Pull Requests remain available after setup through thread controls, Settings, and the collapsed sidebar **Tools** launcher. Standalone server setup and CLI commands live in the [API reference](api).
+Memory, sandbox, computer use, imports, Agents, Workers, Skills, MCP, Schedules, Media, and Pull Requests remain available after setup through thread controls, Settings, and the collapsed sidebar **Tools** launcher, which lists every manager including Providers, Google Workspace, and Mobile. `Ctrl/Cmd+K` opens the command palette for the same managers, panels, chat actions, and slash commands. Standalone server setup and CLI commands live in the [API reference](api).
 
 ## Troubleshooting
 
