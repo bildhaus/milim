@@ -1859,7 +1859,10 @@ fn save_artifact_file_blocking(
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create artifact directory: {e}"))?;
     }
-    std::fs::write(&target, content.as_bytes())
+    // Re-resolve after creating parents so a symlink raced into the new
+    // directory chain cannot redirect the write outside the workspace.
+    let target = resolve_artifact_target(&workspace, &path)?;
+    atomic_write(&target, content.as_bytes())
         .map_err(|e| format!("failed to write artifact file: {e}"))?;
     Ok(SavedArtifactFilePayload {
         path: target.to_string_lossy().to_string(),
@@ -1868,18 +1871,14 @@ fn save_artifact_file_blocking(
     })
 }
 
+/// Resolve an artifact path inside the workspace with the same symlink and
+/// junction rules as the workspace file tools, so a link inside the workspace
+/// cannot redirect saves or previews to files outside it.
 fn resolve_artifact_target(workspace: &str, path: &str) -> std::result::Result<PathBuf, String> {
-    let workspace = PathBuf::from(workspace.trim());
-    if workspace.as_os_str().is_empty() {
-        return Err("no working folder selected".to_string());
-    }
-    let metadata = std::fs::metadata(&workspace)
-        .map_err(|e| format!("failed to read working folder metadata: {e}"))?;
-    if !metadata.is_dir() {
-        return Err("working folder is not a directory".to_string());
-    }
-
-    Ok(workspace.join(safe_artifact_relative_path(path)?))
+    let workspace = workspace_root(workspace)?;
+    let relative = safe_artifact_relative_path(path)?;
+    resolve_workspace_path(&workspace, &relative.to_string_lossy())
+        .map_err(|error| error.to_string())
 }
 
 fn safe_artifact_relative_path(path: &str) -> std::result::Result<PathBuf, String> {
@@ -2240,9 +2239,14 @@ fn artifact_file_status_blocking(
 async fn open_artifact_location(
     path: String,
     target: Option<String>,
+    root: Option<String>,
 ) -> std::result::Result<(), String> {
     tokio::task::spawn_blocking(move || {
-        open_artifact_location_blocking(path, target.unwrap_or_else(|| "file".to_string()))
+        open_artifact_location_blocking(
+            path,
+            target.unwrap_or_else(|| "file".to_string()),
+            root,
+        )
     })
     .await
     .map_err(|e| format!("artifact open task failed: {e}"))?
@@ -2251,8 +2255,12 @@ async fn open_artifact_location(
 fn open_artifact_location_blocking(
     path: String,
     target: String,
+    root: Option<String>,
 ) -> std::result::Result<(), String> {
     let path = validate_artifact_open_path(Path::new(path.trim()))?;
+    if let Some(root) = root.as_deref().filter(|root| !root.trim().is_empty()) {
+        validate_artifact_open_root(&path, root)?;
+    }
     let target = parse_artifact_open_target(&target)?;
     let spec = artifact_open_command(&path, target)?;
     record_subprocess_launch();
@@ -2728,7 +2736,77 @@ fn validate_artifact_open_path(path: &Path) -> std::result::Result<PathBuf, Stri
     if !metadata.is_file() && !metadata.is_dir() {
         return Err("artifact path must be a file or directory".to_string());
     }
-    Ok(path.to_path_buf())
+    // Resolve links so the launch checks below see the real target, not a
+    // harmless-looking name that points at an app or script.
+    canonical_shell_path(path).map_err(|e| format!("artifact path is not available: {e}"))
+}
+
+/// Canonicalize a path for handing to the platform shell. Windows verbatim
+/// prefixes are stripped because Explorer does not accept them.
+fn canonical_shell_path(path: &Path) -> io::Result<PathBuf> {
+    let canonical = std::fs::canonicalize(path)?;
+    if cfg!(windows) {
+        let raw = canonical.to_string_lossy();
+        if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
+            return Ok(PathBuf::from(format!(r"\\{unc}")));
+        }
+        if let Some(local) = raw.strip_prefix(r"\\?\") {
+            return Ok(PathBuf::from(local));
+        }
+    }
+    Ok(canonical)
+}
+
+/// Require an already-canonical artifact path to live inside `root` when the
+/// caller knows which workspace produced it.
+fn validate_artifact_open_root(path: &Path, root: &str) -> std::result::Result<(), String> {
+    let root = canonical_shell_path(Path::new(root.trim()))
+        .map_err(|e| format!("artifact root is not available: {e}"))?;
+    if !path.starts_with(&root) {
+        return Err("artifact path is outside the working folder".to_string());
+    }
+    Ok(())
+}
+
+/// Extensions the OS would run, install, or follow to another target instead
+/// of opening as a document. Opening these could execute model- or
+/// attachment-supplied code, so they are revealed in the file manager.
+const ARTIFACT_LAUNCHABLE_EXTENSIONS: &[&str] = &[
+    // macOS bundles, scripts, and launch shortcuts.
+    "app", "action", "appex", "applescript", "bundle", "command", "fileloc", "inetloc",
+    "kext", "mpkg", "pkg", "plugin", "prefpane", "saver", "scpt", "scptd", "terminal",
+    "tool", "webloc", "workflow", "xpc",
+    // Windows executables, installers, scripts, and shortcuts.
+    "appref-ms", "application", "bat", "cmd", "com", "cpl", "exe", "gadget", "hta", "inf",
+    "jse", "lnk", "msc", "msi", "msix", "msp", "pif", "ps1", "psm1", "reg", "scf", "scr",
+    "url", "vb", "vbe", "vbs", "ws", "wsc", "wsf", "wsh",
+    // Cross-platform interpreters and Linux launchers.
+    "appimage", "bash", "csh", "desktop", "fish", "jar", "js", "ksh", "pl", "py", "pyw",
+    "rb", "run", "sh", "zsh",
+];
+
+fn artifact_path_is_launchable(path: &Path) -> bool {
+    let launchable_extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| {
+            let value = value.to_ascii_lowercase();
+            ARTIFACT_LAUNCHABLE_EXTENSIONS.contains(&value.as_str())
+        })
+        .unwrap_or(false);
+    if launchable_extension {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = std::fs::metadata(path) {
+            if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn parse_artifact_open_target(target: &str) -> std::result::Result<ArtifactOpenTarget, String> {
@@ -2743,6 +2821,9 @@ fn artifact_open_command(
     path: &Path,
     target: ArtifactOpenTarget,
 ) -> std::result::Result<ArtifactOpenCommandSpec, String> {
+    if artifact_path_is_launchable(path) {
+        return Ok(artifact_reveal_command(path));
+    }
     let path_string = path.to_string_lossy().to_string();
     if cfg!(windows) {
         let args = match target {
@@ -2783,6 +2864,31 @@ fn artifact_open_command(
         program: "xdg-open".to_string(),
         args: vec![target_path.to_string_lossy().to_string()],
     })
+}
+
+/// Select the item in the platform file manager without opening it.
+fn artifact_reveal_command(path: &Path) -> ArtifactOpenCommandSpec {
+    let path_string = path.to_string_lossy().to_string();
+    if cfg!(windows) {
+        return ArtifactOpenCommandSpec {
+            program: "explorer".to_string(),
+            args: vec![format!("/select,{path_string}")],
+        };
+    }
+    if cfg!(target_os = "macos") {
+        return ArtifactOpenCommandSpec {
+            program: "open".to_string(),
+            args: vec!["-R".to_string(), path_string],
+        };
+    }
+    let parent = path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| path.to_path_buf());
+    ArtifactOpenCommandSpec {
+        program: "xdg-open".to_string(),
+        args: vec![parent.to_string_lossy().to_string()],
+    }
 }
 
 fn validate_workspace_launcher_root(workspace: &str) -> std::result::Result<PathBuf, String> {
@@ -5728,6 +5834,118 @@ args=['mcp-obsidian']
             spec.args.iter().any(|arg| arg.contains("open-target.txt")),
             "open command must pass the file path as a process argument"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn artifact_open_reveals_executables_instead_of_launching() {
+        let root = std::env::temp_dir().join(format!(
+            "milim-open-launchable-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("Evil.app")).unwrap();
+        for name in ["run.command", "setup.EXE", "install.sh", "link.lnk", "tool.jar"] {
+            std::fs::write(root.join(name), "x").unwrap();
+            assert!(artifact_path_is_launchable(&root.join(name)), "{name}");
+        }
+        assert!(artifact_path_is_launchable(&root.join("Evil.app")));
+        std::fs::write(root.join("notes.txt"), "x").unwrap();
+        assert!(!artifact_path_is_launchable(&root.join("notes.txt")));
+
+        let spec =
+            artifact_open_command(&root.join("run.command"), ArtifactOpenTarget::File).unwrap();
+        let expected = artifact_reveal_command(&root.join("run.command"));
+        assert_eq!(spec.program, expected.program);
+        assert_eq!(spec.args, expected.args);
+        let spec =
+            artifact_open_command(&root.join("Evil.app"), ArtifactOpenTarget::Folder).unwrap();
+        assert_eq!(spec.args, artifact_reveal_command(&root.join("Evil.app")).args);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script = root.join("no-extension");
+            std::fs::write(&script, "#!/bin/sh\n").unwrap();
+            assert!(!artifact_path_is_launchable(&script));
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(artifact_path_is_launchable(&script));
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn artifact_open_requires_path_inside_known_root() {
+        let root = std::env::temp_dir().join(format!(
+            "milim-open-root-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("workspace")).unwrap();
+        std::fs::write(root.join("workspace").join("inside.txt"), "x").unwrap();
+        std::fs::write(root.join("outside.txt"), "x").unwrap();
+        let workspace = root.join("workspace").to_string_lossy().to_string();
+
+        let inside =
+            validate_artifact_open_path(&root.join("workspace").join("inside.txt")).unwrap();
+        assert!(validate_artifact_open_root(&inside, &workspace).is_ok());
+        let outside = validate_artifact_open_path(&root.join("outside.txt")).unwrap();
+        assert!(validate_artifact_open_root(&outside, &workspace).is_err());
+
+        #[cfg(unix)]
+        {
+            let link = root.join("workspace").join("link.txt");
+            std::os::unix::fs::symlink(root.join("outside.txt"), &link).unwrap();
+            let resolved = validate_artifact_open_path(&link).unwrap();
+            assert!(validate_artifact_open_root(&resolved, &workspace).is_err());
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_save_and_preview_reject_symlink_escapes() {
+        let root = std::env::temp_dir().join(format!(
+            "milim-artifact-symlink-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "secret").unwrap();
+        std::os::unix::fs::symlink(&outside, workspace.join("escape")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.txt"), workspace.join("secret.txt"))
+            .unwrap();
+        let workspace_arg = workspace.to_string_lossy().to_string();
+
+        for path in ["escape/new.txt", "escape/secret.txt", "secret.txt"] {
+            assert!(save_artifact_file_blocking(
+                workspace_arg.clone(),
+                path.to_string(),
+                "pwned".to_string(),
+                true,
+            )
+            .is_err());
+            assert!(preview_artifact_file_blocking(
+                workspace_arg.clone(),
+                path.to_string(),
+                "pwned".to_string(),
+            )
+            .is_err());
+        }
+        assert_eq!(
+            std::fs::read_to_string(outside.join("secret.txt")).unwrap(),
+            "secret"
+        );
+        assert!(!outside.join("new.txt").exists());
         let _ = std::fs::remove_dir_all(root);
     }
 
