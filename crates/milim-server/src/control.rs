@@ -1470,7 +1470,7 @@ impl RunManager {
         let active_delivery = self
             .active
             .lock()
-            .expect("control active run store poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(target_thread_id)
             .map(|run| if run.steering { "steer" } else { "queue" });
         let delivery = active_delivery.unwrap_or(if queued_turns > 0 { "queue" } else { "start" });
@@ -1670,7 +1670,7 @@ impl RunManager {
         let active_delivery = self
             .active
             .lock()
-            .expect("control active run store poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(target_thread_id)
             .map(|run| (run.run_id.clone(), run.steering));
         let busy = active_delivery.is_some();
@@ -1956,7 +1956,7 @@ impl RunManager {
         if !self
             .active
             .lock()
-            .expect("control active run store poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_empty()
             || !self.store.control_runs(true)?.is_empty()
             || !self.store.control_queued_turns(None)?.is_empty()
@@ -1977,7 +1977,7 @@ impl RunManager {
     pub fn host(&self) -> ControlHostRecord {
         self.host
             .read()
-            .expect("control host store poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
@@ -1986,7 +1986,10 @@ impl RunManager {
         let restored = self
             .store
             .ensure_control_host(&current.host_id, &current.display_name)?;
-        *self.host.write().expect("control host store poisoned") = restored.clone();
+        *self
+            .host
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = restored.clone();
         Ok(restored)
     }
 
@@ -2095,7 +2098,7 @@ impl RunManager {
         let mut tickets = self
             .socket_tickets
             .lock()
-            .expect("control socket ticket store poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         tickets.retain(|_, value| value.expires_at > Instant::now());
         tickets.insert(
             ticket.clone(),
@@ -2111,7 +2114,7 @@ impl RunManager {
         let mut tickets = self
             .socket_tickets
             .lock()
-            .expect("control socket ticket store poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         tickets.retain(|_, value| value.expires_at > Instant::now());
         tickets.remove(ticket)
     }
@@ -2154,7 +2157,7 @@ impl RunManager {
         let mut uploads = self
             .attachment_uploads
             .lock()
-            .expect("control attachment upload store poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         uploads.retain(|_, upload| upload.expires_at > now);
         let existing = uploads.values().find(|upload| {
             upload.device_id == device_id && upload.client_attachment_id == client_attachment_id
@@ -2217,7 +2220,7 @@ impl RunManager {
             let active = self
                 .active
                 .lock()
-                .expect("control active run store poisoned");
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             threads
                 .iter()
                 .map(|thread| {
@@ -2558,7 +2561,7 @@ impl RunManager {
             let mut pending = self
                 .attachment_uploads
                 .lock()
-                .expect("control attachment upload store poisoned");
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             pending.retain(|_, upload| upload.expires_at > now);
             requested
                 .iter()
@@ -2623,7 +2626,7 @@ impl RunManager {
         let mut pending = self
             .attachment_uploads
             .lock()
-            .expect("control attachment upload store poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for upload_id in upload_ids {
             pending.remove(upload_id);
         }
@@ -3289,7 +3292,7 @@ impl RunManager {
         if self
             .active
             .lock()
-            .expect("control active run store poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains_key(id)
         {
             return Err(Error::InvalidRequest(
@@ -3410,7 +3413,7 @@ impl RunManager {
         if self
             .active
             .lock()
-            .expect("control active run store poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains_key(thread_id)
         {
             return Err(Error::InvalidRequest(
@@ -3505,7 +3508,7 @@ impl RunManager {
         let busy = self
             .active
             .lock()
-            .expect("control active run store poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains_key(&thread_id);
         if busy {
             let queue_id = Uuid::new_v4().to_string();
@@ -3587,7 +3590,7 @@ impl RunManager {
             let active = self
                 .active
                 .lock()
-                .expect("control active run store poisoned");
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let Some(run) = active.get(&thread_id) else {
                 return Err(Error::InvalidRequest("thread has no active turn".into()));
             };
@@ -3733,7 +3736,7 @@ impl RunManager {
         if self
             .active
             .lock()
-            .expect("control active run store poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains_key(&thread_id)
         {
             return Err(Error::InvalidRequest(
@@ -3924,7 +3927,7 @@ impl RunManager {
         if self
             .active
             .lock()
-            .expect("control active run store poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains_key(&thread_id)
         {
             return Err(Error::InvalidRequest(
@@ -3938,7 +3941,7 @@ impl RunManager {
             let mut active = self
                 .active
                 .lock()
-                .expect("control active run store poisoned");
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if active.contains_key(&thread_id) {
                 return Err(Error::InvalidRequest(
                     "thread already has an active turn".into(),
@@ -3962,7 +3965,7 @@ impl RunManager {
             Err(error) => {
                 self.active
                     .lock()
-                    .expect("control active run store poisoned")
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .remove(&thread_id);
                 return Err(error);
             }
@@ -4047,7 +4050,7 @@ impl RunManager {
         if let Err(error) = journal.commit_composition(&accepted) {
             self.active
                 .lock()
-                .expect("control active run store poisoned")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(&thread_id);
             run_record.status = "failed".into();
             run_record.updated_at_ms = now_ms();
@@ -4191,12 +4194,12 @@ impl RunManager {
         let _ = self.store.control_retarget_pending_steers(&run_id);
         self.active
             .lock()
-            .expect("control active run store poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&thread_id);
         let interrupt_queue_id = self
             .queue_interrupts
             .lock()
-            .expect("control queue interrupt store poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&thread_id);
         if let Some(queue_id) = interrupt_queue_id {
             let _ = self.start_queued_turn(state, thread_id, &queue_id, true);
@@ -5189,7 +5192,7 @@ impl RunManager {
         let active = self
             .active
             .lock()
-            .expect("control active run store poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let run = active.get(thread_id);
         if let Some(run) = run {
             let _ = run.stop.send(true);
@@ -5229,7 +5232,7 @@ impl RunManager {
             let active = self
                 .active
                 .lock()
-                .expect("control active run store poisoned");
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(run) = active.get(&thread_id) {
                 if !interrupt_active {
                     return Err(Error::InvalidRequest(
@@ -5247,7 +5250,7 @@ impl RunManager {
                 let mut interrupts = self
                     .queue_interrupts
                     .lock()
-                    .expect("control queue interrupt store poisoned");
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(pending) = interrupts.get(&thread_id) {
                     if pending != &queue_id {
                         return Err(Error::InvalidRequest(
@@ -5618,13 +5621,13 @@ impl RunManager {
     pub async fn shutdown(&self, timeout: Duration) {
         self.queue_interrupts
             .lock()
-            .expect("control queue interrupt store poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
         {
             let active = self
                 .active
                 .lock()
-                .expect("control active run store poisoned");
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             for run in active.values() {
                 let _ = run.stop.send(true);
             }
@@ -5634,7 +5637,7 @@ impl RunManager {
                 if self
                     .active
                     .lock()
-                    .expect("control active run store poisoned")
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .is_empty()
                 {
                     break;
@@ -5650,7 +5653,7 @@ impl RunManager {
     fn lock_for_command(&self, command_id: &str) -> Arc<AsyncMutex<()>> {
         self.command_locks
             .lock()
-            .expect("control command lock store poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .entry(command_id.to_string())
             .or_insert_with(|| Arc::new(AsyncMutex::new(())))
             .clone()
@@ -5659,7 +5662,7 @@ impl RunManager {
     fn lock_for_thread(&self, thread_id: &str) -> Arc<AsyncMutex<()>> {
         self.thread_locks
             .lock()
-            .expect("control thread lock store poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .entry(thread_id.to_string())
             .or_insert_with(|| Arc::new(AsyncMutex::new(())))
             .clone()
@@ -5914,7 +5917,7 @@ impl RunManager {
         let mut confirmations = self
             .confirmations
             .lock()
-            .expect("control confirmation store poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         confirmations.retain(|_, grant| grant.expires_at > Instant::now());
         let grant = confirmations
             .entry(command.command_id.clone())
@@ -5942,7 +5945,7 @@ impl RunManager {
         let mut confirmations = self
             .confirmations
             .lock()
-            .expect("control confirmation store poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         confirmations.retain(|_, grant| grant.expires_at > Instant::now());
         confirmations
             .remove(&command.command_id)

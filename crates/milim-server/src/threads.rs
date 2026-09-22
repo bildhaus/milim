@@ -174,7 +174,10 @@ impl ThreadSupervisor {
                 "all workers in a run must share one parent thread".to_string(),
             ));
         }
-        let mut active = self.handles.lock().expect("thread handles poisoned");
+        let mut active = self
+            .handles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if active.len() + specs.len() > MAX_ACTIVE_CHILDREN {
             return Err(Error::InvalidRequest(format!(
                 "at most {MAX_ACTIVE_CHILDREN} child threads may run at once"
@@ -395,7 +398,7 @@ impl ThreadSupervisor {
         if let Some(handle) = self
             .handles
             .lock()
-            .expect("thread handles poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(id)
         {
             handle.abort();
@@ -420,7 +423,10 @@ impl ThreadSupervisor {
     }
 
     pub fn stop_running_children(&self, message: &str) -> Result<usize> {
-        let mut handles = self.handles.lock().expect("thread handles poisoned");
+        let mut handles = self
+            .handles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for (_, handle) in handles.drain() {
             handle.abort();
         }
@@ -434,7 +440,10 @@ impl ThreadSupervisor {
         if ids.is_empty() {
             return Ok(ids);
         }
-        let mut handles = self.handles.lock().expect("thread handles poisoned");
+        let mut handles = self
+            .handles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for thread_id in &ids {
             if let Some(handle) = handles.remove(thread_id) {
                 handle.abort();
