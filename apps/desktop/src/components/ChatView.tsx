@@ -2,6 +2,7 @@ import {
   lazy,
   Suspense,
   useCallback,
+  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -3551,18 +3552,35 @@ export function ChatView({
     return true;
   }
 
+  // The context meter is advisory, so it trails stream flushes and typing
+  // instead of re-estimating on the urgent render path.
+  const tokenEstimateMessages = useDeferredValue(messages);
+  const tokenEstimateInput = useDeferredValue(input);
   const tokens = useMemo(() => {
     const fixed: ChatMessage[] = [globalInstructions, instructions]
       .map((content) => content.trim())
       .filter(Boolean)
       .map((content): ChatMessage => ({ role: "system", content }));
-    const draft: ChatMessage[] = input.trim() || pendingAttachments.length
-      ? [{ role: "user", content: input, attachments: pendingAttachments }]
-      : [];
+    const draft: ChatMessage[] =
+      tokenEstimateInput.trim() || pendingAttachments.length
+        ? [
+            {
+              role: "user",
+              content: tokenEstimateInput,
+              attachments: pendingAttachments,
+            },
+          ]
+        : [];
     return estimateMessagesTokens(
-      messagesForModelContext(fixed, [...messages, ...draft]),
+      messagesForModelContext(fixed, [...tokenEstimateMessages, ...draft]),
     );
-  }, [messages, input, globalInstructions, instructions, pendingAttachments]);
+  }, [
+    tokenEstimateMessages,
+    tokenEstimateInput,
+    globalInstructions,
+    instructions,
+    pendingAttachments,
+  ]);
   const activeContextBudget = useMemo(
     () => modelContextBudget(effectiveModel.trim(), pickerModels),
     [effectiveModel, pickerModels],
