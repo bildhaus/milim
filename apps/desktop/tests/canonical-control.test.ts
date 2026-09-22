@@ -1,5 +1,6 @@
 import { strict as assert } from "node:assert";
 import {
+  appendControlTimelineItems,
   canonicalNativeSessionAction,
   controlQueuedMessage,
   hostBusySessionIdsFromBootstrap,
@@ -31,6 +32,33 @@ const item = (
   data,
   created_at_ms: seq,
 });
+
+{
+  const timeline: ControlTimelineItemV1[] = [];
+  const known = new Set<string>();
+  appendControlTimelineItems(timeline, known, [
+    item(1, "assistant_delta", { text: "a" }),
+    item(2, "assistant_delta", { text: "b" }),
+  ]);
+  appendControlTimelineItems(timeline, known, [
+    item(2, "assistant_delta", { text: "b" }),
+    item(3, "assistant_delta", { text: "c" }),
+  ]);
+  assert.deepEqual(
+    timeline.map((entry) => entry.seq),
+    [1, 2, 3],
+    "overlapping timeline pages should not duplicate an epoch:seq item",
+  );
+  appendControlTimelineItems(timeline, known, [
+    { ...item(3, "assistant_delta", { text: "c" }), epoch: "epoch-2" },
+    item(0, "run_status", { status: "accepted" }),
+  ]);
+  assert.deepEqual(
+    timeline.map((entry) => `${entry.epoch}:${entry.seq}`),
+    ["epoch-1:0", "epoch-1:1", "epoch-1:2", "epoch-1:3", "epoch-2:3"],
+    "a new epoch keeps its item and an out-of-order page is re-sorted by seq",
+  );
+}
 
 assert.deepEqual(
   canonicalNativeSessionAction([
