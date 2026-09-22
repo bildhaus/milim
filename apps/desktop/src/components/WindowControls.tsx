@@ -30,12 +30,19 @@ export function WindowControls() {
   useEffect(() => {
     if (!inTauri) return;
     const w = getCurrentWindow();
+    let cancelled = false;
     let un: (() => void) | undefined;
     w.isMaximized().then(setMaxed).catch(() => {});
     w.onResized(() => w.isMaximized().then(setMaxed).catch(() => {}))
-      .then((u) => (un = u))
+      .then((u) => {
+        if (cancelled) u();
+        else un = u;
+      })
       .catch(() => {});
-    return () => un?.();
+    return () => {
+      cancelled = true;
+      un?.();
+    };
   }, []);
 
   const act = (label: string, fn: () => Promise<unknown>) => () => {

@@ -787,18 +787,24 @@ function AppContent() {
 
   useEffect(() => {
     if (!inTauri) return;
+    let cancelled = false;
     let dispose: (() => void) | undefined;
     void import("@tauri-apps/api/event")
       .then(({ listen }) => listen("milim://runtime-failed", () => setRuntimeFailed(true)))
       .then((unlisten) => {
-        dispose = unlisten;
+        if (cancelled) unlisten();
+        else dispose = unlisten;
       })
       .catch(() => {});
-    return () => dispose?.();
+    return () => {
+      cancelled = true;
+      dispose?.();
+    };
   }, []);
 
   useEffect(() => {
     if (!inTauri) return;
+    let cancelled = false;
     let dispose: (() => void) | undefined;
     void import("@tauri-apps/api/event")
       .then(({ listen }) => listen<string>(APP_MENU_EVENT, (event) => {
@@ -823,10 +829,14 @@ function AppContent() {
         }
       }))
       .then((unlisten) => {
-        dispose = unlisten;
+        if (cancelled) unlisten();
+        else dispose = unlisten;
       })
       .catch(() => {});
-    return () => dispose?.();
+    return () => {
+      cancelled = true;
+      dispose?.();
+    };
   }, []);
 
   if (runtimeFailed) {
