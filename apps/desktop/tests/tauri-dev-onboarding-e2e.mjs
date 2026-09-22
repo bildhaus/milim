@@ -333,7 +333,7 @@ async function restoreOnboardingState(page, previous) {
 
 async function completeOnboarding(page) {
   await page.getByRole("heading", { name: "Connect a runtime" }).waitFor();
-  await page.getByRole("button", { name: /Installed agents/ }).click();
+  await page.getByRole("button", { name: /Coding CLIs/ }).click();
   for (const runtime of ["codex", "claude", "opencode", "pi"]) {
     await page.getByTestId(`onboarding-runtime-${runtime}`).waitFor();
   }
