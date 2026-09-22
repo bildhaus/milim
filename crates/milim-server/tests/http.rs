@@ -4821,6 +4821,68 @@ async fn workspace_git_staging_actions_stage_hunks_and_guard_discards() {
 }
 
 #[tokio::test]
+async fn usage_summary_aggregates_canonical_message_metrics() {
+    let store = Arc::new(
+        milim_storage::UserDataStore::new(milim_storage::Database::open_in_memory().unwrap())
+            .unwrap(),
+    );
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let thread = json!({
+        "settings": { "folder": "/work/usage-project" },
+        "messages": [{
+            "id": "usage-a1",
+            "role": "assistant",
+            "content": "done",
+            "metrics": {
+                "startedAt": now_ms - 2_000,
+                "endedAt": now_ms - 1_000,
+                "model": "provider:openrouter:test/model",
+                "provider": "OpenRouter",
+                "usage": { "prompt_tokens": 120, "completion_tokens": 30, "total_tokens": 150 },
+                "costUsd": 0.02,
+                "costSource": "provider"
+            }
+        }]
+    });
+    store
+        .control_create_thread("usage-thread", &thread.to_string(), "epoch")
+        .unwrap();
+    let control = milim_server::control::RunManager::new(store, "Usage fixture").unwrap();
+    let base = spawn(test_state().with_control(control)).await;
+
+    let summary: Value = reqwest::get(format!("{base}/usage/summary?days=7&tz_offset_minutes=0"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(summary["days"], 7);
+    assert_eq!(summary["by_day"].as_array().unwrap().len(), 7);
+    assert_eq!(summary["totals"]["total_tokens"], 150);
+    assert_eq!(summary["totals"]["reported_cost_usd"], 0.02);
+    assert_eq!(summary["by_project"][0]["label"], "usage-project");
+    assert_eq!(summary["by_provider"][0]["key"], "OpenRouter");
+    assert_eq!(
+        summary["by_model"][0]["key"],
+        "provider:openrouter:test/model"
+    );
+
+    let invalid = reqwest::get(format!("{base}/usage/summary?days=0"))
+        .await
+        .unwrap();
+    assert!(invalid.status().is_client_error());
+
+    let standalone = spawn(test_state()).await;
+    let unavailable = reqwest::get(format!("{standalone}/usage/summary"))
+        .await
+        .unwrap();
+    assert!(unavailable.status().is_client_error());
+}
+
+#[tokio::test]
 async fn workspace_git_action_diff_reports_patch() {
     if Command::new("git").arg("--version").output().is_err() {
         return;

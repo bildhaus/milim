@@ -17,6 +17,9 @@ use sha2::{Digest, Sha256};
 
 use crate::crypto::EncryptedStore;
 
+mod usage;
+pub use usage::{UsageBucket, UsageSummary, UsageTotals, USAGE_MAX_DAYS};
+
 static DB_LOCK_COUNT: AtomicU64 = AtomicU64::new(0);
 static DB_LOCK_WAIT_NS: AtomicU64 = AtomicU64::new(0);
 static TRANSACTION_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -661,6 +664,16 @@ const USER_DATA_MIGRATIONS: &[Migration] = &[
                 (owner_thread_id, target_thread_id, created_at_ms)
               SELECT target_thread_id, owner_thread_id, created_at_ms
               FROM user_thread_links;",
+    },
+    Migration {
+        version: 11,
+        name: "usage_ledger_indexes",
+        sql: "CREATE INDEX IF NOT EXISTS idx_user_session_messages_metrics_ended
+            ON user_session_messages(json_extract(message_json, '$.metrics.endedAt'))
+            WHERE json_extract(message_json, '$.metrics.endedAt') IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_user_session_messages_compaction_created
+            ON user_session_messages(json_extract(message_json, '$.compaction.createdAt'))
+            WHERE json_extract(message_json, '$.compaction.summary') IS NOT NULL;",
     },
 ];
 

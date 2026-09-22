@@ -81,6 +81,9 @@ export const Gear = (p: P) => (
 export const Sliders = (p: P) => (
   <Svg {...p}><path d="M4 6h8M16 6h4M14 4v4M4 12h3M11 12h9M9 10v4M4 18h10M18 18h2M16 16v4" /></Svg>
 );
+export const BarChart = (p: P) => (
+  <Svg {...p}><path d="M4 20h16" /><path d="M7 16v-5M12 16V6M17 16v-8" /></Svg>
+);
 export const Pin = (p: P) => (
   <Svg {...p}><path d="M9 4h6l-1 6 3 3v2H7v-2l3-3-1-6ZM12 15v5" /></Svg>
 );

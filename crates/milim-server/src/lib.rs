@@ -204,6 +204,8 @@ pub fn build_router(state: AppState) -> Router {
             get(routes::media_library_content),
         )
         .route("/media/library/{id}", delete(routes::media_library_delete))
+        // Usage dashboard aggregates over canonical message metrics
+        .route("/usage/summary", get(routes::usage_summary))
         // Host working folder (drives the filesystem/shell tools)
         .route(
             "/workspace",

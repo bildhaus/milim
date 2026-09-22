@@ -40,7 +40,7 @@ import { HoverScrollText } from "./HoverScrollText";
 import { PaneResizeHandle } from "./PaneResizeHandle";
 import { SheetDialog } from "./SheetDialog";
 import { ColorField } from "./ui";
-import { Archive, ArrowUp, Bolt, Calendar, Check, ChevronDown, Code, Cube, Download, FileText, Folder, FolderOpen, Gear, GitBranch, GitPullRequest, Globe, Image, Lightbulb, MoreHorizontal, Pin, Plus, Search, Sidebar as PanelIcon, Star, Terminal } from "./icons";
+import { Archive, ArrowUp, BarChart, Bolt, Calendar, Check, ChevronDown, Code, Cube, Download, FileText, Folder, FolderOpen, Gear, GitBranch, GitPullRequest, Globe, Image, Lightbulb, MoreHorizontal, Pin, Plus, Search, Sidebar as PanelIcon, Star, Terminal } from "./icons";
 
 const GitPanel = lazy(() =>
   import("./GitPanel").then((mod) => ({ default: mod.GitPanel })),
@@ -781,6 +781,7 @@ export function Sidebar({
   onManageSchedules,
   onManageMedia,
   onManagePullRequests,
+  onManageUsage,
   onManageMcp,
   onGitAction,
   onOpenGitPanel,
@@ -794,6 +795,7 @@ export function Sidebar({
   onManageSchedules: () => void;
   onManageMedia: () => void;
   onManagePullRequests: () => void;
+  onManageUsage?: () => void;
   onManageMcp: () => void;
   onGitAction: (text: string) => void;
   onOpenGitPanel: (sessionId?: string, view?: GitPanelView) => void;
@@ -913,6 +915,7 @@ export function Sidebar({
       { key: "schedules", label: "Schedules", icon: <Calendar size={iconSize} />, action: onManageSchedules, visible: true },
       { key: "media", label: "Media", icon: <Image size={iconSize} />, action: onManageMedia, visible: true },
       { key: "pull-requests", label: "Pull requests", icon: <GitPullRequest size={iconSize} />, action: onManagePullRequests, visible: true },
+      { key: "usage", label: "Usage", icon: <BarChart size={iconSize} />, action: () => onManageUsage?.(), visible: Boolean(onManageUsage) },
     ].filter((item) => item.visible);
   }
 

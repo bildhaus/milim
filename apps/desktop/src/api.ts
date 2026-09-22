@@ -4887,6 +4887,50 @@ export async function getWorkspaceGitStatus(): Promise<WorkspaceGitStatus | null
   }
 }
 
+export interface UsageTotals {
+  responses: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  /** Every known cost, reported plus estimated. */
+  cost_usd: number;
+  /** Billed cost reported by a provider or account runtime. */
+  reported_cost_usd: number;
+  /** Cost estimated from cached per-token pricing. */
+  estimated_cost_usd: number;
+  /** Responses that used tokens without a recorded cost. */
+  unpriced_responses: number;
+}
+
+export interface UsageBucket extends UsageTotals {
+  key: string;
+  label: string;
+}
+
+export interface UsageSummary {
+  days: number;
+  since_ms: number;
+  until_ms: number;
+  tz_offset_minutes: number;
+  totals: UsageTotals;
+  by_day: UsageBucket[];
+  by_model: UsageBucket[];
+  by_provider: UsageBucket[];
+  by_project: UsageBucket[];
+}
+
+/** Usage aggregated by the backend over canonical message metrics. */
+export async function getUsageSummary(days: number): Promise<UsageSummary> {
+  const params = new URLSearchParams({
+    days: String(days),
+    tz_offset_minutes: String(new Date().getTimezoneOffset()),
+  });
+  return await parseJsonResponse<UsageSummary>(
+    await authFetch(`${BASE}/usage/summary?${params}`),
+    "usage summary HTTP failed",
+  );
+}
+
 export async function getWorkspaceContext(): Promise<WorkspaceContext | null> {
   try {
     const r = await authFetch(`${BASE}/workspace/context`);
