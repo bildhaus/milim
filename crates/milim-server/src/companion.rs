@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -8,10 +8,15 @@ use uuid::Uuid;
 use milim_storage::EncryptedStore;
 use milim_tools::atomic_write;
 
+use crate::auth::constant_time_eq;
+
 const PAIRING_TTL_SECS: u64 = 10 * 60;
 const PAIRING_REQUEST_TTL_SECS: u64 = 2 * 60;
 const MAX_PENDING_PAIRING_REQUESTS: usize = 5;
 const MAX_DEVICE_NAME_CHARS: usize = 60;
+/// `last_seen_at` is informational, so authenticated requests refresh it at
+/// most this often instead of taking the write lock on every request.
+const LAST_SEEN_REFRESH_SECS: u64 = 60;
 
 #[derive(Clone)]
 pub struct MobileCompanionBridge {
@@ -188,14 +193,14 @@ impl MobileCompanionBridge {
     }
 
     pub fn status(&self, now: u64) -> MobileCompanionStatus {
-        let mut inner = self.inner.write().expect("mobile companion lock poisoned");
+        let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
         inner.expire_pairing(now);
         inner.expire_pairing_requests(now);
         inner.status()
     }
 
     pub fn set_enabled(&self, enabled: bool, now: u64) -> MobileCompanionStatus {
-        let mut inner = self.inner.write().expect("mobile companion lock poisoned");
+        let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
         inner.enabled = enabled;
         if !enabled {
             inner.pairing = None;
@@ -208,7 +213,7 @@ impl MobileCompanionBridge {
     }
 
     pub fn start_pairing(&self, now: u64) -> Result<MobilePairingInfo, String> {
-        let mut inner = self.inner.write().expect("mobile companion lock poisoned");
+        let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
         if !inner.enabled {
             return Err("mobile companion is disabled".to_string());
         }
@@ -227,7 +232,7 @@ impl MobileCompanionBridge {
         req: MobilePairingRequestCreate,
         now: u64,
     ) -> Result<MobilePairingRequestCreated, String> {
-        let mut inner = self.inner.write().expect("mobile companion lock poisoned");
+        let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
         if !inner.enabled {
             return Err("mobile companion is disabled".to_string());
         }
@@ -266,7 +271,7 @@ impl MobileCompanionBridge {
         key: &str,
         now: u64,
     ) -> Result<MobilePairingRequestView, String> {
-        let mut inner = self.inner.write().expect("mobile companion lock poisoned");
+        let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
         if !inner.enabled {
             return Err("mobile companion is disabled".to_string());
         }
@@ -274,7 +279,7 @@ impl MobileCompanionBridge {
         let request = inner
             .pairing_requests
             .iter()
-            .find(|request| request.id == id && request.key == key)
+            .find(|request| request.id == id && constant_time_eq(&request.key, key))
             .ok_or_else(|| "pairing request expired or missing".to_string())?;
         Ok(request.view())
     }
@@ -285,7 +290,7 @@ impl MobileCompanionBridge {
         decision: MobilePairingRequestDecision,
         now: u64,
     ) -> Result<MobileCompanionStatus, String> {
-        let mut inner = self.inner.write().expect("mobile companion lock poisoned");
+        let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
         if !inner.enabled {
             return Err("mobile companion is disabled".to_string());
         }
@@ -317,7 +322,7 @@ impl MobileCompanionBridge {
         now: u64,
         user_agent: Option<&str>,
     ) -> Result<MobilePairResponse, String> {
-        let mut inner = self.inner.write().expect("mobile companion lock poisoned");
+        let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
         if !inner.enabled {
             return Err("mobile companion is disabled".to_string());
         }
@@ -325,7 +330,7 @@ impl MobileCompanionBridge {
         let index = inner
             .pairing_requests
             .iter()
-            .position(|request| request.id == id && request.key == key)
+            .position(|request| request.id == id && constant_time_eq(&request.key, key))
             .ok_or_else(|| "pairing request expired or missing".to_string())?;
         match inner.pairing_requests[index].state.clone() {
             MobilePairingRequestState::Pending => {
@@ -345,12 +350,12 @@ impl MobileCompanionBridge {
     }
 
     pub fn cancel_pairing_request(&self, id: &str, key: &str, now: u64) -> Result<(), String> {
-        let mut inner = self.inner.write().expect("mobile companion lock poisoned");
+        let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
         inner.expire_pairing_requests(now);
         let index = inner
             .pairing_requests
             .iter()
-            .position(|request| request.id == id && request.key == key)
+            .position(|request| request.id == id && constant_time_eq(&request.key, key))
             .ok_or_else(|| "pairing request expired or missing".to_string())?;
         if matches!(
             &inner.pairing_requests[index].state,
@@ -368,7 +373,7 @@ impl MobileCompanionBridge {
         now: u64,
         user_agent: Option<&str>,
     ) -> Result<MobilePairResponse, String> {
-        let mut inner = self.inner.write().expect("mobile companion lock poisoned");
+        let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
         if !inner.enabled {
             return Err("mobile companion is disabled".to_string());
         }
@@ -377,7 +382,7 @@ impl MobileCompanionBridge {
             .pairing
             .take()
             .ok_or_else(|| "pairing session expired or missing".to_string())?;
-        if pairing.id != req.pair_id || pairing.secret != req.secret {
+        if pairing.id != req.pair_id || !constant_time_eq(&pairing.secret, &req.secret) {
             inner.pairing = Some(pairing);
             return Err("invalid pairing token".to_string());
         }
@@ -389,7 +394,7 @@ impl MobileCompanionBridge {
     }
 
     pub fn revoke_device(&self, id: &str, now: u64) -> MobileCompanionStatus {
-        let mut inner = self.inner.write().expect("mobile companion lock poisoned");
+        let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
         inner.devices.retain(|device| device.id != id);
         inner.expire_pairing(now);
         inner.expire_pairing_requests(now);
@@ -398,11 +403,32 @@ impl MobileCompanionBridge {
     }
 
     pub fn authenticate_device(&self, key: &str, now: u64) -> Option<MobileDeviceInfo> {
-        let mut inner = self.inner.write().expect("mobile companion lock poisoned");
+        {
+            let inner = self.inner.read().unwrap_or_else(PoisonError::into_inner);
+            if !inner.enabled {
+                return None;
+            }
+            let device = inner
+                .devices
+                .iter()
+                .find(|device| constant_time_eq(&device.key, key))?;
+            if device
+                .last_seen_at
+                .is_some_and(|seen| now.saturating_sub(seen) < LAST_SEEN_REFRESH_SECS)
+            {
+                return Some(device.info());
+            }
+        }
+        // Re-check under the write lock: the device may have been revoked or
+        // the companion disabled between the two lock acquisitions.
+        let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
         if !inner.enabled {
             return None;
         }
-        let device = inner.devices.iter_mut().find(|device| device.key == key)?;
+        let device = inner
+            .devices
+            .iter_mut()
+            .find(|device| constant_time_eq(&device.key, key))?;
         device.last_seen_at = Some(now);
         Some(device.info())
     }
@@ -733,6 +759,42 @@ mod tests {
         assert!(revoked.status(13).devices.is_empty());
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn device_authentication_throttles_last_seen_updates() {
+        let bridge = MobileCompanionBridge::default();
+        bridge.set_enabled(true, 1);
+        let pairing = bridge.start_pairing(1).unwrap();
+        let secret = pairing.path.split("secret=").nth(1).unwrap().to_string();
+        let paired = bridge
+            .pair_device(
+                MobilePairRequest {
+                    pair_id: pairing.id,
+                    secret,
+                    device_name: Some("Pixel QA".to_string()),
+                },
+                100,
+                None,
+            )
+            .unwrap();
+        let last_seen = |bridge: &MobileCompanionBridge| bridge.status(100).devices[0].last_seen_at;
+
+        let seen = bridge.authenticate_device(&paired.device_key, 120).unwrap();
+        assert_eq!(seen.last_seen_at, Some(100));
+        assert_eq!(last_seen(&bridge), Some(100));
+
+        let seen = bridge
+            .authenticate_device(&paired.device_key, 100 + LAST_SEEN_REFRESH_SECS)
+            .unwrap();
+        assert_eq!(seen.last_seen_at, Some(100 + LAST_SEEN_REFRESH_SECS));
+        assert_eq!(last_seen(&bridge), Some(100 + LAST_SEEN_REFRESH_SECS));
+
+        let mut wrong = paired.device_key.clone();
+        wrong.pop();
+        wrong.push('x');
+        assert!(bridge.authenticate_device(&wrong, 500).is_none());
+        assert!(bridge.authenticate_device("", 500).is_none());
     }
 
     #[test]

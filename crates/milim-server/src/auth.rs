@@ -36,7 +36,11 @@ pub fn authorize(
     }
 
     if let Some(token) = bearer_token(headers) {
-        if state.api_keys.contains(token) {
+        if state
+            .api_keys
+            .iter()
+            .any(|key| constant_time_eq(key, token))
+        {
             return Ok(());
         }
         if let Some(validator) = &state.access_validator {
@@ -49,6 +53,21 @@ pub fn authorize(
     Err(ApiError(Error::Unauthorized(
         "missing or invalid API key".to_string(),
     )))
+}
+
+/// Compare two secrets without returning early at the first differing byte,
+/// so response timing does not reveal how much of a guessed key matched.
+/// Only the length can leak, and credential lengths are not secret.
+pub(crate) fn constant_time_eq(left: &str, right: &str) -> bool {
+    let (left, right) = (left.as_bytes(), right.as_bytes());
+    if left.len() != right.len() {
+        return false;
+    }
+    let difference = left
+        .iter()
+        .zip(right)
+        .fold(0u8, |difference, (left, right)| difference | (left ^ right));
+    std::hint::black_box(difference) == 0
 }
 
 /// Extract the bearer token from the `Authorization` header.
@@ -88,6 +107,15 @@ mod tests {
             );
         }
         headers
+    }
+
+    #[test]
+    fn constant_time_eq_matches_only_identical_secrets() {
+        assert!(constant_time_eq("mobile-abc", "mobile-abc"));
+        assert!(constant_time_eq("", ""));
+        assert!(!constant_time_eq("mobile-abc", "mobile-abd"));
+        assert!(!constant_time_eq("mobile-abc", "mobile-ab"));
+        assert!(!constant_time_eq("mobile-abc", ""));
     }
 
     #[test]

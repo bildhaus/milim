@@ -202,7 +202,7 @@ pub(crate) fn account_runtime_tool_endpoint(
     };
     st.account_runtime_tools
         .lock()
-        .expect("account runtime tool store poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(
             run_id,
             crate::state::AccountRuntimeToolSession {
@@ -229,7 +229,7 @@ impl Drop for AccountRuntimeToolLease {
             );
             self.sessions
                 .lock()
-                .expect("account runtime tool store poisoned")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(run_id);
         }
     }

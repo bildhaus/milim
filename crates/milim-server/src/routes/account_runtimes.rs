@@ -849,13 +849,13 @@ pub(crate) async fn account_runtime_tool_mcp(
     let session = st
         .account_runtime_tools
         .lock()
-        .expect("account runtime tool store poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(&run_id)
         .cloned();
     let Some(session) = session else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
-    if authorization != format!("Bearer {}", session.token) {
+    if !crate::auth::constant_time_eq(authorization, &format!("Bearer {}", session.token)) {
         return Ok(StatusCode::UNAUTHORIZED.into_response());
     }
     let id = request.get("id").cloned().unwrap_or(Value::Null);
