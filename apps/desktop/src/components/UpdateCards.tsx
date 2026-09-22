@@ -101,7 +101,20 @@ export function UpdateCards() {
       testId="update-cards"
       onClose={dismiss}
     >
-      <div className="update-cards-stage" aria-live="polite">
+      <div
+        className="update-cards-stage"
+        aria-live="polite"
+        onKeyDown={(event) => {
+          // Keyboard parity for clicking a stacked card: arrows page the stack.
+          if (event.key === "ArrowLeft" && index > 0) {
+            event.preventDefault();
+            move(-1);
+          } else if (event.key === "ArrowRight" && index < release.items.length - 1) {
+            event.preventDefault();
+            move(1);
+          }
+        }}
+      >
         {release.items.map((card, cardIndex) => {
           const position = (cardIndex - index + release.items.length) % release.items.length;
           const active = cardIndex === index;
@@ -117,6 +130,9 @@ export function UpdateCards() {
               className="update-card"
               style={style}
               data-active={active ? "true" : "false"}
+              // Stacked cards are empty peeking edges. Clicking one is a pointer
+              // shortcut for Back/Next (and the arrow keys), so it stays hidden
+              // from assistive technology and out of the tab order.
               aria-hidden={!active}
               onClick={active ? undefined : () => setIndex(cardIndex)}
             >

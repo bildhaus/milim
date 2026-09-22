@@ -3189,6 +3189,9 @@ button.git-row:hover svg {
     inset 0 1px 0 color-mix(in srgb, var(--primary-text) 7%, transparent),
     0 10px 26px rgba(0, 0, 0, 0.18);
 }
+.git-modal:focus {
+  outline: none;
+}
 .git-modal-head {
   display: flex;
   align-items: center;

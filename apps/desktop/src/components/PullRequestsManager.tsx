@@ -779,11 +779,12 @@ export function PullRequestsManager({ onClose }: { onClose: () => void }) {
                 <section className="pull-request-action-card">
                   <div>
                     <strong>Submit review</strong>
-                    <button type="button" onClick={() => setReviewAction(null)}>
+                    <button type="button" aria-label="Cancel review" title="Cancel review" onClick={() => setReviewAction(null)}>
                       <X size={13} />
                     </button>
                   </div>
                   <select
+                    aria-label="Review action"
                     value={reviewAction}
                     onChange={(event) =>
                       setReviewAction(event.currentTarget.value as ReviewAction)
@@ -794,6 +795,7 @@ export function PullRequestsManager({ onClose }: { onClose: () => void }) {
                     <option value="comment">Comment</option>
                   </select>
                   <textarea
+                    aria-label="Review note"
                     value={reviewBody}
                     rows={3}
                     placeholder={reviewAction === "approve" ? "Optional review note" : "Review note"}
@@ -822,11 +824,12 @@ export function PullRequestsManager({ onClose }: { onClose: () => void }) {
                 <section className="pull-request-action-card">
                   <div>
                     <strong>Merge pull request</strong>
-                    <button type="button" onClick={() => setMergeMethod(null)}>
+                    <button type="button" aria-label="Cancel merge" title="Cancel merge" onClick={() => setMergeMethod(null)}>
                       <X size={13} />
                     </button>
                   </div>
                   <select
+                    aria-label="Merge method"
                     value={mergeMethod}
                     onChange={(event) =>
                       setMergeMethod(event.currentTarget.value as MergeMethod)
@@ -1033,6 +1036,7 @@ export function PullRequestsManager({ onClose }: { onClose: () => void }) {
         {mutable && (
           <div className="git-pr-comment">
             <textarea
+              aria-label="Comment"
               value={comment}
               placeholder="Leave a comment"
               rows={3}

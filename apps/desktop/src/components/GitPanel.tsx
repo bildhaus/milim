@@ -59,6 +59,7 @@ import { useUiPreferences } from "../ui/store";
 import { useSettings } from "../settings/store";
 import { useContextMenu } from "./ContextMenu";
 import { PaneResizeHandle } from "./PaneResizeHandle";
+import { SheetDialog } from "./SheetDialog";
 import {
   ArrowUp,
   ArrowRight,
@@ -2318,20 +2319,12 @@ export function GitPanel({
           reviewDialogOpen &&
           pullRequest &&
           createPortal(
-            <div
-              className="git-modal-backdrop"
-              data-native-preview-blocker="true"
-              onMouseDown={(event) =>
-                event.target === event.currentTarget &&
-                setReviewDialogOpen(false)
-              }
+            <SheetDialog
+              title="Review pull request"
+              className="git-modal git-pr-dialog"
+              overlayClassName="git-modal-backdrop"
+              onClose={() => setReviewDialogOpen(false)}
             >
-              <section
-                className="git-modal git-pr-dialog"
-                role="dialog"
-                aria-modal="true"
-                aria-label="Review pull request"
-              >
                 <div className="git-modal-head">
                   <strong>Review PR #{pullRequest.number}</strong>
                   <button
@@ -2391,28 +2384,19 @@ export function GitPanel({
                       : "Submit review"}
                   </button>
                 </div>
-              </section>
-            </div>,
+            </SheetDialog>,
             document.body,
           )}
         {typeof document !== "undefined" &&
           mergeDialogOpen &&
           pullRequest &&
           createPortal(
-            <div
-              className="git-modal-backdrop"
-              data-native-preview-blocker="true"
-              onMouseDown={(event) =>
-                event.target === event.currentTarget &&
-                setMergeDialogOpen(false)
-              }
+            <SheetDialog
+              title="Merge pull request"
+              className="git-modal git-pr-dialog"
+              overlayClassName="git-modal-backdrop"
+              onClose={() => setMergeDialogOpen(false)}
             >
-              <section
-                className="git-modal git-pr-dialog"
-                role="dialog"
-                aria-modal="true"
-                aria-label="Merge pull request"
-              >
                 <div className="git-modal-head">
                   <strong>Merge PR #{pullRequest.number}</strong>
                   <button
@@ -2462,8 +2446,7 @@ export function GitPanel({
                     {commandBusy === "pr_merge" ? "Merging..." : "Confirm merge"}
                   </button>
                 </div>
-              </section>
-            </div>,
+            </SheetDialog>,
             document.body,
           )}
       </>
@@ -2795,19 +2778,12 @@ export function GitPanel({
       {typeof document !== "undefined" &&
         branchMenuOpen &&
         createPortal(
-          <div
-            className="git-modal-backdrop"
-            data-native-preview-blocker="true"
-            onMouseDown={(event) =>
-              event.target === event.currentTarget && setBranchMenuOpen(false)
-            }
+          <SheetDialog
+            title="Switch branch"
+            className="git-modal git-branch-modal"
+            overlayClassName="git-modal-backdrop"
+            onClose={() => setBranchMenuOpen(false)}
           >
-            <section
-              className="git-modal git-branch-modal"
-              role="dialog"
-              aria-modal="true"
-              aria-label="Switch branch"
-            >
               <div className="git-modal-head">
                 <span>
                   <GitBranch size={13} />
@@ -2895,26 +2871,18 @@ export function GitPanel({
                   {notice}
                 </div>
               )}
-            </section>
-          </div>,
+          </SheetDialog>,
           document.body,
         )}
       {typeof document !== "undefined" &&
         commandMenu &&
         createPortal(
-          <div
-            className="git-modal-backdrop"
-            data-native-preview-blocker="true"
-            onMouseDown={(event) =>
-              event.target === event.currentTarget && setCommandMenu(null)
-            }
+          <SheetDialog
+            title={`${actionLabel(commandMenu)} command`}
+            className="git-modal git-command-modal"
+            overlayClassName="git-modal-backdrop"
+            onClose={() => setCommandMenu(null)}
           >
-            <section
-              className="git-modal git-command-modal"
-              role="dialog"
-              aria-modal="true"
-              aria-label={`${actionLabel(commandMenu)} command`}
-            >
               <div className="git-modal-head">
                 <span>
                   <GitBranch size={13} />
@@ -3048,27 +3016,19 @@ export function GitPanel({
                   </div>
                 </>
               )}
-            </section>
-          </div>,
+          </SheetDialog>,
           document.body,
         )}
       {typeof document !== "undefined" &&
         diffResult &&
         !forceExpanded &&
         createPortal(
-          <div
-            className="git-modal-backdrop"
-            data-native-preview-blocker="true"
-            onMouseDown={(event) =>
-              event.target === event.currentTarget && setDiffResult(null)
-            }
+          <SheetDialog
+            title="Git diff"
+            className={`git-modal git-diff-panel ${diffResult.ok ? "" : "error"}`}
+            overlayClassName="git-modal-backdrop"
+            onClose={() => setDiffResult(null)}
           >
-            <section
-              className={`git-modal git-diff-panel ${diffResult.ok ? "" : "error"}`}
-              role="dialog"
-              aria-modal="true"
-              aria-label="Git diff"
-            >
               <div className="git-modal-head">
                 <span>
                   <Code size={13} />
@@ -3213,8 +3173,7 @@ export function GitPanel({
               ) : (
                 <div className="git-diff-empty">No diff output.</div>
               )}
-            </section>
-          </div>,
+          </SheetDialog>,
           document.body,
         )}
     </>
