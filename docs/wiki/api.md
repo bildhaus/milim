@@ -86,7 +86,7 @@ Root aliases are also mounted for OpenAI chat, completions, models, and embeddin
 | Mobile companion | Identity probe `GET /mobile`; desktop-authenticated status, enablement, manual-pairing, pairing-request decision, and device revocation routes; private-key-protected `POST/GET/DELETE /mobile/pair-requests...` request, status, claim, and cancellation routes; public one-time manual claim `POST /mobile/pair`; paired-device `GET /mobile/device/status` and `DELETE /mobile/device` |
 | Canonical control v1 | `GET /control/v1/bootstrap`, `GET /control/v1/threads/{id}/timeline`, read-only `POST /control/v1/threads/{id}/effective-run`, authenticated `PUT /control/v1/attachments/{client_attachment_id}`, `GET /control/v1/runs/{run_id}`, paged `GET /control/v1/runs/{run_id}/events`, `POST /control/v1/commands`, `POST /control/v1/socket-ticket`, `GET /control/v1/ws?ticket=...` |
 | Account runtimes | Canonical `POST /harnesses/{id}/run`; compatibility and sideband routes: `GET /codex/account`, `POST /codex/login/device`, `POST /codex/login/chatgpt-device`, `POST /codex/login/api-key`, `POST /codex/logout`, `GET /codex/rate-limits`, `GET /codex/models`, read-only `GET /codex/threads` and `/codex/threads/{id}`, `POST /codex/run`, `GET /claude/status`, read-only `GET /claude/threads` and `/claude/threads/{id}`, `POST /claude/run`, `GET /opencode/status`, `GET /opencode/models`, `POST /opencode/run`, `GET /pi/status`, `GET /pi/models`, `POST /pi/run`. Codex and Claude routes accept `?profile=` to address one signed-in account. |
-| Account profiles | `GET` and `POST /account-runtimes/{runtime}/profiles`, `PATCH` and `DELETE /account-runtimes/{runtime}/profiles/{id}` for `claude` and `codex`. A profile names an alternate configuration folder for that CLI; Milim stores no credential for it. Requires the desktop's canonical store. |
+| Account profiles | `GET` and `POST /account-runtimes/{runtime}/profiles`, `PATCH` and `DELETE /account-runtimes/{runtime}/profiles/{id}` for `claude` and `codex`. A profile names an alternate configuration folder for that CLI; milim stores no credential for it. Requires the desktop's canonical store. |
 
 `POST /memory/graph/search` is the compatibility route for scoped hybrid retrieval; it does not perform graph traversal. The request and response shapes are unchanged. Each `MemoryGraphHit.score` is normalized fused relevance in `0..1`, combining exact-term FTS and embedding ranks with equal-weight reciprocal rank fusion. Scope, archive, and `top_k` filters still apply. Desktop turns request 20 candidates and inject no more than five provenance-labeled entries within a 1,024-token memory budget.
 
@@ -155,7 +155,7 @@ cargo run -p milim-cli -- keys identity
 cargo run -p milim-cli -- keys mint --label local-client --expires-secs 86400
 ```
 
-Set `authRequired: true` in `server.json` to make `milim serve` accept keys minted by this machine. `milim serve --expose` saves that setting and prints a one-time token when no auth is already configured. Use `--audience` when minting a key for a different Milim identity. Omitting it mints for this machine's own address.
+Set `authRequired: true` in `server.json` to make `milim serve` accept keys minted by this machine. `milim serve --expose` saves that setting and prints a one-time token when no auth is already configured. Use `--audience` when minting a key for a different milim identity. Omitting it mints for this machine's own address.
 
 ## Common failures
 

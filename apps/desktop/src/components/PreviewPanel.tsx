@@ -1363,7 +1363,7 @@ export function PreviewPanel({
             {selectedPreviewSource === "url" && !browserSetupSeen && (
               <div className="preview-browser-setup" data-testid="preview-browser-setup" role="status">
                 <div>
-                  <strong>Milim remembers browser sign-ins on this device</strong>
+                  <strong>milim remembers browser sign-ins on this device</strong>
                   <span>Preview tools can interact with the active page under this chat&apos;s approval mode. External browser credentials are not imported.</span>
                 </div>
                 <div className="preview-browser-setup-actions">

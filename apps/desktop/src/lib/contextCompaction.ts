@@ -463,7 +463,7 @@ export function compactionSummaryMessages(
     {
       role: "system",
       content: [
-        "Summarize this Milim thread so a fresh model session can continue without replaying earlier messages.",
+        "Summarize this milim thread so a fresh model session can continue without replaying earlier messages.",
         "Keep durable decisions, requirements, constraints, user preferences, active plans, open tasks, important file paths, tool results, and unresolved errors.",
         `Return a complete checkpoint under ${targetTokens} tokens.`,
         "Omit filler, greetings, and transient wording. Return only the summary.",

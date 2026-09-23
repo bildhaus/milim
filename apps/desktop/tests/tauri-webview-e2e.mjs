@@ -1506,7 +1506,7 @@ async function runInboxSidebarCheck(page) {
   await page.getByRole("menu", { name: "Tools" }).getByText("MCP Servers", { exact: true }).waitFor();
   await page.keyboard.press("Escape");
   await page.getByTestId("app-menu-trigger").click();
-  const horizontalAppMenu = page.getByRole("menu", { name: "Milim menu" });
+  const horizontalAppMenu = page.getByRole("menu", { name: "milim menu" });
   if (await horizontalAppMenu.getByText(/sidebar/i).count()) {
     throw new Error("Horizontal placement should omit the app-menu sidebar toggle.");
   }
@@ -4464,16 +4464,16 @@ async function runWindowPinCheck(page) {
 
 async function runAppMenuCheck(page) {
   const trigger = page.getByTestId("app-menu-trigger");
-  const menu = page.getByRole("menu", { name: "Milim menu" });
+  const menu = page.getByRole("menu", { name: "milim menu" });
   await trigger.click();
   await menu.waitFor();
   await page.waitForFunction(() => document.activeElement?.textContent?.includes("New chat"));
   await page.keyboard.press("End");
-  await page.waitForFunction(() => document.activeElement?.textContent?.includes("Quit Milim"));
+  await page.waitForFunction(() => document.activeElement?.textContent?.includes("Quit milim"));
   await page.keyboard.press("Home");
   await page.waitForFunction(() => document.activeElement?.textContent?.includes("New chat"));
   await page.keyboard.press("ArrowUp");
-  await page.waitForFunction(() => document.activeElement?.textContent?.includes("Quit Milim"));
+  await page.waitForFunction(() => document.activeElement?.textContent?.includes("Quit milim"));
   await page.keyboard.press("ArrowDown");
   await page.waitForFunction(() => document.activeElement?.textContent?.includes("New chat"));
   await page.keyboard.press("Escape");
@@ -6071,9 +6071,9 @@ async function runHarnessHardeningUiCheck(page) {
   await dismissOnboardingIfPresent(page);
   await page.waitForFunction(() =>
     document.body.textContent?.includes("Ledger complete.") ||
-    document.body.textContent?.includes("Milim needs a quick restart."),
+    document.body.textContent?.includes("milim needs a quick restart."),
   );
-  if (await page.getByText("Milim needs a quick restart.", { exact: true }).isVisible().catch(() => false)) {
+  if (await page.getByText("milim needs a quick restart.", { exact: true }).isVisible().catch(() => false)) {
     await page.getByText("Technical details", { exact: true }).click();
     const detail = await page.locator(".app-error-details code").innerText();
     throw new Error(`Run-ledger fixture crashed the UI: ${detail}`);

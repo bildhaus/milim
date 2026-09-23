@@ -955,7 +955,7 @@ impl ClaudeApprovalConfig {
         if needs_approval {
             let url = req.approval_mcp_url.as_deref().ok_or_else(|| {
                 Error::InvalidRequest(
-                    "Claude Review mode requires Milim's interactive approval endpoint".to_string(),
+                    "Claude Review mode requires milim's interactive approval endpoint".to_string(),
                 )
             })?;
             let mut server = json!({ "type": "http", "url": url });
@@ -1170,7 +1170,7 @@ fn run_stream_with_worker_events(
                     if let Some(message) = locked_session_error {
                         if maybe_recover_locked_session(&req, &mut retried_locked_session).await {
                             yield runtime_event_with_worker(&ClaudeStreamEvent::Warning {
-                                message: "Claude session was already in use; Milim stopped the matching local Claude CLI process and retried.".to_string(),
+                                message: "Claude session was already in use; milim stopped the matching local Claude CLI process and retried.".to_string(),
                             }, &worker_events);
                             continue;
                         }
@@ -1191,7 +1191,7 @@ fn run_stream_with_worker_events(
                         && maybe_recover_locked_session(&req, &mut retried_locked_session).await
                     {
                         yield runtime_event_with_worker(&ClaudeStreamEvent::Warning {
-                            message: "Claude session was already in use; Milim stopped the matching local Claude CLI process and retried.".to_string(),
+                            message: "Claude session was already in use; milim stopped the matching local Claude CLI process and retried.".to_string(),
                         }, &worker_events);
                         continue;
                     }
@@ -1247,7 +1247,7 @@ fn locked_session_error_event(req: &ClaudeRunRequest, message: String) -> Value 
     }
     runtime_event(&ClaudeStreamEvent::SessionRecoveryRequired {
         message: format!(
-            "This Claude session appears to be in use by another Claude CLI process. Milim can try to stop the matching local Claude process and retry, or you can cancel and resume manually. Claude reported: {message}"
+            "This Claude session appears to be in use by another Claude CLI process. milim can try to stop the matching local Claude process and retry, or you can cancel and resume manually. Claude reported: {message}"
         ),
     })
 }
@@ -2177,7 +2177,7 @@ fn claude_spawn_error_message(error: &std::io::Error) -> String {
 }
 
 fn cli_path_warning(label: &str, command: &str, install: &str) -> String {
-    format!("{label} CLI was not found on PATH. Apps launched from the Dock or Finder do not inherit your shell PATH, so on macOS and Linux Milim also reads your login shell's PATH and looks in the usual install directories (`~/.local/bin`, Homebrew, `~/.bun/bin`, and asdf/mise/volta shims). Install it with `{install}`, or use Locate binary... in Providers to choose the `{command}` executable.")
+    format!("{label} CLI was not found on PATH. Apps launched from the Dock or Finder do not inherit your shell PATH, so on macOS and Linux milim also reads your login shell's PATH and looks in the usual install directories (`~/.local/bin`, Homebrew, `~/.bun/bin`, and asdf/mise/volta shims). Install it with `{install}`, or use Locate binary... in Providers to choose the `{command}` executable.")
 }
 
 fn is_cli_path_warning(message: &str) -> bool {

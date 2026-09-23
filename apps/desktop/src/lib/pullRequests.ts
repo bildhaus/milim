@@ -46,7 +46,7 @@ export function pullRequestErrorPresentation(error: string): PullRequestErrorPre
   ) {
     return {
       title: "GitHub CLI not found",
-      message: "Install GitHub CLI, then restart Milim so the desktop app can discover it.",
+      message: "Install GitHub CLI, then restart milim so the desktop app can discover it.",
       detail,
       helpLabel: "Install GitHub CLI",
       helpUrl: "https://cli.github.com/",
@@ -85,7 +85,7 @@ export function pullRequestErrorPresentation(error: string): PullRequestErrorPre
 
   return {
     title: "Pull requests unavailable",
-    message: "Milim couldn't load pull requests. Retry, or open the technical details for the GitHub CLI response.",
+    message: "milim couldn't load pull requests. Retry, or open the technical details for the GitHub CLI response.",
     detail,
   };
 }

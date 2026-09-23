@@ -488,12 +488,12 @@ function applyArtifactLimits(artifacts: ChatArtifact[]): ChatArtifact[] {
     const hiddenNamed = keptNamed + omittedNamed;
     const hiddenNamedBytes = namedBytes + omittedNamedBytes;
     return [
-      limitWarningArtifact(0, `Milim hid all ${hiddenNamed} named file artifact(s) (${formatBytes(hiddenNamedBytes)}) because the generated file set exceeded the ${formatBytes(MAX_NAMED_ARTIFACT_BYTES)} preview budget. Runtime preview was disabled instead of staging a partial app.`),
+      limitWarningArtifact(0, `milim hid all ${hiddenNamed} named file artifact(s) (${formatBytes(hiddenNamedBytes)}) because the generated file set exceeded the ${formatBytes(MAX_NAMED_ARTIFACT_BYTES)} preview budget. Runtime preview was disabled instead of staging a partial app.`),
       ...kept.filter((artifact) => !isFileArtifact(artifact)),
     ];
   }
   if (omittedInline > 0) {
-    kept.push(limitWarningArtifact(kept.length, `Milim hid ${omittedInline} extra inline artifact(s). Named file artifacts were kept for preview/runtime staging.`));
+    kept.push(limitWarningArtifact(kept.length, `milim hid ${omittedInline} extra inline artifact(s). Named file artifacts were kept for preview/runtime staging.`));
   }
   return kept;
 }

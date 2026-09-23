@@ -27,6 +27,6 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { id: "agent", label: "Agent", hint: "Set active agent or none", group: "Settings", placeholder: "/agent none", palette: "prefill" },
   { id: "compact", label: "Compact thread", hint: "Summarize prior context into a fresh checkpoint", group: "Commands", palette: "run" },
   { id: "export", label: "Export chat", hint: "Download this thread as JSON", group: "Commands", palette: "run" },
-  { id: "import", label: "Import chat", hint: "Import a Milim thread JSON file", group: "Commands", palette: "run" },
+  { id: "import", label: "Import chat", hint: "Import a milim thread JSON file", group: "Commands", palette: "run" },
   { id: "clear", label: "New chat", hint: "Start a fresh chat with current settings", group: "Commands", palette: "run" },
 ];

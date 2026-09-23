@@ -212,8 +212,8 @@ export function GoogleWorkspacePreview({
           {unavailable
             ? workspaceStatus.unavailable_reason
             : isFolderUrl
-              ? "Open the folder in Google Picker, select its files, then choose Insert. Only those files become available to Milim."
-              : "Google’s embedded editor is not reliable here. Milim uses Google Picker so only files you explicitly choose become available."}
+              ? "Open the folder in Google Picker, select its files, then choose Insert. Only those files become available to milim."
+              : "Google’s embedded editor is not reliable here. milim uses Google Picker so only files you explicitly choose become available."}
         </span>
         {error && !unavailable ? <p className="sheet-hint error" role="alert">{error}</p> : null}
         <div className="google-workspace-actions">

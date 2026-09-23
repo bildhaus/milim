@@ -6,7 +6,7 @@ const RUNTIME_CONTEXT_MAX_CHARS = 32 * 1024;
 const RUNTIME_CONTEXT_MAX_FILE_CHARS = 16 * 1024;
 
 export const NO_FOLDER_ARTIFACT_INSTRUCTIONS = [
-  "Milim captures named fenced code blocks into the current chat's artifact panel.",
+  "milim captures named fenced code blocks into the current chat's artifact panel.",
   "When no working folder is selected and the user asks you to create a file, web app, document, dataset, or other generated artifact, return the artifact inline instead of asking for a folder.",
   "Use fenced blocks with filename metadata, for example ```html file=index.html ... ```; a standalone filename line immediately before a fence or a file=path first line inside a fence is also treated as that file path. For multi-file artifacts, return one named fenced block per relative file path.",
   "Runnable Node/Vite apps must be returned as named files, including package.json, index.html, src/App.tsx, and any sibling CSS/JS/TS/TSX files; do not return runnable apps as anonymous tsx blocks.",
@@ -29,7 +29,7 @@ export function threadArtifactInstructionMessages(
 }
 
 export const PLAN_MODE_INSTRUCTIONS = [
-  "Milim Plan Mode is active for this turn.",
+  "milim Plan Mode is active for this turn.",
   "Use only read-only inspection tools that are available to understand the request and relevant files.",
   "Do not edit files, write files, run commands, control the computer, create schedules, register memories, or perform other mutations.",
   "After inspecting enough context, return an inline implementation plan that is concrete enough to execute.",
@@ -46,7 +46,7 @@ function runtimePreviewFileContext(conversation: readonly ChatMessage[], lastUse
   const selected = prioritizePreviewFiles(files, lastUserText).slice(0, RUNTIME_CONTEXT_MAX_FILES);
   let remaining = RUNTIME_CONTEXT_MAX_CHARS;
   const parts = [
-    "Current no-folder virtual project files are available as read-only context below. These are generated artifact files managed by Milim for this thread's preview app, not arbitrary local disk access. Use them when the user asks about the runtime preview or one of these files.",
+    "Current no-folder virtual project files are available as read-only context below. These are generated artifact files managed by milim for this thread's preview app, not arbitrary local disk access. Use them when the user asks about the runtime preview or one of these files.",
     `Files: ${files.map((file) => file.path).join(", ")}`,
   ];
   for (const file of selected) {

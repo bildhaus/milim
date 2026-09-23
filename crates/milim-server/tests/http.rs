@@ -5317,7 +5317,7 @@ async fn workspace_git_action_checkpoint_restores_worktree() {
     assert!(invalid_turn["message"]
         .as_str()
         .unwrap()
-        .contains("valid Milim turn checkpoint"));
+        .contains("valid milim turn checkpoint"));
 
     let missing_turn: Value = client
         .post(format!("{base}/workspace/git/action"))
@@ -5336,7 +5336,7 @@ async fn workspace_git_action_checkpoint_restores_worktree() {
     assert!(missing_turn["message"]
         .as_str()
         .unwrap()
-        .contains("valid Milim turn checkpoint"));
+        .contains("valid milim turn checkpoint"));
 
     let restored: Value = client
         .post(format!("{base}/workspace/git/action"))

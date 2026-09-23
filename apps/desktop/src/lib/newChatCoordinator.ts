@@ -38,7 +38,7 @@ async function provisionCanonicalChat(settings?: ThreadSettingsPatch): Promise<s
   } catch (error) {
     useUiPreferences.getState().pushNotice({
       tone: "error",
-      message: `Milim could not create the chat: ${error instanceof Error ? error.message : String(error)}`,
+      message: `milim could not create the chat: ${error instanceof Error ? error.message : String(error)}`,
     });
     return null;
   }
@@ -48,7 +48,7 @@ async function provisionCanonicalChat(settings?: ThreadSettingsPatch): Promise<s
   } catch (error) {
     useUiPreferences.getState().pushNotice({
       tone: "error",
-      message: `The chat was created, but Milim could not persist its local replica yet: ${error instanceof Error ? error.message : String(error)}`,
+      message: `The chat was created, but milim could not persist its local replica yet: ${error instanceof Error ? error.message : String(error)}`,
     });
   }
   return localId;

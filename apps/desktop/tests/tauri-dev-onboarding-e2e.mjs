@@ -348,7 +348,7 @@ async function completeOnboarding(page) {
 
   await page.getByRole("button", { name: /Continue/ }).click();
   await page.getByRole("heading", { name: "Choose a workspace" }).waitFor();
-  await page.getByTestId("onboarding-flow").getByRole("button", { name: "Open Milim", exact: true }).click();
+  await page.getByTestId("onboarding-flow").getByRole("button", { name: "Open milim", exact: true }).click();
   await page.getByTestId("onboarding-flow").waitFor({ state: "detached" });
   const composer = page.getByTestId("composer-input");
   await composer.waitFor();

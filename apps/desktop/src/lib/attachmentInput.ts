@@ -3,7 +3,7 @@ export const MAX_ATTACHMENT_TEXT_BYTES = 128 * 1024;
 export const MAX_DESKTOP_ATTACHMENTS = 12;
 export const MAX_OUTBOUND_IMAGE_DATA_URL_BYTES = 20 * 1024 * 1024;
 export const OMITTED_IMAGE_NOTE =
-  "[Earlier image attachments were omitted from this request to stay within Milim's size limit.]";
+  "[Earlier image attachments were omitted from this request to stay within milim's size limit.]";
 
 const SUPPORTED_IMAGE_MIMES = new Set([
   "image/png",

@@ -4624,10 +4624,10 @@ fn complete_workspace_editor_leave_action<R: tauri::Runtime>(
             }
             let window = app
                 .get_webview_window(MAIN_WINDOW_LABEL)
-                .ok_or_else(|| "The main Milim window is unavailable.".to_string())?;
+                .ok_or_else(|| "The main milim window is unavailable.".to_string())?;
             window
                 .hide()
-                .map_err(|error| format!("Failed to hide Milim: {error}"))
+                .map_err(|error| format!("Failed to hide milim: {error}"))
         }
         WorkspaceEditorLeaveAction::Quit => {
             request_user_state_flush_then_exit(app);
@@ -4699,7 +4699,7 @@ fn set_sidebar_toggle_enabled(
 #[cfg(target_os = "macos")]
 fn setup_native_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
     let settings = MenuItem::with_id(app, APP_MENU_SETTINGS_ID, "Settings", true, Some("Cmd+,"))?;
-    let quit = MenuItem::with_id(app, APP_MENU_QUIT_ID, "Quit Milim", true, Some("Cmd+Q"))?;
+    let quit = MenuItem::with_id(app, APP_MENU_QUIT_ID, "Quit milim", true, Some("Cmd+Q"))?;
     let app_menu = SubmenuBuilder::new(app, "Milim")
         .about(None)
         .separator()
@@ -4735,7 +4735,7 @@ fn setup_native_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Res
         .maximize_with_text("Zoom")
         .build()?;
     let help_menu = SubmenuBuilder::new(app, "Help")
-        .text(APP_MENU_DOCUMENTATION_ID, "Milim Documentation")
+        .text(APP_MENU_DOCUMENTATION_ID, "milim Documentation")
         .text(APP_MENU_DIAGNOSTICS_ID, "Open Diagnostics")
         .build()?;
     let menu = MenuBuilder::new(app)

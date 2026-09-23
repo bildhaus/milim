@@ -95,7 +95,7 @@ export function UpdateCards() {
 
   return (
     <SheetDialog
-      title={`What's new in Milim ${release.version}`}
+      title={`What's new in milim ${release.version}`}
       className="sheet update-cards-dialog"
       overlayClassName="sheet-overlay update-cards-overlay"
       testId="update-cards"

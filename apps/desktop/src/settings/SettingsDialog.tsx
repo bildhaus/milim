@@ -604,7 +604,7 @@ export function SettingsPage({
     savePinnedActions([...editablePinnedActions, {
       id: `custom-${Date.now()}`,
       label: "Custom action",
-      prompt: "Describe what you want Milim to help with.",
+      prompt: "Describe what you want milim to help with.",
     }]);
   }
 
@@ -625,7 +625,7 @@ export function SettingsPage({
     setBackupBusy(true);
     try {
       const { save } = await import("@tauri-apps/plugin-dialog");
-      const path = await save({ defaultPath: `milim-${new Date().toISOString().slice(0, 10)}.milim-backup.json`, filters: [{ name: "Milim backup", extensions: ["json"] }] });
+      const path = await save({ defaultPath: `milim-${new Date().toISOString().slice(0, 10)}.milim-backup.json`, filters: [{ name: "milim backup", extensions: ["json"] }] });
       if (!path) return;
       await flushDeferredUserStateWrites();
       const result = await exportMilimBackup(path);
@@ -642,12 +642,12 @@ export function SettingsPage({
     setBackupBusy(true);
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
-      const path = await open({ multiple: false, directory: false, filters: [{ name: "Milim backup", extensions: ["json"] }] });
+      const path = await open({ multiple: false, directory: false, filters: [{ name: "milim backup", extensions: ["json"] }] });
       if (typeof path !== "string") return;
       const inspection = await inspectMilimBackup(path);
       const accepted = await confirmApp({
         title: "Restore this backup?",
-        message: `Replace local Milim data with this v${inspection.appVersion} backup containing ${inspection.summary.chats} chats and ${inspection.summary.projects} projects? A recovery snapshot will be created first.`,
+        message: `Replace local milim data with this v${inspection.appVersion} backup containing ${inspection.summary.chats} chats and ${inspection.summary.projects} projects? A recovery snapshot will be created first.`,
         confirmLabel: "Restore backup",
         tone: "danger",
       });
@@ -1083,7 +1083,7 @@ export function SettingsPage({
                 <div className="setting-toggle-row">
                   <div>
                     <strong>Keep window on top</strong>
-                    <span>Pin Milim above other windows and remember that choice.</span>
+                    <span>Pin milim above other windows and remember that choice.</span>
                   </div>
                   <Toggle
                     checked={windowAlwaysOnTop}
@@ -1168,7 +1168,7 @@ export function SettingsPage({
                 <div className="settings-action-row">
                   <div>
                     <strong>Shortcut defaults</strong>
-                    <span>Restore Milim's default app-window shortcuts.</span>
+                    <span>Restore milim's default app-window shortcuts.</span>
                   </div>
                   <button
                     className="btn-ghost"
@@ -1204,8 +1204,8 @@ export function SettingsPage({
                   <Toggle checked={notifyNeedsAttention} onChange={(enabled) => void setNotificationPreference("attention", enabled)} ariaLabel="Needs attention notifications" />
                 </div>
                 <div className="setting-toggle-row">
-                  <div><strong>Only when Milim is unfocused</strong><span>Suppress native notifications while you are using the app.</span></div>
-                  <Toggle checked={notifyOnlyWhenUnfocused} onChange={setNotifyOnlyWhenUnfocused} ariaLabel="Only notify when Milim is unfocused" />
+                  <div><strong>Only when milim is unfocused</strong><span>Suppress native notifications while you are using the app.</span></div>
+                  <Toggle checked={notifyOnlyWhenUnfocused} onChange={setNotifyOnlyWhenUnfocused} ariaLabel="Only notify when milim is unfocused" />
                 </div>
                 <div className="setting-toggle-row">
                   <div><strong>Include thread title</strong><span>Otherwise notification text stays generic.</span></div>
@@ -1464,11 +1464,11 @@ export function SettingsPage({
                     value={globalInstructions}
                     maxLength={MAX_GLOBAL_INSTRUCTIONS_CHARS}
                     rows={8}
-                    placeholder="Add preferences, conventions, or context Milim should follow in every chat."
+                    placeholder="Add preferences, conventions, or context milim should follow in every chat."
                     onChange={(event) => setGlobalInstructions(event.currentTarget.value)}
                   />
                   <p className="setting-field-note">
-                    Applied to every chat run by this Milim desktop, including paired mobile sends. Workspace AGENTS.md and CLAUDE.md instructions are loaded separately. {globalInstructions.length.toLocaleString()} / {MAX_GLOBAL_INSTRUCTIONS_CHARS.toLocaleString()} characters.
+                    Applied to every chat run by this milim desktop, including paired mobile sends. Workspace AGENTS.md and CLAUDE.md instructions are loaded separately. {globalInstructions.length.toLocaleString()} / {MAX_GLOBAL_INSTRUCTIONS_CHARS.toLocaleString()} characters.
                   </p>
                 </div>
                 <div className="setting-field"><span className="setting-mini-title">Default chat model</span><Select value={configuredThreadDefaults.model} options={modelOptions} onChange={(model) => updateConfiguredDefaults({ model })} /></div>
@@ -1482,7 +1482,7 @@ export function SettingsPage({
                     { value: "blocked", label: "Remain blocked", detail: "Keep it and show the setup error." },
                   ]} />
                 </div>
-                <p className="sheet-hint">Milim never silently selects an arbitrary non-favorite remote model.</p>
+                <p className="sheet-hint">milim never silently selects an arbitrary non-favorite remote model.</p>
               </div>
             </SettingsBlock>
           </SettingsPanel>
@@ -1496,7 +1496,7 @@ export function SettingsPage({
               <div className="setting-field">
                 <span className="setting-mini-title">Preferred opener</span>
                 <Select value={workspaceLauncherPreference} options={launcherOptions} onChange={(value) => setWorkspaceLauncherPreference(value as typeof workspaceLauncherPreference)} />
-                <p className="sheet-hint">{activeFolder ? `Detected launchers for ${folderLabel(activeFolder)}.` : "Open a project to detect installed launchers."} If the selected launcher disappears, Milim uses its existing recommendation logic and shows a notice.</p>
+                <p className="sheet-hint">{activeFolder ? `Detected launchers for ${folderLabel(activeFolder)}.` : "Open a project to detect installed launchers."} If the selected launcher disappears, milim uses its existing recommendation logic and shows a notice.</p>
               </div>
             </SettingsBlock>
             <SettingsBlock title="New project chats" data-setting-id="workspace-new-chat" className={settingHighlightClass("workspace-new-chat").trim()}>
@@ -1523,7 +1523,7 @@ export function SettingsPage({
                     </span>
                     <div>
                       <strong>{googleWorkspace?.connected ? "Google Workspace connected" : "Connect Google Workspace"}</strong>
-                      <span>Choose one or many Sheets, Docs, Slides, and Drive files for Milim.</span>
+                      <span>Choose one or many Sheets, Docs, Slides, and Drive files for milim.</span>
                     </div>
                   </div>
                   <button
@@ -1581,8 +1581,8 @@ export function SettingsPage({
                                 <button
                                   className="btn-ghost google-workspace-file-action"
                                   type="button"
-                                  title={`Open ${file.name} in Milim`}
-                                  aria-label={`Open ${file.name} in Milim`}
+                                  title={`Open ${file.name} in milim`}
+                                  aria-label={`Open ${file.name} in milim`}
                                   onClick={() => openGoogleFileInMilim(url)}
                                 >
                                   <span className="topbar-logo" aria-hidden="true" />
@@ -1599,8 +1599,8 @@ export function SettingsPage({
                                 <button
                                   className="btn-ghost danger google-workspace-file-action"
                                   type="button"
-                                  title={`Remove ${file.name} from Milim`}
-                                  aria-label={`Remove ${file.name} from Milim`}
+                                  title={`Remove ${file.name} from milim`}
+                                  aria-label={`Remove ${file.name} from milim`}
                                   disabled={googleWorkspaceBusy}
                                   onClick={() => void removeGoogleFileFromSettings(file.id)}
                                 >
@@ -1618,7 +1618,7 @@ export function SettingsPage({
                       <div className="settings-action-row">
                         <div>
                           <strong>Disconnect Google Workspace</strong>
-                          <span>Ask Google to revoke Milim, then remove the local token and selected-file registry. Drive files are never deleted.</span>
+                          <span>Ask Google to revoke milim, then remove the local token and selected-file registry. Drive files are never deleted.</span>
                         </div>
                         <button
                           className={"btn-ghost danger" + (confirmGoogleDisconnect ? " confirm" : "")}
@@ -1674,15 +1674,15 @@ export function SettingsPage({
                   testIdPrefix="browser-storage"
                   ariaLabel="Browser storage"
                   options={[
-                    { value: "persistent", label: "Remember sign-ins", detail: "Share one local Milim browser profile across chats and restarts." },
+                    { value: "persistent", label: "Remember sign-ins", detail: "Share one local milim browser profile across chats and restarts." },
                     { value: "private", label: "Private", detail: "Discard cookies and site storage when the sidepanel browser closes." },
                   ]}
                 />
-                <p className="sheet-hint">Milim does not read or import Chrome, Safari, Firefox, or Edge passwords and cookies. Sign in once inside the Milim browser instead. Generated App previews always remain private.</p>
+                <p className="sheet-hint">milim does not read or import Chrome, Safari, Firefox, or Edge passwords and cookies. Sign in once inside the milim browser instead. Generated App previews always remain private.</p>
                 <div className="settings-action-row">
                   <div>
                     <strong>Clear sign-ins and site data</strong>
-                    <span>Remove cookies, local storage, cache, and other data from the persistent Milim browser profile.</span>
+                    <span>Remove cookies, local storage, cache, and other data from the persistent milim browser profile.</span>
                   </div>
                   <button
                     className={"btn-ghost danger" + (confirmBrowserDataClear ? " confirm" : "")}
@@ -1701,14 +1701,14 @@ export function SettingsPage({
               <div className="setting-field">
                 <span className="setting-mini-title">Default single-thread format</span>
                 <SettingsChoiceGroup value={threadExportFormat} onChange={setThreadExportFormat} testIdPrefix="thread-export-format" options={[
-                  { value: "json", label: "JSON", detail: "Preserve structured Milim thread data." },
+                  { value: "json", label: "JSON", detail: "Preserve structured milim thread data." },
                   { value: "markdown", label: "Markdown", detail: "Create a readable conversation document." },
                 ]} />
               </div>
             </SettingsBlock>
             <SettingsBlock title="Backup & restore" data-setting-id="data-backup" className={settingHighlightClass("data-backup").trim()}>
               <div className="setting-stack">
-                <div className="settings-action-row"><div><strong>Export Milim backup</strong><span>Chats, projects, drafts, archive state, settings, themes, quick actions, and local personalization metadata.</span></div><button className="btn-ghost" type="button" disabled={backupBusy} onClick={() => void exportBackupFromSettings()}>Export</button></div>
+                <div className="settings-action-row"><div><strong>Export milim backup</strong><span>Chats, projects, drafts, archive state, settings, themes, quick actions, and local personalization metadata.</span></div><button className="btn-ghost" type="button" disabled={backupBusy} onClick={() => void exportBackupFromSettings()}>Export</button></div>
                 <div className="settings-action-row"><div><strong>Restore backup</strong><span>Validate, snapshot current data, then replace backed-up state in one transaction.</span></div><button className="btn-ghost" type="button" disabled={backupBusy} onClick={() => void restoreBackupFromSettings()}>Restore</button></div>
                 <p className="sheet-hint">Credentials, browser profile data, MCP secrets, paired-device tokens, memory databases, generated media, update packages, worktrees, and running jobs are excluded.</p>
                 {backupStatus ? <p className={backupStatus.includes("failed") ? "sheet-hint error" : "sheet-hint"} role="status">{backupStatus}</p> : null}
@@ -2010,7 +2010,7 @@ export function SettingsPage({
             <SettingsBlock title="Update policy" data-setting-id="app-update-policy" className={settingHighlightClass("app-update-policy").trim()}>
               <div className="setting-stack">
                 <div className="setting-toggle-row">
-                  <div><strong>Check automatically</strong><span>Check at startup and periodically while Milim is open.</span></div>
+                  <div><strong>Check automatically</strong><span>Check at startup and periodically while milim is open.</span></div>
                   <Toggle checked={automaticCheck} onChange={setAutomaticCheck} ariaLabel="Check for updates automatically" />
                 </div>
                 <div className="setting-toggle-row">
@@ -2097,7 +2097,7 @@ export function SettingsPage({
               <div className="settings-action-row">
                 <div>
                   <strong>Local logs</strong>
-                  <span>Milim keeps two bounded log files on this device. Logs are never uploaded automatically.</span>
+                  <span>milim keeps two bounded log files on this device. Logs are never uploaded automatically.</span>
                 </div>
                 <button className="btn-ghost" type="button" data-testid="open-diagnostics" onClick={() => void openLogsFromSettings()}>
                   <FolderOpen size={13} />

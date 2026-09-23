@@ -307,13 +307,13 @@ export function modelDevProfile(
   if (context.toolIntent && !context.planMode) {
     return {
       lane: "milim-tools",
-      laneLabel: "Milim tools",
+      laneLabel: "milim tools",
       providerLabel,
       routeLabel,
       ...setup,
       capabilities,
       detailTags,
-      routeDetail: "Next turn keeps the thread context and routes this provider model through Milim's tool-agent loop.",
+      routeDetail: "Next turn keeps the thread context and routes this provider model through milim's tool-agent loop.",
     };
   }
   return {

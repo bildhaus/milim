@@ -39,7 +39,7 @@ assert(source.includes('label: "About & updates"'), "Update policy and applicati
 assert(source.includes('label: "Google Workspace"'), "Google Workspace should have a dedicated section");
 assert(source.includes('label: "Model & agent defaults"'), "The workflow label should match the defaults it contains");
 assert(source.includes('data-testid="global-custom-instructions"'), "Model and agent defaults should expose app-wide custom instructions");
-assert(source.includes("Applied to every chat run by this Milim desktop, including paired mobile sends."), "Custom instructions should explain their global scope");
+assert(source.includes("Applied to every chat run by this milim desktop, including paired mobile sends."), "Custom instructions should explain their global scope");
 assert(source.includes("Workspace AGENTS.md and CLAUDE.md instructions are loaded separately."), "Custom instructions should distinguish workspace rules");
 assert(source.includes('title="Browser data"'), "Data settings should expose browser profile controls");
 assert(source.includes('activeSection === "google"'), "Google Workspace controls should render in their dedicated section");

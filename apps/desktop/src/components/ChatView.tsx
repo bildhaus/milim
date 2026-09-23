@@ -2314,7 +2314,7 @@ export function ChatView({
       void writeCanonicalThreadModel(activeId, "").catch((error) =>
         setChatNotice({
           tone: "error",
-          message: `Milim could not clear the unavailable model: ${error instanceof Error ? error.message : String(error)}`,
+          message: `milim could not clear the unavailable model: ${error instanceof Error ? error.message : String(error)}`,
         }),
       );
       setChatNotice({
@@ -2336,7 +2336,7 @@ export function ChatView({
         if (reconciliation.status === "repair") {
           setChatNotice({
             tone: "info",
-            message: "Milim repaired this chat's saved model route.",
+            message: "milim repaired this chat's saved model route.",
           });
         }
       })
@@ -2344,7 +2344,7 @@ export function ChatView({
         handledUnavailableModelRoutesRef.current.add(syncFailKey);
         setChatNotice({
           tone: "error",
-          message: `Milim could not synchronize this chat's model: ${error instanceof Error ? error.message : String(error)}`,
+          message: `milim could not synchronize this chat's model: ${error instanceof Error ? error.message : String(error)}`,
         });
       });
   }, [
@@ -4634,7 +4634,7 @@ export function ChatView({
       .catch((error) =>
         setChatNotice({
           tone: "error",
-          message: `Milim could not save this model selection: ${error instanceof Error ? error.message : String(error)}`,
+          message: `milim could not save this model selection: ${error instanceof Error ? error.message : String(error)}`,
         }),
       );
     setBatonRequest(null);
@@ -5547,7 +5547,7 @@ export function ChatView({
     setChatNotice({
       tone: "warning",
       message:
-        "Claude session recovery needs approval before Milim stops a local Claude CLI process.",
+        "Claude session recovery needs approval before milim stops a local Claude CLI process.",
     });
   }
 
@@ -5610,7 +5610,7 @@ export function ChatView({
       setChatNotice({
         tone: "warning",
         message:
-          "Claude session recovery approved. Milim will try to stop the matching local Claude CLI process and retry.",
+          "Claude session recovery approved. milim will try to stop the matching local Claude CLI process and retry.",
       });
       void runTurnAndDrain(approvedMessages, selectedModel, {
         claudeSessionRecoveryGrant: true,
@@ -6210,7 +6210,7 @@ export function ChatView({
             ? markdownSessionCandidate(text)
             : exportedSessionCandidate(JSON.parse(text));
           if (!candidate)
-            throw new Error("The selected file is not a Milim thread export.");
+            throw new Error("The selected file is not a milim thread export.");
           const importedId = useSessions.getState().importSession(candidate);
           if (!importedId)
             throw new Error(
@@ -6252,7 +6252,7 @@ export function ChatView({
     if (!canonicalId) {
       setChatNotice({
         tone: "error",
-        message: "This legacy message has no stable ID, so Milim cannot delete it safely.",
+        message: "This legacy message has no stable ID, so milim cannot delete it safely.",
       });
       return;
     }
@@ -6763,7 +6763,7 @@ export function ChatView({
         store.setSessionHostBusy(sessionId, true);
         setChatNotice({
           tone: "info",
-          message: "Message queued by the Milim runtime and safe to close or reload.",
+          message: "Message queued by the milim runtime and safe to close or reload.",
         });
         return { status: "skipped", messages: sessionMessages(sessionId) };
       }
@@ -6973,7 +6973,7 @@ export function ChatView({
       const detail = error instanceof Error ? error.message : String(error);
       setChatNotice({
         tone: "error",
-        message: `Milim could not save this turn, so it was not sent: ${detail}`,
+        message: `milim could not save this turn, so it was not sent: ${detail}`,
       });
       return {
         status: "error",
@@ -8880,7 +8880,7 @@ export function ChatView({
                     void writeCanonicalThreadModel(activeId, modelId, effort).catch((error) =>
                       setChatNotice({
                         tone: "error",
-                        message: `Milim could not save this reasoning setting: ${error instanceof Error ? error.message : String(error)}`,
+                        message: `milim could not save this reasoning setting: ${error instanceof Error ? error.message : String(error)}`,
                       }),
                     );
                   }
@@ -8956,7 +8956,7 @@ export function ChatView({
                   void approvalAllowances.clear(keys).catch((error) =>
                     setChatNotice({
                       tone: "error",
-                      message: `Milim could not clear chat allowances: ${error instanceof Error ? error.message : String(error)}`,
+                      message: `milim could not clear chat allowances: ${error instanceof Error ? error.message : String(error)}`,
                     }),
                   )
                 }

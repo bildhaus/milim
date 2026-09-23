@@ -27,7 +27,7 @@ export interface WireChatMessage {
 export function attachmentsToPromptContext(
   attachments?: ChatAttachment[],
   imageNote: string | ((attachment: ChatAttachment) => string) =
-    "[Image attachment is available in Milim, but this text-only view cannot receive image pixels.]",
+    "[Image attachment is available in milim, but this text-only view cannot receive image pixels.]",
 ): string {
   if (!attachments?.length) return "";
   const blocks = attachments.map((attachment) => {

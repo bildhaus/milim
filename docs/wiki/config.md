@@ -3,7 +3,7 @@ id: config
 path: config
 label: Config
 title: Config, storage, and build flags
-summary: Milim home, runtime asset directory, server config, persisted databases, provider records, desktop state, and native build variants.
+summary: milim home, runtime asset directory, server config, persisted databases, provider records, desktop state, and native build variants.
 group: Reference
 order: 100
 updated: 2026-09-23
@@ -15,14 +15,14 @@ Configuration is intentionally local. The desktop app embeds the server, encrypt
 
 | Item | Default |
 |---|---|
-| Milim home | OS app-data location resolved by `milim-core` paths. |
+| milim home | OS app-data location resolved by `milim-core` paths. |
 | Server config | `~/.milim/config/server.json` for standalone CLI/server use. |
 | Identity key | `~/.milim/identity/master.key`. |
 | Desktop credential key | Windows Credential Manager, or macOS Keychain with a matching owner-only `desktop-storage.key` recovery copy for rebuild continuity. |
-| Provider records | AES-GCM encrypted provider records under the Milim data root. |
-| Runtime assets | Milim runtime directory for downloaded model and media-related assets. Previously downloaded voice assets are left untouched but no longer used. |
-| Schedules | `schedules.db` under the Milim root. |
-| Agents and Worker Runs | `agents.db` and `threads.db` under the Milim root. `threads.db` retains legacy child rows and stores Run batches in `worker_runs`. |
+| Provider records | AES-GCM encrypted provider records under the milim data root. |
+| Runtime assets | milim runtime directory for downloaded model and media-related assets. Previously downloaded voice assets are left untouched but no longer used. |
+| Schedules | `schedules.db` under the milim root. |
+| Agents and Worker Runs | `agents.db` and `threads.db` under the milim root. `threads.db` retains legacy child rows and stores Run batches in `worker_runs`. |
 
 ## Desktop session state
 
@@ -47,7 +47,7 @@ The remaining storage work is:
 | CORS | Empty allow-list means no browser origins are allowed. |
 | Auth | `authRequired: true` accepts locally minted `msk-v1` keys; `apiKeys` accepts static bearer secrets; `accessKeyIssuers` trusts additional signed-key issuers. |
 
-Standalone CLI/server identity and configuration remain file-based for headless compatibility. Milim creates key-bearing files with owner-only permissions on Unix. Desktop upgrades re-encrypt legacy provider, Google, MCP, and mobile-companion credentials with the OS-backed master key and remove the old key/plaintext files only after verification. This migration is one-way; an older desktop build requires those integrations to be reconnected or re-entered.
+Standalone CLI/server identity and configuration remain file-based for headless compatibility. milim creates key-bearing files with owner-only permissions on Unix. Desktop upgrades re-encrypt legacy provider, Google, MCP, and mobile-companion credentials with the OS-backed master key and remove the old key/plaintext files only after verification. This migration is one-way; an older desktop build requires those integrations to be reconnected or re-entered.
 
 ## Build variants
 
@@ -62,7 +62,7 @@ cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml --features native-
 | Problem | Smallest reset |
 |---|---|
 | Bad provider key | Delete or update that provider record. |
-| Broken MCP server | Use the MCP Servers sheet Test connection action, fill any required env placeholders, or remove the server through `/mcp/servers/{id}` or the desktop UI. Imported secret-looking env values are placeholders only; Milim never copies secret values from Claude/Codex configs. |
+| Broken MCP server | Use the MCP Servers sheet Test connection action, fill any required env placeholders, or remove the server through `/mcp/servers/{id}` or the desktop UI. Imported secret-looking env values are placeholders only; milim never copies secret values from Claude/Codex configs. |
 | Bad theme | Reset desktop theme settings, not the whole app state. |
 | Stale memory | Archive or delete the specific memory node. |
 | Stuck schedule | Disable or delete the schedule row. |

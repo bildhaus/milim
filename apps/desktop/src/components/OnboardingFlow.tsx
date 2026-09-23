@@ -79,7 +79,7 @@ function pathLabel(path: OnboardingSetupPath | null): string {
 function stepTitle(step: OnboardingStepId): string {
   if (step === "model") return "Choose the runtime";
   if (step === "context") return "Choose the workspace";
-  return "Configure Milim";
+  return "Configure milim";
 }
 
 function OnboardingStory({
@@ -489,7 +489,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
 
   return (
     <SheetDialog
-      title="Set up Milim"
+      title="Set up milim"
       className="sheet onboarding-sheet"
       overlayClassName="sheet-overlay onboarding-overlay"
       testId="onboarding-flow"
@@ -501,7 +501,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
           <span>Back</span>
         </button>
         <div className="onboarding-header-title">
-          <strong>Set up Milim</strong>
+          <strong>Set up milim</strong>
           <span>Step {currentIndex + 1} of {steps.length} · {stepTitle(step)}</span>
         </div>
         <button className="icon-btn sheet-close" type="button" onClick={dismiss} title="Close" aria-label="Close onboarding">
@@ -535,7 +535,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
                 <OnboardingStory
                   tone="model"
                   title="Connect any model source."
-                  body="Use a coding CLI, a local server, or a hosted provider. Milim keeps them in the same thread."
+                  body="Use a coding CLI, a local server, or a hosted provider. milim keeps them in the same thread."
                   details={[selectedModelReady ? selectedModel : "No model selected", pathLabel(activeSetupPath)]}
                 />
               <div className="onboarding-step-body">
@@ -652,7 +652,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
                         <span className="onboarding-path-icon"><ProviderIcon brand="claude" size={15} /></span>
                         <div>
                           <h4>Use a coding CLI</h4>
-                          <p>Milim detects each CLI independently. Sign in with that CLI's own tooling, then refresh.</p>
+                          <p>milim detects each CLI independently. Sign in with that CLI's own tooling, then refresh.</p>
                         </div>
                       </div>
                       <div className="onboarding-runtime-list">
@@ -782,7 +782,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
         </div>
         <div className="onboarding-footer-actions">
           <button className="btn-accent" type="button" onClick={nextStep} disabled={step === "model" && !selectedModelReady}>
-            <span>{step === "context" ? "Open Milim" : "Continue"}</span>
+            <span>{step === "context" ? "Open milim" : "Continue"}</span>
             <ArrowRight size={14} />
           </button>
         </div>

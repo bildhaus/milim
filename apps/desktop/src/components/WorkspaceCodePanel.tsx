@@ -175,7 +175,7 @@ export function WorkspaceCodePanel({
       try {
         if (await requestWorkspaceEditorLeave(payload)) await completeWorkspaceEditorLeave(payload);
       } catch (error) {
-        setFileError(`Could not ${payload} Milim: ${errorMessage(error)}`);
+        setFileError(`Could not ${payload} milim: ${errorMessage(error)}`);
       }
     })).then((stop) => {
       if (disposed) void stop();

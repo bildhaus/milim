@@ -1510,7 +1510,7 @@ fn retry_worktree_path(
     if path.starts_with(&root) {
         Ok(path)
     } else {
-        Err("Retry worktree must be inside Milim's runtime directory.".to_string())
+        Err("Retry worktree must be inside milim's runtime directory.".to_string())
     }
 }
 
@@ -1534,7 +1534,7 @@ pub(crate) fn workspace_git_create_retry_worktree_action(
             "create_retry_worktree",
             "git rev-parse --verify <checkpoint>",
             false,
-            "A Milim workspace checkpoint is required.",
+            "A milim workspace checkpoint is required.",
         );
     };
     if let Err(e) = std::fs::create_dir_all(hot_swap_root) {
@@ -1598,7 +1598,7 @@ pub(crate) fn workspace_git_apply_retry_worktree_action(
             "apply_retry_worktree",
             "git rev-parse --verify <checkpoint>",
             false,
-            "A Milim workspace checkpoint is required.",
+            "A milim workspace checkpoint is required.",
         );
     };
     if let Err(e) = std::fs::create_dir_all(hot_swap_root) {
@@ -1944,7 +1944,7 @@ fn workspace_git_remove_thread_worktree_action(
                 "remove_thread_worktree",
                 "",
                 false,
-                "Thread worktree is outside Milim's runtime directory or no longer exists.",
+                "Thread worktree is outside milim's runtime directory or no longer exists.",
             )
         }
     };
@@ -2789,7 +2789,7 @@ fn workspace_git_diff_action(
                             action,
                             "git diff <last-turn-checkpoint> --",
                             false,
-                            "Select a valid Milim turn checkpoint.",
+                            "Select a valid milim turn checkpoint.",
                         );
                     }
                     candidate.to_string()

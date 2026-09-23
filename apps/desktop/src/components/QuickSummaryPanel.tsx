@@ -379,7 +379,7 @@ export function QuickSummaryPanel({
                   <span className="quick-summary-row-icon"><Eye size={13} /></span>
                   <span className="quick-summary-row-copy">
                     <strong>{effectiveRunLoading ? "Resolving..." : effectiveRun ? "Refresh effective run" : "Inspect effective run"}</strong>
-                    <small>Resolve the configuration Milim would freeze now. Nothing is sent.</small>
+                    <small>Resolve the configuration milim would freeze now. Nothing is sent.</small>
                   </span>
                 </button>
                 {effectiveRunError && <p className="effective-run-error" role="alert">{effectiveRunError}</p>}

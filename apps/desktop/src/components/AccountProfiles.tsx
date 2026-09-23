@@ -68,7 +68,7 @@ function LoginHint({ hint }: { hint: AccountProfileLoginHint }) {
     <div className="account-profile-hint">
       <p>
         Sign this account in by running the command below in a terminal, then
-        refresh. Milim never sees the credential; the CLI writes it into that
+        refresh. milim never sees the credential; the CLI writes it into that
         folder.
       </p>
       <div className="account-profile-command">
@@ -169,7 +169,7 @@ export function AccountProfilesPanel({
     const confirmed = await confirmApp({
       title: `Forget ${profile.label}?`,
       message:
-        `Milim stops offering this ${RUNTIME_LABEL[runtime]} account. Its folder stays on disk at ${profile.config_dir}, including that account's own credentials and chat history. ` +
+        `milim stops offering this ${RUNTIME_LABEL[runtime]} account. Its folder stays on disk at ${profile.config_dir}, including that account's own credentials and chat history. ` +
         "Chats pinned to it fall back to the default account.",
       confirmLabel: "Forget account",
       tone: "danger",

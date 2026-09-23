@@ -998,7 +998,7 @@ fn build_lm_studio_native_chat_body(
 ) -> Result<LmStudioNativeChatRequest> {
     if !req.tools.is_empty() || req.tool_choice.is_some() {
         return Err(Error::InvalidRequest(
-            "LM Studio native reasoning does not support Milim function tools yet; use a gpt-oss low/medium/high effort model or Auto.".to_string(),
+            "LM Studio native reasoning does not support milim function tools yet; use a gpt-oss low/medium/high effort model or Auto.".to_string(),
         ));
     }
     if req.response_format.is_some() {

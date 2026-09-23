@@ -1899,12 +1899,12 @@ impl RunManager {
             .try_read_owned()
             .map_err(|_| {
                 Error::InvalidRequest(
-                    "Backup restore is in progress. Try again after Milim restarts.".into(),
+                    "Backup restore is in progress. Try again after milim restarts.".into(),
                 )
             })?;
         if *guard {
             return Err(Error::InvalidRequest(
-                "Backup restored. Restart Milim before making more changes.".into(),
+                "Backup restored. Restart milim before making more changes.".into(),
             ));
         }
         Ok(guard)
@@ -1944,13 +1944,13 @@ impl RunManager {
             .try_write_owned()
             .map_err(|_| {
                 Error::InvalidRequest(
-                    "Milim is processing a change. Wait for it to finish, then restore again."
+                    "milim is processing a change. Wait for it to finish, then restore again."
                         .into(),
                 )
             })?;
         if *guard {
             return Err(Error::InvalidRequest(
-                "Backup restored. Restart Milim before restoring again.".into(),
+                "Backup restored. Restart milim before restoring again.".into(),
             ));
         }
         if !self

@@ -224,8 +224,8 @@ export function TopBar({
           type="button"
           className="topbar-logo-button"
           data-testid="app-menu-trigger"
-          title="Milim menu"
-          aria-label="Open Milim menu"
+          title="milim menu"
+          aria-label="Open milim menu"
           aria-haspopup="menu"
           onClick={onOpenAppMenu}
         >

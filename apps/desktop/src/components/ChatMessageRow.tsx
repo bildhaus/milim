@@ -1020,7 +1020,7 @@ function toolApprovalCardDetail(approval: ChatApprovalRequest): string {
       return `Canceled Claude session recovery${model}.`;
     return (
       approval.detail ||
-      "This Claude session appears to be in use by another Claude CLI process. Milim can try to stop the matching local Claude process and retry, or you can cancel and resume manually."
+      "This Claude session appears to be in use by another Claude CLI process. milim can try to stop the matching local Claude process and retry, or you can cancel and resume manually."
     );
   }
   if (approval.status === "approved") return `Approved${model}.`;

@@ -353,7 +353,7 @@ function AppRecoveryScreen({
             <div className="app-error-actions">
               <button className="app-error-reload" type="button" onClick={restart}>
                 <Refresh size={15} aria-hidden="true" />
-                Restart Milim
+                Restart milim
               </button>
               <button className="app-error-reload secondary" type="button" onClick={openLogs}>
                 <FolderOpen size={15} aria-hidden="true" />
@@ -385,7 +385,7 @@ class AppErrorBoundary extends Component<
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
-    console.error("Milim UI error", error, info);
+    console.error("milim UI error", error, info);
     void recordFrontendError(error.message, [error.stack, info.componentStack].filter(Boolean).join("\n")).catch(() => {});
   }
 
@@ -393,7 +393,7 @@ class AppErrorBoundary extends Component<
     if (!this.state.error) return this.props.children;
     return (
       <AppRecoveryScreen
-        title="Milim needs a quick restart."
+        title="milim needs a quick restart."
         description="The interface stopped unexpectedly. Restart to return to your workspace. Your saved chats and settings will stay put."
         detail={this.state.error.message || "Unknown render error."}
       />
@@ -740,7 +740,7 @@ function AppContent() {
   }
 
   function quitMilim() {
-    void requestDesktopQuit().catch((error) => reportAppActionError("Quitting Milim", error));
+    void requestDesktopQuit().catch((error) => reportAppActionError("Quitting milim", error));
   }
 
   function appMenuItems(): ContextMenuItem[] {
@@ -789,7 +789,7 @@ function AppContent() {
         },
         {
           id: "quit",
-          label: "Quit Milim",
+          label: "Quit milim",
           separatorBefore: true,
           action: quitMilim,
         },
@@ -806,7 +806,7 @@ function AppContent() {
     event.stopPropagation();
     const trigger = event.currentTarget;
     const rect = trigger.getBoundingClientRect();
-    openMenuAt({ x: rect.left, y: rect.bottom + 4 }, appMenuItems(), "Milim menu", trigger);
+    openMenuAt({ x: rect.left, y: rect.bottom + 4 }, appMenuItems(), "milim menu", trigger);
   }
 
   useEffect(() => {
@@ -884,8 +884,8 @@ function AppContent() {
   if (runtimeFailed) {
     return (
       <AppRecoveryScreen
-        title="Milim's local service stopped."
-        description="Restart Milim to restore the local service. Saved chats and settings will stay put."
+        title="milim's local service stopped."
+        description="Restart milim to restore the local service. Saved chats and settings will stay put."
         detail="The embedded milim server exited unexpectedly."
       />
     );
@@ -921,7 +921,7 @@ function AppContent() {
           <div className="window-file-drop-card">
             <FolderOpen size={22} />
             <strong>Attach to {activeThread?.title?.trim() || "New chat"}</strong>
-            <span>Drop files anywhere in Milim</span>
+            <span>Drop files anywhere in milim</span>
           </div>
         </div>
       )}

@@ -17,7 +17,7 @@ Aim for one safe core loop: connect a runtime, optionally select a workspace, ap
 |---|---|
 | Install or run | Use a release build for normal use. Use `pnpm -C apps/desktop tauri:dev` only when working on the app. |
 | Runtime | The searchable picker detects hosted providers, Ollama, LM Studio, Codex, Claude, OpenCode, and Pi. Cached provider models appear first; slower runtime results join as they arrive. Only chat-capable models are listed; media generators such as Replicate and fal are added later in Providers. Codex connects from the **Coding CLIs** path, while Claude, OpenCode, and Pi link to their [sign-in steps](models#sign-in-to-an-account-runtime). Select any reachable model, then choose **Continue**. **Continue without a model** is available, but chat stays disabled until you connect one from **Tools > Providers** or the **Open Providers** action above the composer. |
-| Workspace | A folder is optional for chat and required for repository work. Choose one or skip it, then select **Open Milim**. The composer receives focus and no task is sent automatically. |
+| Workspace | A folder is optional for chat and required for repository work. Choose one or skip it, then select **Open milim**. The composer receives focus and no task is sent automatically. |
 
 Onboarding reaches the composer in two advances: Runtime → optional Workspace → app. Provider, privacy, approval, and workspace choices remain editable from the thread.
 
@@ -29,7 +29,7 @@ Onboarding reaches the composer in two advances: Runtime → optional Workspace 
 4. After execution, inspect the changed-files card and select **Review changes** to open the resulting Git diff. This is the diff produced by the approved action, not a virtual patch waiting to be applied. If review is unavailable, use **Retry** or **Open Git**; use **Undo** to restore the pre-turn checkpoint.
 5. On the latest completed answer, choose the permanently visible **Continue with…** action and select a different runtime. Edit the prepared continuation if useful, then send it in the same thread. **Review with…** and **Retry with…** remain in the adjacent menu.
 
-The closed model chip keeps the selected provider/runtime route visible. Open the picker for setup status, capabilities, favorite state, reasoning effort, and execution-lane details. Provider models use Milim tools when workspace or tool context is active; Codex, Claude, OpenCode, and Pi use their account-runtime bridges.
+The closed model chip keeps the selected provider/runtime route visible. Open the picker for setup status, capabilities, favorite state, reasoning effort, and execution-lane details. Provider models use milim tools when workspace or tool context is active; Codex, Claude, OpenCode, and Pi use their account-runtime bridges.
 
 ## Run the desktop app from source
 
@@ -51,4 +51,4 @@ Memory, sandbox, computer use, imports, Agents, Workers, Skills, MCP, Schedules,
 | Tools refuse the folder | The thread has no workspace folder. Use the folder control or `/folder C:\path\to\repo`. |
 | Remote send is blocked | Privacy is set to `block` and the scanner detected PII or a secret-looking value. |
 | Sandbox fails | Docker is not installed, not running, or cannot start the default container. |
-| Account runtime is missing | Codex, Claude, OpenCode, or Pi must be installed and authenticated through its own tooling, then refreshed in Milim. |
+| Account runtime is missing | Codex, Claude, OpenCode, or Pi must be installed and authenticated through its own tooling, then refreshed in milim. |

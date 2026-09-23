@@ -98,7 +98,7 @@ export function WorkspaceLauncherButton({
     const key = `${activeFolder}:${launcherPreference}`;
     if (unavailableNoticeRef.current === key) return;
     unavailableNoticeRef.current = key;
-    pushNotice({ tone: "warning", message: `${preferred.label} is unavailable. Showing Milim's recommended opener instead.` });
+    pushNotice({ tone: "warning", message: `${preferred.label} is unavailable. Showing milim's recommended opener instead.` });
   }, [activeFolder, launcherPreference, launchers, loading, open, pushNotice]);
   const visibleLaunchers = useMemo(() => {
     const available = rankedLaunchers.filter((launcher) => launcher.available);

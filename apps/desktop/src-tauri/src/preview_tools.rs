@@ -402,7 +402,7 @@ impl Tool for PreviewOpenUrlTool {
             .read()
             .ok()
             .and_then(|value| value.clone())
-            .ok_or_else(|| Error::Other("Milim desktop preview is unavailable".to_string()))?;
+            .ok_or_else(|| Error::Other("milim desktop preview is unavailable".to_string()))?;
         let url = url.to_string();
         app.emit(
             PREVIEW_OPEN_URL_EVENT,
@@ -411,7 +411,7 @@ impl Tool for PreviewOpenUrlTool {
                 url: url.clone(),
             },
         )
-        .map_err(|error| Error::Other(format!("failed to open Milim preview: {error}")))?;
+        .map_err(|error| Error::Other(format!("failed to open milim preview: {error}")))?;
         Ok(json!({ "status": "requested", "url": url }))
     }
 }

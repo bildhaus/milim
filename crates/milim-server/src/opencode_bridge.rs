@@ -776,7 +776,7 @@ async fn preflight_policy(cwd: &std::path::Path, overlay: &Value) -> Result<()> 
     })?;
     if config.get("permission") != Some(&expected) {
         return Err(Error::InvalidRequest(
-            "Managed OpenCode permissions override Milim's selected safety mode.".into(),
+            "Managed OpenCode permissions override milim's selected safety mode.".into(),
         ));
     }
     Ok(())

@@ -742,7 +742,7 @@ pub(crate) fn claude_harness_stream(
             .unwrap_or("127.0.0.1:7377");
         let host = loopback_host(host).ok_or_else(|| {
             ApiError(Error::InvalidRequest(
-                "Claude Review requires a loopback Milim server address".to_string(),
+                "Claude Review requires a loopback milim server address".to_string(),
             ))
         })?;
         req.approval_run_id = Some(run_id.clone());

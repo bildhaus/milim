@@ -189,7 +189,7 @@ pub(crate) fn account_runtime_tool_endpoint(
         .and_then(loopback_host)
         .ok_or_else(|| {
             ApiError(Error::InvalidRequest(
-                "Milim account-runtime tools require a loopback server address".into(),
+                "milim account-runtime tools require a loopback server address".into(),
             ))
         })?;
     let run_id = uuid::Uuid::new_v4().to_string();

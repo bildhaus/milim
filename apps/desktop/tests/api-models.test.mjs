@@ -158,7 +158,7 @@ assert.match(
   /const STEPS:[\s\S]*label: "Runtime"[\s\S]*label: "Workspace"/,
 );
 assert.doesNotMatch(onboarding, /label: "Ready"/);
-assert.match(onboarding, /"Open Milim"/);
+assert.match(onboarding, /"Open milim"/);
 for (const runtime of ["codex", "claude", "opencode", "pi"]) {
   assert.match(providersManager, new RegExp(`${runtime}-enabled-toggle`));
 }

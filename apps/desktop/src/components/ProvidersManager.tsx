@@ -1952,7 +1952,7 @@ function AccountRuntimeImportDialog({
       nativeId = source.id;
       resumable = source.resumable;
     }
-    if (!sessionId) throw new Error("Milim could not import the selected chat.");
+    if (!sessionId) throw new Error("milim could not import the selected chat.");
     const importedSession = useSessions.getState().sessions.find((session) => session.id === sessionId);
     const lastMessageId = importedSession?.messages[importedSession.messages.length - 1]?.id;
     if (!lastMessageId) throw new Error("The imported chat did not contain a sync cursor.");
@@ -2261,7 +2261,7 @@ function AccountRuntimeImportDialog({
               : result
                 ? `${result.imported} imported${result.failed ? ` · ${result.failed} failed` : ""}`
                 : importedIds.size
-                  ? `${importedIds.size} already in Milim`
+                  ? `${importedIds.size} already in milim`
                   : "Project selection includes every chat in the current scope."}
           </span>
         </div>

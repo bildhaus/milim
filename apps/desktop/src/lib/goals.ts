@@ -138,7 +138,7 @@ export function goalDecisionMessages(goal: GoalSettings, messages: ChatMessage[]
     {
       role: "system",
       content: [
-        "You are Milim's autonomous goal controller.",
+        "You are milim's autonomous goal controller.",
         "Decide whether the active goal should continue, complete, or stop as blocked.",
         "Return only strict JSON with exactly these keys: status, reason, next.",
         "status must be one of: continue, complete, blocked.",

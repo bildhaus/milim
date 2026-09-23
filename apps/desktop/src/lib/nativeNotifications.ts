@@ -42,7 +42,7 @@ export async function sendMilimNotification(
   const titled = kind === "finished"
     ? `${options.threadTitle || "A chat"} finished.`
     : `${options.threadTitle || "A chat"} needs your attention.`;
-  sendNotification({ title: "Milim", body: options.includeThreadTitle ? titled : generic });
+  sendNotification({ title: "milim", body: options.includeThreadTitle ? titled : generic });
 }
 
 export function nativeBadgeThreadCount(state: NativeBadgeState): number {

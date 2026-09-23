@@ -3316,7 +3316,7 @@ export interface AgentDraft {
 }
 
 const AGENT_DRAFT_SYSTEM_PROMPT = [
-  "You generate reusable Milim agent profiles.",
+  "You generate reusable milim agent profiles.",
   "Return only one JSON object with string fields: name, description, avatar, system_prompt.",
   "name: concise display name, usually 2-4 words.",
   "description: one short sentence explaining when to choose this agent.",

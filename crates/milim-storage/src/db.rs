@@ -4765,7 +4765,7 @@ fn reconcile_control_startup_locked(conn: &Connection) -> Result<(usize, usize)>
                 .execute(
                     "UPDATE user_runs
                      SET status = 'interrupted', updated_at_ms = ?1, completed_at_ms = ?1,
-                         error_json = COALESCE(error_json, '{\"code\":\"process_restarted\",\"message\":\"Milim stopped before this run completed.\"}')
+                         error_json = COALESCE(error_json, '{\"code\":\"process_restarted\",\"message\":\"milim stopped before this run completed.\"}')
                      WHERE status IN ('accepted', 'running', 'waiting_approval', 'stopping')",
                     params![now],
                 )
@@ -4791,7 +4791,7 @@ fn reconcile_control_startup_locked(conn: &Connection) -> Result<(usize, usize)>
                  SET status = 'failed', updated_at_ms = ?1,
                      reply_json = COALESCE(reply_json, json_object(
                         'content', '',
-                        'error', 'Milim stopped before the linked thread completed.',
+                        'error', 'milim stopped before the linked thread completed.',
                         'code', 'process_restarted'
                      ))
                  WHERE status = 'running' AND target_run_id IN
