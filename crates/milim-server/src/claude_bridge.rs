@@ -2167,13 +2167,17 @@ fn compact_json(value: Option<&Value>) -> Option<String> {
 
 fn claude_spawn_error_message(error: &std::io::Error) -> String {
     if error.kind() == std::io::ErrorKind::NotFound {
-        return cli_path_warning("Claude CLI", "claude");
+        return cli_path_warning(
+            "Claude",
+            "claude",
+            "npm install -g @anthropic-ai/claude-code",
+        );
     }
     format!("failed to start `claude`: {error}. Install Anthropic's official Claude CLI and sign in with `claude auth login`.")
 }
 
-fn cli_path_warning(label: &str, command: &str) -> String {
-    format!("{label} CLI was not found on PATH. Apps launched from the Dock or Finder do not inherit your shell PATH, so on macOS and Linux Milim also looks in the usual install directories (`~/.local/bin`, Homebrew, `~/.bun/bin`, and asdf/mise/volta shims). Install `{command}` into one of those, or launch Milim from a terminal.")
+fn cli_path_warning(label: &str, command: &str, install: &str) -> String {
+    format!("{label} CLI was not found on PATH. Apps launched from the Dock or Finder do not inherit your shell PATH, so on macOS and Linux Milim also reads your login shell's PATH and looks in the usual install directories (`~/.local/bin`, Homebrew, `~/.bun/bin`, and asdf/mise/volta shims). Install it with `{install}`, or use Locate binary... in Providers to choose the `{command}` executable.")
 }
 
 fn is_cli_path_warning(message: &str) -> bool {
@@ -2189,7 +2193,9 @@ fn opt_u32(value: &Value, key: &str) -> Option<u32> {
 
 #[cfg(windows)]
 fn claude_command(profile: &ResolvedAccountProfile) -> Command {
-    let mut command = crate::child_process::account_runtime_inherited(Command::new("claude"));
+    let command = crate::runtime_binaries::override_command("claude")
+        .unwrap_or_else(|| Command::new("claude"));
+    let mut command = crate::child_process::account_runtime_inherited(command);
     profile.apply(&mut command);
     command
 }

@@ -7,6 +7,7 @@ import {
   workspaceFolderPlaceholder,
 } from "../src/lib/onboardingModel.js";
 import { PROVIDER_PRESETS } from "../src/api.js";
+import { RUNTIME_INSTALL_COMMANDS, runtimeMissingMessage } from "../src/lib/runtimeInstall.js";
 
 const old = { id: "old", owned_by: "OpenAI", provider_id: "old-provider" };
 const connected = { id: "new", owned_by: "OpenAI", provider_id: "new-provider" };
@@ -37,4 +38,15 @@ equal(workspaceFolderPlaceholder("Linux x86_64"), "/home/you/project", "Linux ge
 
 for (const runtime of ["claude", "opencode", "pi"] as const) {
   equal(ACCOUNT_RUNTIME_SIGN_IN_HELP[runtime].url.startsWith("https://docs.milim.ai/"), true, `${runtime} sign-in help should link to the docs site`);
+}
+
+equal(RUNTIME_INSTALL_COMMANDS.codex, "npm install -g @openai/codex");
+equal(RUNTIME_INSTALL_COMMANDS.claude, "npm install -g @anthropic-ai/claude-code");
+equal(RUNTIME_INSTALL_COMMANDS.opencode, "npm install -g opencode-ai");
+equal(RUNTIME_INSTALL_COMMANDS.pi, "npm install -g @earendil-works/pi-coding-agent");
+for (const kind of ["codex", "claude", "opencode", "pi"] as const) {
+  const message = runtimeMissingMessage(kind);
+  equal(message.includes(RUNTIME_INSTALL_COMMANDS[kind]), true, `${kind} missing message should include its install command`);
+  equal(message.includes("Locate binary"), true, `${kind} missing message should offer Locate binary`);
+  equal(message.includes("on PATH."), false, `${kind} missing message should not be the bare PATH error`);
 }

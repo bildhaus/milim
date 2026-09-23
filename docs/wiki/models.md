@@ -134,3 +134,18 @@ The repo-level account runtime reference lives at `docs/account-runtimes.md`.
 | `MILIM_REMOTE_API_KEY` | Optional bearer key for `MILIM_REMOTE_BASE_URL`. |
 
 If no CLI backend is configured, `/v1/models` returns an empty list and chat requests return a setup error instead of a synthetic response.
+
+## Provider errors
+
+Rust classifies a failed canonical run at the point it enters run state. The run's `error` object keeps its `code` and raw `message` and adds an optional `provider_error`:
+
+| `kind` | Typical cause | Desktop action |
+|---|---|---|
+| `auth` | HTTP 401/403, invalid or rejected API key | **Update key** opens Providers |
+| `rate_limited` | HTTP 429 or a rate/usage-limit message; `retry_after_secs` when the provider sent `Retry-After` or "try again in" | **Retry**, counting down first |
+| `context_length` | The prompt exceeds the model's context window | **Switch model** |
+| `model_not_found` | The provider does not offer the selected model | **Switch model** |
+| `provider_unavailable` | HTTP 5xx, overload, timeouts, or network failures | **Retry** |
+| `quota` | Exhausted quota, credit, or billing problems (including OpenAI's `429 insufficient_quota`) | **Switch model** |
+
+Unrecognized failures omit `provider_error` and show their original text. Provider HTTP failures carry `"{label} {operation} -> {status}: {body}"` plus ` (retry after Ns)` when a delta-seconds `Retry-After` header was present. Older servers and non-canonical paths send text only; the desktop applies the same rules to that text as a fallback. The raw message always remains available under **Technical details**.

@@ -182,10 +182,22 @@ pub enum ApprovalResolve {
     Missing,
 }
 
+/// How far an approval reaches. `Thread` asks the runtime to remember the
+/// allowance for the rest of its native session where it supports that, and
+/// Milim records a per-thread rule for later matching requests.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalScope {
+    #[default]
+    Once,
+    Thread,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ApprovalDecision {
     pub approved: bool,
     pub response: Option<Value>,
+    pub scope: ApprovalScope,
 }
 
 pub struct PendingApproval {
@@ -252,8 +264,24 @@ impl ToolApprovalBroker {
         approved: bool,
         response: Option<Value>,
     ) -> ApprovalResolve {
+        self.resolve_with_scope(id, approved, response, ApprovalScope::Once)
+    }
+
+    /// Resolve with an explicit scope. A denial is always one-shot.
+    pub fn resolve_with_scope(
+        &self,
+        id: &str,
+        approved: bool,
+        response: Option<Value>,
+        scope: ApprovalScope,
+    ) -> ApprovalResolve {
         let response_fingerprint = approval_response_fingerprint(&response);
-        let decision = ApprovalDecision { approved, response };
+        let scope = if approved { scope } else { ApprovalScope::Once };
+        let decision = ApprovalDecision {
+            approved,
+            response,
+            scope,
+        };
         let (result, snapshot) = {
             let mut pending = self.pending.lock().expect("tool approval broker poisoned");
             let Some(entry) = pending.get_mut(id) else {
@@ -494,6 +522,7 @@ impl PendingApproval {
                 ApprovalDecision {
                     approved: false,
                     response: None,
+                    scope: ApprovalScope::Once,
                 }
             }
         }

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   deleteProvider,
   discoverLocalProviders,
+  getAccountRuntimeBinaries,
   getAccountRuntimeUpdates,
   getClaudeStatus,
   getCodexAccount,
@@ -21,6 +22,7 @@ import {
   verifyProviderModelCapabilities,
   streamCodexDeviceLogin,
   updateAccountRuntime,
+  type AccountRuntimeBinaries,
   type AccountRuntimeUpdateStatus,
   type ClaudeThreadSummary,
   type ClaudeStatusResponse,
@@ -45,6 +47,7 @@ import { Check, ChevronDown, Folder, Plus, Refresh, Search, X } from "./icons";
 import { ProviderIcon, providerBrandForProvider, type ProviderBrand } from "./ProviderIcon";
 import { SheetDialog } from "./SheetDialog";
 import { AccountProfilesPanel } from "./AccountProfiles";
+import { RuntimeInstallHint } from "./RuntimeInstallHint";
 import { Select, Toggle } from "./ui";
 import "./ProvidersManager.css";
 
@@ -215,6 +218,7 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
   const [piStatus, setPiStatus] = useState<PiStatusResponse | null>(null);
   const [piBusy, setPiBusy] = useState(false);
   const [piNote, setPiNote] = useState<{ tone: StatusTone; message: string } | null>(null);
+  const [runtimeBinaries, setRuntimeBinaries] = useState<AccountRuntimeBinaries>({});
   const [runtimeUpdates, setRuntimeUpdates] = useState<
     Partial<Record<AccountRuntimeKind, AccountRuntimeUpdateStatus>>
   >({});
@@ -253,7 +257,44 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
     if (accountRuntimeEnabled.opencode) void refreshOpenCodeStatus();
     if (accountRuntimeEnabled.pi) void refreshPiStatus();
     void refreshRuntimeUpdates();
+    void refreshRuntimeBinaries();
   }, []);
+
+  async function refreshRuntimeBinaries() {
+    try {
+      setRuntimeBinaries(await getAccountRuntimeBinaries());
+    } catch {
+      setRuntimeBinaries({});
+    }
+  }
+
+  /** The CLI itself could not be found, as opposed to being signed out. */
+  function runtimeMissing(runtime: AccountRuntimeKind): boolean {
+    if (runtimeUpdates[runtime]?.available === false) return true;
+    if (runtime === "claude") return claudeStatus?.available === false;
+    if (runtime === "opencode") return openCodeStatus?.available === false;
+    if (runtime === "pi") return piStatus?.available === false;
+    return false;
+  }
+
+  function runtimeBinaryControl(runtime: AccountRuntimeKind) {
+    if (!accountRuntimeEnabled[runtime]) return null;
+    return (
+      <RuntimeInstallHint
+        runtime={runtime}
+        missing={runtimeMissing(runtime)}
+        overridePath={runtimeBinaries[runtime]}
+        onChanged={() => {
+          void refreshRuntimeBinaries();
+          void refreshRuntimeUpdates();
+          if (runtime === "codex") void refreshCodexAccount();
+          else if (runtime === "claude") void refreshClaudeStatus(true);
+          else if (runtime === "opencode") void refreshOpenCodeStatus(true);
+          else void refreshPiStatus(true);
+        }}
+      />
+    );
+  }
 
   function updateAccountRuntimeEnabled(
     runtime: AccountRuntimeKind,
@@ -1088,6 +1129,7 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                     testId="codex-enabled-toggle"
                   />
                 </div>
+                {runtimeBinaryControl("codex")}
               </div>
               <AccountProfilesPanel
                 runtime="codex"
@@ -1110,6 +1152,8 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                       ? "Disabled"
                       : openCodeStatus?.available
                       ? `${openCodeReady ? "Ready · " : ""}${openCodeStatus.models?.length ?? 0} configured model${openCodeStatus.models?.length === 1 ? "" : "s"}${runtimeVersion("opencode")}`
+                      : runtimeMissing("opencode")
+                      ? "CLI not found."
                       : "Install OpenCode separately and configure its providers."}</span>
                   </div>
                 </div>
@@ -1135,6 +1179,7 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                     testId="opencode-enabled-toggle"
                   />
                 </div>
+                {runtimeBinaryControl("opencode")}
               </div>
               <div
                 className={
@@ -1158,7 +1203,9 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                         : `${claudeReady ? "Ready · " : ""}${claudeAccountLabel ??
                             (claudeStatus?.available
                               ? "Run `claude auth login`, then refresh."
-                              : "Install Anthropic's official Claude CLI separately.")}${runtimeVersion("claude")}`}
+                              : runtimeMissing("claude")
+                                ? "CLI not found."
+                                : "Install Anthropic's official Claude CLI separately.")}${runtimeVersion("claude")}`}
                     </span>
                   </div>
                 </div>
@@ -1195,6 +1242,7 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                     testId="claude-enabled-toggle"
                   />
                 </div>
+                {runtimeBinaryControl("claude")}
               </div>
               <AccountProfilesPanel
                 runtime="claude"
@@ -1217,6 +1265,8 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                       ? "Disabled"
                       : piStatus?.available
                       ? `${piReady ? "Ready · " : ""}${piStatus.provider_count ?? 0} provider${piStatus.provider_count === 1 ? "" : "s"} / ${piStatus.models?.length ?? 0} model${piStatus.models?.length === 1 ? "" : "s"}${runtimeVersion("pi")}`
+                      : runtimeMissing("pi")
+                      ? "CLI not found."
                       : "Install Pi separately and use /login in its terminal."}</span>
                   </div>
                 </div>
@@ -1243,6 +1293,7 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
                     testId="pi-enabled-toggle"
                   />
                 </div>
+                {runtimeBinaryControl("pi")}
               </div>
             </div>
             {codexNote && (

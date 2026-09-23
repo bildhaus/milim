@@ -36,6 +36,7 @@ import {
   type PrepareTurnOutboundOptions,
 } from "./turnContext.js";
 import { attachmentsToPromptContext, reviewCommentsToPromptContext } from "./attachmentWire.js";
+import { friendlyError } from "./providerErrors.js";
 import { estimateMessagesTokens, estimateTextTokens, messagesForModelContext, modelContextBudget } from "./contextCompaction.js";
 import {
   accountRuntimeToolPart,
@@ -1243,7 +1244,12 @@ export function handleTurnRuntimeError({
   assistantStarted: boolean;
   append: (text: string) => void;
   flush: () => void;
-  setChatNotice: (notice: { tone: "error"; message: string }) => void;
+  setChatNotice: (notice: {
+    tone: "error";
+    message: string;
+    detail?: string;
+    retryAfterSecs?: number;
+  }) => void;
   appendStreamEvent: (part: ChatStreamEventPart) => void;
   runRef: { current: RunTrace | null };
   snapshot: () => void;
@@ -1254,7 +1260,17 @@ export function handleTurnRuntimeError({
   const aborted = isAbortError(error) || Boolean(signal?.aborted);
   const message = String(error);
   if (!aborted) {
-    setChatNotice({ tone: "error", message });
+    const friendly = friendlyError(message.replace(/^Error:\s*/, ""));
+    setChatNotice(
+      friendly.detail
+        ? {
+            tone: "error",
+            message: friendly.message,
+            detail: friendly.detail,
+            ...(friendly.retryAfterSecs ? { retryAfterSecs: friendly.retryAfterSecs } : {}),
+          }
+        : { tone: "error", message },
+    );
     if (assistantStarted) {
       append(`\nError: ${message}`);
       flush();

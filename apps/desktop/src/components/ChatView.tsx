@@ -171,6 +171,7 @@ import {
   type EmptyStarterSuggestionIcon,
 } from "../lib/emptyStarterSuggestions";
 import {
+  composerActionLabel as composerActionText,
   composerNoticeAction,
   composerNoticeAutoDismissMs,
   composerNoticeIsDismissible,
@@ -420,6 +421,9 @@ import {
 import { useChatConversationController } from "./chat/useChatConversationController";
 import { useChatMediaController } from "./chat/useChatMediaController";
 import { useChatWorkerController } from "./chat/useChatWorkerController";
+import { useApprovalAllowances } from "./chat/useApprovalAllowances";
+import { useRetryCountdown } from "./chat/useRetryCountdown";
+import { errorNotice, type ProviderErrorInfo } from "../lib/providerErrors.js";
 
 const ProvidersManager = lazy(() =>
   import("./ProvidersManager").then((mod) => ({
@@ -1180,6 +1184,10 @@ function EmptyStarterActions({
 type ChatNotice = {
   message: string;
   tone: "info" | "warning" | "error";
+  /** Raw failure text shown under "Technical details". */
+  detail?: string;
+  providerError?: ProviderErrorInfo;
+  retryAfterSecs?: number;
 };
 
 type RunTurnResult = {
@@ -1503,6 +1511,7 @@ export function ChatView({
   const messageRowActionsRef = useRef<MessageRowActions | null>(null);
   const activeId = useSessions((s) => s.activeId);
   const { text: input, attachments: pendingAttachments } = useSessionComposerState(activeId);
+  const approvalAllowances = useApprovalAllowances(activeId);
   const [providersOpen, setProvidersOpen] = useState(false);
   const [mcpOpen, setMcpOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
@@ -1534,6 +1543,8 @@ export function ChatView({
     null,
   );
   const [chatNotice, setChatNotice] = useState<ChatNotice | null>(null);
+  const [modelPickerRequest, setModelPickerRequest] = useState(0);
+  const retryInSecs = useRetryCountdown(chatNotice?.retryAfterSecs, chatNotice);
   const [goalPanelOpen, setGoalPanelOpen] = useState(false);
   const [goalPrefill, setGoalPrefill] = useState<string | null>(null);
   const [goalComposerSessions, setGoalComposerSessions] = useState<
@@ -2231,18 +2242,18 @@ export function ChatView({
   }, [effectiveModel, pendingAttachments, pickerModels]);
   const proactiveModelBlocker = modelRouteBlocker ?? imageAttachmentBlocker;
   const composerNotice = prioritizeComposerNotice(chatNotice, proactiveModelBlocker);
+  const composerNoticeDetail = composerNotice && composerNotice !== proactiveModelBlocker
+    ? (composerNotice as ChatNotice).detail
+    : undefined;
   const composerAction: ComposerBlockerAction | null = composerNotice
     ? composerNotice === proactiveModelBlocker
       ? proactiveModelBlocker.action
-      : composerNoticeAction(composerNotice.message)
+      : composerNoticeAction(
+        composerNoticeDetail ?? composerNotice.message,
+        (composerNotice as ChatNotice).providerError,
+      )
     : null;
-  const composerActionLabel = composerAction === "manage_models"
-    ? "Open Providers"
-    : composerAction === "choose_folder"
-      ? "Choose folder"
-      : composerAction === "privacy_settings"
-        ? "Review privacy"
-        : "";
+  const composerActionLabel = composerActionText(composerAction, retryInSecs);
   const composerNoticeDismissible = composerNoticeIsDismissible(composerNotice, proactiveModelBlocker);
   useEffect(() => {
     const delay = composerNoticeAutoDismissMs(chatNotice);
@@ -6819,10 +6830,14 @@ export function ChatView({
       if (terminal.status === "cancelled" || terminal.status === "aborted") {
         return { status: "aborted", messages: sessionMessages(sessionId) };
       }
+      const failure = terminal.error || `Run ended with status ${terminal.status}.`;
+      if (useSessions.getState().activeId === sessionId) {
+        setChatNotice(errorNotice(failure, terminal.providerError));
+      }
       return {
         status: "error",
         messages: sessionMessages(sessionId),
-        error: terminal.error || `Run ended with status ${terminal.status}.`,
+        error: failure,
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -8745,7 +8760,7 @@ export function ChatView({
             {emptyThread && showEmptyChatRidgeline && <MilimUsageRidgeline usage={milimUsage} />}
             {composerNotice && (
               <div
-                className={`sheet-hint dock-notice ${composerNotice.tone}`}
+                className={`sheet-hint dock-notice ${composerNotice.tone}${composerNoticeDetail ? " has-details" : ""}`}
                 data-testid="chat-notice"
                 role={composerNotice.tone === "error" ? "alert" : "status"}
                 aria-live={composerNotice.tone === "error" ? "assertive" : "polite"}
@@ -8754,14 +8769,27 @@ export function ChatView({
                 {composerAction && (
                   <button
                     type="button"
+                    disabled={composerAction === "retry" && (retryInSecs > 0 || busy)}
                     onClick={() => {
-                      if (composerAction === "manage_models") setProvidersOpen(true);
-                      else if (composerAction === "choose_folder") void pickFolder();
-                      else onOpenSettings();
+                      if (composerAction === "manage_models" || composerAction === "update_key") {
+                        setProvidersOpen(true);
+                      } else if (composerAction === "choose_folder") void pickFolder();
+                      else if (composerAction === "switch_model") {
+                        setModelPickerRequest((request) => request + 1);
+                      } else if (composerAction === "retry") {
+                        setChatNotice(null);
+                        regenerate();
+                      } else onOpenSettings();
                     }}
                   >
                     {composerActionLabel}
                   </button>
+                )}
+                {composerNoticeDetail && (
+                  <details className="dock-notice-details">
+                    <summary>Technical details</summary>
+                    <code>{composerNoticeDetail}</code>
+                  </details>
                 )}
                 {composerNoticeDismissible && (
                   <button
@@ -8777,10 +8805,15 @@ export function ChatView({
               </div>
             )}
             <ComposerSurface>
-              {visibleApprovalPrompts.map((approval) => (
+              {visibleApprovalPrompts.map((approval, index) => (
                 <ToolApprovalPrompt
                   key={approval.approvalId}
                   part={approval}
+                  keyboard={index === 0}
+                  composerEmpty={!input.trim() && pendingAttachments.length === 0}
+                  onResolved={(scope) => {
+                    if (scope === "thread") approvalAllowances.refresh();
+                  }}
                   onDismiss={() => {
                     if (!approval.approvalId) return;
                     setMessages(
@@ -8917,6 +8950,17 @@ export function ChatView({
                     { toolApproval: next },
                   ).catch(() => {})
                 }
+                approvalAllowances={approvalAllowances.allowances}
+                onApprovalControlsOpen={approvalAllowances.refresh}
+                onClearApprovalAllowances={(keys) =>
+                  void approvalAllowances.clear(keys).catch((error) =>
+                    setChatNotice({
+                      tone: "error",
+                      message: `Milim could not clear chat allowances: ${error instanceof Error ? error.message : String(error)}`,
+                    }),
+                  )
+                }
+                openModelPickerRequest={modelPickerRequest}
                 onManageProviders={() => setProvidersOpen(true)}
                 onManageMcp={() => setMcpOpen(true)}
                 onManageMemory={() => {

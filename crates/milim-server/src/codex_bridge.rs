@@ -1020,7 +1020,10 @@ fn run_stream_with_worker_events(
                                 request_kind: name,
                                 request: None,
                             }, &worker_events);
-                            let approved = pending.wait().await.approved;
+                            let resolved = pending.wait().await;
+                            let approved = resolved.approved;
+                            // "Allow for this chat" maps to Codex's native session-wide acceptance.
+                            let session_scope = resolved.scope == milim_agents::ApprovalScope::Thread;
                             let decision = if approved { "approve" } else { "deny" };
                             yield runtime_event_with_worker(&CodexStreamEvent::ToolApprovalStatus {
                                 approval_id: pending.id.clone(),
@@ -1028,7 +1031,7 @@ fn run_stream_with_worker_events(
                                 decision,
                                 status: "decided",
                             }, &worker_events);
-                            let result = match codex_decision_response(params, approved, false) {
+                            let result = match codex_decision_response(params, approved, session_scope) {
                                 Ok(result) => result,
                                 Err(error) => {
                                     pending.fail(error.to_string());
@@ -1664,7 +1667,9 @@ impl CodexProcess {
 
 #[cfg(windows)]
 fn codex_command(profile: &ResolvedAccountProfile) -> Command {
-    let command = if let Some(path) = crate::child_process::find_on_path("codex.cmd") {
+    let command = if let Some(command) = crate::runtime_binaries::override_command("codex") {
+        command
+    } else if let Some(path) = crate::child_process::find_on_path("codex.cmd") {
         if let Some(command) = codex_npm_command(&path) {
             command
         } else {
@@ -2785,15 +2790,15 @@ fn rpc_error_message(error: &Value) -> String {
 
 fn codex_spawn_error_message(error: &std::io::Error) -> String {
     if error.kind() == std::io::ErrorKind::NotFound {
-        return cli_path_warning("Codex", "codex");
+        return cli_path_warning("Codex", "codex", "npm install -g @openai/codex");
     }
     format!(
         "failed to start `codex app-server`: {error}. Install or update the Codex CLI and make sure `codex` is on PATH."
     )
 }
 
-fn cli_path_warning(label: &str, command: &str) -> String {
-    format!("{label} CLI was not found on PATH. Apps launched from the Dock or Finder do not inherit your shell PATH, so on macOS and Linux Milim also looks in the usual install directories (`~/.local/bin`, Homebrew, `~/.bun/bin`, and asdf/mise/volta shims). Install `{command}` into one of those, or launch Milim from a terminal.")
+fn cli_path_warning(label: &str, command: &str, install: &str) -> String {
+    format!("{label} CLI was not found on PATH. Apps launched from the Dock or Finder do not inherit your shell PATH, so on macOS and Linux Milim also reads your login shell's PATH and looks in the usual install directories (`~/.local/bin`, Homebrew, `~/.bun/bin`, and asdf/mise/volta shims). Install it with `{install}`, or use Locate binary... in Providers to choose the `{command}` executable.")
 }
 
 fn is_cli_path_warning(message: &str) -> bool {

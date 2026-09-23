@@ -419,12 +419,12 @@ impl ModelService for RemoteBackend {
             .await
             .map_err(upstream)?;
         if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "{} api/generate keep_alive -> {status}: {text}",
-                self.label
-            )));
+            return Err(crate::http_error::http_status_error(
+                &self.label,
+                "api/generate keep_alive",
+                resp,
+            )
+            .await);
         }
         Ok(true)
     }
@@ -449,12 +449,12 @@ impl ModelService for RemoteBackend {
             .map_err(upstream)?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "{} chat/completions -> {status}: {text}",
-                self.label
-            )));
+            return Err(crate::http_error::http_status_error(
+                &self.label,
+                "chat/completions",
+                resp,
+            )
+            .await);
         }
 
         let stream = async_stream::stream! {
@@ -578,12 +578,9 @@ impl RemoteBackend {
             .map_err(upstream)?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "{} completions -> {status}: {text}",
-                self.label
-            )));
+            return Err(
+                crate::http_error::http_status_error(&self.label, "completions", resp).await,
+            );
         }
 
         let stream = async_stream::stream! {
@@ -644,12 +641,7 @@ impl RemoteBackend {
             .map_err(upstream)?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "{} responses -> {status}: {text}",
-                self.label
-            )));
+            return Err(crate::http_error::http_status_error(&self.label, "responses", resp).await);
         }
 
         let stream = async_stream::stream! {
@@ -719,12 +711,9 @@ impl RemoteBackend {
             .map_err(upstream)?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "{} api/v1/chat -> {status}: {text}",
-                self.label
-            )));
+            return Err(
+                crate::http_error::http_status_error(&self.label, "api/v1/chat", resp).await,
+            );
         }
 
         let stream = async_stream::stream! {

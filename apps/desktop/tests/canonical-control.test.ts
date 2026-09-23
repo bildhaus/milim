@@ -3,6 +3,7 @@ import {
   appendControlTimelineItems,
   canonicalNativeSessionAction,
   controlQueuedMessage,
+  controlRunError,
   hostBusySessionIdsFromBootstrap,
   mailboxMessagesFromTimeline,
   mergeMailboxMessages,
@@ -664,6 +665,54 @@ assert.deepEqual(
   mergeModelChangeMessages(modelChanges, canceledModelChange),
   [],
   "returning to the original model before a user message should remove the pending divider",
+);
+
+assert.deepEqual(
+  controlRunError({
+    code: "upstream_error",
+    message: "upstream error: x -> 429 Too Many Requests: busy (retry after 9s)",
+    provider_error: { kind: "rate_limited", status: 429, retry_after_secs: 9 },
+  }),
+  {
+    error: "upstream error: x -> 429 Too Many Requests: busy (retry after 9s)",
+    providerError: { kind: "rate_limited", status: 429, retry_after_secs: 9 },
+  },
+  "canonical run errors carry the Rust classification to the composer",
+);
+assert.deepEqual(
+  controlRunError({ code: "internal_error", message: "account runtime failed" }),
+  { error: "account runtime failed", providerError: undefined },
+  "older servers without a classification still report the raw message",
+);
+assert.deepEqual(controlRunError(null), {}, "missing errors stay empty");
+
+const autoApproved = projectControlRunMessages([
+  item(1, "message", { id: "user-1", role: "user", content: "run tests" }),
+  item(2, "approval_requested", {
+    approval_id: "approval-auto",
+    name: "shell",
+    arguments: '{"command":"cargo test"}',
+    auto_approved: { scope: "thread", allowance: "command:cargo test" },
+  }),
+  item(3, "approval_requested", {
+    approval_id: "approval-ask",
+    name: "shell",
+    arguments: '{"command":"cargo publish"}',
+  }),
+], "run-1").find((message) => message.role === "assistant");
+const approvalParts = (autoApproved?.streamParts ?? []).filter(
+  (part) => part.kind === "event" && part.approvalId,
+);
+assert.equal(approvalParts.length, 2);
+assert.equal(
+  approvalParts[0]?.kind === "event" ? approvalParts[0].approvalStatus : undefined,
+  "approved",
+  "a request covered by a chat allowance never renders as pending",
+);
+assert.equal(
+  approvalParts[1]?.kind === "event" ? approvalParts[1].detail : undefined,
+  '{"command":"cargo publish"}',
+  "pending canonical approvals keep the exact request for review",
 );
 
 console.log("canonical control projection tests passed");

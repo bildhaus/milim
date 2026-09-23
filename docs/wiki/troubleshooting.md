@@ -28,7 +28,10 @@ Desktop diagnostics are local-only under `<MILIM_HOME>/logs` (normally `~/.milim
 | Symptom | Fix |
 |---|---|
 | Models list is empty | Start Ollama or LM Studio, add a provider, or set `MILIM_REMOTE_BASE_URL` for CLI/server use. |
-| Provider returns 401 | Replace the provider key or verify the account has access to the selected model. |
+| Provider returns 401 | The composer shows **Update key**. Replace the provider key or verify the account has access to the selected model; the raw provider response is under **Technical details**. |
+| Provider is rate limited | **Retry** counts down the provider's `Retry-After` when it sent one. A `429 insufficient_quota` is classified as quota instead; check billing or switch models. |
+| Codex, Claude, OpenCode, or Pi CLI not found | Launches from the Dock, Finder, or a desktop entry now also read your login shell's `PATH` (so nvm and fnm installs are found). Otherwise install with the command shown on the Providers card, or use **Locate binary...** to choose the executable. |
+| An approval no longer asks | A previous **Allow for this chat** rule matched. Remove it under Session controls > Tool approval, or clear all rules there. |
 | Workspace tools are missing | Select a folder. Host filesystem, shell, and Git tools are removed until a workspace exists. |
 | Guarded approval cannot run shell | Switch to Open approval or use the Docker sandbox when command execution is appropriate. |
 | Sandbox run fails | Start Docker, check `MILIM_DOCKER_BIN`, and verify the daemon can run containers. |

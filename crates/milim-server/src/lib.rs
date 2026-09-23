@@ -9,6 +9,7 @@
 mod account_profiles;
 mod account_runtime_events;
 mod account_runtime_update;
+mod approval_allowances;
 mod auth;
 mod blocking;
 mod child_process;
@@ -30,6 +31,7 @@ pub mod preview_runtime;
 pub mod privacy;
 pub mod providers;
 mod routes;
+mod runtime_binaries;
 mod sse;
 mod state;
 pub mod threads;
@@ -71,6 +73,8 @@ pub fn build_router(state: AppState) -> Router {
 /// `host_policy` (DNS-rebinding protection).
 pub fn build_router_with_host_policy(state: AppState, host_policy: HostPolicy) -> Router {
     host_policy.warm();
+    #[cfg(not(windows))]
+    cli_path::warm_login_shell_path();
     let body_limit = state.config.max_request_body_bytes;
     let cors = build_cors(&state.config.allowed_origins);
 
@@ -126,6 +130,11 @@ pub fn build_router_with_host_policy(state: AppState, host_policy: HostPolicy) -
         .route(
             "/control/v1/threads/{id}/effective-run",
             post(routes::control_effective_run_preview),
+        )
+        .route(
+            "/control/v1/threads/{id}/approval-allowances",
+            get(routes::control_approval_allowances)
+                .delete(routes::control_approval_allowances_revoke),
         )
         .route(
             "/control/v1/attachments/{id}",
@@ -315,6 +324,14 @@ pub fn build_router_with_host_policy(state: AppState, host_policy: HostPolicy) -
         .route(
             "/account-runtimes/{runtime}/update",
             post(routes::account_runtime_update),
+        )
+        .route(
+            "/account-runtimes/binaries",
+            get(routes::account_runtime_binaries),
+        )
+        .route(
+            "/account-runtimes/{runtime}/binary",
+            put(routes::account_runtime_binary_set),
         )
         // Multiple signed-in accounts per account runtime
         .route(
@@ -520,6 +537,11 @@ pub fn build_mobile_companion_router(state: AppState) -> Router {
         .route(
             "/control/v1/threads/{id}/effective-run",
             post(routes::control_effective_run_preview),
+        )
+        .route(
+            "/control/v1/threads/{id}/approval-allowances",
+            get(routes::control_approval_allowances)
+                .delete(routes::control_approval_allowances_revoke),
         )
         .route(
             "/control/v1/attachments/{id}",

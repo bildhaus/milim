@@ -3246,6 +3246,9 @@ impl RunManager {
                 }
                 if workspace_changed {
                     settings.insert("toolApproval".into(), Value::String("review".to_string()));
+                    // "Allow for this chat" rules were granted for the old
+                    // project boundary; a new folder starts asking again.
+                    self.revoke_approval_allowances(id, None)?;
                 }
             }
         }
@@ -3309,6 +3312,7 @@ impl RunManager {
         if !self.store.control_delete_thread(id)? {
             return Err(Error::NotFound(format!("thread {id}")));
         }
+        let _ = crate::approval_allowances::revoke(&self.store, id, None);
         self.emit(
             "thread.deleted",
             Some(id),
@@ -4063,7 +4067,7 @@ impl RunManager {
             run_record.updated_at_ms = now_ms();
             run_record.completed_at_ms = Some(run_record.updated_at_ms);
             run_record.error_json =
-                Some(json!({ "code": error.code(), "message": error.to_string() }).to_string());
+                Some(milim_core::provider_error::run_error_value(&error).to_string());
             let _ = self.store.control_put_run(&run_record);
             return Err(error);
         }
@@ -4172,7 +4176,7 @@ impl RunManager {
             Ok(RunOutcome::Cancelled) => ("cancelled", None),
             Err(error) => (
                 "failed",
-                Some(json!({ "code": error.code(), "message": error.to_string() })),
+                Some(milim_core::provider_error::run_error_value(&error)),
             ),
         };
         run.status = status.into();
@@ -4498,7 +4502,7 @@ impl RunManager {
             let Some(event) = event else {
                 break;
             };
-            let value = serde_json::to_value(&event)
+            let mut value = serde_json::to_value(&event)
                 .map_err(|error| Error::Other(format!("serialize Agent event: {error}")))?;
             let event_type = value
                 .get("type")
@@ -4589,6 +4593,16 @@ impl RunManager {
                         created_at_ms: now_ms(),
                         resolved_at_ms: None,
                     })?;
+                    if let Some(key) = self.auto_resolve_allowed_approval(
+                        state,
+                        thread_id,
+                        approval_id,
+                        "command",
+                        name,
+                        arguments,
+                    )? {
+                        value["auto_approved"] = json!({ "scope": "thread", "allowance": key });
+                    }
                 }
                 milim_agents::AgentEvent::Done {
                     usage,
@@ -4836,7 +4850,7 @@ impl RunManager {
                 .and_then(Value::as_str)
                 .unwrap_or("runtime_notice");
             let timeline_type = event_type;
-            let timeline_value = value.clone();
+            let mut timeline_value = value.clone();
             if event_type == "session_recovery_required" {
                 let recovery_session_id = bound_session_id.clone().or_else(|| {
                     value
@@ -4933,6 +4947,23 @@ impl RunManager {
                             created_at_ms: now_ms(),
                             resolved_at_ms: None,
                         })?;
+                        if let Some(key) = self.auto_resolve_allowed_approval(
+                            state,
+                            thread_id,
+                            id,
+                            kind,
+                            value
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default(),
+                            value
+                                .get("arguments")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default(),
+                        )? {
+                            timeline_value["auto_approved"] =
+                                json!({ "scope": "thread", "allowance": key });
+                        }
                     }
                 }
                 _ => {}
@@ -5394,9 +5425,27 @@ impl RunManager {
         let Some(mut durable) = self.store.control_approval(&approval_id)? else {
             return Err(Error::NotFound(format!("approval {approval_id}")));
         };
-        let resolved = state
-            .tool_approvals
-            .resolve_with_response(&approval_id, approved, response);
+        // Optional `scope: "thread"` ("Allow for this chat"). Older clients
+        // omit it and keep one-shot semantics.
+        let allowance = match command.payload.get("scope").and_then(Value::as_str) {
+            None | Some("once") => None,
+            Some("thread") if approved => Some(thread_allowance_for_approval(&durable)?),
+            Some("thread") => None,
+            Some(_) => {
+                return Err(Error::InvalidRequest(
+                    "payload.scope must be once or thread".into(),
+                ))
+            }
+        };
+        let scope = if allowance.is_some() {
+            milim_agents::ApprovalScope::Thread
+        } else {
+            milim_agents::ApprovalScope::Once
+        };
+        let resolved =
+            state
+                .tool_approvals
+                .resolve_with_scope(&approval_id, approved, response, scope);
         if resolved == milim_agents::ApprovalResolve::Conflict {
             return Ok(ControlCommandResultV1 {
                 command_id: command.command_id.clone(),
@@ -5433,10 +5482,25 @@ impl RunManager {
                     .unwrap_or_else(|| "approval delivery failed".into()),
             ));
         }
+        let scope_name = if allowance.is_some() {
+            "thread"
+        } else {
+            "once"
+        };
         durable.status = if approved { "approved" } else { "denied" }.into();
-        durable.decision_json = Some(json!({ "decision": decision }).to_string());
+        durable.decision_json = Some(
+            json!({
+                "decision": decision,
+                "scope": scope_name,
+                "allowance": allowance.as_ref().map(|allowance| allowance.key.as_str()),
+            })
+            .to_string(),
+        );
         durable.resolved_at_ms = Some(now_ms());
         self.store.control_put_approval(&durable)?;
+        if let Some(allowance) = allowance.clone() {
+            self.record_approval_allowance(&durable.thread_id, allowance)?;
+        }
         self.persist_and_emit(
             &durable.thread_id,
             Some(&durable.run_id),
@@ -5445,8 +5509,20 @@ impl RunManager {
                 "approval_id": approval_id,
                 "decision": decision,
                 "status": snapshot.state,
+                "scope": scope_name,
             }),
         )?;
+        let mut data = serde_json::to_value(snapshot)
+            .map_err(|error| Error::Other(format!("serialize approval: {error}")))?;
+        if let Some(object) = data.as_object_mut() {
+            object.insert("scope".into(), Value::from(scope_name));
+            if let Some(allowance) = &allowance {
+                object.insert(
+                    "allowance".into(),
+                    serde_json::to_value(allowance).unwrap_or_default(),
+                );
+            }
+        }
         Ok(ControlCommandResultV1 {
             command_id: command.command_id.clone(),
             status: ControlCommandStatusV1::Applied,
@@ -5456,9 +5532,97 @@ impl RunManager {
             queue_id: None,
             confirmation_token: None,
             message: None,
-            data: serde_json::to_value(snapshot)
-                .map_err(|error| Error::Other(format!("serialize approval: {error}")))?,
+            data,
         })
+    }
+
+    /// Current "Allow for this chat" rules for one thread.
+    pub(crate) fn approval_allowances(
+        &self,
+        thread_id: &str,
+    ) -> Result<Vec<crate::approval_allowances::ApprovalAllowance>> {
+        crate::approval_allowances::load(&self.store, thread_id)
+    }
+
+    /// Revoke the listed chat allowances, or all of them when `keys` is None.
+    pub(crate) fn revoke_approval_allowances(
+        &self,
+        thread_id: &str,
+        keys: Option<&[String]>,
+    ) -> Result<Vec<crate::approval_allowances::ApprovalAllowance>> {
+        let remaining = crate::approval_allowances::revoke(&self.store, thread_id, keys)?;
+        self.emit_approval_allowances(thread_id, &remaining);
+        Ok(remaining)
+    }
+
+    fn record_approval_allowance(
+        &self,
+        thread_id: &str,
+        allowance: crate::approval_allowances::ApprovalAllowance,
+    ) -> Result<()> {
+        if let Some(allowances) =
+            crate::approval_allowances::record(&self.store, thread_id, allowance, now_ms())?
+        {
+            self.emit_approval_allowances(thread_id, &allowances);
+        }
+        Ok(())
+    }
+
+    fn emit_approval_allowances(
+        &self,
+        thread_id: &str,
+        allowances: &[crate::approval_allowances::ApprovalAllowance],
+    ) {
+        self.emit(
+            crate::approval_allowances::ALLOWANCES_EVENT_TYPE,
+            Some(thread_id),
+            None,
+            None,
+            json!({ "thread_id": thread_id, "allowances": allowances }),
+        );
+    }
+
+    /// Resolve a just-requested approval that a chat allowance already
+    /// covers. Returns the matching rule key when it was auto-approved.
+    fn auto_resolve_allowed_approval(
+        &self,
+        state: &AppState,
+        thread_id: &str,
+        approval_id: &str,
+        kind: &str,
+        name: &str,
+        arguments: &str,
+    ) -> Result<Option<String>> {
+        let allowances = crate::approval_allowances::load(&self.store, thread_id)?;
+        let Some(allowance) =
+            crate::approval_allowances::matching(&allowances, kind, name, arguments)
+        else {
+            return Ok(None);
+        };
+        if state.tool_approvals.resolve_with_scope(
+            approval_id,
+            true,
+            None,
+            milim_agents::ApprovalScope::Thread,
+        ) != milim_agents::ApprovalResolve::Resolved
+        {
+            return Ok(None);
+        }
+        if let Some(mut durable) = self.store.control_approval(approval_id)? {
+            durable.status = "approved".into();
+            durable.decision_json = Some(
+                json!({
+                    "decision": "approve",
+                    "scope": "thread",
+                    "allowance": allowance.key,
+                    "automatic": true,
+                })
+                .to_string(),
+            );
+            durable.resolved_at_ms = Some(now_ms());
+            self.store.control_put_approval(&durable)?;
+        }
+        Ok(Some(allowance.key))
     }
 
     async fn worker_start(
@@ -7336,6 +7500,29 @@ fn uppercase_role(role: &str) -> &'static str {
     }
 }
 
+/// The chat allowance an approved `scope: "thread"` decision would create.
+fn thread_allowance_for_approval(
+    durable: &ControlApprovalRecord,
+) -> Result<crate::approval_allowances::ApprovalAllowance> {
+    let request: Value = serde_json::from_str(&durable.request_json).unwrap_or(Value::Null);
+    crate::approval_allowances::allowance_for(
+        &durable.kind,
+        request
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        request
+            .get("arguments")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    )
+    .ok_or_else(|| {
+        Error::InvalidRequest(
+            "this approval cannot be allowed for the whole chat; approve it once instead".into(),
+        )
+    })
+}
+
 fn normalized_approval_kind(kind: &str) -> &str {
     match kind {
         "command" => "command",
@@ -7460,6 +7647,155 @@ mod tests {
             }),
             confirmation_token: None,
         }
+    }
+
+    #[tokio::test]
+    async fn approval_scope_thread_records_exact_command_allowance_and_auto_resolves() {
+        let (manager, state) = manager_and_state();
+        manager
+            .create_thread(&create_command("create", "test-echo"))
+            .unwrap();
+        manager
+            .store
+            .control_put_run(&ControlRunRecord {
+                id: "run-fixture".into(),
+                thread_id: "thread-fixture".into(),
+                status: "completed".into(),
+                adapter: "provider".into(),
+                request_json: json!({ "text": "turn" }).to_string(),
+                agent_snapshot_json: None,
+                native_session_json: None,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                completed_at_ms: Some(1),
+                error_json: None,
+            })
+            .unwrap();
+        let put_pending = |name: &str, arguments: &str| {
+            let mut pending = state.tool_approvals.request();
+            manager
+                .store
+                .control_put_approval(&ControlApprovalRecord {
+                    id: pending.id.clone(),
+                    run_id: "run-fixture".into(),
+                    thread_id: "thread-fixture".into(),
+                    kind: "command".into(),
+                    request_json: json!({ "name": name, "arguments": arguments }).to_string(),
+                    status: "pending".into(),
+                    decision_json: None,
+                    created_at_ms: now_ms(),
+                    resolved_at_ms: None,
+                })
+                .unwrap();
+            let id = pending.id.clone();
+            let waiter = tokio::spawn(async move {
+                let decision = pending.wait().await;
+                let _ = pending.deliver();
+                decision
+            });
+            (id, waiter)
+        };
+        let resolve = |approval_id: &str, scope: &str| ControlCommandV1 {
+            command_id: format!("resolve-{approval_id}"),
+            kind: ControlCommandKindV1::ApprovalResolve,
+            thread_id: None,
+            expected_revision: None,
+            payload: json!({ "approval_id": approval_id, "decision": "approve", "scope": scope }),
+            confirmation_token: None,
+        };
+
+        let (first, waiter) = put_pending("shell", r#"{"command":"cargo test"}"#);
+        let result = manager
+            .command(state.clone(), None, resolve(&first, "thread"))
+            .await
+            .unwrap();
+        assert_eq!(result.status, ControlCommandStatusV1::Applied, "{result:?}");
+        assert_eq!(result.data["scope"], "thread");
+        assert_eq!(result.data["allowance"]["key"], "command:cargo test");
+        let decision = waiter.await.unwrap();
+        assert!(decision.approved);
+        assert_eq!(decision.scope, milim_agents::ApprovalScope::Thread);
+        let allowances = manager.approval_allowances("thread-fixture").unwrap();
+        assert_eq!(allowances.len(), 1);
+        assert_eq!(allowances[0].command.as_deref(), Some("cargo test"));
+
+        // The same exact command is approved without a prompt; any other
+        // command still asks.
+        let (second, waiter) = put_pending("shell", r#"{"command":"cargo test"}"#);
+        let key = manager
+            .auto_resolve_allowed_approval(
+                &state,
+                "thread-fixture",
+                &second,
+                "command",
+                "shell",
+                r#"{"command":"cargo test"}"#,
+            )
+            .unwrap();
+        assert_eq!(key.as_deref(), Some("command:cargo test"));
+        assert!(waiter.await.unwrap().approved);
+        assert_eq!(
+            manager
+                .store
+                .control_approval(&second)
+                .unwrap()
+                .unwrap()
+                .status,
+            "approved"
+        );
+        let (third, _waiter) = put_pending("shell", r#"{"command":"cargo publish"}"#);
+        assert!(manager
+            .auto_resolve_allowed_approval(
+                &state,
+                "thread-fixture",
+                &third,
+                "command",
+                "shell",
+                r#"{"command":"cargo publish"}"#,
+            )
+            .unwrap()
+            .is_none());
+
+        // A shell request without an exact command cannot become a chat rule.
+        let (blank, _waiter) = put_pending("shell", "{}");
+        let refused = manager
+            .command(state.clone(), None, resolve(&blank, "thread"))
+            .await
+            .unwrap();
+        assert_eq!(refused.status, ControlCommandStatusV1::Failed);
+
+        // Individual rules can be revoked by key.
+        manager
+            .record_approval_allowance(
+                "thread-fixture",
+                crate::approval_allowances::allowance_for("command", "write_file", "{}").unwrap(),
+            )
+            .unwrap();
+        let remaining = manager
+            .revoke_approval_allowances("thread-fixture", Some(&["tool:write_file".to_string()]))
+            .unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].key, "command:cargo test");
+
+        // A new workspace folder starts asking again.
+        let moved = manager
+            .patch_thread(
+                &ControlCommandV1 {
+                    command_id: "move-workspace".into(),
+                    kind: ControlCommandKindV1::ThreadSetExecutionSettings,
+                    thread_id: Some("thread-fixture".into()),
+                    expected_revision: None,
+                    payload: json!({ "workspace": "/tmp/milim-other-project" }),
+                    confirmation_token: None,
+                },
+                ThreadPatch::Execution,
+            )
+            .unwrap();
+        assert_eq!(moved.status, ControlCommandStatusV1::Applied);
+        assert!(manager
+            .approval_allowances("thread-fixture")
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

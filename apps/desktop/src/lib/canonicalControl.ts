@@ -10,6 +10,7 @@ import {
   type ControlTimelineItemV1,
 } from "../api.js";
 import { appendPhaseStreamPart } from "./streamParts.js";
+import { providerErrorFromValue, type ProviderErrorInfo } from "./providerErrors.js";
 import type { QueuedMessage } from "../sessions/store.js";
 
 type CanonicalMessage = ChatMessage;
@@ -227,10 +228,22 @@ function eventPart(item: ControlTimelineItemV1): ChatStreamPart | null {
   if (item.type === "approval_requested" || item.type === "tool_approval_required") {
     const approvalId =
       typeof data.approval_id === "string" ? data.approval_id : undefined;
+    // A chat allowance already approved this request in Rust.
+    if (data.auto_approved && typeof data.auto_approved === "object") {
+      return {
+        kind: "event",
+        eventType: "status",
+        label: `Allowed for this chat: ${name}`,
+        status: "done",
+        approvalId,
+        approvalStatus: "approved",
+      };
+    }
     return {
       kind: "event",
       eventType: "status",
       label: `Approval required: ${name}`,
+      detail: typeof data.arguments === "string" ? data.arguments : undefined,
       status: "running",
       approvalId,
       approvalStatus: "pending",
@@ -734,12 +747,24 @@ function lastRunStatusItem(
   return undefined;
 }
 
+/** The raw message and optional structured classification of a run error. */
+export function controlRunError(
+  error: unknown,
+): { error?: string; providerError?: ProviderErrorInfo } {
+  if (!error || typeof error !== "object" || Array.isArray(error)) return {};
+  const raw = error as { message?: unknown; provider_error?: unknown };
+  return {
+    error: "message" in raw ? String(raw.message ?? "") : undefined,
+    providerError: providerErrorFromValue(raw.provider_error),
+  };
+}
+
 export async function pollControlRun(
   threadId: string,
   runId: string,
   signal: AbortSignal,
   onItems: (items: ControlTimelineItemV1[]) => void,
-): Promise<{ status: string; error?: string }> {
+): Promise<{ status: string; error?: string; providerError?: ProviderErrorInfo }> {
   let afterSeq: number | undefined;
   const items: ControlTimelineItemV1[] = [];
   const knownItemKeys = new Set<string>();
@@ -767,14 +792,7 @@ export async function pollControlRun(
     const terminal = lastRunStatusItem(items, runId);
     const status = terminal?.data.status;
     if (typeof status === "string" && status !== "accepted" && status !== "running") {
-      const error = terminal?.data.error;
-      return {
-        status,
-        error:
-          error && typeof error === "object" && "message" in error
-            ? String((error as { message?: unknown }).message ?? "")
-            : undefined,
-      };
+      return { status, ...controlRunError(terminal?.data.error) };
     }
     await new Promise<void>((resolve) => {
       let settled = false;

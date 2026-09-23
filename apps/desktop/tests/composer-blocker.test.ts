@@ -1,12 +1,19 @@
 import { equal } from "node:assert/strict";
 import type { AccountRuntimeEnablement, ModelInfo, ProviderInfo } from "../src/api";
 import {
+  composerActionLabel,
   composerNoticeAction,
   composerNoticeAutoDismissMs,
   composerNoticeIsDismissible,
   modelComposerBlocker,
   prioritizeComposerNotice,
 } from "../src/lib/composerBlocker.js";
+import {
+  classifyErrorMessage,
+  errorNotice,
+  friendlyError,
+  providerErrorFromValue,
+} from "../src/lib/providerErrors.js";
 
 const enabled: AccountRuntimeEnablement = {
   codex: true,
@@ -70,6 +77,61 @@ equal(composerNoticeAction("no working folder selected - pick one first"), "choo
 equal(composerNoticeAction("Claude CLI is not signed in."), "manage_models");
 equal(composerNoticeAction("Codex is unavailable: login expired"), "manage_models");
 equal(composerNoticeAction("Attachment content is unavailable."), null);
+equal(
+  composerNoticeAction("Claude CLI was not found on PATH. Install it with `npm install -g @anthropic-ai/claude-code`."),
+  "manage_models",
+  "a missing CLI should link to Providers",
+);
+
+// Provider failures: HTTP status, well-known phrases, and retry hints.
+equal(
+  composerNoticeAction("upstream error: OpenAI chat/completions -> 401 Unauthorized: {\"error\":{\"message\":\"Incorrect API key\"}}"),
+  "update_key",
+);
+equal(classifyErrorMessage("x chat/completions -> 403 Forbidden: denied").kind, "auth");
+equal(classifyErrorMessage("x messages -> 529 <unknown status code>: overloaded").kind, "provider_unavailable");
+equal(classifyErrorMessage("x chat/completions -> 503 Service Unavailable: ").status, 503);
+equal(classifyErrorMessage("chat HTTP 502").kind, "provider_unavailable");
+equal(classifyErrorMessage("x chat/completions -> 404 Not Found: The model `gpt-9` does not exist").kind, "model_not_found");
+equal(composerNoticeAction("model_not_found: unknown model gpt-9"), "switch_model");
+equal(classifyErrorMessage("x chat/completions -> 400 Bad Request: context_length_exceeded").kind, "context_length");
+equal(composerNoticeAction("prompt is too long: 210000 tokens > 200000 maximum"), "switch_model");
+equal(
+  classifyErrorMessage("x chat/completions -> 429 Too Many Requests: {\"code\":\"insufficient_quota\"}").kind,
+  "quota",
+  "exhausted quota is not a transient rate limit",
+);
+const limited = classifyErrorMessage("x chat/completions -> 429 Too Many Requests: slow down (retry after 12s)");
+equal(limited.kind, "rate_limited");
+equal(limited.retryAfterSecs, 12);
+equal(classifyErrorMessage("Rate limit reached. Please try again in 1.5s.").retryAfterSecs, 2);
+equal(classifyErrorMessage("rate_limit_exceeded: try again in 250ms").retryAfterSecs, 1);
+equal(composerNoticeAction("rate limit reached"), "retry");
+equal(classifyErrorMessage("tool call 42 failed at step 500").kind, "unknown", "bare numbers are not statuses");
+
+// Structured classifications from canonical run state win over text.
+equal(
+  composerNoticeAction("account runtime failed", { kind: "rate_limited", retry_after_secs: 5 }),
+  "retry",
+);
+equal(providerErrorFromValue({ kind: "auth", status: 401 })?.status, 401);
+equal(providerErrorFromValue({ kind: "nonsense" }), undefined);
+equal(providerErrorFromValue(null), undefined);
+
+const friendly = friendlyError("upstream error: x chat/completions -> 401 Unauthorized: bad key");
+equal(friendly.kind, "auth");
+equal(friendly.detail, "upstream error: x chat/completions -> 401 Unauthorized: bad key", "raw text stays available as technical detail");
+equal(friendly.message.includes("401"), false, "friendly copy hides the raw status line");
+equal(friendlyError("Attachment content is unavailable.").detail, undefined, "unrecognized errors show their own text");
+const notice = errorNotice("x -> 429 Too Many Requests: busy", { kind: "rate_limited", status: 429, retry_after_secs: 30 });
+equal(notice.retryAfterSecs, 30);
+equal(notice.detail, "x -> 429 Too Many Requests: busy");
+
+equal(composerActionLabel("update_key"), "Update key");
+equal(composerActionLabel("switch_model"), "Switch model");
+equal(composerActionLabel("retry", 7), "Retry in 7 s");
+equal(composerActionLabel("retry", 0), "Retry");
+equal(composerActionLabel(null), "");
 
 const authoritative = { tone: "error" as const, message: "blocked by the privacy gate" };
 const proactive = {
