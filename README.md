@@ -18,7 +18,7 @@ Release artifacts target Windows and macOS. Linux packaging is not a primary rel
 - **Your runtime choice.** Switch the next turn between hosted providers, Ollama, LM Studio, or vLLM, and separately installed Codex, Claude, OpenCode, or Pi runtimes. Thread history stays put; provider turns can keep per-model generation and capability overrides. Codex and Claude can hold several signed-in accounts, and a chat pins one or lets milim pick whichever has the most room left.
 - **Explicit local boundaries.** Workspace selection, model routing, outbound privacy, and approval mode remain visible and under your control.
 - **Execution you can inspect.** Consequential tool calls can pause for review. Git diffs, checkpoints, previews, run details, and recovery actions stay beside the conversation.
-- **A workbench when you need it.** Agents, Workers, skills, schedules, MCP servers and Apps, memory, media generation, Google Workspace, and previews extend the core thread through the **Tools** launcher.
+- **A workbench when you need it.** The **Tools** launcher groups every manager: Providers, Agents, Memory, MCP servers and Apps, Skills, Schedules, media generation, Pull requests, Usage, Google Workspace, and Mobile. `Ctrl/Cmd+K` opens a command palette for the same managers plus panels, chat actions, and slash commands. Workers and previews extend the thread from the inspector.
 - **Direct mobile control.** The native iOS and Android companion connects to paired desktops over Tailscale, trusted LAN discovery, or a manual URL. Enabled desktop transports restore automatically after milim restarts. milim operates no relay, account service, or cloud transcript store for this path.
 
 Provider-backed chat and installed account runtimes remain distinct. Provider models use milim's tool-agent loop; account runtimes retain their own sessions and tools behind the same visible approval policy.
@@ -115,6 +115,7 @@ cargo clippy --workspace --all-targets
 
 # Desktop
 pnpm -C apps/desktop verify
+pnpm -C apps/desktop test            # all tests/*.test.* files; pass a name to filter, e.g. `test google-workspace`
 
 # Release-runtime performance proof (Windows WebView2)
 pnpm -C apps/desktop perf:canonical
@@ -131,7 +132,7 @@ pnpm -C apps/site build
 
 Platform release work should also follow the [release guide](https://docs.milim.ai/release). The broader packaged-app and Tauri smoke path is available through `pnpm -C apps/desktop verify:tester-ready`.
 
-Pull-request CI splits complete desktop verification between the Rust matrix, frontend job, and a Windows WebView2 close-to-tray check. Release runs reuse that protected validation and add the canonical Windows runtime benchmark plus packaged-artifact checks.
+Pull-request and `main`-push CI splits complete desktop verification between the Rust matrix, an MSRV check, a dependency audit (both Cargo lockfiles plus a check that they agree), the frontend job (including bundle-size budgets), and a Windows WebView2 close-to-tray check. A nightly workflow runs the full Windows WebView2 E2E suite and the enforced perf suite. Release runs reuse that protected validation and add the canonical Windows runtime benchmark plus packaged-artifact checks.
 
 ## Documentation
 
