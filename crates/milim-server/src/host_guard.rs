@@ -166,12 +166,13 @@ fn extra_allowed_hosts() -> &'static [String] {
 fn machine_host_names() -> &'static [String] {
     static NAMES: OnceLock<Vec<String>> = OnceLock::new();
     NAMES.get_or_init(|| {
-        let mut values = ["COMPUTERNAME", "HOSTNAME"]
+        let values = ["COMPUTERNAME", "HOSTNAME"]
             .into_iter()
             .filter_map(|key| std::env::var(key).ok())
             .collect::<Vec<_>>();
         #[cfg(unix)]
-        {
+        let values = {
+            let mut values = values;
             if let Ok(name) = std::fs::read_to_string("/etc/hostname") {
                 values.push(name);
             }
@@ -180,7 +181,8 @@ fn machine_host_names() -> &'static [String] {
                     values.push(String::from_utf8_lossy(&output.stdout).into_owned());
                 }
             }
-        }
+            values
+        };
         normalized_names(values)
     })
 }
