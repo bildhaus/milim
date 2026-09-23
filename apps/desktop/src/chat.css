@@ -2811,6 +2811,37 @@ g.native-chart-mark:focus-visible .native-chart-point {
 .dock .dock-notice .dock-notice-dismiss:focus-visible {
   opacity: 1;
 }
+.dock .dock-notice button:disabled {
+  cursor: default;
+  opacity: 0.7;
+  text-decoration: none;
+}
+.dock .dock-notice.has-details {
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.dock .dock-notice-details {
+  flex-basis: 100%;
+  color: var(--tertiary-text);
+  font-size: 11px;
+}
+.dock .dock-notice-details summary {
+  cursor: pointer;
+}
+.dock .dock-notice-details code {
+  display: block;
+  max-height: 120px;
+  margin-top: 6px;
+  padding: 8px;
+  overflow: auto;
+  border: 1px solid var(--border-primary);
+  border-radius: 7px;
+  background: var(--bg-secondary);
+  color: var(--secondary-text);
+  text-align: left;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .dock .dock-notice.error {
   color: var(--error);
 }

@@ -13,6 +13,7 @@
 
 pub mod anthropic;
 pub mod gemini;
+mod http_error;
 mod image_input;
 pub mod remote;
 pub mod service;

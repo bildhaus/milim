@@ -4053,7 +4053,7 @@ impl RunManager {
             run_record.updated_at_ms = now_ms();
             run_record.completed_at_ms = Some(run_record.updated_at_ms);
             run_record.error_json =
-                Some(json!({ "code": error.code(), "message": error.to_string() }).to_string());
+                Some(milim_core::provider_error::run_error_value(&error).to_string());
             let _ = self.store.control_put_run(&run_record);
             return Err(error);
         }
@@ -4162,7 +4162,7 @@ impl RunManager {
             Ok(RunOutcome::Cancelled) => ("cancelled", None),
             Err(error) => (
                 "failed",
-                Some(json!({ "code": error.code(), "message": error.to_string() })),
+                Some(milim_core::provider_error::run_error_value(&error)),
             ),
         };
         run.status = status.into();

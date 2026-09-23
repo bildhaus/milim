@@ -112,6 +112,7 @@ export function ControlBar({
   onPrivacy,
   toolApproval,
   onToolApproval,
+  openModelPickerRequest = 0,
   onManageProviders,
   onManageMcp,
   onManageMemory,
@@ -147,6 +148,8 @@ export function ControlBar({
   onPrivacy: (privacy: PrivacyMode) => void;
   toolApproval: ToolApprovalMode;
   onToolApproval: (approval: ToolApprovalMode) => void;
+  /** Incrementing this opens the model picker (for example from an error notice). */
+  openModelPickerRequest?: number;
   onManageProviders: () => void;
   onManageMcp: () => void;
   onManageMemory: () => void;
@@ -183,6 +186,16 @@ export function ControlBar({
       window.removeEventListener("resize", closeOnResize);
     };
   }, [menu]);
+
+  useEffect(() => {
+    if (!openModelPickerRequest) return;
+    const trigger = modelTriggerRef.current;
+    if (!trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    setModelPickerStyle(modelPickerPlacement(rect.top, rect.bottom, window.innerHeight));
+    setMenu("model");
+    trigger.focus();
+  }, [openModelPickerRequest]);
 
   const contextAccessibleLabel = `Session controls, Docker sandbox ${sandbox ? "on" : "off"}, Computer ${computerUse ? "on" : "off"}, Memory ${memory ? "on" : "off"}, Privacy ${PRIVACY_LABEL[privacy]}, Tool approval ${TOOL_APPROVAL_LABEL[toolApproval]}`;
   const showGoalChip = Boolean(goalMode) || goalChipVisible(goal);

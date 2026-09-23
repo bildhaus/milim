@@ -37,6 +37,9 @@ Review approvals use a shared lifecycle: requested, user-decided, delivered to t
 
 Each adapter maps the normalized Approve/Deny choice to its own protocol. Codex selects only from the request's advertised `availableDecisions`—including `cancel` rather than assuming `decline`—while Claude, OpenCode, and Pi keep their native response shapes.
 
+
+A failed canonical run's `error` object may include `provider_error` (`kind`, optional `status` and `retry_after_secs`) classifying the failure as `auth`, `rate_limited`, `context_length`, `model_not_found`, `provider_unavailable`, or `quota`; see [Models](wiki/models.md#provider-errors).
+
 A generic failure or user cancellation does not discard a session that may still be resumable. An explicit `session_recovery_required` event compare-and-clears only the matching adapter binding; a stale recovery event cannot erase a newer binding, and bindings for the other adapters remain untouched.
 
 All account-runtime tool events keep their full input text behind the transcript's visual ellipsis. Claude no longer truncates structured tool inputs server-side, while OpenCode and Pi also preserve completion results and error details in the shared run trace.

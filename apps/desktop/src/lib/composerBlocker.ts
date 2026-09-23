@@ -5,8 +5,14 @@ import {
   type ProviderInfo,
 } from "../api.js";
 import { modelDevProfile } from "./modelPicker.js";
+import {
+  classifyError,
+  errorRecoveryAction,
+  type ErrorRecoveryAction,
+  type ProviderErrorInfo,
+} from "./providerErrors.js";
 
-export type ComposerBlockerAction = "manage_models" | "choose_folder" | "privacy_settings";
+export type ComposerBlockerAction = ErrorRecoveryAction;
 
 export type ComposerBlocker = {
   message: string;
@@ -81,23 +87,33 @@ export function composerNoticeIsDismissible<T extends { tone: "info" | "warning"
   return Boolean(notice && notice !== proactive);
 }
 
-export function composerNoticeAction(message: string): ComposerBlockerAction | null {
-  const text = message.toLowerCase();
-  if (text.includes("blocked by the privacy gate")) return "privacy_settings";
-  if (
-    text.includes("no working folder selected") ||
-    text.includes("no working folder is selected") ||
-    text.includes("workspace folder is required") ||
-    text.includes("select a milim workspace folder")
-  ) return "choose_folder";
-  if (
-    text.includes("not signed in") ||
-    text.includes("no configured models") ||
-    text.includes("no authenticated or configured models") ||
-    text.includes("cli is unavailable") ||
-    text.includes("codex is unavailable") ||
-    text.includes("codex login did not complete") ||
-    text.includes("disabled in providers")
-  ) return "manage_models";
-  return null;
+/** The recovery action for a notice, from its structured classification when
+ * present, otherwise from the shared error classifier. */
+export function composerNoticeAction(
+  message: string,
+  providerError?: ProviderErrorInfo,
+): ComposerBlockerAction | null {
+  return errorRecoveryAction(classifyError(message, providerError).kind);
+}
+
+export function composerActionLabel(
+  action: ComposerBlockerAction | null,
+  retryInSecs = 0,
+): string {
+  switch (action) {
+    case "manage_models":
+      return "Manage models";
+    case "choose_folder":
+      return "Choose folder";
+    case "privacy_settings":
+      return "Review privacy";
+    case "update_key":
+      return "Update key";
+    case "switch_model":
+      return "Switch model";
+    case "retry":
+      return retryInSecs > 0 ? `Retry in ${retryInSecs} s` : "Retry";
+    default:
+      return "";
+  }
 }

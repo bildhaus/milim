@@ -174,12 +174,7 @@ impl ModelService for AnthropicBackend {
             .map_err(upstream)?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "{} messages -> {status}: {text}",
-                self.label
-            )));
+            return Err(crate::http_error::http_status_error(&self.label, "messages", resp).await);
         }
 
         let stream = async_stream::stream! {

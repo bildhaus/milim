@@ -10,6 +10,7 @@ import {
   type ControlTimelineItemV1,
 } from "../api.js";
 import { appendPhaseStreamPart } from "./streamParts.js";
+import { providerErrorFromValue, type ProviderErrorInfo } from "./providerErrors.js";
 import type { QueuedMessage } from "../sessions/store.js";
 
 type CanonicalMessage = ChatMessage;
@@ -703,12 +704,24 @@ export function mergeControlRunMessages(
   return [...nextBase, ...nextProjected];
 }
 
+/** The raw message and optional structured classification of a run error. */
+export function controlRunError(
+  error: unknown,
+): { error?: string; providerError?: ProviderErrorInfo } {
+  if (!error || typeof error !== "object" || Array.isArray(error)) return {};
+  const raw = error as { message?: unknown; provider_error?: unknown };
+  return {
+    error: "message" in raw ? String(raw.message ?? "") : undefined,
+    providerError: providerErrorFromValue(raw.provider_error),
+  };
+}
+
 export async function pollControlRun(
   threadId: string,
   runId: string,
   signal: AbortSignal,
   onItems: (items: ControlTimelineItemV1[]) => void,
-): Promise<{ status: string; error?: string }> {
+): Promise<{ status: string; error?: string; providerError?: ProviderErrorInfo }> {
   let afterSeq: number | undefined;
   const items: ControlTimelineItemV1[] = [];
   let wake: (() => void) | null = null;
@@ -742,14 +755,7 @@ export async function pollControlRun(
       .find((item) => item.run_id === runId && item.type === "run_status");
     const status = terminal?.data.status;
     if (typeof status === "string" && status !== "accepted" && status !== "running") {
-      const error = terminal?.data.error;
-      return {
-        status,
-        error:
-          error && typeof error === "object" && "message" in error
-            ? String((error as { message?: unknown }).message ?? "")
-            : undefined,
-      };
+      return { status, ...controlRunError(terminal?.data.error) };
     }
     await new Promise<void>((resolve) => {
       let settled = false;

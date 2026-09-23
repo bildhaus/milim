@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import {
   canonicalNativeSessionAction,
   controlQueuedMessage,
+  controlRunError,
   hostBusySessionIdsFromBootstrap,
   mailboxMessagesFromTimeline,
   mergeMailboxMessages,
@@ -638,4 +639,22 @@ assert.deepEqual(
   "returning to the original model before a user message should remove the pending divider",
 );
 
+assert.deepEqual(
+  controlRunError({
+    code: "upstream_error",
+    message: "upstream error: x -> 429 Too Many Requests: busy (retry after 9s)",
+    provider_error: { kind: "rate_limited", status: 429, retry_after_secs: 9 },
+  }),
+  {
+    error: "upstream error: x -> 429 Too Many Requests: busy (retry after 9s)",
+    providerError: { kind: "rate_limited", status: 429, retry_after_secs: 9 },
+  },
+  "canonical run errors carry the Rust classification to the composer",
+);
+assert.deepEqual(
+  controlRunError({ code: "internal_error", message: "account runtime failed" }),
+  { error: "account runtime failed", providerError: undefined },
+  "older servers without a classification still report the raw message",
+);
+assert.deepEqual(controlRunError(null), {}, "missing errors stay empty");
 console.log("canonical control projection tests passed");

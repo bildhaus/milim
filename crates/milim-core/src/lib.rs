@@ -10,5 +10,6 @@ pub mod config;
 pub mod error;
 pub mod paths;
 pub mod proc;
+pub mod provider_error;
 
 pub use error::{Error, Result};
