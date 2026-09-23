@@ -28,6 +28,7 @@ pub mod preview_runtime;
 pub mod privacy;
 pub mod providers;
 mod routes;
+mod runtime_binaries;
 mod sse;
 mod state;
 pub mod threads;
@@ -54,6 +55,8 @@ pub use state::AppState;
 
 /// Assemble the application router with all routes and middleware.
 pub fn build_router(state: AppState) -> Router {
+    #[cfg(not(windows))]
+    cli_path::warm_login_shell_path();
     let body_limit = state.config.max_request_body_bytes;
     let cors = build_cors(&state.config.allowed_origins);
 
@@ -301,6 +304,14 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/account-runtimes/{runtime}/update",
             post(routes::account_runtime_update),
+        )
+        .route(
+            "/account-runtimes/binaries",
+            get(routes::account_runtime_binaries),
+        )
+        .route(
+            "/account-runtimes/{runtime}/binary",
+            put(routes::account_runtime_binary_set),
         )
         // Multiple signed-in accounts per account runtime
         .route(

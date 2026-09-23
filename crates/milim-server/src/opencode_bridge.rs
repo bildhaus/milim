@@ -940,7 +940,9 @@ fn rpc_error(error: &Value) -> String {
 
 #[cfg(windows)]
 fn opencode_command() -> Command {
-    let command = if let Some(path) = crate::child_process::find_on_path("opencode.cmd") {
+    let command = if let Some(command) = crate::runtime_binaries::override_command("opencode") {
+        command
+    } else if let Some(path) = crate::child_process::find_on_path("opencode.cmd") {
         let mut command = Command::new("cmd");
         command.arg("/C").arg(path);
         command

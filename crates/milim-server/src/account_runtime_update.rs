@@ -279,6 +279,9 @@ fn truncate(mut value: String, max_chars: usize) -> String {
 
 #[cfg(windows)]
 fn runtime_command(name: &str) -> Command {
+    if let Some(command) = crate::runtime_binaries::override_command(name) {
+        return command;
+    }
     if let Some(path) = crate::child_process::find_on_path(&format!("{name}.cmd")) {
         let mut command = Command::new("cmd");
         command.arg("/D").arg("/S").arg("/C").arg(path);
@@ -292,7 +295,7 @@ fn runtime_command(name: &str) -> Command {
 
 #[cfg(not(windows))]
 fn runtime_command(name: &str) -> Command {
-    Command::new(name)
+    crate::cli_path::command(name)
 }
 
 #[cfg(test)]

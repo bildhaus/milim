@@ -209,6 +209,7 @@ impl AppState {
     }
 
     pub fn with_control(mut self, manager: Arc<RunManager>) -> Self {
+        crate::runtime_binaries::load(manager.store());
         self.control = Some(manager);
         self
     }

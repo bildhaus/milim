@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { connectedSourceModel, type ConnectedModelSource } from "../lib/onboardingModel";
+import { runtimeMissingMessage } from "../lib/runtimeInstall";
 import "../settings.css";
 import {
   accountRuntimeKind,
@@ -30,6 +31,7 @@ import { ArrowLeft, ArrowRight, Check, PlusSquare, Search, X } from "./icons";
 import { Logo } from "./Logo";
 import { ModelPicker } from "./ModelPicker";
 import { ProviderIcon, providerBrandForProvider, type ProviderBrand } from "./ProviderIcon";
+import { RuntimeInstallHint } from "./RuntimeInstallHint";
 import { SheetDialog } from "./SheetDialog";
 import { Select } from "./ui";
 
@@ -106,6 +108,12 @@ function runtimeReady(kind: AccountRuntimeKind, statuses: RuntimeStatuses): bool
   return Boolean(statuses[kind]?.available && statuses[kind]?.authenticated);
 }
 
+/** The CLI itself was not found (not merely signed out). */
+function runtimeMissing(kind: AccountRuntimeKind, statuses: RuntimeStatuses): boolean {
+  if (kind === "codex") return false;
+  return statuses[kind]?.available === false;
+}
+
 function runtimeDetail(kind: AccountRuntimeKind, statuses: RuntimeStatuses): string {
   if (kind === "codex") {
     const status = statuses.codex;
@@ -118,13 +126,13 @@ function runtimeDetail(kind: AccountRuntimeKind, statuses: RuntimeStatuses): str
     if (!status) return "Claude CLI was not detected.";
     if (status.available && status.authenticated) return status.auth?.email ?? status.auth?.subscriptionType ?? "Authenticated.";
     if (status.error) return status.error;
-    return status.available ? "Run `claude auth login`, then refresh." : "CLI not found on PATH.";
+    return status.available ? "Run `claude auth login`, then refresh." : runtimeMissingMessage("claude");
   }
   const status = kind === "opencode" ? statuses.opencode : statuses.pi;
   if (!status) return `${kind === "opencode" ? "OpenCode" : "Pi"} CLI was not detected.`;
   if (status.available && status.authenticated) return status.version ? `Version ${status.version}` : "Authenticated and ready.";
   if (status.error) return status.error;
-  if (!status.available) return "CLI not found on PATH.";
+  if (!status.available) return runtimeMissingMessage(kind);
   return kind === "opencode" ? "Configure a provider in OpenCode, then refresh." : "Run Pi and use /login, then refresh.";
 }
 
@@ -646,6 +654,13 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
                                   {codexBusy ? "Connecting..." : "Connect"}
                                 </button>
                               ) : null}
+                              {enabled && runtimeMissing(kind, runtimeStatuses) && (
+                                <RuntimeInstallHint
+                                  runtime={kind}
+                                  missing
+                                  onChanged={() => void refreshAccountRuntimes(true).then(() => refreshModels())}
+                                />
+                              )}
                             </div>
                           );
                         })}

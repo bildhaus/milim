@@ -3173,6 +3173,33 @@ export async function getAccountRuntimeUpdates(): Promise<AccountRuntimeUpdatesR
   );
 }
 
+/** User-located executables, keyed by runtime. */
+export type AccountRuntimeBinaries = Partial<Record<AccountRuntimeKind, string>>;
+
+export async function getAccountRuntimeBinaries(): Promise<AccountRuntimeBinaries> {
+  const body = await parseJsonResponse<{ binaries?: AccountRuntimeBinaries }>(
+    await authFetch(`${BASE}/account-runtimes/binaries`),
+    "Runtime binary paths failed",
+  );
+  return body.binaries ?? {};
+}
+
+/** Set the executable Milim spawns for a runtime, or `null` to use discovery. */
+export async function setAccountRuntimeBinary(
+  runtime: AccountRuntimeKind,
+  path: string | null,
+): Promise<AccountRuntimeBinaries> {
+  const body = await parseJsonResponse<{ binaries?: AccountRuntimeBinaries }>(
+    await authFetch(`${BASE}/account-runtimes/${encodeURIComponent(runtime)}/binary`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    }),
+    `${runtime} binary path failed`,
+  );
+  return body.binaries ?? {};
+}
+
 export async function updateAccountRuntime(
   runtime: AccountRuntimeKind,
 ): Promise<AccountRuntimeUpdateResult> {

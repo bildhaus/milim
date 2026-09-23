@@ -6,7 +6,18 @@ On Windows, Milim refreshes its process search path from the current machine and
 
 Account-runtime processes use the `AccountRuntimeInherited` environment policy: they inherit the user's environment plus adapter-specific overrides so their own authentication and developer tooling keep working. Milim journals only the policy name and names of explicit grants, never environment values. Host-shell tools separately use `HostShellInherited`; configured MCP children start from OS essentials plus explicitly configured variables (`ConfiguredIntegrationSanitized`), and container payloads receive no host credentials unless explicitly granted (`SandboxSanitized`). Docker itself may inherit the host values needed to reach the daemon, but Milim does not translate them into container `-e` values.
 
-On macOS and Linux, Finder, Dock, and desktop-entry launches do not inherit the interactive shell's full search path. Milim keeps inherited entries first, then searches standard Homebrew, MacPorts, Cargo, pnpm, Bun, Volta, asdf, mise, and user-local install directories for account runtimes and GitHub CLI. It resolves symlinked launchers to their real executable target before spawning them, preserving app-bundle-relative companion lookup when a command in a directory such as `~/.local/bin` points into an application bundle.
+On macOS and Linux, Finder, Dock, and desktop-entry launches do not inherit the interactive shell's full search path. At startup Milim asks the user's `$SHELL` once, as an interactive login shell with a 3-second timeout, for the `PATH` it exports, so directories that version managers such as nvm and fnm add from shell startup files are found. The search order is: inherited entries, then that login-shell `PATH`, then standard Homebrew, MacPorts, Cargo, pnpm, Bun, Volta, asdf, mise, and user-local install directories. The result applies to account runtimes, their updaters, and GitHub CLI. Milim resolves symlinked launchers to their real executable target before spawning them, preserving app-bundle-relative companion lookup when a command in a directory such as `~/.local/bin` points into an application bundle.
+
+Each runtime can also use an explicit executable. **Locate binary...** on its Providers card (or in onboarding) saves an absolute path in the canonical store (`PUT /account-runtimes/{runtime}/binary` with `{ "path": "..." }`, or `null` to reset; `GET /account-runtimes/binaries` lists them). The override wins for turns, status checks, model discovery, and updates. Its folder is placed first on the child's `PATH` so a Node launcher still finds the `node` beside it. An override that no longer points at an executable is ignored until it is fixed or reset.
+
+When a CLI is missing, Milim shows its official install command:
+
+| Runtime | Install |
+|---|---|
+| Codex | `npm install -g @openai/codex` |
+| Claude | `npm install -g @anthropic-ai/claude-code` |
+| OpenCode | `npm install -g opencode-ai` |
+| Pi | `npm install -g @earendil-works/pi-coding-agent` |
 
 The Providers panel shows each detected CLI version and compares it with the latest stable version published for that CLI. An available update enables and highlights the Update action; a current runtime shows a disabled Up to date action. If the release check is unavailable, the action remains neutral and usable. Updating requires a second confirmation, then invokes that runtime's own updater (`codex update`, `claude update`, `opencode upgrade --pure`, or `pi update self --no-approve`) and rechecks the installed version. Finish active turns first. Milim does not replace these tools' installers, credentials, or standalone configuration.
 
