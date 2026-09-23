@@ -94,7 +94,7 @@ fn resolve_with_native_store(
             if retain_recovery_key {
                 let key = if fallback_path.exists() {
                     let fallback_key = read_restricted_key(fallback_path)?;
-                    if fallback_key == native_key {
+                    if secrets_equal(&fallback_key, &native_key) {
                         native_key
                     } else {
                         reconcile_native_and_recovery_keys(
@@ -112,7 +112,7 @@ fn resolve_with_native_store(
             }
             if fallback_path.exists() {
                 let fallback_key = read_restricted_key(fallback_path)?;
-                if fallback_key != native_key {
+                if !secrets_equal(&fallback_key, &native_key) {
                     return Err(Error::Other(
                         "native and restricted-file master keys differ; refusing to guess".into(),
                     ));
@@ -198,7 +198,7 @@ fn restricted_fallback(
 fn ensure_fallback(path: &Path, key: &[u8; 32]) -> Result<()> {
     if path.exists() {
         let existing = read_restricted_key(path)?;
-        if existing != *key {
+        if !secrets_equal(&existing, key) {
             return Err(Error::Other(
                 "existing restricted-file master key differs from the selected key".into(),
             ));
@@ -284,7 +284,7 @@ fn store_and_verify(entry: &Entry, key: &[u8; 32]) -> Result<()> {
     let stored = entry
         .get_secret()
         .map_err(|error| Error::Other(format!("verify native credential: {error}")))?;
-    if stored != key {
+    if !secrets_equal(&stored, key) {
         return Err(Error::Other(
             "native credential read-back did not match".into(),
         ));
@@ -316,6 +316,21 @@ fn native_recovery_status() -> SecretStorageStatus {
     restricted_status(
         "The encryption key is stored in macOS Keychain with a matching owner-only local recovery key so encrypted state survives local app rebuilds.",
     )
+}
+
+/// Compare secret bytes in time that depends only on their length, so key
+/// checks never exit early on the first differing byte.
+fn secrets_equal(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let difference = left
+        .iter()
+        .zip(right)
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        });
+    std::hint::black_box(difference) == 0
 }
 
 fn hex_digest(value: &[u8]) -> String {
@@ -394,7 +409,7 @@ fn migrate_encrypted_file(
     }
 
     let legacy_key = read_key(legacy_key_path)?;
-    if legacy_key == *master_key {
+    if secrets_equal(&legacy_key, master_key) {
         return Err(Error::Other(format!(
             "{} cannot be decrypted with its recorded master key",
             data_path.display()
@@ -465,6 +480,15 @@ fn validate_mobile_companion(data: &[u8], path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn secret_comparison_checks_length_and_every_byte() {
+        assert!(secrets_equal(&[1, 2, 3], &[1, 2, 3]));
+        assert!(!secrets_equal(&[1, 2, 3], &[1, 2, 4]));
+        assert!(!secrets_equal(&[0, 2, 3], &[1, 2, 3]));
+        assert!(!secrets_equal(&[1, 2], &[1, 2, 3]));
+        assert!(secrets_equal(&[], &[]));
+    }
     use keyring::mock::MockCredential;
 
     fn root(label: &str) -> PathBuf {

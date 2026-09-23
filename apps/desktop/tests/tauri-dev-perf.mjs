@@ -52,7 +52,7 @@ const consoleErrors = [];
 
 if (process.platform !== "win32") {
   console.log(
-    `Skipping ${binaryMode ? "canonical" : "Tauri dev"} perf benchmark: this runner targets Windows WebView2.`,
+    `SKIPPED: ${binaryMode ? "canonical" : "Tauri dev"} perf benchmark did not run on ${process.platform}; it requires Windows WebView2. Exit 0 is not a pass.`,
   );
   process.exit(0);
 }

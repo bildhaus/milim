@@ -196,7 +196,7 @@ export function AccountProfileChip({
           })}
           <p className="account-profile-menu-note">
             Switching accounts starts a fresh {runtime} session for this chat.
-            Milim replays the conversation so far; the other account keeps its
+            milim replays the conversation so far; the other account keeps its
             own session.
           </p>
         </div>,

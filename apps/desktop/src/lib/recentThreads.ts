@@ -1,3 +1,5 @@
+import { folderLabel } from "./projectColors.js";
+
 export type RecentThreadSession = {
   id: string;
   title: string;
@@ -87,8 +89,4 @@ function uniqueIds(ids: readonly string[]): string[] {
     result.push(id);
   }
   return result;
-}
-
-function folderLabel(folder: string): string {
-  return folder.split(/[\\/]/).filter(Boolean).pop() || folder || "Project";
 }

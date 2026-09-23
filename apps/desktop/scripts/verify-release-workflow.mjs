@@ -9,6 +9,10 @@ const releaseWorkflow = readFileSync(
   "utf8",
 );
 const ciWorkflow = readFileSync(process.env.MILIM_CI_WORKFLOW_PATH || join(repoRoot, ".github", "workflows", "ci.yml"), "utf8");
+const nightlyWorkflow = readFileSync(
+  process.env.MILIM_NIGHTLY_WORKFLOW_PATH || join(repoRoot, ".github", "workflows", "nightly.yml"),
+  "utf8",
+);
 const siteWorkflow = readFileSync(
   process.env.MILIM_SITE_WORKFLOW_PATH || join(repoRoot, ".github", "workflows", "site.yml"),
   "utf8",
@@ -140,10 +144,39 @@ assertNotIncludes(ciWorkflow, "      - run: pnpm -C apps/desktop verify\n", "CI 
 assertNotIncludes(ciWorkflow, "            . -> target", "CI frontend cache");
 for (const line of [
   "  pull_request:",
+  "  push:",
+  "    branches: [main]",
   "  workflow_dispatch:",
 ]) {
   assertLineOccurrences(ciWorkflow, line, 1, "CI workflow trigger");
 }
+assertIncludes(ciWorkflow, "on:\n  pull_request:\n  push:\n    branches: [main]\n", "CI workflow trigger");
+for (const needle of [
+  "name: Rust MSRV",
+  "toolchain: ${{ steps.msrv.outputs.version }}",
+  "cargo check --workspace --all-targets --locked",
+  "name: Dependency audit",
+  "cargo install cargo-audit --locked",
+  "cargo audit --file Cargo.lock",
+  "cargo audit --file apps/desktop/src-tauri/Cargo.lock",
+  "node apps/desktop/scripts/verify-lockfile-drift.mjs",
+]) {
+  assertIncludes(ciWorkflow, needle, "CI workflow");
+}
+assertNotIncludes(ciWorkflow, "--deny warnings", "CI dependency audit");
+assertNotIncludes(ciWorkflow, "schedule:", "CI workflow");
+for (const needle of [
+  "  schedule:",
+  "runs-on: windows-2022",
+  "pnpm -C apps/desktop install --frozen-lockfile",
+  "run: pnpm -C apps/desktop verify:tauri",
+  "run: pnpm -C apps/desktop test:tauri-webview",
+  "run: pnpm -C apps/desktop perf:suite:enforce",
+]) {
+  assertIncludes(nightlyWorkflow, needle, "nightly workflow");
+}
+assertBefore(nightlyWorkflow, "verify:tauri", "test:tauri-webview", "nightly workflow");
+assertNotIncludes(nightlyWorkflow, "pull_request:", "nightly workflow");
 assertNotIncludes(ciWorkflow, 'tags: ["v*"]', "CI workflow");
 assertNotIncludes(ciWorkflow, "runtime-evidence:", "CI workflow");
 assertLineOccurrences(releaseWorkflow, '    tags: ["v*"]', 1, "Release workflow trigger");
@@ -160,9 +193,9 @@ assertEqual(
   "canonical benchmark script",
 );
 assertEqual(desktopPackage.scripts["perf:tauri-dev"], "node tests/tauri-dev-perf.mjs", "Tauri dev benchmark script");
-assertIncludes(desktopPackage.scripts["verify:frontend"], "test:media:frontend", "frontend verification");
-assertIncludes(desktopPackage.scripts["verify:frontend"], "test:mobile-companion:frontend", "frontend verification");
-assertIncludes(desktopPackage.scripts["verify:frontend"], "test:artifacts:frontend", "frontend verification");
+assertEqual(desktopPackage.scripts.test, "node tests/run-tests.mjs", "desktop test discovery script");
+assertIncludes(desktopPackage.scripts["verify:frontend"], "npm run test &&", "frontend verification");
+assertBefore(desktopPackage.scripts["verify:frontend"], "npm run build", "npm run verify:bundle-size", "frontend verification");
 assertNotIncludes(desktopPackage.scripts["verify:frontend"], "cargo", "frontend verification");
 assertNotIncludes(desktopPackage.scripts["verify:frontend"], "test:computer-use", "frontend verification");
 assertEqual(
@@ -204,9 +237,7 @@ assertBefore(
   "runtime evidence job",
 );
 
-for (const needle of ["branches: [main]", "Optional feature smoke"]) {
-  assertNotIncludes(ciWorkflow, needle, "CI workflow");
-}
+assertNotIncludes(ciWorkflow, "Optional feature smoke", "CI workflow");
 
 console.log(`Release workflow smoke verified: ${expectedArtifacts.map((artifact) => `milim-${artifact.artifact}`).join(", ")}`);
 

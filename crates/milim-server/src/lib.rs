@@ -9,7 +9,9 @@
 mod account_profiles;
 mod account_runtime_events;
 mod account_runtime_update;
+mod approval_allowances;
 mod auth;
+mod blocking;
 mod child_process;
 mod claude_bridge;
 #[cfg(not(windows))]
@@ -19,6 +21,8 @@ pub mod companion;
 pub mod control;
 mod error;
 pub mod google_workspace;
+pub mod host_guard;
+mod keyed_lock;
 pub mod mcp_bridge;
 pub mod media_library;
 mod opencode_bridge;
@@ -27,6 +31,7 @@ pub mod preview_runtime;
 pub mod privacy;
 pub mod providers;
 mod routes;
+mod runtime_binaries;
 mod sse;
 mod state;
 pub mod threads;
@@ -49,10 +54,27 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 
+pub use host_guard::HostPolicy;
 pub use state::AppState;
 
-/// Assemble the application router with all routes and middleware.
+/// Assemble the application router with all routes and middleware. The
+/// accepted `Host` names follow `expose_to_network`; listeners served through
+/// [`serve_listener`] derive them from the bound address instead.
 pub fn build_router(state: AppState) -> Router {
+    let policy = if state.config.expose_to_network {
+        HostPolicy::Network
+    } else {
+        HostPolicy::Loopback
+    };
+    build_router_with_host_policy(state, policy)
+}
+
+/// Assemble the application router, accepting only `Host` names allowed by
+/// `host_policy` (DNS-rebinding protection).
+pub fn build_router_with_host_policy(state: AppState, host_policy: HostPolicy) -> Router {
+    host_policy.warm();
+    #[cfg(not(windows))]
+    cli_path::warm_login_shell_path();
     let body_limit = state.config.max_request_body_bytes;
     let cors = build_cors(&state.config.allowed_origins);
 
@@ -108,6 +130,11 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/control/v1/threads/{id}/effective-run",
             post(routes::control_effective_run_preview),
+        )
+        .route(
+            "/control/v1/threads/{id}/approval-allowances",
+            get(routes::control_approval_allowances)
+                .delete(routes::control_approval_allowances_revoke),
         )
         .route(
             "/control/v1/attachments/{id}",
@@ -204,6 +231,8 @@ pub fn build_router(state: AppState) -> Router {
             get(routes::media_library_content),
         )
         .route("/media/library/{id}", delete(routes::media_library_delete))
+        // Usage dashboard aggregates over canonical message metrics
+        .route("/usage/summary", get(routes::usage_summary))
         // Host working folder (drives the filesystem/shell tools)
         .route(
             "/workspace",
@@ -295,6 +324,14 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/account-runtimes/{runtime}/update",
             post(routes::account_runtime_update),
+        )
+        .route(
+            "/account-runtimes/binaries",
+            get(routes::account_runtime_binaries),
+        )
+        .route(
+            "/account-runtimes/{runtime}/binary",
+            put(routes::account_runtime_binary_set),
         )
         // Multiple signed-in accounts per account runtime
         .route(
@@ -442,16 +479,23 @@ pub fn build_router(state: AppState) -> Router {
         .route("/embeddings", post(routes::openai_embeddings))
         .route("/api/embed", post(routes::ollama_embeddings))
         .route("/api/embeddings", post(routes::ollama_embeddings))
-        // Middleware (applied outermost-first)
+        // Middleware (the last layer runs first)
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .layer(RequestBodyLimitLayer::new(body_limit))
+        .layer(axum::middleware::from_fn_with_state(
+            host_policy,
+            host_guard::validate_host,
+        ))
         .with_state(state)
 }
 
 /// Assemble the phone-facing companion router only. This is intentionally
 /// narrower than the local API so it can be exposed through Tailscale Serve.
+/// It always accepts LAN and Tailscale `Host` names ([`HostPolicy::Network`]).
 pub fn build_mobile_companion_router(state: AppState) -> Router {
+    let host_policy = HostPolicy::Network;
+    host_policy.warm();
     let body_limit = state.config.max_request_body_bytes;
     let mut state = state;
     state.mobile_control_only = true;
@@ -495,6 +539,11 @@ pub fn build_mobile_companion_router(state: AppState) -> Router {
             post(routes::control_effective_run_preview),
         )
         .route(
+            "/control/v1/threads/{id}/approval-allowances",
+            get(routes::control_approval_allowances)
+                .delete(routes::control_approval_allowances_revoke),
+        )
+        .route(
             "/control/v1/attachments/{id}",
             put(routes::control_attachment_upload).layer(RequestBodyLimitLayer::new(
                 CONTROL_MAX_ATTACHMENT_BYTES as usize,
@@ -516,6 +565,10 @@ pub fn build_mobile_companion_router(state: AppState) -> Router {
         .route("/control/v1/ws", get(routes::control_socket))
         .layer(TraceLayer::new_for_http())
         .layer(RequestBodyLimitLayer::new(body_limit))
+        .layer(axum::middleware::from_fn_with_state(
+            host_policy,
+            host_guard::validate_host,
+        ))
         .with_state(state)
 }
 
@@ -542,7 +595,8 @@ pub async fn serve_listener_with_graceful_shutdown<S>(
 where
     S: Future<Output = ()> + Send + 'static,
 {
-    let app = build_router(state.clone());
+    let host_policy = HostPolicy::for_bound_address(listener.local_addr()?);
+    let app = build_router_with_host_policy(state.clone(), host_policy);
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

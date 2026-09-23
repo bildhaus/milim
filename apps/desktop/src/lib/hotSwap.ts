@@ -138,7 +138,7 @@ export function assessHotSwap({
       code: "context_compaction_required",
       parity: "translated",
       title: "Context will be compacted",
-      detail: `${target.id} has a smaller prompt budget, so Milim will create a checkpoint before the next send.`,
+      detail: `${target.id} has a smaller prompt budget, so milim will create a checkpoint before the next send.`,
     });
   }
 
@@ -171,7 +171,7 @@ export function assessHotSwap({
       code: "native_session_stale",
       parity: "degraded",
       title: "Native session is behind",
-      detail: "Choose whether to start fresh from Milim context or resume the older native session with intervening turns.",
+      detail: "Choose whether to start fresh from milim context or resume the older native session with intervening turns.",
     });
   }
 

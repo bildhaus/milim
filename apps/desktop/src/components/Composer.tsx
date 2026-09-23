@@ -1,5 +1,5 @@
 import { type ClipboardEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { openExternalUrl, type Agent, type ChatAttachment, type MediaKind, type SkillInfo, type ToolInfo } from "../api";
+import { isTauriRuntime, openExternalUrl, type Agent, type ChatAttachment, type MediaKind, type SkillInfo, type ToolInfo } from "../api";
 import type { WorkspaceFileSuggestion } from "../api";
 import { composerAutocompleteTriggerAt, composerCommandRunsOnSelection, composerSuggestionMatchScore, mcpToolTagCompletion, replaceComposerAutocompleteTrigger, skillTagCompletion } from "../lib/composerAutocomplete";
 import { canNavigateComposerHistory, moveComposerHistory, type ComposerHistoryDirection } from "../lib/composerHistory";
@@ -7,41 +7,13 @@ import { clipboardFiles, isDuplicateClipboardPaste, type ClipboardPasteStamp } f
 import { composerDisplayForText, composerLinkClickAction, composerTokensForText, pasteComposerUrl, type ComposerToken } from "../lib/composerTokens";
 import { composerEnterAction, isComposingKeyEvent, shortcutLabel } from "../ui/shortcuts";
 import { useUiPreferences } from "../ui/store";
+import { SLASH_COMMANDS, type SlashCommand } from "../lib/slashCommands";
 import { AgentAvatar } from "./AgentAvatar";
 import { ArrowUp, ChevronDown, Folder, FolderOpen, GitHub, Paperclip, PlusSquare, Square, UserRound, X } from "./icons";
+import { formatBytes as attachmentSizeLabel } from "../lib/artifacts";
+import { folderLabel } from "../lib/projectColors";
 const COMPOSER_HISTORY_NOTICE_MS = 1800;
 
-function isTauriRuntime(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
-
-type SlashCommand = {
-  id: string;
-  label: string;
-  hint: string;
-  group: "Commands" | "Settings";
-  placeholder?: string;
-};
-
-const SLASH_COMMANDS: SlashCommand[] = [
-  { id: "plan", label: "Plan mode", hint: "Toggle read-only planning", group: "Commands", placeholder: "/plan build feature X" },
-  { id: "goal", label: "Goal", hint: "Make the next prompt an autonomous goal", group: "Commands", placeholder: "/goal build feature X" },
-  { id: "model", label: "Model", hint: "Set the thread model", group: "Settings", placeholder: "/model llama3.2" },
-  { id: "folder", label: "Folder", hint: "Set or pick a working folder", group: "Settings", placeholder: "/folder C:\\project" },
-  { id: "sandbox", label: "Docker sandbox on", hint: "Enable Docker sandbox tools", group: "Settings" },
-  { id: "nosandbox", label: "Docker sandbox off", hint: "Disable Docker sandbox tools", group: "Settings" },
-  { id: "computer", label: "Computer on", hint: "Enable computer-use tools", group: "Settings" },
-  { id: "nocomputer", label: "Computer off", hint: "Disable computer-use tools", group: "Settings" },
-  { id: "memory", label: "Memory on", hint: "Enable scoped memories", group: "Settings" },
-  { id: "nomemory", label: "Memory off", hint: "Disable scoped memories", group: "Settings" },
-  { id: "privacy", label: "Privacy", hint: "Set privacy gate", group: "Settings", placeholder: "/privacy redact" },
-  { id: "approval", label: "Approval", hint: "Set tool approval mode", group: "Settings", placeholder: "/approval guarded" },
-  { id: "agent", label: "Agent", hint: "Set active agent or none", group: "Settings", placeholder: "/agent none" },
-  { id: "compact", label: "Compact thread", hint: "Summarize prior context into a fresh checkpoint", group: "Commands" },
-  { id: "export", label: "Export chat", hint: "Download this thread as JSON", group: "Commands" },
-  { id: "import", label: "Import chat", hint: "Import a Milim thread JSON file", group: "Commands" },
-  { id: "clear", label: "New chat", hint: "Start a fresh chat with current settings", group: "Commands" },
-];
 
 function agentMenuDetail(agent: Agent): string {
   const mode = agent.tool_mode ?? ((agent.enabled_tools ?? []).length === 0 ? "all" : "custom");
@@ -67,16 +39,6 @@ function parseSlashInput(value: string): { id: string; argument: string } | null
   const match = value.trim().match(/^\/([a-z-]+)(?:\s+(.*))?$/i);
   if (!match) return null;
   return { id: match[1].toLowerCase(), argument: match[2]?.trim() ?? "" };
-}
-
-function attachmentSizeLabel(size: number): string {
-  if (size >= 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`;
-  if (size >= 1024) return `${Math.round(size / 1024)} KB`;
-  return `${size} B`;
-}
-
-function folderLabel(folder: string): string {
-  return folder.split(/[\\/]/).filter(Boolean).pop() || folder || "No project";
 }
 
 function isGithubLinkToken(token: ComposerToken): boolean {
@@ -220,7 +182,7 @@ export function Composer({
   const hasInstr = instructions.trim().length > 0;
   const activeWorkspaceFolder = workspaceFolder.trim();
   const activeWorkspaceLabel = activeWorkspaceFolder
-    ? workspaceProjects.find((project) => project.folder === activeWorkspaceFolder)?.name ?? folderLabel(activeWorkspaceFolder)
+    ? workspaceProjects.find((project) => project.folder === activeWorkspaceFolder)?.name ?? folderLabel(activeWorkspaceFolder, "No project")
     : "No project";
   const workspaceControlLabel = workspaceChangeStartsNewChat
     ? "Start new chat in..."

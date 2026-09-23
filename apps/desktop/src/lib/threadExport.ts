@@ -45,7 +45,7 @@ function markerRole(role: string): string {
 export function sessionMarkdownExport(session: Session, exportedAt = new Date().toISOString()): string {
   const lines = [
     "<!-- milim-thread:v1 -->",
-    `# ${session.title.trim() || "Milim thread"}`,
+    `# ${session.title.trim() || "milim thread"}`,
     "",
     `Exported: ${exportedAt}`,
     "",

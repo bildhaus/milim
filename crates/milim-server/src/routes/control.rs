@@ -156,11 +156,58 @@ pub(crate) async fn control_timeline(
     let manager = control_manager(&st)?;
     let limit = query.tail.or(query.limit).unwrap_or(100).clamp(1, 500);
     let tail = query.tail.is_some() || (query.after_seq.is_none() && query.before_seq.is_none());
-    let page: TimelinePageV1 = manager
-        .timeline_page(&id, query.after_seq, query.before_seq, tail, limit)
-        .map_err(ApiError)?
-        .ok_or_else(|| ApiError(Error::ModelNotFound(format!("thread {id}"))))?;
+    let thread_id = id.clone();
+    let page: TimelinePageV1 = crate::blocking::run(move || {
+        manager.timeline_page(&thread_id, query.after_seq, query.before_seq, tail, limit)
+    })
+    .await
+    .map_err(ApiError)?
+    .ok_or_else(|| ApiError(Error::ModelNotFound(format!("thread {id}"))))?;
     Ok(Json(page).into_response())
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct ControlApprovalAllowanceRevoke {
+    /// Keys to revoke. Omitted revokes every allowance in the thread.
+    #[serde(default)]
+    keys: Option<Vec<String>>,
+}
+
+/// `GET /control/v1/threads/{id}/approval-allowances` — the thread's active
+/// "Allow for this chat" rules.
+pub(crate) async fn control_approval_allowances(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    peer: Peer,
+) -> Result<Response, ApiError> {
+    control_identity(&st, &headers, peer_addr(peer))?;
+    let manager = control_manager(&st)?;
+    let allowances = manager.approval_allowances(&id).map_err(ApiError)?;
+    Ok(Json(json!({ "thread_id": id, "allowances": allowances })).into_response())
+}
+
+/// `DELETE /control/v1/threads/{id}/approval-allowances` — revoke listed
+/// rules (`{"keys": [...]}`) or, with no body, all of them.
+pub(crate) async fn control_approval_allowances_revoke(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    peer: Peer,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    control_identity(&st, &headers, peer_addr(peer))?;
+    let manager = control_manager(&st)?;
+    let request: ControlApprovalAllowanceRevoke = if body.iter().all(u8::is_ascii_whitespace) {
+        ControlApprovalAllowanceRevoke::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|error| ApiError(Error::InvalidRequest(format!("invalid body: {error}"))))?
+    };
+    let allowances = manager
+        .revoke_approval_allowances(&id, request.keys.as_deref())
+        .map_err(ApiError)?;
+    Ok(Json(json!({ "thread_id": id, "allowances": allowances })).into_response())
 }
 
 /// `GET /control/v1/runs/{run_id}` — loaded only when an existing work
@@ -173,8 +220,9 @@ pub(crate) async fn control_run_inspection(
 ) -> Result<Response, ApiError> {
     control_identity(&st, &headers, peer_addr(peer))?;
     let manager = control_manager(&st)?;
-    let inspection: RunInspectionV1 = manager
-        .run_inspection(&run_id)
+    let id = run_id.clone();
+    let inspection: RunInspectionV1 = crate::blocking::run(move || manager.run_inspection(&id))
+        .await
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(Error::ModelNotFound(format!("run {run_id}"))))?;
     Ok(Json(inspection).into_response())
@@ -243,10 +291,13 @@ pub(crate) async fn control_run_events(
 ) -> Result<Response, ApiError> {
     control_identity(&st, &headers, peer_addr(peer))?;
     let manager = control_manager(&st)?;
-    let page: RunEventPageV1 = manager
-        .run_event_page(&run_id, query.after_seq, query.limit.unwrap_or(100))
-        .map_err(ApiError)?
-        .ok_or_else(|| ApiError(Error::ModelNotFound(format!("run {run_id}"))))?;
+    let id = run_id.clone();
+    let page: RunEventPageV1 = crate::blocking::run(move || {
+        manager.run_event_page(&id, query.after_seq, query.limit.unwrap_or(100))
+    })
+    .await
+    .map_err(ApiError)?
+    .ok_or_else(|| ApiError(Error::ModelNotFound(format!("run {run_id}"))))?;
     Ok(Json(page).into_response())
 }
 

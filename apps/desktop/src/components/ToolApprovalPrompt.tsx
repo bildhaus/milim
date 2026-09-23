@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   openExternalUrl,
   resolveToolApproval,
@@ -7,9 +7,13 @@ import {
   type ToolApprovalRequest,
 } from "../api";
 import {
+  approvalChatAllowance,
   approvalResponse,
+  approvalShortcut,
+  approvalShortcutTarget,
   initialApprovalValues,
   updateApprovalField,
+  type ToolApprovalScope,
 } from "../lib/toolApproval";
 import { Check, Shield, X } from "./icons";
 
@@ -124,9 +128,16 @@ function ApprovalDetail({ value }: { value: unknown }) {
 export function ToolApprovalPrompt({
   part,
   onDismiss,
+  keyboard = false,
+  composerEmpty = true,
+  onResolved,
 }: {
   part: ApprovalPart;
   onDismiss?: () => void;
+  onResolved?: (scope: ToolApprovalScope) => void;
+  /** This prompt owns Enter/Y (allow once) and Escape/N (deny). */
+  keyboard?: boolean;
+  composerEmpty?: boolean;
 }) {
   const [resolving, setResolving] = useState(false);
   const [values, setValues] = useState<Record<string, unknown>>(() =>
@@ -141,7 +152,10 @@ export function ToolApprovalPrompt({
     part.approvalRequest.kind === "file_change"
   );
 
-  async function decide(decision: "approve" | "deny") {
+  const chatAllowance = approvalChatAllowance(part);
+  const decideRef = useRef<(decision: "approve" | "deny") => void>(() => {});
+
+  async function decide(decision: "approve" | "deny", scope: ToolApprovalScope = "once") {
     if (!part.approvalId || resolving) return;
     if (decision === "approve" && part.approvalRequest?.kind === "mcp_unsupported") return;
     const result = decision === "approve"
@@ -154,19 +168,47 @@ export function ToolApprovalPrompt({
     setResolving(true);
     setError("");
     try {
-      await resolveToolApproval(part.approvalId, decision, result.response);
+      await resolveToolApproval(part.approvalId, decision, result.response, scope);
       setSubmitted(decision);
+      onResolved?.(scope);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Approval failed.");
       setResolving(false);
     }
   }
 
+  decideRef.current = (decision) => void decide(decision);
+  const shortcutsActive = keyboard && !resolving && submitted == null;
+  useEffect(() => {
+    if (!shortcutsActive) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing || event.repeat) return;
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      // A modal sheet or confirmation owns the keyboard while it is open.
+      if (document.querySelector('[aria-modal="true"]')) return;
+      const decision = approvalShortcut(
+        event.key,
+        approvalShortcutTarget(event.target),
+        composerEmpty,
+      );
+      if (!decision) return;
+      if (decision === "approve" && part.approvalRequest?.kind === "mcp_unsupported") return;
+      // Capture phase: consume the key before the composer or the global
+      // Escape-to-stop shortcut sees it.
+      event.preventDefault();
+      event.stopPropagation();
+      decideRef.current(decision);
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [composerEmpty, part.approvalRequest?.kind, shortcutsActive]);
+
   return (
     <section
       className="composer-approval"
       role="alertdialog"
       aria-label={`Approval required: ${title}`}
+      aria-keyshortcuts={shortcutsActive && composerEmpty ? "Enter Y Escape N" : undefined}
     >
       <header className="composer-approval-header">
         <span className="composer-approval-icon" aria-hidden="true">
@@ -201,6 +243,15 @@ export function ToolApprovalPrompt({
           }));
         }}
         onApprove={() => void decide("approve")}
+        onApproveForChat={chatAllowance ? () => void decide("approve", "thread") : undefined}
+        chatAllowanceTitle={
+          chatAllowance?.kind === "command"
+            ? `Run exactly \`${chatAllowance.command}\` without asking again in this chat`
+            : chatAllowance
+              ? `Allow ${chatAllowance.tool} without asking again in this chat`
+              : undefined
+        }
+        shortcutHint={shortcutsActive && composerEmpty}
         onDeny={() => void decide("deny")}
         onDismiss={onDismiss}
         onOpenUrl={(url) => {
@@ -221,6 +272,9 @@ function ApprovalRequestBody({
   disabled,
   onChange,
   onApprove,
+  onApproveForChat,
+  chatAllowanceTitle,
+  shortcutHint = false,
   onDeny,
   onDismiss,
   onOpenUrl,
@@ -231,6 +285,9 @@ function ApprovalRequestBody({
   disabled: boolean;
   onChange: (field: McpApprovalField, value: string | boolean) => void;
   onApprove: () => void;
+  onApproveForChat?: () => void;
+  chatAllowanceTitle?: string;
+  shortcutHint?: boolean;
   onDeny: () => void;
   onDismiss?: () => void;
   onOpenUrl: (url: string) => void;
@@ -312,12 +369,35 @@ function ApprovalRequestBody({
             Dismiss
           </button>
         )}
-        <button className="approval-btn deny" type="button" disabled={disabled} onClick={onDeny}>
+        <button
+          className="approval-btn deny"
+          type="button"
+          disabled={disabled}
+          onClick={onDeny}
+          title={shortcutHint ? "Deny (Esc or N)" : undefined}
+        >
           <X size={13} aria-hidden="true" />
           {request?.kind?.startsWith("mcp_") ? "Decline" : "Deny"}
         </button>
+        {onApproveForChat && (
+          <button
+            className="approval-btn"
+            type="button"
+            disabled={disabled}
+            onClick={onApproveForChat}
+            title={chatAllowanceTitle}
+          >
+            Allow for this chat
+          </button>
+        )}
         {request?.kind !== "mcp_unsupported" && (
-          <button className="approval-btn approve" type="button" disabled={disabled} onClick={onApprove}>
+          <button
+            className="approval-btn approve"
+            type="button"
+            disabled={disabled}
+            onClick={onApprove}
+            title={onApproveForChat ? `Allow once${shortcutHint ? " (Enter or Y)" : ""}` : shortcutHint ? `${approveLabel} (Enter or Y)` : undefined}
+          >
             <Check size={13} aria-hidden="true" />
             {approveLabel}
           </button>

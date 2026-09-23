@@ -166,7 +166,7 @@ test('uncertain acceptance blocks a fresh command and explicit retry preserves I
   await flush();
   expect(jest.mocked(client.sendCommand).mock.calls[1][2]).toEqual(original);
   expect(controller.pendingRetry).toBeNull();
-  expect(controller.draft).toBe('');
+  expect(controller.hot.get().draft).toBe('');
   expect(controller.acceptedRetry?.command).toEqual(original);
 });
 
@@ -192,7 +192,7 @@ test('retry remains bound to its host and preserves later composer edits', async
     await controller.retryPendingCommand();
   });
   await flush();
-  expect(controller.draft).toBe('later edit');
+  expect(controller.hot.get().draft).toBe('later edit');
   expect(jest.mocked(client.sendCommand).mock.calls[1].slice(0, 2)).toEqual([
     'http://a',
     'key-a',
@@ -287,10 +287,10 @@ test('reconnect does not replace an unsaved composer edit with the cached draft'
     controller.setDraft('still typing');
     closed[0]();
   });
-  expect(controller.draft).toBe('still typing');
+  expect(controller.hot.get().draft).toBe('still typing');
   await act(async () => {
     jest.advanceTimersByTime(1000);
   });
   await flush();
-  expect(controller.draft).toBe('still typing');
+  expect(controller.hot.get().draft).toBe('still typing');
 });

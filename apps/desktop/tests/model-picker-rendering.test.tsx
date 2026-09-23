@@ -104,7 +104,7 @@ try {
 
   assert(markup.includes("OpenAI"), "Picker should render provider names");
   assert(markup.includes('data-provider-brand="openai"'), "Picker provider groups should render brand icons");
-  assert(markup.includes("Milim tools"), "Picker should keep the active dev runtime lane in accessible metadata");
+  assert(markup.includes("milim tools"), "Picker should keep the active dev runtime lane in accessible metadata");
   assert(markup.includes("Ready"), "Picker should keep setup status in accessible metadata");
   assert(!markup.includes("mp-meta"), "Picker rows should stay visually compact");
   assert(!markup.includes("128k ctx"), "Picker rows should not render context limits inline");
@@ -243,7 +243,7 @@ try {
   assert(controlBarMarkup.includes(">Ready<"), "The pre-send Goal pill should communicate that it is ready");
   assert(controlBarMarkup.includes('data-provider-brand="openai"'), "The active model chip should render its provider icon");
   assert(controlBarMarkup.includes('<span class="chip-detail">OpenAI</span>'), "The closed model chip should show the selected provider route");
-  assert(!controlBarMarkup.includes('<span class="chip-detail">Milim tools</span>'), "The closed model chip should not replace provider identity with its execution lane");
+  assert(!controlBarMarkup.includes('<span class="chip-detail">milim tools</span>'), "The closed model chip should not replace provider identity with its execution lane");
   assert(!controlBarMarkup.includes('<span class="chip-detail">High</span>'), "The closed model chip should keep reasoning effort in picker and accessible metadata");
   assert(controlBarMarkup.includes('<span class="chip-label">Guarded</span>'), "The closed session-controls pill should prioritize tool approval");
   assert(!controlBarMarkup.includes("Privacy Off</span>"), "The closed session-controls pill should not repeat privacy state");

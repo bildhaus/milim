@@ -512,6 +512,42 @@ pub(crate) async fn account_runtime_update(
     .into_response())
 }
 
+/// `GET /account-runtimes/binaries` - user-located executables per runtime.
+pub(crate) async fn account_runtime_binaries(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: Peer,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    Ok(Json(json!({ "binaries": crate::runtime_binaries::overrides() })).into_response())
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct AccountRuntimeBinaryRequest {
+    /// Absolute executable path, or null/empty to return to discovery.
+    #[serde(default)]
+    path: Option<String>,
+}
+
+/// `PUT /account-runtimes/{runtime}/binary` - set or clear the executable
+/// Milim spawns for one runtime.
+pub(crate) async fn account_runtime_binary_set(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: Peer,
+    Path(runtime): Path<String>,
+    Json(req): Json<AccountRuntimeBinaryRequest>,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    let store = crate::account_profiles::store_of(&st).ok_or_else(|| {
+        ApiError(Error::InvalidRequest(
+            "Binary overrides require the desktop's canonical store.".into(),
+        ))
+    })?;
+    crate::runtime_binaries::set(store, &runtime, req.path.as_deref()).map_err(ApiError)?;
+    Ok(Json(json!({ "binaries": crate::runtime_binaries::overrides() })).into_response())
+}
+
 // ----- Account profiles (multiple signed-in accounts per runtime) -----
 
 /// The canonical store, or an error explaining why profiles are unavailable.
@@ -706,7 +742,7 @@ pub(crate) fn claude_harness_stream(
             .unwrap_or("127.0.0.1:7377");
         let host = loopback_host(host).ok_or_else(|| {
             ApiError(Error::InvalidRequest(
-                "Claude Review requires a loopback Milim server address".to_string(),
+                "Claude Review requires a loopback milim server address".to_string(),
             ))
         })?;
         req.approval_run_id = Some(run_id.clone());
@@ -849,13 +885,13 @@ pub(crate) async fn account_runtime_tool_mcp(
     let session = st
         .account_runtime_tools
         .lock()
-        .expect("account runtime tool store poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(&run_id)
         .cloned();
     let Some(session) = session else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
-    if authorization != format!("Bearer {}", session.token) {
+    if !crate::auth::constant_time_eq(authorization, &format!("Bearer {}", session.token)) {
         return Ok(StatusCode::UNAUTHORIZED.into_response());
     }
     let id = request.get("id").cloned().unwrap_or(Value::Null);

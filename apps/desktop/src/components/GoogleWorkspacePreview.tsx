@@ -2,6 +2,7 @@ import {
   Fragment,
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -17,6 +18,7 @@ import {
 import { createPortal } from "react-dom";
 
 import {
+  isTauriRuntime,
   chooseGoogleWorkspaceFiles,
   editGoogleDoc,
   editGoogleSheet,
@@ -210,8 +212,8 @@ export function GoogleWorkspacePreview({
           {unavailable
             ? workspaceStatus.unavailable_reason
             : isFolderUrl
-              ? "Open the folder in Google Picker, select its files, then choose Insert. Only those files become available to Milim."
-              : "Google’s embedded editor is not reliable here. Milim uses Google Picker so only files you explicitly choose become available."}
+              ? "Open the folder in Google Picker, select its files, then choose Insert. Only those files become available to milim."
+              : "Google’s embedded editor is not reliable here. milim uses Google Picker so only files you explicitly choose become available."}
         </span>
         {error && !unavailable ? <p className="sheet-hint error" role="alert">{error}</p> : null}
         <div className="google-workspace-actions">
@@ -383,6 +385,7 @@ export function SheetPreview({
   const sheetSourceRef = useRef(`${preview.file.id}\0${preview.range}`);
   const width = Math.max(1, ...sheetGrid.values.map((row) => row.length), ...sheetGrid.formulas.map((row) => row.length));
   const gridRef = useRef<HTMLDivElement>(null);
+  const gridCellIdPrefix = useId();
   const editSourceRef = useRef<"cell" | "formula">("cell");
   const [selectedCell, setSelectedCell] = useState<[number, number]>([0, 0]);
   const [editingCell, setEditingCell] = useState<[number, number] | null>(null);
@@ -745,11 +748,16 @@ export function SheetPreview({
         className="google-sheet-grid-wrap"
         ref={gridRef}
         tabIndex={0}
+        role="grid"
         aria-label="Spreadsheet grid. Use arrow keys to move between cells."
+        aria-activedescendant={sheetGrid.values.length
+          ? `${gridCellIdPrefix}-${selectedRow}-${selectedColumn}`
+          : undefined}
         onKeyDown={handleGridKeyDown}
         onPaste={pasteCells}
       >
         <table
+          role="presentation"
           className={`google-sheet-grid${wrapCells ? " is-wrapped" : ""}`}
           style={{ "--sheet-zoom": zoom / 100 } as CSSProperties}
         >
@@ -757,11 +765,11 @@ export function SheetPreview({
             <col className="google-sheet-row-column" />
             {columnWidths.map((value, index) => <col key={index} style={{ width: value }} />)}
           </colgroup>
-          <thead>
-            <tr>
-              <th aria-label="Row" />
+          <thead role="rowgroup">
+            <tr role="row">
+              <th role="columnheader" aria-label="Row" />
               {Array.from({ length: width }, (_, index) => (
-                <th key={index}>
+                <th key={index} role="columnheader">
                   {columnLabel(rangeOrigin.column + index)}
                   <button
                     className="google-sheet-column-resize"
@@ -779,10 +787,10 @@ export function SheetPreview({
               ))}
             </tr>
           </thead>
-          <tbody>
+          <tbody role="rowgroup">
             {sheetGrid.values.length ? sheetGrid.values.map((row, rowIndex) => (
-              <tr key={rowIndex}>
-                <th>{rangeOrigin.row + rowIndex}</th>
+              <tr key={rowIndex} role="row">
+                <th role="rowheader">{rangeOrigin.row + rowIndex}</th>
                 {Array.from({ length: width }, (_, columnIndex) => {
                   const formula = displayCell(sheetGrid.formulas[rowIndex]?.[columnIndex]);
                   const active = rowIndex === selectedRow && columnIndex === selectedColumn;
@@ -791,6 +799,8 @@ export function SheetPreview({
                   return (
                     <td
                       key={columnIndex}
+                      id={`${gridCellIdPrefix}-${rowIndex}-${columnIndex}`}
+                      role="gridcell"
                       className={`${active ? "active" : ""}${match ? " match" : ""}`.trim()}
                       aria-selected={active}
                       data-sheet-cell={`${rowIndex}:${columnIndex}`}
@@ -826,7 +836,7 @@ export function SheetPreview({
                 })}
               </tr>
             )) : (
-              <tr><td colSpan={width + 1}>This range is empty.</td></tr>
+              <tr role="row"><td role="gridcell" colSpan={width + 1}>This range is empty.</td></tr>
             )}
           </tbody>
         </table>
@@ -2309,7 +2319,7 @@ export function SlidesPreview({
     } | null = null;
     let changedFullscreen = false;
     void (async () => {
-      if (!("__TAURI_INTERNALS__" in window)) return;
+      if (!isTauriRuntime()) return;
       try {
         const { getCurrentWindow } = await import("@tauri-apps/api/window");
         fullscreenWindow = getCurrentWindow();

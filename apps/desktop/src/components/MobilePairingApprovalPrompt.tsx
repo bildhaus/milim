@@ -2,7 +2,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   decideMobileCompanionPairingRequest,
   getMobileCompanionStatus,
+  MOBILE_COMPANION_STATUS_EVENT,
   type MobileCompanionPairingRequest,
+  type MobileCompanionStatus,
 } from "../api";
 import { useUiPreferences } from "../ui/store";
 import { Shield, Smartphone } from "./icons";
@@ -21,28 +23,44 @@ function expiryLabel(expiresAt: number): string {
 
 export function MobilePairingApprovalPrompt() {
   const [requests, setRequests] = useState<MobileCompanionPairingRequest[]>([]);
+  // null until the first status read succeeds; polling stops only once the
+  // bridge is known to be disabled.
+  const [enabled, setEnabled] = useState<boolean | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const pushNotice = useUiPreferences((state) => state.pushNotice);
+  const applyStatus = useCallback((status: MobileCompanionStatus) => {
+    setEnabled(status.enabled);
+    setRequests(status.enabled ? status.pairing_requests ?? [] : []);
+  }, []);
   const refresh = useCallback(async () => {
     if (document.visibilityState === "hidden") return;
     try {
-      const status = await getMobileCompanionStatus();
-      setRequests(status.pairing_requests ?? []);
+      applyStatus(await getMobileCompanionStatus());
     } catch {
       // The local service may still be starting; the next visible poll retries.
     }
-  }, []);
+  }, [applyStatus]);
 
   useEffect(() => {
     void refresh();
-    const timer = window.setInterval(() => void refresh(), 1_200);
     const onVisibilityChange = () => void refresh();
+    const onStatus = (event: Event) =>
+      applyStatus((event as CustomEvent<MobileCompanionStatus>).detail);
     document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener(MOBILE_COMPANION_STATUS_EVENT, onStatus);
     return () => {
-      window.clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener(MOBILE_COMPANION_STATUS_EVENT, onStatus);
     };
-  }, [refresh]);
+  }, [applyStatus, refresh]);
+
+  useEffect(() => {
+    // Pairing requests only arrive while Mobile is enabled; enabling it from
+    // Settings emits MOBILE_COMPANION_STATUS_EVENT, which restarts this poll.
+    if (enabled === false) return;
+    const timer = window.setInterval(() => void refresh(), 1_200);
+    return () => window.clearInterval(timer);
+  }, [enabled, refresh]);
 
   const request = useMemo(
     () => requests

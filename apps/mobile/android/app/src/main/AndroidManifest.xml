@@ -32,6 +32,7 @@
             <category android:name="android.intent.category.DEFAULT" />
             <category android:name="android.intent.category.BROWSABLE" />
             <data android:scheme="milim" android:host="pair" />
+            <data android:scheme="milim" android:host="thread" />
         </intent-filter>
       </activity>
     </application>

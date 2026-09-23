@@ -1,4 +1,4 @@
-import { createControlCommandId, sendControlCommand, type ChatMessage } from "../api.js";
+import { createControlCommandId, isTauriRuntime, sendControlCommand, type ChatMessage } from "../api.js";
 import { flushDeferredUserStateWrites, loadSessionSnapshot } from "../persistence/userStateStorage.js";
 import { useSessions, type Session, type ThreadSettingsPatch } from "../sessions/store.js";
 import { requestWorkspaceEditorLeave } from "./workspaceEditorGuard.js";
@@ -20,7 +20,7 @@ export function canonicalMessageIndex(messages: readonly ChatMessage[], message:
 
 export async function completeSessionForExport(sessionId: string): Promise<Session> {
   await flushDeferredUserStateWrites("milim.sessions");
-  if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
+  if (isTauriRuntime()) {
     return loadSessionSnapshot(sessionId);
   }
   const session = useSessions.getState().sessions.find((item) => item.id === sessionId);

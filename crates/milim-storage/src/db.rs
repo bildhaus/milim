@@ -6,8 +6,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{LockResult, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{LockResult, Mutex, MutexGuard, TryLockError};
 use std::time::Instant;
 
 use milim_core::{Error, Result};
@@ -16,6 +16,23 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::crypto::EncryptedStore;
+
+mod usage;
+pub use usage::{UsageBucket, UsageSummary, UsageTotals, USAGE_MAX_DAYS};
+
+/// Per-connection `prepare_cached` capacity; covers the hot control-ledger
+/// statements without evicting them on every timeline read.
+const PREPARED_STATEMENT_CACHE_CAPACITY: usize = 64;
+/// Provider transcript replay; served by `idx_user_timeline_projected_messages`.
+const CONTROL_PROJECTED_MESSAGES_SQL: &str = "SELECT item_type, data_json
+     FROM user_timeline_events
+     WHERE thread_id = ?1 AND item_type IN ('message', 'message_deleted')
+     ORDER BY seq ASC";
+/// Command receipts make `/control/v1/commands` retries idempotent. Mobile
+/// retries live only for one app session and schedules retry on the next
+/// scheduler tick, so 30 days is far beyond any legitimate retry window.
+pub const CONTROL_COMMAND_RECEIPT_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+const CONTROL_COMMAND_RECEIPT_PRUNE_INTERVAL_MS: i64 = 60 * 60 * 1000;
 
 static DB_LOCK_COUNT: AtomicU64 = AtomicU64::new(0);
 static DB_LOCK_WAIT_NS: AtomicU64 = AtomicU64::new(0);
@@ -78,6 +95,17 @@ impl TimedDatabaseMutex {
             Ordering::Relaxed,
         );
         result
+    }
+
+    /// Take the connection only when it is free, without blocking.
+    fn try_lock(&self) -> Option<MutexGuard<'_, Database>> {
+        match self.0.try_lock() {
+            Ok(guard) => {
+                DB_LOCK_COUNT.fetch_add(1, Ordering::Relaxed);
+                Some(guard)
+            }
+            Err(TryLockError::WouldBlock) | Err(TryLockError::Poisoned(_)) => None,
+        }
     }
 }
 
@@ -161,10 +189,17 @@ impl Database {
                 "sqlite journal mode mismatch: requested {journal_mode}, got {actual}"
             )));
         }
+        if options.journal_mode == JournalMode::Wal {
+            // WAL commits stay atomic and consistent with NORMAL; only an OS
+            // crash or power loss can roll back the most recent commits.
+            conn.pragma_update(None, "synchronous", "NORMAL")
+                .map_err(sqlite)?;
+        }
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(sqlite)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(sqlite)?;
+        conn.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE_CAPACITY);
         Ok(())
     }
 
@@ -662,6 +697,25 @@ const USER_DATA_MIGRATIONS: &[Migration] = &[
               SELECT target_thread_id, owner_thread_id, created_at_ms
               FROM user_thread_links;",
     },
+    Migration {
+        version: 11,
+        name: "control_projection_and_receipt_indexes",
+        sql: "CREATE INDEX IF NOT EXISTS idx_user_timeline_projected_messages
+            ON user_timeline_events(thread_id, seq)
+            WHERE item_type IN ('message', 'message_deleted');
+        CREATE INDEX IF NOT EXISTS idx_user_command_receipts_created
+            ON user_command_receipts(created_at_ms);",
+    },
+    Migration {
+        version: 12,
+        name: "usage_ledger_indexes",
+        sql: "CREATE INDEX IF NOT EXISTS idx_user_session_messages_metrics_ended
+            ON user_session_messages(json_extract(message_json, '$.metrics.endedAt'))
+            WHERE json_extract(message_json, '$.metrics.endedAt') IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_user_session_messages_compaction_created
+            ON user_session_messages(json_extract(message_json, '$.compaction.createdAt'))
+            WHERE json_extract(message_json, '$.compaction.summary') IS NOT NULL;",
+    },
 ];
 
 /// Encrypted key/value store (API keys, OAuth tokens, agent secrets).
@@ -716,6 +770,7 @@ pub struct UserDataStore {
     db: TimedDatabaseMutex,
     read_pool: Vec<TimedDatabaseMutex>,
     read_cursor: AtomicUsize,
+    next_receipt_prune_ms: AtomicI64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1216,6 +1271,7 @@ impl UserDataStore {
             db: TimedDatabaseMutex::new(db),
             read_pool,
             read_cursor: AtomicUsize::new(0),
+            next_receipt_prune_ms: AtomicI64::new(0),
         })
     }
 
@@ -1223,8 +1279,17 @@ impl UserDataStore {
         if self.read_pool.is_empty() {
             return self.db.lock();
         }
-        let index = self.read_cursor.fetch_add(1, Ordering::Relaxed) % self.read_pool.len();
-        self.read_pool[index].lock()
+        // Prefer any idle reader so one slow page read does not queue the
+        // next request behind it; block on the round-robin slot only when all
+        // readers are busy.
+        let start = self.read_cursor.fetch_add(1, Ordering::Relaxed);
+        let len = self.read_pool.len();
+        for offset in 0..len {
+            if let Some(guard) = self.read_pool[(start + offset) % len].try_lock() {
+                return Ok(guard);
+            }
+        }
+        self.read_pool[start % len].lock()
     }
 
     pub fn get_json(&self, key: &str) -> Result<Option<String>> {
@@ -1845,24 +1910,27 @@ impl UserDataStore {
             .lock()
             .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
         let conn = db.conn();
-        conn.execute(
+        conn.prepare_cached(
             "INSERT OR IGNORE INTO user_thread_control
              (thread_id, epoch, revision, next_seq, updated_at_ms)
              SELECT id, lower(hex(randomblob(16))), 0, 1, updated_at_ms
              FROM user_sessions WHERE id = ?1",
-            params![thread_id],
         )
+        .map_err(sqlite)?
+        .execute(params![thread_id])
         .map_err(sqlite)?;
-        conn.query_row(
-            "SELECT s.id, s.session_json, c.revision, c.epoch, s.updated_at_ms
-             FROM user_sessions s
-             JOIN user_thread_control c ON c.thread_id = s.id
-             WHERE s.id = ?1",
-            params![thread_id],
-            control_thread_from_row,
-        )
-        .optional()
-        .map_err(sqlite)
+        let thread = conn
+            .prepare_cached(
+                "SELECT s.id, s.session_json, c.revision, c.epoch, s.updated_at_ms
+                 FROM user_sessions s
+                 JOIN user_thread_control c ON c.thread_id = s.id
+                 WHERE s.id = ?1",
+            )
+            .map_err(sqlite)?
+            .query_row(params![thread_id], control_thread_from_row)
+            .optional()
+            .map_err(sqlite)?;
+        Ok(thread)
     }
 
     pub fn control_create_thread(
@@ -2322,14 +2390,18 @@ impl UserDataStore {
             .db
             .lock()
             .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
-        db.conn()
-            .query_row(
+        let max_seq = db
+            .conn()
+            .prepare_cached(
                 "SELECT epoch, MAX(next_seq - 1, 0) FROM user_thread_control WHERE thread_id = ?1",
-                params![thread_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
             )
-            .optional()
             .map_err(sqlite)?
+            .query_row(params![thread_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .optional()
+            .map_err(sqlite)?;
+        max_seq
             .map(|(epoch, seq)| Ok((epoch, i64_to_u64(seq, "timeline sequence")?)))
             .transpose()
     }
@@ -2376,18 +2448,19 @@ impl UserDataStore {
         conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
         let result = (|| -> Result<usize> {
             let index: i64 = conn
-                .query_row(
+                .prepare_cached(
                     "SELECT COALESCE(MAX(message_index), -1) + 1
                      FROM user_session_messages WHERE session_id = ?1",
-                    params![thread_id],
-                    |row| row.get(0),
                 )
+                .map_err(sqlite)?
+                .query_row(params![thread_id], |row| row.get(0))
                 .map_err(sqlite)?;
-            conn.execute(
+            conn.prepare_cached(
                 "INSERT INTO user_session_messages
                  (session_id, message_index, message_json) VALUES (?1, ?2, ?3)",
-                params![thread_id, index, message_json],
             )
+            .map_err(sqlite)?
+            .execute(params![thread_id, index, message_json])
             .map_err(sqlite)?;
             bump_thread_revision_locked(conn, thread_id)?;
             usize::try_from(index)
@@ -2427,12 +2500,7 @@ impl UserDataStore {
             .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
         let mut stmt = db
             .conn()
-            .prepare(
-                "SELECT item_type, data_json
-                 FROM user_timeline_events
-                 WHERE thread_id = ?1 AND item_type IN ('message', 'message_deleted')
-                 ORDER BY seq ASC",
-            )
+            .prepare_cached(CONTROL_PROJECTED_MESSAGES_SQL)
             .map_err(sqlite)?;
         let events = stmt
             .query_map(params![thread_id], |row| {
@@ -2619,26 +2687,30 @@ impl UserDataStore {
         conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
         let result = (|| -> Result<ControlTimelineRecord> {
             let (epoch, seq): (String, i64) = conn
-                .query_row(
+                .prepare_cached(
                     "SELECT epoch, next_seq FROM user_thread_control WHERE thread_id = ?1",
-                    params![thread_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
+                .map_err(sqlite)?
+                .query_row(params![thread_id], |row| Ok((row.get(0)?, row.get(1)?)))
                 .map_err(sqlite)?;
             let now = now_ms();
-            conn.execute(
+            conn.prepare_cached(
                 "INSERT INTO user_timeline_events
                  (thread_id, epoch, seq, item_id, run_id, item_type, data_json, created_at_ms)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![thread_id, epoch, seq, item_id, run_id, item_type, data_json, now],
             )
+            .map_err(sqlite)?
+            .execute(params![
+                thread_id, epoch, seq, item_id, run_id, item_type, data_json, now
+            ])
             .map_err(sqlite)?;
-            conn.execute(
+            conn.prepare_cached(
                 "UPDATE user_thread_control
                  SET next_seq = ?2, revision = revision + 1, updated_at_ms = ?3
                  WHERE thread_id = ?1",
-                params![thread_id, seq.saturating_add(1), now],
             )
+            .map_err(sqlite)?
+            .execute(params![thread_id, seq.saturating_add(1), now])
             .map_err(sqlite)?;
             Ok(ControlTimelineRecord {
                 thread_id: thread_id.to_string(),
@@ -3946,16 +4018,18 @@ impl UserDataStore {
             .db
             .lock()
             .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
-        db.conn()
-            .query_row(
+        let receipt = db
+            .conn()
+            .prepare_cached(
                 "SELECT command_id, device_id, thread_id, command_kind,
                         request_json, result_json, created_at_ms
                  FROM user_command_receipts WHERE command_id = ?1",
-                params![command_id],
-                control_command_receipt_from_row,
             )
+            .map_err(sqlite)?
+            .query_row(params![command_id], control_command_receipt_from_row)
             .optional()
-            .map_err(sqlite)
+            .map_err(sqlite)?;
+        Ok(receipt)
     }
 
     pub fn control_put_command_receipt(&self, receipt: &ControlCommandReceiptRecord) -> Result<()> {
@@ -3965,23 +4039,45 @@ impl UserDataStore {
             .db
             .lock()
             .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let now = now_ms();
+        if now >= self.next_receipt_prune_ms.load(Ordering::Relaxed) {
+            self.next_receipt_prune_ms.store(
+                now.saturating_add(CONTROL_COMMAND_RECEIPT_PRUNE_INTERVAL_MS),
+                Ordering::Relaxed,
+            );
+            prune_command_receipts_locked(
+                db.conn(),
+                now.saturating_sub(CONTROL_COMMAND_RECEIPT_TTL_MS),
+            )?;
+        }
         db.conn()
-            .execute(
+            .prepare_cached(
                 "INSERT INTO user_command_receipts
                  (command_id, device_id, thread_id, command_kind, request_json, result_json, created_at_ms)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    receipt.command_id,
-                    receipt.device_id,
-                    receipt.thread_id,
-                    receipt.command_kind,
-                    receipt.request_json,
-                    receipt.result_json,
-                    receipt.created_at_ms,
-                ],
             )
+            .map_err(sqlite)?
+            .execute(params![
+                receipt.command_id,
+                receipt.device_id,
+                receipt.thread_id,
+                receipt.command_kind,
+                receipt.request_json,
+                receipt.result_json,
+                receipt.created_at_ms,
+            ])
             .map_err(sqlite)?;
         Ok(())
+    }
+
+    /// Remove idempotency receipts created before `before_ms`. Returns the
+    /// number of receipts removed.
+    pub fn control_prune_command_receipts(&self, before_ms: i64) -> Result<usize> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        prune_command_receipts_locked(db.conn(), before_ms)
     }
 
     pub fn control_put_approval(&self, approval: &ControlApprovalRecord) -> Result<()> {
@@ -4669,7 +4765,7 @@ fn reconcile_control_startup_locked(conn: &Connection) -> Result<(usize, usize)>
                 .execute(
                     "UPDATE user_runs
                      SET status = 'interrupted', updated_at_ms = ?1, completed_at_ms = ?1,
-                         error_json = COALESCE(error_json, '{\"code\":\"process_restarted\",\"message\":\"Milim stopped before this run completed.\"}')
+                         error_json = COALESCE(error_json, '{\"code\":\"process_restarted\",\"message\":\"milim stopped before this run completed.\"}')
                      WHERE status IN ('accepted', 'running', 'waiting_approval', 'stopping')",
                     params![now],
                 )
@@ -4695,7 +4791,7 @@ fn reconcile_control_startup_locked(conn: &Connection) -> Result<(usize, usize)>
                  SET status = 'failed', updated_at_ms = ?1,
                      reply_json = COALESCE(reply_json, json_object(
                         'content', '',
-                        'error', 'Milim stopped before the linked thread completed.',
+                        'error', 'milim stopped before the linked thread completed.',
                         'code', 'process_restarted'
                      ))
                  WHERE status = 'running' AND target_run_id IN
@@ -4865,41 +4961,40 @@ fn append_control_timeline_locked(
 ) -> Result<ControlTimelineRecord> {
     validate_control_json(data_json, "timeline data")?;
     let (epoch, seq): (String, i64) = conn
-        .query_row(
-            "SELECT epoch, next_seq FROM user_thread_control WHERE thread_id = ?1",
-            params![thread_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
+        .prepare_cached("SELECT epoch, next_seq FROM user_thread_control WHERE thread_id = ?1")
+        .map_err(sqlite)?
+        .query_row(params![thread_id], |row| Ok((row.get(0)?, row.get(1)?)))
         .map_err(sqlite)?;
-    conn.execute(
+    conn.prepare_cached(
         "INSERT INTO user_timeline_events
          (thread_id, epoch, seq, item_id, run_id, item_type, data_json, created_at_ms)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![
-            thread_id,
-            epoch,
-            seq,
-            item_id,
-            run_id,
-            item_type,
-            data_json,
-            created_at_ms
-        ],
     )
+    .map_err(sqlite)?
+    .execute(params![
+        thread_id,
+        epoch,
+        seq,
+        item_id,
+        run_id,
+        item_type,
+        data_json,
+        created_at_ms
+    ])
     .map_err(sqlite)?;
     TIMELINE_WRITES.fetch_add(1, Ordering::Relaxed);
-    conn.execute(
+    conn.prepare_cached(
         "UPDATE user_thread_control
          SET next_seq = ?2, revision = revision + 1, updated_at_ms = ?3
          WHERE thread_id = ?1",
-        params![thread_id, seq.saturating_add(1), created_at_ms],
     )
+    .map_err(sqlite)?
+    .execute(params![thread_id, seq.saturating_add(1), created_at_ms])
     .map_err(sqlite)?;
-    conn.execute(
-        "UPDATE user_sessions SET updated_at_ms = ?2 WHERE id = ?1",
-        params![thread_id, created_at_ms],
-    )
-    .map_err(sqlite)?;
+    conn.prepare_cached("UPDATE user_sessions SET updated_at_ms = ?2 WHERE id = ?1")
+        .map_err(sqlite)?
+        .execute(params![thread_id, created_at_ms])
+        .map_err(sqlite)?;
     Ok(ControlTimelineRecord {
         thread_id: thread_id.to_string(),
         epoch,
@@ -4912,25 +5007,32 @@ fn append_control_timeline_locked(
     })
 }
 
+fn prune_command_receipts_locked(conn: &Connection, before_ms: i64) -> Result<usize> {
+    conn.prepare_cached("DELETE FROM user_command_receipts WHERE created_at_ms < ?1")
+        .map_err(sqlite)?
+        .execute(params![before_ms])
+        .map_err(sqlite)
+}
+
 fn bump_thread_revision_locked(conn: &Connection, thread_id: &str) -> Result<()> {
     let now = now_ms();
     let changed = conn
-        .execute(
+        .prepare_cached(
             "UPDATE user_thread_control
              SET revision = revision + 1, updated_at_ms = ?2 WHERE thread_id = ?1",
-            params![thread_id, now],
         )
+        .map_err(sqlite)?
+        .execute(params![thread_id, now])
         .map_err(sqlite)?;
     if changed == 0 {
         return Err(Error::InvalidRequest(format!(
             "thread {thread_id} has no control metadata"
         )));
     }
-    conn.execute(
-        "UPDATE user_sessions SET updated_at_ms = ?2 WHERE id = ?1",
-        params![thread_id, now],
-    )
-    .map_err(sqlite)?;
+    conn.prepare_cached("UPDATE user_sessions SET updated_at_ms = ?2 WHERE id = ?1")
+        .map_err(sqlite)?
+        .execute(params![thread_id, now])
+        .map_err(sqlite)?;
     Ok(())
 }
 
@@ -4994,11 +5096,9 @@ fn query_control_timeline_page(
     limit: usize,
 ) -> Result<Option<ControlTimelinePage>> {
     let Some(epoch) = conn
-        .query_row(
-            "SELECT epoch FROM user_thread_control WHERE thread_id = ?1",
-            params![thread_id],
-            |row| row.get::<_, String>(0),
-        )
+        .prepare_cached("SELECT epoch FROM user_thread_control WHERE thread_id = ?1")
+        .map_err(sqlite)?
+        .query_row(params![thread_id], |row| row.get::<_, String>(0))
         .optional()
         .map_err(sqlite)?
     else {
@@ -5048,12 +5148,14 @@ fn query_control_timeline_page(
         )?
     };
     let bounds: (Option<i64>, Option<i64>) = conn
-        .query_row(
+        .prepare_cached(
             "SELECT MIN(seq), MAX(seq) FROM user_timeline_events
              WHERE thread_id = ?1 AND epoch = ?2",
-            params![thread_id, epoch],
-            |row| Ok((row.get(0)?, row.get(1)?)),
         )
+        .map_err(sqlite)?
+        .query_row(params![thread_id, epoch], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
         .map_err(sqlite)?;
     let first_seq = items.first().map(|item| item.seq);
     let last_seq = items.last().map(|item| item.seq);
@@ -5083,7 +5185,7 @@ fn query_timeline_rows<P>(
 where
     P: rusqlite::Params,
 {
-    let mut stmt = conn.prepare(sql).map_err(sqlite)?;
+    let mut stmt = conn.prepare_cached(sql).map_err(sqlite)?;
     let rows = stmt
         .query_map(params, control_timeline_from_row)
         .map_err(sqlite)?;
@@ -5245,18 +5347,16 @@ fn session_messages_page_locked(
     limit: usize,
 ) -> Result<SessionMessagesPage> {
     let total = conn
-        .query_row(
-            "SELECT COUNT(*) FROM user_session_messages WHERE session_id = ?1",
-            params![session_id],
-            |row| row.get::<_, i64>(0),
-        )
+        .prepare_cached("SELECT COUNT(*) FROM user_session_messages WHERE session_id = ?1")
+        .map_err(sqlite)?
+        .query_row(params![session_id], |row| row.get::<_, i64>(0))
         .map_err(sqlite)?;
     let total = usize::try_from(total)
         .map_err(|_| Error::Other("session message count is negative".into()))?;
     let end = before_index.unwrap_or(total).min(total);
     let first_index = end.saturating_sub(limit.clamp(1, 500));
     let mut stmt = conn
-        .prepare(
+        .prepare_cached(
             "SELECT message_json FROM user_session_messages
              WHERE session_id = ?1 AND message_index >= ?2 AND message_index < ?3
              ORDER BY message_index ASC",
@@ -8636,5 +8736,142 @@ mod tests {
             .is_err());
         assert!(store.control_thread("invalid").unwrap().is_none());
         assert!(store.control_messages("invalid").unwrap().is_empty());
+    }
+
+    fn unique_temp_dir(label: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("milim-{label}-{}-{unique}", std::process::id()))
+    }
+
+    #[test]
+    fn wal_databases_use_normal_synchronous_mode() {
+        let dir = unique_temp_dir("sync-normal");
+        let db = Database::open(&dir.join("milim.db")).unwrap();
+        let synchronous: i64 = db
+            .conn()
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            synchronous, 1,
+            "WAL databases should use synchronous=NORMAL"
+        );
+        drop(db);
+
+        let delete = Database::open_with_options(
+            &dir.join("delete.db"),
+            DatabaseOptions {
+                journal_mode: JournalMode::Delete,
+            },
+        )
+        .unwrap();
+        let synchronous: i64 = delete
+            .conn()
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(synchronous, 2, "rollback-journal databases keep FULL");
+        drop(delete);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn projected_messages_use_the_partial_message_index() {
+        let store = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        let db = store.db.lock().unwrap();
+        let plan = db
+            .conn()
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {CONTROL_PROJECTED_MESSAGES_SQL}"
+            ))
+            .unwrap()
+            .query_map(params!["thread-1"], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n");
+        assert!(
+            plan.contains("idx_user_timeline_projected_messages"),
+            "unexpected plan: {plan}"
+        );
+        assert!(!plan.contains("TEMP B-TREE"), "unexpected sort: {plan}");
+    }
+
+    #[test]
+    fn command_receipts_expire_after_the_retry_window() {
+        let store = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        let receipt = |command_id: &str, created_at_ms: i64| ControlCommandReceiptRecord {
+            command_id: command_id.into(),
+            device_id: None,
+            thread_id: None,
+            command_kind: "thread.create".into(),
+            request_json: "{}".into(),
+            result_json: "{}".into(),
+            created_at_ms,
+        };
+        let now = now_ms();
+        let expired = now - CONTROL_COMMAND_RECEIPT_TTL_MS - 1;
+        let retained = now - 7 * 24 * 60 * 60 * 1000;
+        store
+            .control_put_command_receipt(&receipt("expired", expired))
+            .unwrap();
+        store
+            .control_put_command_receipt(&receipt("retained", retained))
+            .unwrap();
+
+        assert_eq!(
+            store
+                .control_prune_command_receipts(now - CONTROL_COMMAND_RECEIPT_TTL_MS)
+                .unwrap(),
+            1
+        );
+        assert!(store.control_command_receipt("expired").unwrap().is_none());
+        assert!(store.control_command_receipt("retained").unwrap().is_some());
+
+        // Writes prune opportunistically, at most once per interval.
+        store
+            .control_put_command_receipt(&receipt("expired-again", expired))
+            .unwrap();
+        store.next_receipt_prune_ms.store(0, Ordering::Relaxed);
+        store
+            .control_put_command_receipt(&receipt("fresh", now))
+            .unwrap();
+        assert!(store
+            .control_command_receipt("expired-again")
+            .unwrap()
+            .is_none());
+        assert!(store.control_command_receipt("retained").unwrap().is_some());
+        assert!(store.control_command_receipt("fresh").unwrap().is_some());
+    }
+
+    #[test]
+    fn busy_pooled_reader_does_not_block_other_reads() {
+        let dir = unique_temp_dir("read-pool");
+        let store = std::sync::Arc::new(
+            UserDataStore::new(Database::open(&dir.join("milim.db")).unwrap()).unwrap(),
+        );
+        store
+            .control_create_thread("thread-1", r#"{"id":"thread-1"}"#, "epoch-1")
+            .unwrap();
+        assert_eq!(store.read_pool.len(), 2);
+        let busy = store.read_pool[0].lock().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reader = store.clone();
+        std::thread::spawn(move || {
+            for _ in 0..4 {
+                let page = reader.control_timeline_page("thread-1", None, None, true, 10);
+                sender.send(page.map(|page| page.is_some())).unwrap();
+            }
+        });
+        for _ in 0..4 {
+            assert!(receiver
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("read waited on a busy pooled connection")
+                .unwrap());
+        }
+        drop(busy);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

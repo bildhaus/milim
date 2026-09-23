@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import type { ArtifactFileStatus, ArtifactOpenTarget, ArtifactWritePreview, ChatArtifact, SavedArtifactFile } from "../api";
 import type { ArtifactRevision, ArtifactRevisionChoice } from "../lib/artifactRevisions";
-import { artifactDisposition, defaultArtifactTargetPath, isFileArtifact, isPreviewableArtifact } from "../lib/artifacts";
+import { artifactDisposition, defaultArtifactTargetPath, formatBytes, isFileArtifact, isPreviewableArtifact } from "../lib/artifacts";
 import { useContextMenu } from "./ContextMenu";
 import { Check, Code, Copy, Download, Eye, FileText, Folder, Search } from "./icons";
 
@@ -852,12 +852,6 @@ export function ArtifactList({
 function downloadName(artifact: ChatArtifact): string {
   const raw = artifact.filename ?? artifact.title;
   return raw.split(/[\\/]/).pop() || "artifact.txt";
-}
-
-function formatBytes(size: number): string {
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
-  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function artifactLabel(count: number): string {

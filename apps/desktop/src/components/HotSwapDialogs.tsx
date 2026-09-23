@@ -231,7 +231,7 @@ export function HotSwapPreflightSheet({
           <legend>Native session</legend>
           <label>
             <input type="radio" name="native-session-mode" checked={nativeMode === "fresh"} onChange={() => setNativeMode("fresh")} />
-            <span><strong>Fresh:</strong> start from Milim's complete canonical context.</span>
+            <span><strong>Fresh:</strong> start from milim's complete canonical context.</span>
           </label>
           <label>
             <input type="radio" name="native-session-mode" disabled={resumeDisabled} checked={nativeMode === "resume"} onChange={() => setNativeMode("resume")} />

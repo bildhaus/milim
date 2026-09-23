@@ -3,7 +3,7 @@ export const MAX_ATTACHMENT_TEXT_BYTES = 128 * 1024;
 export const MAX_DESKTOP_ATTACHMENTS = 12;
 export const MAX_OUTBOUND_IMAGE_DATA_URL_BYTES = 20 * 1024 * 1024;
 export const OMITTED_IMAGE_NOTE =
-  "[Earlier image attachments were omitted from this request to stay within Milim's size limit.]";
+  "[Earlier image attachments were omitted from this request to stay within milim's size limit.]";
 
 const SUPPORTED_IMAGE_MIMES = new Set([
   "image/png",
@@ -154,6 +154,59 @@ export function isTextLikeAttachmentMime(mime: string): boolean {
     normalized === "application/xml" ||
     normalized === "application/javascript"
   );
+}
+
+export function inferAttachmentMime(name: string): string {
+  const ext = name.split(".").pop()?.toLowerCase();
+  switch (ext) {
+    case "png":
+      return "image/png";
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "webp":
+      return "image/webp";
+    case "gif":
+      return "image/gif";
+    case "md":
+    case "markdown":
+      return "text/markdown";
+    case "json":
+      return "application/json";
+    case "csv":
+      return "text/csv";
+    case "html":
+    case "htm":
+      return "text/html";
+    case "css":
+      return "text/css";
+    case "js":
+    case "jsx":
+    case "ts":
+    case "tsx":
+    case "rs":
+    case "py":
+    case "go":
+    case "java":
+    case "c":
+    case "cpp":
+    case "h":
+    case "hpp":
+    case "toml":
+    case "yaml":
+    case "yml":
+    case "xml":
+    case "txt":
+      return "text/plain";
+    default:
+      return "application/octet-stream";
+  }
+}
+
+/** Read a dropped or picked browser `File` into a chat attachment. */
+export async function browserFileAttachment(file: File): Promise<Awaited<ReturnType<typeof browserAttachment>>> {
+  const mime = file.type || inferAttachmentMime(file.name);
+  return browserAttachment(file, mime, crypto.randomUUID());
 }
 
 export async function browserAttachment(

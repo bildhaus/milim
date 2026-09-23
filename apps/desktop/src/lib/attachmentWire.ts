@@ -19,9 +19,15 @@ export interface WireChatMessage {
   content: WireMessageContent;
 }
 
+/**
+ * Text block describing a message's attachments. `imageNote` annotates image
+ * attachments: one note for all of them, or chosen per attachment (account
+ * runtimes mark which images were sent as multimodal input).
+ */
 export function attachmentsToPromptContext(
   attachments?: ChatAttachment[],
-  imageNote = "[Image attachment is available in Milim, but this text-only view cannot receive image pixels.]",
+  imageNote: string | ((attachment: ChatAttachment) => string) =
+    "[Image attachment is available in milim, but this text-only view cannot receive image pixels.]",
 ): string {
   if (!attachments?.length) return "";
   const blocks = attachments.map((attachment) => {
@@ -35,7 +41,9 @@ export function attachmentsToPromptContext(
       .filter(Boolean)
       .join(" ");
     const content = attachment.content?.trimEnd();
-    const imageText = attachment.dataUrl ? imageNote : "";
+    const imageText = attachment.dataUrl
+      ? typeof imageNote === "function" ? imageNote(attachment) : imageNote
+      : "";
     return [
       `--- attachment ${meta} ---`,
       [content, imageText].filter(Boolean).join("\n") ||

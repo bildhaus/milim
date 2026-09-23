@@ -11,6 +11,7 @@ export type MilimIconName =
   | 'chevron-down'
   | 'chevron-right'
   | 'chevron-up'
+  | 'copy'
   | 'cube'
   | 'file'
   | 'folder'
@@ -26,11 +27,13 @@ export type MilimIconName =
   | 'refresh'
   | 'scan'
   | 'search'
+  | 'share'
   | 'sidebar'
   | 'smartphone'
   | 'sparkles'
   | 'star'
   | 'square'
+  | 'text-select'
   | 'trash'
   | 'video'
   | 'volume'
@@ -76,6 +79,14 @@ export function MilimIcon({
       {name === 'chevron-down' ? <Path d="m6 9 6 6 6-6" {...common} /> : null}
       {name === 'chevron-right' ? <Path d="m9 6 6 6-6 6" {...common} /> : null}
       {name === 'chevron-up' ? <Path d="m6 15 6-6 6 6" {...common} /> : null}
+      {name === 'copy' ? (
+        <>
+          <Rect x="9" y="9" width="11" height="11" rx="2" {...common} />
+          <Path d="M5 15H4a1 1 0 0 1-1-1V5a2 2 0 0 1 2-2h9a1 1 0 0 1 1 1v1" {...common} />
+        </>
+      ) : null}
+      {name === 'share' ? <Path d="M12 15V3M8 7l4-4 4 4M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7" {...common} /> : null}
+      {name === 'text-select' ? <Path d="M9 4h6M12 4v16M9 20h6M4 8v8M20 8v8" {...common} /> : null}
       {name === 'cube' ? (
         <>
           <Path d="M12 2 3 7v10l9 5 9-5V7Z" {...common} />

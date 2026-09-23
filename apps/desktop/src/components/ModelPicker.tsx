@@ -12,22 +12,13 @@ import {
 import { hasReasoningEffortChoices, normalizeReasoningEffortForModel, REASONING_EFFORT_LABEL, reasoningEffortDisplay, reasoningEffortOptions } from "../lib/reasoningEffort";
 import { useSettings } from "../settings/store";
 import { HoverScrollText } from "./HoverScrollText";
-import { Bolt, Check, ChevronDown, Eye, Image, Plug, PlusSquare, Search, Sparkles, Volume2 } from "./icons";
+import { Bolt, Check, ChevronDown, Eye, Image, Memory, Plug, PlusSquare, Search, Sparkles, Volume2 } from "./icons";
 import { ProviderIcon, providerBrandForModel } from "./ProviderIcon";
 
 function Star({ filled }: { filled: boolean }) {
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill={filled ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round">
       <path d="M12 3.5l2.6 5.6 5.9.8-4.3 4 1 6L12 17.2 6.8 19.9l1-6-4.3-4 5.9-.8z" />
-    </svg>
-  );
-}
-
-function Memory({ size = 13 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-      <ellipse cx="12" cy="5" rx="7" ry="3" />
-      <path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6" />
     </svg>
   );
 }

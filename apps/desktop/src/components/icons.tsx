@@ -45,14 +45,11 @@ export const Pencil = (p: P) => (
 export const Paperclip = (p: P) => (
   <Svg {...p}><path d="M21 11.5 12.5 20a4.5 4.5 0 0 1-6.4-6.4l8.5-8.5a3 3 0 0 1 4.3 4.3l-8.6 8.5a1.5 1.5 0 0 1-2.1-2.1l7.8-7.8" /></Svg>
 );
-export const Slash = (p: P) => (
-  <Svg {...p}><path d="M9 20 15 4" /></Svg>
-);
-export const Mic = (p: P) => (
-  <Svg {...p}><rect x="9" y="2" width="6" height="11" rx="3" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3" /></Svg>
-);
 export const UserRound = (p: P) => (
   <Svg {...p}><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0" /></Svg>
+);
+export const Memory = (p: P) => (
+  <Svg strokeWidth={1.7} {...p}><ellipse cx="12" cy="5" rx="7" ry="3" /><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6" /></Svg>
 );
 export const Smartphone = (p: P) => (
   <Svg {...p}><rect x="7" y="2" width="10" height="20" rx="2" /><path d="M11 18h2" /></Svg>
@@ -80,6 +77,9 @@ export const Gear = (p: P) => (
 );
 export const Sliders = (p: P) => (
   <Svg {...p}><path d="M4 6h8M16 6h4M14 4v4M4 12h3M11 12h9M9 10v4M4 18h10M18 18h2M16 16v4" /></Svg>
+);
+export const BarChart = (p: P) => (
+  <Svg {...p}><path d="M4 20h16" /><path d="M7 16v-5M12 16V6M17 16v-8" /></Svg>
 );
 export const Pin = (p: P) => (
   <Svg {...p}><path d="M9 4h6l-1 6 3 3v2H7v-2l3-3-1-6ZM12 15v5" /></Svg>
@@ -141,6 +141,9 @@ export const PlusSquare = (p: P) => (
 export const Plus = (p: P) => (
   <Svg {...p}><path d="M12 5v14M5 12h14" /></Svg>
 );
+export const Minus = (p: P) => (
+  <Svg {...p}><path d="M5 12h14" /></Svg>
+);
 export const Trash = (p: P) => (
   <Svg {...p}><path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13" /></Svg>
 );
@@ -176,6 +179,9 @@ export const Copy = (p: P) => (
 );
 export const Refresh = (p: P) => (
   <Svg {...p}><path d="M21 12a9 9 0 1 1-2.6-6.4M21 4v5h-5" /></Svg>
+);
+export const Undo = (p: P) => (
+  <Svg {...p}><path d="M9 14 4 9l5-5" /><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" /></Svg>
 );
 export const GitBranch = (p: P) => (
   <Svg {...p}><circle cx="6" cy="5" r="2" /><circle cx="18" cy="6" r="2" /><circle cx="6" cy="19" r="2" /><path d="M6 7v10M8 19h3a7 7 0 0 0 7-7V8" /></Svg>

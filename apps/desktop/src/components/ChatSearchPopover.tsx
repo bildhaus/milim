@@ -1,27 +1,21 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { SheetDialog } from "./SheetDialog";
 import { isComposingKeyEvent } from "../ui/shortcuts";
-import { wireMessageContent } from "../api";
+import { inTauri, wireMessageContent } from "../api";
 import {
   searchChatSessions,
   type ChatSearchResult,
   type SearchableChatSession,
 } from "../lib/chatSearch";
-import {
-  filterCommandPaletteItems,
-  type CommandPaletteItem,
-} from "../lib/commandPalette";
+import { commandPaletteResults } from "../lib/commandPalette";
+import type { RegistryCommand } from "../lib/commandRegistry";
 import { sessionRecencyLabel } from "../lib/sessionRecency";
 import { useSessions, type Project } from "../sessions/store";
 import { searchUserChats } from "../persistence/userStateStorage.js";
 import { Search, X } from "./icons";
 
-export interface RuntimeCommand extends CommandPaletteItem {
-  run: () => void;
-}
+export type RuntimeCommand = RegistryCommand;
 
-const inTauri =
-  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 export function CommandPalette({
   projects,
@@ -59,7 +53,7 @@ export function CommandPalette({
     [sessions],
   );
   const commandResults = useMemo(
-    () => filterCommandPaletteItems(commands, query),
+    () => commandPaletteResults(commands, query),
     [commands, query],
   );
   const localChatResults = useMemo(
@@ -184,7 +178,9 @@ export function CommandPalette({
                   }}
                 >
                   <span className="chat-search-result-title">{command.label}</span>
-                  {command.shortcut && <span className="chat-search-result-meta">{command.shortcut}</span>}
+                  {(command.shortcut || command.detail) && (
+                    <span className="chat-search-result-meta">{command.shortcut || command.detail}</span>
+                  )}
                 </button>
               ))}
 

@@ -10,6 +10,7 @@ import {
   type SkillInfo,
   type ToolInfo,
 } from "../../api";
+import { useUiPreferences } from "../../ui/store";
 
 export function useChatCatalogController(
   accountRuntimeEnabled: AccountRuntimeEnablement,
@@ -48,7 +49,14 @@ export function useChatCatalogController(
   }, [accountRuntimeEnabled]);
 
   useEffect(() => {
-    void listProviders().then(setProviders);
+    void listProviders()
+      .then(setProviders)
+      .catch((error) =>
+        useUiPreferences.getState().pushNotice({
+          tone: "error",
+          message: `Couldn't load providers: ${error instanceof Error ? error.message : String(error)}`,
+        }),
+      );
   }, []);
 
   useEffect(() => {

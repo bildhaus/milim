@@ -15,10 +15,10 @@ Release artifacts target Windows and macOS. Linux packaging is not a primary rel
 
 - **One canonical thread.** Conversation, workspace context, attachments, tool activity, approvals, and review history stay together when you change models or runtimes.
 - **Threads can collaborate.** Drag one root chat into another to create a reciprocal link with bounded transcript reads, durable mailbox sends, and explicit reply waits, without merging either history.
-- **Your runtime choice.** Switch the next turn between hosted providers, Ollama, LM Studio, or vLLM, and separately installed Codex, Claude, OpenCode, or Pi runtimes. Thread history stays put; provider turns can keep per-model generation and capability overrides. Codex and Claude can hold several signed-in accounts, and a chat pins one or lets Milim pick whichever has the most room left.
+- **Your runtime choice.** Switch the next turn between hosted providers, Ollama, LM Studio, or vLLM, and separately installed Codex, Claude, OpenCode, or Pi runtimes. Thread history stays put; provider turns can keep per-model generation and capability overrides. Codex and Claude can hold several signed-in accounts, and a chat pins one or lets milim pick whichever has the most room left.
 - **Explicit local boundaries.** Workspace selection, model routing, outbound privacy, and approval mode remain visible and under your control.
 - **Execution you can inspect.** Consequential tool calls can pause for review. Git diffs, checkpoints, previews, run details, and recovery actions stay beside the conversation.
-- **A workbench when you need it.** Agents, Workers, skills, schedules, MCP servers and Apps, memory, media generation, Google Workspace, and previews extend the core thread through the **Tools** launcher.
+- **A workbench when you need it.** The **Tools** launcher groups every manager: Providers, Agents, Memory, MCP servers and Apps, Skills, Schedules, media generation, Pull requests, Usage, Google Workspace, and Mobile. `Ctrl/Cmd+K` opens a command palette for the same managers plus panels, chat actions, and slash commands. Workers and previews extend the thread from the inspector.
 - **Direct mobile control.** The native iOS and Android companion connects to paired desktops over Tailscale, trusted LAN discovery, or a manual URL. Enabled desktop transports restore automatically after milim restarts. milim operates no relay, account service, or cloud transcript store for this path.
 
 Provider-backed chat and installed account runtimes remain distinct. Provider models use milim's tool-agent loop; account runtimes retain their own sessions and tools behind the same visible approval policy.
@@ -88,7 +88,7 @@ OpenAI-compatible clients can use `http://127.0.0.1:7377/v1`. milim does not shi
 | Part | Responsibility |
 |---|---|
 | Desktop app | Tauri 2 with Vite, React, and TypeScript. Presents canonical thread state plus desktop-only workspace, preview, Git review, and a dedicated theme-aware full-window Settings surface that leaves the active workspace mounted. |
-| Native mobile app | Bare React Native with TypeScript and Metro. Acts as a bounded, multi-host controller and cache for paired desktops; live events and transcript projection are frame-coalesced and incremental, binary attachments use a native streamed upload when supported, and thread height follows the native keyboard so the composer and followed transcript tail remain visible. |
+| Native mobile app | Bare React Native with TypeScript and Metro. Acts as a bounded, multi-host controller and cache for paired desktops; live events and transcript projection are frame-coalesced and incremental, streamed answers re-render only the Markdown block being written, the thread drawer and keyboard tracking run on the native UI thread, binary attachments use a native streamed upload when supported, and thread height follows the native keyboard so the composer and followed transcript tail remain visible. |
 | Embedded server | In-process Axum server and Rust `RunManager`. Owns active turns, queues, approvals, normalized events, and runtime adapters. |
 | Local data | Desktop SQLite is authoritative for threads, reciprocal thread links, mailbox exchanges, runs, timelines, queues, approvals, and favorite model IDs. Mobile SQLite is a host-partitioned cache for timelines, drafts, and client-only picker layout. |
 | Model sources | Hosted providers, local OpenAI-compatible servers, and separately installed account-runtime CLIs connect through explicit routing and privacy boundaries. |
@@ -97,7 +97,7 @@ Desktop and mobile are replicas of Rust-owned canonical state. Model and reasoni
 
 - **Conversation and review.** Long histories load in pages and keep a bounded number of rows mounted while preserving the reader's position. Model switches retain the thread and add a quiet history notice. Attach supported files and images, inspect effective context before sending, steer a compatible active run, or queue a follow-up. Provider run limits can bound further model and tool steps. See [desktop workflows](docs/wiki/desktop.md), [history loading](docs/wiki/desktop.md#desktop-performance-and-history-loading), and [models and providers](docs/wiki/models.md).
 - **Workspaces and previews.** Folder-backed chats share one managed App runtime per workspace. Preview actions stay bound to the originating chat; App and URL previews retain their own zoom, mute, and navigation state. An optional `.milim/preview.json` specifies the launch command and readiness checks. See [artifacts and previews](docs/wiki/desktop.md#artifacts) and [Git review](docs/wiki/desktop.md#git-side-panel).
-- **Several accounts per runtime.** Codex and Claude keep their whole account state in one relocatable folder, so Milim can offer more than one signed-in account per runtime without reading, copying, or storing a credential. Each chat pins an account or leaves it on Auto, which prefers the account with the most reported headroom and steps around one that is rate limited. See [account runtimes](docs/account-runtimes.md#multiple-accounts-per-runtime).
+- **Several accounts per runtime.** Codex and Claude keep their whole account state in one relocatable folder, so milim can offer more than one signed-in account per runtime without reading, copying, or storing a credential. Each chat pins an account or leaves it on Auto, which prefers the account with the most reported headroom and steps around one that is rate limited. See [account runtimes](docs/account-runtimes.md#multiple-accounts-per-runtime).
 - **Agents and continuity.** Linked chats exchange bounded reads and durable messages. Scheduled occurrences freeze their model, workspace, privacy, time zone, and approval boundary and appear on both clients. Codex, Claude, OpenCode, and Pi retain native session bindings and sync only intervening conversation; Codex receives frozen instructions through its native developer channel. See [linked chats](docs/wiki/desktop.md#linked-chats-and-mailbox), [Agents and schedules](docs/wiki/agents.md), and [account runtimes](docs/account-runtimes.md).
 - **Local data and privacy.** Canonical messages retain usage and cost provenance, and the local run ledger supports inspection without loading diagnostics into the ordinary transcript. Privacy gates cover outbound text and structured tool data; backups use atomic file replacement, support files larger than 64 MiB, and require an idle runtime before restore. Memory has explicit review, archive, restore, deletion, and retrieval benchmarks. See [privacy and recovery](docs/wiki/privacy.md) and [memory](docs/wiki/memory.md).
 - **Mobile recovery.** Paired phones use the same desktop model catalog and canonical favorites, with local caches and drafts partitioned by desktop. Foreground reconnect catches up from canonical state without sending drafts or decisions. An uncertain command result exposes an explicit retry with the original ID and desktop association. See [pairing and foreground synchronization](docs/wiki/voice-media-mobile.md#mobile-companion).
@@ -115,6 +115,7 @@ cargo clippy --workspace --all-targets
 
 # Desktop
 pnpm -C apps/desktop verify
+pnpm -C apps/desktop test            # all tests/*.test.* files; pass a name to filter, e.g. `test google-workspace`
 
 # Release-runtime performance proof (Windows WebView2)
 pnpm -C apps/desktop perf:canonical
@@ -131,7 +132,7 @@ pnpm -C apps/site build
 
 Platform release work should also follow the [release guide](https://docs.milim.ai/release). The broader packaged-app and Tauri smoke path is available through `pnpm -C apps/desktop verify:tester-ready`.
 
-Pull-request CI splits complete desktop verification between the Rust matrix, frontend job, and a Windows WebView2 close-to-tray check. Release runs reuse that protected validation and add the canonical Windows runtime benchmark plus packaged-artifact checks.
+Pull-request and `main`-push CI splits complete desktop verification between the Rust matrix, an MSRV check, a dependency audit (both Cargo lockfiles plus a check that they agree), the frontend job (including bundle-size budgets), and a Windows WebView2 close-to-tray check. A nightly workflow runs the full Windows WebView2 E2E suite and the enforced perf suite. Release runs reuse that protected validation and add the canonical Windows runtime benchmark plus packaged-artifact checks.
 
 ## Documentation
 

@@ -1,4 +1,52 @@
 {
+  "0.2.69": {
+    "version": "0.2.69",
+    "summary": "milim 0.2.69 puts every manager one shortcut away, adds per-hunk Git staging and a Usage view, explains provider errors, and tightens the desktop's local security.",
+    "items": [
+      {
+        "id": "tools-hub-command-palette",
+        "eyebrow": "Navigation",
+        "title": "Everything is one shortcut away",
+        "description": "The Tools launcher and command palette now reach every manager, panel, and chat action.",
+        "details": [
+          "Tools groups Providers, Agents, Memory, MCP, Skills, Schedules, Media, Pull requests, Usage, Google Workspace, and Mobile",
+          "Ctrl/Cmd+K runs manager, panel, chat, and slash commands",
+          "New shortcuts for Settings, the model picker, Git and Preview panels, Plan mode, and archiving; Ctrl/Cmd+1–9 jump between chats",
+          "Settings search finds managers, so “API key” leads to Providers"
+        ],
+        "accent": "var(--accent)",
+        "icon": "file-text"
+      },
+      {
+        "id": "git-staging-and-usage",
+        "eyebrow": "Review and spend",
+        "title": "Stage what you mean, see what you spend",
+        "description": "Stage, unstage, or discard single files and hunks, and track tokens and spend in a new Usage view.",
+        "details": [
+          "Hover a file or hunk in the Git panel to stage, unstage, or discard it",
+          "Commit only staged changes, or stage everything and commit",
+          "Usage breaks down tokens and spend by day, model, provider, and project",
+          "Reported and estimated costs stay separate"
+        ],
+        "accent": "var(--accent)",
+        "icon": "git-pull-request"
+      },
+      {
+        "id": "clearer-errors-fewer-prompts",
+        "eyebrow": "Runs and approvals",
+        "title": "Clearer errors, fewer prompts",
+        "description": "Provider failures say what to do next, and a repeated tool call can be allowed for the whole chat.",
+        "details": [
+          "Invalid keys, rate limits, and missing models offer Update key, Switch model, or Retry in N s",
+          "Allow for this chat approves the same tool again without asking; shell commands must match exactly",
+          "With the composer empty, Enter or Y approves and Esc or N denies",
+          "Coding CLIs installed with nvm or fnm are found when milim starts from the Dock, or you can locate the binary"
+        ],
+        "accent": "var(--accent)",
+        "icon": "plug"
+      }
+    ]
+  },
   "0.2.68": {
     "version": "0.2.68",
     "summary": "Milim 0.2.68 fixes panel scrolling and cropping so connecting several Codex or Claude accounts works end to end.",

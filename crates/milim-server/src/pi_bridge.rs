@@ -522,7 +522,7 @@ fn actionable_pi_error(message: &str) -> String {
         || normalized.contains("authentication token is invalid")
         || normalized.contains("unauthorized")
     {
-        "Pi sign-in expired. Open Pi, run /login, then refresh models in Milim.".into()
+        "Pi sign-in expired. Open Pi, run /login, then refresh models in milim.".into()
     } else {
         message.to_string()
     }
@@ -963,7 +963,7 @@ export default function (pi) {{
           signal,
         }});
         const body = await response.json();
-        if (!response.ok || body.error) throw new Error(body.error?.message || "Milim tool call failed");
+        if (!response.ok || body.error) throw new Error(body.error?.message || "milim tool call failed");
         return {{ content: body.result.content, details: {{}} }};
       }},
     }});
@@ -993,7 +993,9 @@ fn remove_extension(path: Option<PathBuf>) {
 
 #[cfg(windows)]
 fn pi_command() -> Command {
-    let command = if let Some(path) = crate::child_process::find_on_path("pi.cmd") {
+    let command = if let Some(command) = crate::runtime_binaries::override_command("pi") {
+        command
+    } else if let Some(path) = crate::child_process::find_on_path("pi.cmd") {
         let mut command = Command::new("cmd");
         command.arg("/C").arg(path);
         command
@@ -1243,7 +1245,7 @@ mod tests {
         );
         assert_eq!(
             actionable_pi_error(pi_error_message(&message).unwrap()),
-            "Pi sign-in expired. Open Pi, run /login, then refresh models in Milim."
+            "Pi sign-in expired. Open Pi, run /login, then refresh models in milim."
         );
     }
 }

@@ -1175,7 +1175,7 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
   const stageEmptyDetail = stageStatus === "running"
     ? "The output will appear here when it is ready."
     : stageStatus === "saving"
-      ? "Milim is adding the finished output to your local library."
+      ? "milim is adding the finished output to your local library."
       : stageStatus === "failed"
         ? selectedLibraryItem ? "Refresh it to retry, or reuse its settings." : "Review the error details and try again."
         : "Choose a model, write a prompt, and generate.";

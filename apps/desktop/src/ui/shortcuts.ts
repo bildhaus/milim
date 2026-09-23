@@ -1,4 +1,17 @@
-export type AppShortcutAction = "newChat" | "focusSearch" | "focusComposer" | "openComposerSuggestions" | "stopGeneration" | "toggleSidebar" | "previousThread";
+export type AppShortcutAction =
+  | "newChat"
+  | "focusSearch"
+  | "focusComposer"
+  | "openComposerSuggestions"
+  | "stopGeneration"
+  | "toggleSidebar"
+  | "previousThread"
+  | "openSettings"
+  | "openModelPicker"
+  | "toggleGitPanel"
+  | "togglePreviewPanel"
+  | "togglePlanMode"
+  | "archiveThread";
 export type AppShortcuts = Record<AppShortcutAction, string>;
 
 export const APP_SHORTCUT_ACTIONS: AppShortcutAction[] = [
@@ -9,6 +22,14 @@ export const APP_SHORTCUT_ACTIONS: AppShortcutAction[] = [
   "stopGeneration",
   "toggleSidebar",
   "previousThread",
+  // Newer actions stay last so saved custom bindings for older actions keep
+  // priority when normalization resolves a collision with a new default.
+  "openSettings",
+  "openModelPicker",
+  "toggleGitPanel",
+  "togglePreviewPanel",
+  "togglePlanMode",
+  "archiveThread",
 ];
 
 export const APP_SHORTCUT_LABELS: Record<AppShortcutAction, string> = {
@@ -19,6 +40,12 @@ export const APP_SHORTCUT_LABELS: Record<AppShortcutAction, string> = {
   stopGeneration: "Stop generation",
   toggleSidebar: "Toggle sidebar",
   previousThread: "Previous thread",
+  openSettings: "Open settings",
+  openModelPicker: "Choose model",
+  toggleGitPanel: "Toggle Git panel",
+  togglePreviewPanel: "Toggle Preview panel",
+  togglePlanMode: "Toggle Plan mode",
+  archiveThread: "Archive chat",
 };
 
 export const DEFAULT_APP_SHORTCUTS: AppShortcuts = {
@@ -29,7 +56,16 @@ export const DEFAULT_APP_SHORTCUTS: AppShortcuts = {
   stopGeneration: "Escape",
   toggleSidebar: "Mod+B",
   previousThread: "Ctrl+Tab",
+  openSettings: "Mod+,",
+  openModelPicker: "Mod+Shift+M",
+  toggleGitPanel: "Mod+Shift+G",
+  togglePreviewPanel: "Mod+Shift+O",
+  togglePlanMode: "Mod+Shift+P",
+  archiveThread: "Mod+Shift+A",
 };
+
+/** Mod+1 through Mod+9 always jump to the Nth visible thread and cannot be rebound. */
+export const THREAD_JUMP_SHORTCUT_COUNT = 9;
 
 type ShortcutParts = {
   mod: boolean;
@@ -77,6 +113,9 @@ const KEY_ALIASES: Record<string, string> = {
   right: "ArrowRight",
 };
 
+// "+" separates shortcut parts, and "-", "=", and "+" are reserved for UI size.
+const PUNCTUATION_KEYS = new Set([",", ".", "/", ";", "'", "[", "]", "\\", "`"]);
+
 function isMacPlatform(): boolean {
   if (typeof navigator === "undefined") return false;
   return /(Mac|iPhone|iPad|iPod)/i.test(`${navigator.platform} ${navigator.userAgent}`);
@@ -90,6 +129,7 @@ function normalizeKey(key: unknown): string | null {
   if (alias) return alias;
   if (/^[a-z]$/i.test(raw)) return raw.toUpperCase();
   if (/^[0-9]$/.test(raw)) return raw;
+  if (PUNCTUATION_KEYS.has(raw)) return raw;
   const fKey = raw.match(/^f([1-9]|1\d|2[0-4])$/i);
   if (fKey) return `F${Number(fKey[1])}`;
   if (raw.length > 1) return raw[0].toUpperCase() + raw.slice(1);
@@ -150,10 +190,23 @@ export function globalAcceleratorToShortcut(shortcut: unknown): string | null {
 export function shortcutValidationIssue(shortcut: unknown): string | null {
   const parsed = parseShortcut(shortcut);
   if (!parsed) return "Press a key combination.";
+  if (isThreadJumpParts(parsed)) return "Mod+1 through Mod+9 are reserved for jumping to sidebar chats.";
   const hasModifier = parsed.mod || parsed.ctrl || parsed.alt || parsed.shift;
   if (hasModifier) return null;
   if (parsed.key === "Escape" || /^F([1-9]|1\d|2[0-4])$/.test(parsed.key)) return null;
   return "Use a modifier, Escape, or an F-key.";
+}
+
+function isThreadJumpParts(parts: ShortcutParts): boolean {
+  return parts.mod && !parts.ctrl && !parts.alt && !parts.shift && /^[1-9]$/.test(parts.key);
+}
+
+/** Returns the zero-based sidebar thread index for Mod+1 through Mod+9, or null. */
+export function threadJumpIndexFromEvent(event: KeyboardLike, mac = isMacPlatform()): number | null {
+  if (event.repeat || isComposingKeyEvent(event)) return null;
+  const key = normalizeKey(event.key);
+  if (!key || !/^[1-9]$/.test(key)) return null;
+  return shortcutMatchesEvent(`Mod+${key}`, event, mac) ? Number(key) - 1 : null;
 }
 
 export function shortcutFromKeyboardEvent(event: KeyboardLike, mac = isMacPlatform()): string | null {
@@ -229,8 +282,12 @@ export function normalizeAppShortcuts(value: unknown): AppShortcuts {
     const valid = candidate && !shortcutValidationIssue(candidate) && !used.has(candidate)
       ? candidate
       : DEFAULT_APP_SHORTCUTS[action];
-    next[action] = used.has(valid) ? DEFAULT_APP_SHORTCUTS[action] : valid;
-    used.add(next[action]);
+    // A default already claimed by a saved custom binding stays unbound ("")
+    // instead of creating a duplicate.
+    next[action] = used.has(valid)
+      ? used.has(DEFAULT_APP_SHORTCUTS[action]) ? "" : DEFAULT_APP_SHORTCUTS[action]
+      : valid;
+    if (next[action]) used.add(next[action]);
   }
   return next;
 }

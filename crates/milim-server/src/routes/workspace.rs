@@ -1,5 +1,7 @@
 use super::*;
 
+mod staging;
+
 // ----- Workspace (host working folder for filesystem/shell tools) -----
 
 #[derive(Deserialize)]
@@ -38,6 +40,10 @@ pub(crate) struct WorkspaceGitStatus {
 pub(crate) struct WorkspaceGitFileChange {
     status: String,
     path: String,
+    /// The index column has a change (`X` in porcelain `XY`).
+    staged: bool,
+    /// The worktree column has a change, including untracked files.
+    unstaged: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -98,6 +104,10 @@ pub(crate) struct WorkspaceGitActionRequest {
     expected_head: Option<String>,
     #[serde(default)]
     repository: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    hunk: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -353,7 +363,8 @@ pub(crate) async fn workspace_git_action(
             | "pr_comment"
             | "pr_review"
             | "pr_merge"
-    ) {
+    ) && !staging::STAGING_ACTIONS.contains(&action.as_str())
+    {
         return Err(ApiError(Error::InvalidRequest(format!(
             "unsupported git action: {action}"
         ))));
@@ -732,11 +743,19 @@ fn parse_git_porcelain_files(text: &str) -> (u32, Vec<WorkspaceGitFileChange>) {
         if line.starts_with("##") || line.len() < 3 {
             continue;
         }
+        let bytes = line.as_bytes();
+        let (x, y) = (bytes[0] as char, bytes[1] as char);
         let status = line[..2].trim().to_string();
         let path = line[3..].trim().to_string();
         if !status.is_empty() && !path.is_empty() {
             count += 1;
-            files.push(WorkspaceGitFileChange { status, path });
+            let untracked = x == '?' && y == '?';
+            files.push(WorkspaceGitFileChange {
+                status,
+                path,
+                staged: !untracked && x != ' ' && x != '!',
+                unstaged: untracked || (y != ' ' && y != '!'),
+            });
         }
     }
     (count, files)
@@ -791,6 +810,8 @@ fn workspace_git_action_blocking(
         merge_method,
         expected_head,
         repository,
+        path,
+        hunk,
     } = request;
 
     if action == "pr_list" {
@@ -836,6 +857,9 @@ fn workspace_git_action_blocking(
             scope,
             diff_base.as_deref(),
         );
+    }
+    if staging::STAGING_ACTIONS.contains(&action.as_str()) {
+        return staging::workspace_git_staging_action(&root, &status, &action, path, hunk, force);
     }
     if action == "checkpoint" {
         return workspace_git_checkpoint_action(&root, &status, message);
@@ -1486,7 +1510,7 @@ fn retry_worktree_path(
     if path.starts_with(&root) {
         Ok(path)
     } else {
-        Err("Retry worktree must be inside Milim's runtime directory.".to_string())
+        Err("Retry worktree must be inside milim's runtime directory.".to_string())
     }
 }
 
@@ -1510,7 +1534,7 @@ pub(crate) fn workspace_git_create_retry_worktree_action(
             "create_retry_worktree",
             "git rev-parse --verify <checkpoint>",
             false,
-            "A Milim workspace checkpoint is required.",
+            "A milim workspace checkpoint is required.",
         );
     };
     if let Err(e) = std::fs::create_dir_all(hot_swap_root) {
@@ -1574,7 +1598,7 @@ pub(crate) fn workspace_git_apply_retry_worktree_action(
             "apply_retry_worktree",
             "git rev-parse --verify <checkpoint>",
             false,
-            "A Milim workspace checkpoint is required.",
+            "A milim workspace checkpoint is required.",
         );
     };
     if let Err(e) = std::fs::create_dir_all(hot_swap_root) {
@@ -1920,7 +1944,7 @@ fn workspace_git_remove_thread_worktree_action(
                 "remove_thread_worktree",
                 "",
                 false,
-                "Thread worktree is outside Milim's runtime directory or no longer exists.",
+                "Thread worktree is outside milim's runtime directory or no longer exists.",
             )
         }
     };
@@ -2765,7 +2789,7 @@ fn workspace_git_diff_action(
                             action,
                             "git diff <last-turn-checkpoint> --",
                             false,
-                            "Select a valid Milim turn checkpoint.",
+                            "Select a valid milim turn checkpoint.",
                         );
                     }
                     candidate.to_string()

@@ -158,7 +158,7 @@ assert.match(
   /const STEPS:[\s\S]*label: "Runtime"[\s\S]*label: "Workspace"/,
 );
 assert.doesNotMatch(onboarding, /label: "Ready"/);
-assert.match(onboarding, /"Open Milim"/);
+assert.match(onboarding, /"Open milim"/);
 for (const runtime of ["codex", "claude", "opencode", "pi"]) {
   assert.match(providersManager, new RegExp(`${runtime}-enabled-toggle`));
 }
@@ -201,4 +201,3 @@ assert.match(providerRun, /\{ workspace: toolContext\.workspace \}/);
 assert.match(providerRun, /\{ privacy_mode: toolContext\.privacy_mode \}/);
 assert.doesNotMatch(providerRun, /tool_approval_policy: toolContext/);
 assert.match(api, /\/codex\/login\/chatgpt-device/);
-assert.match(api, /\/codex\/login\/api-key/);

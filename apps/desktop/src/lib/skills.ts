@@ -43,7 +43,7 @@ export function skillDiscoveryMessage(
     content: [
       loadedMessage,
       catalog ? [
-        "Relevant Milim skills available for this turn:",
+        "Relevant milim skills available for this turn:",
         catalog,
         "Skill bodies are not in context. Before following one, call milim_skill_read with its id. Use milim_skill_search if these candidates are insufficient.",
       ].join("\n") : "",

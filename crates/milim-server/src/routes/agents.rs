@@ -189,7 +189,7 @@ pub(crate) fn account_runtime_tool_endpoint(
         .and_then(loopback_host)
         .ok_or_else(|| {
             ApiError(Error::InvalidRequest(
-                "Milim account-runtime tools require a loopback server address".into(),
+                "milim account-runtime tools require a loopback server address".into(),
             ))
         })?;
     let run_id = uuid::Uuid::new_v4().to_string();
@@ -202,7 +202,7 @@ pub(crate) fn account_runtime_tool_endpoint(
     };
     st.account_runtime_tools
         .lock()
-        .expect("account runtime tool store poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(
             run_id,
             crate::state::AccountRuntimeToolSession {
@@ -229,7 +229,7 @@ impl Drop for AccountRuntimeToolLease {
             );
             self.sessions
                 .lock()
-                .expect("account runtime tool store poisoned")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(run_id);
         }
     }
@@ -1779,6 +1779,9 @@ pub(crate) struct ToolApprovalDecision {
     decision: String,
     #[serde(default)]
     response: Option<Value>,
+    /// `once` (default) or `thread` for "Allow for this chat".
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 pub(crate) async fn tool_approval_status(
@@ -1833,6 +1836,7 @@ pub(crate) async fn tool_approval_resolve(
                         "approval_id": id,
                         "decision": req.decision,
                         "response": req.response,
+                        "scope": req.scope,
                     }),
                     confirmation_token: None,
                 },
@@ -1855,9 +1859,14 @@ pub(crate) async fn tool_approval_resolve(
                 .into_response()),
         };
     }
+    let scope = if req.scope.as_deref() == Some("thread") {
+        milim_agents::ApprovalScope::Thread
+    } else {
+        milim_agents::ApprovalScope::Once
+    };
     match st
         .tool_approvals
-        .resolve_with_response(&id, approved, req.response)
+        .resolve_with_scope(&id, approved, req.response, scope)
     {
         milim_agents::ApprovalResolve::Resolved
         | milim_agents::ApprovalResolve::AlreadyResolved => {

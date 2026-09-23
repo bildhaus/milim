@@ -10,6 +10,7 @@ import {
   type ControlTimelineItemV1,
 } from "../api.js";
 import { appendPhaseStreamPart } from "./streamParts.js";
+import { providerErrorFromValue, type ProviderErrorInfo } from "./providerErrors.js";
 import type { QueuedMessage } from "../sessions/store.js";
 
 type CanonicalMessage = ChatMessage;
@@ -227,10 +228,22 @@ function eventPart(item: ControlTimelineItemV1): ChatStreamPart | null {
   if (item.type === "approval_requested" || item.type === "tool_approval_required") {
     const approvalId =
       typeof data.approval_id === "string" ? data.approval_id : undefined;
+    // A chat allowance already approved this request in Rust.
+    if (data.auto_approved && typeof data.auto_approved === "object") {
+      return {
+        kind: "event",
+        eventType: "status",
+        label: `Allowed for this chat: ${name}`,
+        status: "done",
+        approvalId,
+        approvalStatus: "approved",
+      };
+    }
     return {
       kind: "event",
       eventType: "status",
       label: `Approval required: ${name}`,
+      detail: typeof data.arguments === "string" ? data.arguments : undefined,
       status: "running",
       approvalId,
       approvalStatus: "pending",
@@ -452,10 +465,7 @@ export function projectControlRunMessages(
     };
   }
   if (assistant) {
-    const terminalStatus = [...items]
-      .reverse()
-      .find((item) => item.run_id === runId && item.type === "run_status")
-      ?.data.status;
+    const terminalStatus = lastRunStatusItem(items, runId)?.data.status;
     assistant.streamTerminalOutcome = terminalStatus === "completed"
       ? "completed"
       : typeof terminalStatus === "string" &&
@@ -703,14 +713,61 @@ export function mergeControlRunMessages(
   return [...nextBase, ...nextProjected];
 }
 
+/**
+ * Merge a timeline page into `items`, which stays ordered by `seq`. `known`
+ * holds the `epoch:seq` key of every item already present, so each page costs
+ * O(page) rather than rescanning the whole timeline; a full sort only runs
+ * when a page arrives out of order.
+ */
+export function appendControlTimelineItems(
+  items: ControlTimelineItemV1[],
+  known: Set<string>,
+  page: readonly ControlTimelineItemV1[],
+): void {
+  let ordered = true;
+  for (const item of page) {
+    const key = `${item.epoch}:${item.seq}`;
+    if (known.has(key)) continue;
+    known.add(key);
+    const last = items[items.length - 1];
+    if (last && item.seq < last.seq) ordered = false;
+    items.push(item);
+  }
+  if (!ordered) items.sort((left, right) => left.seq - right.seq);
+}
+
+function lastRunStatusItem(
+  items: readonly ControlTimelineItemV1[],
+  runId: string,
+): ControlTimelineItemV1 | undefined {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item.run_id === runId && item.type === "run_status") return item;
+  }
+  return undefined;
+}
+
+/** The raw message and optional structured classification of a run error. */
+export function controlRunError(
+  error: unknown,
+): { error?: string; providerError?: ProviderErrorInfo } {
+  if (!error || typeof error !== "object" || Array.isArray(error)) return {};
+  const raw = error as { message?: unknown; provider_error?: unknown };
+  return {
+    error: "message" in raw ? String(raw.message ?? "") : undefined,
+    providerError: providerErrorFromValue(raw.provider_error),
+  };
+}
+
 export async function pollControlRun(
   threadId: string,
   runId: string,
   signal: AbortSignal,
   onItems: (items: ControlTimelineItemV1[]) => void,
-): Promise<{ status: string; error?: string }> {
+): Promise<{ status: string; error?: string; providerError?: ProviderErrorInfo }> {
   let afterSeq: number | undefined;
   const items: ControlTimelineItemV1[] = [];
+  const knownItemKeys = new Set<string>();
   let wake: (() => void) | null = null;
   let socketAvailable = false;
   void streamControlEvents(signal, (event) => {
@@ -729,27 +786,13 @@ export async function pollControlRun(
       threadId,
       afterSeq == null ? { tail: 500 } : { afterSeq },
     );
-    for (const item of page.items) {
-      if (!items.some((known) => known.epoch === item.epoch && known.seq === item.seq)) {
-        items.push(item);
-      }
-    }
-    items.sort((left, right) => left.seq - right.seq);
+    appendControlTimelineItems(items, knownItemKeys, page.items);
     afterSeq = page.last_seq ?? afterSeq;
     onItems(items);
-    const terminal = [...items]
-      .reverse()
-      .find((item) => item.run_id === runId && item.type === "run_status");
+    const terminal = lastRunStatusItem(items, runId);
     const status = terminal?.data.status;
     if (typeof status === "string" && status !== "accepted" && status !== "running") {
-      const error = terminal?.data.error;
-      return {
-        status,
-        error:
-          error && typeof error === "object" && "message" in error
-            ? String((error as { message?: unknown }).message ?? "")
-            : undefined,
-      };
+      return { status, ...controlRunError(terminal?.data.error) };
     }
     await new Promise<void>((resolve) => {
       let settled = false;

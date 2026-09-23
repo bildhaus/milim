@@ -59,6 +59,17 @@ assert.equal(estimateMessagesTokens([user("12345678")]), 3);
 assert.equal(estimateMessagesTokens([user("const x = call(1);")]), 7);
 assert.equal(estimateMessagesTokens([user("\u3053\u3093\u306b\u3061\u306f\u4e16\u754c")]), 4, "non-ASCII text should use tokenizer counts");
 assert(estimateMessagesTokens([user("こんにちは世界")]) >= 4, "non-ASCII text should not use ASCII chars-per-token estimates");
+{
+  const cachedMessage = user("12345678");
+  assert.equal(estimateMessagesTokens([cachedMessage]), 3);
+  assert.equal(estimateMessagesTokens([cachedMessage]), 3, "an unchanged message should reuse its cached count");
+  cachedMessage.content = "12345678 12345678 12345678";
+  assert.equal(
+    estimateMessagesTokens([cachedMessage]),
+    estimateMessagesTokens([user("12345678 12345678 12345678")]),
+    "an in-place content edit should invalidate the cached count",
+  );
+}
 
 const checkpoint = checkpointMessage("Keep the API shape stable. Open task: add tests.", {
   auto: false,

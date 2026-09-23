@@ -64,6 +64,9 @@ const {
   responseMetricsForTurn,
   summarizeMilimUsage,
   summarizeResponseMetrics,
+  formatUsageCost,
+  usageCostSource,
+  usageModelLabel,
 } = await import("../src/lib/usageMetrics.js");
 const { previewRuntimeKeyForThread } =
   await import("../src/lib/previewRuntimeKeys.js");
@@ -3016,5 +3019,25 @@ const scheduledThread = useSessions
 equal(scheduledThread?.origin?.kind, "schedule", "scheduled bootstrap threads should enter the desktop replica");
 equal(scheduledThread?.messagesHydrated, false, "scheduled bootstrap threads should hydrate their timeline lazily");
 equal(scheduledThread?.settings.folder, "C:\\workspace", "scheduled bootstrap threads should retain their workspace");
+
+const usageTotals = {
+  responses: 3,
+  prompt_tokens: 0,
+  completion_tokens: 0,
+  total_tokens: 30,
+  cost_usd: 0.5,
+  reported_cost_usd: 0.2,
+  estimated_cost_usd: 0.3,
+  unpriced_responses: 0,
+};
+equal(usageCostSource(usageTotals), "mixed", "reported plus estimated usage should be mixed provenance");
+equal(formatUsageCost(usageTotals), "est. $0.50", "mixed usage cost should carry the estimate marker");
+equal(
+  formatUsageCost({ ...usageTotals, estimated_cost_usd: 0, cost_usd: 0.2, unpriced_responses: 1 }),
+  "~$0.20",
+  "reported usage with unpriced responses should be marked incomplete",
+);
+equal(formatUsageCost({ ...usageTotals, cost_usd: 0, reported_cost_usd: 0, estimated_cost_usd: 0, unpriced_responses: 3 }), "Unpriced", "usage with no recorded cost should say so");
+equal(usageModelLabel("codex:gpt-5"), "gpt-5", "usage model labels should drop runtime prefixes");
 
 export {};

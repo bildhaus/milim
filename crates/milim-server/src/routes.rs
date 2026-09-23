@@ -76,6 +76,7 @@ mod inference;
 mod mcp;
 mod media;
 mod mobile;
+mod usage;
 mod workspace;
 
 pub(crate) use account_runtimes::*;
@@ -86,6 +87,7 @@ pub(crate) use inference::*;
 pub(crate) use mcp::*;
 pub(crate) use media::*;
 pub(crate) use mobile::*;
+pub(crate) use usage::*;
 pub(crate) use workspace::*;
 
 // axum 0.8 routes `Option<T>` through `OptionalFromRequestParts`, which

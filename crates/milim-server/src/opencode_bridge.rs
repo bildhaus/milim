@@ -199,6 +199,7 @@ fn native_event_stream(
                 let arguments = call.get("rawInput").cloned().unwrap_or(Value::Null).to_string();
                 let interactive = req.interactive_tool_approval && !req.tool_approval_grant;
                 let mut pending_delivery = None;
+                let mut always = false;
                 let approved = if interactive {
                     let Some(broker) = approval_broker.as_ref() else {
                         let _ = proc.respond(id, permission_response(params, false)).await;
@@ -210,7 +211,10 @@ fn native_event_stream(
                         "type": "tool_approval_required", "approval_id": pending.id,
                         "call_id": call_id, "name": name, "arguments": arguments, "effect": "unknown"
                     });
-                    let decision = pending.wait().await.approved;
+                    let resolved = pending.wait().await;
+                    let decision = resolved.approved;
+                    // "Allow for this chat" maps to OpenCode's native "always" option.
+                    always = resolved.scope == milim_agents::ApprovalScope::Thread;
                     yield json!({
                         "type": "tool_approval_status", "approval_id": pending.id,
                         "call_id": call_id, "decision": if decision { "approve" } else { "deny" },
@@ -221,7 +225,7 @@ fn native_event_stream(
                 } else {
                     req.tool_approval_grant || req.tool_approval_policy.as_deref() == Some("open")
                 };
-                if let Err(error) = proc.respond(id, permission_response(params, approved)).await {
+                if let Err(error) = proc.respond(id, permission_response_with_scope(params, approved, always)).await {
                     if let Some(pending) = pending_delivery.take() {
                         pending.fail(error.to_string());
                         yield json!({
@@ -359,17 +363,24 @@ fn prompt_params(req: &OpenCodeRunRequest, session_id: &str) -> Value {
 }
 
 fn permission_response(params: &Value, approved: bool) -> Value {
+    permission_response_with_scope(params, approved, false)
+}
+
+/// Select the ACP permission option. `always` prefers `allow_always` and falls
+/// back to `allow_once` when the request does not advertise it.
+fn permission_response_with_scope(params: &Value, approved: bool, always: bool) -> Value {
     let options = params.get("options").and_then(Value::as_array);
-    let kind = if approved {
-        "allow_once"
-    } else {
-        "reject_once"
+    let kinds: &[&str] = match (approved, always) {
+        (true, true) => &["allow_always", "allow_once"],
+        (true, false) => &["allow_once"],
+        (false, _) => &["reject_once"],
     };
-    let option = options
-        .and_then(|items| {
-            items
+    let option = kinds
+        .iter()
+        .find_map(|kind| {
+            options?
                 .iter()
-                .find(|item| item.get("kind").and_then(Value::as_str) == Some(kind))
+                .find(|item| item.get("kind").and_then(Value::as_str) == Some(*kind))
         })
         .and_then(|item| item.get("optionId"))
         .cloned();
@@ -765,7 +776,7 @@ async fn preflight_policy(cwd: &std::path::Path, overlay: &Value) -> Result<()> 
     })?;
     if config.get("permission") != Some(&expected) {
         return Err(Error::InvalidRequest(
-            "Managed OpenCode permissions override Milim's selected safety mode.".into(),
+            "Managed OpenCode permissions override milim's selected safety mode.".into(),
         ));
     }
     Ok(())
@@ -929,7 +940,9 @@ fn rpc_error(error: &Value) -> String {
 
 #[cfg(windows)]
 fn opencode_command() -> Command {
-    let command = if let Some(path) = crate::child_process::find_on_path("opencode.cmd") {
+    let command = if let Some(command) = crate::runtime_binaries::override_command("opencode") {
+        command
+    } else if let Some(path) = crate::child_process::find_on_path("opencode.cmd") {
         let mut command = Command::new("cmd");
         command.arg("/C").arg(path);
         command
@@ -1055,6 +1068,19 @@ mod tests {
         assert_eq!(
             permission_response(&params, false)["outcome"]["optionId"],
             "reject"
+        );
+        assert_eq!(
+            permission_response_with_scope(&params, true, true)["outcome"]["optionId"],
+            "always"
+        );
+        assert_eq!(
+            permission_response_with_scope(&params, false, true)["outcome"]["optionId"],
+            "reject"
+        );
+        let once_only = json!({ "options": [{ "optionId": "once", "kind": "allow_once" }] });
+        assert_eq!(
+            permission_response_with_scope(&once_only, true, true)["outcome"]["optionId"],
+            "once"
         );
     }
 

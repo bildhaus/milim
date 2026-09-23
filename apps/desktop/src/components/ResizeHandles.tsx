@@ -1,7 +1,7 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { MouseEvent } from "react";
+import { inTauri } from "../api";
 
-const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 type Dir = "North" | "South" | "East" | "West" | "NorthEast" | "NorthWest" | "SouthEast" | "SouthWest";
 

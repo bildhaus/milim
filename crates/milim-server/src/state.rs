@@ -48,7 +48,10 @@ impl McpAppViewStore {
     pub fn insert(&self, document: McpAppViewDocument) -> String {
         const MAX_PENDING_BYTES: usize = 64 * 1024 * 1024;
         let now = Instant::now();
-        let mut views = self.views.lock().expect("MCP App view store poisoned");
+        let mut views = self
+            .views
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         views.retain(|_, view| view.expires_at > now);
         while !views.is_empty()
             && views
@@ -79,7 +82,10 @@ impl McpAppViewStore {
 
     pub fn take(&self, id: &str) -> Option<McpAppViewDocument> {
         let now = Instant::now();
-        let mut views = self.views.lock().expect("MCP App view store poisoned");
+        let mut views = self
+            .views
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         views.retain(|_, view| view.expires_at > now);
         views.remove(id).map(|view| view.document)
     }
@@ -209,6 +215,7 @@ impl AppState {
     }
 
     pub fn with_control(mut self, manager: Arc<RunManager>) -> Self {
+        crate::runtime_binaries::load(manager.store());
         self.control = Some(manager);
         self
     }

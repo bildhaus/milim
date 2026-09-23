@@ -1537,3 +1537,46 @@
   font-size: 11px;
   line-height: 1.45;
 }
+
+.runtime-install-hint,
+.runtime-binary-line {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.runtime-binary-line {
+  display: grid;
+  gap: 4px;
+}
+
+.runtime-binary-actions {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.runtime-binary-actions .btn-ghost {
+  padding: 2px 8px;
+  font-size: 11.5px;
+}
+
+.runtime-binary-path {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--tertiary-text);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-binary-path code {
+  color: var(--secondary-text);
+}
+
+.runtime-binary-error {
+  margin: 0;
+  color: var(--error);
+  font-size: 11.5px;
+}

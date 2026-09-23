@@ -55,8 +55,8 @@ assert.match(compaction, /toolContext: AgentToolContext/);
 assert.match(compaction, /toolContext: options\.toolContext/);
 assert.ok(
   (compaction.match(/milim_context: utilityAccountRuntimeMilimContext/g) ?? [])
-    .length >= 2,
-  "OpenCode and Pi compaction must carry the captured run context",
+    .length >= 1 && /summary = await summarizeWithHarness\(/.test(compaction),
+  "every account-runtime compaction must share the call that carries the captured run context",
 );
 
 const goalDecision = section(
@@ -92,7 +92,7 @@ assert.ok(
   "submitted conversation must durably flush before generation is claimed",
 );
 assert.match(runTurn, /persistingTurnIdsRef\.current\.has\(id\)/);
-assert.match(runTurn, /Milim could not save this turn, so it was not sent/);
+assert.match(runTurn, /milim could not save this turn, so it was not sent/);
 assert.match(
   runTurn,
   /runtimeKind[\s\S]*runRef\.current\?\.context[\s\S]*resultStatus === "error"[\s\S]*resultStatus === "aborted"[\s\S]*clearAccountRuntimeKind\(id, runtimeKind\)/,

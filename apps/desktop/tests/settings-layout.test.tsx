@@ -15,7 +15,7 @@ function equal<T>(actual: T, expected: T, message: string): void {
 const source = readFileSync(resolve(process.cwd(), "src/settings/SettingsDialog.tsx"), "utf8");
 const surfaceSource = readFileSync(resolve(process.cwd(), "src/settings/SettingsSurface.tsx"), "utf8");
 const stylesSource = readFileSync(resolve(process.cwd(), "src/settings.css"), "utf8");
-assert(source.includes("export function SettingsPage({ onClose }"), "Settings should expose the full-window page contract");
+assert(/export function SettingsPage\(\{\s+onClose,/.test(source), "Settings should expose the full-window page contract");
 assert(source.includes('testId="settings-page"'), "Settings should expose the page test identifier");
 assert(source.includes('backLabel="Back to app"'), "Settings should provide dedicated back navigation");
 assert(source.includes("<SettingsSurface"), "Settings should use the shared full-window surface");
@@ -39,7 +39,7 @@ assert(source.includes('label: "About & updates"'), "Update policy and applicati
 assert(source.includes('label: "Google Workspace"'), "Google Workspace should have a dedicated section");
 assert(source.includes('label: "Model & agent defaults"'), "The workflow label should match the defaults it contains");
 assert(source.includes('data-testid="global-custom-instructions"'), "Model and agent defaults should expose app-wide custom instructions");
-assert(source.includes("Applied to every chat run by this Milim desktop, including paired mobile sends."), "Custom instructions should explain their global scope");
+assert(source.includes("Applied to every chat run by this milim desktop, including paired mobile sends."), "Custom instructions should explain their global scope");
 assert(source.includes("Workspace AGENTS.md and CLAUDE.md instructions are loaded separately."), "Custom instructions should distinguish workspace rules");
 assert(source.includes('title="Browser data"'), "Data settings should expose browser profile controls");
 assert(source.includes('activeSection === "google"'), "Google Workspace controls should render in their dedicated section");

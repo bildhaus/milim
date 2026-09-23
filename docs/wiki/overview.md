@@ -35,7 +35,7 @@ Agents, Workers, skills, schedules, MCP, media, Google Workspace, previews, and 
 |---|---|
 | Desktop app | Tauri 2, Vite, React, TypeScript, one canonical thread, persisted UI state, and per-launch bearer auth. |
 | Embedded server | Axum HTTP server and Rust control plane with OpenAI, Anthropic, Ollama, provider, workspace, agent, memory, MCP, media, mobile, privacy, durable inbox, and lazy run-inspection routes. |
-| Local data | SQLite owns canonical timelines, runs, privacy-processed run ledgers, content-addressed run artifacts, follow-up/steer/inject inbox items, approvals, and compatibility message projections; provider records, memories, schedules, and other runtime state remain under the Milim home directory. |
+| Local data | SQLite owns canonical timelines, runs, privacy-processed run ledgers, content-addressed run artifacts, follow-up/steer/inject inbox items, approvals, and compatibility message projections; provider records, memories, schedules, and other runtime state remain under the milim home directory. |
 | Remote traffic | Hosted chat, embeddings, media, Codex, and installed Claude CLI calls pass through explicit routing and the privacy gate. |
 
 ## Source map
@@ -50,6 +50,6 @@ Agents, Workers, skills, schedules, MCP, media, Google Workspace, previews, and 
 
 ## Local-first line
 
-Local-first does not mean local-only. milim can talk to OpenAI, Anthropic, Gemini, OpenRouter, Ollama, LM Studio, Replicate, fal, Codex, and the installed Claude CLI. The important boundary is explicit routing: local API runtimes stay on the machine, provider models use Milim's tool-agent loop when workspace or tool context is active, Codex and Claude use their account-runtime bridges, and remote sends can pass through the server-side privacy gate before leaving it.
+Local-first does not mean local-only. milim can talk to OpenAI, Anthropic, Gemini, OpenRouter, Ollama, LM Studio, Replicate, fal, Codex, and the installed Claude CLI. The important boundary is explicit routing: local API runtimes stay on the machine, provider models use milim's tool-agent loop when workspace or tool context is active, Codex and Claude use their account-runtime bridges, and remote sends can pass through the server-side privacy gate before leaving it.
 
 The canonical control path resolves complete model input from SQLite timeline and run events, treats memory as a cache, and records the privacy-processed provider request before sending it. Tool calls pass through one bounded pipeline, and follow-up, steer, and inject inputs share one durable inbox with atomic claims. Desktop and mobile keep this machinery quiet: normal transcript rendering makes no ledger request, while explicit **Run details** expands nested diagnostics inside the existing work surface.

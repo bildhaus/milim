@@ -133,7 +133,7 @@ export function McpAppView({
       if (connection !== activeRef.current) return;
       const bridge = new AppBridge(
         null,
-        { name: "Milim", version: "0.1.29" },
+        { name: "milim", version: "0.1.29" },
         { serverTools: {}, serverResources: {} },
         {
           hostContext: {

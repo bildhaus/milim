@@ -752,12 +752,31 @@
   gap: 12px;
   padding: 16px;
 }
-.app-confirmation-modal > p {
+.app-confirmation-modal > form {
+  display: contents;
+}
+.app-confirmation-modal > form > p {
   margin: 0;
   color: var(--secondary-text);
   font-size: 12px;
   line-height: 1.5;
   white-space: pre-wrap;
+}
+.app-confirmation-input {
+  width: 100%;
+  min-width: 0;
+  min-height: 32px;
+  padding: 6px 9px;
+  border: 1px solid var(--input-border);
+  border-radius: 7px;
+  outline: 0;
+  background: var(--input-bg);
+  color: var(--primary-text);
+  font: inherit;
+  font-size: 12.5px;
+}
+.app-confirmation-input:focus {
+  border-color: var(--focus-border);
 }
 .app-confirmation-actions {
   display: flex;
@@ -1664,6 +1683,10 @@
 .session-item:hover {
   background: color-mix(in srgb, var(--panel-row-hover) 82%, transparent);
   border-color: color-mix(in srgb, var(--border-primary) 58%, transparent);
+}
+.session-item:focus-visible {
+  outline: 2px solid var(--focus-border);
+  outline-offset: -2px;
 }
 .session-item.drag-over {
   background: color-mix(in srgb, var(--accent-soft) 48%, transparent);
@@ -3185,6 +3208,9 @@ button.git-row:hover svg {
     inset 0 1px 0 color-mix(in srgb, var(--primary-text) 7%, transparent),
     0 10px 26px rgba(0, 0, 0, 0.18);
 }
+.git-modal:focus {
+  outline: none;
+}
 .git-modal-head {
   display: flex;
   align-items: center;
@@ -3361,6 +3387,101 @@ button.git-row:hover svg {
   height: 13px;
   margin: 0;
   accent-color: var(--accent);
+}
+.git-commit-scope {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.git-commit-scope legend {
+  padding: 0 0 3px;
+  color: var(--tertiary-text);
+  font-size: 10.5px;
+  font-weight: 650;
+  text-transform: uppercase;
+}
+.git-commit-scope-option {
+  display: grid;
+  grid-template-columns: 13px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid color-mix(in srgb, var(--border-primary) 62%, transparent);
+  border-radius: 7px;
+  color: var(--secondary-text);
+  font-size: 11.5px;
+  line-height: 1.25;
+  cursor: pointer;
+}
+.git-commit-scope-option.active {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-primary));
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  color: var(--primary-text);
+}
+.git-commit-scope-option:has(input:disabled) {
+  cursor: default;
+  opacity: 0.6;
+}
+.git-commit-scope-option input {
+  width: 13px;
+  height: 13px;
+  margin: 1px 0 0;
+  accent-color: var(--accent);
+}
+.git-commit-scope-option span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.git-commit-scope-option small {
+  overflow: hidden;
+  color: var(--tertiary-text);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.git-file-stage-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  min-width: 0;
+}
+.git-stage-actions,
+.git-hunk-actions {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+}
+.git-stage-actions {
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.git-file-stage-row:hover .git-stage-actions,
+.git-file-stage-row:focus-within .git-stage-actions {
+  opacity: 1;
+}
+.git-hunk-actions {
+  grid-column: 1 / 3;
+  justify-content: flex-end;
+  padding-inline: 3px;
+}
+.git-stage-btn.git-icon-btn {
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+}
+.git-stage-btn.danger:hover {
+  color: var(--error);
+}
+@media (hover: none) {
+  .git-stage-actions {
+    opacity: 1;
+  }
 }
 .git-command-preview {
   display: block;
@@ -4184,7 +4305,8 @@ button.git-row:hover svg {
   transition: max-height var(--motion-fast) var(--motion-ease-out), opacity var(--motion-fast) var(--motion-ease-out), transform var(--motion-fast) var(--motion-ease-out);
 }
 .sidebar-workbench-wrap.expanded .sidebar-workbench-reveal {
-  max-height: 184px;
+  max-height: min(430px, 48vh);
+  overflow-y: auto;
   opacity: 1;
   pointer-events: auto;
   transform: translateY(0);
@@ -4200,6 +4322,22 @@ button.git-row:hover svg {
 }
 .sidebar-workbench-inline .sidebar-footer-item:hover {
   color: var(--primary-text);
+}
+.sidebar-workbench-group {
+  padding: 6px 9px 0;
+  color: var(--tertiary-text);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.sidebar-workbench-group:first-child {
+  padding-top: 2px;
+}
+.sidebar-workbench-separator {
+  width: 16px;
+  height: 1px;
+  margin: 2px 0;
+  background: var(--border-primary);
 }
 .sidebar-workbench-wrap.collapsed {
   justify-items: center;

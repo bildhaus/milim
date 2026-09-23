@@ -437,7 +437,7 @@ impl GoogleWorkspaceConnection {
             managed_folder_id: stored.managed_folder_id.clone(),
             files: stored.files.values().cloned().collect(),
             unavailable_reason: (!self.available()).then(|| {
-                "This build does not include Milim's Google OAuth credentials.".to_string()
+                "This build does not include milim's Google OAuth credentials.".to_string()
             }),
             error: self.state_error.lock().ok().and_then(|error| error.clone()),
         }
@@ -647,7 +647,7 @@ impl GoogleWorkspaceConnection {
             .is_some_and(|existing| existing != account_id)
         {
             return Err(Error::Unauthorized(
-                "Milim supports one Google account; disconnect before choosing another account"
+                "milim supports one Google account; disconnect before choosing another account"
                     .into(),
             ));
         }
@@ -934,7 +934,7 @@ impl GoogleWorkspaceConnection {
                     }
                     if descendants.len() >= FOLDER_FILE_LIMIT {
                         return Err(Error::InvalidRequest(format!(
-                            "Google Drive folders are limited to {FOLDER_FILE_LIMIT} Milim-authorized descendants"
+                            "Google Drive folders are limited to {FOLDER_FILE_LIMIT} milim-authorized descendants"
                         )));
                     }
                     if summary.mime_type == GOOGLE_FOLDER_MIME
@@ -1312,14 +1312,14 @@ impl GoogleWorkspaceConnection {
             .read()
             .map_err(|_| Error::Other("workspace lock poisoned".into()))?
             .clone()
-            .ok_or_else(|| Error::InvalidRequest("Select a Milim workspace folder first".into()))
+            .ok_or_else(|| Error::InvalidRequest("Select a milim workspace folder first".into()))
     }
 }
 
 const DRIVE_FILE_FIELDS: &str = "id,name,mimeType,webViewLink,iconLink,modifiedTime,size,trashed,parents,driveId,capabilities(canEdit,canDownload,canMoveItemWithinDrive,canMoveItemOutOfDrive,canRename,canShare,canTrash)";
 
 fn unavailable_error() -> Error {
-    Error::InvalidRequest("This build does not include Milim's Google OAuth credentials".into())
+    Error::InvalidRequest("This build does not include milim's Google OAuth credentials".into())
 }
 
 fn random_token() -> String {
@@ -1377,7 +1377,7 @@ async fn read_response_bounded(mut response: reqwest::Response, limit: usize) ->
         .is_some_and(|length| length > limit as u64)
     {
         return Err(Error::InvalidRequest(format!(
-            "Google file exceeds Milim's {} MB limit",
+            "Google file exceeds milim's {} MB limit",
             limit / 1024 / 1024
         )));
     }
@@ -1390,7 +1390,7 @@ async fn read_response_bounded(mut response: reqwest::Response, limit: usize) ->
     while let Some(chunk) = response.chunk().await.map_err(upstream)? {
         if bytes.len().saturating_add(chunk.len()) > limit {
             return Err(Error::InvalidRequest(format!(
-                "Google file exceeds Milim's {} MB limit",
+                "Google file exceeds milim's {} MB limit",
                 limit / 1024 / 1024
             )));
         }
@@ -2078,7 +2078,7 @@ async fn oauth_callback(
     if query.state.as_deref() != Some(relay.expected_state.as_str()) {
         return (
             StatusCode::BAD_REQUEST,
-            Html("<h1>Milim rejected this Google callback.</h1><p>You can close this tab.</p>"),
+            Html("<h1>milim rejected this Google callback.</h1><p>You can close this tab.</p>"),
         )
             .into_response();
     }
@@ -2103,9 +2103,9 @@ async fn oauth_callback(
             .into_response();
     }
     Html(if cancelled {
-        "<h1>Google selection cancelled.</h1><p>You can close this tab and return to Milim.</p>"
+        "<h1>Google selection cancelled.</h1><p>You can close this tab and return to milim.</p>"
     } else {
-        "<h1>Files selected for Milim.</h1><p>You can close this tab and return to Milim.</p>"
+        "<h1>Files selected for milim.</h1><p>You can close this tab and return to milim.</p>"
     })
     .into_response()
 }
@@ -3070,7 +3070,7 @@ fn require_capability(allowed: bool, action: &str, file: &GoogleFileSummary) -> 
         Ok(())
     } else {
         Err(Error::InvalidRequest(format!(
-            "Google does not allow Milim to {action} {}",
+            "Google does not allow milim to {action} {}",
             file.name
         )))
     }
@@ -3123,14 +3123,14 @@ fn read_bounded_file(path: &Path, limit: usize) -> Result<Vec<u8>> {
     }
     if metadata.len() > limit as u64 {
         return Err(Error::InvalidRequest(format!(
-            "Transfer exceeds Milim's {} MB limit",
+            "Transfer exceeds milim's {} MB limit",
             limit / 1024 / 1024
         )));
     }
     let bytes = std::fs::read(path)?;
     if bytes.len() > limit {
         return Err(Error::InvalidRequest(format!(
-            "Transfer exceeds Milim's {} MB limit",
+            "Transfer exceeds milim's {} MB limit",
             limit / 1024 / 1024
         )));
     }

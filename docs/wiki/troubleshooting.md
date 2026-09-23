@@ -6,12 +6,12 @@ title: Troubleshooting
 summary: Fix missing models, setup errors, workspace tool refusal, sandbox failures, privacy blocks, MCP disconnects, computer use, and busy ports.
 group: Reference
 order: 120
-updated: 2026-07-20
+updated: 2026-09-23
 ---
 
 Start with the current base URL and selected model. Most local issues are either a missing provider, a workspace folder that was never selected, or an optional runtime that is not running yet.
 
-Desktop diagnostics are local-only under `<MILIM_HOME>/logs` (normally `~/.milim/logs`). Milim retains `desktop.log` and one 5 MiB previous log, never uploads them automatically, and exposes the folder from **Settings → About → Diagnostics** and the recovery screen.
+Desktop diagnostics are local-only under `<MILIM_HOME>/logs` (normally `~/.milim/logs`). milim retains `desktop.log` and one 5 MiB previous log, never uploads them automatically, and exposes the folder from **Settings → About & updates → Diagnostics** and the recovery screen.
 
 ## Diagnostic order
 
@@ -28,19 +28,23 @@ Desktop diagnostics are local-only under `<MILIM_HOME>/logs` (normally `~/.milim
 | Symptom | Fix |
 |---|---|
 | Models list is empty | Start Ollama or LM Studio, add a provider, or set `MILIM_REMOTE_BASE_URL` for CLI/server use. |
-| Provider returns 401 | Replace the provider key or verify the account has access to the selected model. |
+| Provider returns 401 | The composer shows **Update key**. Replace the provider key or verify the account has access to the selected model; the raw provider response is under **Technical details**. |
+| Provider is rate limited | **Retry** counts down the provider's `Retry-After` when it sent one. A `429 insufficient_quota` is classified as quota instead; check billing or switch models. |
+| Codex, Claude, OpenCode, or Pi CLI not found | Launches from the Dock, Finder, or a desktop entry now also read your login shell's `PATH` (so nvm and fnm installs are found). Otherwise install with the command shown on the Providers card, or use **Locate binary...** to choose the executable. |
+| An approval no longer asks | A previous **Allow for this chat** rule matched. Remove it under Session controls > Tool approval, or clear all rules there. |
 | Workspace tools are missing | Select a folder. Host filesystem, shell, and Git tools are removed until a workspace exists. |
 | Guarded approval cannot run shell | Switch to Open approval or use the Docker sandbox when command execution is appropriate. |
 | Sandbox run fails | Start Docker, check `MILIM_DOCKER_BIN`, and verify the daemon can run containers. |
 | App preview will not Run | Open Preview → App, choose **Review commands**, confirm the folder, exact commands, and source fingerprint, then choose **Run**. Any artifact or project change invalidates the review. |
 | App preview is active but unhealthy | The process is still running but the loopback readiness probe failed or the app has a compile error. Keep the URL, inspect the runtime logs, use **Prepare fix** to queue editable context, and wait for recovery or Stop. |
-| Preview says disconnected or stale | Status polling failed. Milim keeps the last-known runtime and URL instead of clearing the inspector; confirm the embedded server is reachable, then retry or reopen the inspector. |
+| Preview says disconnected or stale | Status polling failed. milim keeps the last-known runtime and URL instead of clearing the inspector; confirm the embedded server is reachable, then retry or reopen the inspector. |
 | URL preview controls stay disabled | Wait for the native child webview's real page-load-ready event. Only public HTTPS and loopback HTTP URLs are accepted; creation, navigation, and load errors appear in the inspector. |
 | Computer use is unavailable | Build with the `computer-use` feature and enable the `/computer` gate. |
-| MCP tools disappeared | Check `/mcp/servers` or the MCP Servers sheet. Imported servers stay disabled and secret-looking env values become required placeholders; fill them and use Test connection before enabling. |
+| MCP tools disappeared | Open **Tools → MCP Servers** (or search the command palette for "MCP") and check each server's status. Imported servers stay disabled and secret-looking env values become required placeholders; fill them and use Test connection before enabling. |
 | Privacy block error | The server detected PII before a remote send. Use Redact, Off, or a local runtime. |
 | Desktop port is busy | The embedded server falls back to a free loopback port and the UI asks Tauri for the actual API base URL. |
-| Desktop recovery screen appears | Open the local logs for the recorded failure, then restart Milim from the same screen. Saved chats and settings remain on device. |
+| milim shows "milim could not start" | Startup could not open the local database, bind its loopback servers, or initialize the chat runtime. The alert names the failure; details are in the diagnostics log. Fix the reported cause, then relaunch. |
+| Desktop recovery screen appears | Open the local logs for the recorded failure, then restart milim from the same screen. Saved chats and settings remain on device. |
 
 ## Next reading path
 

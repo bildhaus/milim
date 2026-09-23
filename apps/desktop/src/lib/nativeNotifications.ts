@@ -4,6 +4,7 @@ import {
   type Session,
 } from "../sessions/store.js";
 import { pendingAttentionKey } from "../ui/sounds.js";
+import { isTauriRuntime } from "../api.js";
 
 export type NativeNotificationKind = "finished" | "attention";
 
@@ -21,9 +22,6 @@ type NativeBadgeState = {
 
 type NativeBadgeWriter = (count: number) => Promise<void>;
 
-function isTauriRuntime(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
 
 export async function ensureNativeNotificationPermission(): Promise<boolean> {
   if (!isTauriRuntime()) return false;
@@ -44,7 +42,7 @@ export async function sendMilimNotification(
   const titled = kind === "finished"
     ? `${options.threadTitle || "A chat"} finished.`
     : `${options.threadTitle || "A chat"} needs your attention.`;
-  sendNotification({ title: "Milim", body: options.includeThreadTitle ? titled : generic });
+  sendNotification({ title: "milim", body: options.includeThreadTitle ? titled : generic });
 }
 
 export function nativeBadgeThreadCount(state: NativeBadgeState): number {

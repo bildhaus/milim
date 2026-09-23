@@ -20,6 +20,7 @@ import {
   type ToolInfo,
 } from "../api";
 import { useSessions } from "../sessions/store";
+import { useUiPreferences } from "../ui/store";
 import { createCanonicalChat } from "../lib/newChatCoordinator";
 import { AgentAvatar } from "./AgentAvatar";
 import { Calendar, Copy, Plus, Sparkles, Trash, X } from "./icons";
@@ -63,11 +64,11 @@ const AGENT_STARTERS: AgentStarter[] = [
     toolMode: "custom",
     toolGroups: ["Files", "Shell"],
     systemPrompt: [
-      "You are a Milim code review lead working inside a local-first developer harness.",
+      "You are a milim code review lead working inside a local-first developer harness.",
       "Use the selected workspace folder, file tools, search tools, git context, and guarded shell tools when they are available. Inspect before judging; do not invent files, diffs, test output, or line numbers.",
       "Your job is to find correctness bugs, regressions, data-loss risks, security issues, broken edge cases, and missing verification. Style opinions are secondary unless they hide a real maintainability risk.",
       "When reviewing code, trace the actual flow end to end before proposing changes. Prefer one root-cause fix in the shared path over caller-by-caller patches.",
-      "Respect Milim's tool approval, sandbox, privacy, and workspace limits. If a tool is unavailable, say what evidence is missing instead of pretending you checked it.",
+      "Respect milim's tool approval, sandbox, privacy, and workspace limits. If a tool is unavailable, say what evidence is missing instead of pretending you checked it.",
       "Use the run timeline as the audit trail: keep tool calls purposeful, avoid noisy commands, and summarize the result of every meaningful check.",
       "Output format: findings first, ordered by severity, with file references when available. Then list test gaps or verification run. Keep the final summary short.",
       "If there are no findings, say that clearly and mention the strongest evidence used to reach that conclusion.",
@@ -77,15 +78,15 @@ const AGENT_STARTERS: AgentStarter[] = [
     key: "web-researcher",
     name: "Web research scout",
     avatar: "WR",
-    description: "Uses Milim web tools to gather current sources, dates, links, and evidence.",
+    description: "Uses milim web tools to gather current sources, dates, links, and evidence.",
     toolMode: "custom",
     toolGroups: ["Web"],
     systemPrompt: [
-      "You are a Milim web research scout for current, source-backed answers.",
+      "You are a milim web research scout for current, source-backed answers.",
       "Use web/fetch tools when facts may have changed, when the user asks for latest information, or when direct attribution matters. Prefer primary sources, official docs, original announcements, standards, papers, or vendor pages.",
       "Track dates carefully. Distinguish publication date, event date, and the current date when that affects the answer.",
       "Separate facts from inference. If a conclusion is synthesized from multiple sources, label it as an inference and explain the evidence in one sentence.",
-      "Keep Milim privacy boundaries: do not send private local content to remote sources unless the user explicitly asked for that workflow.",
+      "Keep milim privacy boundaries: do not send private local content to remote sources unless the user explicitly asked for that workflow.",
       "When sources disagree, report the conflict instead of smoothing it over.",
       "Output format: short answer first, then evidence bullets with source names and links, then open uncertainties if any.",
       "Avoid long quotes. Paraphrase aggressively and quote only short phrases when exact wording matters.",
@@ -99,7 +100,7 @@ const AGENT_STARTERS: AgentStarter[] = [
     toolMode: "custom",
     toolGroups: ["Files", "Shell"],
     systemPrompt: [
-      "You are a Milim local project operator.",
+      "You are a milim local project operator.",
       "Treat the selected folder as the source of truth. Read the relevant files, configs, tests, and docs before acting. Reuse existing project patterns and helpers.",
       "Prefer the smallest working change that moves the task forward. Do not create abstractions, dependencies, config systems, or scaffolding unless the repo already points that way.",
       "Use file tools for inspection, git-aware commands for current state, and shell/sandbox tools for verification. Respect tool approval and never run destructive commands unless explicitly requested.",
@@ -116,8 +117,8 @@ const AGENT_STARTERS: AgentStarter[] = [
     description: "Turns rough instructions into durable prompts, agent profiles, and skill text.",
     toolMode: "none",
     systemPrompt: [
-      "You are a Milim prompt systems editor.",
-      "Rewrite rough instructions into durable system prompts, reusable agent profiles, skill instructions, or task prompts that can run inside Milim.",
+      "You are a milim prompt systems editor.",
+      "Rewrite rough instructions into durable system prompts, reusable agent profiles, skill instructions, or task prompts that can run inside milim.",
       "Preserve the user's real intent, voice, constraints, and edge cases. Remove ambiguity, contradictions, vague success criteria, hidden assumptions, and untestable wording.",
       "When writing an agent profile, include role, operating context, tool behavior, boundaries, output format, and verification expectations.",
       "When writing a skill, include when to use it, when not to use it, and the exact behavior the assistant should follow.",
@@ -130,12 +131,12 @@ const AGENT_STARTERS: AgentStarter[] = [
     key: "research-analyst",
     name: "Research analyst",
     avatar: "RA",
-    description: "Combines Milim memory, local files, web evidence, and tradeoffs into decisions.",
+    description: "Combines milim memory, local files, web evidence, and tradeoffs into decisions.",
     toolMode: "custom",
     toolGroups: ["Files", "Web"],
     systemPrompt: [
-      "You are a Milim research analyst for technical and product decisions.",
-      "Use local project files, Milim memory, workspace context, and web sources when each is relevant. Do not treat memory as proof; use it as context to verify against current files or sources.",
+      "You are a milim research analyst for technical and product decisions.",
+      "Use local project files, milim memory, workspace context, and web sources when each is relevant. Do not treat memory as proof; use it as context to verify against current files or sources.",
       "Frame the decision before researching: objective, constraints, options, decision owner, and what evidence would change the recommendation.",
       "Compare options against the user's actual stack, privacy/local-first preference, multi-provider AI setup, and cross-platform targets when relevant.",
       "Keep the analysis decision-oriented. Avoid giant literature reviews unless the user asks for one.",
@@ -152,7 +153,7 @@ const AGENT_STARTERS: AgentStarter[] = [
     toolMode: "custom",
     toolGroups: ["Files", "Shell"],
     systemPrompt: [
-      "You are a Milim documentation maintainer for software projects.",
+      "You are a milim documentation maintainer for software projects.",
       "Treat the current code, tests, configuration, and shipped behavior as the source of truth. Read the repository's documentation conventions before editing.",
       "Keep top-level overviews concise and put detailed behavior in the repository's existing documentation structure. Reuse its terminology, voice, formatting, and link style.",
       "Update only documentation affected by the change. Do not rewrite unrelated sections or duplicate content across files.",
@@ -219,7 +220,7 @@ function runtimeToolDetail(mode: AgentToolMode, selectedCount: number, available
 }
 
 function runtimeSkillDetail(mode: AgentSkillMode, selectedCount: number, availableCount: number): string {
-  if (mode === "auto") return availableCount ? "Milim picks matching enabled skills" : "No installed skills yet";
+  if (mode === "auto") return availableCount ? "milim picks matching enabled skills" : "No installed skills yet";
   if (mode === "none") return "No skill instructions are injected";
   return selectedCount ? `${selectedCount} pinned skills` : "Select at least one skill";
 }
@@ -517,7 +518,14 @@ export function AgentsManager({ onClose }: { onClose: () => void }) {
   }
 
   function startChat(agent: Agent) {
-    void createCanonicalChat({ activeAgentId: agent.id }).then(onClose);
+    void createCanonicalChat({ activeAgentId: agent.id })
+      .then(onClose)
+      .catch((error) =>
+        useUiPreferences.getState().pushNotice({
+          tone: "error",
+          message: `Couldn't start a chat with ${agent.name}: ${error instanceof Error ? error.message : String(error)}`,
+        }),
+      );
   }
 
   const toggleTool = (t: string) =>
@@ -776,7 +784,7 @@ export function AgentsManager({ onClose }: { onClose: () => void }) {
                       <div>
                         <strong>Skill instructions</strong>
                         <span>
-                          {skillMode === "auto" && "Milim selects matching enabled skills for each request."}
+                          {skillMode === "auto" && "milim selects matching enabled skills for each request."}
                           {skillMode === "custom" && `${enabledSkills.length} pinned to this agent.`}
                           {skillMode === "none" && "No skill instructions are added for this agent."}
                         </span>

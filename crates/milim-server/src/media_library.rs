@@ -137,7 +137,10 @@ impl MediaLibrary {
             urls: BTreeMap::new(),
             media: Vec::new(),
         };
-        let mut items = self.items.lock().expect("media library poisoned");
+        let mut items = self
+            .items
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         items.insert(0, item.clone());
         self.persist(&items)?;
         Ok(item)
@@ -146,7 +149,7 @@ impl MediaLibrary {
     pub fn get(&self, id: &str) -> Option<MediaLibraryItem> {
         self.items
             .lock()
-            .expect("media library poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .find(|item| item.id == id)
             .cloned()
@@ -155,7 +158,7 @@ impl MediaLibrary {
     pub fn find_by_run(&self, provider_id: &str, run_id: &str) -> Option<MediaLibraryItem> {
         self.items
             .lock()
-            .expect("media library poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .find(|item| item.provider_id == provider_id && item.provider_run_id == run_id)
             .cloned()
@@ -171,7 +174,10 @@ impl MediaLibrary {
         limit: usize,
     ) -> MediaLibraryPage {
         let query = query.trim().to_lowercase();
-        let items = self.items.lock().expect("media library poisoned");
+        let items = self
+            .items
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let filtered = items.iter().filter(|item| {
             (query.is_empty()
                 || item.prompt.to_lowercase().contains(&query)
@@ -205,7 +211,10 @@ impl MediaLibrary {
     }
 
     pub fn update(&self, id: &str, update: MediaLibraryUpdate) -> Result<MediaLibraryItem> {
-        let mut items = self.items.lock().expect("media library poisoned");
+        let mut items = self
+            .items
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let item = items
             .iter_mut()
             .find(|item| item.id == id)
@@ -261,7 +270,10 @@ impl MediaLibrary {
     }
 
     pub fn fail(&self, id: &str, message: String) -> Result<()> {
-        let mut items = self.items.lock().expect("media library poisoned");
+        let mut items = self
+            .items
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let item = items
             .iter_mut()
             .find(|item| item.id == id)
@@ -282,7 +294,10 @@ impl MediaLibrary {
         if asset_dir.exists() {
             std::fs::remove_dir_all(&asset_dir)?;
         }
-        let mut items = self.items.lock().expect("media library poisoned");
+        let mut items = self
+            .items
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let before = items.len();
         items.retain(|item| item.id != id);
         if items.len() == before {
@@ -354,7 +369,10 @@ impl MediaLibrary {
                 }
             }
         }
-        let mut items = self.items.lock().expect("media library poisoned");
+        let mut items = self
+            .items
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let item = items
             .iter_mut()
             .find(|item| item.id == id)
@@ -369,7 +387,10 @@ impl MediaLibrary {
     }
 
     fn mark_save_failed(&self, id: &str, message: String) -> Result<()> {
-        let mut items = self.items.lock().expect("media library poisoned");
+        let mut items = self
+            .items
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let item = items
             .iter_mut()
             .find(|item| item.id == id)

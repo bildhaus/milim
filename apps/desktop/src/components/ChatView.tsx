@@ -2,6 +2,7 @@ import {
   lazy,
   Suspense,
   useCallback,
+  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -15,6 +16,7 @@ import {
 } from "react";
 import { useAgents } from "../agents/store";
 import {
+  inTauri,
   artifactFileStatus,
   applyWorkerDiff,
   claudeRuntimeModel,
@@ -95,8 +97,6 @@ import {
   type DelegationPolicy,
   type CodexLoginEvent,
   type HarnessEvent,
-  type HarnessEventEnvelope,
-  type HarnessRunRequest,
   type MediaGenerationResult,
   type MemoryNotice,
   type ModelInfo,
@@ -162,7 +162,7 @@ import {
   workerRunSynthesisId,
 } from "../lib/workerRuns";
 import {
-  browserAttachment,
+  browserFileAttachment,
   MAX_DESKTOP_ATTACHMENTS,
 } from "../lib/attachmentInput";
 import {
@@ -171,6 +171,7 @@ import {
   type EmptyStarterSuggestionIcon,
 } from "../lib/emptyStarterSuggestions";
 import {
+  composerActionLabel as composerActionText,
   composerNoticeAction,
   composerNoticeAutoDismissMs,
   composerNoticeIsDismissible,
@@ -200,6 +201,11 @@ import {
   accountProfileRuntimeForModel,
   withAccountProfile,
 } from "../lib/accountProfiles";
+import {
+  collectHarnessUtilityRun,
+  utilityHarnessForModel,
+  type UtilityHarness,
+} from "../lib/harnessUtility";
 import { reasoningEffortForThread, reasoningEffortOverridesWithSelection } from "../lib/reasoningEffort";
 import { managedPreviewRuntimeForTurn, type ManagedPreviewRuntimeContext } from "../lib/managedPreviewRuntime";
 import {
@@ -359,10 +365,13 @@ import { requestWorkspaceEditorLeave } from "../lib/workspaceEditorGuard";
 import { isLoopbackProviderEndpoint } from "../lib/providerEndpoint.js";
 import { pendingAttentionKey, playInterfaceSound } from "../ui/sounds";
 import { DEFAULT_PREVIEW_PANEL_WIDTH, useUiPreferences } from "../ui/store";
-import { confirmApp } from "../ui/confirmation";
+import { useTheme } from "../theme/store";
+import { confirmApp, promptApp } from "../ui/confirmation";
 import { Composer } from "./Composer";
 import { ComposerSurface } from "./ComposerSurface";
-import { ControlBar } from "./ControlBar";
+import { ControlBar, requestOpenModelPicker } from "./ControlBar";
+import { buildCommandRegistry } from "../lib/commandRegistry";
+import { managerIdFromEvent, OPEN_MANAGER_EVENT, requestOpenManager } from "../lib/managers";
 import { AssistantMessage } from "./AssistantMessage";
 import type { ModelPickerSelection } from "./ModelPicker";
 import { GoalPanel, type GoalPanelDraft } from "./GoalPanel";
@@ -412,6 +421,9 @@ import {
 import { useChatConversationController } from "./chat/useChatConversationController";
 import { useChatMediaController } from "./chat/useChatMediaController";
 import { useChatWorkerController } from "./chat/useChatWorkerController";
+import { useApprovalAllowances } from "./chat/useApprovalAllowances";
+import { useRetryCountdown } from "./chat/useRetryCountdown";
+import { errorNotice, type ProviderErrorInfo } from "../lib/providerErrors.js";
 
 const ProvidersManager = lazy(() =>
   import("./ProvidersManager").then((mod) => ({
@@ -449,8 +461,6 @@ const WorkersSummary = lazy(() =>
     ([, mod]) => ({ default: mod.WorkersSummary }),
   ),
 );
-const inTauri =
-  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const MAX_MOUNTED_MESSAGE_ROWS = 200;
 const MESSAGE_WINDOW_SHIFT = 100;
 const DEFAULT_MESSAGE_ROW_HEIGHT = 180;
@@ -582,48 +592,39 @@ type CompactionSummaryResult = {
   finishReason?: string;
 };
 
-async function collectHarnessUtilityRun(
-  harnessId: "codex" | "claude" | "opencode" | "pi",
-  request: HarnessRunRequest,
-  signal?: AbortSignal,
-): Promise<CompactionSummaryResult> {
-  let content = "";
-  let warning: string | null = null;
-  let error: string | null = null;
-  let usage: TokenUsage | undefined;
-  let costUsd: number | undefined;
-  let costSource: "provider" | undefined;
-  await streamHarnessRun(
-    harnessId,
-    request,
-    (envelope: HarnessEventEnvelope) => {
-      const event = envelope.event;
-      if (event.type === "text_delta" && event.text) {
-        content += event.text;
-      } else if (event.type === "runtime_notice") {
-        if (event.level === "error") error = event.message;
-        else if (event.code === "runtime_warning") warning = event.message;
-      } else if (
-        event.type === "turn_failed" ||
-        event.type === "turn_cancelled"
-      ) {
-        error = event.message ?? "Harness turn was cancelled.";
-      } else if (
-        event.type === "usage_updated" ||
-        event.type === "turn_completed"
-      ) {
-        if (event.usage) usage = event.usage;
-        if (typeof event.cost_usd === "number" && event.cost_usd >= 0) {
-          costUsd = event.cost_usd;
-          costSource = "provider";
-        }
-      }
-    },
-    signal,
+const UTILITY_HARNESS_PROVIDER_LABELS: Record<UtilityHarness["id"], string> = {
+  codex: "Codex",
+  claude: "Local Claude CLI",
+  opencode: "Local OpenCode CLI",
+  pi: "Local Pi CLI",
+};
+
+/**
+ * `messages` without its last entry, keeping the previous array reference
+ * while every prefix message is unchanged. Store updates preserve untouched
+ * message objects, so this stays stable across stream flushes of the tail.
+ */
+function useSettledMessagePrefix(messages: ChatMessage[]): ChatMessage[] {
+  const settledRef = useRef<ChatMessage[]>(EMPTY);
+  const previous = settledRef.current;
+  const length = Math.max(0, messages.length - 1);
+  let unchanged = previous.length === length;
+  for (let index = 0; unchanged && index < length; index += 1) {
+    unchanged = previous[index] === messages[index];
+  }
+  if (!unchanged) settledRef.current = messages.slice(0, length);
+  return settledRef.current;
+}
+
+/** Whether a message holds anything the approval and attention scans read. */
+function messageHasApprovalActivity(message: ChatMessage | undefined): boolean {
+  if (!message) return false;
+  if (message.approval) return true;
+  if (message.run?.steps.some((step) => step.approval)) return true;
+  return (message.streamParts ?? []).some(
+    (part) =>
+      part.kind === "event" && Boolean(part.approvalId || part.approvalStatus),
   );
-  if (error) throw new Error(error);
-  if (warning) throw new Error(warning);
-  return { content, usage, costUsd, costSource };
 }
 
 function mergeTokenUsage(
@@ -767,11 +768,6 @@ const APP_SESSION_ID = crypto.randomUUID();
 
 function attachmentId(): string {
   return crypto.randomUUID();
-}
-
-async function browserFileAttachment(file: File): Promise<ChatAttachment> {
-  const mime = file.type || inferAttachmentMime(file.name);
-  return browserAttachment(file, mime, attachmentId());
 }
 
 function previewArtifactsForMessage(
@@ -1188,6 +1184,10 @@ function EmptyStarterActions({
 type ChatNotice = {
   message: string;
   tone: "info" | "warning" | "error";
+  /** Raw failure text shown under "Technical details". */
+  detail?: string;
+  providerError?: ProviderErrorInfo;
+  retryAfterSecs?: number;
 };
 
 type RunTurnResult = {
@@ -1511,6 +1511,7 @@ export function ChatView({
   const messageRowActionsRef = useRef<MessageRowActions | null>(null);
   const activeId = useSessions((s) => s.activeId);
   const { text: input, attachments: pendingAttachments } = useSessionComposerState(activeId);
+  const approvalAllowances = useApprovalAllowances(activeId);
   const [providersOpen, setProvidersOpen] = useState(false);
   const [mcpOpen, setMcpOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
@@ -1542,6 +1543,8 @@ export function ChatView({
     null,
   );
   const [chatNotice, setChatNotice] = useState<ChatNotice | null>(null);
+  const [modelPickerRequest, setModelPickerRequest] = useState(0);
+  const retryInSecs = useRetryCountdown(chatNotice?.retryAfterSecs, chatNotice);
   const [goalPanelOpen, setGoalPanelOpen] = useState(false);
   const [goalPrefill, setGoalPrefill] = useState<string | null>(null);
   const [goalComposerSessions, setGoalComposerSessions] = useState<
@@ -1680,13 +1683,28 @@ export function ChatView({
     messages.length,
     messageWindowStart + MAX_MOUNTED_MESSAGE_ROWS,
   );
+  // Stream flushes replace only the tail message. Whole-thread scans run over
+  // the stable settled prefix unless the tail carries data the scan reads, so
+  // streamed text alone does not rescan the thread.
+  const settledMessages = useSettledMessagePrefix(messages);
+  const tailMessage =
+    messages.length > settledMessages.length
+      ? messages[messages.length - 1]
+      : undefined;
+  const approvalScanMessages = messageHasApprovalActivity(tailMessage)
+    ? messages
+    : settledMessages;
   const pendingApprovals = useMemo(
-    () => pendingToolApprovals(messages),
-    [messages],
+    () => pendingToolApprovals(approvalScanMessages),
+    [approvalScanMessages],
   );
+  const artifactScanMessages =
+    tailMessage?.role === "assistant" && tailMessage.artifacts?.length
+      ? messages
+      : settledMessages;
   const artifactRevisionGroupsForThread = useMemo(
-    () => artifactRevisionGroups(messages),
-    [messages],
+    () => artifactRevisionGroups(artifactScanMessages),
+    [artifactScanMessages],
   );
   const artifactRevisionsByOccurrence = useMemo(
     () => artifactRevisionChoiceByOccurrence(artifactRevisionGroupsForThread),
@@ -1695,13 +1713,17 @@ export function ChatView({
   const promptHistoryScope = useUiPreferences((s) => s.promptHistoryScope);
   const globalPromptHistory = useUiPreferences((s) => s.globalPromptHistory);
   const recordGlobalPrompt = useUiPreferences((s) => s.recordGlobalPrompt);
+  const tailUserPrompt =
+    tailMessage?.role === "user" ? tailMessage.content.trim() : "";
   const sentHistory = useMemo(() => {
     if (promptHistoryScope === "off") return [];
     if (promptHistoryScope === "global") return globalPromptHistory.slice().reverse();
-    return messages
+    const history = settledMessages
       .filter((message) => message.role === "user" && message.content.trim())
       .map((message) => message.content.trim());
-  }, [globalPromptHistory, messages, promptHistoryScope]);
+    if (tailUserPrompt) history.push(tailUserPrompt);
+    return history;
+  }, [globalPromptHistory, promptHistoryScope, settledMessages, tailUserPrompt]);
   const activeTitle = useSessions(
     (s) =>
       s.sessions.find((x) => x.id === s.activeId)?.title ?? "Current thread",
@@ -1709,8 +1731,19 @@ export function ChatView({
   const activeWorker = useSessions(
     (s) => s.sessions.find((x) => x.id === s.activeId)?.worker,
   );
-  const activeSession = useSessions(
-    (s) => s.sessions.find((x) => x.id === s.activeId),
+  // Narrow slices of the active session: subscribing to the whole session
+  // object re-rendered on every stream flush.
+  const activeBrowserSession = useSessions(
+    (s) => s.sessions.find((x) => x.id === s.activeId)?.browserSession,
+  );
+  const activeRetryWorkspace = useSessions(
+    (s) => s.sessions.find((x) => x.id === s.activeId)?.retryWorkspace,
+  );
+  const activeSessionExists = useSessions((s) =>
+    s.sessions.some((x) => x.id === s.activeId),
+  );
+  const activeSettledAt = useSessions(
+    (s) => s.sessions.find((x) => x.id === s.activeId)?.settledAt,
   );
   const workerRuns = useSessions((s) => s.workerRuns);
   const activeWorkerRuns = useMemo(
@@ -1725,12 +1758,11 @@ export function ChatView({
   );
   const activeWorkerRun = activeWorkerRuns[0];
   const announcedAttentionKeysRef = useRef(new Set<string>());
+  const proposedWorkerRunId =
+    activeWorkerRun?.run.status === "proposed" ? activeWorkerRun.run.id : undefined;
   const attentionKey = useMemo(
-    () => pendingAttentionKey(
-      messages,
-      activeWorkerRun?.run.status === "proposed" ? activeWorkerRun.run.id : undefined,
-    ),
-    [activeWorkerRun?.run.id, activeWorkerRun?.run.status, messages],
+    () => pendingAttentionKey(approvalScanMessages, proposedWorkerRunId),
+    [approvalScanMessages, proposedWorkerRunId],
   );
   useEffect(() => {
     if (!attentionKey || announcedAttentionKeysRef.current.has(attentionKey)) return;
@@ -2210,18 +2242,18 @@ export function ChatView({
   }, [effectiveModel, pendingAttachments, pickerModels]);
   const proactiveModelBlocker = modelRouteBlocker ?? imageAttachmentBlocker;
   const composerNotice = prioritizeComposerNotice(chatNotice, proactiveModelBlocker);
+  const composerNoticeDetail = composerNotice && composerNotice !== proactiveModelBlocker
+    ? (composerNotice as ChatNotice).detail
+    : undefined;
   const composerAction: ComposerBlockerAction | null = composerNotice
     ? composerNotice === proactiveModelBlocker
       ? proactiveModelBlocker.action
-      : composerNoticeAction(composerNotice.message)
+      : composerNoticeAction(
+        composerNoticeDetail ?? composerNotice.message,
+        (composerNotice as ChatNotice).providerError,
+      )
     : null;
-  const composerActionLabel = composerAction === "manage_models"
-    ? "Manage models"
-    : composerAction === "choose_folder"
-      ? "Choose folder"
-      : composerAction === "privacy_settings"
-        ? "Review privacy"
-        : "";
+  const composerActionLabel = composerActionText(composerAction, retryInSecs);
   const composerNoticeDismissible = composerNoticeIsDismissible(composerNotice, proactiveModelBlocker);
   useEffect(() => {
     const delay = composerNoticeAutoDismissMs(chatNotice);
@@ -2282,7 +2314,7 @@ export function ChatView({
       void writeCanonicalThreadModel(activeId, "").catch((error) =>
         setChatNotice({
           tone: "error",
-          message: `Milim could not clear the unavailable model: ${error instanceof Error ? error.message : String(error)}`,
+          message: `milim could not clear the unavailable model: ${error instanceof Error ? error.message : String(error)}`,
         }),
       );
       setChatNotice({
@@ -2304,7 +2336,7 @@ export function ChatView({
         if (reconciliation.status === "repair") {
           setChatNotice({
             tone: "info",
-            message: "Milim repaired this chat's saved model route.",
+            message: "milim repaired this chat's saved model route.",
           });
         }
       })
@@ -2312,7 +2344,7 @@ export function ChatView({
         handledUnavailableModelRoutesRef.current.add(syncFailKey);
         setChatNotice({
           tone: "error",
-          message: `Milim could not synchronize this chat's model: ${error instanceof Error ? error.message : String(error)}`,
+          message: `milim could not synchronize this chat's model: ${error instanceof Error ? error.message : String(error)}`,
         });
       });
   }, [
@@ -2926,9 +2958,27 @@ export function ChatView({
       const latest = useSessions
         .getState()
         .workerRuns.find((item) => item.run.id === record.run.id);
-      void maybeResumeAfterWorkerRun(latest ?? record);
+      void workerRunHandlersRef.current.maybeResumeAfterWorkerRun(
+        latest ?? record,
+      );
     }, 500 * 2 ** attempts);
   }
+
+  // Worker event streams and reconciliation timers outlive the render that
+  // started them; they call through this ref so a resumed turn uses the
+  // current providers, models, and settings instead of a stale closure.
+  const workerRunHandlersRef = useRef({
+    applyWorkerRunEvent,
+    maybeResumeAfterWorkerRun,
+    startWorkerRunEvents,
+  });
+  useLayoutEffect(() => {
+    workerRunHandlersRef.current = {
+      applyWorkerRunEvent,
+      maybeResumeAfterWorkerRun,
+      startWorkerRunEvents,
+    };
+  });
 
   function startWorkerRunEvents(record: WorkerRunRecord) {
     const run = record.run;
@@ -2962,7 +3012,7 @@ export function ChatView({
               if (event.event?.seq)
                 afterSeq = Math.max(afterSeq, event.event.seq);
               retry = 0;
-              applyWorkerRunEvent(event);
+              workerRunHandlersRef.current.applyWorkerRunEvent(event);
               terminalEvent = Boolean(
                 event.run &&
                   ["done", "partial", "stopped", "error"].includes(
@@ -2982,7 +3032,9 @@ export function ChatView({
         try {
           const canonical = await getWorkerRun(run.id);
           useSessions.getState().upsertWorkerRun(canonical);
-          await maybeResumeAfterWorkerRun(canonical);
+          await workerRunHandlersRef.current.maybeResumeAfterWorkerRun(
+            canonical,
+          );
           if (
             ["done", "partial", "stopped", "error"].includes(
               canonical.run.status,
@@ -3018,9 +3070,9 @@ export function ChatView({
           store.upsertWorkerRun(record);
           if (pending.has(record.run.id)) {
             approvedWorkerRunsRef.current.add(record.run.id);
-            void maybeResumeAfterWorkerRun(record);
+            void workerRunHandlersRef.current.maybeResumeAfterWorkerRun(record);
           }
-          startWorkerRunEvents(record);
+          workerRunHandlersRef.current.startWorkerRunEvents(record);
         }
       })
       .catch(() => {
@@ -3029,15 +3081,11 @@ export function ChatView({
     return () => {
       cancelled = true;
     };
-  }, [
-    activeId,
-    activeSession?.browserSession,
-    sessionsHydrated,
-    setSessionBrowserSession,
-  ]);
+  }, [activeId, sessionsHydrated]);
 
   useEffect(() => {
-    for (const record of activeWorkerRuns) startWorkerRunEvents(record);
+    for (const record of activeWorkerRuns)
+      workerRunHandlersRef.current.startWorkerRunEvents(record);
   }, [activeWorkerRuns]);
 
   useEffect(() => {
@@ -3258,6 +3306,9 @@ export function ChatView({
   }, [activeId, autoTitleChats, sessionsHydrated, setMessages, updateCanonicalActiveRun]);
 
   async function loadOlderMessages() {
+    const activeSession = useSessions
+      .getState()
+      .sessions.find((session) => session.id === activeId);
     const beforeIndex = activeSession?.messagesLoadedFrom ?? 0;
     if (
       !inTauri ||
@@ -3585,18 +3636,35 @@ export function ChatView({
     return true;
   }
 
+  // The context meter is advisory, so it trails stream flushes and typing
+  // instead of re-estimating on the urgent render path.
+  const tokenEstimateMessages = useDeferredValue(messages);
+  const tokenEstimateInput = useDeferredValue(input);
   const tokens = useMemo(() => {
     const fixed: ChatMessage[] = [globalInstructions, instructions]
       .map((content) => content.trim())
       .filter(Boolean)
       .map((content): ChatMessage => ({ role: "system", content }));
-    const draft: ChatMessage[] = input.trim() || pendingAttachments.length
-      ? [{ role: "user", content: input, attachments: pendingAttachments }]
-      : [];
+    const draft: ChatMessage[] =
+      tokenEstimateInput.trim() || pendingAttachments.length
+        ? [
+            {
+              role: "user",
+              content: tokenEstimateInput,
+              attachments: pendingAttachments,
+            },
+          ]
+        : [];
     return estimateMessagesTokens(
-      messagesForModelContext(fixed, [...messages, ...draft]),
+      messagesForModelContext(fixed, [...tokenEstimateMessages, ...draft]),
     );
-  }, [messages, input, globalInstructions, instructions, pendingAttachments]);
+  }, [
+    tokenEstimateMessages,
+    tokenEstimateInput,
+    globalInstructions,
+    instructions,
+    pendingAttachments,
+  ]);
   const activeContextBudget = useMemo(
     () => modelContextBudget(effectiveModel.trim(), pickerModels),
     [effectiveModel, pickerModels],
@@ -3701,7 +3769,7 @@ export function ChatView({
         ? "app"
         : "url");
   const activeInspectorBrowserSession =
-    activeSession?.browserSession ?? emptyBrowserSession();
+    activeBrowserSession ?? emptyBrowserSession();
   const activeInspectorAppBrowserSession = useSessions(
     (state) => state.previewBrowserSessionsByKey[activePreviewRuntimeKey],
   );
@@ -3734,9 +3802,8 @@ export function ChatView({
     if (restoredArtifact)
       artifactSelectionsByThreadRef.current.set(activeId, restoredArtifact);
     setPreviewSelection(restoredArtifact);
-    const restoredBrowser =
-      activeSession?.browserSession ?? emptyBrowserSession();
-    if (!activeSession?.browserSession)
+    const restoredBrowser = activeBrowserSession ?? emptyBrowserSession();
+    if (!activeBrowserSession)
       setSessionBrowserSession(activeId, restoredBrowser);
     const restoredSource =
       previewSourcesByThreadRef.current.get(activeId) ??
@@ -4416,7 +4483,12 @@ export function ChatView({
       target,
       models: pickerModels,
       providers,
-      session: activeSession ?? { messages, accountRuntime: undefined },
+      session: useSessions
+        .getState()
+        .sessions.find((session) => session.id === activeId) ?? {
+        messages,
+        accountRuntime: undefined,
+      },
       toolRequired: contextualModelToolIntent || Boolean(activeAgentId && activeAgent?.tool_mode !== "none"),
     });
   }
@@ -4562,7 +4634,7 @@ export function ChatView({
       .catch((error) =>
         setChatNotice({
           tone: "error",
-          message: `Milim could not save this model selection: ${error instanceof Error ? error.message : String(error)}`,
+          message: `milim could not save this model selection: ${error instanceof Error ? error.message : String(error)}`,
         }),
       );
     setBatonRequest(null);
@@ -4596,7 +4668,7 @@ export function ChatView({
   }
 
   async function applyRetryWorkspace() {
-    const retry = activeSession?.retryWorkspace;
+    const retry = activeRetryWorkspace;
     if (!retry || busy) return;
     if (!(await confirmApp({
       title: "Apply retry changes?",
@@ -4632,7 +4704,7 @@ export function ChatView({
   }
 
   async function discardRetryWorkspace() {
-    const retry = activeSession?.retryWorkspace;
+    const retry = activeRetryWorkspace;
     if (!retry || busy) return;
     if (!(await confirmApp({
       title: "Discard retry worktree?",
@@ -5195,7 +5267,7 @@ export function ChatView({
   }
 
   async function createCompactionCheckpoint(
-    _sessionId: string,
+    sessionId: string,
     sourceMessages: ChatMessage[],
     model: string,
     options: {
@@ -5211,23 +5283,18 @@ export function ChatView({
       throw new Error("There is no thread context to compact.");
     }
     const baseline = summarizeThreadMetricsBreakdown(sourceMessages).lifetime;
-    const codexModel = codexRuntimeModel(model);
-    const claudeModel = claudeRuntimeModel(model);
-    const opencodeModel = opencodeRuntimeModel(model);
-    const piModel = piRuntimeModel(model);
+    const harness = utilityHarnessForModel(model);
+    const accountProfileId = accountProfileForModel(
+      useSessions.getState().getSettings(sessionId).accountProfiles,
+      model,
+    );
     const summaryStartedAt = Date.now();
     const selectedProvider = providers.find(
       (item) => providerOwnsModel(item, model),
     );
-    const provider = codexModel
-      ? "Codex"
-      : claudeModel
-        ? "Local Claude CLI"
-        : opencodeModel
-          ? "Local OpenCode CLI"
-          : piModel
-            ? "Local Pi CLI"
-        : selectedProvider?.name;
+    const provider = harness
+      ? UTILITY_HARNESS_PROVIDER_LABELS[harness.id]
+      : selectedProvider?.name;
     const summaryReasoningEffort =
       compactionSummaryReasoningEffort(selectedProvider);
     let usage: TokenUsage | undefined;
@@ -5249,47 +5316,16 @@ export function ChatView({
         { retry, outputCapTokens },
       );
       let summary: CompactionSummaryResult;
-      if (codexModel) {
-        const ready = await ensureCodexAccount();
+      if (harness) {
+        const ready = await ensureAccountRuntime(harness.id);
         if (!ready.ok) throw new Error(ready.message);
-        summary = await summarizeWithCodex(
-          codexModel,
+        summary = await summarizeWithHarness(
+          harness,
           promptMessages,
           options.folder,
           options.reasoningEffort,
           options.toolContext,
-          options.signal,
-        );
-      } else if (claudeModel) {
-        const ready = await ensureClaudeAccount();
-        if (!ready.ok) throw new Error(ready.message);
-        summary = await summarizeWithClaude(
-          claudeModel,
-          promptMessages,
-          options.folder,
-          options.reasoningEffort,
-          options.toolContext,
-          options.signal,
-        );
-      } else if (opencodeModel) {
-        const ready = await ensureOpenCodeAccount();
-        if (!ready.ok) throw new Error(ready.message);
-        summary = await summarizeWithOpenCode(
-          opencodeModel,
-          promptMessages,
-          options.folder,
-          options.toolContext,
-          options.signal,
-        );
-      } else if (piModel) {
-        const ready = await ensurePiAccount();
-        if (!ready.ok) throw new Error(ready.message);
-        summary = await summarizeWithPi(
-          piModel,
-          promptMessages,
-          options.folder,
-          options.reasoningEffort,
-          options.toolContext,
+          accountProfileId,
           options.signal,
         );
       } else {
@@ -5353,88 +5389,41 @@ export function ChatView({
     throw new Error(lastError);
   }
 
-  async function summarizeWithCodex(
-    model: string,
+  function ensureAccountRuntime(
+    id: UtilityHarness["id"],
+  ): Promise<AccountRuntimeReady> {
+    switch (id) {
+      case "codex":
+        return ensureCodexAccount();
+      case "claude":
+        return ensureClaudeAccount();
+      case "opencode":
+        return ensureOpenCodeAccount();
+      case "pi":
+        return ensurePiAccount();
+    }
+  }
+
+  async function summarizeWithHarness(
+    harness: UtilityHarness,
     promptMessages: ChatMessage[],
     folder: string,
     reasoningEffort: ReasoningEffort,
     toolContext: AgentToolContext,
+    accountProfileId: string | undefined,
     signal?: AbortSignal,
   ): Promise<CompactionSummaryResult> {
     const runtimeInput = accountRuntimeInputFromMessages(promptMessages);
     return await collectHarnessUtilityRun(
-      "codex",
+      harness.id,
       {
-        model,
+        model: harness.model,
         prompt: runtimeInput.prompt,
         cwd: folder.trim() || undefined,
-        reasoning_effort: reasoningEffort,
-        images: runtimeInput.images,
-        persist_session: false,
-        // A side call bills a subscription, so it uses the same account as
-        // this chat's turns rather than the runtime's default.
-        account_profile_id: accountProfileForModel(accountProfiles, model),
-        tool_approval_policy: "guarded",
-        tool_approval_grant: false,
-        plan_mode: true,
-        milim_context: utilityAccountRuntimeMilimContext({
-          toolContext,
-          toolApproval: "guarded",
-          planMode: true,
-        }),
-      },
-      signal,
-    );
-  }
-
-  async function summarizeWithClaude(
-    model: string,
-    promptMessages: ChatMessage[],
-    folder: string,
-    reasoningEffort: ReasoningEffort,
-    toolContext: AgentToolContext,
-    signal?: AbortSignal,
-  ): Promise<CompactionSummaryResult> {
-    const runtimeInput = accountRuntimeInputFromMessages(promptMessages);
-    return await collectHarnessUtilityRun(
-      "claude",
-      {
-        model,
-        prompt: runtimeInput.prompt,
-        cwd: folder.trim() || undefined,
-        reasoning_effort: reasoningEffort,
-        images: runtimeInput.images,
-        persist_session: false,
-        // A side call bills a subscription, so it uses the same account as
-        // this chat's turns rather than the runtime's default.
-        account_profile_id: accountProfileForModel(accountProfiles, model),
-        tool_approval_policy: "guarded",
-        tool_approval_grant: false,
-        plan_mode: true,
-        milim_context: utilityAccountRuntimeMilimContext({
-          toolContext,
-          toolApproval: "guarded",
-          planMode: true,
-        }),
-      },
-      signal,
-    );
-  }
-
-  async function summarizeWithOpenCode(
-    model: string,
-    promptMessages: ChatMessage[],
-    folder: string,
-    toolContext: AgentToolContext,
-    signal?: AbortSignal,
-  ): Promise<CompactionSummaryResult> {
-    const runtimeInput = accountRuntimeInputFromMessages(promptMessages);
-    return await collectHarnessUtilityRun(
-      "opencode",
-      {
-        model,
-        prompt: runtimeInput.prompt,
-        cwd: folder.trim() || undefined,
+        // OpenCode has no reasoning-effort control.
+        ...(harness.id === "opencode"
+          ? {}
+          : { reasoning_effort: reasoningEffort }),
         images: runtimeInput.images,
         persist_session: false,
         tool_approval_policy: "guarded",
@@ -5446,38 +5435,9 @@ export function ChatView({
           planMode: true,
         }),
       },
-      signal,
-    );
-  }
-
-  async function summarizeWithPi(
-    model: string,
-    promptMessages: ChatMessage[],
-    folder: string,
-    reasoningEffort: ReasoningEffort,
-    toolContext: AgentToolContext,
-    signal?: AbortSignal,
-  ): Promise<CompactionSummaryResult> {
-    const runtimeInput = accountRuntimeInputFromMessages(promptMessages);
-    return await collectHarnessUtilityRun(
-      "pi",
-      {
-        model,
-        prompt: runtimeInput.prompt,
-        cwd: folder.trim() || undefined,
-        images: runtimeInput.images,
-        reasoning_effort: reasoningEffort,
-        persist_session: false,
-        tool_approval_policy: "guarded",
-        tool_approval_grant: false,
-        plan_mode: true,
-        milim_context: utilityAccountRuntimeMilimContext({
-          toolContext,
-          toolApproval: "guarded",
-          planMode: true,
-        }),
-      },
-      signal,
+      // A side call bills a subscription, so it uses the same account as
+      // this chat's turns rather than the runtime's default.
+      { accountProfileId, signal },
     );
   }
 
@@ -5587,7 +5547,7 @@ export function ChatView({
     setChatNotice({
       tone: "warning",
       message:
-        "Claude session recovery needs approval before Milim stops a local Claude CLI process.",
+        "Claude session recovery needs approval before milim stops a local Claude CLI process.",
     });
   }
 
@@ -5650,7 +5610,7 @@ export function ChatView({
       setChatNotice({
         tone: "warning",
         message:
-          "Claude session recovery approved. Milim will try to stop the matching local Claude CLI process and retry.",
+          "Claude session recovery approved. milim will try to stop the matching local Claude CLI process and retry.",
       });
       void runTurnAndDrain(approvedMessages, selectedModel, {
         claudeSessionRecoveryGrant: true,
@@ -5722,21 +5682,9 @@ export function ChatView({
         turnModel,
         pickerModels,
       );
-      const codexModel = codexRuntimeModel(turnModel);
-      const claudeModel = claudeRuntimeModel(turnModel);
-      const opencodeModel = opencodeRuntimeModel(turnModel);
-      const piModel = piRuntimeModel(turnModel);
       const runtimeInput = accountRuntimeInputFromMessages(decisionMessages);
       let content = "";
-      const selectedHarness = codexModel
-        ? { id: "codex" as const, model: codexModel }
-        : claudeModel
-          ? { id: "claude" as const, model: claudeModel }
-          : opencodeModel
-            ? { id: "opencode" as const, model: opencodeModel }
-            : piModel
-              ? { id: "pi" as const, model: piModel }
-              : null;
+      const selectedHarness = utilityHarnessForModel(turnModel);
       if (selectedHarness) {
         const guarded = selectedHarness.id === "pi";
         const result = await collectHarnessUtilityRun(
@@ -5761,7 +5709,13 @@ export function ChatView({
                 })
               : decisionMilimContext,
           },
-          controller.signal,
+          {
+            accountProfileId: accountProfileForModel(
+              decisionSettings.accountProfiles,
+              turnModel,
+            ),
+            signal: controller.signal,
+          },
         );
         content = result.content;
       } else {
@@ -6059,7 +6013,7 @@ export function ChatView({
         });
       return;
     }
-    await openArtifactLocation(saved.path, target);
+    await openArtifactLocation(saved.path, target, folder);
   }
 
   async function handleCheckArtifact(
@@ -6256,7 +6210,7 @@ export function ChatView({
             ? markdownSessionCandidate(text)
             : exportedSessionCandidate(JSON.parse(text));
           if (!candidate)
-            throw new Error("The selected file is not a Milim thread export.");
+            throw new Error("The selected file is not a milim thread export.");
           const importedId = useSessions.getState().importSession(candidate);
           if (!importedId)
             throw new Error(
@@ -6298,7 +6252,7 @@ export function ChatView({
     if (!canonicalId) {
       setChatNotice({
         tone: "error",
-        message: "This legacy message has no stable ID, so Milim cannot delete it safely.",
+        message: "This legacy message has no stable ID, so milim cannot delete it safely.",
       });
       return;
     }
@@ -6809,7 +6763,7 @@ export function ChatView({
         store.setSessionHostBusy(sessionId, true);
         setChatNotice({
           tone: "info",
-          message: "Message queued by the Milim runtime and safe to close or reload.",
+          message: "Message queued by the milim runtime and safe to close or reload.",
         });
         return { status: "skipped", messages: sessionMessages(sessionId) };
       }
@@ -6876,10 +6830,14 @@ export function ChatView({
       if (terminal.status === "cancelled" || terminal.status === "aborted") {
         return { status: "aborted", messages: sessionMessages(sessionId) };
       }
+      const failure = terminal.error || `Run ended with status ${terminal.status}.`;
+      if (useSessions.getState().activeId === sessionId) {
+        setChatNotice(errorNotice(failure, terminal.providerError));
+      }
       return {
         status: "error",
         messages: sessionMessages(sessionId),
-        error: terminal.error || `Run ended with status ${terminal.status}.`,
+        error: failure,
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -7015,7 +6973,7 @@ export function ChatView({
       const detail = error instanceof Error ? error.message : String(error);
       setChatNotice({
         tone: "error",
-        message: `Milim could not save this turn, so it was not sent: ${detail}`,
+        message: `milim could not save this turn, so it was not sent: ${detail}`,
       });
       return {
         status: "error",
@@ -7986,64 +7944,121 @@ export function ChatView({
     }, 2000);
   }
 
-  const paletteCommands: RuntimeCommand[] = [
-    {
-      id: "chat.new",
-      label: "New chat",
-      keywords: ["thread", "conversation"],
-      shortcut: shortcutLabel(appShortcuts.newChat),
-      run: startShortcutNewChat,
+  const themeIsDark = useTheme((s) => s.theme.isDark);
+  const settledThreadsEnabled = useUiPreferences((s) => s.settledThreadsEnabled);
+  const threadActionsAvailable = activeSessionExists && messages.length > 0;
+  const archiveAvailable =
+    threadActionsAvailable && (!settledThreadsEnabled || Boolean(activeSettledAt));
+  const gitPanelOpen = sidePanelVisible && inspectorTab === "git";
+  const previewPanelOpen = sidePanelVisible && inspectorTab === "preview";
+  const codePanelOpen = sidePanelVisible && inspectorTab === "code";
+
+  useEffect(() => {
+    const onOpenManager = (event: Event) => {
+      const id = managerIdFromEvent(event);
+      if (id === "providers") setProvidersOpen(true);
+      else if (id === "memory") {
+        setMemoryTarget(null);
+        setMemoryOpen(true);
+      }
+    };
+    window.addEventListener(OPEN_MANAGER_EVENT, onOpenManager);
+    return () => window.removeEventListener(OPEN_MANAGER_EVENT, onOpenManager);
+  }, []);
+
+  function toggleGitPanelFromCommand() {
+    if (gitPanelOpen) closeGitPanel();
+    else void openGitPanel();
+  }
+
+  function togglePreviewPanelFromCommand() {
+    if (previewPanelOpen) void closePreview();
+    else void openPreviewInspector();
+  }
+
+  function toggleCodePanelFromCommand() {
+    if (codePanelOpen) void closePreview();
+    else void openArtifactSidePanel("code");
+  }
+
+  function toggleThemeFromCommand() {
+    const theme = useTheme.getState();
+    const next = theme.builtins.find((item) => item.isDark !== theme.theme.isDark);
+    if (next) theme.setTheme(next.id);
+  }
+
+  function sessionTitle(id: string): string {
+    return useSessions.getState().sessions.find((x) => x.id === id)?.title ?? "";
+  }
+
+  async function renameActiveThreadFromCommand() {
+    const id = activeId;
+    const title = await promptApp({
+      title: "Rename chat",
+      message: "Choose a new name for this chat.",
+      confirmLabel: "Rename",
+      input: { label: "Chat name", defaultValue: sessionTitle(id) },
+    });
+    if (title == null) return;
+    useSessions.getState().rename(id, title.trim());
+  }
+
+  async function branchActiveThreadFromCommand() {
+    try {
+      const forkedId = await branchCanonicalSession(activeId);
+      if (!forkedId || useSessions.getState().activeId !== forkedId) return;
+      setChatNotice({ tone: "info", message: "Thread branched." });
+      focusComposer();
+    } catch (error) {
+      setChatNotice({ tone: "error", message: `Could not branch thread: ${error instanceof Error ? error.message : String(error)}` });
+    }
+  }
+
+  async function archiveActiveThreadFromCommand() {
+    if (!archiveAvailable) return;
+    const id = activeId;
+    const title = sessionTitle(id).trim() || "this chat";
+    if (!(await confirmApp({
+      title: "Archive chat?",
+      message: `Archive "${title}"? Archived chats can be restored from Settings > Data & privacy.`,
+      confirmLabel: "Archive",
+    }))) return;
+    if (!(await requestWorkspaceEditorLeave("navigate"))) return;
+    useSessions.getState().archiveSession(id);
+  }
+
+  function prefillSlashCommandFromPalette(id: string) {
+    setInput((current) => (current.trim() ? `/${id} ${current}` : `/${id} `));
+    focusComposerInput();
+  }
+
+  const paletteCommands: RuntimeCommand[] = buildCommandRegistry({
+    shortcuts: appShortcuts,
+    state: {
+      busy,
+      inTauri,
+      sidebarPlacement: threadNavigationPlacement === "sidebar",
+      sidebarOpen,
+      threadCount: sessionSummaries.length,
+      threadActionsAvailable,
+      archiveAvailable,
+      gitAvailable: Boolean(folder.trim() && canOpenGitPanel),
+      gitOpen: gitPanelOpen,
+      previewOpen: previewPanelOpen,
+      codeAvailable: Boolean(activeArtifactSelection || folder.trim()),
+      codeOpen: codePanelOpen,
+      planMode,
+      darkTheme: themeIsDark,
     },
-    {
-      id: "composer.focus",
-      label: "Focus composer",
-      keywords: ["prompt", "input"],
-      shortcut: shortcutLabel(appShortcuts.focusComposer),
-      run: focusComposer,
-    },
-    {
-      id: "composer.suggestions",
-      label: "Open composer suggestions",
-      keywords: ["autocomplete", "commands", "skills", "files"],
-      shortcut: shortcutLabel(appShortcuts.openComposerSuggestions),
-      run: () => window.dispatchEvent(new Event("milim:open-composer-suggestions")),
-    },
-    {
-      id: "sidebar.toggle",
-      label: sidebarOpen ? "Hide sidebar" : "Show sidebar",
-      keywords: ["toggle", "navigation"],
-      shortcut: shortcutLabel(appShortcuts.toggleSidebar),
-      available: threadNavigationPlacement === "sidebar",
-      run: toggleSidebar,
-    },
-    {
-      id: "thread.previous",
-      label: "Previous thread",
-      keywords: ["chat", "recent", "switch"],
-      shortcut: shortcutLabel(appShortcuts.previousThread),
-      available: sessionSummaries.length > 1,
-      run: switchToPreviousThread,
-    },
-    {
-      id: "generation.stop",
-      label: "Stop generation",
-      keywords: ["cancel", "abort"],
-      shortcut: shortcutLabel(appShortcuts.stopGeneration),
-      available: busy,
-      run: stop,
-    },
-    {
-      id: "settings.open",
-      label: "Open settings",
-      keywords: ["preferences", "configuration"],
-      run: onOpenSettings,
-    },
-    {
-      id: "diagnostics.open",
-      label: "Open diagnostics",
-      keywords: ["logs", "recovery", "debug"],
-      available: inTauri,
-      run: () => {
+    actions: {
+      newChat: startShortcutNewChat,
+      focusComposer,
+      openComposerSuggestions: () => window.dispatchEvent(new Event("milim:open-composer-suggestions")),
+      toggleSidebar,
+      previousThread: switchToPreviousThread,
+      stopGeneration: stop,
+      openSettings: onOpenSettings,
+      openDiagnostics: () => {
         void openDiagnosticsFolder().catch((error) =>
           setChatNotice({
             tone: "error",
@@ -8051,8 +8066,23 @@ export function ChatView({
           }),
         );
       },
+      openManager: requestOpenManager,
+      openModelPicker: requestOpenModelPicker,
+      toggleGitPanel: toggleGitPanelFromCommand,
+      togglePreviewPanel: togglePreviewPanelFromCommand,
+      toggleCodePanel: toggleCodePanelFromCommand,
+      togglePlanMode: () => setPlanModeActive(!planMode),
+      toggleTheme: toggleThemeFromCommand,
+      renameThread: () => void renameActiveThreadFromCommand(),
+      branchThread: () => void branchActiveThreadFromCommand(),
+      exportThread: () => void exportSessionById(activeId, threadExportFormat),
+      archiveThread: () => void archiveActiveThreadFromCommand(),
+      runSlashCommand: (id, argument = "") => {
+        runSlashCommand(id, argument);
+      },
+      prefillSlashCommand: prefillSlashCommandFromPalette,
     },
-  ];
+  });
 
   function shortcutTargetBlocked(target: EventTarget | null): boolean {
     if (!(target instanceof HTMLElement)) return false;
@@ -8061,8 +8091,13 @@ export function ChatView({
     );
   }
 
-  useEffect(() => {
-    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+  // The listener is registered once and calls the latest render's handler,
+  // so shortcuts such as Stop never act on a stale `stop`/`busy` closure.
+  const shortcutKeyDownRef = useRef<
+    (event: globalThis.KeyboardEvent) => void
+  >(() => {});
+  useLayoutEffect(() => {
+    shortcutKeyDownRef.current = (event: globalThis.KeyboardEvent) => {
       if (event.defaultPrevented || shortcutTargetBlocked(event.target)) return;
       if (recentThreadSwitcher && event.key === "Escape") {
         event.preventDefault();
@@ -8090,25 +8125,36 @@ export function ChatView({
       } else if (shortcutMatchesEvent(appShortcuts.previousThread, event)) {
         event.preventDefault();
         switchToPreviousThread();
+      } else if (shortcutMatchesEvent(appShortcuts.openSettings, event)) {
+        event.preventDefault();
+        onOpenSettings();
+      } else if (shortcutMatchesEvent(appShortcuts.openModelPicker, event)) {
+        event.preventDefault();
+        requestOpenModelPicker();
+      } else if (shortcutMatchesEvent(appShortcuts.toggleGitPanel, event)) {
+        event.preventDefault();
+        if (gitPanelOpen || (folder.trim() && canOpenGitPanel)) toggleGitPanelFromCommand();
+      } else if (shortcutMatchesEvent(appShortcuts.togglePreviewPanel, event)) {
+        event.preventDefault();
+        togglePreviewPanelFromCommand();
+      } else if (shortcutMatchesEvent(appShortcuts.togglePlanMode, event)) {
+        event.preventDefault();
+        setPlanModeActive(!planMode);
+      } else if (shortcutMatchesEvent(appShortcuts.archiveThread, event)) {
+        event.preventDefault();
+        void archiveActiveThreadFromCommand();
       } else if (shortcutMatchesEvent(appShortcuts.stopGeneration, event)) {
         event.preventDefault();
         stopFromShortcut();
       }
     };
+  });
+  useEffect(() => {
+    const onKeyDown = (event: globalThis.KeyboardEvent) =>
+      shortcutKeyDownRef.current(event);
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [
-    activeId,
-    appShortcuts,
-    busy,
-    projects,
-    recentThreadSwitcher,
-    sessionSummaries,
-    switchToSession,
-    threadSettings,
-    threadNavigationPlacement,
-    toggleSidebar,
-  ]);
+  }, []);
 
   function promoteQueuedMessage(messageId: string) {
     const first =
@@ -8714,7 +8760,7 @@ export function ChatView({
             {emptyThread && showEmptyChatRidgeline && <MilimUsageRidgeline usage={milimUsage} />}
             {composerNotice && (
               <div
-                className={`sheet-hint dock-notice ${composerNotice.tone}`}
+                className={`sheet-hint dock-notice ${composerNotice.tone}${composerNoticeDetail ? " has-details" : ""}`}
                 data-testid="chat-notice"
                 role={composerNotice.tone === "error" ? "alert" : "status"}
                 aria-live={composerNotice.tone === "error" ? "assertive" : "polite"}
@@ -8723,14 +8769,27 @@ export function ChatView({
                 {composerAction && (
                   <button
                     type="button"
+                    disabled={composerAction === "retry" && (retryInSecs > 0 || busy)}
                     onClick={() => {
-                      if (composerAction === "manage_models") setProvidersOpen(true);
-                      else if (composerAction === "choose_folder") void pickFolder();
-                      else onOpenSettings();
+                      if (composerAction === "manage_models" || composerAction === "update_key") {
+                        setProvidersOpen(true);
+                      } else if (composerAction === "choose_folder") void pickFolder();
+                      else if (composerAction === "switch_model") {
+                        setModelPickerRequest((request) => request + 1);
+                      } else if (composerAction === "retry") {
+                        setChatNotice(null);
+                        regenerate();
+                      } else onOpenSettings();
                     }}
                   >
                     {composerActionLabel}
                   </button>
+                )}
+                {composerNoticeDetail && (
+                  <details className="dock-notice-details">
+                    <summary>Technical details</summary>
+                    <code>{composerNoticeDetail}</code>
+                  </details>
                 )}
                 {composerNoticeDismissible && (
                   <button
@@ -8746,10 +8805,15 @@ export function ChatView({
               </div>
             )}
             <ComposerSurface>
-              {visibleApprovalPrompts.map((approval) => (
+              {visibleApprovalPrompts.map((approval, index) => (
                 <ToolApprovalPrompt
                   key={approval.approvalId}
                   part={approval}
+                  keyboard={index === 0}
+                  composerEmpty={!input.trim() && pendingAttachments.length === 0}
+                  onResolved={(scope) => {
+                    if (scope === "thread") approvalAllowances.refresh();
+                  }}
                   onDismiss={() => {
                     if (!approval.approvalId) return;
                     setMessages(
@@ -8816,7 +8880,7 @@ export function ChatView({
                     void writeCanonicalThreadModel(activeId, modelId, effort).catch((error) =>
                       setChatNotice({
                         tone: "error",
-                        message: `Milim could not save this reasoning setting: ${error instanceof Error ? error.message : String(error)}`,
+                        message: `milim could not save this reasoning setting: ${error instanceof Error ? error.message : String(error)}`,
                       }),
                     );
                   }
@@ -8886,6 +8950,17 @@ export function ChatView({
                     { toolApproval: next },
                   ).catch(() => {})
                 }
+                approvalAllowances={approvalAllowances.allowances}
+                onApprovalControlsOpen={approvalAllowances.refresh}
+                onClearApprovalAllowances={(keys) =>
+                  void approvalAllowances.clear(keys).catch((error) =>
+                    setChatNotice({
+                      tone: "error",
+                      message: `milim could not clear chat allowances: ${error instanceof Error ? error.message : String(error)}`,
+                    }),
+                  )
+                }
+                openModelPickerRequest={modelPickerRequest}
                 onManageProviders={() => setProvidersOpen(true)}
                 onManageMcp={() => setMcpOpen(true)}
                 onManageMemory={() => {
@@ -9159,12 +9234,12 @@ export function ChatView({
                 onClose={closeGitPanel}
                 modeSwitcher={inspectorTabSwitcher}
                 headerNotice={
-                  activeSession?.retryWorkspace ? (
+                  activeRetryWorkspace ? (
                     <div className="hot-swap-retry-banner">
                       <div>
                         <strong>Isolated Hot Swap retry</strong>
                         <span>
-                          {activeSession.retryWorkspace.adoptedAt
+                          {activeRetryWorkspace.adoptedAt
                             ? "Applied to the original workspace; the retry remains available."
                             : "Review this diff before applying it to the original workspace."}
                         </span>

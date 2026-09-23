@@ -103,7 +103,7 @@ assert.deepEqual(
   pullRequestErrorPresentation("Failed to run GitHub CLI: No such file or directory (os error 2)\nFailed to run GitHub CLI: No such file or directory (os error 2)"),
   {
     title: "GitHub CLI not found",
-    message: "Install GitHub CLI, then restart Milim so the desktop app can discover it.",
+    message: "Install GitHub CLI, then restart milim so the desktop app can discover it.",
     detail: "Failed to run GitHub CLI: No such file or directory (os error 2)",
     helpLabel: "Install GitHub CLI",
     helpUrl: "https://cli.github.com/",

@@ -18,7 +18,9 @@ const screenshots = {
 };
 
 if (process.platform !== "win32") {
-  console.log("Skipping Tauri dev onboarding E2E: this test currently targets Windows WebView2.");
+  console.log(
+    `SKIPPED: Tauri dev onboarding E2E did not run on ${process.platform}; it requires Windows WebView2. Exit 0 is not a pass.`,
+  );
   process.exit(0);
 }
 
@@ -333,7 +335,7 @@ async function restoreOnboardingState(page, previous) {
 
 async function completeOnboarding(page) {
   await page.getByRole("heading", { name: "Connect a runtime" }).waitFor();
-  await page.getByRole("button", { name: /Installed agents/ }).click();
+  await page.getByRole("button", { name: /Coding CLIs/ }).click();
   for (const runtime of ["codex", "claude", "opencode", "pi"]) {
     await page.getByTestId(`onboarding-runtime-${runtime}`).waitFor();
   }
@@ -346,7 +348,7 @@ async function completeOnboarding(page) {
 
   await page.getByRole("button", { name: /Continue/ }).click();
   await page.getByRole("heading", { name: "Choose a workspace" }).waitFor();
-  await page.getByTestId("onboarding-flow").getByRole("button", { name: "Open Milim", exact: true }).click();
+  await page.getByTestId("onboarding-flow").getByRole("button", { name: "Open milim", exact: true }).click();
   await page.getByTestId("onboarding-flow").waitFor({ state: "detached" });
   const composer = page.getByTestId("composer-input");
   await composer.waitFor();

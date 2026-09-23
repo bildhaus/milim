@@ -54,6 +54,15 @@ function initialize(): Promise<void> {
             updated_at INTEGER NOT NULL
           )`,
         ],
+        [
+          // thread_id '' holds the host baseline: the moment read tracking began.
+          `CREATE TABLE IF NOT EXISTS thread_reads (
+            host_id TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            seen_updated_at_ms INTEGER NOT NULL,
+            PRIMARY KEY(host_id, thread_id)
+          )`,
+        ],
         ]),
       )
       .then(() => undefined);
@@ -83,6 +92,7 @@ export async function removeHost(hostId: string): Promise<void> {
     ['DELETE FROM timeline_tails WHERE host_id = ?', [hostId]],
     ['DELETE FROM drafts WHERE host_id = ?', [hostId]],
     ['DELETE FROM model_picker_preferences WHERE host_id = ?', [hostId]],
+    ['DELETE FROM thread_reads WHERE host_id = ?', [hostId]],
     ['DELETE FROM hosts WHERE host_id = ?', [hostId]],
   ]);
 }
@@ -185,5 +195,36 @@ export async function saveModelPickerPreferences(
      ON CONFLICT(host_id) DO UPDATE SET preferences_json = excluded.preferences_json,
        updated_at = excluded.updated_at`,
     [hostId, JSON.stringify(normalized), Date.now()],
+  );
+}
+
+export type ThreadReads = {baselineMs: number; seen: Record<string, number>};
+
+export async function readThreadReads(hostId: string): Promise<ThreadReads> {
+  await initialize();
+  const result = await db.execute(
+    'SELECT thread_id, seen_updated_at_ms FROM thread_reads WHERE host_id = ?',
+    [hostId],
+  );
+  const seen: Record<string, number> = {};
+  let baselineMs: number | null = null;
+  for (const row of result.rows) {
+    const threadId = String(row.thread_id);
+    if (threadId) seen[threadId] = Number(row.seen_updated_at_ms);
+    else baselineMs = Number(row.seen_updated_at_ms);
+  }
+  if (baselineMs === null) {
+    baselineMs = Date.now();
+    await saveThreadRead(hostId, '', baselineMs);
+  }
+  return {baselineMs, seen};
+}
+
+export async function saveThreadRead(hostId: string, threadId: string, seenUpdatedAtMs: number): Promise<void> {
+  await initialize();
+  await db.execute(
+    `INSERT INTO thread_reads(host_id, thread_id, seen_updated_at_ms) VALUES(?, ?, ?)
+     ON CONFLICT(host_id, thread_id) DO UPDATE SET seen_updated_at_ms = excluded.seen_updated_at_ms`,
+    [hostId, threadId, seenUpdatedAtMs],
   );
 }

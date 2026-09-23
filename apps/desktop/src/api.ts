@@ -3,7 +3,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { qualifyDuplicateProviderModels } from "./lib/modelPicker.js";
 import { wireMessages } from "./lib/attachmentWire.js";
-import { assertValidImageAttachment } from "./lib/attachmentInput.js";
+import { assertValidImageAttachment, inferAttachmentMime } from "./lib/attachmentInput.js";
 import { assertDesktopRequestBodyFits } from "./lib/requestBody.js";
 import type { GoogleRevocationStatus } from "./lib/googleWorkspace.js";
 import type { AppearanceSnapshotV1 } from "./theme/appearanceSnapshot.js";
@@ -484,8 +484,16 @@ const BASE = DEFAULT_BASE;
 const STARTUP_PROVIDER_PICKER_TIMEOUT_MS = 900;
 const ACCOUNT_RUNTIME_PICKER_TIMEOUT_MS = 8_000;
 const ACCOUNT_RUNTIME_PICKER_RETRY_DELAY_MS = 500;
-const inTauri =
-  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+/**
+ * Whether the page runs inside the Tauri webview. Evaluated per call, so code
+ * that runs after startup (and tests that stub `window`) see the live value.
+ */
+export function isTauriRuntime(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+/** `isTauriRuntime()` sampled once at module load, for render-time checks. */
+export const inTauri = isTauriRuntime();
 
 let tokenPromise: Promise<string | null> | null = null;
 let apiBasePromise: Promise<string> | null = null;
@@ -521,38 +529,6 @@ export function refreshProviderModelsAtStartup(): Promise<boolean> {
     "refresh_provider_models",
   ).catch(() => true);
   return startupProviderRefreshPromise;
-}
-
-export interface HarnessMcpCandidate {
-  harness: string;
-  name: string;
-  command: string;
-  args: string[];
-  cwd?: string | null;
-  env?: McpEnvVar[];
-  warnings?: string[];
-  source_path: string;
-}
-
-export interface HarnessSkillCandidate {
-  harness: string;
-  name: string;
-  path: string;
-  skill_md: string;
-}
-
-export interface HarnessImportPreview {
-  mcps: HarnessMcpCandidate[];
-  skills: HarnessSkillCandidate[];
-}
-
-export async function discoverHarnessImports(): Promise<HarnessImportPreview> {
-  if (!inTauri) return { mcps: [], skills: [] };
-  try {
-    return await invoke<HarnessImportPreview>("discover_harness_imports");
-  } catch {
-    return { mcps: [], skills: [] };
-  }
 }
 
 async function resolveApiInput(
@@ -756,15 +732,21 @@ export async function artifactFileStatus(
   return await invoke<ArtifactFileStatus>("artifact_file_status", { path });
 }
 
+/**
+ * Open a file or folder with the OS. Launchable files (apps, scripts,
+ * executables, shortcuts) are revealed in the file manager instead. Pass
+ * `root` when the path must stay inside a known working folder.
+ */
 export async function openArtifactLocation(
   path: string,
   target: ArtifactOpenTarget = "file",
+  root?: string,
 ): Promise<void> {
   if (!inTauri)
     throw new Error(
       "Opening saved artifacts is only available in the desktop app.",
     );
-  await invoke("open_artifact_location", { path, target });
+  await invoke("open_artifact_location", { path, target, root });
 }
 
 export async function recordFrontendError(
@@ -886,52 +868,8 @@ export async function setActivePreviewTarget(
   });
 }
 
-export function inferAttachmentMime(name: string): string {
-  const ext = name.split(".").pop()?.toLowerCase();
-  switch (ext) {
-    case "png":
-      return "image/png";
-    case "jpg":
-    case "jpeg":
-      return "image/jpeg";
-    case "webp":
-      return "image/webp";
-    case "gif":
-      return "image/gif";
-    case "md":
-    case "markdown":
-      return "text/markdown";
-    case "json":
-      return "application/json";
-    case "csv":
-      return "text/csv";
-    case "html":
-    case "htm":
-      return "text/html";
-    case "css":
-      return "text/css";
-    case "js":
-    case "jsx":
-    case "ts":
-    case "tsx":
-    case "rs":
-    case "py":
-    case "go":
-    case "java":
-    case "c":
-    case "cpp":
-    case "h":
-    case "hpp":
-    case "toml":
-    case "yaml":
-    case "yml":
-    case "xml":
-    case "txt":
-      return "text/plain";
-    default:
-      return "application/octet-stream";
-  }
-}
+/** Kept on the API surface; the pure implementation lives with attachment input. */
+export { inferAttachmentMime };
 
 async function authFetch(
   input: RequestInfo | URL,
@@ -1108,22 +1046,46 @@ async function openControlEventSocket(
   });
 }
 
+const CONTROL_SOCKET_MIN_RETRY_MS = 250;
+const CONTROL_SOCKET_MAX_RETRY_MS = 15_000;
+/** A connection that lasted this long without delivering an event still counts as healthy. */
+const CONTROL_SOCKET_HEALTHY_MS = 5_000;
+
 /** Resumable canonical event transport. Timeline cursors recover every gap. */
 export async function streamControlEvents(
   signal: AbortSignal,
   onEvent: (event: ControlEventV1) => void,
 ): Promise<void> {
-  let retryMs = 250;
+  let retryMs = CONTROL_SOCKET_MIN_RETRY_MS;
   while (!signal.aborted) {
+    const openedAt = Date.now();
+    let received = false;
     try {
-      await openControlEventSocket(signal, onEvent);
-      retryMs = 250;
+      await openControlEventSocket(signal, (event) => {
+        received = true;
+        onEvent(event);
+      });
     } catch {
       // Reconnect below; callers retain their timeline cursor.
     }
     if (signal.aborted) return;
-    await new Promise<void>((resolve) => window.setTimeout(resolve, retryMs));
-    retryMs = Math.min(4_000, retryMs * 2);
+    // Only a connection that actually worked resets backoff; a socket that
+    // opens and immediately closes must not reconnect in a tight loop.
+    if (received || Date.now() - openedAt >= CONTROL_SOCKET_HEALTHY_MS) {
+      retryMs = CONTROL_SOCKET_MIN_RETRY_MS;
+    }
+    // Jitter in [retryMs / 2, retryMs) spreads reconnects after a server restart.
+    const delayMs = retryMs / 2 + Math.random() * (retryMs / 2);
+    await new Promise<void>((resolve) => {
+      const timer = window.setTimeout(done, delayMs);
+      function done() {
+        window.clearTimeout(timer);
+        signal.removeEventListener("abort", done);
+        resolve();
+      }
+      signal.addEventListener("abort", done, { once: true });
+    });
+    retryMs = Math.min(CONTROL_SOCKET_MAX_RETRY_MS, retryMs * 2);
   }
 }
 
@@ -1544,12 +1506,6 @@ export interface PreviewStaticStartOptions {
   entry_path: string;
 }
 
-export interface PreviewAppLogs {
-  logs: PreviewAppLog[];
-  next_seq: number;
-  truncated: boolean;
-}
-
 function previewAppUrl(threadId: string, suffix = ""): string {
   return `${BASE}/preview-apps/${encodeURIComponent(threadId)}${suffix}`;
 }
@@ -1670,20 +1626,6 @@ export async function restartPreviewApp(
   );
 }
 
-export async function getPreviewAppLogs(
-  threadId: string,
-  afterSeq?: number,
-): Promise<PreviewAppLogs> {
-  const query =
-    typeof afterSeq === "number" && Number.isFinite(afterSeq)
-      ? `?after_seq=${encodeURIComponent(String(Math.max(0, Math.floor(afterSeq))))}`
-      : "";
-  return await parseJsonResponse<PreviewAppLogs>(
-    await authFetch(previewAppUrl(threadId, `/logs${query}`)),
-    "preview app logs failed",
-  );
-}
-
 export async function getMobileCompanionStatus(): Promise<MobileCompanionStatus> {
   return await parseJsonResponse<MobileCompanionStatus>(
     await authFetch(`${BASE}/mobile/status`),
@@ -1691,10 +1633,13 @@ export async function getMobileCompanionStatus(): Promise<MobileCompanionStatus>
   );
 }
 
+/** Window event carrying the latest `MobileCompanionStatus` after an enable toggle. */
+export const MOBILE_COMPANION_STATUS_EVENT = "milim:mobile-companion-status";
+
 export async function setMobileCompanionEnabled(
   enabled: boolean,
 ): Promise<MobileCompanionStatus> {
-  return await parseJsonResponse<MobileCompanionStatus>(
+  const status = await parseJsonResponse<MobileCompanionStatus>(
     await authFetch(`${BASE}/mobile/enabled`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1702,6 +1647,12 @@ export async function setMobileCompanionEnabled(
     }),
     "mobile companion update failed",
   );
+  window.dispatchEvent(
+    new CustomEvent<MobileCompanionStatus>(MOBILE_COMPANION_STATUS_EVENT, {
+      detail: status,
+    }),
+  );
+  return status;
 }
 
 export async function startMobileCompanionPairing(): Promise<MobileCompanionPairing> {
@@ -1765,19 +1716,6 @@ export async function configureMobileTailscale(): Promise<MobileTailscaleStatus>
   return await invoke<MobileTailscaleStatus>(
     "configure_mobile_tailscale",
   );
-}
-
-export async function disableMobileTailscale(): Promise<MobileTailscaleStatus> {
-  if (!inTauri) {
-    return {
-      installed: false,
-      logged_in: false,
-      serve_configured: false,
-      local_target: "",
-      message: "Tailscale setup is available in the desktop app.",
-    };
-  }
-  return await invoke<MobileTailscaleStatus>("disable_mobile_tailscale");
 }
 
 export async function getMobileLanStatus(): Promise<MobileLanStatus> {
@@ -3173,6 +3111,33 @@ export async function getAccountRuntimeUpdates(): Promise<AccountRuntimeUpdatesR
   );
 }
 
+/** User-located executables, keyed by runtime. */
+export type AccountRuntimeBinaries = Partial<Record<AccountRuntimeKind, string>>;
+
+export async function getAccountRuntimeBinaries(): Promise<AccountRuntimeBinaries> {
+  const body = await parseJsonResponse<{ binaries?: AccountRuntimeBinaries }>(
+    await authFetch(`${BASE}/account-runtimes/binaries`),
+    "Runtime binary paths failed",
+  );
+  return body.binaries ?? {};
+}
+
+/** Set the executable Milim spawns for a runtime, or `null` to use discovery. */
+export async function setAccountRuntimeBinary(
+  runtime: AccountRuntimeKind,
+  path: string | null,
+): Promise<AccountRuntimeBinaries> {
+  const body = await parseJsonResponse<{ binaries?: AccountRuntimeBinaries }>(
+    await authFetch(`${BASE}/account-runtimes/${encodeURIComponent(runtime)}/binary`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    }),
+    `${runtime} binary path failed`,
+  );
+  return body.binaries ?? {};
+}
+
 export async function updateAccountRuntime(
   runtime: AccountRuntimeKind,
 ): Promise<AccountRuntimeUpdateResult> {
@@ -3204,17 +3169,6 @@ export async function streamCodexDeviceLogin(
       await responseErrorMessage(resp, `Codex login HTTP ${resp.status}`),
     );
   await streamJsonSse(resp, onEvent);
-}
-
-export async function loginCodexApiKey(apiKey: string): Promise<unknown> {
-  return await parseJsonResponse<unknown>(
-    await authFetch(`${BASE}/codex/login/api-key`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ api_key: apiKey }),
-    }),
-    "Codex API-key login failed",
-  );
 }
 
 const HARNESS_EVENT_TYPES = new Set<HarnessEvent["type"]>([
@@ -3362,7 +3316,7 @@ export interface AgentDraft {
 }
 
 const AGENT_DRAFT_SYSTEM_PROMPT = [
-  "You generate reusable Milim agent profiles.",
+  "You generate reusable milim agent profiles.",
   "Return only one JSON object with string fields: name, description, avatar, system_prompt.",
   "name: concise display name, usually 2-4 words.",
   "description: one short sentence explaining when to choose this agent.",
@@ -3793,24 +3747,6 @@ export interface WorkerRunRecord {
   workers: Worker[];
 }
 
-export interface CreateWorkerRunRequest {
-  parent_thread_id: string;
-  parent_turn_id?: string;
-  workspace?: string | null;
-  privacy_mode?: PrivacyMode;
-  policy?: WorkerRunPolicy;
-  runtime?: Exclude<WorkerRunRuntime, "legacy">;
-  model?: string;
-  tasks: Array<{
-    title?: string;
-    prompt: string;
-    role?: string;
-    agent_id?: string;
-    model?: string;
-    access?: WorkerAccess;
-  }>;
-}
-
 export interface ThreadEvent {
   id: string;
   thread_id: string;
@@ -3858,21 +3794,6 @@ function workerRunRecord(data: {
   workers?: Worker[];
 }): WorkerRunRecord {
   return { run: data.run, workers: data.workers ?? [] };
-}
-
-export async function createWorkerRun(
-  request: CreateWorkerRunRequest,
-): Promise<WorkerRunRecord> {
-  return workerRunRecord(
-    await parseJsonResponse<{ run: WorkerRun; workers?: Worker[] }>(
-      await authFetch(`${BASE}/worker-runs`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(request),
-      }),
-      "worker run create HTTP failed",
-    ),
-  );
 }
 
 export async function listWorkerRuns(
@@ -4720,6 +4641,10 @@ export interface WorkspaceContext {
 export interface WorkspaceGitFileChange {
   status: string;
   path: string;
+  /** Index column changed. Absent from backends older than per-file staging. */
+  staged?: boolean;
+  /** Worktree column changed, including untracked files. */
+  unstaged?: boolean;
 }
 
 export interface WorkspaceGitBranch {
@@ -4759,7 +4684,13 @@ export type WorkspaceGitAction =
   | "pr_ready"
   | "pr_comment"
   | "pr_review"
-  | "pr_merge";
+  | "pr_merge"
+  | "stage_file"
+  | "unstage_file"
+  | "discard_file"
+  | "stage_hunk"
+  | "unstage_hunk"
+  | "discard_hunk";
 
 export type WorkspaceGitDiffScope =
   | "all"
@@ -4877,6 +4808,50 @@ export async function getWorkspaceGitStatus(): Promise<WorkspaceGitStatus | null
   }
 }
 
+export interface UsageTotals {
+  responses: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  /** Every known cost, reported plus estimated. */
+  cost_usd: number;
+  /** Billed cost reported by a provider or account runtime. */
+  reported_cost_usd: number;
+  /** Cost estimated from cached per-token pricing. */
+  estimated_cost_usd: number;
+  /** Responses that used tokens without a recorded cost. */
+  unpriced_responses: number;
+}
+
+export interface UsageBucket extends UsageTotals {
+  key: string;
+  label: string;
+}
+
+export interface UsageSummary {
+  days: number;
+  since_ms: number;
+  until_ms: number;
+  tz_offset_minutes: number;
+  totals: UsageTotals;
+  by_day: UsageBucket[];
+  by_model: UsageBucket[];
+  by_provider: UsageBucket[];
+  by_project: UsageBucket[];
+}
+
+/** Usage aggregated by the backend over canonical message metrics. */
+export async function getUsageSummary(days: number): Promise<UsageSummary> {
+  const params = new URLSearchParams({
+    days: String(days),
+    tz_offset_minutes: String(new Date().getTimezoneOffset()),
+  });
+  return await parseJsonResponse<UsageSummary>(
+    await authFetch(`${BASE}/usage/summary?${params}`),
+    "usage summary HTTP failed",
+  );
+}
+
 export async function getWorkspaceContext(): Promise<WorkspaceContext | null> {
   try {
     const r = await authFetch(`${BASE}/workspace/context`);
@@ -4890,14 +4865,57 @@ export async function resolveToolApproval(
   approvalId: string,
   decision: "approve" | "deny",
   responseBody?: Record<string, unknown>,
+  scope: "once" | "thread" = "once",
 ): Promise<ToolApprovalSnapshot | null> {
   const response = await authFetch(`${BASE}/tool-approvals/${encodeURIComponent(approvalId)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ decision, ...(responseBody ? { response: responseBody } : {}) }),
+    body: JSON.stringify({
+      decision,
+      ...(responseBody ? { response: responseBody } : {}),
+      ...(scope === "thread" ? { scope } : {}),
+    }),
   });
   if (!response.ok) throw new Error(await responseErrorMessage(response, "Tool approval failed"));
   return response.status === 204 ? null : ((await response.json()) as ToolApprovalSnapshot);
+}
+
+/** One "Allow for this chat" rule held in canonical Rust state. */
+export interface ApprovalAllowance {
+  /** `tool:<name>` or `command:<exact command>`. */
+  key: string;
+  tool: string;
+  command?: string;
+  created_at_ms: number;
+}
+
+export async function getApprovalAllowances(threadId: string): Promise<ApprovalAllowance[]> {
+  const body = await parseJsonResponse<{ allowances?: ApprovalAllowance[] }>(
+    await authFetch(
+      `${BASE}/control/v1/threads/${encodeURIComponent(threadId)}/approval-allowances`,
+    ),
+    "Chat allowances failed",
+  );
+  return body.allowances ?? [];
+}
+
+/** Revoke the listed allowances, or every allowance in the thread. */
+export async function revokeApprovalAllowances(
+  threadId: string,
+  keys?: string[],
+): Promise<ApprovalAllowance[]> {
+  const body = await parseJsonResponse<{ allowances?: ApprovalAllowance[] }>(
+    await authFetch(
+      `${BASE}/control/v1/threads/${encodeURIComponent(threadId)}/approval-allowances`,
+      {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: keys ? JSON.stringify({ keys }) : "",
+      },
+    ),
+    "Clearing chat allowances failed",
+  );
+  return body.allowances ?? [];
 }
 
 export interface ToolApprovalSnapshot {
@@ -4907,13 +4925,6 @@ export interface ToolApprovalSnapshot {
   error?: string | null;
   created_at_ms: number;
   updated_at_ms: number;
-}
-
-export async function getToolApproval(approvalId: string): Promise<ToolApprovalSnapshot> {
-  return parseJsonResponse<ToolApprovalSnapshot>(
-    await authFetch(`${BASE}/tool-approvals/${encodeURIComponent(approvalId)}`),
-    "Tool approval status failed",
-  );
 }
 
 export async function runWorkspaceGitAction(
@@ -4939,6 +4950,10 @@ export async function runWorkspaceGitAction(
     merge_method?: "merge" | "squash" | "rebase";
     expected_head?: string;
     repository?: string;
+    /** Porcelain path for per-file and per-hunk staging actions. */
+    path?: string;
+    /** Exact hunk text (header and body) the server re-validates before applying. */
+    hunk?: string;
   } = {},
 ): Promise<WorkspaceGitActionResult> {
   const r = await authFetch(`${BASE}/workspace/git/action`, {
@@ -4980,20 +4995,6 @@ export async function setComputerUse(enabled: boolean): Promise<boolean> {
  *  Local models are never scanned. */
 export type PrivacyMode = "off" | "redact" | "block";
 
-export interface PrivacyDetection {
-  kind: string;
-  value: string;
-  start: number;
-  end: number;
-}
-
-export interface PrivacyScanResult {
-  clean: boolean;
-  detections: PrivacyDetection[];
-  redacted: string;
-  map: Record<string, string>;
-}
-
 export async function getPrivacyMode(): Promise<PrivacyMode> {
   const r = await authFetch(`${BASE}/privacy/mode`);
   if (!r.ok) {
@@ -5028,22 +5029,6 @@ async function responseErrorMessage(
   } catch {
     return text.trim();
   }
-}
-
-export async function scanPrivacyText(
-  text: string,
-): Promise<PrivacyScanResult> {
-  const r = await authFetch(`${BASE}/privacy/scan`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
-  });
-  if (!r.ok) {
-    throw new Error(
-      await responseErrorMessage(r, `privacy scan HTTP ${r.status}`),
-    );
-  }
-  return (await r.json()) as PrivacyScanResult;
 }
 
 // ----- Memory / RAG -----
@@ -5093,29 +5078,6 @@ export interface MemoryNotice {
 export interface MemoryGraphHit {
   node: MemoryNode;
   score: number;
-}
-
-export interface MemoryBenchmarkCase {
-  name?: string;
-  query: string;
-  relevant_node_ids: string[];
-  scopes?: MemoryScopeRef[];
-}
-
-export interface MemoryBenchmarkReport {
-  top_k: number;
-  case_count: number;
-  recall_at_k: number;
-  mean_reciprocal_rank: number;
-  cases: Array<{
-    name: string;
-    query: string;
-    relevant_node_ids: string[];
-    retrieved_node_ids: string[];
-    first_relevant_rank?: number | null;
-    recall_at_k: number;
-    reciprocal_rank: number;
-  }>;
 }
 
 export interface RegisterMemoryInput {
@@ -5223,28 +5185,6 @@ export async function searchGraphMemory(
   } catch {
     return [];
   }
-}
-
-export async function benchmarkGraphMemory(
-  cases: MemoryBenchmarkCase[],
-  topK = 5,
-  model?: string,
-  includeArchived = false,
-): Promise<MemoryBenchmarkReport> {
-  const memoryModel = model && isUsableChatModel(model) ? model : "default";
-  return await parseJsonResponse<MemoryBenchmarkReport>(
-    await authFetch(`${BASE}/memory/benchmark`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: memoryModel,
-        cases,
-        top_k: topK,
-        include_archived: includeArchived,
-      }),
-    }),
-    "memory benchmark failed",
-  );
 }
 
 export async function updateMemoryNode(
@@ -5533,18 +5473,6 @@ export async function testMcpServer(s: {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(s),
-    });
-    if (!r.ok) return null;
-    return (await r.json()) as McpTestResult;
-  } catch {
-    return null;
-  }
-}
-
-export async function testSavedMcpServer(id: string): Promise<McpTestResult | null> {
-  try {
-    const r = await authFetch(`${BASE}/mcp/servers/${encodeURIComponent(id)}/test`, {
-      method: "POST",
     });
     if (!r.ok) return null;
     return (await r.json()) as McpTestResult;

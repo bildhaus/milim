@@ -182,6 +182,45 @@ export function diffRows(text: string): DiffRow[] {
   return firstPatchRow >= 0 ? rows.slice(firstPatchRow) : rows;
 }
 
+export type DiffHunk = {
+  path: string;
+  /** Header plus body lines exactly as rendered, for server-side re-validation. */
+  text: string;
+};
+
+/**
+ * Raw hunks in the same order as the `hunk` rows produced by `diffRows`, so
+ * the nth hunk row maps to the nth entry.
+ */
+export function diffHunks(text: string): DiffHunk[] {
+  const hunks: DiffHunk[] = [];
+  let path: string | null = null;
+  let current: string[] | null = null;
+  const flush = () => {
+    if (current && path != null) {
+      while (current.length > 1 && current[current.length - 1] === "") current.pop();
+      hunks.push({ path, text: current.join("\n") });
+    }
+    current = null;
+  };
+  for (const line of text.split(/\r?\n/)) {
+    if (line.startsWith("diff --git ")) {
+      flush();
+      path = diffFileLabel(line);
+      continue;
+    }
+    if (path == null) continue;
+    if (line.startsWith("@@")) {
+      flush();
+      current = [line];
+      continue;
+    }
+    current?.push(line);
+  }
+  flush();
+  return hunks;
+}
+
 export function diffSections(rows: DiffRow[]): DiffSection[] {
   const sections: DiffSection[] = [];
   for (let index = 0; index < rows.length; index += 1) {

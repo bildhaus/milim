@@ -1,7 +1,14 @@
 import type { ClaudeImportedThread, CodexRecoveredThread, ToolApprovalRequest } from "../src/api.js";
 import { recoveredCodexSession, recoveredCodexSessionId } from "../src/lib/codexRecovery.js";
 import { importedClaudeSession, importedClaudeSessionId } from "../src/lib/claudeImport.js";
-import { approvalResponse, initialApprovalValues, updateApprovalField } from "../src/lib/toolApproval.js";
+import {
+  approvalChatAllowance,
+  approvalResponse,
+  approvalShortcut,
+  approvalShortcutTarget,
+  initialApprovalValues,
+  updateApprovalField,
+} from "../src/lib/toolApproval.js";
 import type { Session } from "../src/sessions/store.js";
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -82,3 +89,43 @@ equal(
   "milim-claude",
   "existing Claude imports should open instead of duplicating",
 );
+
+const approvalPart = (label: string, detail?: string, request?: ToolApprovalRequest) => ({
+  kind: "event" as const,
+  eventType: "status" as const,
+  label,
+  detail,
+  status: "running" as const,
+  approvalId: "approval-1",
+  approvalStatus: "pending" as const,
+  approvalRequest: request,
+});
+const shellAllowance = approvalChatAllowance(approvalPart("Approve shell", '{"command":"cargo test"}'));
+equal(shellAllowance?.kind, "command", "shell approvals allow only their exact command");
+equal(shellAllowance?.kind === "command" ? shellAllowance.command : "", "cargo test", "the exact command is kept");
+equal(approvalChatAllowance(approvalPart("Approve shell", "{}")), null, "shell without a command is never allowed for a chat");
+equal(approvalChatAllowance(approvalPart("Approval required: Bash")), null, "Bash without a command stays one-shot");
+const toolAllowance = approvalChatAllowance(approvalPart("Approve write_file", '{"path":"a.txt"}'));
+equal(toolAllowance?.kind === "tool" ? toolAllowance.tool : "", "write_file", "other tools are allowed by name");
+equal(
+  approvalChatAllowance(approvalPart("Approve additional permissions", undefined, { kind: "permissions" })),
+  null,
+  "permission elevations stay one-shot",
+);
+equal(
+  approvalChatAllowance(approvalPart("Provide MCP input", undefined, { kind: "mcp_form", server_name: "s", message: "m", fields: [] })),
+  null,
+  "MCP forms stay one-shot",
+);
+
+equal(approvalShortcut("Enter", "other", true), "approve", "Enter approves once when nothing is focused");
+equal(approvalShortcut("y", "other", true), "approve", "Y approves once");
+equal(approvalShortcut("N", "other", true), "deny", "N denies");
+equal(approvalShortcut("Escape", "other", true), "deny", "Escape denies");
+equal(approvalShortcut("Enter", "composer", true), "approve", "Enter in an empty composer approves");
+equal(approvalShortcut("y", "composer", true), null, "typing Y into the composer is never hijacked");
+equal(approvalShortcut("Enter", "composer", false), null, "a composer draft keeps Enter for sending");
+equal(approvalShortcut("Escape", "other", false), null, "shortcuts pause while the composer has text");
+equal(approvalShortcut("Enter", "button", true), null, "a focused button keeps its native Enter");
+equal(approvalShortcut("n", "editable", true), null, "form fields keep their keys");
+equal(approvalShortcutTarget(null), "other", "no target is treated as the page");

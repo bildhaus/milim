@@ -1,7 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { connectedSourceModel, type ConnectedModelSource } from "../lib/onboardingModel";
+import {
+  ACCOUNT_RUNTIME_SIGN_IN_HELP,
+  connectedSourceModel,
+  isChatCapableModel,
+  isMediaOnlyProviderKind,
+  workspaceFolderPlaceholder,
+  type ConnectedModelSource,
+} from "../lib/onboardingModel";
+import { runtimeMissingMessage } from "../lib/runtimeInstall";
 import "../settings.css";
 import {
+  isTauriRuntime,
   accountRuntimeKind,
   discoverLocalProviders,
   getClaudeStatus,
@@ -30,6 +39,7 @@ import { ArrowLeft, ArrowRight, Check, PlusSquare, Search, X } from "./icons";
 import { Logo } from "./Logo";
 import { ModelPicker } from "./ModelPicker";
 import { ProviderIcon, providerBrandForProvider, type ProviderBrand } from "./ProviderIcon";
+import { RuntimeInstallHint } from "./RuntimeInstallHint";
 import { SheetDialog } from "./SheetDialog";
 import { Select } from "./ui";
 
@@ -62,14 +72,14 @@ function modelProviderLabel(model: ModelInfo | null): string {
 function pathLabel(path: OnboardingSetupPath | null): string {
   if (path === "local_detect") return "Local detection";
   if (path === "hosted") return "Hosted provider";
-  if (path === "account_runtime") return "Installed agent";
+  if (path === "account_runtime") return "Coding CLI";
   return "Not chosen";
 }
 
 function stepTitle(step: OnboardingStepId): string {
   if (step === "model") return "Choose the runtime";
   if (step === "context") return "Choose the workspace";
-  return "Configure Milim";
+  return "Configure milim";
 }
 
 function OnboardingStory({
@@ -97,13 +107,16 @@ function OnboardingStory({
   );
 }
 
-function inTauriRuntime(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
 
 function runtimeReady(kind: AccountRuntimeKind, statuses: RuntimeStatuses): boolean {
   if (kind === "codex") return Boolean(statuses.codex && (statuses.codex.account || !statuses.codex.requiresOpenaiAuth));
   return Boolean(statuses[kind]?.available && statuses[kind]?.authenticated);
+}
+
+/** The CLI itself was not found (not merely signed out). */
+function runtimeMissing(kind: AccountRuntimeKind, statuses: RuntimeStatuses): boolean {
+  if (kind === "codex") return false;
+  return statuses[kind]?.available === false;
 }
 
 function runtimeDetail(kind: AccountRuntimeKind, statuses: RuntimeStatuses): string {
@@ -118,13 +131,13 @@ function runtimeDetail(kind: AccountRuntimeKind, statuses: RuntimeStatuses): str
     if (!status) return "Claude CLI was not detected.";
     if (status.available && status.authenticated) return status.auth?.email ?? status.auth?.subscriptionType ?? "Authenticated.";
     if (status.error) return status.error;
-    return status.available ? "Run `claude auth login`, then refresh." : "CLI not found on PATH.";
+    return status.available ? "Run `claude auth login`, then refresh." : runtimeMissingMessage("claude");
   }
   const status = kind === "opencode" ? statuses.opencode : statuses.pi;
   if (!status) return `${kind === "opencode" ? "OpenCode" : "Pi"} CLI was not detected.`;
   if (status.available && status.authenticated) return status.version ? `Version ${status.version}` : "Authenticated and ready.";
   if (status.error) return status.error;
-  if (!status.available) return "CLI not found on PATH.";
+  if (!status.available) return runtimeMissingMessage(kind);
   return kind === "opencode" ? "Configure a provider in OpenCode, then refresh." : "Run Pi and use /login, then refresh.";
 }
 
@@ -155,8 +168,12 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
   const steps = STEPS;
   const currentIndex = Math.max(0, steps.findIndex((item) => item.id === step));
   const selectedModelInfo = models.find((model) => model.id === selectedModel) ?? null;
-  const selectedModelReady = Boolean(selectedModelInfo);
-  const hostedPreset = PROVIDER_PRESETS.find((preset) => preset.name === hostedPresetName) ?? PROVIDER_PRESETS[0];
+  // Media generators (Replicate, fal, image/video/music models) cannot answer a chat turn.
+  const selectedModelReady = Boolean(selectedModelInfo && isChatCapableModel(selectedModelInfo));
+  const chatModels = useMemo(() => models.filter(isChatCapableModel), [models]);
+  const hostedPresets = PROVIDER_PRESETS.filter((preset) => preset.needsKey && !isMediaOnlyProviderKind(preset.kind));
+  const hostedPreset = hostedPresets.find((preset) => preset.name === hostedPresetName) ?? hostedPresets[0];
+  const [folderNotice, setFolderNotice] = useState<string | null>(null);
 
   const modelRefreshRevision = useRef(0);
 
@@ -204,7 +221,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
     void refreshAccountRuntimes();
     onboarding.start();
     return () => { modelRefreshRevision.current += 1; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Re-run only when runtime enablement changes; the refresh helpers read current state.
   }, [accountRuntimeEnabled]);
 
   useEffect(() => {
@@ -385,8 +402,19 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
     }
   }
 
+  async function openSignInHelp(kind: keyof typeof ACCOUNT_RUNTIME_SIGN_IN_HELP) {
+    const help = ACCOUNT_RUNTIME_SIGN_IN_HELP[kind];
+    setProviderNotice({ tone: "info", message: `${help.instruction}, then choose Refresh CLIs.` });
+    try {
+      await openExternalUrl(help.url);
+    } catch (error) {
+      setProviderNotice({ tone: "error", message: `Could not open sign-in help: ${error instanceof Error ? error.message : String(error)}` });
+    }
+  }
+
   async function pickFolder() {
-    if (!inTauriRuntime()) return;
+    if (!isTauriRuntime()) return;
+    setFolderNotice(null);
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
       const selected = await open({ directory: true, multiple: false });
@@ -394,8 +422,8 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
         setFolderDraft(selected);
         updateThreadSettings(activeId, { folder: selected });
       }
-    } catch {
-      /* dialog unavailable */
+    } catch (error) {
+      setFolderNotice(`Could not open the folder picker: ${error instanceof Error ? error.message : String(error)}. Type the folder path instead.`);
     }
   }
 
@@ -461,7 +489,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
 
   return (
     <SheetDialog
-      title="Set up Milim"
+      title="Set up milim"
       className="sheet onboarding-sheet"
       overlayClassName="sheet-overlay onboarding-overlay"
       testId="onboarding-flow"
@@ -473,7 +501,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
           <span>Back</span>
         </button>
         <div className="onboarding-header-title">
-          <strong>Set up Milim</strong>
+          <strong>Set up milim</strong>
           <span>Step {currentIndex + 1} of {steps.length} · {stepTitle(step)}</span>
         </div>
         <button className="icon-btn sheet-close" type="button" onClick={dismiss} title="Close" aria-label="Close onboarding">
@@ -507,7 +535,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
                 <OnboardingStory
                   tone="model"
                   title="Connect any model source."
-                  body="Use an installed coding agent, a local server, or a hosted provider. Milim keeps them in the same thread."
+                  body="Use a coding CLI, a local server, or a hosted provider. milim keeps them in the same thread."
                   details={[selectedModelReady ? selectedModel : "No model selected", pathLabel(activeSetupPath)]}
                 />
               <div className="onboarding-step-body">
@@ -546,7 +574,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
                     </button>
                     <button className={"onboarding-path-option" + (activeSetupPath === "account_runtime" ? " active" : "")} type="button" aria-pressed={activeSetupPath === "account_runtime"} onClick={() => chooseSetupPath("account_runtime")}>
                       <span className="onboarding-path-icon"><ProviderIcon brand="claude" /></span>
-                      <span><strong>Installed agents</strong><small>Codex, Claude, OpenCode, Pi</small></span>
+                      <span><strong>Coding CLIs</strong><small>Codex, Claude, OpenCode, Pi</small></span>
                     </button>
                   </div>
 
@@ -599,7 +627,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
                           <Select
                             value={hostedPresetName}
                             onChange={setHostedPresetName}
-                            options={PROVIDER_PRESETS.filter((preset) => preset.needsKey).map((preset) => ({ value: preset.name, label: preset.name }))}
+                            options={hostedPresets.map((preset) => ({ value: preset.name, label: preset.name }))}
                             testId="onboarding-hosted-preset"
                           />
                         </div>
@@ -612,7 +640,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
                           data-testid="onboarding-hosted-api-key"
                         />
                         <button className="btn-accent" type="button" onClick={() => void saveHostedPreset()} disabled={hostedBusy}>
-                          {hostedBusy ? "Saving..." : `Save ${hostedPresetName}`}
+                          {hostedBusy ? "Saving..." : `Save ${hostedPreset?.name ?? hostedPresetName}`}
                         </button>
                       </div>
                     </>
@@ -623,8 +651,8 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
                       <div className="onboarding-path-head">
                         <span className="onboarding-path-icon"><ProviderIcon brand="claude" size={15} /></span>
                         <div>
-                          <h4>Use an installed agent</h4>
-                          <p>Milim detects each CLI independently. Authenticate with that agent's own tooling, then refresh.</p>
+                          <h4>Use a coding CLI</h4>
+                          <p>milim detects each CLI independently. Sign in with that CLI's own tooling, then refresh.</p>
                         </div>
                       </div>
                       <div className="onboarding-runtime-list">
@@ -645,13 +673,30 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
                                 <button className="btn-ghost" type="button" onClick={() => void connectCodex()} disabled={codexBusy}>
                                   {codexBusy ? "Connecting..." : "Connect"}
                                 </button>
+                              ) : kind !== "codex" && !ready ? (
+                                <button
+                                  className="btn-ghost"
+                                  type="button"
+                                  data-testid={`onboarding-sign-in-help-${kind}`}
+                                  title={ACCOUNT_RUNTIME_SIGN_IN_HELP[kind].instruction}
+                                  onClick={() => void openSignInHelp(kind)}
+                                >
+                                  Sign-in help
+                                </button>
                               ) : null}
+                              {enabled && runtimeMissing(kind, runtimeStatuses) && (
+                                <RuntimeInstallHint
+                                  runtime={kind}
+                                  missing
+                                  onChanged={() => void refreshAccountRuntimes(true).then(() => refreshModels())}
+                                />
+                              )}
                             </div>
                           );
                         })}
                       </div>
                       <button className="btn-accent" type="button" onClick={() => void refreshAccountRuntimes(true).then(() => refreshModels())} disabled={runtimeBusy || modelsLoading}>
-                        {runtimeBusy ? "Checking..." : "Refresh agents"}
+                        {runtimeBusy ? "Checking..." : "Refresh CLIs"}
                       </button>
                     </>
                   )}
@@ -665,11 +710,11 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
                   </p>
                 )}
 
-                {models.length > 0 && (
+                {chatModels.length > 0 && (
                   <div className="onboarding-model-picker">
                     <span className="onboarding-mini-title">Available models</span>
                     <ModelPicker
-                      models={models}
+                      models={chatModels}
                       model={selectedModel}
                       onModel={({ model }) => selectModel(model)}
                       onClose={() => {}}
@@ -703,13 +748,16 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
                         value={folderDraft}
                         onChange={(event) => setFolderDraft(event.currentTarget.value)}
                         onBlur={() => updateThreadSettings(activeId, { folder: folderDraft.trim() })}
-                        placeholder="C:/path/to/project"
+                        placeholder={workspaceFolderPlaceholder(typeof navigator === "undefined" ? "" : `${navigator.platform} ${navigator.userAgent}`)}
                       />
-                      <button className="btn-ghost" type="button" onClick={() => void pickFolder()} disabled={!inTauriRuntime()}>
+                      <button className="btn-ghost" type="button" onClick={() => void pickFolder()} disabled={!isTauriRuntime()}>
                         Choose
                       </button>
                     </span>
                   </label>
+                  {folderNotice && (
+                    <p className="onboarding-notice error" role="alert">{folderNotice}</p>
+                  )}
                   <p className="onboarding-path-note">
                     Memory, privacy, sandbox, computer use, and power tools remain available after setup.
                   </p>
@@ -728,13 +776,13 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
           </button>
           {!selectedModelReady && (
             <p className="onboarding-path-note">
-              Chat stays disabled until you connect one. Use Manage models above the composer to resume setup.
+              Chat stays disabled until you connect one. Open Providers from Tools to resume setup.
             </p>
           )}
         </div>
         <div className="onboarding-footer-actions">
           <button className="btn-accent" type="button" onClick={nextStep} disabled={step === "model" && !selectedModelReady}>
-            <span>{step === "context" ? "Open Milim" : "Continue"}</span>
+            <span>{step === "context" ? "Open milim" : "Continue"}</span>
             <ArrowRight size={14} />
           </button>
         </div>
