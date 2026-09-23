@@ -131,11 +131,11 @@
   gap: 4px;
 }
 .chat-body:not(.inspector-stacked) .chat-main.context-open .chat-main-actions {
-  right: 312px;
+  right: calc(var(--context-panel-width, 300px) + 12px);
 }
 .chat-body:not(.inspector-stacked) .chat-main.context-open .chat-scroll,
 .chat-body:not(.inspector-stacked) .chat-main.context-open .dock {
-  padding-right: 316px;
+  padding-right: calc(var(--context-panel-width, 300px) + 16px);
 }
 .preview-open-btn svg {
   transform: scaleX(-1);
@@ -197,7 +197,7 @@
 }
 .chat-jump-latest:hover { background: var(--panel-hover); color: var(--primary-text); }
 .chat-jump-latest:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.chat-body:not(.inspector-stacked) .chat-main.context-open .chat-jump-latest { left: calc(50% - 158px); }
+.chat-body:not(.inspector-stacked) .chat-main.context-open .chat-jump-latest { left: calc(50% - (var(--context-panel-width, 300px) + 16px) / 2); }
 .preview-resize-handle {
   position: relative;
   z-index: 2;

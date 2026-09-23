@@ -77,6 +77,15 @@
 .sheet-resize-edge-sw { bottom: -7px; left: -7px; cursor: nesw-resize; }
 .sheet-resize-edge-nw { top: -7px; left: -7px; cursor: nwse-resize; }
 .sheet-resize-edge-se { right: -7px; bottom: -7px; cursor: nwse-resize; }
+/* Rail | detail splits inside manager sheets (useSplitPane). Each body sets
+   --manager-rail-size to its saved width clamped to the live space. */
+.manager-rail-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--manager-rail-size);
+  transform: translateX(-50%);
+}
 /* Visible, focusable corner grip; it follows the sheet's corner radius. */
 .sheet-resize-handle {
   --sheet-resize-radius: var(--card-radius);

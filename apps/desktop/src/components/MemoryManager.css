@@ -105,11 +105,22 @@
 }
 
 .mem-layout {
+  /* Saved detail width, clamped live so the list keeps 320px beside the gap. */
+  --memory-detail-size: max(320px, min(var(--memory-detail-width, 420px), calc(100% - 330px)));
+  position: relative;
   flex: 1;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.85fr);
+  grid-template-columns: minmax(0, 1fr) var(--memory-detail-size);
   gap: 10px;
   min-height: 0;
+}
+
+.memory-detail-resize-handle {
+  position: absolute;
+  top: 0;
+  right: calc(var(--memory-detail-size) + 5px);
+  bottom: 0;
+  transform: translateX(50%);
 }
 
 .mem-list,
@@ -260,6 +271,10 @@
     display: flex;
     flex-direction: column;
     overflow: auto;
+  }
+
+  .memory-detail-resize-handle {
+    display: none;
   }
 
   .mem-list,

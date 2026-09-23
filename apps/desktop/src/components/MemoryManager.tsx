@@ -17,6 +17,8 @@ import {
 import { DEFAULT_THREAD_SETTINGS, useSessions } from "../sessions/store";
 import { Archive, Check, Pencil, Plus, Refresh, Search, Trash, X } from "./icons";
 import { SheetDialog } from "./SheetDialog";
+import { PaneResizeHandle } from "./PaneResizeHandle";
+import { useSplitPane } from "../ui/usePaneResize";
 import "./MemoryManager.css";
 
 type MemoryTab = "personal" | "project" | "legacy";
@@ -73,6 +75,9 @@ function draftFrom(node: MemoryNode): MemoryDraft {
   return { title: node.title, content: node.body };
 }
 
+/** The memory list keeps this much room (plus the column gap) beside the detail pane. */
+const MEMORY_LIST_MIN_WIDTH = 330;
+
 export function MemoryManager({
   initialNodeId,
   initialScopeKind,
@@ -83,6 +88,8 @@ export function MemoryManager({
   onClose: () => void;
 }) {
   const activeId = useSessions((state) => state.activeId);
+  // The detail pane sits on the right, so dragging left widens it.
+  const detail = useSplitPane("memoryDetail", "--memory-detail-width", MEMORY_LIST_MIN_WIDTH, { direction: -1 });
   const session = useSessions((state) => state.sessions.find((item) => item.id === state.activeId));
   const settings = session?.settings ?? DEFAULT_THREAD_SETTINGS;
   const folder = settings.folder;
@@ -367,7 +374,7 @@ export function MemoryManager({
   }
 
   return (
-    <SheetDialog title="Memory" className="sheet mem-sheet" onClose={onClose}>
+    <SheetDialog title="Memory" className="sheet mem-sheet" resizable={{ id: "memory" }} onClose={onClose}>
       <div className="sheet-header mem-sheet-header">
         <div>
           <h2>Memory</h2>
@@ -392,7 +399,8 @@ export function MemoryManager({
         {tab !== "legacy" && <button className="btn-accent mem-icon-action" type="button" disabled={busy || (tab === "project" && !canUseProject)} onClick={startCreate}><Plus size={14} /> Add</button>}
       </div>
 
-      <div className="mem-layout">
+      <div ref={detail.containerRef} className="mem-layout" style={detail.style}>
+      <PaneResizeHandle resize={detail.resize} className="memory-detail-resize-handle" data-testid="memory-detail-resize-handle" />
         <main className="mem-list" aria-label={`${tab} memories`} aria-busy={busy}>
           {nodes.map((node) => (
             <button key={node.id} type="button" className={`mem-row${node.id === selectedId ? " active" : ""}${isArchived(node) ? " archived" : ""}`} onClick={() => { setSelectedId(node.id); setMode("view"); setNote(null); setConfirmDeleteId(null); }}>

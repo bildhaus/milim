@@ -121,10 +121,20 @@ textarea,
 .workers-inspector-summary strong { font-size: 12px; }
 .workers-inspector-summary span { color: var(--tertiary-text); font-size: 10px; }
 .workers-history-split {
+  /* Saved width, clamped live so the details keep 180px. */
+  --workers-history-size: max(180px, min(var(--workers-history-width, 240px), calc(100% - 180px)));
+  position: relative;
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(210px, 40%) minmax(0, 1fr);
+  grid-template-columns: var(--workers-history-size) minmax(0, 1fr);
+}
+.workers-history-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--workers-history-size);
+  transform: translateX(-50%);
 }
 .workers-history {
   min-width: 0;
@@ -459,6 +469,7 @@ textarea,
 .workers-run-error { margin: 10px; padding: 8px; border-radius: 7px; background: color-mix(in srgb, var(--error) 10%, transparent); color: var(--error); font-size: 11px; }
 @container preview-panel (max-width: 439px) {
   .workers-history-split { grid-template-columns: 1fr; grid-template-rows: fit-content(50%) minmax(0, 1fr); }
+  .workers-history-resize-handle { display: none; }
   .workers-history { border-right: 0; border-bottom: 1px solid var(--border-primary); }
 }
 

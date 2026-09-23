@@ -171,7 +171,7 @@ export function UsageManager({ onClose }: { onClose: () => void }) {
   const activeDays = summary?.by_day.filter((day) => day.responses > 0).length ?? 0;
 
   return (
-    <SheetDialog title="Usage" className="sheet usage-sheet" testId="usage-manager" onClose={onClose}>
+    <SheetDialog title="Usage" className="sheet usage-sheet" testId="usage-manager" resizable={{ id: "usage" }} onClose={onClose}>
       <div className="usage-header">
         <div className="usage-title">
           <h2>Usage</h2>

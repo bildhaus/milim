@@ -42,6 +42,15 @@ try {
     "src/components/PreviewPanel.tsx",
     "src/components/PullRequestsManager.tsx",
     "src/components/MediaManager.tsx",
+    "src/components/WorkersInspector.tsx",
+    "src/components/GoogleWorkspacePreview.tsx",
+    "src/components/AgentsManager.tsx",
+    "src/components/SkillsManager.tsx",
+    "src/components/SchedulesManager.tsx",
+    "src/components/ProvidersManager.tsx",
+    "src/components/McpManager.tsx",
+    "src/components/MemoryManager.tsx",
+    "src/settings/SettingsDialog.tsx",
   ];
   const paneHandleCount = componentFiles.reduce((count, path) => {
     const source = readFileSync(path, "utf8");
@@ -52,13 +61,20 @@ try {
     }
     return count + handles.length;
   }, 0);
-  assert(paneHandleCount === 8, `All eight structural separators should use PaneResizeHandle, found ${paneHandleCount}`);
+  assert(paneHandleCount === 18, `All eighteen structural separators should use PaneResizeHandle, found ${paneHandleCount}`);
   for (const path of componentFiles) {
     const source = readFileSync(path, "utf8");
     assert(!/Resize(?:Start|Cleanup)Ref\b/.test(source), `${path} should leave drag state to the shared resize hook`);
   }
 
   const sheetManagers = [
+    ["src/components/AgentsManager.tsx", "agents"],
+    ["src/components/SkillsManager.tsx", "skills"],
+    ["src/components/SchedulesManager.tsx", "schedules"],
+    ["src/components/ProvidersManager.tsx", "providers"],
+    ["src/components/MemoryManager.tsx", "memory"],
+    ["src/components/McpManager.tsx", "mcp"],
+    ["src/components/UsageManager.tsx", "usage"],
     ["src/components/MediaManager.tsx", "media"],
     ["src/components/PullRequestsManager.tsx", "pullRequests"],
   ] as const;

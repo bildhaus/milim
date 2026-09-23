@@ -739,11 +739,13 @@ function nativeWorkerRunRecord(
 
 const CHAT_MAIN_MIN_WIDTH = 420;
 const PREVIEW_RESIZE_HANDLE_WIDTH = 8;
-const CONTEXT_PANEL_WIDTH = 300;
+// The Context card is resizable; stacking and coexistence use its minimum, and
+// a wider saved width is clamped to the space left beside the transcript.
+const CONTEXT_PANEL_MIN_WIDTH = PANES.context.min;
 const INSPECTOR_STACK_THRESHOLD =
   PREVIEW_PANEL_MIN_WIDTH + CHAT_MAIN_MIN_WIDTH + PREVIEW_RESIZE_HANDLE_WIDTH;
-const CONTEXT_STACK_THRESHOLD = CONTEXT_PANEL_WIDTH + CHAT_MAIN_MIN_WIDTH;
-const CONCURRENT_PANEL_THRESHOLD = INSPECTOR_STACK_THRESHOLD + CONTEXT_PANEL_WIDTH;
+const CONTEXT_STACK_THRESHOLD = CONTEXT_PANEL_MIN_WIDTH + CHAT_MAIN_MIN_WIDTH;
+const CONCURRENT_PANEL_THRESHOLD = INSPECTOR_STACK_THRESHOLD + CONTEXT_PANEL_MIN_WIDTH;
 const PREVIEW_PANEL_STAGE_OVERSHOOT = 32;
 const PREVIEW_PANEL_ANIMATION_MS = 180;
 const COLLAPSED_SIDEBAR_WIDTH = 48;
@@ -1082,6 +1084,14 @@ function maxPreviewPanelWidth(
     PREVIEW_PANEL_MIN_WIDTH,
     availableWidth -
       (overlay ? PREVIEW_RESIZE_HANDLE_WIDTH : reservedWidth + CHAT_MAIN_MIN_WIDTH + PREVIEW_RESIZE_HANDLE_WIDTH),
+  );
+}
+
+function maxContextPanelWidth(chatBodyWidth: number, inspectorDocked: boolean): number {
+  return (
+    chatBodyWidth -
+    CHAT_MAIN_MIN_WIDTH -
+    (inspectorDocked ? PREVIEW_PANEL_MIN_WIDTH + PREVIEW_RESIZE_HANDLE_WIDTH : 0)
   );
 }
 
@@ -4423,7 +4433,31 @@ export function ChatView({
   const contextStacked = contextPanelOpen && chatBodyWidth < CONTEXT_STACK_THRESHOLD;
   const inspectorStacked = sidePanelVisible && chatBodyWidth < INSPECTOR_STACK_THRESHOLD;
   const panelsStacked = contextStacked || inspectorStacked;
-  const reservedContextWidth = contextPanelOpen && !contextStacked ? CONTEXT_PANEL_WIDTH : 0;
+  const inspectorDocked = sidePanelVisible && !panelsStacked && !previewPanelOverlay;
+  const contextResize = usePaneResize("context", {
+    direction: -1,
+    // The card may squeeze a docked inspector down to its minimum, never the transcript.
+    max: () => maxContextPanelWidth(chatBodyWidth, inspectorDocked),
+    targetRef: chatBodyRef,
+    cssVar: "--context-panel-width",
+    controls: "quick-summary-panel",
+    onCollapse: () => setSessionContextPanelOpen(activeId, false),
+    onExpand: () => setSessionContextPanelOpen(activeId, true),
+    // A docked inspector yields live while the card grows...
+    onLiveSize: (width) => {
+      if (!inspectorDocked) return;
+      chatBodyRef.current?.style.setProperty(
+        "--preview-panel-width",
+        `${clampPreviewPanelWidth(inspectorResize.preference, chatBodyWidth, width)}px`,
+      );
+    },
+    // ...and returns to its rendered width, which the committed size re-derives.
+    onDragEnd: () => {
+      if (!inspectorDocked) return;
+      chatBodyRef.current?.style.setProperty("--preview-panel-width", `${resolvedPreviewPanelWidth}px`);
+    },
+  });
+  const reservedContextWidth = contextPanelOpen && !contextStacked ? contextResize.size : 0;
   const dockedPreviewPanelWidth = maxPreviewPanelWidth(
     chatBodyWidth,
     reservedContextWidth,
@@ -4473,6 +4507,7 @@ export function ChatView({
   const previewPanelStyle = {
     "--preview-panel-width": `${resolvedPreviewPanelWidth}px`,
     "--preview-panel-docked-width": `${dockedPreviewPanelWidth}px`,
+    "--context-panel-width": `${contextResize.size}px`,
   } as CSSProperties;
   const inspectorLauncherLabel =
     inspectorTab === "workers"
@@ -9057,6 +9092,13 @@ export function ChatView({
                   text: wireMessageContent({ role: "user", content: input, attachments: pendingAttachments }),
                   attachments: controlAttachments(pendingAttachments),
                 })}
+                resizeHandle={panelsStacked ? undefined : (
+                  <PaneResizeHandle
+                    resize={contextResize}
+                    className="context-resize-handle"
+                    data-testid="context-resize-handle"
+                  />
+                )}
               />
             </Suspense>
           )}

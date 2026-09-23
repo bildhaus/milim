@@ -5084,6 +5084,17 @@ async function runResizeHandleCheck(page) {
   }
   await page.keyboard.press("Enter");
 
+  await page.getByTestId("open-context-panel").click();
+  const contextHandle = page.getByTestId("context-resize-handle");
+  await contextHandle.waitFor();
+  await waitForAttribute(contextHandle, "aria-valuenow", "300");
+  await contextHandle.focus();
+  await page.keyboard.press("ArrowLeft");
+  await waitForAttribute(contextHandle, "aria-valuenow", "316");
+  await page.keyboard.press("Enter");
+  await waitForAttribute(contextHandle, "aria-valuenow", "300");
+  await page.getByRole("button", { name: "Close context" }).click();
+
   await page.getByTestId("open-artifact-browser").click();
   const previewHandle = page.getByTestId("preview-resize-handle");
   await previewHandle.waitFor();

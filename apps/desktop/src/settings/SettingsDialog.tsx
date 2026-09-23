@@ -1,4 +1,4 @@
-import { Fragment, type KeyboardEvent, useEffect, useMemo, useState } from "react";
+import { Fragment, type CSSProperties, type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import "../settings.css";
 import { RunLimitsSettings } from "./RunLimitsSettings";
 import {
@@ -86,6 +86,8 @@ import {
 } from "../ui/store";
 import { playInterfaceSound } from "../ui/sounds";
 import { confirmApp } from "../ui/confirmation";
+import { usePaneResize } from "../ui/usePaneResize";
+import { PaneResizeHandle } from "../components/PaneResizeHandle";
 import { Archive, Check, Code, Download, ExternalLink, FileText, FolderOpen, Gear, GitLogo, Pencil, PlusSquare, Refresh, Search, Sidebar, Smartphone, Sun, Trash, Volume2, X } from "../components/icons";
 import { MobileCompanionSettings } from "../components/MobileCompanionSettings";
 import { ThemeEditor } from "../components/ThemeEditor";
@@ -341,6 +343,12 @@ export function SettingsPage({
   const setComposerCompletionMode = useUiPreferences((s) => s.setComposerCompletionMode);
   const setRemoteCompletionConfirmed = useUiPreferences((s) => s.setRemoteCompletionConfirmed);
   const resetAllPaneSizes = useUiPreferences((s) => s.resetAllPaneSizes);
+  const settingsLayoutRef = useRef<HTMLDivElement>(null);
+  const settingsNavResize = usePaneResize("settingsNav", {
+    targetRef: settingsLayoutRef,
+    cssVar: "--settings-nav-width",
+    controls: "settings-nav",
+  });
   const setAppShortcut = useUiPreferences((s) => s.setAppShortcut);
   const resetAppShortcuts = useUiPreferences((s) => s.resetAppShortcuts);
   const onboardingStatus = useOnboarding((s) => s.status);
@@ -912,8 +920,8 @@ export function SettingsPage({
       testId="settings-page"
       onBack={onClose}
     >
-        <div className="settings-layout">
-          <nav className="settings-nav" aria-label="Settings sections">
+        <div ref={settingsLayoutRef} className="settings-layout" style={{ "--settings-nav-width": `${settingsNavResize.size}px` } as CSSProperties}>
+          <nav id="settings-nav" className="settings-nav" aria-label="Settings sections">
             <div className="settings-nav-search">
               <Search size={14} aria-hidden="true" />
               <input
@@ -1012,6 +1020,11 @@ export function SettingsPage({
               </div>
             )}
           </nav>
+          <PaneResizeHandle
+            resize={settingsNavResize}
+            className="settings-nav-resize-handle"
+            data-testid="settings-nav-resize-handle"
+          />
 
           <div className="settings-detail">
             <div className="settings-detail-head">

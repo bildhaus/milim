@@ -25,6 +25,9 @@ import { createCanonicalChat } from "../lib/newChatCoordinator";
 import { AgentAvatar } from "./AgentAvatar";
 import { Calendar, Copy, Plus, Sparkles, Trash, X } from "./icons";
 import { SheetDialog } from "./SheetDialog";
+import { PaneResizeHandle } from "./PaneResizeHandle";
+import { MANAGER_DETAIL_MIN_WIDTH } from "../lib/paneSizes";
+import { useSplitPane } from "../ui/usePaneResize";
 import { Checkbox } from "./ui";
 import "./AgentsManager.css";
 
@@ -261,6 +264,7 @@ function AgentStarterGrid({
 }
 
 export function AgentsManager({ onClose }: { onClose: () => void }) {
+  const rail = useSplitPane("agentsRail", "--manager-rail-width", MANAGER_DETAIL_MIN_WIDTH);
   const agents = useAgents((s) => s.agents);
   const refresh = useAgents((s) => s.refresh);
   const activeSession = useSessions((s) => s.sessions.find((x) => x.id === s.activeId));
@@ -576,7 +580,7 @@ export function AgentsManager({ onClose }: { onClose: () => void }) {
     : "Click again to delete this agent.";
 
   return (
-    <SheetDialog title="Agents" className="sheet agents-sheet agent-manager-sheet" onClose={onClose}>
+    <SheetDialog title="Agents" className="sheet agents-sheet agent-manager-sheet" resizable={{ id: "agents" }} onClose={onClose}>
         <div className="agent-manager-header">
           <div className="agent-manager-title">
             <h2>Agents</h2>
@@ -593,7 +597,8 @@ export function AgentsManager({ onClose }: { onClose: () => void }) {
           </div>
         </div>
 
-        <div className="agent-manager-body">
+        <div ref={rail.containerRef} className="agent-manager-body" style={rail.style}>
+          <PaneResizeHandle resize={rail.resize} className="manager-rail-resize-handle" data-testid="agents-rail-resize-handle" />
           <aside className="agent-rail" aria-label="Saved agents">
             <div className="agent-rail-summary">
               <span>{agents.length} saved</span>

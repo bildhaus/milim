@@ -61,10 +61,12 @@
 }
 
 .mcp-manager-body {
+  --manager-rail-size: max(220px, min(var(--manager-rail-width, 306px), calc(100% - 320px)));
+  position: relative;
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(248px, 306px) minmax(0, 1fr);
+  grid-template-columns: var(--manager-rail-size) minmax(0, 1fr);
 }
 
 .mcp-rail {
@@ -543,6 +545,10 @@
   .mcp-manager-body {
     grid-template-columns: 1fr;
     grid-template-rows: minmax(160px, 30vh) minmax(0, 1fr);
+  }
+
+  .mcp-manager-body > .manager-rail-resize-handle {
+    display: none;
   }
 
   .mcp-impact-panel {

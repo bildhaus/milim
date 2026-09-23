@@ -270,10 +270,13 @@ export function QuickSummaryPanel({
   onOpenGoal,
   onOpenSource,
   onInspectEffectiveRun,
+  resizeHandle,
 }: {
   summary: QuickSummary;
   open: boolean;
   workerPanel: ReactNode;
+  /** Width separator on the card's leading edge; the owner decides when it applies. */
+  resizeHandle?: ReactNode;
   collapsedSections: QuickSummarySectionId[];
   canOpenGit: boolean;
   onOpenChange: (open: boolean) => void;
@@ -359,6 +362,7 @@ export function QuickSummaryPanel({
     >
       {open && (
         <div className="quick-summary-card">
+          {resizeHandle}
           <div className="quick-summary-toolbar">
             <strong id="quick-summary-title">Context</strong>
             <button className="icon-btn quick-summary-close" type="button" title="Close context" aria-label="Close context" onClick={() => onOpenChange(false)}>

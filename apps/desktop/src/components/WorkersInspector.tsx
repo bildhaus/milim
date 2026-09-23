@@ -22,6 +22,8 @@ import type {
 import { modelDisplayName } from "../lib/modelPicker";
 import type { SessionWorkerRunRecord } from "../sessions/store";
 import { confirmApp } from "../ui/confirmation";
+import { containerMax, usePaneResize } from "../ui/usePaneResize";
+import { PaneResizeHandle } from "./PaneResizeHandle";
 import { AgentAvatar } from "./AgentAvatar";
 import { ArrowRight, Check, ChevronDown, Copy, Gear, Refresh, Sidebar, Square, Trash } from "./icons";
 import { ModelPicker } from "./ModelPicker";
@@ -44,6 +46,9 @@ const POLICY_DESCRIPTION: Record<DelegationPolicy, string> = {
   ask: "Review a worker plan before it runs, unless approval is Open.",
   auto: "Run independent tasks automatically.",
 };
+
+/** Selected-worker details keep this much room beside the history list. */
+const WORKER_DETAIL_MIN_WIDTH = 180;
 
 function workerTimestamp(value: string) {
   return Date.parse(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value)
@@ -267,6 +272,13 @@ export function WorkersInspector({
   onClose: () => void;
 }) {
   const [selectedKey, setSelectedKey] = useState("");
+  const historySplitRef = useRef<HTMLDivElement>(null);
+  const historyResize = usePaneResize("workersHistory", {
+    max: containerMax(historySplitRef, WORKER_DETAIL_MIN_WIDTH),
+    targetRef: historySplitRef,
+    cssVar: "--workers-history-width",
+    controls: "workers-history",
+  });
   const [visibleDone, setVisibleDone] = useState(10);
   const [copied, setCopied] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -600,8 +612,17 @@ export function WorkersInspector({
       {!records.length ? (
         <div className="workers-empty"><span>No runs yet</span></div>
       ) : (
-        <div className="workers-history-split">
-          <div className="workers-history" role="list" aria-label="Worker history">
+        <div
+          ref={historySplitRef}
+          className="workers-history-split"
+          style={{ "--workers-history-width": `${historyResize.size}px` } as CSSProperties}
+        >
+          <PaneResizeHandle
+            resize={historyResize}
+            className="workers-history-resize-handle"
+            data-testid="workers-history-resize-handle"
+          />
+          <div id="workers-history" className="workers-history" role="list" aria-label="Worker history">
             <section aria-label="Active workers">
               <h3>Active <span>{counts.proposed + counts.active}</span></h3>
               {!proposedRecords.length && !activeEntries.length && (
