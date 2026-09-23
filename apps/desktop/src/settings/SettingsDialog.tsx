@@ -245,6 +245,7 @@ export function SettingsPage({
   const activeBackgroundImage = current.background.image?.trim() ? current.background.image : undefined;
   const setTheme = useTheme((s) => s.setTheme);
   const sidebarOpen = useUiPreferences((s) => s.sidebarOpen);
+  const customizedPaneCount = useUiPreferences((s) => Object.keys(s.paneSizes).length);
   const uiSize = useUiPreferences((s) => s.uiSize);
   const showAccountUsageInTitleBar = useUiPreferences((s) => s.showAccountUsageInTitleBar);
   const windowAlwaysOnTop = useUiPreferences((s) => s.windowAlwaysOnTop);
@@ -1135,13 +1136,36 @@ export function SettingsPage({
                   </div>
                   <Toggle checked={newChatButtonAtBottom} onChange={setNewChatButtonAtBottom} ariaLabel="New chat at bottom" testId="general-new-chat-bottom-toggle" />
                 </div>}
+              </div>
+            </SettingsBlock>
+            <SettingsBlock title="Panel sizes" data-setting-id="app-panel-sizes" className={settingHighlightClass("app-panel-sizes").trim()}>
+              <div className="setting-stack">
                 <div className="settings-action-row">
                   <div>
-                    <strong>Panel sizes</strong>
-                    <span>Return every resized panel to its default size.</span>
+                    <strong>Reset panel sizes</strong>
+                    <span>
+                      Drag any panel edge to resize it; sizes are remembered.{" "}
+                      {customizedPaneCount === 0
+                        ? "Every panel uses its default size."
+                        : `${customizedPaneCount} ${customizedPaneCount === 1 ? "panel has" : "panels have"} a custom size.`}
+                    </span>
                   </div>
-                  <button className="btn-ghost" type="button" data-testid="general-reset-layout" onClick={resetAllPaneSizes}>
-                    Reset
+                  <button
+                    className="btn-ghost"
+                    type="button"
+                    data-testid="general-reset-layout"
+                    disabled={customizedPaneCount === 0}
+                    onClick={() => void (async () => {
+                      const accepted = await confirmApp({
+                        title: "Reset panel sizes?",
+                        message: "The sidebar, side panel, Context card, rails, drawers, and manager sheets return to their default sizes.",
+                        confirmLabel: "Reset sizes",
+                      });
+                      if (accepted) resetAllPaneSizes();
+                    })()}
+                  >
+                    <Refresh size={13} />
+                    Reset panel sizes
                   </button>
                 </div>
               </div>
