@@ -413,6 +413,7 @@ import {
 import { useChatConversationController } from "./chat/useChatConversationController";
 import { useChatMediaController } from "./chat/useChatMediaController";
 import { useChatWorkerController } from "./chat/useChatWorkerController";
+import { useApprovalAllowances } from "./chat/useApprovalAllowances";
 import { useRetryCountdown } from "./chat/useRetryCountdown";
 import { errorNotice, type ProviderErrorInfo } from "../lib/providerErrors.js";
 
@@ -1518,6 +1519,7 @@ export function ChatView({
   const messageRowActionsRef = useRef<MessageRowActions | null>(null);
   const activeId = useSessions((s) => s.activeId);
   const { text: input, attachments: pendingAttachments } = useSessionComposerState(activeId);
+  const approvalAllowances = useApprovalAllowances(activeId);
   const [providersOpen, setProvidersOpen] = useState(false);
   const [mcpOpen, setMcpOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
@@ -8772,10 +8774,15 @@ export function ChatView({
               </div>
             )}
             <ComposerSurface>
-              {visibleApprovalPrompts.map((approval) => (
+              {visibleApprovalPrompts.map((approval, index) => (
                 <ToolApprovalPrompt
                   key={approval.approvalId}
                   part={approval}
+                  keyboard={index === 0}
+                  composerEmpty={!input.trim() && pendingAttachments.length === 0}
+                  onResolved={(scope) => {
+                    if (scope === "thread") approvalAllowances.refresh();
+                  }}
                   onDismiss={() => {
                     if (!approval.approvalId) return;
                     setMessages(
@@ -8911,6 +8918,16 @@ export function ChatView({
                     { tool_approval: next },
                     { toolApproval: next },
                   ).catch(() => {})
+                }
+                approvalAllowances={approvalAllowances.allowances}
+                onApprovalControlsOpen={approvalAllowances.refresh}
+                onClearApprovalAllowances={(keys) =>
+                  void approvalAllowances.clear(keys).catch((error) =>
+                    setChatNotice({
+                      tone: "error",
+                      message: `Milim could not clear chat allowances: ${error instanceof Error ? error.message : String(error)}`,
+                    }),
+                  )
                 }
                 openModelPickerRequest={modelPickerRequest}
                 onManageProviders={() => setProvidersOpen(true)}

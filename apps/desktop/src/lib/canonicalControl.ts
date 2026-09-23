@@ -228,10 +228,22 @@ function eventPart(item: ControlTimelineItemV1): ChatStreamPart | null {
   if (item.type === "approval_requested" || item.type === "tool_approval_required") {
     const approvalId =
       typeof data.approval_id === "string" ? data.approval_id : undefined;
+    // A chat allowance already approved this request in Rust.
+    if (data.auto_approved && typeof data.auto_approved === "object") {
+      return {
+        kind: "event",
+        eventType: "status",
+        label: `Allowed for this chat: ${name}`,
+        status: "done",
+        approvalId,
+        approvalStatus: "approved",
+      };
+    }
     return {
       kind: "event",
       eventType: "status",
       label: `Approval required: ${name}`,
+      detail: typeof data.arguments === "string" ? data.arguments : undefined,
       status: "running",
       approvalId,
       approvalStatus: "pending",

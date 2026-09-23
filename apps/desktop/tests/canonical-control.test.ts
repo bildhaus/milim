@@ -657,4 +657,34 @@ assert.deepEqual(
   "older servers without a classification still report the raw message",
 );
 assert.deepEqual(controlRunError(null), {}, "missing errors stay empty");
+
+const autoApproved = projectControlRunMessages([
+  item(1, "message", { id: "user-1", role: "user", content: "run tests" }),
+  item(2, "approval_requested", {
+    approval_id: "approval-auto",
+    name: "shell",
+    arguments: '{"command":"cargo test"}',
+    auto_approved: { scope: "thread", allowance: "command:cargo test" },
+  }),
+  item(3, "approval_requested", {
+    approval_id: "approval-ask",
+    name: "shell",
+    arguments: '{"command":"cargo publish"}',
+  }),
+], "run-1").find((message) => message.role === "assistant");
+const approvalParts = (autoApproved?.streamParts ?? []).filter(
+  (part) => part.kind === "event" && part.approvalId,
+);
+assert.equal(approvalParts.length, 2);
+assert.equal(
+  approvalParts[0]?.kind === "event" ? approvalParts[0].approvalStatus : undefined,
+  "approved",
+  "a request covered by a chat allowance never renders as pending",
+);
+assert.equal(
+  approvalParts[1]?.kind === "event" ? approvalParts[1].detail : undefined,
+  '{"command":"cargo publish"}',
+  "pending canonical approvals keep the exact request for review",
+);
+
 console.log("canonical control projection tests passed");

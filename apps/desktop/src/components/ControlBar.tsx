@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
+  type ApprovalAllowance,
   type ModelInfo,
   type PrivacyMode,
   type ProviderInfo,
@@ -112,6 +113,9 @@ export function ControlBar({
   onPrivacy,
   toolApproval,
   onToolApproval,
+  approvalAllowances = [],
+  onApprovalControlsOpen,
+  onClearApprovalAllowances,
   openModelPickerRequest = 0,
   onManageProviders,
   onManageMcp,
@@ -148,6 +152,11 @@ export function ControlBar({
   onPrivacy: (privacy: PrivacyMode) => void;
   toolApproval: ToolApprovalMode;
   onToolApproval: (approval: ToolApprovalMode) => void;
+  /** Active "Allow for this chat" rules, shown under Tool approval. */
+  approvalAllowances?: ApprovalAllowance[];
+  onApprovalControlsOpen?: () => void;
+  /** Revoke the listed rules, or every rule when omitted. */
+  onClearApprovalAllowances?: (keys?: string[]) => void;
   /** Incrementing this opens the model picker (for example from an error notice). */
   openModelPickerRequest?: number;
   onManageProviders: () => void;
@@ -357,9 +366,10 @@ export function ControlBar({
                 (toolApproval === "open" ? " chip-on" : "")
               }
               data-testid="context-menu-trigger"
-              onClick={() =>
-                setMenu((m) => (m === "context" ? null : "context"))
-              }
+              onClick={() => {
+                if (menu !== "context") onApprovalControlsOpen?.();
+                setMenu((m) => (m === "context" ? null : "context"));
+              }}
               title={`Privacy ${PRIVACY_LABEL[privacy]}, approval ${TOOL_APPROVAL_LABEL[toolApproval]}`}
               aria-label={contextAccessibleLabel}
               aria-haspopup="dialog"
@@ -491,6 +501,49 @@ export function ControlBar({
                   >
                     {TOOL_APPROVAL_DESCRIPTION[toolApproval]}
                   </span>
+                  {approvalAllowances.length > 0 && (
+                    <div
+                      className="context-allowances"
+                      data-testid="approval-allowances"
+                      aria-label="Allowed for this chat"
+                    >
+                      <span className="context-allowances-heading">
+                        Allowed for this chat
+                        {onClearApprovalAllowances && (
+                          <button
+                            type="button"
+                            className="context-allowances-clear"
+                            onClick={() => onClearApprovalAllowances()}
+                            title="Ask again before every matching request"
+                          >
+                            Clear
+                          </button>
+                        )}
+                      </span>
+                      <ul>
+                        {approvalAllowances.map((allowance) => (
+                          <li key={allowance.key}>
+                            {allowance.command ? (
+                              <code title={`${allowance.tool}: ${allowance.command}`}>{allowance.command}</code>
+                            ) : (
+                              <span>{allowance.tool}</span>
+                            )}
+                            {onClearApprovalAllowances && (
+                              <button
+                                type="button"
+                                className="context-allowances-remove"
+                                aria-label={`Stop allowing ${allowance.command ?? allowance.tool}`}
+                                title="Stop allowing"
+                                onClick={() => onClearApprovalAllowances([allowance.key])}
+                              >
+                                ×
+                              </button>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
                 </div>
 
                 {model && onGenerationSettings && !["codex", "claude", "opencode", "pi"].includes(activeProviderBrand ?? "") && (

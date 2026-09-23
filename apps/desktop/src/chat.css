@@ -3580,6 +3580,57 @@ span.provider-brand-icon {
   font-size: 10.5px;
   line-height: 1.35;
 }
+.context-allowances {
+  grid-column: 2 / -1;
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  color: var(--secondary-text);
+  font-size: 10.5px;
+}
+.context-allowances-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--tertiary-text);
+}
+.context-allowances ul {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.context-allowances li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.context-allowances li > code,
+.context-allowances li > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.context-allowances-clear,
+.context-allowances-remove {
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: var(--tertiary-text);
+  font: inherit;
+  cursor: pointer;
+}
+.context-allowances-clear:hover,
+.context-allowances-remove:hover,
+.context-allowances-clear:focus-visible,
+.context-allowances-remove:focus-visible {
+  color: var(--primary-text);
+}
 .context-memory-actions {
   display: flex;
   align-items: center;

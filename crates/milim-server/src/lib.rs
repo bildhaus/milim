@@ -9,6 +9,7 @@
 mod account_profiles;
 mod account_runtime_events;
 mod account_runtime_update;
+mod approval_allowances;
 mod auth;
 mod child_process;
 mod claude_bridge;
@@ -108,6 +109,11 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/control/v1/threads/{id}/effective-run",
             post(routes::control_effective_run_preview),
+        )
+        .route(
+            "/control/v1/threads/{id}/approval-allowances",
+            get(routes::control_approval_allowances)
+                .delete(routes::control_approval_allowances_revoke),
         )
         .route(
             "/control/v1/attachments/{id}",
@@ -493,6 +499,11 @@ pub fn build_mobile_companion_router(state: AppState) -> Router {
         .route(
             "/control/v1/threads/{id}/effective-run",
             post(routes::control_effective_run_preview),
+        )
+        .route(
+            "/control/v1/threads/{id}/approval-allowances",
+            get(routes::control_approval_allowances)
+                .delete(routes::control_approval_allowances_revoke),
         )
         .route(
             "/control/v1/attachments/{id}",

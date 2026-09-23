@@ -1020,7 +1020,10 @@ fn run_stream_with_worker_events(
                                 request_kind: name,
                                 request: None,
                             }, &worker_events);
-                            let approved = pending.wait().await.approved;
+                            let resolved = pending.wait().await;
+                            let approved = resolved.approved;
+                            // "Allow for this chat" maps to Codex's native session-wide acceptance.
+                            let session_scope = resolved.scope == milim_agents::ApprovalScope::Thread;
                             let decision = if approved { "approve" } else { "deny" };
                             yield runtime_event_with_worker(&CodexStreamEvent::ToolApprovalStatus {
                                 approval_id: pending.id.clone(),
@@ -1028,7 +1031,7 @@ fn run_stream_with_worker_events(
                                 decision,
                                 status: "decided",
                             }, &worker_events);
-                            let result = match codex_decision_response(params, approved, false) {
+                            let result = match codex_decision_response(params, approved, session_scope) {
                                 Ok(result) => result,
                                 Err(error) => {
                                     pending.fail(error.to_string());

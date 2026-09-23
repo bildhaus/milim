@@ -4890,14 +4890,57 @@ export async function resolveToolApproval(
   approvalId: string,
   decision: "approve" | "deny",
   responseBody?: Record<string, unknown>,
+  scope: "once" | "thread" = "once",
 ): Promise<ToolApprovalSnapshot | null> {
   const response = await authFetch(`${BASE}/tool-approvals/${encodeURIComponent(approvalId)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ decision, ...(responseBody ? { response: responseBody } : {}) }),
+    body: JSON.stringify({
+      decision,
+      ...(responseBody ? { response: responseBody } : {}),
+      ...(scope === "thread" ? { scope } : {}),
+    }),
   });
   if (!response.ok) throw new Error(await responseErrorMessage(response, "Tool approval failed"));
   return response.status === 204 ? null : ((await response.json()) as ToolApprovalSnapshot);
+}
+
+/** One "Allow for this chat" rule held in canonical Rust state. */
+export interface ApprovalAllowance {
+  /** `tool:<name>` or `command:<exact command>`. */
+  key: string;
+  tool: string;
+  command?: string;
+  created_at_ms: number;
+}
+
+export async function getApprovalAllowances(threadId: string): Promise<ApprovalAllowance[]> {
+  const body = await parseJsonResponse<{ allowances?: ApprovalAllowance[] }>(
+    await authFetch(
+      `${BASE}/control/v1/threads/${encodeURIComponent(threadId)}/approval-allowances`,
+    ),
+    "Chat allowances failed",
+  );
+  return body.allowances ?? [];
+}
+
+/** Revoke the listed allowances, or every allowance in the thread. */
+export async function revokeApprovalAllowances(
+  threadId: string,
+  keys?: string[],
+): Promise<ApprovalAllowance[]> {
+  const body = await parseJsonResponse<{ allowances?: ApprovalAllowance[] }>(
+    await authFetch(
+      `${BASE}/control/v1/threads/${encodeURIComponent(threadId)}/approval-allowances`,
+      {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: keys ? JSON.stringify({ keys }) : "",
+      },
+    ),
+    "Clearing chat allowances failed",
+  );
+  return body.allowances ?? [];
 }
 
 export interface ToolApprovalSnapshot {

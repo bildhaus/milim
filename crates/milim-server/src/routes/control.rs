@@ -163,6 +163,50 @@ pub(crate) async fn control_timeline(
     Ok(Json(page).into_response())
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct ControlApprovalAllowanceRevoke {
+    /// Keys to revoke. Omitted revokes every allowance in the thread.
+    #[serde(default)]
+    keys: Option<Vec<String>>,
+}
+
+/// `GET /control/v1/threads/{id}/approval-allowances` — the thread's active
+/// "Allow for this chat" rules.
+pub(crate) async fn control_approval_allowances(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    peer: Peer,
+) -> Result<Response, ApiError> {
+    control_identity(&st, &headers, peer_addr(peer))?;
+    let manager = control_manager(&st)?;
+    let allowances = manager.approval_allowances(&id).map_err(ApiError)?;
+    Ok(Json(json!({ "thread_id": id, "allowances": allowances })).into_response())
+}
+
+/// `DELETE /control/v1/threads/{id}/approval-allowances` — revoke listed
+/// rules (`{"keys": [...]}`) or, with no body, all of them.
+pub(crate) async fn control_approval_allowances_revoke(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    peer: Peer,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    control_identity(&st, &headers, peer_addr(peer))?;
+    let manager = control_manager(&st)?;
+    let request: ControlApprovalAllowanceRevoke = if body.iter().all(u8::is_ascii_whitespace) {
+        ControlApprovalAllowanceRevoke::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|error| ApiError(Error::InvalidRequest(format!("invalid body: {error}"))))?
+    };
+    let allowances = manager
+        .revoke_approval_allowances(&id, request.keys.as_deref())
+        .map_err(ApiError)?;
+    Ok(Json(json!({ "thread_id": id, "allowances": allowances })).into_response())
+}
+
 /// `GET /control/v1/runs/{run_id}` — loaded only when an existing work
 /// surface explicitly asks for details.
 pub(crate) async fn control_run_inspection(
