@@ -326,7 +326,7 @@ try {
   assert(!managerSource.includes('testId="media-model-select"'), "The model picker should not duplicate search and selection controls");
   assert(!managerSource.includes('className="field media-model-field"'), "Generation settings should not repeat the model picker");
   assert(managerSource.includes("favoriteIds={favoriteModelIds}"), "The shared picker should retain provider-scoped media favorites");
-  assert(managerSource.includes("setMediaStudioSize"), "The resized studio dimensions should be persisted");
+  assert(managerSource.includes(`resizable={{ id: "media"`), "The resized studio dimensions should be persisted through the shared sheet registry");
   assert(managerSource.includes("Saving locally..."), "The preview should distinguish local saving from generation");
   assert(managerSource.includes("This run failed"), "The preview should present a specific failed state");
   assert(managerSource.includes("Loading local library..."), "Initial library loading should not leave a blank grid");
@@ -345,7 +345,7 @@ try {
   assert(managerSource.includes('aria-current={item.id === selectedLibraryItem?.id ? "true" : undefined}'), "The selected library card should expose its current state");
   assert(managerSource.includes("interactive={false}"), "Library and variant thumbnails should not add nested focus targets");
   assert(managerSource.includes('<aside className="media-library"'), "The local library should render as a collapsible sidebar");
-  assert(managerSource.includes("Math.min(savedStudioWidth, window.innerWidth - 24) >= 960"), "A wide studio should open the local library initially");
+  assert(managerSource.includes('paneSizes["mediaSheet.width"] ?? MEDIA_STUDIO_CSS_WIDTH') && managerSource.includes(") >= 960"), "A wide studio should open the local library initially");
   assert(!managerSource.includes("libraryVisibilityInitialized"), "Background loading should never auto-open the local library");
   assert(!managerSource.includes("libraryItems[0] ?? null"), "Background loading should not silently select the first saved item");
   assert((managerSource.match(/setConfirmDeleteId\(""\)/g) ?? []).length >= 2, "Changing selection should disarm stale delete confirmation");
@@ -392,8 +392,10 @@ try {
   assert(styleSource.includes("animation: media-generation-drift 4.8s"), "The generating canvas should use one slow bloom animation");
   assert(styleSource.includes(".media-generation-field::before,"), "Reduced motion should disable the generating bloom");
   assert(styleSource.includes(".inline-media-popover::before"), "The media settings surface should keep nested dropdown backdrop blur working");
-  assert(styleSource.includes("border-bottom-right-radius: max(0px, calc(var(--card-radius) - 6px))"), "Resizable panels should use the shared inset theme-radius corner curve");
-  assert(styleSource.includes("mask-composite: intersect"), "The resize curve tails should fade without dimming the corner");
+  const overlaySource = readFileSync(resolve(process.cwd(), "src/shell-overlays.css"), "utf8");
+  assert(overlaySource.includes("border-bottom-right-radius: max(0px, calc(var(--sheet-resize-radius) - 4px))"), "Resizable sheets should use the shared inset theme-radius corner curve");
+  assert(overlaySource.includes("mask-composite: intersect"), "The resize curve tails should fade without dimming the corner");
+  assert(!styleSource.includes(".media-sheet-resize-handle"), "Media Studio should not keep a private sheet grip");
 
   const apiSource = readFileSync(resolve(process.cwd(), "src/api.ts"), "utf8");
   assert(apiSource.includes("new URL(`${BASE}/media/library`)"), "The desktop API should list the media library");

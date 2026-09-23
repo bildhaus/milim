@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import {
   completeWorkspaceEditorLeave,
@@ -14,13 +14,11 @@ import {
 import { registerWorkspaceEditorGuard, requestWorkspaceEditorLeave, type WorkspaceEditorLeaveReason } from "../lib/workspaceEditorGuard";
 import { ChevronDown, Eye, FileText, Folder, FolderOpen, Search, Sidebar } from "./icons";
 import { PaneResizeHandle } from "./PaneResizeHandle";
+import { containerMax, usePaneResize } from "../ui/usePaneResize";
 import { SourceCodeView } from "./SourceCodeView";
 
 const WorkspaceCodeEditor = lazy(() => import("./WorkspaceCodeEditor"));
-const RAIL_MIN_WIDTH = 148;
-const RAIL_MAX_WIDTH = 360;
-const RAIL_DEFAULT_WIDTH = 188;
-const RAIL_KEYBOARD_STEP = 24;
+const EDITOR_MIN_WIDTH = 220;
 
 export type GeneratedCodeFile = {
   artifact: ChatArtifact;
@@ -74,9 +72,16 @@ export function WorkspaceCodePanel({
   const [saving, setSaving] = useState(false);
   const [conflictRevision, setConflictRevision] = useState<string | null>(null);
   const [leaveRequest, setLeaveRequest] = useState<{ reason: WorkspaceEditorLeaveReason; resolve: (leave: boolean) => void } | null>(null);
-  const [railWidth, setRailWidth] = useState(RAIL_DEFAULT_WIDTH);
   const [railCollapsed, setRailCollapsed] = useState(false);
-  const resizeStartRef = useRef<{ x: number; width: number } | null>(null);
+  const layoutRef = useRef<HTMLDivElement>(null);
+  // Dragging past the minimum collapses the rail, like its collapse button.
+  const railResize = usePaneResize("codeRail", {
+    max: containerMax(layoutRef, EDITOR_MIN_WIDTH),
+    targetRef: layoutRef,
+    cssVar: "--workspace-code-rail-width",
+    onCollapse: () => setRailCollapsed(true),
+    onExpand: () => setRailCollapsed(false),
+  });
   const previousSelectedArtifactRef = useRef(selectedArtifactId);
   const dirty = Boolean(openFile && openFile.draft !== openFile.content);
   const selectedArtifact = generatedFiles.find((file) => file.artifact.id === selectedArtifactId) ?? generatedFiles[0];
@@ -308,26 +313,8 @@ export function WorkspaceCodePanel({
     request?.resolve(saved);
   }
 
-  function clampRail(width: number) {
-    return Math.min(RAIL_MAX_WIDTH, Math.max(RAIL_MIN_WIDTH, Math.round(width)));
-  }
-
-  function resizeRailKeyDown(event: KeyboardEvent<HTMLDivElement>) {
-    if (event.key === "ArrowLeft") setRailWidth((width) => clampRail(width - RAIL_KEYBOARD_STEP));
-    else if (event.key === "ArrowRight") setRailWidth((width) => clampRail(width + RAIL_KEYBOARD_STEP));
-    else if (event.key === "Home") setRailWidth(RAIL_MIN_WIDTH);
-    else if (event.key === "End") setRailWidth(RAIL_MAX_WIDTH);
-    else return;
-    event.preventDefault();
-  }
-
-  function resizeRailMove(event: PointerEvent<HTMLDivElement>) {
-    if (!resizeStartRef.current) return;
-    setRailWidth(clampRail(resizeStartRef.current.width + event.clientX - resizeStartRef.current.x));
-  }
-
   const searchEntries = searchQuery.trim() ? searchResults : null;
-  return <div className={`workspace-code-layout${railCollapsed ? " rail-collapsed" : ""}`} style={{ "--workspace-code-rail-width": `${railWidth}px` } as React.CSSProperties}>
+  return <div ref={layoutRef} className={`workspace-code-layout${railCollapsed ? " rail-collapsed" : ""}`} style={{ "--workspace-code-rail-width": `${railResize.size}px` } as CSSProperties}>
     <aside className="workspace-code-rail" aria-label="Code sources">
       <div className="workspace-code-rail-head">
         <strong>Code</strong>
@@ -354,23 +341,9 @@ export function WorkspaceCodePanel({
       </section> : null}
     </aside>
     {railCollapsed ? <button type="button" className="workspace-code-rail-open icon-btn" aria-label="Show file rail" title="Show file rail" onClick={() => setRailCollapsed(false)}><Sidebar size={14} /></button> : <PaneResizeHandle
+      resize={railResize}
       className="workspace-code-rail-resizer"
-      orientation="vertical"
       data-testid="workspace-code-rail-resizer"
-      aria-label="Resize file rail"
-      aria-valuemin={RAIL_MIN_WIDTH}
-      aria-valuemax={RAIL_MAX_WIDTH}
-      aria-valuenow={railWidth}
-      tabIndex={0}
-      onKeyDown={resizeRailKeyDown}
-      onPointerDown={(event) => {
-        if (event.button !== 0) return;
-        resizeStartRef.current = { x: event.clientX, width: railWidth };
-        event.currentTarget.setPointerCapture(event.pointerId);
-      }}
-      onPointerMove={resizeRailMove}
-      onPointerUp={(event) => { resizeStartRef.current = null; event.currentTarget.releasePointerCapture(event.pointerId); }}
-      onPointerCancel={() => { resizeStartRef.current = null; }}
     />}
     <main className="workspace-code-main">
       {activeSource === "workspace" && openFile ? <>

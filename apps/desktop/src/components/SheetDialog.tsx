@@ -1,4 +1,6 @@
 import { useEffect, useRef, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
+import type { SheetId } from "../lib/paneSizes";
+import { PANE_RESIZE_TITLE, SHEET_EDGES, useResizableSheet } from "../ui/usePaneResize";
 
 const FOCUSABLE_SELECTOR = [
   "a[href]",
@@ -15,6 +17,7 @@ export function SheetDialog({
   overlayClassName = "sheet-overlay",
   testId,
   style,
+  resizable,
   children,
   onClose,
 }: {
@@ -23,10 +26,13 @@ export function SheetDialog({
   overlayClassName?: string;
   testId?: string;
   style?: CSSProperties;
+  /** Persisted, edge- and corner-resizable sheet; `testId` names the corner grip. */
+  resizable?: { id: SheetId; testId?: string };
   children: ReactNode;
   onClose: () => void;
 }) {
   const sheetRef = useRef<HTMLDivElement>(null);
+  const resize = useResizableSheet(resizable?.id ?? null);
 
   useEffect(() => {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -73,6 +79,34 @@ export function SheetDialog({
     }
   }
 
+  const sheet = (
+    <div
+      ref={sheetRef}
+      className={className}
+      data-testid={testId}
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+      tabIndex={-1}
+      style={resize?.style ? { ...style, ...resize.style } : style}
+      onKeyDown={onKeyDown}
+    >
+      {children}
+      {resize && (
+        <button
+          className="sheet-resize-handle"
+          data-testid={resizable?.testId ?? `${resizable?.id}-sheet-resize-handle`}
+          type="button"
+          aria-label={`Resize ${resize.label}`}
+          title={`${PANE_RESIZE_TITLE} · Arrow keys resize`}
+          onPointerDown={(event) => resize.startDrag("se", event, sheetRef.current)}
+          onKeyDown={(event) => resize.onKeyDown(event, sheetRef.current)}
+          onDoubleClick={() => resize.reset()}
+        />
+      )}
+    </div>
+  );
+
   return (
     <div
       className={overlayClassName}
@@ -81,19 +115,21 @@ export function SheetDialog({
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <div
-        ref={sheetRef}
-        className={className}
-        data-testid={testId}
-        role="dialog"
-        aria-modal="true"
-        aria-label={title}
-        tabIndex={-1}
-        style={style}
-        onKeyDown={onKeyDown}
-      >
-        {children}
-      </div>
+      {resize ? (
+        <div className={`sheet-resize-frame${resize.dragging ? " resizing" : ""}`}>
+          {sheet}
+          {SHEET_EDGES.map((edge) => (
+            <div
+              key={edge}
+              className={`sheet-resize-edge sheet-resize-edge-${edge}`}
+              aria-hidden="true"
+              title={PANE_RESIZE_TITLE}
+              onPointerDown={(event) => resize.startDrag(edge, event, sheetRef.current)}
+              onDoubleClick={() => resize.reset(edge === "e" || edge === "w" ? "width" : edge === "n" || edge === "s" ? "height" : undefined)}
+            />
+          ))}
+        </div>
+      ) : sheet}
     </div>
   );
 }

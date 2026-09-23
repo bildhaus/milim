@@ -2909,10 +2909,12 @@ html[data-dark="true"] .preview-control-cursor {
   --workspace-code-function: #82aaff;
   --workspace-code-type: #ffcb6b;
   --workspace-code-tag: #f07178;
+  /* Saved width, clamped live so the editor keeps 220px. */
+  --workspace-code-rail-size: max(148px, min(var(--workspace-code-rail-width, 188px), calc(100% - 220px)));
   flex: 1;
   position: relative;
   display: grid;
-  grid-template-columns: var(--workspace-code-rail-width) minmax(0, 1fr);
+  grid-template-columns: var(--workspace-code-rail-size) minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
   background: var(--panel-muted-bg);
@@ -3022,7 +3024,7 @@ html[data-dark="true"] .preview-control-cursor {
   position: absolute;
   top: 0;
   bottom: 0;
-  left: var(--workspace-code-rail-width);
+  left: var(--workspace-code-rail-size);
   transform: translateX(-50%);
 }
 .workspace-code-main {
@@ -3173,6 +3175,7 @@ html[data-dark="true"] .preview-control-cursor {
   left: 0;
 }
 .preview-log-list {
+  height: var(--preview-log-height, 142px);
   overflow: auto;
   padding: 0 8px 8px;
   font-family: var(--mono);

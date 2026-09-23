@@ -6,8 +6,6 @@ import {
   useRef,
   useState,
   type CSSProperties,
-  type KeyboardEvent,
-  type PointerEvent as ReactPointerEvent,
 } from "react";
 import {
   openExternalUrl,
@@ -30,17 +28,7 @@ import {
   pullRequestReadiness,
 } from "../lib/pullRequests";
 import { sessionRecencyLabel } from "../lib/sessionRecency";
-import {
-  DEFAULT_MEDIA_STUDIO_HEIGHT,
-  DEFAULT_MEDIA_STUDIO_WIDTH,
-  DEFAULT_PULL_REQUESTS_LIST_WIDTH,
-  MIN_MEDIA_STUDIO_HEIGHT,
-  MIN_MEDIA_STUDIO_WIDTH,
-  MIN_PULL_REQUESTS_LIST_WIDTH,
-  normalizeMediaStudioSize,
-  normalizePullRequestsListWidth,
-  useUiPreferences,
-} from "../ui/store";
+import { containerMax, usePaneResize } from "../ui/usePaneResize";
 import {
   ArrowRight,
   Check,
@@ -89,6 +77,8 @@ function relativeDate(value?: string): string {
   return Number.isFinite(timestamp) ? sessionRecencyLabel(timestamp) : "";
 }
 
+const PULL_REQUEST_DETAIL_MIN_WIDTH = 320;
+
 function titleCase(value?: string): string {
   const text = value?.toLowerCase().replace(/_/g, " ").trim() ?? "";
   return text ? text.charAt(0).toUpperCase() + text.slice(1) : "";
@@ -110,21 +100,13 @@ function parsePullRequestList(stdout: string): PullRequestListItem[] {
 }
 
 export function PullRequestsManager({ onClose }: { onClose: () => void }) {
-  const savedWidth = useUiPreferences((state) => state.pullRequestsWidth);
-  const savedHeight = useUiPreferences((state) => state.pullRequestsHeight);
-  const setSavedSize = useUiPreferences((state) => state.setPullRequestsSize);
-  const savedListWidth = useUiPreferences(
-    (state) => state.pullRequestsListWidth,
-  );
-  const setSavedListWidth = useUiPreferences(
-    (state) => state.setPullRequestsListWidth,
-  );
-  const [size, setSize] = useState(() =>
-    normalizeMediaStudioSize(savedWidth, savedHeight),
-  );
-  const [listWidth, setListWidth] = useState(() =>
-    normalizePullRequestsListWidth(savedListWidth),
-  );
+  const layoutRef = useRef<HTMLDivElement>(null);
+  // The detail pane keeps at least 320px; CSS applies the same clamp live.
+  const listResize = usePaneResize("pullRequestsList", {
+    max: containerMax(layoutRef, PULL_REQUEST_DETAIL_MIN_WIDTH),
+    targetRef: layoutRef,
+    cssVar: "--pull-requests-list-width",
+  });
   const [filter, setFilter] = useState<PullRequestFilter>("all");
   const [tab, setTab] = useState<PullRequestTab>("summary");
   const [query, setQuery] = useState("");
@@ -146,9 +128,6 @@ export function PullRequestsManager({ onClose }: { onClose: () => void }) {
   const [reviewBody, setReviewBody] = useState("");
   const [mergeMethod, setMergeMethod] = useState<MergeMethod | null>(null);
   const [actionBusy, setActionBusy] = useState<WorkspaceGitAction | null>(null);
-  const [dividerResizing, setDividerResizing] = useState(false);
-  const resizeCleanupRef = useRef<(() => void) | null>(null);
-  const dividerCleanupRef = useRef<(() => void) | null>(null);
   const detailsRequestsRef = useRef(new Set<string>());
 
   const selected = items.find((item) => item.url === selectedUrl) ?? null;
@@ -173,14 +152,6 @@ export function PullRequestsManager({ onClose }: { onClose: () => void }) {
       );
     });
   }, [filter, items, query]);
-
-  useEffect(() => {
-    setSize(normalizeMediaStudioSize(savedWidth, savedHeight));
-  }, [savedHeight, savedWidth]);
-
-  useEffect(() => {
-    setListWidth(normalizePullRequestsListWidth(savedListWidth));
-  }, [savedListWidth]);
 
   useEffect(() => {
     let active = true;
@@ -208,8 +179,6 @@ export function PullRequestsManager({ onClose }: { onClose: () => void }) {
     });
     return () => {
       active = false;
-      resizeCleanupRef.current?.();
-      dividerCleanupRef.current?.();
     };
   }, []);
 
@@ -364,150 +333,8 @@ export function PullRequestsManager({ onClose }: { onClose: () => void }) {
     }
   }
 
-  function startResize(event: ReactPointerEvent<HTMLButtonElement>) {
-    if (event.button !== 0) return;
-    const sheet = event.currentTarget.closest<HTMLElement>(".pull-requests-sheet");
-    if (!sheet) return;
-    event.preventDefault();
-    event.stopPropagation();
-    resizeCleanupRef.current?.();
-    const bounds = sheet.getBoundingClientRect();
-    const origin = {
-      x: event.clientX,
-      y: event.clientY,
-      width: bounds.width,
-      height: bounds.height,
-    };
-    let latest = { width: bounds.width, height: bounds.height };
-    let moved = false;
-    const cleanup = () => {
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerup", onPointerUp);
-      window.removeEventListener("pointercancel", cleanup);
-      document.body.classList.remove("pull-requests-resizing");
-      resizeCleanupRef.current = null;
-    };
-    const onPointerMove = (moveEvent: PointerEvent) => {
-      moved = true;
-      const maxWidth = Math.max(320, window.innerWidth - 24);
-      const maxHeight = Math.max(360, window.innerHeight - 24);
-      latest = {
-        width: Math.round(
-          Math.min(
-            Math.max(
-              origin.width + (moveEvent.clientX - origin.x) * 2,
-              Math.min(MIN_MEDIA_STUDIO_WIDTH, maxWidth),
-            ),
-            maxWidth,
-          ),
-        ),
-        height: Math.round(
-          Math.min(
-            Math.max(
-              origin.height + (moveEvent.clientY - origin.y) * 2,
-              Math.min(MIN_MEDIA_STUDIO_HEIGHT, maxHeight),
-            ),
-            maxHeight,
-          ),
-        ),
-      };
-      setSize(latest);
-    };
-    const onPointerUp = () => {
-      cleanup();
-      if (moved) setSavedSize(latest.width, latest.height);
-    };
-    resizeCleanupRef.current = cleanup;
-    document.body.classList.add("pull-requests-resizing");
-    window.addEventListener("pointermove", onPointerMove);
-    window.addEventListener("pointerup", onPointerUp);
-    window.addEventListener("pointercancel", cleanup);
-  }
-
-  function resizeWithKeyboard(event: KeyboardEvent<HTMLButtonElement>) {
-    const step = event.shiftKey ? 64 : 32;
-    let next = { ...size };
-    if (event.key === "ArrowLeft") next.width -= step;
-    else if (event.key === "ArrowRight") next.width += step;
-    else if (event.key === "ArrowUp") next.height -= step;
-    else if (event.key === "ArrowDown") next.height += step;
-    else if (event.key === "Home") {
-      next = {
-        width: DEFAULT_MEDIA_STUDIO_WIDTH,
-        height: DEFAULT_MEDIA_STUDIO_HEIGHT,
-      };
-    } else return;
-    event.preventDefault();
-    event.stopPropagation();
-    next = normalizeMediaStudioSize(next.width, next.height);
-    setSize(next);
-    setSavedSize(next.width, next.height);
-  }
-
-  function startDividerResize(event: ReactPointerEvent<HTMLDivElement>) {
-    if (event.button !== 0) return;
-    const layout = event.currentTarget.parentElement;
-    if (!layout) return;
-    event.preventDefault();
-    dividerCleanupRef.current?.();
-    const bounds = layout.getBoundingClientRect();
-    const clamp = (width: number) =>
-      Math.round(
-        Math.min(
-          Math.max(width, MIN_PULL_REQUESTS_LIST_WIDTH),
-          Math.max(MIN_PULL_REQUESTS_LIST_WIDTH, bounds.width - 320),
-        ),
-      );
-    let latest = clamp(event.clientX - bounds.left);
-    const cleanup = () => {
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerup", onPointerUp);
-      window.removeEventListener("pointercancel", cleanup);
-      document.body.classList.remove("pull-requests-divider-resizing");
-      setDividerResizing(false);
-      dividerCleanupRef.current = null;
-    };
-    const onPointerMove = (moveEvent: PointerEvent) => {
-      latest = clamp(moveEvent.clientX - bounds.left);
-      setListWidth(latest);
-    };
-    const onPointerUp = () => {
-      cleanup();
-      setSavedListWidth(latest);
-    };
-    dividerCleanupRef.current = cleanup;
-    setDividerResizing(true);
-    document.body.classList.add("pull-requests-divider-resizing");
-    window.addEventListener("pointermove", onPointerMove);
-    window.addEventListener("pointerup", onPointerUp);
-    window.addEventListener("pointercancel", cleanup);
-  }
-
-  function resizeDividerWithKeyboard(event: KeyboardEvent<HTMLDivElement>) {
-    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-    event.preventDefault();
-    const bounds = event.currentTarget.parentElement?.getBoundingClientRect();
-    const next = Math.min(
-      Math.max(
-        listWidth + (event.key === "ArrowLeft" ? -24 : 24),
-        MIN_PULL_REQUESTS_LIST_WIDTH,
-      ),
-      Math.max(MIN_PULL_REQUESTS_LIST_WIDTH, (bounds?.width ?? size.width) - 320),
-    );
-    setListWidth(next);
-    setSavedListWidth(next);
-  }
-
-  const resolvedListWidth = Math.min(
-    listWidth,
-    Math.max(MIN_PULL_REQUESTS_LIST_WIDTH, size.width - 320),
-  );
-  const sheetStyle = {
-    width: size.width,
-    height: size.height,
-  } satisfies CSSProperties;
   const layoutStyle = {
-    "--pull-requests-list-width": `${resolvedListWidth}px`,
+    "--pull-requests-list-width": `${listResize.size}px`,
   } as CSSProperties;
   const readiness = details ? pullRequestReadiness(details) : null;
   const mutable = details?.state.toUpperCase() === "OPEN";
@@ -525,10 +352,10 @@ export function PullRequestsManager({ onClose }: { onClose: () => void }) {
       title="Pull requests"
       className="sheet pull-requests-sheet"
       testId="pull-requests-manager"
-      style={sheetStyle}
+      resizable={{ id: "pullRequests", testId: "pull-requests-resize-handle" }}
       onClose={onClose}
     >
-      <div className="pull-requests-layout" style={layoutStyle}>
+      <div ref={layoutRef} className="pull-requests-layout" style={layoutStyle}>
         <aside className="pull-requests-list-pane">
           <header className="pull-requests-list-header">
             <nav aria-label="Pull request filters">
@@ -627,19 +454,9 @@ export function PullRequestsManager({ onClose }: { onClose: () => void }) {
         </aside>
 
         <PaneResizeHandle
-          className={`pull-requests-divider${dividerResizing ? " dragging" : ""}`}
-          orientation="vertical"
+          resize={listResize}
+          className="pull-requests-divider"
           data-testid="pull-requests-divider"
-          aria-label="Resize pull request list"
-          aria-valuemin={MIN_PULL_REQUESTS_LIST_WIDTH}
-          aria-valuenow={resolvedListWidth}
-          title="Drag to resize the pull request list"
-          onPointerDown={startDividerResize}
-          onKeyDown={resizeDividerWithKeyboard}
-          onDoubleClick={() => {
-            setListWidth(DEFAULT_PULL_REQUESTS_LIST_WIDTH);
-            setSavedListWidth(DEFAULT_PULL_REQUESTS_LIST_WIDTH);
-          }}
         />
 
         <main className="pull-request-detail-pane">
@@ -979,23 +796,6 @@ export function PullRequestsManager({ onClose }: { onClose: () => void }) {
         </main>
       </div>
 
-      <button
-        className="media-sheet-resize-handle"
-        data-testid="pull-requests-resize-handle"
-        type="button"
-        aria-label="Resize pull requests panel"
-        title="Drag to resize. Use arrow keys for precise sizing; Home resets."
-        onPointerDown={startResize}
-        onKeyDown={resizeWithKeyboard}
-        onDoubleClick={() => {
-          const next = {
-            width: DEFAULT_MEDIA_STUDIO_WIDTH,
-            height: DEFAULT_MEDIA_STUDIO_HEIGHT,
-          };
-          setSize(next);
-          setSavedSize(next.width, next.height);
-        }}
-      />
     </SheetDialog>
   );
 

@@ -283,54 +283,6 @@
 .media-sheet :is(.btn-accent, .btn-ghost, .inline-media-kind button, .media-filter-tabs button, .media-control-bar button):active:not(:disabled) {
   transform: translateY(1px);
 }
-.media-sheet-resize-handle {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  z-index: 5;
-  width: 30px;
-  height: 30px;
-  padding: 0;
-  border: 0;
-  border-radius: 0 0 var(--card-radius) 0;
-  background: transparent;
-  color: var(--secondary-text);
-  cursor: nwse-resize;
-  touch-action: none;
-  transition: color var(--motion-fast) var(--motion-ease-out);
-}
-.media-sheet-resize-handle::before {
-  content: "";
-  position: absolute;
-  right: 6px;
-  bottom: 6px;
-  width: 20px;
-  height: 20px;
-  box-sizing: border-box;
-  border-right: 1.5px solid currentColor;
-  border-bottom: 1.5px solid currentColor;
-  border-bottom-right-radius: max(0px, calc(var(--card-radius) - 6px));
-  -webkit-mask:
-    linear-gradient(to bottom, transparent, #000 clamp(2px, calc(26px - var(--card-radius)), 16px)),
-    linear-gradient(to right, transparent, #000 clamp(2px, calc(26px - var(--card-radius)), 16px));
-  -webkit-mask-composite: source-in;
-  mask:
-    linear-gradient(to bottom, transparent, #000 clamp(2px, calc(26px - var(--card-radius)), 16px)),
-    linear-gradient(to right, transparent, #000 clamp(2px, calc(26px - var(--card-radius)), 16px));
-  mask-composite: intersect;
-}
-.media-sheet-resize-handle:hover,
-.media-sheet-resize-handle:focus-visible {
-  color: var(--primary-text);
-  outline-offset: -1px;
-}
-body:is(.media-studio-resizing, .pull-requests-resizing) .media-sheet-resize-handle {
-  color: var(--accent);
-}
-body.media-studio-resizing {
-  cursor: nwse-resize;
-  user-select: none;
-}
 
 .media-stage,
 .media-library {

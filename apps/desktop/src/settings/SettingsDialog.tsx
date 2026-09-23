@@ -73,8 +73,6 @@ import {
 import {
   ATTENTION_SOUND_OPTIONS,
   DEFAULT_UI_SIZE,
-  DEFAULT_PREVIEW_PANEL_WIDTH,
-  DEFAULT_SIDEBAR_WIDTH,
   FINISHED_SOUND_OPTIONS,
   MAX_UI_SIZE,
   MIN_UI_SIZE,
@@ -245,8 +243,6 @@ export function SettingsPage({
   const activeBackgroundImage = current.background.image?.trim() ? current.background.image : undefined;
   const setTheme = useTheme((s) => s.setTheme);
   const sidebarOpen = useUiPreferences((s) => s.sidebarOpen);
-  const sidebarWidth = useUiPreferences((s) => s.sidebarWidth);
-  const previewPanelWidth = useUiPreferences((s) => s.previewPanelWidth);
   const uiSize = useUiPreferences((s) => s.uiSize);
   const showAccountUsageInTitleBar = useUiPreferences((s) => s.showAccountUsageInTitleBar);
   const windowAlwaysOnTop = useUiPreferences((s) => s.windowAlwaysOnTop);
@@ -344,7 +340,7 @@ export function SettingsPage({
   const setNewProjectChatWorkspace = useUiPreferences((s) => s.setNewProjectChatWorkspace);
   const setComposerCompletionMode = useUiPreferences((s) => s.setComposerCompletionMode);
   const setRemoteCompletionConfirmed = useUiPreferences((s) => s.setRemoteCompletionConfirmed);
-  const resetLayoutWidths = useUiPreferences((s) => s.resetLayoutWidths);
+  const resetAllPaneSizes = useUiPreferences((s) => s.resetAllPaneSizes);
   const setAppShortcut = useUiPreferences((s) => s.setAppShortcut);
   const resetAppShortcuts = useUiPreferences((s) => s.resetAppShortcuts);
   const onboardingStatus = useOnboarding((s) => s.status);
@@ -1128,12 +1124,10 @@ export function SettingsPage({
                 </div>}
                 <div className="settings-action-row">
                   <div>
-                    <strong>Panel widths</strong>
-                    <span>
-                      Sidebar {sidebarWidth}px / Preview {previewPanelWidth}px · Defaults {DEFAULT_SIDEBAR_WIDTH}px / {DEFAULT_PREVIEW_PANEL_WIDTH}px
-                    </span>
+                    <strong>Panel sizes</strong>
+                    <span>Return every resized panel to its default size.</span>
                   </div>
-                  <button className="btn-ghost" type="button" data-testid="general-reset-layout" onClick={resetLayoutWidths}>
+                  <button className="btn-ghost" type="button" data-testid="general-reset-layout" onClick={resetAllPaneSizes}>
                     Reset
                   </button>
                 </div>

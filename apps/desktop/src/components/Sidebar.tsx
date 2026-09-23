@@ -1,4 +1,4 @@
-import { Fragment, lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type HTMLAttributes, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
+import { Fragment, lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type HTMLAttributes, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
 import { createPortal } from "react-dom";
 import {
   SIDEBAR_CHATS_SECTION_ID,
@@ -35,7 +35,8 @@ import { threadLinkDropDecision } from "../lib/threadLinks.js";
 import { chatExportFilename, sessionExportPayload, sessionMarkdownExport } from "../lib/threadExport";
 import { branchCanonicalSession, completeSessionForExport } from "../lib/threadHistory";
 import { threadJumpIndexFromEvent } from "../ui/shortcuts";
-import { DEFAULT_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, normalizeSidebarWidth, useUiPreferences, type ThreadNavigationPlacement } from "../ui/store";
+import { useUiPreferences, type ThreadNavigationPlacement } from "../ui/store";
+import { usePaneResize } from "../ui/usePaneResize";
 import { useTheme } from "../theme/store";
 import type { GitPanelView } from "./GitPanel";
 import { useContextMenu } from "./ContextMenu";
@@ -49,9 +50,6 @@ const GitPanel = lazy(() =>
   import("./GitPanel").then((mod) => ({ default: mod.GitPanel })),
 );
 
-const SIDEBAR_KEYBOARD_STEP = 32;
-const SIDEBAR_COLLAPSE_OVERSHOOT = 96;
-const SIDEBAR_SNAP_ANIMATION_MS = 180;
 const SIDEBAR_DRAG_THRESHOLD = 5;
 const SIDEBAR_SECTION_PREVIEW_LIMIT = 5;
 const SIDEBAR_INBOX_SECTION_ID = "inbox";
@@ -1129,8 +1127,6 @@ export function Sidebar({
   const setSessionUnread = useSessions((s) => s.setSessionUnread);
   const moveSidebarSection = useSessions((s) => s.moveSidebarSection);
   const moveSessionInSidebar = useSessions((s) => s.moveSessionInSidebar);
-  const sidebarWidth = useUiPreferences((s) => s.sidebarWidth);
-  const setSidebarWidth = useUiPreferences((s) => s.setSidebarWidth);
   const newChatButtonAtBottom = useUiPreferences((s) => s.newChatButtonAtBottom);
   const settledThreadsEnabled = useUiPreferences((s) => s.settledThreadsEnabled);
   const autoColorThreadNames = useUiPreferences((s) => s.autoColorThreadNames);
@@ -1148,22 +1144,17 @@ export function Sidebar({
   const searchInputRef = useRef<HTMLInputElement>(null);
   const focusSearchAfterOpenRef = useRef(false);
   const sidebarElementRef = useRef<HTMLElement>(null);
-  const sidebarResizeHandleRef = useRef<HTMLDivElement>(null);
-  const sidebarResizeStartRef = useRef<{
-    clientX: number;
-    width: number;
-    latestWidth: number;
-    pointerId: number;
-    target: HTMLDivElement;
-    snappedClosed: boolean;
-    resumeTimer: number | null;
-  } | null>(null);
-  const sidebarResizeCleanupRef = useRef<(() => void) | null>(null);
+  // Dragging 96px past the minimum collapses the sidebar; reversing reopens it.
+  const sidebarResize = usePaneResize("sidebar", {
+    targetRef: sidebarElementRef,
+    cssVar: "--sidebar-width",
+    onCollapse: onToggle,
+    onExpand: onToggle,
+  });
   const pointerDragRef = useRef<SidebarPointerDrag | null>(null);
   const dragGhostRef = useRef<HTMLDivElement | null>(null);
   const dragOverRef = useRef<SidebarDragTarget | null>(null);
   const suppressNextClickRef = useRef(false);
-  const [sidebarResizing, setSidebarResizing] = useState(false);
   const [dragging, setDragging] = useState<SidebarDragItem | null>(null);
   const [dragOver, setDragOver] = useState<SidebarDragTarget | null>(null);
   const [sectionVisibleLimits, setSectionVisibleLimits] = useState<Record<string, number>>(() => ({}));
@@ -2078,11 +2069,8 @@ export function Sidebar({
     endSidebarDrag();
   }
 
-  const resolvedSidebarWidth = normalizeSidebarWidth(
-    sidebarResizeStartRef.current?.latestWidth ?? sidebarWidth,
-  );
   const sidebarStyle = {
-    "--sidebar-width": `${resolvedSidebarWidth}px`,
+    "--sidebar-width": `${sidebarResize.size}px`,
   } as CSSProperties;
   const newChatPrimaryButton = (
     <button
@@ -2112,107 +2100,6 @@ export function Sidebar({
   ) : (
     newChatPrimaryButton
   );
-
-  function resizeSidebar(width: number) {
-    setSidebarWidth(normalizeSidebarWidth(width));
-  }
-
-  function resizeSidebarDuringDrag(width: number) {
-    const start = sidebarResizeStartRef.current;
-    if (!start) return;
-    const nextWidth = normalizeSidebarWidth(width);
-    start.latestWidth = nextWidth;
-    sidebarElementRef.current?.style.setProperty("--sidebar-width", `${nextWidth}px`);
-    sidebarResizeHandleRef.current?.setAttribute("aria-valuenow", String(nextWidth));
-  }
-
-  function startSidebarResize(event: ReactPointerEvent<HTMLDivElement>) {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    const target = event.currentTarget;
-    sidebarResizeStartRef.current = {
-      clientX: event.clientX,
-      width: resolvedSidebarWidth,
-      latestWidth: resolvedSidebarWidth,
-      pointerId: event.pointerId,
-      target,
-      snappedClosed: false,
-      resumeTimer: null,
-    };
-    setSidebarResizing(true);
-    target.setPointerCapture(event.pointerId);
-    const move = (nextEvent: PointerEvent) => moveSidebarResize(nextEvent);
-    const end = (nextEvent: PointerEvent) => endSidebarResize(nextEvent);
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", end);
-    window.addEventListener("pointercancel", end);
-    sidebarResizeCleanupRef.current = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", end);
-      window.removeEventListener("pointercancel", end);
-      sidebarResizeCleanupRef.current = null;
-    };
-  }
-
-  function moveSidebarResize(event: PointerEvent) {
-    const start = sidebarResizeStartRef.current;
-    if (!start || event.pointerId !== start.pointerId) return;
-    const width = start.width + event.clientX - start.clientX;
-    if (width < MIN_SIDEBAR_WIDTH - SIDEBAR_COLLAPSE_OVERSHOOT) {
-      if (!start.snappedClosed) {
-        start.snappedClosed = true;
-        if (start.resumeTimer != null) window.clearTimeout(start.resumeTimer);
-        start.resumeTimer = null;
-        setSidebarResizing(false);
-        onToggle();
-      }
-      return;
-    }
-    if (start.snappedClosed) {
-      start.snappedClosed = false;
-      start.latestWidth = normalizeSidebarWidth(width);
-      onToggle();
-      start.resumeTimer = window.setTimeout(() => {
-        if (sidebarResizeStartRef.current === start && !start.snappedClosed) {
-          setSidebarResizing(true);
-        }
-        start.resumeTimer = null;
-      }, SIDEBAR_SNAP_ANIMATION_MS);
-    }
-    resizeSidebarDuringDrag(width);
-  }
-
-  function endSidebarResize(event: PointerEvent) {
-    const start = sidebarResizeStartRef.current;
-    if (!start || event.pointerId !== start.pointerId) return;
-    if (start.latestWidth !== start.width) setSidebarWidth(start.latestWidth);
-    sidebarResizeStartRef.current = null;
-    if (start.resumeTimer != null) window.clearTimeout(start.resumeTimer);
-    sidebarResizeCleanupRef.current?.();
-    setSidebarResizing(false);
-    if (start.target.hasPointerCapture(event.pointerId)) {
-      start.target.releasePointerCapture(event.pointerId);
-    }
-  }
-
-  function resizeSidebarWithKeyboard(event: KeyboardEvent<HTMLDivElement>) {
-    if (event.key === "ArrowLeft") {
-      event.preventDefault();
-      resizeSidebar(resolvedSidebarWidth - SIDEBAR_KEYBOARD_STEP);
-    } else if (event.key === "ArrowRight") {
-      event.preventDefault();
-      resizeSidebar(resolvedSidebarWidth + SIDEBAR_KEYBOARD_STEP);
-    } else if (event.key === "Home") {
-      event.preventDefault();
-      resizeSidebar(MIN_SIDEBAR_WIDTH);
-    } else if (event.key === "End") {
-      event.preventDefault();
-      resizeSidebar(MAX_SIDEBAR_WIDTH);
-    } else if (event.key === "Enter") {
-      event.preventDefault();
-      resizeSidebar(DEFAULT_SIDEBAR_WIDTH);
-    }
-  }
 
   function threadBarPopoverStyle(): CSSProperties {
     const trigger = threadBarTriggerRef.current;
@@ -2619,7 +2506,7 @@ export function Sidebar({
 
   return (
     <>
-    <aside ref={sidebarElementRef} className={"sidebar" + (sidebarResizing ? " resizing" : "")} aria-label={settledThreadsEnabled ? "Thread inbox" : "Chats"} style={sidebarStyle}>
+    <aside ref={sidebarElementRef} className={"sidebar" + (sidebarResize.dragging ? " resizing" : "")} aria-label={settledThreadsEnabled ? "Thread inbox" : "Chats"} style={sidebarStyle}>
       <div className="sidebar-inner">
         <div className="sidebar-head">
           <button className="icon-btn" title="Collapse sidebar" onClick={onToggle}>
@@ -3196,19 +3083,9 @@ export function Sidebar({
         </div>
       </div>
       <PaneResizeHandle
-        ref={sidebarResizeHandleRef}
-        className={`sidebar-resize-handle${sidebarResizing ? " dragging" : ""}`}
-        orientation="vertical"
+        resize={sidebarResize}
+        className="sidebar-resize-handle"
         data-testid="sidebar-resize-handle"
-        aria-label="Resize thread sidebar; double-click or press Enter to reset"
-        title="Drag to resize; double-click to reset"
-        aria-valuemin={MIN_SIDEBAR_WIDTH}
-        aria-valuemax={MAX_SIDEBAR_WIDTH}
-        aria-valuenow={resolvedSidebarWidth}
-        tabIndex={0}
-        onKeyDown={resizeSidebarWithKeyboard}
-        onPointerDown={startSidebarResize}
-        onDoubleClick={() => resizeSidebar(DEFAULT_SIDEBAR_WIDTH)}
       />
     </aside>
     {customizingProject && (

@@ -5,6 +5,14 @@ import {
   normalizeWorkspaceLauncherHistory,
   rememberWorkspaceLauncherInHistory,
 } from "../lib/workspaceLauncher.js";
+import {
+  LEGACY_PANE_SIZE_KEYS,
+  migratePaneSizes,
+  normalizePaneSizes,
+  withPaneSize,
+  type PaneId,
+  type PaneSizes,
+} from "../lib/paneSizes.js";
 import { userStateStorage, writeUserStateKey } from "../persistence/userStateStorage.js";
 import {
   DEFAULT_APP_SHORTCUTS,
@@ -68,16 +76,9 @@ const WINDOW_ALWAYS_ON_TOP_KEY = "milim.window.alwaysOnTop";
 
 interface UiPreferencesState {
   sidebarOpen: boolean;
-  sidebarWidth: number;
-  previewPanelWidth: number;
-  mediaStudioWidth: number;
-  mediaStudioHeight: number;
+  /** Sparse pane-size preferences; see lib/paneSizes. */
+  paneSizes: PaneSizes;
   mediaComposerPlacement: MediaComposerPlacement;
-  mediaComposerWidth: number;
-  mediaLibraryWidth: number;
-  pullRequestsWidth: number;
-  pullRequestsHeight: number;
-  pullRequestsListWidth: number;
   uiSize: number;
   previewBrowserZoom: PreviewBrowserZoom;
   showAccountUsageInTitleBar: boolean;
@@ -133,14 +134,13 @@ interface UiPreferencesState {
   notices: AppNotice[];
   appShortcuts: AppShortcuts;
   setSidebarOpen: (sidebarOpen: boolean) => void;
-  setSidebarWidth: (sidebarWidth: number) => void;
-  setPreviewPanelWidth: (previewPanelWidth: number) => void;
-  setMediaStudioSize: (width: number, height: number) => void;
+  /** Saves one pane size; `null` (or the default) clears the preference. */
+  setPaneSize: (id: PaneId, size: number | null) => void;
+  /** Saves several pane sizes in one persisted write. */
+  setPaneSizes: (sizes: Partial<Record<PaneId, number | null>>) => void;
+  resetPaneSize: (id: PaneId) => void;
+  resetAllPaneSizes: () => void;
   setMediaComposerPlacement: (placement: MediaComposerPlacement) => void;
-  setMediaComposerWidth: (width: number) => void;
-  setMediaLibraryWidth: (width: number) => void;
-  setPullRequestsSize: (width: number, height: number) => void;
-  setPullRequestsListWidth: (width: number) => void;
   setUiSize: (uiSize: number) => void;
   setPreviewBrowserZoom: (source: PreviewBrowserZoomSource, zoom: number) => void;
   setShowAccountUsageInTitleBar: (showAccountUsageInTitleBar: boolean) => void;
@@ -199,25 +199,9 @@ interface UiPreferencesState {
   dismissNotice: (id: string) => void;
   setAppShortcut: (action: AppShortcutAction, shortcut: string) => boolean;
   resetAppShortcuts: () => void;
-  resetLayoutWidths: () => void;
   toggleSidebar: () => void;
 }
 
-export const DEFAULT_SIDEBAR_WIDTH = 248;
-export const MIN_SIDEBAR_WIDTH = 220;
-export const MAX_SIDEBAR_WIDTH = 420;
-export const DEFAULT_PREVIEW_PANEL_WIDTH = 420;
-const MIN_PREVIEW_PANEL_WIDTH = 280;
-export const DEFAULT_MEDIA_STUDIO_WIDTH = 1120;
-export const DEFAULT_MEDIA_STUDIO_HEIGHT = 820;
-export const DEFAULT_MEDIA_COMPOSER_WIDTH = 300;
-export const DEFAULT_MEDIA_LIBRARY_WIDTH = 280;
-export const MIN_MEDIA_STUDIO_WIDTH = 560;
-export const MIN_MEDIA_STUDIO_HEIGHT = 480;
-export const DEFAULT_PULL_REQUESTS_LIST_WIDTH = 520;
-export const MIN_PULL_REQUESTS_LIST_WIDTH = 240;
-const MAX_MEDIA_STUDIO_WIDTH = 2400;
-const MAX_MEDIA_STUDIO_HEIGHT = 1600;
 export const DEFAULT_UI_SIZE = 100;
 export const MIN_UI_SIZE = 80;
 export const MAX_UI_SIZE = 140;
@@ -226,28 +210,6 @@ export const PREVIEW_BROWSER_ZOOM_LEVELS = [
   25, 33, 50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300, 400, 500,
 ] as const;
 export const DEFAULT_PREVIEW_BROWSER_ZOOM: PreviewBrowserZoom = { app: 100, url: 100 };
-
-export function normalizeSidebarWidth(width: number): number {
-  if (!Number.isFinite(width)) return DEFAULT_SIDEBAR_WIDTH;
-  return Math.round(Math.min(Math.max(width, MIN_SIDEBAR_WIDTH), MAX_SIDEBAR_WIDTH));
-}
-
-export function normalizePullRequestsListWidth(width: number): number {
-  if (!Number.isFinite(width)) return DEFAULT_PULL_REQUESTS_LIST_WIDTH;
-  return Math.round(Math.max(width, MIN_PULL_REQUESTS_LIST_WIDTH));
-}
-
-function normalizePreviewPanelWidth(width: number): number {
-  if (!Number.isFinite(width)) return DEFAULT_PREVIEW_PANEL_WIDTH;
-  return Math.round(Math.max(width, MIN_PREVIEW_PANEL_WIDTH));
-}
-
-export function normalizeMediaStudioSize(width: number, height: number): { width: number; height: number } {
-  return {
-    width: Math.round(Math.min(Math.max(Number.isFinite(width) ? width : DEFAULT_MEDIA_STUDIO_WIDTH, MIN_MEDIA_STUDIO_WIDTH), MAX_MEDIA_STUDIO_WIDTH)),
-    height: Math.round(Math.min(Math.max(Number.isFinite(height) ? height : DEFAULT_MEDIA_STUDIO_HEIGHT, MIN_MEDIA_STUDIO_HEIGHT), MAX_MEDIA_STUDIO_HEIGHT)),
-  };
-}
 
 export function normalizeUiSize(size: number): number {
   if (!Number.isFinite(size)) return DEFAULT_UI_SIZE;
@@ -431,16 +393,8 @@ export const useUiPreferences = create<UiPreferencesState>()(
   persist(
     (set) => ({
       sidebarOpen: true,
-      sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
-      previewPanelWidth: DEFAULT_PREVIEW_PANEL_WIDTH,
-      mediaStudioWidth: DEFAULT_MEDIA_STUDIO_WIDTH,
-      mediaStudioHeight: DEFAULT_MEDIA_STUDIO_HEIGHT,
+      paneSizes: {},
       mediaComposerPlacement: "bottom",
-      mediaComposerWidth: DEFAULT_MEDIA_COMPOSER_WIDTH,
-      mediaLibraryWidth: DEFAULT_MEDIA_LIBRARY_WIDTH,
-      pullRequestsWidth: DEFAULT_MEDIA_STUDIO_WIDTH,
-      pullRequestsHeight: DEFAULT_MEDIA_STUDIO_HEIGHT,
-      pullRequestsListWidth: DEFAULT_PULL_REQUESTS_LIST_WIDTH,
       uiSize: DEFAULT_UI_SIZE,
       previewBrowserZoom: { ...DEFAULT_PREVIEW_BROWSER_ZOOM },
       showAccountUsageInTitleBar: true,
@@ -496,21 +450,17 @@ export const useUiPreferences = create<UiPreferencesState>()(
       notices: [],
       appShortcuts: { ...DEFAULT_APP_SHORTCUTS },
       setSidebarOpen: (sidebarOpen) => set({ sidebarOpen }),
-      setSidebarWidth: (sidebarWidth) => set({ sidebarWidth: normalizeSidebarWidth(sidebarWidth) }),
-      setPreviewPanelWidth: (previewPanelWidth) => set({ previewPanelWidth: normalizePreviewPanelWidth(previewPanelWidth) }),
-      setMediaStudioSize: (width, height) => {
-        const size = normalizeMediaStudioSize(width, height);
-        set({ mediaStudioWidth: size.width, mediaStudioHeight: size.height });
-      },
+      setPaneSize: (id, size) => set((state) => ({ paneSizes: withPaneSize(state.paneSizes, id, size) })),
+      setPaneSizes: (sizes) => set((state) => {
+        let paneSizes = state.paneSizes;
+        for (const [id, size] of Object.entries(sizes) as [PaneId, number | null][]) {
+          paneSizes = withPaneSize(paneSizes, id, size);
+        }
+        return { paneSizes };
+      }),
+      resetPaneSize: (id) => set((state) => ({ paneSizes: withPaneSize(state.paneSizes, id, null) })),
+      resetAllPaneSizes: () => set({ paneSizes: {} }),
       setMediaComposerPlacement: (mediaComposerPlacement) => set({ mediaComposerPlacement }),
-      setMediaComposerWidth: (mediaComposerWidth) => set({ mediaComposerWidth: normalizeSidebarWidth(mediaComposerWidth) }),
-      setMediaLibraryWidth: (mediaLibraryWidth) => set({ mediaLibraryWidth: normalizeSidebarWidth(mediaLibraryWidth) }),
-      setPullRequestsSize: (width, height) => {
-        const size = normalizeMediaStudioSize(width, height);
-        set({ pullRequestsWidth: size.width, pullRequestsHeight: size.height });
-      },
-      setPullRequestsListWidth: (width) =>
-        set({ pullRequestsListWidth: normalizePullRequestsListWidth(width) }),
       setUiSize: (uiSize) => set({ uiSize: normalizeUiSize(uiSize) }),
       setPreviewBrowserZoom: (source, zoom) => set((state) => ({
         previewBrowserZoom: {
@@ -634,18 +584,6 @@ export const useUiPreferences = create<UiPreferencesState>()(
         return accepted;
       },
       resetAppShortcuts: () => set({ appShortcuts: { ...DEFAULT_APP_SHORTCUTS } }),
-      resetLayoutWidths: () =>
-        set({
-          sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
-          previewPanelWidth: DEFAULT_PREVIEW_PANEL_WIDTH,
-          mediaStudioWidth: DEFAULT_MEDIA_STUDIO_WIDTH,
-          mediaStudioHeight: DEFAULT_MEDIA_STUDIO_HEIGHT,
-          mediaComposerWidth: DEFAULT_MEDIA_COMPOSER_WIDTH,
-          mediaLibraryWidth: DEFAULT_MEDIA_LIBRARY_WIDTH,
-          pullRequestsWidth: DEFAULT_MEDIA_STUDIO_WIDTH,
-          pullRequestsHeight: DEFAULT_MEDIA_STUDIO_HEIGHT,
-          pullRequestsListWidth: DEFAULT_PULL_REQUESTS_LIST_WIDTH,
-        }),
       toggleSidebar: () => set((state) => ({ sidebarOpen: !state.sidebarOpen })),
     }),
     {
@@ -653,38 +591,18 @@ export const useUiPreferences = create<UiPreferencesState>()(
       storage: createJSONStorage(() => userStateStorage),
       merge: (persisted, current) => {
         const saved = persisted as (Partial<UiPreferencesState> & { thinkingBlocksOpen?: unknown; interfaceMode?: unknown; workbenchExpanded?: unknown }) | undefined;
-        const savedState = saved ? { ...saved } : undefined;
+        const savedState: Record<string, unknown> | undefined = saved ? { ...saved } : undefined;
         delete savedState?.thinkingBlocksOpen;
         delete savedState?.interfaceMode;
         delete savedState?.workbenchExpanded;
+        for (const legacyKey of Object.keys(LEGACY_PANE_SIZE_KEYS)) delete savedState?.[legacyKey];
         return {
           ...current,
           ...savedState,
           sidebarOpen: typeof saved?.sidebarOpen === "boolean" ? saved.sidebarOpen : current.sidebarOpen,
-          sidebarWidth: normalizeSidebarWidth(saved?.sidebarWidth ?? current.sidebarWidth),
-          previewPanelWidth: normalizePreviewPanelWidth(saved?.previewPanelWidth ?? current.previewPanelWidth),
-          mediaStudioWidth: normalizeMediaStudioSize(
-            saved?.mediaStudioWidth ?? current.mediaStudioWidth,
-            saved?.mediaStudioHeight ?? current.mediaStudioHeight,
-          ).width,
-          mediaStudioHeight: normalizeMediaStudioSize(
-            saved?.mediaStudioWidth ?? current.mediaStudioWidth,
-            saved?.mediaStudioHeight ?? current.mediaStudioHeight,
-          ).height,
+          // Pre-registry builds saved sizes as top-level keys; they migrate once here.
+          paneSizes: migratePaneSizes(saved as Record<string, unknown> | undefined),
           mediaComposerPlacement: normalizeEnum(saved?.mediaComposerPlacement, ["side", "bottom"], "bottom"),
-          mediaComposerWidth: normalizeSidebarWidth(saved?.mediaComposerWidth ?? current.mediaComposerWidth),
-          mediaLibraryWidth: normalizeSidebarWidth(saved?.mediaLibraryWidth ?? current.mediaLibraryWidth),
-          pullRequestsWidth: normalizeMediaStudioSize(
-            saved?.pullRequestsWidth ?? current.pullRequestsWidth,
-            saved?.pullRequestsHeight ?? current.pullRequestsHeight,
-          ).width,
-          pullRequestsHeight: normalizeMediaStudioSize(
-            saved?.pullRequestsWidth ?? current.pullRequestsWidth,
-            saved?.pullRequestsHeight ?? current.pullRequestsHeight,
-          ).height,
-          pullRequestsListWidth: normalizePullRequestsListWidth(
-            saved?.pullRequestsListWidth ?? current.pullRequestsListWidth,
-          ),
           uiSize: normalizeUiSize(saved?.uiSize ?? current.uiSize),
           previewBrowserZoom: normalizePreviewBrowserZoomBySource(saved?.previewBrowserZoom),
           showAccountUsageInTitleBar: typeof saved?.showAccountUsageInTitleBar === "boolean" ? saved.showAccountUsageInTitleBar : current.showAccountUsageInTitleBar,
@@ -748,16 +666,8 @@ export const useUiPreferences = create<UiPreferencesState>()(
       },
       partialize: (state) => ({
         sidebarOpen: state.sidebarOpen,
-        sidebarWidth: normalizeSidebarWidth(state.sidebarWidth),
-        previewPanelWidth: normalizePreviewPanelWidth(state.previewPanelWidth),
-        mediaStudioWidth: normalizeMediaStudioSize(state.mediaStudioWidth, state.mediaStudioHeight).width,
-        mediaStudioHeight: normalizeMediaStudioSize(state.mediaStudioWidth, state.mediaStudioHeight).height,
+        paneSizes: normalizePaneSizes(state.paneSizes),
         mediaComposerPlacement: normalizeEnum(state.mediaComposerPlacement, ["side", "bottom"], "bottom"),
-        mediaComposerWidth: normalizeSidebarWidth(state.mediaComposerWidth),
-        mediaLibraryWidth: normalizeSidebarWidth(state.mediaLibraryWidth),
-        pullRequestsWidth: normalizeMediaStudioSize(state.pullRequestsWidth, state.pullRequestsHeight).width,
-        pullRequestsHeight: normalizeMediaStudioSize(state.pullRequestsWidth, state.pullRequestsHeight).height,
-        pullRequestsListWidth: normalizePullRequestsListWidth(state.pullRequestsListWidth),
         uiSize: normalizeUiSize(state.uiSize),
         previewBrowserZoom: normalizePreviewBrowserZoomBySource(state.previewBrowserZoom),
         showAccountUsageInTitleBar: state.showAccountUsageInTitleBar,

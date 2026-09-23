@@ -1303,7 +1303,7 @@ async function runInboxSidebarCheck(page) {
     await invoke("user_state_set", {
       key: "milim.ui",
       value: JSON.stringify({
-        state: { settledThreadsEnabled: false, sidebarOpen: true, sidebarWidth: 236, threadNavigationPlacement: "sidebar", showAccountUsageInTitleBar: true },
+        state: { settledThreadsEnabled: false, sidebarOpen: true, paneSizes: { sidebar: 236 }, threadNavigationPlacement: "sidebar", showAccountUsageInTitleBar: true },
         version: 0,
       }),
     });
@@ -5174,10 +5174,10 @@ async function runMicroUiCheck(page) {
     throw new Error("Sidebar keyboard resize should change its width.");
   }
   await page.keyboard.press("Enter");
-  await assertAttribute(sidebarHandle, "aria-valuenow", "248");
+  await waitForAttribute(sidebarHandle, "aria-valuenow", "248");
   await page.keyboard.press("ArrowRight");
   await sidebarHandle.dblclick();
-  await assertAttribute(sidebarHandle, "aria-valuenow", "248");
+  await waitForAttribute(sidebarHandle, "aria-valuenow", "248");
   await delay(220);
 
   await resetUiPersistenceWrites(page);
@@ -5192,14 +5192,14 @@ async function runMicroUiCheck(page) {
     await page.mouse.move(sidebarDragX + step * 4, sidebarDragY);
     await delay(8);
   }
-  await assertAttribute(sidebarHandle, "aria-valuenow", "344");
+  await waitForAttribute(sidebarHandle, "aria-valuenow", "344");
   await assertUiPersistenceWrites(page, 0, "Sidebar drag before pointer-up");
   await page.mouse.up();
-  await assertAttribute(sidebarHandle, "aria-valuenow", "344");
+  await waitForAttribute(sidebarHandle, "aria-valuenow", "344");
   await assertUiPersistenceWrites(page, 1, "Completed sidebar drag");
   await sidebarHandle.focus();
   await page.keyboard.press("Enter");
-  await assertAttribute(sidebarHandle, "aria-valuenow", "248");
+  await waitForAttribute(sidebarHandle, "aria-valuenow", "248");
   await delay(220);
 
   const sidebarHandleBox = await sidebarHandle.boundingBox();
@@ -5208,13 +5208,13 @@ async function runMicroUiCheck(page) {
   await page.mouse.down();
   await delay(50);
   await page.mouse.move(sidebarHandleBox.x - 112, sidebarHandleBox.y + sidebarHandleBox.height / 2, { steps: 4 });
-  await assertAttribute(sidebarHandle, "aria-valuenow", "220");
+  await waitForAttribute(sidebarHandle, "aria-valuenow", "220");
   await page.mouse.move(sidebarHandleBox.x - 128, sidebarHandleBox.y + sidebarHandleBox.height / 2);
   await sidebarHandle.waitFor({ state: "hidden" });
   await delay(150);
   await page.mouse.move(sidebarHandleBox.x - 112, sidebarHandleBox.y + sidebarHandleBox.height / 2);
   await sidebarHandle.waitFor();
-  await assertAttribute(sidebarHandle, "aria-valuenow", "220");
+  await waitForAttribute(sidebarHandle, "aria-valuenow", "220");
   await page.mouse.move(sidebarHandleBox.x - 128, sidebarHandleBox.y + sidebarHandleBox.height / 2);
   await sidebarHandle.waitFor({ state: "hidden" });
   await page.mouse.up();
@@ -5238,10 +5238,10 @@ async function runMicroUiCheck(page) {
     throw new Error("Inspector keyboard resize should change its width.");
   }
   await page.keyboard.press("Enter");
-  await assertAttribute(previewHandle, "aria-valuenow", "420");
+  await waitForAttribute(previewHandle, "aria-valuenow", "420");
   await page.keyboard.press("ArrowLeft");
   await previewHandle.dblclick();
-  await assertAttribute(previewHandle, "aria-valuenow", "420");
+  await waitForAttribute(previewHandle, "aria-valuenow", "420");
 
   await resetUiPersistenceWrites(page);
   const previewDragBox = await previewHandle.boundingBox();
@@ -5254,14 +5254,14 @@ async function runMicroUiCheck(page) {
     await page.mouse.move(previewDragX - step * 4, previewDragY);
     await delay(8);
   }
-  await assertAttribute(previewHandle, "aria-valuenow", "516");
+  await waitForAttribute(previewHandle, "aria-valuenow", "516");
   await assertUiPersistenceWrites(page, 0, "Inspector drag before pointer-up");
   await page.mouse.up();
-  await assertAttribute(previewHandle, "aria-valuenow", "516");
+  await waitForAttribute(previewHandle, "aria-valuenow", "516");
   await assertUiPersistenceWrites(page, 1, "Completed inspector drag");
   await previewHandle.focus();
   await page.keyboard.press("Enter");
-  await assertAttribute(previewHandle, "aria-valuenow", "420");
+  await waitForAttribute(previewHandle, "aria-valuenow", "420");
 
   await runProgressiveInspectorResizeCheck(page, previewHandle);
 
@@ -5271,7 +5271,7 @@ async function runMicroUiCheck(page) {
   await page.mouse.down();
   await delay(50);
   await page.mouse.move(previewHandleBox.x + 152, previewHandleBox.y + previewHandleBox.height / 2, { steps: 4 });
-  await assertAttribute(previewHandle, "aria-valuenow", "360");
+  await waitForAttribute(previewHandle, "aria-valuenow", "360");
   await page.mouse.move(previewHandleBox.x + 168, previewHandleBox.y + previewHandleBox.height / 2);
   const closingPreviewPanel = page.locator(".preview-panel.closing");
   await closingPreviewPanel.waitFor();
@@ -5590,9 +5590,9 @@ async function runProgressiveInspectorResizeCheck(page, previewHandle) {
   await page.keyboard.press("ArrowRight");
   await page.waitForFunction(() => !document.querySelector(".chat-body")?.classList.contains("inspector-overlay"));
   await page.keyboard.press("Home");
-  await assertAttribute(previewHandle, "aria-valuenow", "360");
+  await waitForAttribute(previewHandle, "aria-valuenow", "360");
   await page.keyboard.press("Enter");
-  await assertAttribute(previewHandle, "aria-valuenow", "420");
+  await waitForAttribute(previewHandle, "aria-valuenow", "420");
   await page.getByTitle("Expand sidebar").click();
   await sidebarHandle.waitFor();
   await delay(220);
@@ -6680,6 +6680,18 @@ async function assertHidden(locator, label) {
   if (await locator.isVisible().catch(() => false)) {
     throw new Error(`Expected ${label} to be hidden.`);
   }
+}
+
+// Resize handles apply pointer moves once per animation frame, so drag
+// assertions poll briefly instead of reading the attribute once.
+async function waitForAttribute(locator, name, expected, timeout = 2_000) {
+  const deadline = Date.now() + timeout;
+  let value = await locator.getAttribute(name);
+  while (value !== expected && Date.now() < deadline) {
+    await delay(16);
+    value = await locator.getAttribute(name);
+  }
+  if (value !== expected) throw new Error(`Expected ${name} to be "${expected}", got "${value}".`);
 }
 
 async function assertAttribute(locator, name, expected) {
