@@ -3920,7 +3920,7 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 }
 
 /* ---- Agents manager ---- */
-.agents-sheet { width: min(720px, 95vw); }
+.agents-sheet { width: min(var(--manager-sheet-width), calc(100vw - 48px)); height: min(var(--manager-sheet-height), calc(100dvh - 48px)); }
 .agents-body { flex: 1; display: flex; gap: 16px; margin-top: 14px; min-height: 0; overflow: hidden; }
 .agents-list {
   width: 200px;

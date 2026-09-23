@@ -71,7 +71,7 @@ Every panel edge uses one handle: a 12px target centered on the visible seam (or
 | Workers history, Settings navigation | Width | 180–480 · 240px, 200–360 · 232px |
 | Media Studio composer and Library | Width; past the minimum the composer moves below Output and the Library closes | 220–420 · 300px and 280px |
 | Manager lists: Agents, Skills, Schedules, MCP Servers, Providers, Pull requests, and the Memory detail pane | Width | 220–480 · 306px (Skills 292px), Providers 200–440 · 264px, Pull requests 240px+ · 520px, Memory detail 320–720 · 420px |
-| Manager sheets: Agents, Skills, Schedules, Providers, Memory, MCP Servers, Usage, Media Studio, Pull requests | Width and height from any edge or the corner grip; centered sheets grow from both sides | 560×480 minimum, up to the window less 24px · layout default until resized |
+| Manager sheets: Agents, Skills, Schedules, Providers, Memory, MCP Servers, Usage, Media Studio, Pull requests | Width and height from any edge or the corner grip; centered sheets grow from both sides | 560×480 minimum, up to the window less 24px · opens at 1120×820 (Providers 1240×880), shrinking to fit the window, until resized |
 
 Focus a divider to use the keyboard: `Arrow` keys move 16px along its axis (`Shift+Arrow` 64px), `Home` and `End` jump to the smallest and largest size that fits, and `Enter` or double-click resets it. A sheet's corner grip takes `Arrow Left/Right` for width and `Arrow Up/Down` for height; double-clicking a sheet edge resets that axis and the corner resets both. Collapsible panes snap closed when dragged 96px past their minimum (48px for logs), reopen when the same drag reverses, and keep the size they had before collapsing.
 

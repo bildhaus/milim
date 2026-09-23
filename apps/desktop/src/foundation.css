@@ -682,6 +682,11 @@ body.sidebar-pointer-dragging .session-section-title {
 :root {
   --titlebar-height: 44px;
   --chat-content-width: 760px;
+  /* Default manager sheet size until the user resizes it (then the size persists per manager). */
+  --manager-sheet-width: 1120px;
+  --manager-sheet-height: 820px;
+  --manager-sheet-large-width: 1240px;
+  --manager-sheet-large-height: 880px;
   --pane-resize-target: 12px;
   --pane-resize-half-target: 6px;
   --pane-resize-indicator-thickness: 2px;

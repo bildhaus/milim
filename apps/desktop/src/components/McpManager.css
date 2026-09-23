@@ -1,6 +1,6 @@
 .mcp-manager-sheet {
-  width: min(980px, 96vw);
-  height: min(760px, 88vh);
+  width: min(var(--manager-sheet-width), calc(100vw - 48px));
+  height: min(var(--manager-sheet-height), calc(100dvh - 48px));
   padding: 0;
 }
 

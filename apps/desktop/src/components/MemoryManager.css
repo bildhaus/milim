@@ -1,7 +1,7 @@
 .mem-sheet {
-  width: min(980px, calc(100vw - 32px));
-  height: min(720px, calc(100dvh - 28px));
-  max-height: min(720px, calc(100dvh - 28px));
+  width: min(var(--manager-sheet-width), calc(100vw - 48px));
+  height: min(var(--manager-sheet-height), calc(100dvh - 48px));
+  max-height: calc(100dvh - 24px);
   gap: 10px;
 }
 

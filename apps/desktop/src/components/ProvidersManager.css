@@ -1,7 +1,8 @@
 .providers-sheet {
-  width: min(1040px, 96vw);
-  height: min(740px, 90vh);
-  max-height: 90vh;
+  /* Provider rows, account runtimes, and model discovery need the most room. */
+  width: min(var(--manager-sheet-large-width), calc(100vw - 48px));
+  height: min(var(--manager-sheet-large-height), calc(100dvh - 48px));
+  max-height: calc(100dvh - 24px);
   padding: 14px;
 }
 
