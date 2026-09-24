@@ -22,6 +22,9 @@ import { useUiPreferences } from "../ui/store";
 import { Calendar, Paperclip, Plus, Trash, X } from "./icons";
 import { AgentAvatar } from "./AgentAvatar";
 import { SheetDialog } from "./SheetDialog";
+import { PaneResizeHandle } from "./PaneResizeHandle";
+import { MANAGER_DETAIL_MIN_WIDTH } from "../lib/paneSizes";
+import { useSplitPane } from "../ui/usePaneResize";
 import { Select, Toggle } from "./ui";
 import "./SchedulesManager.css";
 
@@ -410,6 +413,7 @@ function scheduleNoteTone(note: string): "error" | "warning" | "success" {
 }
 
 export function SchedulesManager({ onClose }: { onClose: () => void }) {
+  const rail = useSplitPane("schedulesList", "--manager-rail-width", MANAGER_DETAIL_MIN_WIDTH);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const agents = useAgents((s) => s.agents);
   const refreshAgents = useAgents((s) => s.refresh);
@@ -676,7 +680,7 @@ export function SchedulesManager({ onClose }: { onClose: () => void }) {
   const saveLabel = busy ? "Saving..." : sel === "new" ? "Create schedule" : isDirty ? "Save changes" : "Saved";
 
   return (
-    <SheetDialog title="Schedules" className="sheet agents-sheet schedule-sheet" onClose={onClose}>
+    <SheetDialog title="Schedules" className="sheet agents-sheet schedule-sheet" resizable={{ id: "schedules" }} onClose={onClose}>
         <input
           ref={fileInputRef}
           type="file"
@@ -708,7 +712,8 @@ export function SchedulesManager({ onClose }: { onClose: () => void }) {
           </div>
         </div>
 
-        <div className="schedule-manager">
+        <div ref={rail.containerRef} className="schedule-manager" style={rail.style}>
+          <PaneResizeHandle resize={rail.resize} className="manager-rail-resize-handle" data-testid="schedules-rail-resize-handle" />
           <aside className="schedule-list-panel" aria-label="Schedule list">
             <div className="schedule-list-summary">
               <span>{schedules.length} total</span>

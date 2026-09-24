@@ -1,4 +1,4 @@
-import { Fragment, type KeyboardEvent, useEffect, useMemo, useState } from "react";
+import { Fragment, type CSSProperties, type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import "../settings.css";
 import { RunLimitsSettings } from "./RunLimitsSettings";
 import {
@@ -73,8 +73,6 @@ import {
 import {
   ATTENTION_SOUND_OPTIONS,
   DEFAULT_UI_SIZE,
-  DEFAULT_PREVIEW_PANEL_WIDTH,
-  DEFAULT_SIDEBAR_WIDTH,
   FINISHED_SOUND_OPTIONS,
   MAX_UI_SIZE,
   MIN_UI_SIZE,
@@ -88,6 +86,8 @@ import {
 } from "../ui/store";
 import { playInterfaceSound } from "../ui/sounds";
 import { confirmApp } from "../ui/confirmation";
+import { usePaneResize } from "../ui/usePaneResize";
+import { PaneResizeHandle } from "../components/PaneResizeHandle";
 import { Archive, Check, Code, Download, ExternalLink, FileText, FolderOpen, Gear, GitLogo, Pencil, PlusSquare, Refresh, Search, Sidebar, Smartphone, Sun, Trash, Volume2, X } from "../components/icons";
 import { MobileCompanionSettings } from "../components/MobileCompanionSettings";
 import { ThemeEditor } from "../components/ThemeEditor";
@@ -245,8 +245,7 @@ export function SettingsPage({
   const activeBackgroundImage = current.background.image?.trim() ? current.background.image : undefined;
   const setTheme = useTheme((s) => s.setTheme);
   const sidebarOpen = useUiPreferences((s) => s.sidebarOpen);
-  const sidebarWidth = useUiPreferences((s) => s.sidebarWidth);
-  const previewPanelWidth = useUiPreferences((s) => s.previewPanelWidth);
+  const customizedPaneCount = useUiPreferences((s) => Object.keys(s.paneSizes).length);
   const uiSize = useUiPreferences((s) => s.uiSize);
   const showAccountUsageInTitleBar = useUiPreferences((s) => s.showAccountUsageInTitleBar);
   const windowAlwaysOnTop = useUiPreferences((s) => s.windowAlwaysOnTop);
@@ -344,7 +343,13 @@ export function SettingsPage({
   const setNewProjectChatWorkspace = useUiPreferences((s) => s.setNewProjectChatWorkspace);
   const setComposerCompletionMode = useUiPreferences((s) => s.setComposerCompletionMode);
   const setRemoteCompletionConfirmed = useUiPreferences((s) => s.setRemoteCompletionConfirmed);
-  const resetLayoutWidths = useUiPreferences((s) => s.resetLayoutWidths);
+  const resetAllPaneSizes = useUiPreferences((s) => s.resetAllPaneSizes);
+  const settingsLayoutRef = useRef<HTMLDivElement>(null);
+  const settingsNavResize = usePaneResize("settingsNav", {
+    targetRef: settingsLayoutRef,
+    cssVar: "--settings-nav-width",
+    controls: "settings-nav",
+  });
   const setAppShortcut = useUiPreferences((s) => s.setAppShortcut);
   const resetAppShortcuts = useUiPreferences((s) => s.resetAppShortcuts);
   const onboardingStatus = useOnboarding((s) => s.status);
@@ -916,8 +921,8 @@ export function SettingsPage({
       testId="settings-page"
       onBack={onClose}
     >
-        <div className="settings-layout">
-          <nav className="settings-nav" aria-label="Settings sections">
+        <div ref={settingsLayoutRef} className="settings-layout" style={{ "--settings-nav-width": `${settingsNavResize.size}px` } as CSSProperties}>
+          <nav id="settings-nav" className="settings-nav" aria-label="Settings sections">
             <div className="settings-nav-search">
               <Search size={14} aria-hidden="true" />
               <input
@@ -1016,6 +1021,11 @@ export function SettingsPage({
               </div>
             )}
           </nav>
+          <PaneResizeHandle
+            resize={settingsNavResize}
+            className="settings-nav-resize-handle"
+            data-testid="settings-nav-resize-handle"
+          />
 
           <div className="settings-detail">
             <div className="settings-detail-head">
@@ -1126,15 +1136,36 @@ export function SettingsPage({
                   </div>
                   <Toggle checked={newChatButtonAtBottom} onChange={setNewChatButtonAtBottom} ariaLabel="New chat at bottom" testId="general-new-chat-bottom-toggle" />
                 </div>}
+              </div>
+            </SettingsBlock>
+            <SettingsBlock title="Panel sizes" data-setting-id="app-panel-sizes" className={settingHighlightClass("app-panel-sizes").trim()}>
+              <div className="setting-stack">
                 <div className="settings-action-row">
                   <div>
-                    <strong>Panel widths</strong>
+                    <strong>Reset panel sizes</strong>
                     <span>
-                      Sidebar {sidebarWidth}px / Preview {previewPanelWidth}px · Defaults {DEFAULT_SIDEBAR_WIDTH}px / {DEFAULT_PREVIEW_PANEL_WIDTH}px
+                      Drag any panel edge to resize it; sizes are remembered.{" "}
+                      {customizedPaneCount === 0
+                        ? "Every panel uses its default size."
+                        : `${customizedPaneCount} ${customizedPaneCount === 1 ? "panel has" : "panels have"} a custom size.`}
                     </span>
                   </div>
-                  <button className="btn-ghost" type="button" data-testid="general-reset-layout" onClick={resetLayoutWidths}>
-                    Reset
+                  <button
+                    className="btn-ghost"
+                    type="button"
+                    data-testid="general-reset-layout"
+                    disabled={customizedPaneCount === 0}
+                    onClick={() => void (async () => {
+                      const accepted = await confirmApp({
+                        title: "Reset panel sizes?",
+                        message: "The sidebar, side panel, Context card, rails, drawers, and manager sheets return to their default sizes.",
+                        confirmLabel: "Reset sizes",
+                      });
+                      if (accepted) resetAllPaneSizes();
+                    })()}
+                  >
+                    <Refresh size={13} />
+                    Reset panel sizes
                   </button>
                 </div>
               </div>

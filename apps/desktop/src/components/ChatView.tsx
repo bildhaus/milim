@@ -10,7 +10,6 @@ import {
   useState,
   type CSSProperties,
   type KeyboardEvent,
-  type PointerEvent as ReactPointerEvent,
   type ReactNode,
   type SetStateAction,
 } from "react";
@@ -364,7 +363,9 @@ import { createInteractiveChat } from "../lib/newChatCoordinator";
 import { requestWorkspaceEditorLeave } from "../lib/workspaceEditorGuard";
 import { isLoopbackProviderEndpoint } from "../lib/providerEndpoint.js";
 import { pendingAttentionKey, playInterfaceSound } from "../ui/sounds";
-import { DEFAULT_PREVIEW_PANEL_WIDTH, useUiPreferences } from "../ui/store";
+import { PANES } from "../lib/paneSizes";
+import { useUiPreferences } from "../ui/store";
+import { paneKeyboardStep, usePaneResize } from "../ui/usePaneResize";
 import { useTheme } from "../theme/store";
 import { confirmApp, promptApp } from "../ui/confirmation";
 import { Composer } from "./Composer";
@@ -485,7 +486,8 @@ function moveItemById<T extends { id: string }>(
 }
 const EMPTY_CONTEXT_SECTION_IDS: QuickSummarySectionId[] = [];
 const NON_EMPTY_USAGE_MESSAGES: ChatMessage[] = [{ role: "user", content: "" }];
-const PREVIEW_PANEL_MIN_WIDTH = 360;
+const PREVIEW_PANEL_MIN_WIDTH = PANES.inspector.min;
+const DEFAULT_PREVIEW_PANEL_WIDTH = PANES.inspector.default ?? PREVIEW_PANEL_MIN_WIDTH;
 const RECENT_THREAD_SWITCHER_CLOSE_MS = 1600;
 const EVENT_STREAM_RECONNECT_MAX_MS = 5_000;
 const previewArtifactCache = new WeakMap<ChatMessage, ChatArtifact[] | null>();
@@ -737,14 +739,14 @@ function nativeWorkerRunRecord(
 
 const CHAT_MAIN_MIN_WIDTH = 420;
 const PREVIEW_RESIZE_HANDLE_WIDTH = 8;
-const CONTEXT_PANEL_WIDTH = 300;
+// The Context card is resizable; stacking and coexistence use its minimum, and
+// a wider saved width is clamped to the space left beside the transcript.
+const CONTEXT_PANEL_MIN_WIDTH = PANES.context.min;
 const INSPECTOR_STACK_THRESHOLD =
   PREVIEW_PANEL_MIN_WIDTH + CHAT_MAIN_MIN_WIDTH + PREVIEW_RESIZE_HANDLE_WIDTH;
-const CONTEXT_STACK_THRESHOLD = CONTEXT_PANEL_WIDTH + CHAT_MAIN_MIN_WIDTH;
-const CONCURRENT_PANEL_THRESHOLD = INSPECTOR_STACK_THRESHOLD + CONTEXT_PANEL_WIDTH;
-const PREVIEW_PANEL_KEYBOARD_STEP = 32;
+const CONTEXT_STACK_THRESHOLD = CONTEXT_PANEL_MIN_WIDTH + CHAT_MAIN_MIN_WIDTH;
+const CONCURRENT_PANEL_THRESHOLD = INSPECTOR_STACK_THRESHOLD + CONTEXT_PANEL_MIN_WIDTH;
 const PREVIEW_PANEL_STAGE_OVERSHOOT = 32;
-const PREVIEW_PANEL_COLLAPSE_OVERSHOOT = 96;
 const PREVIEW_PANEL_ANIMATION_MS = 180;
 const COLLAPSED_SIDEBAR_WIDTH = 48;
 const HOT_SWAP_CONTINUE_PROMPT =
@@ -1082,6 +1084,14 @@ function maxPreviewPanelWidth(
     PREVIEW_PANEL_MIN_WIDTH,
     availableWidth -
       (overlay ? PREVIEW_RESIZE_HANDLE_WIDTH : reservedWidth + CHAT_MAIN_MIN_WIDTH + PREVIEW_RESIZE_HANDLE_WIDTH),
+  );
+}
+
+function maxContextPanelWidth(chatBodyWidth: number, inspectorDocked: boolean): number {
+  return (
+    chatBodyWidth -
+    CHAT_MAIN_MIN_WIDTH -
+    (inspectorDocked ? PREVIEW_PANEL_MIN_WIDTH + PREVIEW_RESIZE_HANDLE_WIDTH : 0)
   );
 }
 
@@ -1876,10 +1886,9 @@ export function ChatView({
     setProviders,
     setComposerTools,
   } = useChatCatalogController(accountRuntimeEnabled, skillsRevision);
-  const previewPanelWidth = useUiPreferences((s) => s.previewPanelWidth);
-  const setPreviewPanelWidth = useUiPreferences((s) => s.setPreviewPanelWidth);
+  const setPaneSize = useUiPreferences((s) => s.setPaneSize);
   const sidebarOpen = useUiPreferences((s) => s.sidebarOpen);
-  const sidebarWidth = useUiPreferences((s) => s.sidebarWidth);
+  const sidebarWidth = useUiPreferences((s) => s.paneSizes.sidebar ?? PANES.sidebar.default ?? PANES.sidebar.min);
   const threadNavigationPlacement = useUiPreferences((s) => s.threadNavigationPlacement);
   const setSidebarOpen = useUiPreferences((s) => s.setSidebarOpen);
   const appShortcuts = useUiPreferences((s) => s.appShortcuts);
@@ -2437,7 +2446,6 @@ export function ChatView({
   const transcriptContentRef = useRef<HTMLDivElement>(null);
   const chatBodyRef = useRef<HTMLDivElement>(null);
   const chatDockRef = useRef<HTMLDivElement>(null);
-  const previewResizeHandleRef = useRef<HTMLDivElement>(null);
   const contextLauncherRef = useRef<HTMLButtonElement>(null);
   const emptyDockTopRef = useRef<number | null>(null);
   const stickToBottomRef = useRef(true);
@@ -2540,21 +2548,15 @@ export function ChatView({
       setTranscriptWindowStart(nextStart);
     }
   }, [activeId, messageWindow.start, messageWindow.threadId, messages.length]);
-  const previewResizeStartRef = useRef<{
-    clientX: number;
-    width: number;
-    intentWidth: number;
-    latestWidth: number;
-    pointerId: number;
-    target: HTMLDivElement;
-    snappedClosed: boolean;
+  // Progressive inspector drag: past the docked limit it first collapses the
+  // sidebar, then overlays the transcript; reversing undoes each stage.
+  const inspectorDragRef = useRef<{
     sidebarWasOpen: boolean;
     sidebarAutoCollapsed: boolean;
     sidebarCollapseBoundary: number;
     overlayBoundary: number;
     overlayActive: boolean;
   } | null>(null);
-  const previewResizeCleanupRef = useRef<(() => void) | null>(null);
   const previewCloseTimeoutRef = useRef<number | null>(null);
   const stopShortcutConfirmUntilRef = useRef(0);
   const stopShortcutConfirmTimerRef = useRef<number | null>(null);
@@ -2574,7 +2576,6 @@ export function ChatView({
     new Map<string, PreviewAppFile[]>(),
   );
   const gitStatusUpdatedAtRef = useRef<number | null>(null);
-  const [previewResizing, setPreviewResizing] = useState(false);
   const [previewPanelOverlay, setPreviewPanelOverlay] = useState(false);
   const [recentThreadSwitcher, setRecentThreadSwitcher] =
     useState<RecentThreadSwitcherState | null>(null);
@@ -4432,20 +4433,81 @@ export function ChatView({
   const contextStacked = contextPanelOpen && chatBodyWidth < CONTEXT_STACK_THRESHOLD;
   const inspectorStacked = sidePanelVisible && chatBodyWidth < INSPECTOR_STACK_THRESHOLD;
   const panelsStacked = contextStacked || inspectorStacked;
-  const reservedContextWidth = contextPanelOpen && !contextStacked ? CONTEXT_PANEL_WIDTH : 0;
+  const inspectorDocked = sidePanelVisible && !panelsStacked && !previewPanelOverlay;
+  const contextResize = usePaneResize("context", {
+    direction: -1,
+    // The card may squeeze a docked inspector down to its minimum, never the transcript.
+    max: () => maxContextPanelWidth(chatBodyWidth, inspectorDocked),
+    targetRef: chatBodyRef,
+    cssVar: "--context-panel-width",
+    controls: "quick-summary-panel",
+    onCollapse: () => setSessionContextPanelOpen(activeId, false),
+    onExpand: () => setSessionContextPanelOpen(activeId, true),
+    // A docked inspector yields live while the card grows...
+    onLiveSize: (width) => {
+      if (!inspectorDocked) return;
+      chatBodyRef.current?.style.setProperty(
+        "--preview-panel-width",
+        `${clampPreviewPanelWidth(inspectorResize.preference, chatBodyWidth, width)}px`,
+      );
+    },
+    // ...and returns to its rendered width, which the committed size re-derives.
+    onDragEnd: () => {
+      if (!inspectorDocked) return;
+      chatBodyRef.current?.style.setProperty("--preview-panel-width", `${resolvedPreviewPanelWidth}px`);
+    },
+  });
+  const reservedContextWidth = contextPanelOpen && !contextStacked ? contextResize.size : 0;
   const dockedPreviewPanelWidth = maxPreviewPanelWidth(
     chatBodyWidth,
     reservedContextWidth,
   );
-  const resolvedPreviewPanelWidth = clampPreviewPanelWidth(
-    previewResizeStartRef.current?.latestWidth ?? previewPanelWidth,
-    chatBodyWidth,
-    reservedContextWidth,
-    previewPanelOverlay,
-  );
+  const inspectorOverlayActive = () =>
+    inspectorDragRef.current?.overlayActive ?? previewPanelOverlay;
+  const inspectorResize = usePaneResize("inspector", {
+    direction: -1,
+    min: PREVIEW_PANEL_MIN_WIDTH,
+    max: () => maxPreviewPanelWidth(chatBodyWidth, reservedContextWidth, inspectorOverlayActive()),
+    targetRef: chatBodyRef,
+    cssVar: "--preview-panel-width",
+    label: "Resize side panel; keep expanding at the limit to collapse the sidebar, then overlay the transcript",
+    valueText: (width) => `${width} pixels, ${inspectorOverlayActive() ? "overlay" : "docked"}`,
+    onCollapse: () => {
+      if (inspectorTab === "git") closeGitPanel();
+      else void closePreview();
+    },
+    onExpand: () => {
+      clearPreviewCloseTimer();
+      setPreviewPanelClosing(false);
+      setSessionInspectorOpen(activeId, true);
+    },
+    onDragStart: () => {
+      const dockedLimit = maxPreviewPanelWidth(chatBodyWidth, reservedContextWidth);
+      const sidebarGain = verticalSidebarOpen
+        ? Math.max(0, sidebarWidth - COLLAPSED_SIDEBAR_WIDTH)
+        : 0;
+      inspectorDragRef.current = {
+        sidebarWasOpen: verticalSidebarOpen,
+        sidebarAutoCollapsed: false,
+        sidebarCollapseBoundary: dockedLimit,
+        overlayBoundary: dockedLimit + sidebarGain,
+        overlayActive: previewPanelOverlay,
+      };
+    },
+    onDrag: stageInspectorDrag,
+    onDragEnd: (width) => {
+      const drag = inspectorDragRef.current;
+      inspectorDragRef.current = null;
+      if (drag?.overlayActive && width <= maxPreviewPanelWidth(chatBodyWidth, reservedContextWidth)) {
+        setPreviewPanelOverlay(false);
+      }
+    },
+  });
+  const resolvedPreviewPanelWidth = inspectorResize.size;
   const previewPanelStyle = {
     "--preview-panel-width": `${resolvedPreviewPanelWidth}px`,
     "--preview-panel-docked-width": `${dockedPreviewPanelWidth}px`,
+    "--context-panel-width": `${contextResize.size}px`,
   } as CSSProperties;
   const inspectorLauncherLabel =
     inspectorTab === "workers"
@@ -4754,33 +4816,32 @@ export function ChatView({
 
   useEffect(() => {
     setPreviewPanelOverlay(false);
-    if (previewResizeStartRef.current) {
-      previewResizeStartRef.current.overlayActive = false;
+    if (inspectorDragRef.current) {
+      inspectorDragRef.current.overlayActive = false;
     }
   }, [activeId]);
 
   useEffect(() => {
     if (sidePanelVisible && !panelsStacked) return;
     setPreviewPanelOverlay(false);
-    if (previewResizeStartRef.current) {
-      previewResizeStartRef.current.overlayActive = false;
+    if (inspectorDragRef.current) {
+      inspectorDragRef.current.overlayActive = false;
     }
   }, [panelsStacked, sidePanelVisible]);
 
   useEffect(() => {
     if (
       previewPanelOverlay &&
-      !previewResizeStartRef.current &&
-      previewPanelWidth <= dockedPreviewPanelWidth
+      !inspectorDragRef.current &&
+      inspectorResize.preference <= dockedPreviewPanelWidth
     ) {
       setPreviewPanelOverlay(false);
     }
-  }, [dockedPreviewPanelWidth, previewPanelOverlay, previewPanelWidth]);
+  }, [dockedPreviewPanelWidth, inspectorResize.preference, previewPanelOverlay]);
 
+  // Keep a still pointer's drag target as the sidebar animates out of the way.
   useEffect(() => {
-    const start = previewResizeStartRef.current;
-    if (!start || start.snappedClosed) return;
-    resizePreviewPanelDuringDrag(start.intentWidth);
+    inspectorResize.reapply();
   }, [chatBodyWidth, reservedContextWidth]);
 
   const liveWorkerRunId =
@@ -4825,165 +4886,63 @@ export function ChatView({
   }
 
   function resizePreviewPanel(width: number, overlay = previewPanelOverlay) {
-    setPreviewPanelWidth(
+    setPaneSize(
+      "inspector",
       clampPreviewPanelWidth(width, chatBodyWidth, reservedContextWidth, overlay),
     );
   }
 
-  function resizePreviewPanelDuringDrag(width: number) {
-    const start = previewResizeStartRef.current;
-    if (!start) return;
-    const bodyWidth = chatBodyRef.current?.getBoundingClientRect().width ?? chatBodyWidth;
-    const nextWidth = clampPreviewPanelWidth(
-      width,
-      bodyWidth,
-      reservedContextWidth,
-      start.overlayActive,
-    );
-    start.latestWidth = nextWidth;
-    chatBodyRef.current?.style.setProperty("--preview-panel-width", `${nextWidth}px`);
-    previewResizeHandleRef.current?.setAttribute("aria-valuenow", String(nextWidth));
-    previewResizeHandleRef.current?.setAttribute(
-      "aria-valuetext",
-      `${nextWidth} pixels, ${start.overlayActive ? "overlay" : "docked"}`,
-    );
-  }
-
-  function startPreviewResize(event: ReactPointerEvent<HTMLDivElement>) {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    const target = event.currentTarget;
-    const bodyWidth = chatBodyRef.current?.getBoundingClientRect().width ?? chatBodyWidth;
-    const dockedLimit = maxPreviewPanelWidth(bodyWidth, reservedContextWidth);
-    const sidebarGain = verticalSidebarOpen
-      ? Math.max(0, sidebarWidth - COLLAPSED_SIDEBAR_WIDTH)
-      : 0;
-    previewResizeStartRef.current = {
-      clientX: event.clientX,
-      width: resolvedPreviewPanelWidth,
-      intentWidth: resolvedPreviewPanelWidth,
-      latestWidth: resolvedPreviewPanelWidth,
-      pointerId: event.pointerId,
-      target,
-      snappedClosed: false,
-      sidebarWasOpen: verticalSidebarOpen,
-      sidebarAutoCollapsed: false,
-      sidebarCollapseBoundary: dockedLimit,
-      overlayBoundary: dockedLimit + sidebarGain,
-      overlayActive: previewPanelOverlay,
-    };
-    setPreviewResizing(true);
-    target.setPointerCapture(event.pointerId);
-    const move = (nextEvent: PointerEvent) => movePreviewResize(nextEvent);
-    const end = (nextEvent: PointerEvent) => endPreviewResize(nextEvent);
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", end);
-    window.addEventListener("pointercancel", end);
-    previewResizeCleanupRef.current = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", end);
-      window.removeEventListener("pointercancel", end);
-      previewResizeCleanupRef.current = null;
-    };
-  }
-
-  function movePreviewResize(event: PointerEvent) {
-    const start = previewResizeStartRef.current;
-    if (!start || event.pointerId !== start.pointerId) return;
-    const width = start.width + start.clientX - event.clientX;
-    start.intentWidth = width;
-    if (width < PREVIEW_PANEL_MIN_WIDTH - PREVIEW_PANEL_COLLAPSE_OVERSHOOT) {
-      if (!start.snappedClosed) {
-        start.snappedClosed = true;
-        if (inspectorTab === "git") closeGitPanel();
-        else closePreview();
-      }
-      return;
-    }
-    if (start.snappedClosed) {
-      start.snappedClosed = false;
-      start.latestWidth = clampPreviewPanelWidth(
-        width,
-        chatBodyRef.current?.getBoundingClientRect().width ?? chatBodyWidth,
-        reservedContextWidth,
-        start.overlayActive,
-      );
-      clearPreviewCloseTimer();
-      setPreviewPanelClosing(false);
-      setSessionInspectorOpen(activeId, true);
-    }
-
-    if (start.overlayActive && width <= start.overlayBoundary) {
-      start.overlayActive = false;
+  function stageInspectorDrag(width: number) {
+    const drag = inspectorDragRef.current;
+    if (!drag) return;
+    if (drag.overlayActive && width <= drag.overlayBoundary) {
+      drag.overlayActive = false;
       setPreviewPanelOverlay(false);
     }
     if (
-      start.sidebarWasOpen &&
-      start.sidebarAutoCollapsed &&
-      width <= start.sidebarCollapseBoundary
+      drag.sidebarWasOpen &&
+      drag.sidebarAutoCollapsed &&
+      width <= drag.sidebarCollapseBoundary
     ) {
-      start.sidebarAutoCollapsed = false;
+      drag.sidebarAutoCollapsed = false;
       setSidebarOpen(true);
     } else if (
-      start.sidebarWasOpen &&
-      !start.sidebarAutoCollapsed &&
-      width >= start.sidebarCollapseBoundary + PREVIEW_PANEL_STAGE_OVERSHOOT
+      drag.sidebarWasOpen &&
+      !drag.sidebarAutoCollapsed &&
+      width >= drag.sidebarCollapseBoundary + PREVIEW_PANEL_STAGE_OVERSHOOT
     ) {
-      start.sidebarAutoCollapsed = true;
+      drag.sidebarAutoCollapsed = true;
       setSidebarOpen(false);
     }
     if (
-      !start.overlayActive &&
-      (!start.sidebarWasOpen || start.sidebarAutoCollapsed) &&
-      width >= start.overlayBoundary + PREVIEW_PANEL_STAGE_OVERSHOOT
+      !drag.overlayActive &&
+      (!drag.sidebarWasOpen || drag.sidebarAutoCollapsed) &&
+      width >= drag.overlayBoundary + PREVIEW_PANEL_STAGE_OVERSHOOT
     ) {
-      start.overlayActive = true;
+      drag.overlayActive = true;
       setPreviewPanelOverlay(true);
     }
-    resizePreviewPanelDuringDrag(width);
   }
 
-  function endPreviewResize(event: PointerEvent) {
-    const start = previewResizeStartRef.current;
-    if (!start || event.pointerId !== start.pointerId) return;
-    const bodyWidth = chatBodyRef.current?.getBoundingClientRect().width ?? chatBodyWidth;
-    const finalWidth = clampPreviewPanelWidth(
-      start.latestWidth,
-      bodyWidth,
-      reservedContextWidth,
-      start.overlayActive,
-    );
-    if (finalWidth !== start.width) setPreviewPanelWidth(finalWidth);
-    if (
-      start.overlayActive &&
-      finalWidth <= maxPreviewPanelWidth(bodyWidth, reservedContextWidth)
-    ) {
-      setPreviewPanelOverlay(false);
-    }
-    previewResizeStartRef.current = null;
-    previewResizeCleanupRef.current?.();
-    setPreviewResizing(false);
-    if (start.target.hasPointerCapture(event.pointerId)) {
-      start.target.releasePointerCapture(event.pointerId);
-    }
-  }
-
+  // Extends the shared keyboard contract with the same progressive stages as
+  // dragging: grow docked, then collapse the sidebar, then overlay.
   function resizePreviewWithKeyboard(event: KeyboardEvent<HTMLDivElement>) {
+    const step = paneKeyboardStep(event);
     if (event.key === "ArrowLeft") {
       event.preventDefault();
       if (previewPanelOverlay) {
-        resizePreviewPanel(resolvedPreviewPanelWidth + PREVIEW_PANEL_KEYBOARD_STEP, true);
+        resizePreviewPanel(resolvedPreviewPanelWidth + step, true);
       } else if (resolvedPreviewPanelWidth < dockedPreviewPanelWidth) {
-        resizePreviewPanel(resolvedPreviewPanelWidth + PREVIEW_PANEL_KEYBOARD_STEP, false);
+        resizePreviewPanel(resolvedPreviewPanelWidth + step, false);
       } else if (verticalSidebarOpen) {
         setSidebarOpen(false);
       } else {
         setPreviewPanelOverlay(true);
-        resizePreviewPanel(resolvedPreviewPanelWidth + PREVIEW_PANEL_KEYBOARD_STEP, true);
+        resizePreviewPanel(resolvedPreviewPanelWidth + step, true);
       }
     } else if (event.key === "ArrowRight") {
       event.preventDefault();
-      const nextWidth = resolvedPreviewPanelWidth - PREVIEW_PANEL_KEYBOARD_STEP;
+      const nextWidth = resolvedPreviewPanelWidth - step;
       if (previewPanelOverlay && nextWidth <= dockedPreviewPanelWidth) {
         setPreviewPanelOverlay(false);
         resizePreviewPanel(dockedPreviewPanelWidth, false);
@@ -4994,17 +4953,17 @@ export function ChatView({
       event.preventDefault();
       setPreviewPanelOverlay(false);
       resizePreviewPanel(PREVIEW_PANEL_MIN_WIDTH, false);
-    } else if (event.key === "End") {
-      event.preventDefault();
-      resizePreviewPanel(
-        maxPreviewPanelWidth(chatBodyWidth, reservedContextWidth, previewPanelOverlay),
-        previewPanelOverlay,
-      );
     } else if (event.key === "Enter") {
       event.preventDefault();
-      setPreviewPanelOverlay(false);
-      resizePreviewPanel(DEFAULT_PREVIEW_PANEL_WIDTH, false);
+      resetPreviewPanelWidth();
+    } else {
+      inspectorResize.handleProps.onKeyDown(event);
     }
+  }
+
+  function resetPreviewPanelWidth() {
+    setPreviewPanelOverlay(false);
+    inspectorResize.reset();
   }
 
   function writeCanonicalThreadModel(
@@ -9133,6 +9092,13 @@ export function ChatView({
                   text: wireMessageContent({ role: "user", content: input, attachments: pendingAttachments }),
                   attachments: controlAttachments(pendingAttachments),
                 })}
+                resizeHandle={panelsStacked ? undefined : (
+                  <PaneResizeHandle
+                    resize={contextResize}
+                    className="context-resize-handle"
+                    data-testid="context-resize-handle"
+                  />
+                )}
               />
             </Suspense>
           )}
@@ -9144,27 +9110,13 @@ export function ChatView({
             )}
             {!panelsStacked && (
               <PaneResizeHandle
-                ref={previewResizeHandleRef}
-                className={`preview-resize-handle${previewResizing ? " dragging" : ""}${previewPanelClosing ? " closing" : ""}${sidePanelAlreadyOpen ? " no-enter" : ""}`}
-                orientation="vertical"
+                resize={inspectorResize}
+                className={`preview-resize-handle${previewPanelClosing ? " closing" : ""}${sidePanelAlreadyOpen ? " no-enter" : ""}`}
                 data-testid="preview-resize-handle"
-                aria-label="Resize side panel; keep expanding at the limit to collapse the sidebar, then overlay the transcript"
-                title="Drag to resize; keep dragging at the limit for more space; double-click to reset"
-                aria-valuemin={PREVIEW_PANEL_MIN_WIDTH}
-                aria-valuemax={maxPreviewPanelWidth(
-                  chatBodyWidth,
-                  reservedContextWidth,
-                  previewPanelOverlay,
-                )}
-                aria-valuenow={resolvedPreviewPanelWidth}
-                aria-valuetext={`${resolvedPreviewPanelWidth} pixels, ${previewPanelOverlay ? "overlay" : "docked"}`}
+                title="Drag to resize · Keep dragging at the limit for more space · Double-click to reset"
                 tabIndex={previewPanelClosing ? -1 : 0}
                 onKeyDown={resizePreviewWithKeyboard}
-                onPointerDown={startPreviewResize}
-                onDoubleClick={() => {
-                  setPreviewPanelOverlay(false);
-                  resizePreviewPanel(DEFAULT_PREVIEW_PANEL_WIDTH, false);
-                }}
+                onDoubleClick={resetPreviewPanelWidth}
               />
             )}
             <div

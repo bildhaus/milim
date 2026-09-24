@@ -40,6 +40,102 @@
 .sheet-sub { flex: none; max-width: 620px; margin: 3px 0 14px; font-size: 12.5px; line-height: 1.45; color: var(--secondary-text); }
 .sheet-hint { margin: 12px 2px 0; font-size: 12px; color: var(--tertiary-text); }
 .sheet-hint.error { color: var(--error); }
+/* Resizable sheets (SheetDialog `resizable`). The frame shrink-wraps the
+   sheet so edge handles can straddle its border without being clipped. */
+.sheet-resize-frame {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+.sheet-resize-frame > [role="dialog"] {
+  position: relative;
+  max-width: calc(100vw - 24px);
+  max-height: calc(100vh - 24px);
+}
+.sheet-resize-frame.resizing > [role="dialog"] {
+  transition: none;
+}
+.sheet-resize-edge {
+  position: absolute;
+  z-index: 6;
+  touch-action: none;
+}
+.sheet-resize-edge-n,
+.sheet-resize-edge-s { left: 14px; right: 14px; height: 10px; cursor: ns-resize; }
+.sheet-resize-edge-e,
+.sheet-resize-edge-w { top: 14px; bottom: 14px; width: 10px; cursor: ew-resize; }
+.sheet-resize-edge-n { top: -7px; }
+.sheet-resize-edge-s { bottom: -7px; }
+.sheet-resize-edge-e { right: -7px; }
+.sheet-resize-edge-w { left: -7px; }
+.sheet-resize-edge-ne,
+.sheet-resize-edge-nw,
+.sheet-resize-edge-se,
+.sheet-resize-edge-sw { width: 18px; height: 18px; }
+.sheet-resize-edge-ne { top: -7px; right: -7px; cursor: nesw-resize; }
+.sheet-resize-edge-sw { bottom: -7px; left: -7px; cursor: nesw-resize; }
+.sheet-resize-edge-nw { top: -7px; left: -7px; cursor: nwse-resize; }
+.sheet-resize-edge-se { right: -7px; bottom: -7px; cursor: nwse-resize; }
+/* Rail | detail splits inside manager sheets (useSplitPane). Each body sets
+   --manager-rail-size to its saved width clamped to the live space. */
+.manager-rail-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--manager-rail-size);
+  transform: translateX(-50%);
+}
+/* Visible, focusable corner grip; it follows the sheet's corner radius. */
+.sheet-resize-handle {
+  --sheet-resize-radius: var(--card-radius);
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  z-index: 7;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 0 0 var(--sheet-resize-radius) 0;
+  background: transparent;
+  color: var(--tertiary-text);
+  cursor: nwse-resize;
+  touch-action: none;
+  transition: color var(--motion-fast) var(--motion-ease-out);
+}
+.sheet-resize-handle::before {
+  content: "";
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 12px;
+  height: 12px;
+  box-sizing: border-box;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  border-bottom-right-radius: max(0px, calc(var(--sheet-resize-radius) - 4px));
+  -webkit-mask:
+    linear-gradient(to bottom, transparent, #000 6px),
+    linear-gradient(to right, transparent, #000 6px);
+  -webkit-mask-composite: source-in;
+  mask:
+    linear-gradient(to bottom, transparent, #000 6px),
+    linear-gradient(to right, transparent, #000 6px);
+  mask-composite: intersect;
+}
+.sheet-resize-handle:hover,
+.sheet-resize-frame.resizing .sheet-resize-handle {
+  color: var(--accent);
+}
+.sheet-resize-frame .sheet-resize-handle:focus-visible {
+  color: var(--accent);
+  outline: 2px solid var(--focus-border);
+  outline-offset: -2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .sheet-resize-handle { transition: none; }
+}
 
 .onboarding-preflight {
   position: fixed;

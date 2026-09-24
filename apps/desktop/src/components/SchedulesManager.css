@@ -1,6 +1,6 @@
 .schedule-sheet {
-  width: min(980px, 96vw);
-  height: min(760px, 88vh);
+  width: min(var(--manager-sheet-width), calc(100vw - 48px));
+  height: min(var(--manager-sheet-height), calc(100dvh - 48px));
   padding: 0;
 }
 
@@ -77,10 +77,12 @@
 }
 
 .schedule-manager {
+  --manager-rail-size: max(220px, min(var(--manager-rail-width, 306px), calc(100% - 320px)));
+  position: relative;
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(248px, 306px) minmax(0, 1fr);
+  grid-template-columns: var(--manager-rail-size) minmax(0, 1fr);
 }
 
 .schedule-list-panel {
@@ -956,6 +958,10 @@
   .schedule-manager {
     grid-template-columns: 1fr;
     grid-template-rows: minmax(160px, 30vh) minmax(0, 1fr);
+  }
+
+  .schedule-manager > .manager-rail-resize-handle {
+    display: none;
   }
 
   .schedule-list-panel {

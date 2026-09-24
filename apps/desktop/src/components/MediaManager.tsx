@@ -5,7 +5,6 @@ import {
   useState,
   type CSSProperties,
   type KeyboardEvent,
-  type PointerEvent as ReactPointerEvent,
 } from "react";
 import {
   deleteMediaLibraryItem,
@@ -44,19 +43,8 @@ import {
   isTerminalMediaStatus,
 } from "../lib/media";
 import { useSettings } from "../settings/store";
-import {
-  DEFAULT_MEDIA_COMPOSER_WIDTH,
-  DEFAULT_MEDIA_LIBRARY_WIDTH,
-  DEFAULT_MEDIA_STUDIO_HEIGHT,
-  DEFAULT_MEDIA_STUDIO_WIDTH,
-  MAX_SIDEBAR_WIDTH,
-  MIN_MEDIA_STUDIO_HEIGHT,
-  MIN_MEDIA_STUDIO_WIDTH,
-  MIN_SIDEBAR_WIDTH,
-  normalizeMediaStudioSize,
-  normalizeSidebarWidth,
-  useUiPreferences,
-} from "../ui/store";
+import { useUiPreferences } from "../ui/store";
+import { usePaneResize } from "../ui/usePaneResize";
 import { ArrowUp, Check, ChevronDown, FolderOpen, Image, Refresh, Search, Sidebar, Sparkles, Trash, Volume2, X } from "./icons";
 import { ComposerSurface } from "./ComposerSurface";
 import { GeneratedMedia } from "./GeneratedMedia";
@@ -72,11 +60,9 @@ type GenerationPhase = "idle" | "submitting" | "failed";
 type LibraryAction = "refresh" | "delete" | "reveal";
 type LibraryFeedback = { id: string; label: string; message: string };
 type StageRequest = { kind: MediaKind; model: string; prompt: string };
-type MediaSidePanel = "composer" | "library";
 
-const MEDIA_PANEL_KEYBOARD_STEP = 32;
-const MEDIA_PANEL_COLLAPSE_OVERSHOOT = 96;
-const MEDIA_PANEL_SNAP_ANIMATION_MS = 180;
+/** Matches `.media-sheet` in media-manager.css until the studio is resized. */
+const MEDIA_STUDIO_CSS_WIDTH = 1120;
 
 function schemaDraftFromInput(schema: MediaModelSchema, input: Record<string, unknown>) {
   const advanced = structuredClone(input);
@@ -107,16 +93,8 @@ function schemaDraftFromInput(schema: MediaModelSchema, input: Record<string, un
 export function MediaManager({ onClose }: { onClose: () => void }) {
   const mediaSettings = useSettings((s) => s.media);
   const setMediaSettings = useSettings((s) => s.setMediaSettings);
-  const savedStudioWidth = useUiPreferences((s) => s.mediaStudioWidth);
-  const savedStudioHeight = useUiPreferences((s) => s.mediaStudioHeight);
   const composerPlacement = useUiPreferences((s) => s.mediaComposerPlacement);
-  const composerWidth = useUiPreferences((s) => s.mediaComposerWidth);
-  const libraryWidth = useUiPreferences((s) => s.mediaLibraryWidth);
-  const setMediaStudioSize = useUiPreferences((s) => s.setMediaStudioSize);
   const setComposerPlacement = useUiPreferences((s) => s.setMediaComposerPlacement);
-  const setComposerWidth = useUiPreferences((s) => s.setMediaComposerWidth);
-  const setLibraryWidth = useUiPreferences((s) => s.setMediaLibraryWidth);
-  const [studioSize, setStudioSize] = useState(() => normalizeMediaStudioSize(savedStudioWidth, savedStudioHeight));
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const available = useMemo(() => mediaProviders(providers), [providers]);
   const [providerId, setProviderId] = useState("");
@@ -148,7 +126,11 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
   const [libraryStatus, setLibraryStatus] = useState<MediaLibraryStatus | "">("");
   const [libraryLoading, setLibraryLoading] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(() => (
-    typeof window !== "undefined" && Math.min(savedStudioWidth, window.innerWidth - 24) >= 960
+    typeof window !== "undefined" &&
+    Math.min(
+      useUiPreferences.getState().paneSizes["mediaSheet.width"] ?? MEDIA_STUDIO_CSS_WIDTH,
+      window.innerWidth - 24,
+    ) >= 960
   ));
   const [selectedLibraryId, setSelectedLibraryId] = useState("");
   const [libraryListError, setLibraryListError] = useState<string | null>(null);
@@ -160,7 +142,6 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
   const [providersVersion, setProvidersVersion] = useState(0);
   const [stageVariantIndex, setStageVariantIndex] = useState(0);
   const [privacyMode, setPrivacyModeLabel] = useState("off");
-  const [resizingPanel, setResizingPanel] = useState<MediaSidePanel | null>(null);
   const pollingKeys = useRef<Set<string>>(new Set());
   const generationInFlightRef = useRef(false);
   const generationRunRef = useRef(0);
@@ -176,13 +157,31 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
     input: Record<string, unknown>;
   } | null>(null);
   const preserveProviderDraftRef = useRef(false);
-  const resizeCleanupRef = useRef<(() => void) | null>(null);
   const deleteConfirmTimerRef = useRef<number | null>(null);
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const modelPickerTriggerRef = useRef<HTMLButtonElement>(null);
   const modelPickerPopoverRef = useRef<HTMLDivElement>(null);
   const libraryToggleRef = useRef<HTMLButtonElement>(null);
   const mediaGridRef = useRef<HTMLDivElement>(null);
+  // Dragging a side panel past its minimum moves the composer below Output or
+  // closes the library; reversing the drag restores it.
+  const composerResize = usePaneResize("mediaComposer", {
+    targetRef: mediaGridRef,
+    cssVar: "--media-composer-width",
+    measure: () => mediaGridRef.current?.querySelector<HTMLElement>(".media-create-pane")?.getBoundingClientRect().width,
+    onCollapse: () => setComposerPlacement("bottom"),
+    onExpand: () => setComposerPlacement("side"),
+    label: "Resize media composer; drag past minimum to move it below Output",
+  });
+  const libraryResize = usePaneResize("mediaLibrary", {
+    direction: -1,
+    targetRef: mediaGridRef,
+    cssVar: "--media-library-width",
+    measure: () => mediaGridRef.current?.querySelector<HTMLElement>(".media-library")?.getBoundingClientRect().width,
+    onCollapse: () => setLibraryOpen(false),
+    onExpand: () => setLibraryOpen(true),
+    label: "Resize local library; drag past minimum to close it",
+  });
   const variantRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const libraryCardRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
   const selectedLibraryIdRef = useRef("");
@@ -244,12 +243,7 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
     status: libraryStatus,
   };
 
-  useEffect(() => {
-    setStudioSize(normalizeMediaStudioSize(savedStudioWidth, savedStudioHeight));
-  }, [savedStudioWidth, savedStudioHeight]);
-
   useEffect(() => () => {
-    resizeCleanupRef.current?.();
     generationRunRef.current += 1;
     if (deleteConfirmTimerRef.current !== null) window.clearTimeout(deleteConfirmTimerRef.current);
   }, []);
@@ -975,173 +969,6 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
     if (canGenerate) void submit();
   }
 
-  function startStudioResize(event: ReactPointerEvent<HTMLButtonElement>) {
-    if (event.button !== 0) return;
-    const sheet = event.currentTarget.closest<HTMLElement>(".media-sheet");
-    if (!sheet) return;
-
-    event.preventDefault();
-    event.stopPropagation();
-    resizeCleanupRef.current?.();
-
-    const bounds = sheet.getBoundingClientRect();
-    const origin = { x: event.clientX, y: event.clientY, width: bounds.width, height: bounds.height };
-    let latest = { width: bounds.width, height: bounds.height };
-    let moved = false;
-
-    const cleanup = () => {
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerup", onPointerUp);
-      window.removeEventListener("pointercancel", onPointerCancel);
-      document.body.classList.remove("media-studio-resizing");
-      resizeCleanupRef.current = null;
-    };
-    const onPointerMove = (moveEvent: PointerEvent) => {
-      moved = true;
-      const maxWidth = Math.max(320, window.innerWidth - 24);
-      const maxHeight = Math.max(360, window.innerHeight - 24);
-      const minWidth = Math.min(MIN_MEDIA_STUDIO_WIDTH, maxWidth);
-      const minHeight = Math.min(MIN_MEDIA_STUDIO_HEIGHT, maxHeight);
-      latest = {
-        width: Math.round(Math.min(Math.max(origin.width + ((moveEvent.clientX - origin.x) * 2), minWidth), maxWidth)),
-        height: Math.round(Math.min(Math.max(origin.height + ((moveEvent.clientY - origin.y) * 2), minHeight), maxHeight)),
-      };
-      setStudioSize(latest);
-    };
-    const onPointerUp = () => {
-      cleanup();
-      if (moved) setMediaStudioSize(latest.width, latest.height);
-    };
-    const onPointerCancel = () => cleanup();
-
-    resizeCleanupRef.current = cleanup;
-    document.body.classList.add("media-studio-resizing");
-    window.addEventListener("pointermove", onPointerMove);
-    window.addEventListener("pointerup", onPointerUp);
-    window.addEventListener("pointercancel", onPointerCancel);
-  }
-
-  function resizeStudioWithKeyboard(event: KeyboardEvent<HTMLButtonElement>) {
-    const step = event.shiftKey ? 64 : 32;
-    const sheet = event.currentTarget.closest<HTMLElement>(".media-sheet");
-    const bounds = sheet?.getBoundingClientRect();
-    const current = bounds
-      ? { width: bounds.width, height: bounds.height }
-      : studioSize;
-    let next: { width: number; height: number } | null = null;
-
-    if (event.key === "ArrowLeft") next = { ...current, width: current.width - step };
-    if (event.key === "ArrowRight") next = { ...current, width: current.width + step };
-    if (event.key === "ArrowUp") next = { ...current, height: current.height - step };
-    if (event.key === "ArrowDown") next = { ...current, height: current.height + step };
-    if (event.key === "Home") next = { width: DEFAULT_MEDIA_STUDIO_WIDTH, height: DEFAULT_MEDIA_STUDIO_HEIGHT };
-    if (!next) return;
-
-    event.preventDefault();
-    event.stopPropagation();
-    const normalized = normalizeMediaStudioSize(next.width, next.height);
-    setStudioSize(normalized);
-    setMediaStudioSize(normalized.width, normalized.height);
-  }
-
-  function resetStudioSize() {
-    const size = { width: DEFAULT_MEDIA_STUDIO_WIDTH, height: DEFAULT_MEDIA_STUDIO_HEIGHT };
-    setStudioSize(size);
-    setMediaStudioSize(size.width, size.height);
-  }
-
-  function panelWidth(panel: MediaSidePanel) {
-    const selector = panel === "composer" ? ".media-create-pane" : ".media-library";
-    const fallback = panel === "composer" ? composerWidth : libraryWidth;
-    return mediaGridRef.current?.querySelector<HTMLElement>(selector)?.getBoundingClientRect().width || fallback;
-  }
-
-  function setPanelWidth(panel: MediaSidePanel, width: number) {
-    if (panel === "composer") setComposerWidth(width);
-    else setLibraryWidth(width);
-  }
-
-  function startPanelResize(panel: MediaSidePanel, event: ReactPointerEvent<HTMLDivElement>) {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    event.stopPropagation();
-    resizeCleanupRef.current?.();
-
-    const target = event.currentTarget;
-    const originX = event.clientX;
-    const originWidth = panelWidth(panel);
-    let latestWidth = originWidth;
-    let snappedClosed = false;
-    let resumeTimer: number | null = null;
-    setResizingPanel(panel);
-    target.setPointerCapture(event.pointerId);
-
-    const cleanup = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", end);
-      window.removeEventListener("pointercancel", end);
-      if (resumeTimer !== null) window.clearTimeout(resumeTimer);
-      resizeCleanupRef.current = null;
-    };
-    const move = (moveEvent: PointerEvent) => {
-      if (moveEvent.pointerId !== event.pointerId) return;
-      const delta = moveEvent.clientX - originX;
-      const rawWidth = originWidth + (panel === "composer" ? delta : -delta);
-      if (rawWidth < MIN_SIDEBAR_WIDTH - MEDIA_PANEL_COLLAPSE_OVERSHOOT) {
-        if (!snappedClosed) {
-          snappedClosed = true;
-          if (resumeTimer !== null) window.clearTimeout(resumeTimer);
-          resumeTimer = null;
-          setResizingPanel(null);
-          if (panel === "composer") setComposerPlacement("bottom");
-          else setLibraryOpen(false);
-        }
-        return;
-      }
-      if (snappedClosed) {
-        snappedClosed = false;
-        if (panel === "composer") setComposerPlacement("side");
-        else setLibraryOpen(true);
-        resumeTimer = window.setTimeout(() => {
-          setResizingPanel(panel);
-          resumeTimer = null;
-        }, MEDIA_PANEL_SNAP_ANIMATION_MS);
-      }
-      latestWidth = normalizeSidebarWidth(rawWidth);
-      mediaGridRef.current?.style.setProperty(
-        panel === "composer" ? "--media-composer-width" : "--media-library-width",
-        `${latestWidth}px`,
-      );
-      target.setAttribute("aria-valuenow", String(latestWidth));
-    };
-    const end = (endEvent: PointerEvent) => {
-      if (endEvent.pointerId !== event.pointerId) return;
-      cleanup();
-      if (latestWidth !== originWidth) setPanelWidth(panel, latestWidth);
-      setResizingPanel(null);
-      if (target.hasPointerCapture(event.pointerId)) target.releasePointerCapture(event.pointerId);
-    };
-
-    resizeCleanupRef.current = cleanup;
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", end);
-    window.addEventListener("pointercancel", end);
-  }
-
-  function resizePanelWithKeyboard(panel: MediaSidePanel, event: KeyboardEvent<HTMLDivElement>) {
-    const current = panelWidth(panel);
-    const direction = panel === "composer" ? 1 : -1;
-    let next: number | null = null;
-    if (event.key === "ArrowLeft") next = current - MEDIA_PANEL_KEYBOARD_STEP * direction;
-    if (event.key === "ArrowRight") next = current + MEDIA_PANEL_KEYBOARD_STEP * direction;
-    if (event.key === "Home") next = MIN_SIDEBAR_WIDTH;
-    if (event.key === "End") next = MAX_SIDEBAR_WIDTH;
-    if (event.key === "Enter") next = panel === "composer" ? DEFAULT_MEDIA_COMPOSER_WIDTH : DEFAULT_MEDIA_LIBRARY_WIDTH;
-    if (next === null) return;
-    event.preventDefault();
-    setPanelWidth(panel, next);
-  }
-
   const stageItems = selectedLibraryItem?.media ?? latestResult?.media ?? [];
   const stageSourceKey = selectedLibraryItem
     ? `library:${selectedLibraryItem.id}`
@@ -1212,13 +1039,9 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
     ? libraryAction.action
     : null;
   const deleteConfirmationArmed = confirmDeleteId === selectedLibraryItem?.id;
-  const mediaSheetStyle = {
-    width: studioSize.width,
-    height: studioSize.height,
-  } satisfies CSSProperties;
   const mediaGridStyle = {
-    "--media-composer-width": `${composerWidth}px`,
-    "--media-library-width": `${libraryWidth}px`,
+    "--media-composer-width": `${composerResize.size}px`,
+    "--media-library-width": `${libraryResize.size}px`,
   } as CSSProperties;
 
   useEffect(() => {
@@ -1393,7 +1216,7 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
       title="Media studio"
       className="sheet media-sheet"
       testId="media-generator"
-      style={mediaSheetStyle}
+      resizable={{ id: "media", testId: "media-studio-resize-handle" }}
       onClose={onClose}
     >
       <div className="media-studio">
@@ -1406,7 +1229,7 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
 
         <div
           ref={mediaGridRef}
-          className={`media-grid${libraryOpen ? " library-open" : ""}${resizingPanel ? ` resizing-${resizingPanel}` : ""}`}
+          className={`media-grid${libraryOpen ? " library-open" : ""}${composerResize.dragging ? " resizing-composer" : ""}${libraryResize.dragging ? " resizing-library" : ""}`}
           style={mediaGridStyle}
         >
           <section className="media-stage" data-testid="media-stage" aria-label="Generated media">
@@ -1498,17 +1321,9 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
                 {mediaComposer}
                 {composerPlacement === "side" && (
                   <PaneResizeHandle
-                    className={`media-panel-resize-handle media-composer-resize-handle${resizingPanel === "composer" ? " dragging" : ""}`}
-                    orientation="vertical"
+                    resize={composerResize}
+                    className="media-panel-resize-handle media-composer-resize-handle"
                     data-testid="media-composer-resize-handle"
-                    aria-label="Resize media composer; drag past minimum to move it below Output"
-                    aria-valuemin={MIN_SIDEBAR_WIDTH}
-                    aria-valuemax={MAX_SIDEBAR_WIDTH}
-                    aria-valuenow={composerWidth}
-                    tabIndex={0}
-                    onPointerDown={(event) => startPanelResize("composer", event)}
-                    onKeyDown={(event) => resizePanelWithKeyboard("composer", event)}
-                    onDoubleClick={() => setComposerWidth(DEFAULT_MEDIA_COMPOSER_WIDTH)}
                   />
                 )}
               </div>
@@ -1595,17 +1410,9 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
 
           {libraryOpen && <aside className="media-library" id="media-library-sidebar" aria-label="Local library">
               <PaneResizeHandle
-                className={`media-panel-resize-handle media-library-resize-handle${resizingPanel === "library" ? " dragging" : ""}`}
-                orientation="vertical"
+                resize={libraryResize}
+                className="media-panel-resize-handle media-library-resize-handle"
                 data-testid="media-library-resize-handle"
-                aria-label="Resize local library; drag past minimum to close it"
-                aria-valuemin={MIN_SIDEBAR_WIDTH}
-                aria-valuemax={MAX_SIDEBAR_WIDTH}
-                aria-valuenow={libraryWidth}
-                tabIndex={0}
-                onPointerDown={(event) => startPanelResize("library", event)}
-                onKeyDown={(event) => resizePanelWithKeyboard("library", event)}
-                onDoubleClick={() => setLibraryWidth(DEFAULT_MEDIA_LIBRARY_WIDTH)}
               />
               <div className="media-library-head">
                 <div>
@@ -1754,17 +1561,6 @@ export function MediaManager({ onClose }: { onClose: () => void }) {
             />
           </div>
         )}
-        <button
-          className="media-sheet-resize-handle"
-          data-testid="media-studio-resize-handle"
-          type="button"
-          aria-label="Resize media studio"
-          title="Drag to resize. Use arrow keys for precise sizing; Home or double-click resets."
-          onPointerDown={startStudioResize}
-          onKeyDown={resizeStudioWithKeyboard}
-          onDoubleClick={resetStudioSize}
-        >
-        </button>
       </div>
     </SheetDialog>
   );

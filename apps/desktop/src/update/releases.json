@@ -1,4 +1,9 @@
 {
+  "0.2.70": {
+    "version": "0.2.70",
+    "summary": "milim 0.2.70 lets you resize every panel and manager window, remembers each size, and opens managers larger by default.",
+    "items": []
+  },
   "0.2.69": {
     "version": "0.2.69",
     "summary": "milim 0.2.69 puts every manager one shortcut away, adds per-hunk Git staging and a Usage view, explains provider errors, and tightens the desktop's local security.",

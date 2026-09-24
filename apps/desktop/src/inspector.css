@@ -211,8 +211,8 @@
   transition: flex-basis var(--motion-standard) var(--motion-ease-out), width var(--motion-standard) var(--motion-ease-out), opacity var(--motion-standard) var(--motion-ease-out);
 }
 .quick-summary-panel.open {
-  flex-basis: 300px;
-  width: 300px;
+  flex-basis: var(--context-panel-width, 300px);
+  width: var(--context-panel-width, 300px);
   opacity: 1;
   overflow: visible;
   pointer-events: auto;
@@ -223,6 +223,7 @@
   inset: 0 10px 0 auto;
 }
 .quick-summary-card {
+  position: relative;
   display: flex;
   flex-direction: column;
   width: calc(100% - 16px);
@@ -234,6 +235,19 @@
   border-radius: 7px;
   background: var(--popover-bg);
   box-shadow: 0 6px 6px rgba(0, 0, 0, 0.28), 0 0 0 1px rgba(255, 255, 255, 0.03);
+}
+/* Sits inside the clipped card, over the sections' 8px inset, with its seam
+   line on the card border. */
+.context-resize-handle {
+  --pane-resize-target: 8px;
+  --pane-resize-indicator-left: 0.5px;
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+}
+.chat-body.inspector-stacked .context-resize-handle {
+  display: none;
 }
 .quick-summary-toolbar {
   flex: 0 0 auto;
@@ -1481,10 +1495,20 @@ button.quick-summary-row:disabled {
   border-top: 1px dashed #bdc1c6;
 }
 .google-slides-preview {
+  /* Saved width, clamped live so the slide keeps 200px. */
+  --google-slide-rail-size: max(120px, min(var(--google-slide-rail-width, 168px), calc(100% - 200px)));
+  position: relative;
   flex: 1;
   display: grid;
-  grid-template-columns: minmax(148px, 22%) minmax(0, 1fr);
+  grid-template-columns: var(--google-slide-rail-size) minmax(0, 1fr);
   min-height: 0;
+}
+.google-slide-rail-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--google-slide-rail-size);
+  transform: translateX(-50%);
 }
 .google-slides-preview.rail-collapsed {
   grid-template-columns: minmax(0, 1fr);
@@ -2909,10 +2933,12 @@ html[data-dark="true"] .preview-control-cursor {
   --workspace-code-function: #82aaff;
   --workspace-code-type: #ffcb6b;
   --workspace-code-tag: #f07178;
+  /* Saved width, clamped live so the editor keeps 220px. */
+  --workspace-code-rail-size: max(148px, min(var(--workspace-code-rail-width, 188px), calc(100% - 220px)));
   flex: 1;
   position: relative;
   display: grid;
-  grid-template-columns: var(--workspace-code-rail-width) minmax(0, 1fr);
+  grid-template-columns: var(--workspace-code-rail-size) minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
   background: var(--panel-muted-bg);
@@ -3022,7 +3048,7 @@ html[data-dark="true"] .preview-control-cursor {
   position: absolute;
   top: 0;
   bottom: 0;
-  left: var(--workspace-code-rail-width);
+  left: var(--workspace-code-rail-size);
   transform: translateX(-50%);
 }
 .workspace-code-main {
@@ -3173,6 +3199,7 @@ html[data-dark="true"] .preview-control-cursor {
   left: 0;
 }
 .preview-log-list {
+  height: var(--preview-log-height, 142px);
   overflow: auto;
   padding: 0 8px 8px;
   font-family: var(--mono);

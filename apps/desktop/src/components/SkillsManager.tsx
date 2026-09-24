@@ -2,6 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 import { createSkill, deleteSkill, listSkills, updateSkill, type SkillInfo } from "../api";
 import { Lightbulb, Plus, Search, Trash, X } from "./icons";
 import { SheetDialog } from "./SheetDialog";
+import { PaneResizeHandle } from "./PaneResizeHandle";
+import { MANAGER_DETAIL_MIN_WIDTH } from "../lib/paneSizes";
+import { useSplitPane } from "../ui/usePaneResize";
 import { Toggle } from "./ui";
 import "./AgentsManager.css";
 
@@ -35,6 +38,7 @@ function emptyDraft() {
 }
 
 export function SkillsManager({ onClose }: { onClose: () => void }) {
+  const rail = useSplitPane("skillsRail", "--manager-rail-width", MANAGER_DETAIL_MIN_WIDTH);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [sel, setSel] = useState<Selection>(null);
   const [q, setQ] = useState("");
@@ -134,7 +138,7 @@ export function SkillsManager({ onClose }: { onClose: () => void }) {
   );
 
   return (
-    <SheetDialog title="Skills" className="sheet agents-sheet agent-manager-sheet skills-manager-sheet" onClose={onClose}>
+    <SheetDialog title="Skills" className="sheet agents-sheet agent-manager-sheet skills-manager-sheet" resizable={{ id: "skills" }} onClose={onClose}>
       <div className="agent-manager-header">
         <div className="agent-manager-title">
           <h2>Skills</h2>
@@ -151,7 +155,8 @@ export function SkillsManager({ onClose }: { onClose: () => void }) {
         </div>
       </div>
 
-      <div className="agent-manager-body">
+      <div ref={rail.containerRef} className="agent-manager-body" style={rail.style}>
+        <PaneResizeHandle resize={rail.resize} className="manager-rail-resize-handle" data-testid="skills-rail-resize-handle" />
         <aside className="agent-rail" aria-label="Installed skills">
           <div className="agent-rail-summary">
             <span>{skills.filter((s) => s.enabled).length} enabled</span>

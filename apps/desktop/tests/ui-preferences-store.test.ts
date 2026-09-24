@@ -45,19 +45,11 @@ function persistedUiState(): Record<string, unknown> {
 }
 
 const { DEFAULT_APP_SHORTCUTS, uiSizeShortcutDelta } = await import("../src/ui/shortcuts.js");
+const { PANES } = await import("../src/lib/paneSizes.js");
 const {
-  DEFAULT_MEDIA_COMPOSER_WIDTH,
-  DEFAULT_MEDIA_LIBRARY_WIDTH,
-  DEFAULT_MEDIA_STUDIO_HEIGHT,
-  DEFAULT_MEDIA_STUDIO_WIDTH,
   DEFAULT_PREVIEW_BROWSER_ZOOM,
-  DEFAULT_SIDEBAR_WIDTH,
   DEFAULT_UI_SIZE,
-  MAX_SIDEBAR_WIDTH,
   MAX_UI_SIZE,
-  MIN_MEDIA_STUDIO_HEIGHT,
-  MIN_MEDIA_STUDIO_WIDTH,
-  MIN_SIDEBAR_WIDTH,
   MIN_UI_SIZE,
   nextPreviewBrowserZoom,
   UI_SIZE_STEP,
@@ -65,13 +57,9 @@ const {
 } = await import("../src/ui/store.js");
 
 equal(useUiPreferences.getState().sidebarOpen, true, "sidebar should default open");
-equal(useUiPreferences.getState().sidebarWidth, DEFAULT_SIDEBAR_WIDTH, "sidebar should have a default width");
-equal(useUiPreferences.getState().previewPanelWidth, 420, "preview panel should have a default width");
-equal(useUiPreferences.getState().mediaStudioWidth, DEFAULT_MEDIA_STUDIO_WIDTH, "media studio should have a default width");
-equal(useUiPreferences.getState().mediaStudioHeight, DEFAULT_MEDIA_STUDIO_HEIGHT, "media studio should have a default height");
+equal(JSON.stringify(useUiPreferences.getState().paneSizes), "{}", "every pane should start at its default size");
+equal("sidebarWidth" in useUiPreferences.getState(), false, "legacy per-pane size fields should not be exposed");
 equal(useUiPreferences.getState().mediaComposerPlacement, "bottom", "media composer should default below Output");
-equal(useUiPreferences.getState().mediaComposerWidth, DEFAULT_MEDIA_COMPOSER_WIDTH, "media composer should have a default width");
-equal(useUiPreferences.getState().mediaLibraryWidth, DEFAULT_MEDIA_LIBRARY_WIDTH, "media library should have a default width");
 equal(useUiPreferences.getState().uiSize, DEFAULT_UI_SIZE, "UI size should default to 100%");
 equal(useUiPreferences.getState().previewBrowserZoom.app, DEFAULT_PREVIEW_BROWSER_ZOOM.app, "App preview zoom should default to 100%");
 equal(useUiPreferences.getState().previewBrowserZoom.url, DEFAULT_PREVIEW_BROWSER_ZOOM.url, "URL preview zoom should default to 100%");
@@ -134,41 +122,50 @@ equal(persistedUiState().threadNavigationPlacement, "top", "thread navigation pl
 useUiPreferences.getState().setThreadNavigationPlacement("bottom");
 equal(useUiPreferences.getState().threadNavigationPlacement, "bottom", "thread navigation should move to the bottom bar");
 
-useUiPreferences.getState().setSidebarWidth(320);
-equal(useUiPreferences.getState().sidebarWidth, 320, "sidebar width should update");
-equal(persistedUiState().sidebarWidth, 320, "sidebar width should be persisted");
+function persistedPaneSizes(): Record<string, unknown> {
+  return (persistedUiState().paneSizes ?? {}) as Record<string, unknown>;
+}
 
-useUiPreferences.getState().setSidebarWidth(9999);
-equal(useUiPreferences.getState().sidebarWidth, MAX_SIDEBAR_WIDTH, "sidebar width should be capped");
+useUiPreferences.getState().setPaneSize("sidebar", 320);
+equal(useUiPreferences.getState().paneSizes.sidebar, 320, "sidebar width should update");
+equal(persistedPaneSizes().sidebar, 320, "sidebar width should be persisted");
 
-useUiPreferences.getState().setSidebarWidth(1);
-equal(useUiPreferences.getState().sidebarWidth, MIN_SIDEBAR_WIDTH, "sidebar width should have a floor");
+useUiPreferences.getState().setPaneSize("sidebar", 9999);
+equal(useUiPreferences.getState().paneSizes.sidebar, PANES.sidebar.max, "sidebar width should be capped");
 
-useUiPreferences.getState().setPreviewPanelWidth(540);
-equal(useUiPreferences.getState().previewPanelWidth, 540, "preview panel width should update");
-equal(persistedUiState().previewPanelWidth, 540, "preview panel width should be persisted");
+useUiPreferences.getState().setPaneSize("sidebar", 1);
+equal(useUiPreferences.getState().paneSizes.sidebar, PANES.sidebar.min, "sidebar width should have a floor");
 
-useUiPreferences.getState().setPreviewPanelWidth(9999);
-equal(useUiPreferences.getState().previewPanelWidth, 9999, "preview panel width should not have a fixed cap");
+useUiPreferences.getState().setPaneSize("inspector", 540);
+equal(useUiPreferences.getState().paneSizes.inspector, 540, "preview panel width should update");
+equal(persistedPaneSizes().inspector, 540, "preview panel width should be persisted");
 
-useUiPreferences.getState().setMediaStudioSize(980, 680);
-equal(useUiPreferences.getState().mediaStudioWidth, 980, "media studio width should update");
-equal(useUiPreferences.getState().mediaStudioHeight, 680, "media studio height should update");
-equal(persistedUiState().mediaStudioWidth, 980, "media studio width should be persisted");
-equal(persistedUiState().mediaStudioHeight, 680, "media studio height should be persisted");
+useUiPreferences.getState().setPaneSize("inspector", 3000);
+equal(useUiPreferences.getState().paneSizes.inspector, 3000, "preview panel width should only be capped by its container");
+
+useUiPreferences.getState().setPaneSizes({ "mediaSheet.width": 980, "mediaSheet.height": 680 });
+equal(useUiPreferences.getState().paneSizes["mediaSheet.width"], 980, "media studio width should update");
+equal(useUiPreferences.getState().paneSizes["mediaSheet.height"], 680, "media studio height should update");
+equal(persistedPaneSizes()["mediaSheet.width"], 980, "media studio width should be persisted");
+equal(persistedPaneSizes()["mediaSheet.height"], 680, "media studio height should be persisted");
+
+useUiPreferences.getState().resetPaneSize("sidebar");
+equal("sidebar" in useUiPreferences.getState().paneSizes, false, "resetting one pane should clear its preference");
+equal(useUiPreferences.getState().paneSizes.inspector, 3000, "resetting one pane should keep the others");
+useUiPreferences.getState().setPaneSize("sidebar", 320);
 
 useUiPreferences.getState().setMediaComposerPlacement("side");
 equal(useUiPreferences.getState().mediaComposerPlacement, "side", "media composer placement should update");
 equal(persistedUiState().mediaComposerPlacement, "side", "media composer placement should be persisted");
 
-useUiPreferences.getState().setMediaComposerWidth(336);
-useUiPreferences.getState().setMediaLibraryWidth(312);
-equal(persistedUiState().mediaComposerWidth, 336, "media composer width should be persisted");
-equal(persistedUiState().mediaLibraryWidth, 312, "media library width should be persisted");
+useUiPreferences.getState().setPaneSize("mediaComposer", 336);
+useUiPreferences.getState().setPaneSize("mediaLibrary", 312);
+equal(persistedPaneSizes().mediaComposer, 336, "media composer width should be persisted");
+equal(persistedPaneSizes().mediaLibrary, 312, "media library width should be persisted");
 
-useUiPreferences.getState().setMediaStudioSize(1, 1);
-equal(useUiPreferences.getState().mediaStudioWidth, MIN_MEDIA_STUDIO_WIDTH, "media studio width should have a floor");
-equal(useUiPreferences.getState().mediaStudioHeight, MIN_MEDIA_STUDIO_HEIGHT, "media studio height should have a floor");
+useUiPreferences.getState().setPaneSizes({ "mediaSheet.width": 1, "mediaSheet.height": 1 });
+equal(useUiPreferences.getState().paneSizes["mediaSheet.width"], PANES["mediaSheet.width"].min, "media studio width should have a floor");
+equal(useUiPreferences.getState().paneSizes["mediaSheet.height"], PANES["mediaSheet.height"].min, "media studio height should have a floor");
 
 useUiPreferences.getState().setUiSize(120);
 equal(useUiPreferences.getState().uiSize, 120, "UI size should update");
@@ -334,18 +331,13 @@ equal(useUiPreferences.getState().appShortcuts.newChat, DEFAULT_APP_SHORTCUTS.ne
 useUiPreferences.getState().resetAppShortcuts();
 equal(useUiPreferences.getState().appShortcuts.focusComposer, DEFAULT_APP_SHORTCUTS.focusComposer, "shortcut reset should restore defaults");
 
-useUiPreferences.getState().resetLayoutWidths();
-equal(useUiPreferences.getState().sidebarWidth, DEFAULT_SIDEBAR_WIDTH, "reset should restore sidebar width");
-equal(useUiPreferences.getState().previewPanelWidth, 420, "reset should restore preview panel width");
-equal(useUiPreferences.getState().mediaStudioWidth, DEFAULT_MEDIA_STUDIO_WIDTH, "reset should restore media studio width");
-equal(useUiPreferences.getState().mediaStudioHeight, DEFAULT_MEDIA_STUDIO_HEIGHT, "reset should restore media studio height");
-equal(useUiPreferences.getState().mediaComposerWidth, DEFAULT_MEDIA_COMPOSER_WIDTH, "reset should restore media composer width");
-equal(useUiPreferences.getState().mediaLibraryWidth, DEFAULT_MEDIA_LIBRARY_WIDTH, "reset should restore media library width");
+useUiPreferences.getState().resetAllPaneSizes();
+equal(JSON.stringify(useUiPreferences.getState().paneSizes), "{}", "reset should restore every pane size");
+equal(JSON.stringify(persistedPaneSizes()), "{}", "reset should persist default pane sizes");
 
 useUiPreferences.setState({
   sidebarOpen: true,
-  sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
-  previewPanelWidth: 420,
+  paneSizes: {},
   uiSize: DEFAULT_UI_SIZE,
   showAccountUsageInTitleBar: true,
   windowAlwaysOnTop: false,
@@ -383,10 +375,12 @@ localStorage.setItem(
 );
 await useUiPreferences.persist.rehydrate();
 equal(useUiPreferences.getState().sidebarOpen, false, "sidebar should rehydrate persisted closed state");
-equal(useUiPreferences.getState().sidebarWidth, 384, "sidebar should rehydrate persisted width");
-equal(useUiPreferences.getState().previewPanelWidth, 512, "preview panel should rehydrate persisted width");
-equal(useUiPreferences.getState().mediaStudioWidth, 1040, "media studio should rehydrate persisted width");
-equal(useUiPreferences.getState().mediaStudioHeight, 740, "media studio should rehydrate persisted height");
+equal(useUiPreferences.getState().paneSizes.sidebar, 384, "legacy sidebar width should migrate into the pane registry");
+equal(useUiPreferences.getState().paneSizes.inspector, 512, "legacy preview panel width should migrate into the pane registry");
+equal(useUiPreferences.getState().paneSizes["mediaSheet.width"], 1040, "legacy media studio width should migrate into the pane registry");
+equal(useUiPreferences.getState().paneSizes["mediaSheet.height"], 740, "legacy media studio height should migrate into the pane registry");
+equal("sidebarWidth" in useUiPreferences.getState(), false, "legacy size keys should not survive rehydration");
+equal("sidebarWidth" in persistedUiState(), true, "rehydration alone should not rewrite storage");
 equal(useUiPreferences.getState().mediaComposerPlacement, "side", "media composer placement should rehydrate");
 equal(useUiPreferences.getState().uiSize, 130, "UI size should rehydrate persisted value");
 equal(useUiPreferences.getState().showAccountUsageInTitleBar, true, "missing title-bar account usage preference should keep its enabled default");
@@ -409,7 +403,7 @@ equal(useUiPreferences.getState().experimentalHashlinePatch, true, "hashline pat
 equal(useUiPreferences.getState().chatLayoutStyle, "compact", "chat layout should rehydrate");
 equal(useUiPreferences.getState().threadNavigationPlacement, "bottom", "thread navigation placement should rehydrate");
 equal(useUiPreferences.getState().sidebarOpen, false, "horizontal navigation should preserve the saved sidebar open state");
-equal(useUiPreferences.getState().sidebarWidth, 384, "horizontal navigation should preserve the saved sidebar width");
+equal(useUiPreferences.getState().paneSizes.sidebar, 384, "horizontal navigation should preserve the saved sidebar width");
 equal(useUiPreferences.getState().sidebarRailStyle, "split", "collapsed sidebar rail style should rehydrate");
 equal(useUiPreferences.getState().settledThreadsEnabled, true, "settled threads should rehydrate");
 equal(useUiPreferences.getState().showEmptyChatRidgeline, true, "missing empty-chat ridgeline preference should keep its enabled default");
@@ -435,6 +429,18 @@ localStorage.setItem(
 await useUiPreferences.persist.rehydrate();
 equal(useUiPreferences.getState().threadNavigationPlacement, "sidebar", "invalid thread navigation placement should fall back to the sidebar");
 equal(useUiPreferences.getState().sidebarOpen, false, "invalid placement fallback should retain the saved sidebar open state");
-equal(useUiPreferences.getState().sidebarWidth, 360, "invalid placement fallback should retain the saved sidebar width");
+equal(useUiPreferences.getState().paneSizes.sidebar, 360, "invalid placement fallback should retain the saved sidebar width");
+
+localStorage.setItem(
+  "milim.ui",
+  '{"state":{"sidebarWidth":384,"paneSizes":{"sidebar":300,"context":420,"unknownPane":10}},"version":0}',
+);
+await useUiPreferences.persist.rehydrate();
+equal(useUiPreferences.getState().paneSizes.sidebar, 300, "saved registry sizes should win over legacy keys");
+equal(useUiPreferences.getState().paneSizes.context, 420, "saved registry sizes should rehydrate");
+equal("unknownPane" in useUiPreferences.getState().paneSizes, false, "unknown panes should be dropped on rehydrate");
+useUiPreferences.getState().setPaneSize("codeRail", 240);
+equal("sidebarWidth" in persistedUiState(), false, "the next write should drop legacy size keys");
+equal(persistedPaneSizes().sidebar, 300, "the next write should keep migrated sizes");
 
 export {};

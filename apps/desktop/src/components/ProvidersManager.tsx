@@ -46,6 +46,9 @@ import { useSettings } from "../settings/store";
 import { Check, ChevronDown, Folder, Plus, Refresh, Search, X } from "./icons";
 import { ProviderIcon, providerBrandForProvider, type ProviderBrand } from "./ProviderIcon";
 import { SheetDialog } from "./SheetDialog";
+import { PaneResizeHandle } from "./PaneResizeHandle";
+import { MANAGER_DETAIL_MIN_WIDTH } from "../lib/paneSizes";
+import { useSplitPane } from "../ui/usePaneResize";
 import { AccountProfilesPanel } from "./AccountProfiles";
 import { RuntimeInstallHint } from "./RuntimeInstallHint";
 import { Select, Toggle } from "./ui";
@@ -186,6 +189,8 @@ function noteTone(note: string): StatusTone {
 }
 
 export function ProvidersManager({ onClose }: { onClose: () => void }) {
+  // The providers body separates rail and detail with an 18px gap.
+  const rail = useSplitPane("providersRail", "--manager-rail-width", MANAGER_DETAIL_MIN_WIDTH + 18);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [sel, setSel] = useState<Selection>(null);
   const [name, setName] = useState("");
@@ -930,6 +935,7 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
     <SheetDialog
       title="Providers"
       className="sheet agents-sheet providers-sheet"
+      resizable={{ id: "providers" }}
       onClose={onClose}
     >
       <div className="sheet-header providers-header">
@@ -963,7 +969,8 @@ export function ProvidersManager({ onClose }: { onClose: () => void }) {
         </div>
       </div>
 
-      <div className="agents-body providers-body">
+      <div ref={rail.containerRef} className="agents-body providers-body" style={rail.style}>
+        <PaneResizeHandle resize={rail.resize} className="manager-rail-resize-handle" data-testid="providers-rail-resize-handle" />
         <aside className="providers-rail" aria-label="Provider connections">
           <div className="providers-list" role="list">
             <button

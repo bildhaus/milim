@@ -6,9 +6,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
-  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
-  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
@@ -73,6 +71,7 @@ import {
   GitHunkActions,
 } from "./GitStagingControls";
 import { PaneResizeHandle } from "./PaneResizeHandle";
+import { containerMax, usePaneResize } from "../ui/usePaneResize";
 import { SheetDialog } from "./SheetDialog";
 import {
   ArrowUp,
@@ -109,10 +108,7 @@ function PullRequestMarkdownContent({ content }: { content: string }) {
 }
 
 const COMMIT_MESSAGE_DIFF_LIMIT = 18_000;
-const DIFF_NAVIGATOR_MIN_WIDTH = 160;
-const DIFF_NAVIGATOR_DEFAULT_WIDTH = 210;
 const DIFF_MAIN_MIN_WIDTH = 320;
-const DIFF_NAVIGATOR_KEYBOARD_STEP = 24;
 const DIFF_SCOPE_OPTIONS: { value: WorkspaceGitDiffScope; label: string }[] = [
   { value: "all", label: "All changes" },
   { value: "unstaged", label: "Unstaged" },
@@ -683,19 +679,19 @@ export function GitPanel({
   const [activeDiffSectionId, setActiveDiffSectionId] = useState<string | null>(
     null,
   );
-  const [diffNavigatorWidth, setDiffNavigatorWidth] = useState(
-    DIFF_NAVIGATOR_DEFAULT_WIDTH,
-  );
   const [diffNavigatorVisible, setDiffNavigatorVisible] = useState(true);
-  const [diffNavigatorResizing, setDiffNavigatorResizing] = useState(false);
   const [collapsedFileTreePaths, setCollapsedFileTreePaths] = useState<
     Set<string>
   >(() => new Set());
-  const diffNavigatorResizeStartRef = useRef<{
-    clientX: number;
-    width: number;
-  } | null>(null);
   const diffLayoutRef = useRef<HTMLDivElement | null>(null);
+  // Dragging past the minimum hides the file list, like its toolbar toggle.
+  const diffNavigatorResize = usePaneResize("gitDiffNavigator", {
+    max: containerMax(diffLayoutRef, DIFF_MAIN_MIN_WIDTH),
+    targetRef: diffLayoutRef,
+    cssVar: "--git-diff-navigator-width",
+    onCollapse: () => setDiffNavigatorVisible(false),
+    onExpand: () => setDiffNavigatorVisible(true),
+  });
   const diffViewRef = useRef<HTMLDivElement | null>(null);
   const selectedFolder = folder.trim();
 
@@ -1332,62 +1328,6 @@ export function GitPanel({
     setDiffSearchIndex(0);
   }
 
-  function resizeDiffNavigator(width: number) {
-    const max = Math.max(
-      DIFF_NAVIGATOR_MIN_WIDTH,
-      (diffLayoutRef.current?.clientWidth ??
-        DIFF_NAVIGATOR_DEFAULT_WIDTH + DIFF_MAIN_MIN_WIDTH) -
-        DIFF_MAIN_MIN_WIDTH,
-    );
-    setDiffNavigatorWidth(
-      Math.round(Math.min(Math.max(width, DIFF_NAVIGATOR_MIN_WIDTH), max)),
-    );
-  }
-
-  function startDiffNavigatorResize(event: ReactPointerEvent<HTMLDivElement>) {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    diffNavigatorResizeStartRef.current = {
-      clientX: event.clientX,
-      width: diffNavigatorWidth,
-    };
-    setDiffNavigatorResizing(true);
-    event.currentTarget.setPointerCapture(event.pointerId);
-  }
-
-  function moveDiffNavigatorResize(event: ReactPointerEvent<HTMLDivElement>) {
-    const start = diffNavigatorResizeStartRef.current;
-    if (!start) return;
-    resizeDiffNavigator(start.width + event.clientX - start.clientX);
-  }
-
-  function endDiffNavigatorResize(event: ReactPointerEvent<HTMLDivElement>) {
-    if (!diffNavigatorResizeStartRef.current) return;
-    diffNavigatorResizeStartRef.current = null;
-    setDiffNavigatorResizing(false);
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-  }
-
-  function resizeDiffNavigatorWithKeyboard(
-    event: ReactKeyboardEvent<HTMLDivElement>,
-  ) {
-    if (event.key === "ArrowLeft") {
-      event.preventDefault();
-      resizeDiffNavigator(diffNavigatorWidth - DIFF_NAVIGATOR_KEYBOARD_STEP);
-    } else if (event.key === "ArrowRight") {
-      event.preventDefault();
-      resizeDiffNavigator(diffNavigatorWidth + DIFF_NAVIGATOR_KEYBOARD_STEP);
-    } else if (event.key === "Home") {
-      event.preventDefault();
-      resizeDiffNavigator(DIFF_NAVIGATOR_MIN_WIDTH);
-    } else if (event.key === "End") {
-      event.preventDefault();
-      resizeDiffNavigator(Number.MAX_SAFE_INTEGER);
-    }
-  }
-
   function stepDiffSearch(delta: number) {
     if (!diffSearchMatches.length) return;
     setDiffSearchIndex(
@@ -1865,31 +1805,16 @@ export function GitPanel({
         className={`git-diff-layout${diffNavigatorVisible ? "" : " files-hidden"}`}
         style={
           {
-            "--git-diff-navigator-width": `${diffNavigatorWidth}px`,
+            "--git-diff-navigator-width": `${diffNavigatorResize.size}px`,
           } as CSSProperties
         }
       >
         {diffNavigatorVisible && renderFileNavigator(true)}
         {diffNavigatorVisible && navigableFiles.length > 0 && (
           <PaneResizeHandle
-            className={`git-diff-resize-handle${diffNavigatorResizing ? " dragging" : ""}`}
-            orientation="vertical"
+            resize={diffNavigatorResize}
+            className="git-diff-resize-handle"
             data-testid="git-diff-resize-handle"
-            aria-label="Resize changed files"
-            aria-valuemin={DIFF_NAVIGATOR_MIN_WIDTH}
-            aria-valuemax={Math.max(
-              DIFF_NAVIGATOR_MIN_WIDTH,
-              (diffLayoutRef.current?.clientWidth ??
-                DIFF_NAVIGATOR_DEFAULT_WIDTH + DIFF_MAIN_MIN_WIDTH) -
-                DIFF_MAIN_MIN_WIDTH,
-            )}
-            aria-valuenow={diffNavigatorWidth}
-            tabIndex={0}
-            onKeyDown={resizeDiffNavigatorWithKeyboard}
-            onPointerDown={startDiffNavigatorResize}
-            onPointerMove={moveDiffNavigatorResize}
-            onPointerUp={endDiffNavigatorResize}
-            onPointerCancel={endDiffNavigatorResize}
           />
         )}
         <div className="git-diff-main">

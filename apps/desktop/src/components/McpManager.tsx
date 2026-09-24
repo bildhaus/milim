@@ -2,6 +2,9 @@ import { useEffect, useState } from "react";
 import { deleteMcpServer, listMcpServers, MCP_PRESETS, saveMcpServer, testMcpServer, type McpEnvVar, type McpServerInfo } from "../api";
 import { Cube, Plus, Trash, X } from "./icons";
 import { SheetDialog } from "./SheetDialog";
+import { PaneResizeHandle } from "./PaneResizeHandle";
+import { MANAGER_DETAIL_MIN_WIDTH } from "../lib/paneSizes";
+import { useSplitPane } from "../ui/usePaneResize";
 import { Select, Toggle } from "./ui";
 import "./McpManager.css";
 
@@ -79,6 +82,7 @@ function McpListPlaceholder() {
 }
 
 export function McpManager({ onClose }: { onClose: () => void }) {
+  const rail = useSplitPane("mcpRail", "--manager-rail-width", MANAGER_DETAIL_MIN_WIDTH);
   const [servers, setServers] = useState<McpServerInfo[]>([]);
   const [sel, setSel] = useState<Selection>(null);
   const [name, setName] = useState("");
@@ -208,7 +212,7 @@ export function McpManager({ onClose }: { onClose: () => void }) {
     setEnv((rows) => [...rows, { id: `env-${Date.now()}`, key: "", value: "", secret: false, required: false, has_value: false }]);
 
   return (
-    <SheetDialog title="MCP Servers" className="sheet agents-sheet mcp-manager-sheet" onClose={onClose}>
+    <SheetDialog title="MCP Servers" className="sheet agents-sheet mcp-manager-sheet" resizable={{ id: "mcp" }} onClose={onClose}>
         <div className="mcp-manager-header">
           <div className="mcp-manager-title">
             <h2>MCP Servers</h2>
@@ -228,7 +232,8 @@ export function McpManager({ onClose }: { onClose: () => void }) {
           </div>
         </div>
 
-        <div className="mcp-manager-body">
+        <div ref={rail.containerRef} className="mcp-manager-body" style={rail.style}>
+          <PaneResizeHandle resize={rail.resize} className="manager-rail-resize-handle" data-testid="mcp-rail-resize-handle" />
           <aside className="mcp-rail" aria-label="MCP server list">
             <div className="mcp-rail-summary">
               <span>{servers.length} saved</span>

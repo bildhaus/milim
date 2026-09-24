@@ -3714,9 +3714,11 @@ button.git-row:hover svg {
   border-top-color: color-mix(in srgb, var(--error) 42%, var(--border-primary));
 }
 .git-diff-layout {
+  /* Saved width, clamped live so the diff keeps 320px. */
+  --git-diff-navigator-size: max(160px, min(var(--git-diff-navigator-width, 210px), calc(100% - 320px)));
   position: relative;
   display: grid;
-  grid-template-columns: var(--git-diff-navigator-width, 210px) minmax(0, 1fr);
+  grid-template-columns: var(--git-diff-navigator-size) minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
   height: 100%;
@@ -3739,7 +3741,7 @@ button.git-row:hover svg {
   position: absolute;
   top: 0;
   bottom: 0;
-  left: var(--git-diff-navigator-width, 210px);
+  left: var(--git-diff-navigator-size);
   transform: translateX(-50%);
 }
 .git-diff-navigator-head {

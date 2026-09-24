@@ -1,7 +1,8 @@
 .providers-sheet {
-  width: min(1040px, 96vw);
-  height: min(740px, 90vh);
-  max-height: 90vh;
+  /* Provider rows, account runtimes, and model discovery need the most room. */
+  width: min(var(--manager-sheet-large-width), calc(100vw - 48px));
+  height: min(var(--manager-sheet-large-height), calc(100dvh - 48px));
+  max-height: calc(100dvh - 24px);
   padding: 14px;
 }
 
@@ -57,6 +58,8 @@
 }
 
 .providers-body {
+  --manager-rail-size: max(200px, min(var(--manager-rail-width, 264px), calc(100% - 338px)));
+  position: relative;
   /* Direct child of the fixed-height, overflow-hidden `.sheet` column. Without
      both of these the default `min-height: auto` keeps this item from
      shrinking, so it grows past the sheet, gets clipped, and the rail and
@@ -64,7 +67,7 @@
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 264px minmax(0, 1fr);
+  grid-template-columns: var(--manager-rail-size) minmax(0, 1fr);
   gap: 18px;
   margin-top: 12px;
 }
@@ -1234,6 +1237,10 @@
   .providers-body {
     grid-template-columns: 1fr;
     overflow-y: auto;
+  }
+
+  .providers-body > .manager-rail-resize-handle {
+    display: none;
   }
 
   .providers-rail {

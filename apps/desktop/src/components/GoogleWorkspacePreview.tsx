@@ -51,6 +51,8 @@ import {
 } from "../lib/googleWorkspace";
 import { useContextMenu } from "./ContextMenu";
 import { confirmApp } from "../ui/confirmation";
+import { containerMax, usePaneResize } from "../ui/usePaneResize";
+import { PaneResizeHandle } from "./PaneResizeHandle";
 import {
   AlignCenter,
   AlignJustify,
@@ -314,6 +316,9 @@ export function googleWorkspacePreviewNeedsLoad(
 export function googleSlideThumbnailRequestKey(fileId: string, slideId: string, generation: number) {
   return `${fileId}\0${slideId}\0${generation}`;
 }
+
+/** The slide canvas keeps this much width beside the thumbnail rail. */
+const GOOGLE_SLIDE_STAGE_MIN_WIDTH = 200;
 
 function useGoogleSaveQueue(onDrained: () => void) {
   const onDrainedRef = useRef(onDrained);
@@ -2039,6 +2044,15 @@ export function SlidesPreview({
   const [query, setQuery] = useState("");
   const [zoom, setZoom] = useState<"fit" | number>("fit");
   const [railOpen, setRailOpen] = useState(true);
+  const slidesLayoutRef = useRef<HTMLDivElement | null>(null);
+  // Dragging the thumbnail rail past its minimum hides it, like its toolbar toggle.
+  const railResize = usePaneResize("googleSlidesRail", {
+    max: containerMax(slidesLayoutRef, GOOGLE_SLIDE_STAGE_MIN_WIDTH),
+    targetRef: slidesLayoutRef,
+    cssVar: "--google-slide-rail-width",
+    onCollapse: () => setRailOpen(false),
+    onExpand: () => setRailOpen(true),
+  });
   const [notesOpen, setNotesOpen] = useState(false);
   const [presenting, setPresenting] = useState(false);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
@@ -2956,7 +2970,16 @@ export function SlidesPreview({
           </select>
         </label>
       </div>
-      <div className={`google-slides-preview${railOpen ? "" : " rail-collapsed"}`}>
+      <div
+        ref={slidesLayoutRef}
+        className={`google-slides-preview${railOpen ? "" : " rail-collapsed"}`}
+        style={{ "--google-slide-rail-width": `${railResize.size}px` } as CSSProperties}
+      >
+      {railOpen ? <PaneResizeHandle
+        resize={railResize}
+        className="google-slide-rail-resize-handle"
+        data-testid="google-slide-rail-resize-handle"
+      /> : null}
       {railOpen ? <nav className="google-slide-rail" aria-label="Slides">
         {visibleSlides.map((item, index) => (
           <div

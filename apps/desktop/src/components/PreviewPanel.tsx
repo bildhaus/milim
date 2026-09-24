@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { inTauri, cancelPreviewPicker, openExternalUrl, setActivePreviewTarget, startPreviewPicker, takePreviewPicker, type ChatArtifact, type PreviewAppPreflight, type PreviewAppStatus, type PreviewSurfaceCapability, type PreviewSurfaceKind, type PreviewSurfaceTarget } from "../api";
 import type { ArtifactRevision, ArtifactRevisionGroup } from "../lib/artifactRevisions";
@@ -18,6 +18,7 @@ import { ArrowLeft, ArrowRight, Bolt, Code, Copy, Download, ExternalLink, Eye, G
 import { GoogleWorkspacePreview } from "./GoogleWorkspacePreview";
 import { Logo } from "./Logo";
 import { PaneResizeHandle } from "./PaneResizeHandle";
+import { usePaneResize } from "../ui/usePaneResize";
 import { WorkspaceCodePanel } from "./WorkspaceCodePanel";
 
 const Markdown = lazy(() => import("./Markdown").then((mod) => ({ default: mod.Markdown })));
@@ -69,10 +70,8 @@ type PreviewLogEntry = {
 
 const PREVIEW_LOG_EVENT = "milim-artifact-log";
 const MAX_PREVIEW_LOGS = 200;
-const LOG_DRAWER_MIN_HEIGHT = 48;
-const LOG_DRAWER_DEFAULT_HEIGHT = 142;
-const LOG_DRAWER_MAX_HEIGHT = 360;
-const LOG_DRAWER_KEYBOARD_STEP = 24;
+/** The log drawer never takes more than this share of the window height. */
+const LOG_DRAWER_MAX_VIEWPORT_SHARE = 0.45;
 const PREVIEW_CONTROL_OVERLAY_CLOSE_MS = 3400;
 const PREVIEW_CONTROL_OVERLAY_STORAGE_PREFIX = "milim-preview-control-activity:";
 const PREVIEW_CONTROL_OVERLAY_LABEL = "artifact-overlay-preview";
@@ -216,8 +215,17 @@ export function PreviewPanel({
   const [runtimeDetailsOpen, setRuntimeDetailsOpen] = useState(false);
   const [runtimePanelFocused, setRuntimePanelFocused] = useState(false);
   const [runtimeLogsClearedAt, setRuntimeLogsClearedAt] = useState(0);
-  const [logDrawerHeight, setLogDrawerHeight] = useState(LOG_DRAWER_DEFAULT_HEIGHT);
-  const [logResizing, setLogResizing] = useState(false);
+  const logDrawerRef = useRef<HTMLDivElement>(null);
+  // Dragging the drawer down past its minimum closes the logs.
+  const logResize = usePaneResize("previewLogs", {
+    direction: -1,
+    max: () => typeof window === "undefined" ? undefined : Math.round(window.innerHeight * LOG_DRAWER_MAX_VIEWPORT_SHARE),
+    targetRef: logDrawerRef,
+    cssVar: "--preview-log-height",
+    controls: "preview-log-list",
+    onCollapse: () => setLogsOpen(false),
+    onExpand: () => setLogsOpen(true),
+  });
   const [iframeReadyKey, setIframeReadyKey] = useState<string | null>(null);
   const [reviewCommentDraft, setReviewCommentDraft] = useState("");
   const [reviewCommentOpen, setReviewCommentOpen] = useState(false);
@@ -226,7 +234,6 @@ export function PreviewPanel({
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const pickerRunRef = useRef(0);
   const logIdRef = useRef(0);
-  const logResizeStartRef = useRef<{ clientY: number; height: number } | null>(null);
   const previewWasDeferredRef = useRef(previewDeferred);
   const nativeBrowserClaimsRef = useRef(new Map<string, NativePreviewClaim>());
   const handledNewTabRequestsRef = useRef(new Set<number>());
@@ -972,58 +979,6 @@ export function PreviewPanel({
     event.currentTarget.closest("details")?.removeAttribute("open");
   }
 
-  function maxLogDrawerHeight(): number {
-    if (typeof window === "undefined") return LOG_DRAWER_MAX_HEIGHT;
-    return Math.max(LOG_DRAWER_MIN_HEIGHT, Math.min(LOG_DRAWER_MAX_HEIGHT, Math.round(window.innerHeight * 0.45)));
-  }
-
-  function clampLogDrawerHeight(height: number): number {
-    return Math.round(Math.min(Math.max(height, LOG_DRAWER_MIN_HEIGHT), maxLogDrawerHeight()));
-  }
-
-  function resizeLogDrawer(height: number) {
-    setLogDrawerHeight(clampLogDrawerHeight(height));
-  }
-
-  function startLogResize(event: PointerEvent<HTMLDivElement>) {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    logResizeStartRef.current = { clientY: event.clientY, height: logDrawerHeight };
-    setLogResizing(true);
-    event.currentTarget.setPointerCapture(event.pointerId);
-  }
-
-  function moveLogResize(event: PointerEvent<HTMLDivElement>) {
-    const start = logResizeStartRef.current;
-    if (!start) return;
-    resizeLogDrawer(start.height + start.clientY - event.clientY);
-  }
-
-  function endLogResize(event: PointerEvent<HTMLDivElement>) {
-    if (!logResizeStartRef.current) return;
-    logResizeStartRef.current = null;
-    setLogResizing(false);
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-  }
-
-  function resizeLogDrawerWithKeyboard(event: KeyboardEvent<HTMLDivElement>) {
-    if (event.key === "ArrowUp") {
-      event.preventDefault();
-      resizeLogDrawer(logDrawerHeight + LOG_DRAWER_KEYBOARD_STEP);
-    } else if (event.key === "ArrowDown") {
-      event.preventDefault();
-      resizeLogDrawer(logDrawerHeight - LOG_DRAWER_KEYBOARD_STEP);
-    } else if (event.key === "Home") {
-      event.preventDefault();
-      resizeLogDrawer(LOG_DRAWER_MIN_HEIGHT);
-    } else if (event.key === "End") {
-      event.preventDefault();
-      resizeLogDrawer(maxLogDrawerHeight());
-    }
-  }
-
   return (
     <aside
       ref={panelRef}
@@ -1479,21 +1434,12 @@ export function PreviewPanel({
                 {controlActivity && <PreviewControlOverlay key={controlActivity.id} activity={controlActivity} />}
               </div>
             )}
-            <div className={`preview-log-drawer${logsOpen ? " open" : ""}`} data-testid="preview-log-drawer">
+            <div ref={logDrawerRef} className={`preview-log-drawer${logsOpen ? " open" : ""}`} data-testid="preview-log-drawer" style={{ "--preview-log-height": `${logResize.size}px` } as CSSProperties}>
               {logsOpen && (
                 <PaneResizeHandle
-                  className={`preview-log-resize-handle${logResizing ? " dragging" : ""}`}
-                  orientation="horizontal"
+                  resize={logResize}
+                  className="preview-log-resize-handle"
                   data-testid="preview-log-resize-handle"
-                  aria-label="Resize logs"
-                  aria-valuemin={LOG_DRAWER_MIN_HEIGHT}
-                  aria-valuemax={maxLogDrawerHeight()}
-                  aria-valuenow={logDrawerHeight}
-                  onKeyDown={resizeLogDrawerWithKeyboard}
-                  onPointerDown={startLogResize}
-                  onPointerMove={moveLogResize}
-                  onPointerUp={endLogResize}
-                  onPointerCancel={endLogResize}
                 />
               )}
               <div className="preview-log-head">
@@ -1529,7 +1475,6 @@ export function PreviewPanel({
                   role="log"
                   aria-live="polite"
                   aria-relevant="additions"
-                  style={{ height: logDrawerHeight }}
                 >
                   {visibleLogs.length ? visibleLogs.map((log) => <PreviewLogRow key={log.id} log={log} />) : <div className="preview-log-empty">No logs</div>}
                 </div>

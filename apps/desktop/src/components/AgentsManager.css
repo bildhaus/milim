@@ -1,6 +1,6 @@
 .agent-manager-sheet {
-  width: min(980px, 96vw);
-  height: min(760px, 88vh);
+  width: min(var(--manager-sheet-width), calc(100vw - 48px));
+  height: min(var(--manager-sheet-height), calc(100dvh - 48px));
   padding: 0;
 }
 
@@ -56,10 +56,12 @@
 }
 
 .agent-manager-body {
+  --manager-rail-size: max(220px, min(var(--manager-rail-width, 306px), calc(100% - 320px)));
+  position: relative;
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(248px, 306px) minmax(0, 1fr);
+  grid-template-columns: var(--manager-rail-size) minmax(0, 1fr);
 }
 
 .agent-rail {
@@ -773,6 +775,10 @@
     grid-template-rows: minmax(160px, 30vh) minmax(0, 1fr);
   }
 
+  .agent-manager-body > .manager-rail-resize-handle {
+    display: none;
+  }
+
   .agent-starter-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -840,8 +846,8 @@
 }
 
 .skills-manager-sheet {
-  width: min(1000px, 96vw);
-  height: min(760px, 88vh);
+  width: min(var(--manager-sheet-width), calc(100vw - 48px));
+  height: min(var(--manager-sheet-height), calc(100dvh - 48px));
 }
 
 .skills-manager-sheet .agent-manager-header {
@@ -850,7 +856,8 @@
 }
 
 .skills-manager-sheet .agent-manager-body {
-  grid-template-columns: 292px minmax(0, 1fr);
+  --manager-rail-size: max(220px, min(var(--manager-rail-width, 292px), calc(100% - 320px)));
+  grid-template-columns: var(--manager-rail-size) minmax(0, 1fr);
   background: color-mix(in srgb, var(--bg-secondary) 96%, var(--panel-bg));
 }
 
