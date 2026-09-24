@@ -1,4 +1,4 @@
-import { Fragment, lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type HTMLAttributes, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type HTMLAttributes, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
 import { createPortal } from "react-dom";
 import {
   SIDEBAR_CHATS_SECTION_ID,
@@ -17,7 +17,7 @@ import { inTauri, openWorkspaceLauncher, runWorkspaceGitAction } from "../api";
 import { createInteractiveChat } from "../lib/newChatCoordinator";
 import { requestWorkspaceEditorLeave } from "../lib/workspaceEditorGuard";
 import { GIT_STATUS_REFRESH_INTERVAL_MS } from "../lib/gitRefresh";
-import { managersByGroup, type ManagerId } from "../lib/managers";
+import { toolsMenuManagers, type ManagerId } from "../lib/managers";
 import { markPerfRender } from "../lib/perf";
 import { previewRuntimeKeyForThread } from "../lib/previewRuntimeKeys";
 import {
@@ -1196,39 +1196,31 @@ export function Sidebar({
   }, [confirmArchiveId, projectMenuOpen]);
 
   function toolsActions(iconSize = 13) {
-    return managersByGroup().flatMap((group, groupIndex) =>
-      group.managers.map((entry, index) => ({
-        key: entry.id,
-        label: entry.label,
-        groupLabel: index === 0 ? group.label : undefined,
-        groupStart: index === 0 && groupIndex > 0,
-        icon: managerIcon(entry.id, iconSize),
-        action: () => onOpenManager(entry.id),
-      })),
-    );
+    return toolsMenuManagers().map((entry) => ({
+      key: entry.id,
+      label: entry.label,
+      icon: managerIcon(entry.id, iconSize),
+      action: () => onOpenManager(entry.id),
+    }));
   }
 
   function renderToolsActions(collapsedRail = false) {
     const iconSize = collapsedRail ? 15 : 13;
     const buttonClass = collapsedRail ? "icon-btn sidebar-workbench-action" : "sidebar-footer-item sidebar-workbench-action";
     return toolsActions(iconSize).map((item) => (
-      <Fragment key={item.key}>
-        {collapsedRail
-          ? item.groupStart && <span className="sidebar-workbench-separator" aria-hidden="true" />
-          : item.groupLabel && <span className="sidebar-workbench-group">{item.groupLabel}</span>}
-        <button
-          className={buttonClass}
-          type="button"
-          data-testid={`open-manager-${item.key}`}
-          title={collapsedRail ? item.label : undefined}
-          aria-label={collapsedRail ? item.label : undefined}
-          tabIndex={toolsExpanded ? undefined : -1}
-          onClick={item.action}
-        >
-          {item.icon}
-          {!collapsedRail && <span>{item.label}</span>}
-        </button>
-      </Fragment>
+      <button
+        key={item.key}
+        className={buttonClass}
+        type="button"
+        data-testid={`open-manager-${item.key}`}
+        title={collapsedRail ? item.label : undefined}
+        aria-label={collapsedRail ? item.label : undefined}
+        tabIndex={toolsExpanded ? undefined : -1}
+        onClick={item.action}
+      >
+        {item.icon}
+        {!collapsedRail && <span>{item.label}</span>}
+      </button>
     ));
   }
 
@@ -1565,7 +1557,6 @@ export function Sidebar({
         id: item.key,
         label: item.label,
         icon: item.icon,
-        separatorBefore: item.groupStart,
         action: item.action,
       })),
       "Tools",
