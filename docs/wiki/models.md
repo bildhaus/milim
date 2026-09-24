@@ -85,13 +85,13 @@ Verification is recorded per provider and modality. OpenRouter image is live-ver
 
 Codex, the installed Claude CLI, OpenCode, and Pi are separate from saved provider records. They are backed by user-installed CLIs, appear in the model picker after authentication/configuration, and reuse the active milim chat session when the runtime exposes a native session id. milim does not read or store their credentials.
 
-Provider settings checks installed account runtimes for newer versions. You can update an enabled runtime individually or use **Update all** to apply every detected update in sequence; both paths ask you to finish active runtime turns and confirm before changing an installed CLI.
+Providers checks installed account runtimes for newer versions. You can update an enabled runtime from its page or use **Update all** in the Overview attention bar to apply every detected update in sequence; both paths ask you to finish active runtime turns and confirm before changing an installed CLI.
 
 ### Several accounts for one runtime
 
 Codex and Claude can hold more than one signed-in account. Each account is a named profile backed by its own configuration folder, which milim points the CLI at through `CODEX_HOME` or `CLAUDE_CONFIG_DIR`. milim never reads, copies, or stores a credential to do this; the CLI keeps owning whatever it writes into that folder. OpenCode and Pi do not relocate their configuration this way and keep a single account.
 
-Add accounts under Providers. milim creates an empty folder and shows the command that signs it in; run it in a terminal, then refresh. Removing an account forgets it in milim and leaves the folder, and its credentials, on disk.
+Add accounts from the runtime's page in Providers, which lists every account (including **Default**, the CLI's own folder) with the same layout for Codex and Claude. milim creates an empty folder and shows the command that signs it in; run it in a terminal, then refresh. Each row has a **Use in Auto** switch, an **Auto picks** marker on the account Auto would choose now, and a menu with **Rename...**, **Open folder**, **Copy path**, and **Remove account...**. Removing an account forgets it in milim and leaves the folder, and its credentials, on disk; Default cannot be removed or excluded from Auto.
 
 Chats pick an account with the account chip, which appears once a second account exists. **Auto** re-picks before each turn, preferring the enabled account with the most room left and skipping any that is rate limited; a named account pins the chat to it. The choice is frozen per turn, and managed Workers inherit their parent chat's account.
 
@@ -103,7 +103,7 @@ Each account runtime keeps its native skill catalog. milim does not copy all ena
 
 ### Sign in to an account runtime
 
-Each CLI signs in with its own tooling; milim never handles those credentials. In onboarding, the **Coding CLIs** path offers **Connect** for Codex and **Sign-in help** for Claude, OpenCode, and Pi, which opens this section. After signing in, choose **Refresh CLIs** in onboarding or refresh the runtime in Providers.
+Each CLI signs in with its own tooling; milim never handles those credentials. In onboarding, the **Coding CLIs** path offers **Connect** for Codex and **Sign-in help** for Claude, OpenCode, and Pi, which opens this section. After signing in, choose **Refresh CLIs** in onboarding or **Refresh status** on the runtime's Providers page.
 
 | Runtime | Setup | Session behavior |
 |---|---|---|
