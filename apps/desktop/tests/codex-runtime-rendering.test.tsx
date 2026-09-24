@@ -33,8 +33,8 @@ try {
     groupRuntimeImportThreads,
     runtimeImportGroupSelection,
     setRuntimeImportGroupSelected,
-  } = (await server.ssrLoadModule("/src/components/ProvidersManager.tsx")) as
-    typeof import("../src/components/ProvidersManager.js");
+  } = (await server.ssrLoadModule("/src/components/AccountRuntimeImportDialog.tsx")) as
+    typeof import("../src/components/AccountRuntimeImportDialog.js");
 
   const importThreads = [
     {

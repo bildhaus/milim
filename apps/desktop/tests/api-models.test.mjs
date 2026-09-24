@@ -20,10 +20,19 @@ const chatCatalogController = readFileSync(
   ),
   "utf8",
 );
-const providersManager = readFileSync(
-  join(root, "src", "components", "ProvidersManager.tsx"),
-  "utf8",
-);
+// The Providers manager is split across a shell, a rail, pages, and a hook.
+const providersManager = [
+  ["components", "ProvidersManager.tsx"],
+  ["components", "ProvidersRail.tsx"],
+  ["components", "ProviderOverview.tsx"],
+  ["components", "ProviderPage.tsx"],
+  ["components", "RuntimePage.tsx"],
+  ["components", "RuntimeAccounts.tsx"],
+  ["components", "useAccountRuntimes.ts"],
+  ["components", "AccountRuntimeImportDialog.tsx"],
+  ["lib", "providerConnections.ts"],
+].map((parts) => readFileSync(join(root, "src", ...parts), "utf8")).join("\n");
+const runtimePage = readFileSync(join(root, "src", "components", "RuntimePage.tsx"), "utf8");
 const providersCss = readFileSync(
   join(root, "src", "components", "ProvidersManager.css"),
   "utf8",
@@ -100,31 +109,30 @@ assert.match(
   api,
   /`\$\{BASE\}\/account-runtimes\/\$\{encodeURIComponent\(runtime\)\}\/update`/,
 );
-assert.match(providersManager, /<strong>Pi CLI<\/strong>/);
 assert.match(providersManager, /piStatus\.provider_count/);
 assert.match(api, /export async function listClaudeThreads/);
 assert.match(api, /export async function importClaudeThread/);
 assert.match(api, /project_path\?: string \| null;/);
 assert.match(api, /if \(options\.all\) url\.searchParams\.set\("all", "true"\);/);
-assert.match(providersManager, /data-testid="codex-import-chats"/);
-assert.match(providersManager, /data-testid="claude-import-chats"/);
+assert.match(runtimePage, /\(runtime === "codex" && ready\) \|\| \(runtime === "claude" && enabled\)/);
+assert.match(runtimePage, /label: "Import chats\.\.\."/);
 assert.match(providersManager, /Import \{runtimeLabel\} chats/);
 assert.match(providersManager, /scope === "all"/);
 assert.match(providersManager, /setRuntimeImportGroupSelected/);
 assert.match(providersManager, /Importing \$\{progress\.current\} of \$\{progress\.total\}/);
 assert.doesNotMatch(providersManager, />Recover chats</);
-for (const runtime of ["codex", "claude", "opencode", "pi"]) {
-  assert.match(providersManager, new RegExp(`runtimeUpdateControl\\("${runtime}"`));
-}
-assert.match(providersManager, /data-testid=\{`\$\{runtime\}-update`\}/);
-assert.match(providersManager, /updateAvailable === true \? "btn-accent" : "btn-ghost"/);
-assert.match(providersManager, /if \(!installed\)/);
-assert.match(providersManager, /if \(!accountRuntimeEnabled\[runtime\]\)/);
-assert.match(providersManager, /"Update available"/);
-assert.match(providersManager, /provider-account-update-status/);
+// Every coding CLI renders through the same page, with at most one emphasized
+// action that is never the solid accent button.
+assert.match(providersManager, /ACCOUNT_RUNTIME_KINDS\.map\(\(runtime\) =>/);
+assert.match(runtimePage, /testId: `\$\{runtime\}-update`/);
+assert.match(runtimePage, /providers-emphasis-button/);
+assert.doesNotMatch(runtimePage, /btn-accent/);
+assert.match(runtimePage, /update\?\.update_available === false\s*\?\s*"Up to date"/);
+assert.match(runtimePage, /: "Run CLI updater"/);
+assert.match(runtimePage, /if \(enabled\) \{\s*menu\.push\(\{\s*id: "locate"/);
 assert.match(
   providersManager,
-  /confirmRuntimeUpdate !== runtime[\s\S]*click Confirm update/,
+  /confirmUpdate !== runtime[\s\S]*click Confirm update/,
 );
 assert.match(providersManager, /data-testid="account-runtimes-update-all"/);
 assert.match(
@@ -132,10 +140,10 @@ assert.match(
   /for \(const \[index, runtime\] of targets\.entries\(\)\)[\s\S]*await updateAccountRuntime\(runtime\)/,
 );
 assert.match(providersManager, /"Confirm update all"/);
-assert.match(providersManager, /`Update all \(\$\{runtimeUpdateTargets\.length\}\)`/);
+assert.match(providersManager, /coding CLI update\$\{attention\.count === 1 \? "" : "s"\} available/);
 assert.match(
   providersCss,
-  /\.provider-account-card\s*\{[^}]*grid-template-columns:\s*minmax\(220px,\s*1fr\)\s+auto\s+auto;/,
+  /\.providers-rail-row\s*\{[^}]*grid-template-columns:\s*16px minmax\(0, 1fr\) auto;/,
 );
 assert.match(
   api,
@@ -159,9 +167,7 @@ assert.match(
 );
 assert.doesNotMatch(onboarding, /label: "Ready"/);
 assert.match(onboarding, /"Open milim"/);
-for (const runtime of ["codex", "claude", "opencode", "pi"]) {
-  assert.match(providersManager, new RegExp(`${runtime}-enabled-toggle`));
-}
+assert.match(runtimePage, /testId=\{`\$\{runtime\}-enabled-toggle`\}/);
 assert.match(
   api,
   /export type ReasoningEffort\s*=\s*(?:\|\s*)?"auto"\s*\|\s*"none"\s*\|\s*"minimal"\s*\|\s*"low"\s*\|\s*"medium"\s*\|\s*"high"\s*\|\s*"on"\s*\|\s*"xhigh"\s*\|\s*"max";/,

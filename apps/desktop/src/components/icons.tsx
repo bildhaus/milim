@@ -153,6 +153,9 @@ export const Archive = (p: P) => (
 export const X = (p: P) => (
   <Svg {...p}><path d="M6 6l12 12M18 6 6 18" /></Svg>
 );
+export const Info = (p: P) => (
+  <Svg {...p}><circle cx="12" cy="12" r="9" /><path d="M12 11v5" /><path d="M12 8h.01" /></Svg>
+);
 export const MoreHorizontal = (p: P) => (
   <Svg {...p}><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></Svg>
 );

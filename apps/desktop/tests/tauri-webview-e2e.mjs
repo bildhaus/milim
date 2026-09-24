@@ -3962,7 +3962,7 @@ async function runProviderSetup(page) {
   await page.getByTestId("chat-shell").waitFor();
 
   await openProviders(page);
-  await page.getByText("Account runtimes", { exact: true }).waitFor();
+  await page.getByTestId("provider-rail-codex").waitFor();
   await page.getByText("Add providers", { exact: true }).waitFor();
   await page.getByTestId("detect-local-providers").click();
   await page.getByText("Ollama (local)").waitFor({ timeout: 20_000 });
