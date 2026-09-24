@@ -1,4 +1,9 @@
 {
+  "0.2.72": {
+    "version": "0.2.72",
+    "summary": "milim 0.2.72 keeps long code and links inside the chat column so the transcript never scrolls sideways, renders runtime work summaries as collapsible sections, and trims the Tools menu back to six entries.",
+    "items": []
+  },
   "0.2.71": {
     "version": "0.2.71",
     "summary": "milim 0.2.71 reorganizes Providers into a grouped rail with one page per connection, clearer update actions, and a single accounts layout for Codex and Claude.",
