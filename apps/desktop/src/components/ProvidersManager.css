@@ -862,6 +862,12 @@
   white-space: nowrap;
 }
 
+.runtime-account-auto-fixed {
+  font-size: 12px;
+  color: var(--tertiary-text);
+  white-space: nowrap;
+}
+
 .runtime-account-auto .ui-toggle-row {
   gap: 8px;
   color: var(--secondary-text);

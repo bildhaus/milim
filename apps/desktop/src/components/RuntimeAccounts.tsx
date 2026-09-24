@@ -303,13 +303,15 @@ export function RuntimeAccounts({
                     </div>
                   )}
                 </div>
-                <div
-                  className="runtime-account-auto"
-                  title={profile.is_default ? "The default account is always available to Auto" : undefined}
-                >
+                <div className="runtime-account-auto">
+                  {profile.is_default ? (
+                    <span className="runtime-account-auto-fixed" title="The default account is always available to Auto">
+                      Always in Auto
+                    </span>
+                  ) : (
                   <Toggle
                     checked={profile.enabled}
-                    disabled={disabled || busy || profile.is_default}
+                    disabled={disabled || busy}
                     onChange={(enabled) =>
                       void run(async () => {
                         await updateAccountProfile(runtime, profile.id, { enabled });
@@ -319,6 +321,7 @@ export function RuntimeAccounts({
                     ariaLabel={`Use ${profile.label} in Auto`}
                     testId={`${runtime}-account-${profile.id}-auto`}
                   />
+                  )}
                 </div>
                 {menu.length ? (
                   <OverflowMenuButton

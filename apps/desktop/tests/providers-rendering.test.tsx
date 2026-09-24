@@ -269,8 +269,9 @@ try {
   assert(count(accounts, "Auto picks") === 1, "only one account should be marked Auto picks");
   assert(accountsText.includes("~/.milim/account-profiles/claude/lw") && !accountsText.includes("/Users/you"), "account paths should be shortened in visible text");
   assert(accounts.includes('title="/Users/you/.milim/account-profiles/claude/lw"'), "the full path should stay in the tooltip");
-  assert(count(accounts, ">Use in Auto<") === 2, "every account should have a labelled Use in Auto switch");
-  assert(/data-testid="claude-account-default-auto"[^>]*disabled/.test(accounts) || /disabled=""[^>]*data-testid="claude-account-default-auto"/.test(accounts), "the default account should always stay in Auto");
+  assert(count(accounts, ">Use in Auto<") === 1, "every non-default account should have a labelled Use in Auto switch");
+  assert(accounts.includes(">Always in Auto<"), "the default account should say it always stays in Auto");
+  assert(!accounts.includes('data-testid="claude-account-default-auto"'), "the default account should not render a disabled switch");
   assert(accounts.includes('data-testid="claude-account-lw-menu"') && !accounts.includes('data-testid="claude-account-default-menu"'), "only removable accounts get a row menu");
   assert(accounts.includes('data-testid="claude-add-account"') && accountsText.includes("Add account"), "Add account should close the list");
   assert(!accounts.includes("btn-accent"), "the accounts list should not add a primary button");
