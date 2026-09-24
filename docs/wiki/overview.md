@@ -27,7 +27,7 @@ milim is a model-agnostic software development desktop app with an embedded Rust
 3. Choose the local workspace and execution boundaries explicitly.
 4. Inspect tool output and Git diffs before accepting changes.
 
-Agents, Workers, skills, schedules, MCP, media, Google Workspace, previews, and the mobile companion are optional power modules available from **Tools**. They extend the core workflow without changing it.
+Agents, Workers, skills, schedules, MCP, media, Google Workspace, previews, and the mobile companion are optional power modules. MCP, skills, schedules, media, pull requests, and usage open from **Tools**; the rest open from their in-context controls, the `Ctrl/Cmd+K` command palette, or Settings. They extend the core workflow without changing it.
 
 ## App model
 

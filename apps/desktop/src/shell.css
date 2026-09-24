@@ -4325,22 +4325,6 @@ button.git-row:hover svg {
 .sidebar-workbench-inline .sidebar-footer-item:hover {
   color: var(--primary-text);
 }
-.sidebar-workbench-group {
-  padding: 6px 9px 0;
-  color: var(--tertiary-text);
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-}
-.sidebar-workbench-group:first-child {
-  padding-top: 2px;
-}
-.sidebar-workbench-separator {
-  width: 16px;
-  height: 1px;
-  margin: 2px 0;
-  background: var(--border-primary);
-}
 .sidebar-workbench-wrap.collapsed {
   justify-items: center;
 }

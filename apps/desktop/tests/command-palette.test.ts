@@ -8,7 +8,7 @@ import {
   isManagerId,
   managerEntry,
   managerIdFromEvent,
-  managersByGroup,
+  toolsMenuManagers,
   matchingManagers,
   MANAGERS,
 } from "../src/lib/managers.js";
@@ -83,11 +83,11 @@ equal(
 
 // Managers registry
 const expectedManagers = ["providers", "agents", "memory", "mcp", "skills", "schedules", "media", "pull-requests", "usage", "google-workspace", "mobile"];
-equal(MANAGERS.map((entry) => entry.id).join(","), expectedManagers.join(","), "every manager should be registered once in hub order");
+equal(MANAGERS.map((entry) => entry.id).join(","), expectedManagers.join(","), "every manager should be registered once");
 equal(
-  managersByGroup().flatMap((group) => group.managers).length,
-  MANAGERS.length,
-  "every manager should belong to a rendered group",
+  toolsMenuManagers().map((entry) => entry.id).join(","),
+  "mcp,skills,schedules,media,pull-requests,usage",
+  "the sidebar Tools menu should stay short: Extensions plus work tools",
 );
 equal(matchingManagers("API key")[0]?.id, "providers", "API key should find Providers");
 equal(matchingManagers("ollama")[0]?.id, "providers", "local runtime names should find Providers");

@@ -126,11 +126,74 @@ const safeHtmlHighlightRehypePlugins = [
   selectedHighlightPlugin as MarkdownRehypePlugin,
 ] satisfies MarkdownRehypePlugins;
 
+type MdastNode = { type: string; value?: string; children?: MdastNode[] };
+
+const DISCLOSURE_TAG = /<\/?([a-zA-Z][\w-]*)([^>]*)>/g;
+const DISCLOSURE_OPEN_ATTRIBUTE = /^\s*(?:open(?:\s*=\s*(?:"open"|'open'|open|""|''))?)?\s*$/i;
+
+/**
+ * True when raw HTML contains only `<details>`/`<summary>` tags (with at most
+ * a bare `open` on details) plus text. Runtimes such as Codex emit these for
+ * collapsible work summaries; everything else stays literal text in chat.
+ */
+export function isDisclosureOnlyHtml(html: string): boolean {
+  if (/<!--|<!|<\?/.test(html)) return false;
+  let sawTag = false;
+  for (const match of html.matchAll(DISCLOSURE_TAG)) {
+    sawTag = true;
+    const tag = match[1].toLowerCase();
+    const closing = match[0].startsWith("</");
+    const attributes = match[2];
+    if (tag === "summary") {
+      if (attributes.trim()) return false;
+    } else if (tag === "details") {
+      if (closing ? attributes.trim() : !DISCLOSURE_OPEN_ATTRIBUTE.test(attributes)) return false;
+    } else {
+      return false;
+    }
+  }
+  // A stray `<` that is not part of an allowed tag keeps the node literal.
+  return sawTag && !/<(?![/]?(?:details|summary)\b)/i.test(html);
+}
+
+export function containsDisclosureHtml(content: string): boolean {
+  return /<details[\s>]/i.test(content);
+}
+
+/** Turns every raw HTML node except disclosure-only ones into literal text. */
+function remarkDisclosureHtmlOnly() {
+  return (tree: MdastNode) => {
+    const visit = (node: MdastNode) => {
+      for (const child of node.children ?? []) {
+        if (child.type === "html" && !isDisclosureOnlyHtml(child.value ?? "")) child.type = "text";
+        visit(child);
+      }
+    };
+    visit(tree);
+  };
+}
+
+const defaultRemarkPlugins = [remarkGfm];
+const disclosureRemarkPlugins = [remarkGfm, remarkDisclosureHtmlOnly];
+const disclosureRehypePlugins = [rehypeRaw] satisfies MarkdownRehypePlugins;
+const disclosureHighlightRehypePlugins = [
+  rehypeRaw,
+  selectedHighlightPlugin as MarkdownRehypePlugin,
+] satisfies MarkdownRehypePlugins;
+
+function disclosureDepthChange(line: string): number {
+  const opens = line.match(/<details[\s>]/gi)?.length ?? 0;
+  const closes = line.match(/<\/details\s*>/gi)?.length ?? 0;
+  return opens - closes;
+}
+
 export function parseMarkdownIntoBlocks(content: string): string[] {
   const lines = content.match(/[^\n]*(?:\n|$)/g)?.filter(Boolean) ?? [];
   const blocks: string[] = [];
   let current: string[] = [];
   let inFence = false;
+  // Keep a `<details>` disclosure and its `</details>` in one block so it renders whole.
+  let disclosureDepth = 0;
 
   const push = () => {
     const block = current.join("").trimEnd();
@@ -141,7 +204,8 @@ export function parseMarkdownIntoBlocks(content: string): string[] {
   for (const line of lines) {
     current.push(line);
     if (/^\s*(```|~~~)/.test(line)) inFence = !inFence;
-    if (!inFence && line.trim() === "") push();
+    else if (!inFence) disclosureDepth = Math.max(0, disclosureDepth + disclosureDepthChange(line));
+    if (!inFence && disclosureDepth === 0 && line.trim() === "") push();
   }
   push();
   return blocks;
@@ -275,17 +339,23 @@ function MarkdownBody({
     [collapseArtifacts, content, previewArtifacts],
   );
 
+  const disclosureHtml = !allowHtml && containsDisclosureHtml(content);
+
   return (
     <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
+      remarkPlugins={disclosureHtml ? disclosureRemarkPlugins : defaultRemarkPlugins}
       rehypePlugins={
         allowHtml
           ? highlight
             ? safeHtmlHighlightRehypePlugins
             : safeHtmlRehypePlugins
-          : highlight
-            ? highlightRehypePlugins
-            : undefined
+          : disclosureHtml
+            ? highlight
+              ? disclosureHighlightRehypePlugins
+              : disclosureRehypePlugins
+            : highlight
+              ? highlightRehypePlugins
+              : undefined
       }
       components={{
         pre: ({ children }) => {
