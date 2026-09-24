@@ -425,6 +425,7 @@ import { useChatWorkerController } from "./chat/useChatWorkerController";
 import { useApprovalAllowances } from "./chat/useApprovalAllowances";
 import { useRetryCountdown } from "./chat/useRetryCountdown";
 import { errorNotice, type ProviderErrorInfo } from "../lib/providerErrors.js";
+import type { ProvidersTarget } from "../lib/providerConnections";
 
 const ProvidersManager = lazy(() =>
   import("./ProvidersManager").then((mod) => ({
@@ -1523,6 +1524,7 @@ export function ChatView({
   const { text: input, attachments: pendingAttachments } = useSessionComposerState(activeId);
   const approvalAllowances = useApprovalAllowances(activeId);
   const [providersOpen, setProvidersOpen] = useState(false);
+  const [providersTarget, setProvidersTarget] = useState<ProvidersTarget | undefined>();
   const [mcpOpen, setMcpOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [memoryTarget, setMemoryTarget] = useState<MemoryNotice | null>(null);
@@ -5116,6 +5118,7 @@ export function ChatView({
         tone: "error",
         message: `${runtime === "claude" ? "Claude CLI" : runtime === "opencode" ? "OpenCode" : runtime === "pi" ? "Pi" : "Codex"} is disabled in Providers.`,
       });
+      setProvidersTarget({ view: "runtime", runtime });
       setProvidersOpen(true);
       return null;
     }
@@ -9346,8 +9349,10 @@ export function ChatView({
       <Suspense fallback={null}>
         {providersOpen && (
           <ProvidersManager
+            initialTarget={providersTarget}
             onClose={() => {
               setProvidersOpen(false);
+              setProvidersTarget(undefined);
               listModelsDetailed(
                 useSettings.getState().accountRuntimeEnabled,
                 { retry: true },
