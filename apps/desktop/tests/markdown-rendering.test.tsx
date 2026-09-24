@@ -59,12 +59,13 @@ const server = await createServer({
 });
 
 try {
-  const { Markdown, MemoizedMarkdown, hasClosedMermaidFence, isHttpHref, parseMarkdownIntoBlocks, sourceLinkDetails } = await server.ssrLoadModule("/src/components/Markdown.tsx") as {
+  const { Markdown, MemoizedMarkdown, hasClosedMermaidFence, isDisclosureOnlyHtml, isHttpHref, parseMarkdownIntoBlocks, sourceLinkDetails } = await server.ssrLoadModule("/src/components/Markdown.tsx") as {
     Markdown: ComponentType<MarkdownProps>;
     MemoizedMarkdown: ComponentType<MarkdownProps>;
     hasClosedMermaidFence: (content: string) => boolean;
     isHttpHref: (href: string | undefined) => boolean;
     parseMarkdownIntoBlocks: (content: string) => string[];
+    isDisclosureOnlyHtml: (html: string) => boolean;
     sourceLinkDetails: (href: string | undefined) => { host: string; path: string } | null;
   };
   const { MermaidDiagram, boundedRasterDimensions, mermaidSvgDimensions, standaloneMermaidSvg } = await server.ssrLoadModule("/src/components/MermaidDiagram.tsx") as {
@@ -328,6 +329,32 @@ try {
   equal(grownBlocks[0], startedBlocks[0], "first completed block should stay stable");
   equal(grownBlocks[1], startedBlocks[1], "second completed block should stay stable");
   assert(grownBlocks[2] !== startedBlocks[2], "only the trailing streaming block should change");
+
+  // Runtime work summaries use <details>/<summary>; chat renders only that pair.
+  const disclosure = "Done.\n\n<details><summary>Explored 4 files, a list</summary>\n\n- Read `./docs/a.md`\n- Listed files in `app`\n\n</details>\n\nNext step.";
+  const disclosureHtml = renderMarkdown(disclosure);
+  assert(/<details><summary>Explored 4 files, a list<\/summary>/.test(disclosureHtml), "chat should render runtime disclosure summaries");
+  assert(/<details>[\s\S]*<li>Read <code>.\/docs\/a.md<\/code><\/li>[\s\S]*<\/details>/.test(disclosureHtml), "disclosure bodies should keep their markdown inside the details element");
+  assert(!disclosureHtml.includes("&lt;details&gt;"), "disclosure tags should not leak as literal text");
+  const nestedDisclosure = renderMarkdown("<details><summary>Outer</summary>\n\n<details open><summary>Inner</summary>\n\n- item\n\n</details>\n\n</details>");
+  equal(count(nestedDisclosure, "<details"), 2, "nested disclosures should both render");
+  assert(nestedDisclosure.includes("<details open"), "a bare open attribute should be kept");
+
+  const memoDisclosure = renderMemoizedMarkdown(disclosure);
+  assert(/<details><summary>Explored 4 files, a list<\/summary>[\s\S]*<li>Listed files in <code>app<\/code><\/li>[\s\S]*<\/details>/.test(memoDisclosure), "streamed blocks should keep a disclosure and its body together");
+  equal(parseMarkdownIntoBlocks(disclosure).length, 3, "a disclosure should be one block between the surrounding paragraphs");
+
+  const unsafeHtml = renderMarkdown("<details onclick=\"alert(1)\"><summary>x</summary>\n\n<script>alert(1)</script>\n\n<div>raw</div>\n\n</details>");
+  assert(!unsafeHtml.includes("<script"), "scripts must never render as elements in chat");
+  assert(!/<[a-z]+[^>]*\sonclick=/i.test(unsafeHtml), "disclosures with event handlers must not render as elements");
+  assert(unsafeHtml.includes("&lt;details onclick="), "a rejected disclosure stays literal text");
+  assert(unsafeHtml.includes("&lt;div&gt;raw&lt;/div&gt;"), "other raw HTML stays literal text in chat");
+  assert(isDisclosureOnlyHtml("<details><summary>Explored a list</summary>"), "plain disclosure openers are allowed");
+  assert(isDisclosureOnlyHtml("</details> </details>"), "closing tags are allowed");
+  assert(!isDisclosureOnlyHtml("<details><summary>x</summary><img src=x>"), "any other tag disqualifies the node");
+  assert(!isDisclosureOnlyHtml("<summary class=\"x\">x</summary>"), "summary attributes are not allowed");
+  assert(!isDisclosureOnlyHtml("<details><!-- c --></details>"), "comments are not allowed");
+  assert(!renderMarkdown("Use <kbd>Ctrl</kbd> here").includes("<kbd>"), "chat without disclosures keeps raw HTML literal");
 } finally {
   await server.close();
 }

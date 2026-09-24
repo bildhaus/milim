@@ -146,6 +146,8 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  /* The transcript never scrolls sideways; code blocks and tables scroll inside their own row. */
+  overflow-x: hidden;
   display: flex;
   flex-direction: column;
   padding: var(--chat-scroll-fade) 16px calc(var(--chat-scroll-fade) + 8px);
@@ -220,7 +222,7 @@
   }
 }
 /* ---- Messages ---- */
-.messages { width: 100%; max-width: var(--chat-content-width); margin: 0 auto; display: flex; flex-direction: column; gap: 12px; padding: 8px 0 4px; user-select: text; cursor: auto; overflow-anchor: none; }
+.messages { width: 100%; min-width: 0; max-width: var(--chat-content-width); margin: 0 auto; display: flex; flex-direction: column; gap: 12px; padding: 8px 0 4px; user-select: text; cursor: auto; overflow-anchor: none; }
 .messages, .msg-content, .md, .md * { user-select: text; -webkit-user-select: text; }
 .model-change-event {
   display: grid;
@@ -2259,7 +2261,7 @@ g.native-chart-mark:focus-visible .native-chart-point {
 .msg-edit-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
 /* ---- Markdown ---- */
-.md { font-size: 14px; line-height: 1.65; color: var(--primary-text); }
+.md { min-width: 0; font-size: 14px; line-height: 1.65; color: var(--primary-text); overflow-wrap: break-word; }
 .md > :first-child { margin-top: 0; }
 .md > :last-child { margin-bottom: 0; }
 .md p { margin: 0 0 10px; }
@@ -2270,7 +2272,7 @@ g.native-chart-mark:focus-visible .native-chart-point {
 .md h4 { font-size: 1em; }
 .md ul, .md ol { margin: 0 0 10px; padding-left: 22px; }
 .md li { margin: 3px 0; }
-.md a { color: var(--accent-light); text-decoration: none; }
+.md a { color: var(--accent-light); text-decoration: none; overflow-wrap: anywhere; }
 .md a:hover { text-decoration: underline; }
 .md-source {
   position: relative;
@@ -2335,7 +2337,19 @@ g.native-chart-mark:focus-visible .native-chart-point {
   border: 1px solid var(--border-primary);
   border-radius: 5px;
   padding: 1px 5px;
+  /* Long unbroken tokens (paths, regexes) wrap inside the column instead of widening it. */
+  overflow-wrap: anywhere;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
 }
+.md details { margin: 0 0 10px; }
+.md details > summary {
+  cursor: pointer;
+  color: var(--secondary-text);
+  margin-bottom: 6px;
+}
+.md details:not([open]) > summary { margin-bottom: 0; }
+.md details > summary:hover { color: var(--primary-text); }
 
 /* fenced code blocks */
 .code-block { position: relative; margin: 0 0 10px; border-radius: 8px; border: 1px solid var(--border-primary); background: var(--chat-block-bg); overflow: visible; }
