@@ -1420,7 +1420,7 @@ async function screenshotProviders(page) {
   await page.getByTestId("model-picker-trigger").click();
   await page.getByTestId("manage-providers").click();
   await page.getByTestId("provider-overview").waitFor();
-  await page.locator(".providers-sheet").getByText("Perf Mock", { exact: true }).waitFor();
+  await page.locator(".providers-rail").getByText("Perf Mock", { exact: true }).waitFor();
   await page.screenshot({ path: screenshotPaths.providers, fullPage: false });
   await page.getByTestId("close-providers").click();
 }

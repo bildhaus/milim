@@ -56,6 +56,10 @@
 .sheet-resize-frame.resizing > [role="dialog"] {
   transition: none;
 }
+/* The dialog itself only receives focus as a landing spot on open; controls inside keep their rings. */
+[role="dialog"][tabindex="-1"]:focus-visible {
+  outline: none;
+}
 .sheet-resize-edge {
   position: absolute;
   z-index: 6;

@@ -1,4 +1,9 @@
 {
+  "0.2.71": {
+    "version": "0.2.71",
+    "summary": "milim 0.2.71 reorganizes Providers into a grouped rail with one page per connection, clearer update actions, and a single accounts layout for Codex and Claude.",
+    "items": []
+  },
   "0.2.70": {
     "version": "0.2.70",
     "summary": "milim 0.2.70 lets you resize every panel and manager window, remembers each size, and opens managers larger by default.",
