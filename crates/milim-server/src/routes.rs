@@ -70,6 +70,7 @@ use milim_tools::{Tool, ToolEffect, ToolRegistry};
 
 mod account_runtimes;
 mod agents;
+mod commands;
 mod control;
 mod harnesses;
 mod inference;
@@ -81,6 +82,7 @@ mod workspace;
 
 pub(crate) use account_runtimes::*;
 pub(crate) use agents::*;
+pub(crate) use commands::*;
 pub(crate) use control::*;
 pub(crate) use harnesses::*;
 pub(crate) use inference::*;
@@ -1222,6 +1224,41 @@ pub(crate) async fn memory_node_review(
     authorize(&st, &headers, peer_addr(peer))?;
     let reviewed = memory_store(&st)?.review_node(&id).map_err(ApiError)?;
     Ok(Json(json!({ "reviewed": reviewed })).into_response())
+}
+
+/// `GET /memory/embeddings` — embedding coverage and re-embed job status.
+pub(crate) async fn memory_embeddings(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: Peer,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    let status = memory_store(&st)?.embedding_status().map_err(ApiError)?;
+    Ok(Json(status).into_response())
+}
+
+/// `POST /memory/embeddings/reindex` — re-embed stale memories in the background.
+pub(crate) async fn memory_embeddings_reindex(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: Peer,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    let mem = memory_store(&st)?;
+    mem.start_reembed();
+    Ok(Json(mem.embedding_status().map_err(ApiError)?).into_response())
+}
+
+/// `POST /memory/embeddings/cancel` — stop re-embedding after the current batch.
+pub(crate) async fn memory_embeddings_cancel(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: Peer,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    let mem = memory_store(&st)?;
+    mem.cancel_reembed();
+    Ok(Json(mem.embedding_status().map_err(ApiError)?).into_response())
 }
 
 // ----- Embeddings -----

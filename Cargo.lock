@@ -1296,6 +1296,7 @@ dependencies = [
 name = "milim-memory"
 version = "0.2.72"
 dependencies = [
+ "async-trait",
  "milim-core",
  "milim-inference",
  "milim-storage",

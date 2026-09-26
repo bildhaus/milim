@@ -142,6 +142,10 @@ function toolLabel(name: string | undefined, done: boolean): string {
       return done ? "Ran sandbox command" : "Running sandbox command";
     case "http_fetch":
       return done ? "Fetched URL" : "Fetching URL";
+    case "web_search":
+      return done ? "Searched the web" : "Searching the web";
+    case "todo_write":
+      return done ? "Updated todos" : "Updating todos";
     case "memory_register":
       return done ? "Saved memory" : "Saving memory";
     case "schedule_create":
@@ -193,6 +197,10 @@ function toolFailedLabel(name: string | undefined): string {
       return "Computer use failed";
     case "http_fetch":
       return "Fetch failed";
+    case "web_search":
+      return "Web search failed";
+    case "todo_write":
+      return "Todo update failed";
     case "memory_register":
       return "Save memory failed";
     case "schedule_create":
@@ -219,6 +227,14 @@ function toolDetail(name: string | undefined, args: Record<string, unknown> | nu
   if (command) return command;
   if (path) return compactText(diffStats ? `${path} ${diffStats}` : path);
   if (url) return compactText(url);
+  if (name === "web_search") {
+    const query = toolArg(args, "query");
+    return query ? compactText(query) : undefined;
+  }
+  if (name === "todo_write" && Array.isArray(args?.todos)) {
+    const todos = args.todos.map(asRecord);
+    return `${todos.filter((todo) => todo?.status === "completed").length}/${todos.length} done`;
+  }
 
   if (name === "shell" || name === "run_command") {
     const exitCode = record?.exit_code;

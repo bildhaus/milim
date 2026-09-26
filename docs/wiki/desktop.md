@@ -168,6 +168,23 @@ The built-in read-only `render_chart` tool accepts bounded structured data for b
 
 Hover or focus a mark to inspect it; tapping pins its pointed tooltip until another mark or the surrounding chart is selected, and the matching category label gains emphasis. Bar and line tooltips compare every visible series at the active category, while pie and scatter tooltips remain mark-specific. Keyboard arrows follow the visual direction: left and right move within vertical-bar, line, and scatter series, while up and down move within horizontal-bar series; the other arrow pair changes series at the same category. Legend buttons show or hide series or slices, and line and scatter charts add a crosshair to the active point. Layout, tick density, direct bar labels, and label wrapping adapt to the transcript width. Bars stay square at zero, round only at the value end, use a restrained accent-derived gradient without encoding another value, and reveal outward from the baseline with a short stagger. The renderer honors reduced motion and does not require an installed MCP server, remote HTML, or network access.
 
+## Web and checklist tools
+
+Provider-backed agents have three more built-in read-only tools.
+
+- **`web_search`** takes `query` and an optional `max_results` (default 8, at most 20). It returns a numbered list of titles, URLs, and snippets.
+  - It uses a Brave Search or Tavily key when one is saved under **Providers** (the **Brave Search** and **Tavily** presets, grouped under **Web search**). The first enabled provider with a key wins.
+  - Without a key it falls back to DuckDuckGo's HTML results page. DuckDuckGo may refuse automated searches; the tool then reports that and suggests adding a key.
+  - The query is outbound text. The chat's privacy mode applies to it before any request: **Block** refuses a query with detected PII, and **Redact** sends placeholders that are never restored.
+- **`http_fetch`** takes a `format`: `markdown` (default), `text`, or `raw`.
+  - For HTML, `markdown` keeps the title, headings, paragraphs, lists, `[text](url)` links, code blocks, and simple tables, and drops scripts, styles, navigation, footers, and SVG. `text` keeps the same structure without markup; `raw` returns the source.
+  - JSON and plain-text responses pass through unchanged.
+  - Each call returns at most 60,000 characters of rendered content. A longer page ends with a note naming the `offset` that continues it.
+  - The public-address, redirect, 1 MiB download, and timeout limits are unchanged.
+- **`todo_write`** replaces the agent's checklist with the complete list it sends. Each item has `content` and a `status` of `pending`, `in_progress`, or `completed`; at most one item may be in progress.
+  - The latest list is kept in memory per chat while milim runs, so later turns in the same chat replace the same list.
+  - The transcript renders each update as a checklist under the tool step.
+
 ## MCP Apps
 
 Provider/local chats and Codex, Claude, OpenCode, and Pi account runtimes can manage the same MCP server registry as the MCP Servers sheet through `mcp_server_list`, `mcp_server_test`, `mcp_server_save`, and `mcp_server_delete`. Guarded exposes only the read-only list; Review shows the exact configuration on the normal one-shot approval card before testing, saving, launching, or deleting; Open performs eligible calls immediately. Account runtimes receive these milim-owned tools through an authenticated per-turn loopback gateway while keeping their own filesystem and shell tools.
@@ -298,6 +315,32 @@ While a milim provider-agent run advertises steering, Ctrl/Cmd+Enter and the exp
 | `/clear` | Start a fresh chat through the shared inherited/configured new-chat policy. Computer Use, Plan Mode, goals, temporary instructions, and running state always reset. |
 
 Calling `/privacy` or `/approval` without one of those valid arguments shows usage help and leaves the current state unchanged. Every slash command is also available from the command palette: commands that need an argument, such as `/agent` and `/model`, place `/<command> ` in the composer, and Privacy and Approval appear as one palette entry per mode.
+
+### Custom slash commands
+
+Markdown files define your own prompt commands. milim reads them from these folders, in precedence order:
+
+| Scope | Folders |
+|---|---|
+| Project | `<thread folder>/.milim/commands/`, then `<thread folder>/.claude/commands/` |
+| User | `~/.milim/commands/`, then `~/.claude/commands/` |
+
+Each `*.md` file becomes `/<file name>`, lowercased. Files in subfolders are namespaced, so `git/commit.md` becomes `/git:commit`; nesting is limited to two folder levels, and names may use only letters, digits, `-`, and `_`. When the same name appears more than once, the first definition in the order above wins, so project commands override user commands. Built-in commands always win over a custom command with the same name.
+
+An optional frontmatter block sets the menu text. Only flat `description` and `argument-hint` keys are read; other keys, such as Claude Code's `allowed-tools`, are ignored. Without a description, the menu shows the file's first non-empty line.
+
+```markdown
+---
+description: Review a branch
+argument-hint: <branch> [focus]
+---
+Review the changes on $1 against main. Focus on $2.
+Full request: $ARGUMENTS
+```
+
+The body is a prompt template. `$ARGUMENTS` is replaced by everything after the command name, and `$1` through `$9` by whitespace-separated positional arguments; quotes group words into one argument, and a missing argument becomes empty text. If the template uses no placeholder, non-empty arguments are appended after a blank line. Files larger than 64 KiB are skipped.
+
+Custom commands appear in the slash menu after the built-ins, labeled Project or User, and follow the Commands suggestion source. The list reloads when the thread folder changes and when the window becomes visible again. Selecting one inserts `/<name> `. Sending `/<name> arguments` expands the template on the server and sends the result as an ordinary user message, or queues it while a reply is running. The expanded text, not the command, is what appears in the transcript.
 
 ## Command palette and shortcuts
 

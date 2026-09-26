@@ -22,6 +22,11 @@ export function isMediaOnlyProviderKind(kind: ProviderKind): boolean {
   return kind === "replicate" || kind === "fal";
 }
 
+/** Media generators and web search credentials cannot back a chat runtime. */
+export function isChatProviderKind(kind: ProviderKind): boolean {
+  return !isMediaOnlyProviderKind(kind) && kind !== "brave_search" && kind !== "tavily";
+}
+
 export function workspaceFolderPlaceholder(platform: string): string {
   if (/(mac|iphone|ipad|darwin)/i.test(platform)) return "/Users/you/project";
   if (/win/i.test(platform)) return "C:\\path\\to\\project";

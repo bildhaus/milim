@@ -6,7 +6,7 @@ title: Models and providers
 summary: Model-agnostic dev chat routing across provider APIs, local runtimes, Codex, Claude, OpenCode, and Pi bridges.
 group: Core
 order: 40
-updated: 2026-09-23
+updated: 2026-09-26
 ---
 
 Model routing is provider-agnostic and centered on the active dev thread. The provider registry stores enabled remotes and their model metadata, then the desktop model picker merges local API runtime models, provider models, account runtime models, and media-capable models. Duplicate provider model ids stay provider-scoped in the picker and route back to the selected provider; provider sections with fewer visible models appear first.
@@ -38,6 +38,7 @@ OpenCode model rows use the CLI's verbose catalog for context, output, image, to
 | Gemini | Google Generative Language API | Chat, model discovery, model routing, inline image bytes, and genuine Gemini Files API URIs. Arbitrary web image URLs are rejected instead of downloaded server-side. |
 | Replicate | Remote image/video/music provider | Media model catalog, schemas, generation status polling, and normalized URL-returning music results. |
 | fal | Remote image/video/music provider | Queued generation, status polling, and normalized media results. |
+| Brave Search, Tavily | Web search API keys | Backs the agent's `web_search` tool instead of the keyless DuckDuckGo fallback. No chat models. |
 | Local API runtimes | Ollama, LM Studio, and vLLM on this machine | Chat, prompt generation, Ollama `keep_alive` lifecycle calls, Responses or completions where the runtime exposes them, model list, embeddings, structured output, native vision/tool-use labels where available, and reasoning effort for supported local reasoning models. |
 | Account runtimes | Installed Codex, Claude, OpenCode, and Pi CLIs, not saved provider API keys | Resumable agent-style turns with real image input, visible tool events, active milim browser context, milim-owned tools, and milim approval modes. |
 

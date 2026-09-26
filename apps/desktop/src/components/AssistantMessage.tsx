@@ -22,6 +22,7 @@ import {
 } from "../lib/streamParts";
 import { formatDuration } from "../lib/usageMetrics";
 import { Calendar, Code, Copy, Eye, FileText, Lightbulb, Pencil, X } from "./icons";
+import { TodoChecklist } from "./TodoChecklist";
 
 const Markdown = lazy(() =>
   import("./Markdown").then((mod) => ({ default: mod.Markdown })),
@@ -244,6 +245,9 @@ function StreamEvent({
           />
         )}
       </div>
+      {part.name === "todo_write" && status === "done" ? (
+        <TodoChecklist argumentsText={part.toolArguments} />
+      ) : null}
       {part.mcpApp ? isNativeChart(part.mcpApp) ? (
         <Suspense fallback={<div className="native-chart-state">Loading chart...</div>}>
           <NativeChartView argumentsText={part.toolArguments} result={part.mcpAppResult} status={part.status} />

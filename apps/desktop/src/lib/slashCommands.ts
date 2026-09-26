@@ -1,3 +1,5 @@
+import type { CustomSlashCommand } from "../api.js";
+
 export type SlashCommand = {
   id: string;
   label: string;
@@ -30,3 +32,46 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { id: "import", label: "Import chat", hint: "Import a milim thread JSON file", group: "Commands", palette: "run" },
   { id: "clear", label: "New chat", hint: "Start a fresh chat with current settings", group: "Commands", palette: "run" },
 ];
+
+const BUILTIN_SLASH_IDS = new Set(SLASH_COMMANDS.map((command) => command.id));
+
+/**
+ * Custom commands shown after the built-ins. Built-ins win on name conflicts,
+ * and the first definition of a repeated name is kept.
+ */
+export function mergeCustomSlashCommands(
+  custom: CustomSlashCommand[],
+  builtins: SlashCommand[] = SLASH_COMMANDS,
+): CustomSlashCommand[] {
+  const taken = new Set(builtins.map((command) => command.id));
+  const merged: CustomSlashCommand[] = [];
+  for (const command of custom) {
+    const name = command.name.toLowerCase();
+    if (!name || taken.has(name)) continue;
+    taken.add(name);
+    merged.push({ ...command, name });
+  }
+  return merged;
+}
+
+/** `/name rest of line` -> `{ id, argument }`. Arguments may span lines. */
+export function parseSlashCommandInput(value: string): { id: string; argument: string } | null {
+  const match = value.trim().match(/^\/([a-z0-9_:-]+)(?:\s+([\s\S]*))?$/i);
+  if (!match) return null;
+  return { id: match[1].toLowerCase(), argument: match[2]?.trim() ?? "" };
+}
+
+/** The custom command a composer value invokes, unless a built-in owns the name. */
+export function resolveCustomSlashCommand(
+  value: string,
+  custom: CustomSlashCommand[],
+): { command: CustomSlashCommand; argument: string } | null {
+  const parsed = parseSlashCommandInput(value);
+  if (!parsed || BUILTIN_SLASH_IDS.has(parsed.id)) return null;
+  const command = custom.find((entry) => entry.name.toLowerCase() === parsed.id);
+  return command ? { command, argument: parsed.argument } : null;
+}
+
+export function customSlashCommandSourceLabel(command: CustomSlashCommand): string {
+  return command.source === "project" ? "Project" : "User";
+}

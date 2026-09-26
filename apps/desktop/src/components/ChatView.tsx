@@ -42,6 +42,8 @@ import {
   isOpenCodeModel,
   isPiModel,
   listWorkspaceFiles,
+  listCustomSlashCommands,
+  expandCustomSlashCommand,
   listModelsDetailed,
   listProviders,
   listTools,
@@ -85,6 +87,7 @@ import {
   type ArtifactWritePreview,
   type ChatArtifact,
   type ChatAttachment,
+  type CustomSlashCommand,
   type ChatApprovalRequest,
   type ChatMessage,
   type ChatStreamPart,
@@ -1555,6 +1558,12 @@ export function ChatView({
     null,
   );
   const [chatNotice, setChatNotice] = useState<ChatNotice | null>(null);
+  const [customSlashCommands, setCustomSlashCommands] = useState<CustomSlashCommand[]>([]);
+  // Custom commands expand asynchronously; send with the latest render's state.
+  const sendComposerTextRef = useRef(sendComposerText);
+  useEffect(() => {
+    sendComposerTextRef.current = sendComposerText;
+  });
   const [modelPickerRequest, setModelPickerRequest] = useState(0);
   const retryInSecs = useRetryCountdown(chatNotice?.retryAfterSecs, chatNotice);
   const [goalPanelOpen, setGoalPanelOpen] = useState(false);
@@ -3536,6 +3545,26 @@ export function ChatView({
     })();
     return () => {
       cancelled = true;
+    };
+  }, [folder]);
+
+  // Custom slash commands come from the thread folder and the home folder;
+  // refresh them when the folder changes or the window becomes visible again.
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = () => {
+      void listCustomSlashCommands(folder).then((commands) => {
+        if (!cancelled) setCustomSlashCommands(commands);
+      });
+    };
+    refresh();
+    const onVisible = () => {
+      if (documentVisible()) refresh();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [folder]);
 
@@ -7465,7 +7494,27 @@ export function ChatView({
   }
 
   function send() {
-    const text = input.trim();
+    sendComposerText(input);
+  }
+
+  async function runCustomSlashCommand(command: CustomSlashCommand, argument: string) {
+    try {
+      const prompt = await expandCustomSlashCommand(folder, command.name, argument);
+      if (!prompt.trim()) {
+        setChatNotice({ tone: "error", message: `/${command.name} expanded to an empty prompt.` });
+        return;
+      }
+      sendComposerTextRef.current(prompt);
+    } catch (error) {
+      setChatNotice({
+        tone: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  function sendComposerText(rawText: string) {
+    const text = rawText.trim();
     if (!text && pendingAttachments.length === 0 && pendingReviewComments.length === 0) return;
     if (rejectUnsupportedImageAttachments(pendingAttachments)) return;
     if (compactionInFlightRef.current) {
@@ -9014,6 +9063,8 @@ export function ChatView({
                   )
                 }
                 onSlashCommand={runSlashCommand}
+                customCommands={customSlashCommands}
+                onCustomCommand={(command, argument) => void runCustomSlashCommand(command, argument)}
                 agents={agents}
                 activeAgentId={activeAgentId}
                 onAgent={(agent) => {

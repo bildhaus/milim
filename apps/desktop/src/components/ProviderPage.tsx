@@ -12,6 +12,7 @@ import {
 import {
   isMediaOnlyProvider,
   isMediaProvider,
+  isSearchProvider,
   KIND_LABEL,
   modelCount,
   noteTone,
@@ -123,7 +124,11 @@ export function ProviderPage({
     setModelOverrides(saved.model_overrides ?? {});
     setCapabilityModel((current) => (saved.models.includes(current) ? current : (saved.models[0] ?? "")));
     setNote(
-      isMediaProvider(saved)
+      isSearchProvider(saved)
+        ? saved.has_key
+          ? "Search key saved. The agent's web_search tool now uses this provider."
+          : "Saved without a key. web_search keeps using DuckDuckGo until a key is added."
+        : isMediaProvider(saved)
         ? action === "test"
           ? "Media credential checked. Image/video workflows can use this encrypted credential when those surfaces are enabled."
           : "Media provider saved. Image/video generation workflows can use this encrypted credential when those surfaces are enabled."

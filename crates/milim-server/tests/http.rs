@@ -6069,6 +6069,70 @@ async fn memory_ingest_and_search() {
 }
 
 #[tokio::test]
+async fn memory_embedding_status_tracks_the_current_model() {
+    use milim_memory::MemoryStore;
+    use milim_storage::Database;
+
+    let mem = MemoryStore::new(
+        Database::open_in_memory().unwrap(),
+        Arc::new(TestBackend::new()),
+    )
+    .unwrap();
+    let state = AppState::new(Arc::new(TestBackend::new()), ServerConfiguration::default())
+        .with_memory(mem);
+    let base = spawn(state).await;
+    let client = reqwest::Client::new();
+
+    let empty: Value = client
+        .get(format!("{base}/memory/embeddings"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(empty["model"], Value::Null);
+    assert_eq!(empty["total"], 0);
+
+    client
+        .post(format!("{base}/memory/register"))
+        .json(&json!({
+            "model": "test-echo",
+            "scope": { "kind": "global", "label": "Personal", "locator": "personal" },
+            "node": { "title": "Tracked vector", "body": "Embedded with test-echo." }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    let status: Value = client
+        .post(format!("{base}/memory/embeddings/reindex"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status["model"], "test-echo");
+    assert_eq!(status["dim"], 16);
+    assert_eq!(status["total"], 1);
+    assert_eq!(status["current"], 1);
+    assert_eq!(status["stale"], 0);
+
+    let cancelled: Value = client
+        .post(format!("{base}/memory/embeddings/cancel"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(cancelled["current"], 1);
+}
+
+#[tokio::test]
 async fn memory_graph_register_search_update_and_delete() {
     use milim_memory::MemoryStore;
     use milim_storage::Database;
@@ -8208,4 +8272,75 @@ async fn anthropic_tool_use_block() {
     assert_eq!(block["type"], "tool_use");
     assert_eq!(block["name"], "echo");
     assert_eq!(block["input"]["text"], "test");
+}
+
+#[tokio::test]
+async fn custom_commands_list_and_expand_workspace_templates() {
+    let workspace =
+        std::env::temp_dir().join(format!("milim-http-commands-{}", uuid::Uuid::new_v4()));
+    let commands = workspace.join(".milim").join("commands").join("git");
+    std::fs::create_dir_all(&commands).unwrap();
+    std::fs::write(
+        commands.join("review.md"),
+        "---\ndescription: Review a branch\nargument-hint: <branch> [focus]\n---\nReview $1 focusing on $2. All: $ARGUMENTS",
+    )
+    .unwrap();
+    let state = AppState::new(Arc::new(TestBackend::new()), ServerConfiguration::default());
+    let base = spawn(state).await;
+    let client = reqwest::Client::new();
+    let folder = workspace.to_string_lossy().to_string();
+
+    let listed: Value = client
+        .get(format!("{base}/commands"))
+        .query(&[("workspace", folder.as_str())])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let review = listed["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|command| command["name"] == "git:review")
+        .expect("project command is listed");
+    assert_eq!(review["source"], "project");
+    assert_eq!(review["description"], "Review a branch");
+    assert_eq!(review["argument_hint"], "<branch> [focus]");
+    assert!(review.get("template").is_none());
+
+    let expanded: Value = client
+        .post(format!("{base}/commands/expand"))
+        .json(&json!({"workspace": folder, "name": "git:review", "arguments": "main tests"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        expanded["prompt"],
+        "Review main focusing on tests. All: main tests"
+    );
+
+    let missing = client
+        .post(format!("{base}/commands/expand"))
+        .json(&json!({"workspace": folder, "name": "git:missing"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let invalid = client
+        .get(format!("{base}/commands"))
+        .query(&[(
+            "workspace",
+            workspace.join("absent").to_string_lossy().as_ref(),
+        )])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), reqwest::StatusCode::BAD_REQUEST);
+    std::fs::remove_dir_all(workspace).ok();
 }

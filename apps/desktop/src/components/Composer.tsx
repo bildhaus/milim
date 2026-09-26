@@ -1,5 +1,5 @@
 import { type ClipboardEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { isTauriRuntime, openExternalUrl, type Agent, type ChatAttachment, type MediaKind, type SkillInfo, type ToolInfo } from "../api";
+import { isTauriRuntime, openExternalUrl, type Agent, type ChatAttachment, type CustomSlashCommand, type MediaKind, type SkillInfo, type ToolInfo } from "../api";
 import type { WorkspaceFileSuggestion } from "../api";
 import { composerAutocompleteTriggerAt, composerCommandRunsOnSelection, composerSuggestionMatchScore, mcpToolTagCompletion, replaceComposerAutocompleteTrigger, skillTagCompletion } from "../lib/composerAutocomplete";
 import { canNavigateComposerHistory, moveComposerHistory, type ComposerHistoryDirection } from "../lib/composerHistory";
@@ -7,7 +7,7 @@ import { clipboardFiles, isDuplicateClipboardPaste, type ClipboardPasteStamp } f
 import { composerDisplayForText, composerLinkClickAction, composerTokensForText, pasteComposerUrl, type ComposerToken } from "../lib/composerTokens";
 import { composerEnterAction, isComposingKeyEvent, shortcutLabel } from "../ui/shortcuts";
 import { useUiPreferences } from "../ui/store";
-import { SLASH_COMMANDS, type SlashCommand } from "../lib/slashCommands";
+import { customSlashCommandSourceLabel, mergeCustomSlashCommands, resolveCustomSlashCommand, SLASH_COMMANDS, type SlashCommand } from "../lib/slashCommands";
 import { AgentAvatar } from "./AgentAvatar";
 import { ArrowUp, ChevronDown, Folder, FolderOpen, GitHub, Paperclip, PlusSquare, Square, UserRound, X } from "./icons";
 import { formatBytes as attachmentSizeLabel } from "../lib/artifacts";
@@ -26,6 +26,7 @@ function agentMenuDetail(agent: Agent): string {
 type Suggestion =
   | { kind: "action"; group: "Add"; key: string; name: string; label: string; hint: string }
   | { kind: "command"; group: SlashCommand["group"]; command: SlashCommand }
+  | { kind: "custom"; group: "Custom commands"; command: CustomSlashCommand }
   | { kind: "file"; group: "Files"; file: WorkspaceFileSuggestion }
   | { kind: "mcp"; group: "MCP"; tool: ToolInfo }
   | { kind: "skill"; group: "Skills"; skill: SkillInfo };
@@ -56,6 +57,8 @@ export function Composer({
   onAttachWorkspaceFile,
   onRemoveAttachment,
   onSlashCommand,
+  customCommands = [],
+  onCustomCommand,
   agents,
   activeAgentId,
   onAgent,
@@ -93,6 +96,8 @@ export function Composer({
   onAttachWorkspaceFile: (file: WorkspaceFileSuggestion) => Promise<boolean>;
   onRemoveAttachment: (id: string) => void;
   onSlashCommand: (id: string, argument: string) => boolean;
+  customCommands?: CustomSlashCommand[];
+  onCustomCommand?: (command: CustomSlashCommand, argument: string) => void;
   agents: Agent[];
   activeAgentId: string | null;
   onAgent: (agent: Agent | null) => void;
@@ -189,13 +194,15 @@ export function Composer({
     : activeWorkspaceLabel;
   const showWorkspaceSelector = true;
   const availableSlashCommands = autocompleteSources.commands ? SLASH_COMMANDS : [];
+  const mergedCustomCommands = useMemo(() => mergeCustomSlashCommands(customCommands), [customCommands]);
+  const availableCustomCommands = autocompleteSources.commands && onCustomCommand ? mergedCustomCommands : [];
   const suggestions = useMemo(() => {
     const scored: Array<{ item: Suggestion; score: number; usageId?: string }> = [];
-    const add = (item: Suggestion, text: string, usageId?: string) => {
+    const add = (item: Suggestion, text: string, usageId?: string, penalty = 0) => {
       const matchScore = composerSuggestionMatchScore(text, suggestionQuery);
       if (matchScore == null) return;
       const usage = personalizedSuggestions && usageId ? suggestionUsage[usageId] : undefined;
-      scored.push({ item, usageId, score: matchScore - Math.min(0.75, (usage?.count ?? 0) * 0.05) });
+      scored.push({ item, usageId, score: matchScore + penalty - Math.min(0.75, (usage?.count ?? 0) * 0.05) });
     };
     if (!suggestionPrefix && composerSuggestionMatchScore("files folders attach", suggestionQuery) != null) {
       add({ kind: "action", group: "Add", key: "files", name: "Files", label: "Files and folders", hint: "Attach local context" }, "files folders attach");
@@ -208,6 +215,13 @@ export function Composer({
         { kind: "command", group: command.group, command },
         `${command.id} ${command.label} ${command.hint}`,
         `command:${command.id}`,
+      ));
+      // Custom commands rank just behind built-ins on equal matches.
+      availableCustomCommands.forEach((command) => add(
+        { kind: "custom", group: "Custom commands", command },
+        `${command.name} ${command.description}`,
+        `custom:${command.name}`,
+        0.001,
       ));
     }
     if (suggestionPrefix === "/" && autocompleteSources.mcp) {
@@ -225,7 +239,7 @@ export function Composer({
       ));
     }
     return scored.sort((left, right) => left.score - right.score).map(({ item }) => item);
-  }, [autocompleteSources, availableSlashCommands, personalizedSuggestions, skills, suggestionPrefix, suggestionQuery, suggestionUsage, tools, workspaceFiles]);
+  }, [autocompleteSources, availableCustomCommands, availableSlashCommands, personalizedSuggestions, skills, suggestionPrefix, suggestionQuery, suggestionUsage, tools, workspaceFiles]);
   const suggestionGroups = useMemo(() => {
     const groups: Array<{ label: Suggestion["group"]; items: Suggestion[] }> = [];
     for (const item of suggestions) {
@@ -542,6 +556,11 @@ export function Composer({
       insertCompletion(mcpToolTagCompletion(item.tool.name));
       return;
     }
+    if (item.kind === "custom") {
+      recordSuggestionUse(`custom:${item.command.name}`);
+      insertCompletion(`/${item.command.name} `);
+      return;
+    }
     if (composerCommandRunsOnSelection(item.command.id)) {
       recordSuggestionUse(`command:${item.command.id}`);
       activateSuggestedCommand(item.command.id);
@@ -617,6 +636,12 @@ export function Composer({
     completionControllerRef.current?.abort();
     setGhostCompletion("");
     if (!busy && slashInput && runSlash(slashInput.id, slashInput.argument)) return;
+    const custom = onCustomCommand ? resolveCustomSlashCommand(value, mergedCustomCommands) : null;
+    if (custom && onCustomCommand) {
+      setSlashOpen(false);
+      onCustomCommand(custom.command, custom.argument);
+      return;
+    }
     onSend();
   }
 
@@ -963,6 +988,25 @@ export function Composer({
                       <span className="slash-name">/{item.tool.name}</span>
                       <span className="slash-label">{item.tool.name}</span>
                       <span className="slash-hint">{item.tool.description || "Use this MCP tool"}</span>
+                    </button>
+                  );
+                }
+                if (item.kind === "custom") {
+                  const sourceLabel = customSlashCommandSourceLabel(item.command);
+                  return (
+                    <button
+                      key={`custom:${item.command.name}`}
+                      type="button"
+                      className={"slash-item" + (index === slashFocusIndex ? " active" : "")}
+                      data-testid={`custom-command-${item.command.name}`}
+                      title={item.command.path}
+                      onClick={() => void completeSuggestion(item)}
+                    >
+                      <span className="slash-name">/{item.command.name}</span>
+                      <span className="slash-label">{item.command.description || `${sourceLabel} command`}</span>
+                      <span className="slash-hint">
+                        {item.command.argument_hint ? `${sourceLabel} · ${item.command.argument_hint}` : sourceLabel}
+                      </span>
                     </button>
                   );
                 }

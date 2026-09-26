@@ -3,7 +3,7 @@ import {
   ACCOUNT_RUNTIME_SIGN_IN_HELP,
   connectedSourceModel,
   isChatCapableModel,
-  isMediaOnlyProviderKind,
+  isChatProviderKind,
   workspaceFolderPlaceholder,
   type ConnectedModelSource,
 } from "../lib/onboardingModel";
@@ -171,7 +171,7 @@ export function OnboardingFlow({ onModelsChanged }: { onModelsChanged?: () => Pr
   // Media generators (Replicate, fal, image/video/music models) cannot answer a chat turn.
   const selectedModelReady = Boolean(selectedModelInfo && isChatCapableModel(selectedModelInfo));
   const chatModels = useMemo(() => models.filter(isChatCapableModel), [models]);
-  const hostedPresets = PROVIDER_PRESETS.filter((preset) => preset.needsKey && !isMediaOnlyProviderKind(preset.kind));
+  const hostedPresets = PROVIDER_PRESETS.filter((preset) => preset.needsKey && isChatProviderKind(preset.kind));
   const hostedPreset = hostedPresets.find((preset) => preset.name === hostedPresetName) ?? hostedPresets[0];
   const [folderNotice, setFolderNotice] = useState<string | null>(null);
 

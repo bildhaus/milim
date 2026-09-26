@@ -6,7 +6,7 @@ title: Privacy and security
 summary: Local and remote data boundaries, Google Workspace access, privacy modes, redaction, blocking, bearer auth, and CORS boundaries.
 group: Local data
 order: 70
-updated: 2026-09-23
+updated: 2026-09-26
 ---
 
 Privacy settings are easiest to reason about as a routing question: what stays local, what goes to a provider, and which gate runs before a remote send.
@@ -37,6 +37,7 @@ Because image content cannot be scanned or redacted by the text privacy gate, re
 | Codex runtime | Text is scanned/redacted/blocked before `/codex/run`; image pixels require Privacy Off before any bytes are decoded or written to temporary files. |
 | Installed Claude CLI | Text is scanned/redacted/blocked before `/claude/run`; image pixels require Privacy Off before the native multimodal message is built. |
 | OpenCode and Pi | Text is scanned/redacted/blocked before `/opencode/run` or `/pi/run`; image pixels require Privacy Off before native ACP/RPC input is built. |
+| `web_search` tool | The query is scanned before it goes to Brave Search, Tavily, or DuckDuckGo. Block refuses a query with detected PII; Redact sends placeholders that are never restored. |
 | Local Ollama or LM Studio | Not scanned by milim because the configured local runtime receives the prompt on the machine. |
 
 Each desktop run snapshots its selected privacy mode and canonical workspace when the request starts. That immutable context is reused for every inference iteration, tool call, delegation, approval, and retry, so changing another thread cannot redirect or reclassify an in-flight run. Legacy API clients may omit the run mode; the server then snapshots the current `POST /privacy/mode` default once at request start. An invalid explicit mode or workspace is rejected instead of falling back.

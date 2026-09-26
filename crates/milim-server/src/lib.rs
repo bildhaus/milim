@@ -19,6 +19,7 @@ mod cli_path;
 mod codex_bridge;
 pub mod companion;
 pub mod control;
+mod custom_commands;
 mod error;
 pub mod google_workspace;
 pub mod host_guard;
@@ -246,6 +247,9 @@ pub fn build_router_with_host_policy(state: AppState, host_policy: HostPolicy) -
         .route("/workspace/git", get(routes::workspace_git_status))
         .route("/workspace/context", get(routes::workspace_context))
         .route("/workspace/git/action", post(routes::workspace_git_action))
+        // User and project slash commands (Markdown prompt templates)
+        .route("/commands", get(routes::custom_commands_list))
+        .route("/commands/expand", post(routes::custom_commands_expand))
         // Managed preview apps for no-folder chat artifacts.
         .route("/preview-apps/{thread_id}", get(routes::preview_app_get))
         .route(
@@ -449,6 +453,15 @@ pub fn build_router_with_host_policy(state: AppState, host_policy: HostPolicy) -
         .route(
             "/memory/nodes/{id}/review",
             post(routes::memory_node_review),
+        )
+        .route("/memory/embeddings", get(routes::memory_embeddings))
+        .route(
+            "/memory/embeddings/reindex",
+            post(routes::memory_embeddings_reindex),
+        )
+        .route(
+            "/memory/embeddings/cancel",
+            post(routes::memory_embeddings_cancel),
         )
         // Privacy filter
         .route("/privacy/scan", post(routes::privacy_scan))

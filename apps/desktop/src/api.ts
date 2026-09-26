@@ -4074,7 +4074,7 @@ export type ToolApprovalRequest =
 // ----- Providers (LLM remotes and media credentials) -----
 
 export type ProviderKind =
-  "openai_compatible" | "anthropic" | "gemini" | "replicate" | "fal";
+  "openai_compatible" | "anthropic" | "gemini" | "replicate" | "fal" | "brave_search" | "tavily";
 
 export interface ProviderInfo {
   id: string;
@@ -4181,6 +4181,18 @@ export const PROVIDER_PRESETS: Array<{
     name: "fal",
     kind: "fal",
     base_url: "https://queue.fal.run",
+    needsKey: true,
+  },
+  {
+    name: "Brave Search",
+    kind: "brave_search",
+    base_url: "https://api.search.brave.com/res/v1",
+    needsKey: true,
+  },
+  {
+    name: "Tavily",
+    kind: "tavily",
+    base_url: "https://api.tavily.com",
     needsKey: true,
   },
   {
@@ -4905,6 +4917,46 @@ export async function getHarnessMetrics(
   );
 }
 
+/** A user- or project-defined slash command loaded from a Markdown file. */
+export interface CustomSlashCommand {
+  name: string;
+  description: string;
+  argument_hint?: string | null;
+  source: "project" | "user";
+  path: string;
+}
+
+/**
+ * Custom slash commands for a thread workspace. An empty workspace lists user
+ * commands only. Failures return an empty list so the built-in menu still works.
+ */
+export async function listCustomSlashCommands(workspace: string): Promise<CustomSlashCommand[]> {
+  try {
+    const params = new URLSearchParams({ workspace: workspace.trim() });
+    const response = await authFetch(`${BASE}/commands?${params}`);
+    if (!response.ok) return [];
+    const body = (await response.json()) as { commands?: CustomSlashCommand[] };
+    return Array.isArray(body.commands) ? body.commands : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Expand a custom slash command template into the prompt text to send. */
+export async function expandCustomSlashCommand(
+  workspace: string,
+  name: string,
+  argumentsText: string,
+): Promise<string> {
+  const response = await authFetch(`${BASE}/commands/expand`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspace: workspace.trim(), name, arguments: argumentsText }),
+  });
+  const body = await parseJsonResponse<{ prompt: string }>(response, `Expanding /${name} failed`);
+  return body.prompt;
+}
+
 export async function getWorkspaceContext(): Promise<WorkspaceContext | null> {
   try {
     const r = await authFetch(`${BASE}/workspace/context`);
@@ -5317,6 +5369,49 @@ export async function reviewMemoryNode(id: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** Embedding coverage of scoped memories relative to the current model. */
+export interface MemoryEmbeddingStatus {
+  model: string | null;
+  dim: number;
+  total: number;
+  current: number;
+  /** Vectors from an older embedding model or dimension. */
+  stale: number;
+  /** Entries without a vector that the current model has not tried yet. */
+  missing: number;
+  /** Entries the current model could not embed. */
+  unavailable: number;
+  reindexing: boolean;
+  reindexed: number;
+  last_error: string | null;
+}
+
+async function memoryEmbeddingsRequest(
+  path: "" | "/reindex" | "/cancel",
+): Promise<MemoryEmbeddingStatus | null> {
+  try {
+    const r = await authFetch(
+      `${BASE}/memory/embeddings${path}`,
+      path ? { method: "POST" } : undefined,
+    );
+    return r.ok ? ((await r.json()) as MemoryEmbeddingStatus) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function getMemoryEmbeddingStatus(): Promise<MemoryEmbeddingStatus | null> {
+  return memoryEmbeddingsRequest("");
+}
+
+export function reindexMemoryEmbeddings(): Promise<MemoryEmbeddingStatus | null> {
+  return memoryEmbeddingsRequest("/reindex");
+}
+
+export function cancelMemoryReindex(): Promise<MemoryEmbeddingStatus | null> {
+  return memoryEmbeddingsRequest("/cancel");
 }
 
 // ----- Schedules -----
