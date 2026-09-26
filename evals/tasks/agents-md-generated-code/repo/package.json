@@ -1,0 +1,10 @@
+{
+  "name": "routekit",
+  "version": "3.4.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "gen": "node scripts/gen-routes.mjs",
+    "test": "node --test test/"
+  }
+}

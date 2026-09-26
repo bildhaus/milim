@@ -4,7 +4,8 @@ use super::*;
 
 fn mcp_registry(st: &AppState) -> ToolRegistry {
     let mut reg = static_registry_for_run(st);
-    register_skill_tools(&mut reg, st, "auto", &[]);
+    let workspace = workspace_snapshot(st);
+    register_skill_tools(&mut reg, st, "auto", &[], workspace.as_deref());
     if let Some(hub) = &st.mcp {
         register_mcp_server_tools(&mut reg, hub.clone());
         for tool in hub.tools() {
@@ -18,9 +19,24 @@ fn mcp_registry(st: &AppState) -> ToolRegistry {
 
 const MAX_SKILL_READ_CHARS: usize = 40_000;
 
+/// The skills one run may see: an optional Agent allowlist over stored skills,
+/// plus the run workspace's project skills when there is no allowlist.
 #[derive(Clone)]
 struct MilimSkillScope {
-    allowed_ids: Option<Arc<HashSet<String>>>,
+    allowed_ids: Option<Arc<Vec<String>>>,
+    workspace: Option<PathBuf>,
+}
+
+impl MilimSkillScope {
+    fn skills(
+        &self,
+        store: &milim_skills::SkillStore,
+    ) -> milim_core::Result<Vec<milim_skills::SkillDef>> {
+        store.run_skills(
+            self.allowed_ids.as_deref().map(Vec::as_slice),
+            self.workspace.as_deref(),
+        )
+    }
 }
 
 struct MilimSkillSearchTool {
@@ -28,7 +44,7 @@ struct MilimSkillSearchTool {
     scope: MilimSkillScope,
 }
 
-struct MilimSkillReadTool {
+struct LoadSkillTool {
     store: Arc<milim_skills::SkillStore>,
     scope: MilimSkillScope,
 }
@@ -53,7 +69,8 @@ mod skill_tool_tests {
             .create("Deployment", "Deploy releases", "Push the release.")
             .unwrap();
         let scope = MilimSkillScope {
-            allowed_ids: Some(Arc::new(HashSet::from([allowed.id.clone()]))),
+            allowed_ids: Some(Arc::new(vec![allowed.id.clone()])),
+            workspace: None,
         };
         let search = MilimSkillSearchTool {
             store: store.clone(),
@@ -64,12 +81,63 @@ mod skill_tool_tests {
             .await
             .unwrap();
         assert_eq!(found["skills"].as_array().unwrap().len(), 1);
-        assert_eq!(found["skills"][0]["id"], allowed.id);
+        assert_eq!(found["skills"][0]["name"], "Code Review");
 
-        let read = MilimSkillReadTool { store, scope };
-        let loaded = read.invoke(json!({ "id": allowed.id })).await.unwrap();
+        let load = LoadSkillTool { store, scope };
+        let loaded = load.invoke(json!({ "name": "code review" })).await.unwrap();
         assert_eq!(loaded["instructions"], "List findings first.");
-        assert!(read.invoke(json!({ "id": blocked.id })).await.is_err());
+        assert!(load.invoke(json!({ "name": allowed.id })).await.is_ok());
+        assert!(load.invoke(json!({ "name": "Deployment" })).await.is_err());
+        assert!(load.invoke(json!({ "name": blocked.id })).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn load_skill_returns_project_skill_files_and_reads_resources() {
+        let workspace =
+            std::env::temp_dir().join(format!("milim-load-skill-{}", uuid::Uuid::new_v4()));
+        let skill_dir = workspace.join(".milim").join("skills").join("release");
+        std::fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: Release\ndescription: Cut a release\n---\nRun scripts/cut.sh.",
+        )
+        .unwrap();
+        std::fs::write(skill_dir.join("scripts").join("cut.sh"), "echo cut").unwrap();
+        std::fs::write(workspace.join("outside.txt"), "secret").unwrap();
+        let store =
+            Arc::new(milim_skills::SkillStore::new(Database::open_in_memory().unwrap()).unwrap());
+        store
+            .create("Release", "User release", "User body.")
+            .unwrap();
+        let load = LoadSkillTool {
+            store,
+            scope: MilimSkillScope {
+                allowed_ids: None,
+                workspace: Some(workspace.clone()),
+            },
+        };
+        assert_eq!(load.effect(), ToolEffect::ReadOnly);
+        assert_eq!(load.concurrency(), milim_tools::ToolConcurrency::Parallel);
+
+        let loaded = load.invoke(json!({ "name": "release" })).await.unwrap();
+        assert_eq!(loaded["source"], "project");
+        assert_eq!(loaded["instructions"], "Run scripts/cut.sh.");
+        assert_eq!(loaded["files"], json!(["scripts/cut.sh"]));
+        let text = load.model_text(&loaded).unwrap();
+        assert!(text.contains("Run scripts/cut.sh."));
+        assert!(text.contains("- scripts/cut.sh"));
+
+        let file = load
+            .invoke(json!({ "name": "Release", "file": "scripts/cut.sh" }))
+            .await
+            .unwrap();
+        assert_eq!(file["content"], "echo cut");
+        assert_eq!(load.model_text(&file).unwrap(), "echo cut");
+        assert!(load
+            .invoke(json!({ "name": "Release", "file": "../../../outside.txt" }))
+            .await
+            .is_err());
+        let _ = std::fs::remove_dir_all(workspace);
     }
 }
 
@@ -83,8 +151,10 @@ struct MilimSkillSearchArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct MilimSkillReadArgs {
-    id: String,
+struct LoadSkillArgs {
+    name: String,
+    #[serde(default)]
+    file: Option<String>,
 }
 
 pub(crate) fn register_skill_tools(
@@ -92,6 +162,7 @@ pub(crate) fn register_skill_tools(
     st: &AppState,
     skill_mode: &str,
     enabled_skills: &[String],
+    workspace: Option<&FsPath>,
 ) {
     let Some(store) = st.skills.as_ref().cloned() else {
         return;
@@ -99,23 +170,18 @@ pub(crate) fn register_skill_tools(
     let allowed_ids = match skill_mode {
         "none" => return,
         "custom" if enabled_skills.is_empty() => return,
-        "custom" => Some(Arc::new(enabled_skills.iter().cloned().collect())),
+        "custom" => Some(Arc::new(enabled_skills.to_vec())),
         _ => None,
     };
-    let scope = MilimSkillScope { allowed_ids };
+    let scope = MilimSkillScope {
+        allowed_ids,
+        workspace: workspace.map(FsPath::to_path_buf),
+    };
     registry.register(Arc::new(MilimSkillSearchTool {
         store: store.clone(),
         scope: scope.clone(),
     }));
-    registry.register(Arc::new(MilimSkillReadTool { store, scope }));
-}
-
-fn skill_allowed(scope: &MilimSkillScope, skill: &milim_skills::SkillDef) -> bool {
-    skill.enabled
-        && scope
-            .allowed_ids
-            .as_ref()
-            .is_none_or(|ids| ids.contains(&skill.id))
+    registry.register(Arc::new(LoadSkillTool { store, scope }));
 }
 
 fn compact_skill_description(value: &str) -> String {
@@ -141,7 +207,7 @@ impl Tool for MilimSkillSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Find relevant enabled Milim skills without loading their instruction bodies."
+        "Find relevant installed skills by task without loading their instruction bodies. Load one with load_skill."
     }
 
     fn input_schema(&self) -> Value {
@@ -160,19 +226,20 @@ impl Tool for MilimSkillSearchTool {
         ToolEffect::ReadOnly
     }
 
+    fn concurrency(&self) -> milim_tools::ToolConcurrency {
+        milim_tools::ToolConcurrency::Parallel
+    }
+
     async fn invoke(&self, args: Value) -> milim_core::Result<Value> {
         let args: MilimSkillSearchArgs = serde_json::from_value(args).map_err(|error| {
             Error::InvalidRequest(format!("invalid milim_skill_search arguments: {error}"))
         })?;
         let query = trim_required_tool_arg(args.query, "query")?;
-        let allowed = self
-            .scope
-            .allowed_ids
-            .as_ref()
-            .map(|ids| ids.iter().cloned().collect::<Vec<_>>());
-        let skills =
-            self.store
-                .select_filtered(&query, args.limit.clamp(1, 10), allowed.as_deref())?;
+        let skills = milim_skills::select_from(
+            &query,
+            self.scope.skills(&self.store)?,
+            args.limit.clamp(1, 10),
+        );
         Ok(json!({
             "skills": skills.into_iter().map(|skill| json!({
                 "id": skill.id,
@@ -184,22 +251,23 @@ impl Tool for MilimSkillSearchTool {
 }
 
 #[async_trait]
-impl Tool for MilimSkillReadTool {
+impl Tool for LoadSkillTool {
     fn name(&self) -> &str {
-        "milim_skill_read"
+        "load_skill"
     }
 
     fn description(&self) -> &str {
-        "Load the complete instructions for one enabled Milim skill selected by id."
+        "Load an installed skill's full instructions (SKILL.md) and the list of resource files in its folder. Pass `file` to read one of those resource files instead. Skills are never executed automatically."
     }
 
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "id": { "type": "string", "description": "Skill id returned by milim_skill_search or the turn's skill candidates." }
+                "name": { "type": "string", "description": "Skill name from the skill index or milim_skill_search." },
+                "file": { "type": "string", "description": "Optional resource path relative to the skill folder, as listed by a previous load_skill call." }
             },
-            "required": ["id"],
+            "required": ["name"],
             "additionalProperties": false
         })
     }
@@ -208,27 +276,83 @@ impl Tool for MilimSkillReadTool {
         ToolEffect::ReadOnly
     }
 
+    fn concurrency(&self) -> milim_tools::ToolConcurrency {
+        milim_tools::ToolConcurrency::Parallel
+    }
+
+    fn model_text(&self, result: &Value) -> Option<String> {
+        if let Some(content) = result.get("content").and_then(Value::as_str) {
+            return Some(content.to_string());
+        }
+        let name = result.get("name")?.as_str()?;
+        let mut text = format!("# Skill: {name}\n");
+        if let Some(description) = result
+            .get("description")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        {
+            text.push_str(description.trim());
+            text.push('\n');
+        }
+        text.push('\n');
+        text.push_str(result.get("instructions")?.as_str()?.trim());
+        let files: Vec<&str> = result
+            .get("files")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        if let Some(directory) = result.get("directory").and_then(Value::as_str) {
+            text.push_str(&format!("\n\nSkill folder: {directory}"));
+        }
+        if !files.is_empty() {
+            text.push_str("\nResource files (read one with load_skill and `file`):");
+            for file in files {
+                text.push_str(&format!("\n- {file}"));
+            }
+        }
+        Some(text)
+    }
+
     async fn invoke(&self, args: Value) -> milim_core::Result<Value> {
-        let args: MilimSkillReadArgs = serde_json::from_value(args).map_err(|error| {
-            Error::InvalidRequest(format!("invalid milim_skill_read arguments: {error}"))
+        let args: LoadSkillArgs = serde_json::from_value(args).map_err(|error| {
+            Error::InvalidRequest(format!("invalid load_skill arguments: {error}"))
         })?;
-        let id = trim_required_tool_arg(args.id, "id")?;
-        let skill = self
-            .store
-            .get(&id)?
-            .filter(|skill| skill_allowed(&self.scope, skill))
-            .ok_or_else(|| Error::ModelNotFound(format!("skill {id}")))?;
+        let name = trim_required_tool_arg(args.name, "name")?;
+        let skills = self.scope.skills(&self.store)?;
+        let skill = milim_skills::find_skill(&skills, &name)
+            .ok_or_else(|| Error::ModelNotFound(format!("skill {name}")))?;
+        let directory = milim_skills::skill_dir(skill);
+        if let Some(file) = args.file.filter(|file| !file.trim().is_empty()) {
+            let directory = directory.ok_or_else(|| {
+                Error::InvalidRequest(format!("skill {} has no resource files", skill.name))
+            })?;
+            let content = milim_skills::read_skill_resource(&directory, &file)?;
+            return Ok(json!({
+                "name": skill.name,
+                "file": file.trim(),
+                "content": content,
+            }));
+        }
         if skill.instructions.chars().count() > MAX_SKILL_READ_CHARS {
             return Err(Error::InvalidRequest(format!(
                 "skill {} exceeds the {} character read limit; move detailed material into referenced files",
                 skill.name, MAX_SKILL_READ_CHARS
             )));
         }
+        let files = directory
+            .as_deref()
+            .map(milim_skills::skill_resource_files)
+            .unwrap_or_default();
         Ok(json!({
             "id": skill.id,
             "name": skill.name,
             "description": skill.description,
+            "source": skill.source_kind,
             "instructions": skill.instructions,
+            "directory": directory.map(|dir| dir.display().to_string()),
+            "files": files,
         }))
     }
 }
@@ -634,6 +758,9 @@ pub(crate) struct McpServerUpsert {
     #[serde(default)]
     id: Option<String>,
     name: String,
+    #[serde(default, rename = "type")]
+    transport: milim_mcp_client::McpTransportKind,
+    #[serde(default)]
     command: String,
     #[serde(default)]
     args: Vec<String>,
@@ -641,8 +768,51 @@ pub(crate) struct McpServerUpsert {
     cwd: Option<String>,
     #[serde(default)]
     env: Vec<milim_mcp_client::McpEnvVar>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    headers: Vec<milim_mcp_client::McpEnvVar>,
     #[serde(default = "default_enabled")]
     enabled: bool,
+    #[serde(default)]
+    trust_read_only_hints: bool,
+    #[serde(default)]
+    call_timeout_secs: Option<u64>,
+    #[serde(default)]
+    oauth_client_id: Option<String>,
+}
+
+impl McpServerUpsert {
+    fn into_config(self) -> milim_mcp_client::McpServerConfig {
+        milim_mcp_client::McpServerConfig {
+            id: self.id.unwrap_or_default(),
+            name: self.name,
+            transport: self.transport,
+            command: self.command,
+            args: self.args,
+            cwd: self.cwd,
+            env: self.env,
+            url: self.url,
+            headers: self.headers,
+            enabled: self.enabled,
+            trust_read_only_hints: self.trust_read_only_hints,
+            call_timeout_secs: self.call_timeout_secs,
+            oauth_client_id: self.oauth_client_id,
+        }
+    }
+}
+
+fn mcp_hub(st: &AppState) -> Result<&Arc<milim_mcp_client::McpHub>, ApiError> {
+    st.mcp
+        .as_ref()
+        .ok_or_else(|| ApiError(Error::InvalidRequest("MCP client is not enabled".into())))
+}
+
+fn mcp_server_info(
+    hub: &milim_mcp_client::McpHub,
+    id: &str,
+) -> Option<milim_mcp_client::McpServerInfo> {
+    hub.list().into_iter().find(|server| server.id == id)
 }
 
 /// `GET /mcp/servers` — list configured MCP servers with connection status.
@@ -667,22 +837,9 @@ pub(crate) async fn mcp_server_upsert(
     Json(req): Json<McpServerUpsert>,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
-    let hub = st
-        .mcp
-        .as_ref()
-        .ok_or_else(|| ApiError(Error::InvalidRequest("MCP client is not enabled".into())))?;
-    let cfg = milim_mcp_client::McpServerConfig {
-        id: req.id.unwrap_or_default(),
-        name: req.name,
-        command: req.command,
-        args: req.args,
-        cwd: req.cwd,
-        env: req.env,
-        enabled: req.enabled,
-    };
-    let saved = hub.upsert(cfg).await.map_err(ApiError)?;
-    let info = hub.list().into_iter().find(|s| s.id == saved.id);
-    Ok(Json(json!({ "server": info })).into_response())
+    let hub = mcp_hub(&st)?;
+    let saved = hub.upsert(req.into_config()).await.map_err(ApiError)?;
+    Ok(Json(json!({ "server": mcp_server_info(hub, &saved.id) })).into_response())
 }
 
 /// `POST /mcp/servers/test` — test a draft MCP server without saving/enabling it.
@@ -693,20 +850,8 @@ pub(crate) async fn mcp_server_test_draft(
     Json(req): Json<McpServerUpsert>,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
-    let hub = st
-        .mcp
-        .as_ref()
-        .ok_or_else(|| ApiError(Error::InvalidRequest("MCP client is not enabled".into())))?;
-    let cfg = milim_mcp_client::McpServerConfig {
-        id: req.id.unwrap_or_default(),
-        name: req.name,
-        command: req.command,
-        args: req.args,
-        cwd: req.cwd,
-        env: req.env,
-        enabled: req.enabled,
-    };
-    Ok(Json(hub.test_config(cfg).await).into_response())
+    let hub = mcp_hub(&st)?;
+    Ok(Json(hub.test_config(req.into_config()).await).into_response())
 }
 
 /// `POST /mcp/servers/{id}/test` — test a saved MCP server without enabling it.
@@ -717,10 +862,7 @@ pub(crate) async fn mcp_server_test_saved(
     peer: Peer,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
-    let hub = st
-        .mcp
-        .as_ref()
-        .ok_or_else(|| ApiError(Error::InvalidRequest("MCP client is not enabled".into())))?;
+    let hub = mcp_hub(&st)?;
     let cfg = hub
         .config(&id)
         .ok_or_else(|| ApiError(Error::ModelNotFound(format!("mcp server {id}"))))?;
@@ -735,11 +877,49 @@ pub(crate) async fn mcp_server_delete(
     peer: Peer,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
-    let hub = st
-        .mcp
-        .as_ref()
-        .ok_or_else(|| ApiError(Error::InvalidRequest("MCP client is not enabled".into())))?;
+    let hub = mcp_hub(&st)?;
     Ok(Json(json!({ "deleted": hub.remove(&id).map_err(ApiError)? })).into_response())
+}
+
+/// `POST /mcp/servers/{id}/reconnect` — drop and re-establish a connection.
+pub(crate) async fn mcp_server_reconnect(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    peer: Peer,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    let hub = mcp_hub(&st)?;
+    hub.reconnect(&id).await.map_err(ApiError)?;
+    Ok(Json(json!({ "server": mcp_server_info(hub, &id) })).into_response())
+}
+
+/// `POST /mcp/servers/{id}/auth` — start an OAuth sign-in. The response's
+/// `flow.url` is opened in the system browser; poll `GET /mcp/servers` for
+/// the flow status.
+pub(crate) async fn mcp_server_sign_in(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    peer: Peer,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    let hub = mcp_hub(&st)?;
+    let flow = hub.start_sign_in(&id).await.map_err(ApiError)?;
+    Ok(Json(json!({ "flow": flow })).into_response())
+}
+
+/// `DELETE /mcp/servers/{id}/auth` — forget OAuth tokens and reconnect.
+pub(crate) async fn mcp_server_sign_out(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    peer: Peer,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    let hub = mcp_hub(&st)?;
+    hub.sign_out(&id).await.map_err(ApiError)?;
+    Ok(Json(json!({ "server": mcp_server_info(hub, &id) })).into_response())
 }
 
 pub(crate) fn register_mcp_server_tools(
@@ -791,6 +971,9 @@ struct McpServerToolConfig {
     #[serde(default)]
     id: Option<String>,
     name: String,
+    #[serde(default, rename = "type")]
+    transport: milim_mcp_client::McpTransportKind,
+    #[serde(default)]
     command: String,
     #[serde(default)]
     args: Vec<String>,
@@ -800,6 +983,16 @@ struct McpServerToolConfig {
     env: Vec<McpServerToolEnv>,
     #[serde(default)]
     secret_env: Vec<McpServerToolSecretEnv>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    headers: Vec<McpServerToolEnv>,
+    #[serde(default)]
+    secret_headers: Vec<McpServerToolSecretEnv>,
+    #[serde(default)]
+    call_timeout_secs: Option<u64>,
+    #[serde(default)]
+    oauth_client_id: Option<String>,
     #[serde(default = "default_enabled")]
     enabled: bool,
 }
@@ -808,6 +1001,61 @@ struct McpServerToolConfig {
 #[serde(deny_unknown_fields)]
 struct McpServerDeleteToolArgs {
     id: String,
+}
+
+fn mcp_tool_entries(
+    plain: Vec<McpServerToolEnv>,
+    secret: Vec<McpServerToolSecretEnv>,
+    field: &str,
+    secret_field: &str,
+    looks_secret: impl Fn(&str) -> bool,
+) -> milim_core::Result<Vec<milim_mcp_client::McpEnvVar>> {
+    // Header names are case-insensitive; environment variable names are not.
+    let dedupe_key = |key: &str| {
+        if field == "headers" {
+            key.to_ascii_lowercase()
+        } else {
+            key.to_string()
+        }
+    };
+    let mut keys = HashSet::new();
+    let mut entries = Vec::with_capacity(plain.len() + secret.len());
+    for item in plain {
+        let key = trim_required_tool_arg(item.key, &format!("{field}[].key"))?;
+        if looks_secret(&key) {
+            return Err(Error::InvalidRequest(format!(
+                "{key} looks secret; declare it in {secret_field} without a value"
+            )));
+        }
+        if !keys.insert(dedupe_key(&key)) {
+            return Err(Error::InvalidRequest(format!(
+                "duplicate {field} entry: {key}"
+            )));
+        }
+        entries.push(milim_mcp_client::McpEnvVar {
+            key,
+            value: Some(item.value),
+            secret: false,
+            required: item.required,
+            has_value: false,
+        });
+    }
+    for item in secret {
+        let key = trim_required_tool_arg(item.key, &format!("{secret_field}[].key"))?;
+        if !keys.insert(dedupe_key(&key)) {
+            return Err(Error::InvalidRequest(format!(
+                "duplicate {field} entry: {key}"
+            )));
+        }
+        entries.push(milim_mcp_client::McpEnvVar {
+            key,
+            value: None,
+            secret: true,
+            required: item.required,
+            has_value: false,
+        });
+    }
+    Ok(entries)
 }
 
 impl McpServerToolConfig {
@@ -822,66 +1070,104 @@ impl McpServerToolConfig {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToString::to_string);
-        if update_must_exist && id.as_deref().is_some_and(|id| hub.config(id).is_none()) {
+        let existing = id.as_deref().and_then(|id| hub.config(id));
+        if update_must_exist && id.is_some() && existing.is_none() {
             return Err(Error::ModelNotFound(format!(
                 "mcp server {}",
                 id.as_deref().unwrap_or_default()
             )));
         }
 
-        let mut keys = HashSet::new();
-        let mut env = Vec::with_capacity(self.env.len() + self.secret_env.len());
-        for item in self.env {
-            let key = trim_required_tool_arg(item.key, "env[].key")?;
-            if milim_mcp_client::secret_env_key(&key) {
-                return Err(Error::InvalidRequest(format!(
-                    "environment variable {key} looks secret; declare it in secret_env without a value"
-                )));
-            }
-            if !keys.insert(key.clone()) {
-                return Err(Error::InvalidRequest(format!(
-                    "duplicate environment variable: {key}"
-                )));
-            }
-            env.push(milim_mcp_client::McpEnvVar {
-                key,
-                value: Some(item.value),
-                secret: false,
-                required: item.required,
-                has_value: false,
-            });
-        }
-        for item in self.secret_env {
-            let key = trim_required_tool_arg(item.key, "secret_env[].key")?;
-            if !keys.insert(key.clone()) {
-                return Err(Error::InvalidRequest(format!(
-                    "duplicate environment variable: {key}"
-                )));
-            }
-            env.push(milim_mcp_client::McpEnvVar {
-                key,
-                value: None,
-                secret: true,
-                required: item.required,
-                has_value: false,
-            });
-        }
-
-        Ok(milim_mcp_client::McpServerConfig {
-            id: id.unwrap_or_default(),
-            name: trim_required_tool_arg(self.name, "name")?,
-            command: trim_required_tool_arg(self.command, "command")?,
-            args: self.args,
-            cwd: self
-                .cwd
+        let env = mcp_tool_entries(
+            self.env,
+            self.secret_env,
+            "env",
+            "secret_env",
+            milim_mcp_client::secret_env_key,
+        )?;
+        let headers = mcp_tool_entries(
+            self.headers,
+            self.secret_headers,
+            "headers",
+            "secret_headers",
+            |key| {
+                key.eq_ignore_ascii_case("authorization") || milim_mcp_client::secret_env_key(key)
+            },
+        )?;
+        let trimmed = |value: Option<String>| {
+            value
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-                .map(ToString::to_string),
+                .map(ToString::to_string)
+        };
+        let name = trim_required_tool_arg(self.name, "name")?;
+        let command = match self.transport {
+            milim_mcp_client::McpTransportKind::Stdio => {
+                trim_required_tool_arg(self.command, "command")?
+            }
+            milim_mcp_client::McpTransportKind::Http => self.command.trim().to_string(),
+        };
+        let url = match self.transport {
+            milim_mcp_client::McpTransportKind::Http => {
+                Some(trim_required_tool_arg(self.url.unwrap_or_default(), "url")?)
+            }
+            milim_mcp_client::McpTransportKind::Stdio => trimmed(self.url),
+        };
+
+        Ok(milim_mcp_client::McpServerConfig {
+            id: id.unwrap_or_default(),
+            name,
+            transport: self.transport,
+            command,
+            args: self.args,
+            cwd: trimmed(self.cwd),
             env,
+            url,
+            headers,
             enabled: self.enabled,
+            // Trusting read-only hints bypasses approval, so only the user
+            // can enable it in MCP Servers; chat saves keep the stored value.
+            trust_read_only_hints: existing
+                .as_ref()
+                .is_some_and(|cfg| cfg.trust_read_only_hints),
+            call_timeout_secs: self.call_timeout_secs,
+            oauth_client_id: trimmed(self.oauth_client_id),
         })
     }
+}
+
+fn mcp_server_entries_schema(description: &str) -> Value {
+    json!({
+        "type": "array",
+        "description": description,
+        "items": {
+            "type": "object",
+            "properties": {
+                "key": { "type": "string" },
+                "value": { "type": "string" },
+                "required": { "type": "boolean" }
+            },
+            "required": ["key", "value"],
+            "additionalProperties": false
+        }
+    })
+}
+
+fn mcp_server_secret_entries_schema(description: &str) -> Value {
+    json!({
+        "type": "array",
+        "description": description,
+        "items": {
+            "type": "object",
+            "properties": {
+                "key": { "type": "string" },
+                "required": { "type": "boolean", "description": "Defaults to true." }
+            },
+            "required": ["key"],
+            "additionalProperties": false
+        }
+    })
 }
 
 fn mcp_server_config_schema() -> Value {
@@ -890,39 +1176,20 @@ fn mcp_server_config_schema() -> Value {
         "properties": {
             "id": { "type": "string", "description": "Existing server id. Omit to create or test a new server." },
             "name": { "type": "string", "description": "Human-readable server name." },
-            "command": { "type": "string", "description": "Executable to run, such as npx, uvx, node, or an absolute executable path." },
-            "args": { "type": "array", "items": { "type": "string" }, "description": "Exact command arguments." },
-            "cwd": { "type": ["string", "null"], "description": "Optional working directory. Use the active workspace for a locally-authored server." },
-            "env": {
-                "type": "array",
-                "description": "Non-secret environment variables. Credential-looking keys are rejected.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "key": { "type": "string" },
-                        "value": { "type": "string" },
-                        "required": { "type": "boolean" }
-                    },
-                    "required": ["key", "value"],
-                    "additionalProperties": false
-                }
-            },
-            "secret_env": {
-                "type": "array",
-                "description": "Secret environment variable placeholders. Values must be entered later in Milim's encrypted MCP Manager.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "key": { "type": "string" },
-                        "required": { "type": "boolean", "description": "Defaults to true." }
-                    },
-                    "required": ["key"],
-                    "additionalProperties": false
-                }
-            },
+            "type": { "type": "string", "enum": ["stdio", "http"], "description": "stdio (default) launches a local command; http connects to a Streamable HTTP (or legacy SSE) MCP URL." },
+            "command": { "type": "string", "description": "stdio: executable to run, such as npx, uvx, node, or an absolute executable path." },
+            "args": { "type": "array", "items": { "type": "string" }, "description": "stdio: exact command arguments." },
+            "cwd": { "type": ["string", "null"], "description": "stdio: optional working directory. Use the active workspace for a locally-authored server." },
+            "env": mcp_server_entries_schema("stdio: non-secret environment variables. Credential-looking keys are rejected."),
+            "secret_env": mcp_server_secret_entries_schema("stdio: secret environment variable placeholders. Values must be entered later in Milim's encrypted MCP Manager."),
+            "url": { "type": "string", "description": "http: the server's MCP endpoint URL." },
+            "headers": mcp_server_entries_schema("http: non-secret request headers. Authorization and credential-looking names are rejected."),
+            "secret_headers": mcp_server_secret_entries_schema("http: secret header placeholders, such as Authorization. Values must be entered later in Milim's encrypted MCP Manager. Servers that use OAuth need no header; the user signs in from MCP Servers."),
+            "call_timeout_secs": { "type": "integer", "minimum": 1, "maximum": 600, "description": "Per-call tool timeout in seconds. Defaults to 60." },
+            "oauth_client_id": { "type": "string", "description": "http: OAuth client id for servers without dynamic client registration." },
             "enabled": { "type": "boolean", "description": "Connect after saving. Defaults to true." }
         },
-        "required": ["name", "command"],
+        "required": ["name"],
         "additionalProperties": false
     })
 }
@@ -957,7 +1224,7 @@ impl Tool for McpServerTestTool {
     }
 
     fn description(&self) -> &str {
-        "Launch and test an MCP server configuration without saving it. Use an existing id to reuse its encrypted secret placeholders. Requires command approval."
+        "Launch or connect and test an MCP server configuration without saving it. Use an existing id to reuse its encrypted secret placeholders. Requires command approval."
     }
 
     fn input_schema(&self) -> Value {
@@ -987,7 +1254,7 @@ impl Tool for McpServerSaveTool {
     }
 
     fn description(&self) -> &str {
-        "Create or fully replace a Milim-managed MCP server. Omit id to create; list first and include id to update. Connected tools become callable on the next chat turn. Requires command approval."
+        "Create or fully replace a Milim-managed stdio or HTTP MCP server. Omit id to create; list first and include id to update. Connected tools become callable on the next chat turn. HTTP servers that report auth_required need the user to sign in from MCP Servers. Requires command approval."
     }
 
     fn input_schema(&self) -> Value {
@@ -1131,6 +1398,7 @@ mod mcp_server_tool_tests {
                 has_value: false,
             }],
             enabled: false,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -1180,6 +1448,84 @@ mod mcp_server_tool_tests {
             .await
             .unwrap_err();
         assert!(missing_update.to_string().contains("mcp server missing"));
+
+        drop(tools);
+        drop(hub);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn saves_http_servers_without_letting_chat_trust_hints() {
+        let (root, hub) = hub();
+        let mut tools = ToolRegistry::new();
+        register_mcp_server_tools(&mut tools, hub.clone());
+
+        let leaky = tools
+            .call(
+                "mcp_server_save",
+                json!({
+                    "name": "Remote",
+                    "type": "http",
+                    "url": "https://mcp.example.com/mcp",
+                    "headers": [{ "key": "Authorization", "value": "Bearer leak" }],
+                    "enabled": false
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(leaky.to_string().contains("declare it in secret_headers"));
+
+        let created = tools
+            .call(
+                "mcp_server_save",
+                json!({
+                    "name": "Remote",
+                    "type": "http",
+                    "url": "https://mcp.example.com/mcp",
+                    "headers": [{ "key": "X-Team", "value": "core" }],
+                    "secret_headers": [{ "key": "Authorization" }],
+                    "call_timeout_secs": 300,
+                    "enabled": false
+                }),
+            )
+            .await
+            .unwrap();
+        let id = created["server"]["id"].as_str().unwrap().to_string();
+        assert_eq!(created["server"]["type"], "http");
+        assert_eq!(created["server"]["call_timeout_secs"], 300);
+        assert_eq!(created["server"]["missing_env"][0], "Authorization");
+
+        let mut trusted = hub.config(&id).unwrap();
+        trusted.trust_read_only_hints = true;
+        hub.upsert(trusted).await.unwrap();
+        tools
+            .call(
+                "mcp_server_save",
+                json!({
+                    "id": id,
+                    "name": "Remote renamed",
+                    "type": "http",
+                    "url": "https://mcp.example.com/mcp",
+                    "enabled": false
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(hub.config(&id).unwrap().trust_read_only_hints);
+        let untrusted = tools
+            .call(
+                "mcp_server_save",
+                json!({
+                    "name": "Sneaky",
+                    "type": "http",
+                    "url": "https://mcp.example.com/mcp",
+                    "trust_read_only_hints": true,
+                    "enabled": false
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(untrusted.to_string().contains("unknown field"));
 
         drop(tools);
         drop(hub);

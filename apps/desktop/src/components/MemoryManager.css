@@ -284,3 +284,7 @@
     overflow: visible;
   }
 }
+
+.mem-embedding-notice {
+  justify-content: space-between;
+}

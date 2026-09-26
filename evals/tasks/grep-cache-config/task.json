@@ -1,0 +1,8 @@
+{
+  "id": "grep-cache-config",
+  "title": "Find why caching is silently disabled",
+  "category": "grep-and-fix",
+  "prompt": "Response caching in this service appears to be silently disabled: repeated GET /catalog requests always rebuild the catalog even though CACHE_TTL_SECONDS defaults to 60. Track down the cause and fix it. Do not change src/lib/config.js.",
+  "timeout_s": 420,
+  "check": "node check.mjs"
+}

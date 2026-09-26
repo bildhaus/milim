@@ -253,6 +253,7 @@ export function ControlBar({
           ? "dot-off"
           : "dot-green";
   const activeProviderBrand = providerBrandForModel(activeModel, providers);
+  const accountRuntimeModel = ["codex", "claude", "opencode", "pi"].includes(activeProviderBrand ?? "");
   const generationOverrideCount = Object.keys(generationSettings ?? {}).length;
   const setGenerationNumber = (key: keyof GenerationSettings, raw: string) => {
     if (!onGenerationSettings) return false;
@@ -473,7 +474,12 @@ export function ControlBar({
                     <Shield size={14} />
                   </span>
                   <span className="context-title">Privacy</span>
-                  <span className="context-choice-group" role="radiogroup" aria-label="Privacy">
+                  <span
+                    className="context-choice-group"
+                    role="radiogroup"
+                    aria-label="Privacy"
+                    aria-describedby={accountRuntimeModel && privacy !== "off" ? "privacy-description" : undefined}
+                  >
                     {(["off", "redact", "block"] as const).map((value) => (
                       <button
                         key={value}
@@ -488,6 +494,11 @@ export function ControlBar({
                       </button>
                     ))}
                   </span>
+                  {accountRuntimeModel && privacy !== "off" && (
+                    <span id="privacy-description" className="context-choice-description">
+                      Covers the prompt milim sends. Files the runtime reads with its own tools reach its provider unscanned.
+                    </span>
+                  )}
                 </div>
 
                 <div className="context-row context-choice-row">
@@ -543,7 +554,9 @@ export function ControlBar({
                       <ul>
                         {approvalAllowances.map((allowance) => (
                           <li key={allowance.key}>
-                            {allowance.command ? (
+                            {allowance.prefix ? (
+                              <code title={`${allowance.tool}: ${allowance.prefix} and its arguments`}>{`${allowance.prefix} ...`}</code>
+                            ) : allowance.command ? (
                               <code title={`${allowance.tool}: ${allowance.command}`}>{allowance.command}</code>
                             ) : (
                               <span>{allowance.tool}</span>
@@ -552,7 +565,7 @@ export function ControlBar({
                               <button
                                 type="button"
                                 className="context-allowances-remove"
-                                aria-label={`Stop allowing ${allowance.command ?? allowance.tool}`}
+                                aria-label={`Stop allowing ${allowance.prefix ?? allowance.command ?? allowance.tool}`}
                                 title="Stop allowing"
                                 onClick={() => onClearApprovalAllowances([allowance.key])}
                               >
@@ -566,7 +579,7 @@ export function ControlBar({
                   )}
                 </div>
 
-                {model && onGenerationSettings && !["codex", "claude", "opencode", "pi"].includes(activeProviderBrand ?? "") && (
+                {model && onGenerationSettings && !accountRuntimeModel && (
                   <details className="generation-controls">
                     <summary>
                       <span>Generation</span>

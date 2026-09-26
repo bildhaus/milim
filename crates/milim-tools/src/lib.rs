@@ -7,6 +7,10 @@
 
 mod builtins;
 mod fs;
+mod html;
+pub mod shell_command;
+mod todo;
+mod web_search;
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -26,6 +30,10 @@ pub use fs::{
     atomic_write, fs_tools, read_text_range, resolve_workspace_path, ListDirTool, ReadFileTool,
     WriteFileTool,
 };
+pub use todo::{TodoItem, TodoStatus, TodoWriteTool};
+pub use web_search::{
+    WebSearchApi, WebSearchApiSource, WebSearchProvider, WebSearchQueryFilter, WebSearchTool,
+};
 
 /// A callable tool exposed to agents and MCP clients.
 #[async_trait]
@@ -39,6 +47,23 @@ pub trait Tool: Send + Sync {
     /// The externally visible effect used by approval policy.
     fn effect(&self) -> ToolEffect {
         ToolEffect::Unknown
+    }
+    /// The effect of one concrete call. Tools whose consequence depends on
+    /// their arguments (for example a shell running `git status`) narrow it
+    /// here; approval policy and scheduling use this value.
+    fn effect_for_call(&self, _args: &Value) -> ToolEffect {
+        self.effect()
+    }
+    /// Deadline for one concrete call. `None` keeps the pipeline default.
+    fn deadline_for_call(&self, _args: &Value) -> Option<Duration> {
+        None
+    }
+    /// Whether the tool only waits on other runs (delegated Workers, linked
+    /// thread replies). Such calls take no scheduler permits: holding them
+    /// while waiting would block the very runs they wait on from executing
+    /// their own tools.
+    fn waits_on_other_runs(&self) -> bool {
+        false
     }
     /// Read-only is necessary but not sufficient for concurrency. Tools must
     /// opt in after proving their implementation is parallel-safe.
@@ -60,6 +85,12 @@ pub trait Tool: Send + Sync {
     /// Result projected into the model-visible tool reply.
     fn model_result(&self, result: &Value) -> Value {
         result.clone()
+    }
+    /// Plain-text projection for the model. When `Some`, the agent loop sends
+    /// this text verbatim instead of the JSON-encoded [`Tool::model_result`],
+    /// so command output and file contents keep real newlines.
+    fn model_text(&self, _result: &Value) -> Option<String> {
+        None
     }
     /// Previous names accepted for persisted custom-agent selections.
     fn aliases(&self) -> Vec<String> {
@@ -171,20 +202,20 @@ impl ToolExecutionPipeline {
         run_permits: Arc<tokio::sync::Semaphore>,
         _context: ToolExecutionContext,
     ) -> Result<ToolExecutionResult> {
-        let effect = tool.effect();
+        let effect = tool.effect_for_call(&request.arguments);
+        let deadline = tool
+            .deadline_for_call(&request.arguments)
+            .unwrap_or(request.deadline);
         let concurrency = match (effect, tool.concurrency()) {
             (ToolEffect::ReadOnly, ToolConcurrency::Parallel) => ToolConcurrency::Parallel,
             _ => ToolConcurrency::Exclusive,
         };
-        let permits = if concurrency == ToolConcurrency::Parallel {
-            1
+        let (permits, process_permits) = if tool.waits_on_other_runs() {
+            (0, 0)
+        } else if concurrency == ToolConcurrency::Parallel {
+            (1, 1)
         } else {
-            RUN_TOOL_LIMIT
-        };
-        let process_permits = if concurrency == ToolConcurrency::Parallel {
-            1
-        } else {
-            PROCESS_TOOL_LIMIT
+            (RUN_TOOL_LIMIT, PROCESS_TOOL_LIMIT)
         };
         let _run_guard = run_permits
             .acquire_many_owned(permits)
@@ -196,12 +227,12 @@ impl ToolExecutionPipeline {
             .await
             .map_err(|_| Error::Other("tool process scheduler closed".into()))?;
         let started = Instant::now();
-        let raw = tokio::time::timeout(request.deadline, tool.invoke(request.arguments))
+        let raw = tokio::time::timeout(deadline, tool.invoke(request.arguments))
             .await
             .map_err(|_| {
                 Error::Other(format!(
                     "tool {} exceeded its {:?} deadline",
-                    request.name, request.deadline
+                    request.name, deadline
                 ))
             })??;
         let raw = normalize_tool_output(raw, request.output_limit_bytes);
@@ -244,8 +275,70 @@ pub enum ToolUiDescriptor {
 #[derive(Debug, Clone)]
 pub struct ToolAgentResult {
     pub result: Value,
+    /// Plain-text model projection from [`Tool::model_text`], when provided.
+    pub model_text: Option<String>,
     pub app_result: Option<Value>,
     pub ui: Option<ToolUiDescriptor>,
+}
+
+static TOOL_OUTPUT_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+/// Register the process-wide directory where oversized tool output is saved
+/// for later ranged reads. The first registration wins.
+pub fn set_tool_output_root(root: PathBuf) {
+    let _ = TOOL_OUTPUT_ROOT.set(root);
+}
+
+/// Directory holding saved oversized tool output, when one is registered.
+/// File tools may read absolute paths inside it even when workspace-scoped.
+pub fn tool_output_root() -> Option<&'static Path> {
+    TOOL_OUTPUT_ROOT.get().map(PathBuf::as_path)
+}
+
+/// Saved tool output older than this is removed at startup.
+pub const TOOL_OUTPUT_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// Prune saved output older than [`TOOL_OUTPUT_RETENTION`] under `root`, then
+/// register it as the process-wide tool output root. Pruning is best-effort.
+pub fn init_tool_output_root(root: PathBuf) {
+    prune_tool_output(&root, TOOL_OUTPUT_RETENTION);
+    set_tool_output_root(root);
+}
+
+/// Remove files older than `max_age` under `root` (one level of run
+/// directories deep) and drop run directories left empty. Returns the number
+/// of removed files.
+pub fn prune_tool_output(root: &Path, max_age: Duration) -> usize {
+    let Some(cutoff) = std::time::SystemTime::now().checked_sub(max_age) else {
+        return 0;
+    };
+    let expired = |path: &Path| {
+        std::fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .is_ok_and(|modified| modified < cutoff)
+    };
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Ok(files) = std::fs::read_dir(&path) {
+                for file in files.flatten() {
+                    let file = file.path();
+                    if file.is_file() && expired(&file) && std::fs::remove_file(&file).is_ok() {
+                        removed += 1;
+                    }
+                }
+            }
+            // Fails harmlessly while the directory still holds recent output.
+            let _ = std::fs::remove_dir(&path);
+        } else if path.is_file() && expired(&path) && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 /// A serializable description of a tool (for `/mcp/tools` and tool listings).
@@ -288,6 +381,8 @@ impl ToolRegistry {
         r.register(Arc::new(CurrentTimeTool));
         r.register(Arc::new(HttpFetchTool));
         r.register(Arc::new(RenderChartTool));
+        r.register(Arc::new(WebSearchTool::default()));
+        r.register(Arc::new(TodoWriteTool::default()));
         r
     }
 
@@ -554,6 +649,7 @@ impl ToolRegistry {
         let ui = tool.ui();
         Ok(ToolAgentResult {
             result: tool.model_result(&raw),
+            model_text: tool.model_text(&raw),
             app_result: ui.is_some().then_some(raw),
             ui,
         })
@@ -564,9 +660,24 @@ impl ToolRegistry {
         self.tool(name).ok()?.ui()
     }
 
+    /// Input schema of one tool, resolving aliases the same way as calls.
+    pub fn input_schema(&self, name: &str) -> Option<Value> {
+        self.tool(name).ok().map(|tool| tool.input_schema())
+    }
+
+    /// Canonical names of all registered tools, ordered by name.
+    pub fn names(&self) -> Vec<String> {
+        self.tools.keys().cloned().collect()
+    }
+
     /// Effect declared by a tool, resolving aliases the same way as calls.
     pub fn effect(&self, name: &str) -> Option<ToolEffect> {
         self.tool(name).ok().map(|tool| tool.effect())
+    }
+
+    /// Effect of one concrete call, resolving aliases the same way as calls.
+    pub fn effect_for_call(&self, name: &str, args: &Value) -> Option<ToolEffect> {
+        self.tool(name).ok().map(|tool| tool.effect_for_call(args))
     }
 
     pub fn environment_policy(&self, name: &str) -> Option<ProcessEnvironmentPolicy> {
@@ -685,7 +796,14 @@ mod tests {
         let names: Vec<String> = reg.list().into_iter().map(|s| s.name).collect();
         assert_eq!(
             names,
-            vec!["current_time", "echo", "http_fetch", "render_chart"]
+            vec![
+                "current_time",
+                "echo",
+                "http_fetch",
+                "render_chart",
+                "todo_write",
+                "web_search"
+            ]
         ); // BTreeMap → sorted
 
         let out = reg.call("echo", json!({"text": "hi"})).await.unwrap();
@@ -708,7 +826,16 @@ mod tests {
 
         let filtered = reg.without(&["echo"]);
         let names: Vec<String> = filtered.list().into_iter().map(|s| s.name).collect();
-        assert_eq!(names, vec!["current_time", "http_fetch", "render_chart"]);
+        assert_eq!(
+            names,
+            vec![
+                "current_time",
+                "http_fetch",
+                "render_chart",
+                "todo_write",
+                "web_search"
+            ]
+        );
         assert!(!filtered.contains("echo"));
     }
 
@@ -811,6 +938,27 @@ mod tests {
         assert_eq!(maximum.load(Ordering::SeqCst), 1);
     }
 
+    #[test]
+    fn prune_tool_output_removes_only_expired_files() {
+        let root = std::env::temp_dir().join(format!("milim-prune-{}", std::process::id()));
+        let run = root.join("run-1");
+        std::fs::create_dir_all(&run).unwrap();
+        let old = run.join("old.txt");
+        std::fs::write(&old, "old").unwrap();
+        let fresh_run = root.join("run-2");
+        std::fs::create_dir_all(&fresh_run).unwrap();
+        std::fs::write(fresh_run.join("fresh.txt"), "fresh").unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(fresh_run.join("fresh.txt"), "fresh").unwrap();
+        // Everything written before the sleep is older than the 10ms cutoff.
+        let removed = prune_tool_output(&root, Duration::from_millis(10));
+        assert_eq!(removed, 1);
+        assert!(!old.exists());
+        assert!(!run.exists(), "an emptied run directory is removed");
+        assert!(fresh_run.join("fresh.txt").exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     #[tokio::test]
     async fn pipeline_enforces_deadline_and_output_limit_without_cancelling_a_sibling() {
         let (slow, _) = timed_tool(
@@ -845,5 +993,59 @@ mod tests {
         let (slow_result, good_result) = tokio::join!(slow_call, good_call);
         assert!(slow_result.unwrap_err().to_string().contains("deadline"));
         assert_eq!(good_result.unwrap().raw["truncated"], true);
+    }
+
+    struct DelegatingTool {
+        child: Arc<TimedTool>,
+    }
+
+    #[async_trait]
+    impl Tool for DelegatingTool {
+        fn name(&self) -> &str {
+            "delegate"
+        }
+        fn description(&self) -> &str {
+            "waits on another run's tool"
+        }
+        fn input_schema(&self) -> Value {
+            json!({"type":"object"})
+        }
+        fn waits_on_other_runs(&self) -> bool {
+            true
+        }
+        async fn invoke(&self, _args: Value) -> Result<Value> {
+            // The child run has its own run scheduler but shares the
+            // process-wide one with the waiting parent.
+            let child_permits = Arc::new(tokio::sync::Semaphore::new(RUN_TOOL_LIMIT as usize));
+            ToolExecutionPipeline::execute(
+                self.child.clone(),
+                ToolExecutionRequest::new("child", json!({})),
+                child_permits,
+                ToolExecutionContext::default(),
+            )
+            .await
+            .map(|result| result.raw)
+        }
+    }
+
+    #[tokio::test]
+    async fn waiting_tool_does_not_block_the_run_it_waits_on() {
+        let (child, _) = timed_tool(
+            "child",
+            ToolEffect::Command,
+            ToolConcurrency::Exclusive,
+            Duration::from_millis(1),
+        );
+        let parent_permits = Arc::new(tokio::sync::Semaphore::new(RUN_TOOL_LIMIT as usize));
+        let call = ToolExecutionPipeline::execute(
+            Arc::new(DelegatingTool { child }),
+            ToolExecutionRequest::new("delegate", json!({})),
+            parent_permits,
+            ToolExecutionContext::default(),
+        );
+        let result = tokio::time::timeout(Duration::from_secs(5), call)
+            .await
+            .expect("the delegated child ran while its parent waited");
+        assert!(result.is_ok());
     }
 }

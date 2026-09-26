@@ -3,7 +3,7 @@ import {
   ACCOUNT_RUNTIME_SIGN_IN_HELP,
   connectedSourceModel,
   isChatCapableModel,
-  isMediaOnlyProviderKind,
+  isChatProviderKind,
   workspaceFolderPlaceholder,
 } from "../src/lib/onboardingModel.js";
 import { PROVIDER_PRESETS } from "../src/api.js";
@@ -28,8 +28,9 @@ equal(isChatCapableModel({ id: "codex:gpt-5-codex" }), true, "account-runtime mo
 equal(connectedSourceModel([imageOutput, chat], { providerId: "openrouter" }), chat, "a newly connected source should select its first chat-capable model");
 equal(connectedSourceModel([fluxImage], { providerId: "replicate" }), undefined, "a media-only source must not satisfy the runtime step");
 
-const chatPresets = PROVIDER_PRESETS.filter((preset) => preset.needsKey && !isMediaOnlyProviderKind(preset.kind)).map((preset) => preset.name);
+const chatPresets = PROVIDER_PRESETS.filter((preset) => preset.needsKey && isChatProviderKind(preset.kind)).map((preset) => preset.name);
 equal(chatPresets.includes("Replicate") || chatPresets.includes("fal"), false, "media-only presets are excluded from the chat provider step");
+equal(chatPresets.includes("Brave Search") || chatPresets.includes("Tavily"), false, "web search presets are excluded from the chat provider step");
 equal(chatPresets.includes("OpenAI"), true, "hosted chat presets remain available");
 
 equal(workspaceFolderPlaceholder("MacIntel Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"), "/Users/you/project", "macOS gets a POSIX home path");

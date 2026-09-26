@@ -108,6 +108,10 @@
   gap: 8px;
 }
 
+.usage-stats.usage-totals {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
 .usage-stat,
 .usage-panel,
 .usage-breakdown,
@@ -297,6 +301,11 @@
   background: color-mix(in srgb, var(--accent) 72%, var(--accent-light));
 }
 
+.usage-harness .usage-breakdown {
+  padding: 0;
+  border: 0;
+}
+
 .usage-empty-note {
   margin: 0;
   color: var(--tertiary-text);
@@ -326,7 +335,8 @@
     flex-wrap: wrap;
   }
 
-  .usage-stats {
+  .usage-stats,
+  .usage-stats.usage-totals {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 

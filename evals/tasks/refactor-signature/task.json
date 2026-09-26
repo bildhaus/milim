@@ -1,0 +1,8 @@
+{
+  "id": "refactor-signature",
+  "title": "Change a function signature and update every caller",
+  "category": "refactor-multi-file",
+  "prompt": "Refactor `createUser` in src/users.js from positional arguments `createUser(name, email, isAdmin)` to a single options object `createUser({ name, email, role })`, where `role` is \"admin\" or \"member\" (default \"member\"). The returned user object must now have a `role` field instead of `isAdmin`. Calling createUser with anything other than a plain object must throw a TypeError, and an unknown role must throw a RangeError. Update every caller in src/ so the app behaves the same, and update the tests in test/ to the new shape.",
+  "timeout_s": 420,
+  "check": "node check.mjs"
+}

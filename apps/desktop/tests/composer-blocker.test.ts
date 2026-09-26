@@ -92,6 +92,11 @@ equal(classifyErrorMessage("x chat/completions -> 403 Forbidden: denied").kind, 
 equal(classifyErrorMessage("x messages -> 529 <unknown status code>: overloaded").kind, "provider_unavailable");
 equal(classifyErrorMessage("x chat/completions -> 503 Service Unavailable: ").status, 503);
 equal(classifyErrorMessage("chat HTTP 502").kind, "provider_unavailable");
+const interrupted = classifyErrorMessage(
+  "upstream error: anthropic stream interrupted: error decoding response body",
+);
+equal(interrupted.kind, "provider_unavailable", "a broken stream is a transient provider failure");
+equal(composerNoticeAction("openai stream interrupted: connection closed"), "retry");
 equal(classifyErrorMessage("x chat/completions -> 404 Not Found: The model `gpt-9` does not exist").kind, "model_not_found");
 equal(composerNoticeAction("model_not_found: unknown model gpt-9"), "switch_model");
 equal(classifyErrorMessage("x chat/completions -> 400 Bad Request: context_length_exceeded").kind, "context_length");

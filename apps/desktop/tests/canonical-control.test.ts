@@ -288,6 +288,7 @@ const completedWithProviderCost = projectControlRunMessages(
           completion_tokens: 656,
           total_tokens: 120_656,
           cost_usd: 0.1745104,
+          cache_read_tokens: 90_000,
         },
         costUsd: 0.1745104,
         costSource: "provider",
@@ -306,6 +307,7 @@ assert.deepEqual(completedWithProviderCost.metrics, {
     prompt_tokens: 120_000,
     completion_tokens: 656,
     total_tokens: 120_656,
+    cache_read_tokens: 90_000,
   },
   costUsd: 0.1745104,
   costSource: "provider",
@@ -713,6 +715,202 @@ assert.equal(
   approvalParts[1]?.kind === "event" ? approvalParts[1].detail : undefined,
   '{"command":"cargo publish"}',
   "pending canonical approvals keep the exact request for review",
+);
+
+const checkpointData = {
+  ref: "refs/milim/checkpoints/turn-1",
+  createdAt: 42,
+  folder: "/work",
+  root: "/work",
+  head: "abc123",
+};
+const checkpointed = projectControlRunMessages([
+  item(1, "message", { id: "user-1", role: "user", content: "edit" }),
+  item(2, "workspace_checkpoint", { status: "created", checkpoint: checkpointData }),
+  item(3, "assistant_delta", { text: "partial" }),
+  item(4, "run_status", { status: "failed" }),
+], "run-1").find((message) => message.role === "assistant");
+assert.deepEqual(
+  checkpointed?.workspaceCheckpoint,
+  checkpointData,
+  "a Rust checkpoint stays attached even when the run failed before its reply",
+);
+assert.deepEqual(checkpointed?.streamParts?.[0], {
+  kind: "event",
+  eventType: "status",
+  label: "Workspace checkpoint",
+  detail: "Restore is available from this turn.",
+  status: "done",
+});
+const persistedCheckpoint = projectControlRunMessages([
+  item(1, "message", {
+    id: "assistant-1",
+    role: "assistant",
+    content: "done",
+    workspaceCheckpoint: checkpointData,
+  }),
+], "run-1")[0];
+assert.equal(persistedCheckpoint.workspaceCheckpoint?.ref, checkpointData.ref);
+const skippedCheckpoint = projectControlRunMessages([
+  item(1, "workspace_checkpoint", {
+    status: "skipped",
+    reason: "not_git",
+    message: "No Git repository found in the selected folder",
+  }),
+  item(2, "workspace_checkpoint", { status: "skipped", reason: "error", message: "disk full" }),
+  item(3, "assistant_delta", { text: "ok" }),
+], "run-1")[0];
+assert.equal(skippedCheckpoint.workspaceCheckpoint, undefined);
+assert.deepEqual(
+  skippedCheckpoint.streamParts?.slice(0, 2).map((part) =>
+    part.kind === "event" ? [part.eventType, part.label, part.detail] : null
+  ),
+  [
+    ["status", "Workspace checkpoint skipped", "No Git repository found in the selected folder"],
+    ["warning", "Workspace checkpoint skipped", "disk full"],
+  ],
+);
+assert.equal(
+  projectControlRunMessages([
+    item(1, "workspace_checkpoint", {
+      status: "created",
+      checkpoint: { ...checkpointData, ref: "refs/heads/main" },
+    }),
+    item(2, "assistant_delta", { text: "ok" }),
+  ], "run-1")[0].workspaceCheckpoint,
+  undefined,
+  "only milim checkpoint refs become restore points",
+);
+
+const prefixed = projectControlRunMessages([
+  item(1, "approval_requested", {
+    approval_id: "approval-prefix",
+    name: "shell",
+    arguments: '{"command":"cargo test -p core"}',
+    allowance_prefix: "cargo test",
+  }),
+], "run-1")[0];
+assert.equal(
+  prefixed.streamParts?.[0]?.kind === "event" ? prefixed.streamParts[0].allowancePrefix : undefined,
+  "cargo test",
+  "pending approvals carry the prefix Rust would allow for the chat",
+);
+
+const hooked = projectControlRunMessages([
+  item(1, "hook", {
+    event: "*",
+    hook: ".milim/settings.json",
+    source: "project",
+    outcome: "skipped",
+    duration_ms: 0,
+    message: "Project hooks did not run.",
+    trust: { workspace: "/repo", config_hash: "abc123" },
+  }),
+  item(2, "hook", {
+    event: "PreToolUse",
+    hook: "./guard.sh",
+    source: "user",
+    tool_name: "shell",
+    outcome: "deny",
+    duration_ms: 12,
+    message: "no rm -rf",
+  }),
+  item(3, "hook", {
+    event: "PostToolUse",
+    hook: "cargo fmt",
+    source: "user",
+    tool_name: "edit_file",
+    outcome: "ok",
+    duration_ms: 40,
+  }),
+], "run-1")[0];
+assert.deepEqual(hooked.streamParts, [
+  {
+    kind: "event",
+    eventType: "warning",
+    label: "Project hooks are not trusted",
+    detail: "Project hooks did not run.",
+    status: "done",
+    hookTrust: { workspace: "/repo", configHash: "abc123" },
+  },
+  {
+    kind: "event",
+    eventType: "warning",
+    label: "PreToolUse hook (shell) denied in 12 ms",
+    detail: "./guard.sh: no rm -rf",
+    status: "done",
+  },
+  {
+    kind: "event",
+    eventType: "tool",
+    label: "PostToolUse hook (edit_file) ran in 40 ms",
+    name: "PostToolUse hook",
+    icon: "tool",
+    detail: "cargo fmt",
+    status: "done",
+  },
+], "hook events render as warnings, with a trust action for untrusted project hooks");
+
+// A provider retry drops the failed attempt's partial output (UTF-8 bytes)
+// and shows a pending notice until the retried attempt streams.
+const retryItems = [
+  item(1, "assistant_delta", { text: "Plan: ", reasoning: "think" }),
+  item(2, "assistant_delta", { text: "caf\u00e9 \u{1f600}", reasoning: "ing" }),
+  item(3, "provider_retry", {
+    attempt: 2,
+    delay_ms: 4000,
+    reason: "rate limited (429)",
+    discarded_content_bytes: 10,
+    discarded_reasoning_bytes: 3,
+  }),
+];
+const retrying = projectControlRunMessages(retryItems, "run-1")[0];
+assert.equal(retrying.content, "Plan: ", "the live stream drops the failed attempt's text");
+assert.deepEqual(
+  retrying.streamParts?.map((part) => part.kind === "event" ? [part.label, part.status] : [part.kind, part.content]),
+  [
+    ["text", "Plan: "],
+    ["thinking", "think"],
+    ["Retrying after rate limit (attempt 2, 4s)...", "running"],
+  ],
+);
+const retried = projectControlRunMessages([
+  ...retryItems,
+  item(4, "assistant_delta", { text: "done" }),
+  item(5, "message", { id: "assistant-1", role: "assistant", content: "Plan: done", reasoning: "think" }),
+], "run-1")[0];
+assert.deepEqual(
+  retried.streamParts?.map((part) => part.kind === "event" ? [part.label, part.status] : [part.kind, part.content]),
+  [
+    ["text", "Plan: "],
+    ["thinking", "think"],
+    ["Retried after rate limit (attempt 2)", "done"],
+    ["text", "done"],
+  ],
+  "the final message keeps the live parts once the retried text matches",
+);
+
+const compacted = projectControlRunMessages([
+  item(1, "context_compacted", {
+    elided_tool_results: 12,
+    summarized_messages: 30,
+    estimated_tokens_before: 150000,
+    estimated_tokens_after: 60000,
+  }),
+], "run-1")[0];
+assert.deepEqual(
+  compacted.streamParts?.map((part) => part.kind === "event" ? [part.eventType, part.label, part.detail] : []),
+  [["status", "Context compacted: 12 older tool outputs elided, 30 messages summarized", "About 150,000 to 60,000 tokens"]],
+);
+
+const timedOut = projectControlRunMessages([
+  item(1, "tool_approval_required", { approval_id: "approval-late", name: "shell" }),
+  item(2, "tool_approval_resolved", { approval_id: "approval-late", decision: "deny", reason: "timed_out" }),
+], "run-1")[0];
+assert.deepEqual(
+  timedOut.streamParts?.map((part) => part.kind === "event" ? [part.label, part.approvalStatus] : []),
+  [["Approval timed out", "denied"]],
+  "a timed-out approval resolves its own card",
 );
 
 console.log("canonical control projection tests passed");

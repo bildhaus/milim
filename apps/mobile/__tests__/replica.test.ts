@@ -375,3 +375,32 @@ test('removes a pending model switch notice when selection returns to the origin
 
   expect(transcript).toEqual([]);
 });
+
+test('provider retries drop the failed attempt and compaction and approval timeouts stay compact', () => {
+  const runItem = (seq: number, type: string, data: any): TimelineItemV1 => ({
+    ...item(seq, type, data),
+    run_id: 'run-9',
+  });
+  const transcript = projectTranscript([
+    runItem(1, 'assistant_delta', {text: 'Plan: half an answ', reasoning: ''}),
+    runItem(2, 'provider_retry', {
+      attempt: 2,
+      delay_ms: 4000,
+      reason: 'rate limited (429)',
+      discarded_content_bytes: 12,
+      discarded_reasoning_bytes: 0,
+    }),
+    runItem(3, 'context_compacted', {elided_tool_results: 12, summarized_messages: 30}),
+    runItem(4, 'tool_approval_required', {approval_id: 'late', name: 'shell', arguments: '{}'}),
+    runItem(5, 'tool_approval_resolved', {approval_id: 'late', decision: 'deny', reason: 'timed_out'}),
+    runItem(6, 'assistant_delta', {text: 'done'}),
+  ]);
+  expect(transcript.find(entry => entry.kind === 'message')).toMatchObject({content: 'Plan: done'});
+  const activity = transcript.find(entry => entry.kind === 'activity');
+  if (!activity || activity.kind !== 'activity') throw new Error('missing activity group');
+  expect(activity.rows.map(row => [row.label, row.detail])).toEqual([
+    ['Retried after rate limit (attempt 2)', ''],
+    ['Context compacted', '12 older tool outputs elided, 30 messages summarized'],
+  ]);
+  expect(transcript.find(entry => entry.kind === 'approval')).toMatchObject({label: 'Approval timed out'});
+});

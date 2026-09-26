@@ -109,11 +109,8 @@ pub(crate) fn account_runtime_tool_endpoint(
     let Some(context) = context else {
         return Ok(None);
     };
-    let approval = match context.tool_context.tool_approval_policy.as_deref() {
-        Some("review") => ToolApprovalPolicy::Review,
-        Some("open") => ToolApprovalPolicy::Open,
-        _ => ToolApprovalPolicy::Guarded,
-    };
+    let approval =
+        ToolApprovalPolicy::from_requested(context.tool_context.tool_approval_policy.as_deref());
     let policy = ToolRunPolicy {
         approval,
         approval_granted: context.tool_context.tool_approval_grant,
@@ -153,30 +150,29 @@ pub(crate) fn account_runtime_tool_endpoint(
         run_context,
     )
     .without(DESKTOP_WORKSPACE_TOOL_NAMES);
-    if !policy.plan_mode {
-        register_skill_tools(
-            &mut registry,
-            st,
-            &context.skill_mode,
-            &context.enabled_skills,
-        );
-        if registry.contains("preview_open_url") {
-            if let (Some(thread_id), Some(cwd)) = (
-                context
-                    .tool_context
-                    .preview_runtime_key
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty()),
-                run_context.workspace.clone(),
+    register_skill_tools(
+        &mut registry,
+        st,
+        &context.skill_mode,
+        &context.enabled_skills,
+        run_context.workspace(),
+    );
+    if !policy.plan_mode && registry.contains("preview_open_url") {
+        if let (Some(thread_id), Some(cwd)) = (
+            context
+                .tool_context
+                .preview_runtime_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            run_context.workspace.clone(),
+        ) {
+            for tool in crate::preview_runtime::account_runtime_preview_tools(
+                st.preview_runtime.clone(),
+                thread_id.to_string(),
+                cwd,
             ) {
-                for tool in crate::preview_runtime::account_runtime_preview_tools(
-                    st.preview_runtime.clone(),
-                    thread_id.to_string(),
-                    cwd,
-                ) {
-                    registry.register(tool);
-                }
+                registry.register(tool);
             }
         }
     }
@@ -355,10 +351,15 @@ const DESKTOP_WORKSPACE_TOOL_NAMES: &[&str] = &[
     "read_file",
     "read_file_anchors",
     "list_dir",
+    "glob",
+    "grep",
+    "diagnostics",
     "write_file",
     "edit_file",
     "patch_file",
     "shell",
+    "process_output",
+    "process_kill",
 ];
 const RUN_WORKSPACE_TOOL_NAMES: &[&str] = &["google_drive_transfer"];
 pub(crate) const HASHLINE_TOOL_NAMES: &[&str] = &["read_file_anchors", "patch_file"];
@@ -390,18 +391,31 @@ const CHILD_THREAD_TOOL_NAMES: &[&str] = &[
 const CHILD_THREAD_READ_ONLY_TOOL_NAMES: &[&str] = &[
     "read_file",
     "list_dir",
+    "glob",
+    "grep",
+    "diagnostics",
     "http_fetch",
+    "web_search",
     "current_time",
     "echo",
 ];
 const PLAN_MODE_READ_ONLY_TOOL_NAMES: &[&str] = &[
     "read_file",
     "list_dir",
+    "glob",
+    "grep",
+    "diagnostics",
     "list_agents",
     "linked_thread_list",
     "linked_thread_read",
 ];
 const MAX_CHILD_THREAD_WAIT_MS: u64 = 300_000;
+/// Extra time past a tool's own wait so its timeout handling and cleanup run
+/// before the pipeline deadline cancels the call.
+const TOOL_WAIT_GRACE: Duration = Duration::from_secs(30);
+/// Read-only workspace tools that need a selected working folder.
+const WORKSPACE_READ_TOOL_NAMES: &[&str] =
+    &["read_file", "list_dir", "glob", "grep", "diagnostics"];
 const DEFAULT_LINKED_THREAD_WAIT_MS: u64 = 60_000;
 const WORKSPACE_UNAVAILABLE_SYSTEM_PROMPT: &str = concat!(
     "No working folder is selected in Milim. Host filesystem and host shell tools are unavailable. ",
@@ -419,6 +433,18 @@ enum ToolApprovalPolicy {
     Review,
     Guarded,
     Open,
+}
+
+impl ToolApprovalPolicy {
+    /// Matches the requested policy exactly; anything else, including no
+    /// policy, is `Guarded`.
+    fn from_requested(value: Option<&str>) -> Self {
+        match value {
+            Some("review") => Self::Review,
+            Some("open") => Self::Open,
+            _ => Self::Guarded,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1500,6 +1526,238 @@ mod run_context_tests {
     }
 }
 
+#[cfg(test)]
+mod native_run_context_tests {
+    use super::*;
+    use milim_inference::test_backend::TestBackend;
+    use milim_storage::Database;
+
+    struct ReadOnlyProbe(&'static str);
+
+    #[async_trait]
+    impl Tool for ReadOnlyProbe {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn description(&self) -> &str {
+            "read-only probe"
+        }
+        fn input_schema(&self) -> Value {
+            json!({ "type": "object", "properties": {} })
+        }
+        fn effect(&self) -> ToolEffect {
+            ToolEffect::ReadOnly
+        }
+        async fn invoke(&self, _args: Value) -> milim_core::Result<Value> {
+            Ok(json!({}))
+        }
+    }
+
+    fn state_with(names: &[&'static str], workspace: Option<PathBuf>) -> AppState {
+        let mut tools = ToolRegistry::new();
+        for name in names {
+            tools.register(Arc::new(ReadOnlyProbe(name)));
+        }
+        AppState::new(
+            Arc::new(TestBackend::new()),
+            milim_core::config::ServerConfiguration::default(),
+        )
+        .with_tools(tools)
+        .with_workspace(Arc::new(std::sync::RwLock::new(workspace)))
+    }
+
+    #[test]
+    fn plan_and_guarded_modes_keep_glob_and_grep() {
+        let names = [
+            "read_file",
+            "list_dir",
+            "glob",
+            "grep",
+            "diagnostics",
+            "shell",
+        ];
+        let workspace = std::env::temp_dir();
+        let state = state_with(&names, Some(workspace.clone()));
+        let run_context = RunContext {
+            workspace: Some(workspace),
+            privacy_mode: crate::privacy::PrivacyMode::Off,
+        };
+        let plan = agent_base_registry_with_memory(
+            &state,
+            None,
+            &ToolRunPolicy {
+                approval: ToolApprovalPolicy::Open,
+                plan_mode: true,
+                ..Default::default()
+            },
+            &run_context,
+        );
+        let plan_names: Vec<String> = plan.list().into_iter().map(|tool| tool.name).collect();
+        assert_eq!(
+            plan_names,
+            ["diagnostics", "glob", "grep", "list_dir", "read_file"]
+        );
+
+        let guarded =
+            agent_base_registry_with_memory(&state, None, &ToolRunPolicy::default(), &run_context);
+        assert!(guarded.contains("glob"));
+        assert!(guarded.contains("grep"));
+        assert!(guarded.contains("diagnostics"));
+
+        let mut edit_tools = ToolRegistry::new();
+        edit_tools.register(Arc::new(ReadOnlyProbe("diagnostics")));
+        edit_tools.register(Arc::new(ReadOnlyProbe("glob")));
+        edit_tools.register(Arc::new(ReadOnlyProbe("grep")));
+        edit_tools.register(Arc::new(ReadOnlyProbe("edit_file")));
+        let no_folder = AppState::new(
+            Arc::new(TestBackend::new()),
+            milim_core::config::ServerConfiguration::default(),
+        )
+        .with_tools(edit_tools);
+        let unscoped = RunContext {
+            workspace: None,
+            privacy_mode: crate::privacy::PrivacyMode::Off,
+        };
+        let plan_without_folder = agent_base_registry_with_memory(
+            &no_folder,
+            None,
+            &ToolRunPolicy {
+                plan_mode: true,
+                ..Default::default()
+            },
+            &unscoped,
+        );
+        assert!(!plan_without_folder.contains("glob"));
+        assert!(!plan_without_folder.contains("grep"));
+        assert!(!plan_without_folder.contains("diagnostics"));
+    }
+
+    #[test]
+    fn long_waiting_tools_outlast_their_own_wait() {
+        let state = AppState::new(
+            Arc::new(TestBackend::new()),
+            milim_core::config::ServerConfiguration::default(),
+        );
+        let delegate = DelegateWorkersTool {
+            state,
+            supervisor: Arc::new(ThreadSupervisor::new(
+                milim_agents::ThreadStore::new(Database::open_in_memory().unwrap()).unwrap(),
+            )),
+            context: AgentMemoryContext::default(),
+            child_tools: ToolRegistry::new(),
+            allow_write_review: false,
+            auto_approve_workers: false,
+            run_context: RunContext {
+                workspace: None,
+                privacy_mode: crate::privacy::PrivacyMode::Off,
+            },
+        };
+        let deadline = delegate.deadline_for_call(&json!({})).unwrap();
+        assert!(deadline > Duration::from_millis(MAX_CHILD_THREAD_WAIT_MS));
+        assert_eq!(deadline, Duration::from_secs(330));
+
+        let store = Arc::new(
+            milim_storage::UserDataStore::new(Database::open_in_memory().unwrap()).unwrap(),
+        );
+        let wait = LinkedThreadWaitTool {
+            control: crate::control::RunManager::new(store, "Deadline fixture").unwrap(),
+            origin_thread_id: "origin".into(),
+            origin_run_id: "run".into(),
+            grants: Vec::new(),
+        };
+        assert_eq!(
+            wait.deadline_for_call(&json!({ "exchange_id": "x" })),
+            Some(Duration::from_millis(DEFAULT_LINKED_THREAD_WAIT_MS) + TOOL_WAIT_GRACE)
+        );
+        assert_eq!(
+            wait.deadline_for_call(&json!({ "exchange_id": "x", "timeout_ms": 90_000 })),
+            Some(
+                Duration::from_millis(crate::control::MAX_LINKED_THREAD_WAIT_MS) + TOOL_WAIT_GRACE
+            )
+        );
+    }
+
+    #[test]
+    fn parent_context_is_framed_as_background_for_workers() {
+        let block = parent_context_block("  Implement slugify.\n");
+        assert!(block.starts_with("<parent_context>\n"));
+        assert!(block.contains("do not carry out the parent's request yourself"));
+        assert!(block.ends_with("Implement slugify.\n</parent_context>"));
+    }
+
+    #[test]
+    fn native_workers_get_the_base_prompt_for_their_own_tools_and_an_environment() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(ReadOnlyProbe("read_file")));
+        let mut spec = ChildRunSpec {
+            parent_id: "parent-1".to_string(),
+            title: "Worker".to_string(),
+            model: "model-x".to_string(),
+            agent_id: None,
+            system_prompt: None,
+            prompt: "Inspect.".to_string(),
+            run_id: Some("run-1".to_string()),
+            runtime: milim_agents::WorkerRuntime::Managed,
+            access: milim_agents::WorkerAccess::ReadOnly,
+            worktree_path: None,
+            account_profile_id: None,
+            base_prompt: None,
+            environment: None,
+        };
+        add_native_worker_context(&mut spec, &registry, None);
+        let base = spec.base_prompt.as_deref().unwrap();
+        assert!(base.starts_with("You are milim's coding agent"));
+        assert!(base.contains("read_file"));
+        assert!(
+            !base.contains("edit_file"),
+            "guidance covers only the Worker's tools"
+        );
+        assert!(!base.contains("# Plan mode"));
+        let environment = spec.environment.as_deref().unwrap();
+        assert!(environment.starts_with("<environment>"));
+        assert!(environment.contains("Model: model-x"));
+
+        let mut bare = spec.clone();
+        bare.base_prompt = None;
+        bare.environment = None;
+        add_native_worker_context(&mut bare, &ToolRegistry::new(), None);
+        assert!(bare.base_prompt.is_none() && bare.environment.is_none());
+    }
+
+    #[test]
+    fn native_run_context_leads_with_base_prompt_and_ends_system_block_with_environment() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(ReadOnlyProbe("read_file")));
+        let run_context = RunContext {
+            workspace: None,
+            privacy_mode: crate::privacy::PrivacyMode::Off,
+        };
+        let mut messages = vec![
+            ChatMessage::text("system", "Custom instructions"),
+            ChatMessage::text("user", "hello"),
+        ];
+        add_native_run_context(&mut messages, &registry, &run_context, "model-x", true);
+        let texts: Vec<String> = messages.iter().map(ChatMessage::text_content).collect();
+        assert!(texts[0].starts_with("You are milim's coding agent"));
+        assert!(texts[0].contains("# Plan mode"));
+        assert_eq!(texts[1], "Custom instructions");
+        assert!(texts[2].starts_with("<environment>"));
+        assert!(texts[2].contains("Workspace root: none"));
+        assert!(texts[2].contains("Model: model-x"));
+        assert_eq!(messages[3].role, "user");
+
+        let mut plain = vec![ChatMessage::text("user", "hello")];
+        add_native_run_context(
+            &mut plain,
+            &ToolRegistry::new(),
+            &run_context,
+            "model-x",
+            false,
+        );
+        assert_eq!(plain.len(), 1, "runs without tools are plain chat");
+    }
+}
+
 fn string_extra(req: &ChatCompletionRequest, key: &str) -> Option<String> {
     req.extra
         .get(key)
@@ -1525,11 +1783,8 @@ fn bool_extra(req: &ChatCompletionRequest, key: &str) -> bool {
 }
 
 fn tool_run_policy_from_request(req: &ChatCompletionRequest) -> ToolRunPolicy {
-    let approval = match string_extra(req, "tool_approval_policy").as_deref() {
-        Some("review") => ToolApprovalPolicy::Review,
-        Some("open") => ToolApprovalPolicy::Open,
-        _ => ToolApprovalPolicy::Guarded,
-    };
+    let approval =
+        ToolApprovalPolicy::from_requested(string_extra(req, "tool_approval_policy").as_deref());
     ToolRunPolicy {
         approval,
         approval_granted: bool_extra(req, "tool_approval_grant"),
@@ -1621,7 +1876,37 @@ fn static_registry_for_context_with_access(
     if context.workspace.is_none() {
         reg = reg.without(RUN_WORKSPACE_TOOL_NAMES);
     }
-    reg.scoped_for_run()
+    let mut reg = reg.scoped_for_run();
+    if reg.contains("web_search") {
+        reg = reg.without(&["web_search"]);
+        reg.register(Arc::new(web_search_for_context(st, context)));
+    }
+    reg
+}
+
+struct ProviderWebSearchSource(Arc<crate::providers::ProviderRegistry>);
+
+#[async_trait]
+impl milim_tools::WebSearchApiSource for ProviderWebSearchSource {
+    async fn api(&self) -> Option<milim_tools::WebSearchApi> {
+        self.0.web_search_api().await
+    }
+}
+
+/// `web_search` bound to the configured search provider and the run's
+/// privacy mode, which applies to the query before it leaves the machine.
+fn web_search_for_context(st: &AppState, context: &RunContext) -> milim_tools::WebSearchTool {
+    let mut tool = milim_tools::WebSearchTool::default();
+    if let Some(providers) = st.providers.clone() {
+        tool = tool.with_api_source(Arc::new(ProviderWebSearchSource(providers)));
+    }
+    let mode = context.privacy_mode;
+    if mode != crate::privacy::PrivacyMode::Off {
+        tool = tool.with_query_filter(Arc::new(move |query: &str| {
+            crate::privacy::gate_outbound_tool_text(mode, query, "web search query")
+        }));
+    }
+    tool
 }
 
 fn registry_has_desktop_host_tools(reg: &ToolRegistry) -> bool {
@@ -1664,6 +1949,38 @@ pub(crate) fn add_workspace_instructions_for(
         return;
     };
     messages.insert(0, ChatMessage::text("system", instructions));
+}
+
+/// Base context shared by every native tool-agent run (desktop, mobile, and
+/// schedules through the control path, plus the HTTP agent routes): milim's
+/// base coding-agent prompt first, ahead of custom, agent, and repository
+/// instructions, and the environment snapshot at the end of the leading system
+/// block. Both are computed once here, so they stay byte-identical across the
+/// run's steps. Runs without tools are plain chat and get neither.
+fn add_native_run_context(
+    messages: &mut Vec<ChatMessage>,
+    registry: &ToolRegistry,
+    run_context: &RunContext,
+    model: &str,
+    plan_mode: bool,
+) {
+    if registry.is_empty() {
+        return;
+    }
+    let environment =
+        crate::workspace_context::RunEnvironment::capture(run_context.workspace(), model).render();
+    let insert_at = messages
+        .iter()
+        .position(|message| message.role != "system")
+        .unwrap_or(messages.len());
+    messages.insert(insert_at, ChatMessage::text("system", environment));
+    messages.insert(
+        0,
+        ChatMessage::text(
+            "system",
+            crate::agent_prompt::base_system_prompt(registry, plan_mode),
+        ),
+    );
 }
 
 /// The effective tool registry for an agent run: the static tools (builtins,
@@ -1768,10 +2085,12 @@ fn agent_base_registry_with_memory(
 }
 
 fn tools_available(policy: &ToolRunPolicy) -> bool {
-    (policy.approval_granted
-        || policy.interactive_approval
-        || policy.approval != ToolApprovalPolicy::Review)
-        && !policy.plan_mode
+    crate::account_runtime_common::tools_allowed(
+        policy.plan_mode,
+        policy.approval == ToolApprovalPolicy::Review,
+        policy.approval_granted,
+        policy.interactive_approval,
+    )
 }
 
 #[derive(Deserialize)]
@@ -1782,6 +2101,9 @@ pub(crate) struct ToolApprovalDecision {
     /// `once` (default) or `thread` for "Allow for this chat".
     #[serde(default)]
     scope: Option<String>,
+    /// `exact` (default) or `prefix` for a `thread` command allowance.
+    #[serde(default)]
+    allowance_match: Option<String>,
 }
 
 pub(crate) async fn tool_approval_status(
@@ -1837,6 +2159,7 @@ pub(crate) async fn tool_approval_resolve(
                         "decision": req.decision,
                         "response": req.response,
                         "scope": req.scope,
+                        "allowance_match": req.allowance_match,
                     }),
                     confirmation_token: None,
                 },
@@ -1935,7 +2258,9 @@ fn plan_mode_registry(
     }
     let mut reg = reg.filtered(&allowed);
     if workspace_unavailable {
-        reg = reg.without(&["read_file", "list_dir", "read_file_anchors"]);
+        reg = reg
+            .without(WORKSPACE_READ_TOOL_NAMES)
+            .without(HASHLINE_TOOL_NAMES);
     }
     reg
 }
@@ -2256,6 +2581,19 @@ impl Tool for LinkedThreadWaitTool {
         ToolEffect::ReadOnly
     }
 
+    fn deadline_for_call(&self, args: &Value) -> Option<Duration> {
+        let wait_ms = args
+            .get("timeout_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(DEFAULT_LINKED_THREAD_WAIT_MS)
+            .min(crate::control::MAX_LINKED_THREAD_WAIT_MS);
+        Some(Duration::from_millis(wait_ms) + TOOL_WAIT_GRACE)
+    }
+
+    fn waits_on_other_runs(&self) -> bool {
+        true
+    }
+
     fn concurrency(&self) -> milim_tools::ToolConcurrency {
         milim_tools::ToolConcurrency::Parallel
     }
@@ -2535,7 +2873,7 @@ fn child_read_only_registry(st: &AppState, run_context: &RunContext) -> ToolRegi
         .collect();
     let mut reg = static_registry_for_context(st, run_context).filtered(&allowed);
     if desktop_workspace_unavailable_for(st, run_context.workspace.as_deref()) {
-        reg = reg.without(&["read_file", "list_dir"]);
+        reg = reg.without(WORKSPACE_READ_TOOL_NAMES);
     }
     reg
 }
@@ -2948,6 +3286,8 @@ mod worker_model_tests {
             access: milim_agents::WorkerAccess::ReadOnly,
             worktree_path: None,
             account_profile_id: Some("work".to_string()),
+            base_prompt: None,
+            environment: None,
         };
         let (adapter, request) = account_worker_harness_request(
             &spec,
@@ -3037,7 +3377,12 @@ fn worker_specs(
         .cloned()
         .zip(system_prompts)
         .map(|(task, system_prompt)| {
-            let system_prompt = [run.context.as_deref(), system_prompt.as_deref()]
+            let context = run
+                .context
+                .as_deref()
+                .filter(|context| !context.trim().is_empty())
+                .map(parent_context_block);
+            let system_prompt = [context.as_deref(), system_prompt.as_deref()]
                 .into_iter()
                 .flatten()
                 .filter(|value| !value.trim().is_empty())
@@ -3055,9 +3400,39 @@ fn worker_specs(
                 access: task.access,
                 worktree_path: None,
                 account_profile_id: None,
+                base_prompt: None,
+                environment: None,
             }
         })
         .collect()
+}
+
+/// Frame the delegating chat's request as background. Without the framing a
+/// Worker reads the parent's goal ("implement X") as its own assignment and
+/// ignores the narrower delegated task in its user message.
+fn parent_context_block(context: &str) -> String {
+    format!(
+        "<parent_context>\nBackground from the chat that delegated this task. Use it to \
+         understand the goal, but do not carry out the parent's request yourself: your \
+         assignment is only the delegated task in the user message.\n\n{}\n</parent_context>",
+        context.trim()
+    )
+}
+
+/// Give a native Worker the same leading context as a native tool-agent run:
+/// the base prompt built from the Worker's own tools, and an environment
+/// snapshot of the folder it works in (its review worktree when it has one).
+fn add_native_worker_context(
+    spec: &mut ChildRunSpec,
+    tools: &ToolRegistry,
+    workspace: Option<&FsPath>,
+) {
+    if tools.is_empty() {
+        return;
+    }
+    spec.base_prompt = Some(crate::agent_prompt::base_system_prompt(tools, false));
+    spec.environment =
+        Some(crate::workspace_context::RunEnvironment::capture(workspace, &spec.model).render());
 }
 
 fn account_worker_harness_request(
@@ -3331,6 +3706,12 @@ pub(crate) async fn start_managed_worker_run(
                 Arc::new(move |spec| account_worker_agent_stream(&state, &run_context, spec));
             workers.push(supervisor.spawn_stream(factory, spec)?);
         } else {
+            let workspace = spec
+                .worktree_path
+                .as_deref()
+                .map(PathBuf::from)
+                .or_else(|| run_context.workspace.clone());
+            add_native_worker_context(&mut spec, &worker_tools, workspace.as_deref());
             workers.push(supervisor.spawn(service.clone(), worker_tools, spec)?);
         }
     }
@@ -3386,6 +3767,12 @@ impl Tool for DelegateWorkersTool {
     }
     fn effect(&self) -> ToolEffect {
         ToolEffect::ReadOnly
+    }
+    fn deadline_for_call(&self, _args: &Value) -> Option<Duration> {
+        Some(Duration::from_millis(MAX_CHILD_THREAD_WAIT_MS) + TOOL_WAIT_GRACE)
+    }
+    fn waits_on_other_runs(&self) -> bool {
+        true
     }
     fn description(&self) -> &str {
         "Delegate 1 to 4 genuinely independent tasks as one Worker Run. Do not delegate short or sequential work. Ask mode proposes a frozen plan unless tool approval is Open; Open and Auto start eligible workers immediately."
@@ -3866,21 +4253,59 @@ pub(crate) async fn agents_run(
     {
         agent_config.approval_broker = Some(st.tool_approvals.clone());
     }
+    let run_id = gen_id("agentrun");
+    agent_config.interceptor = crate::user_hooks::interceptor(
+        run_context.workspace(),
+        &run_id,
+        string_extra(&req, "thread_id").as_deref(),
+    );
     let memory = memory_context_from_request(&req, model.clone());
     let skill_mode = string_extra(&req, "skill_mode").unwrap_or_else(|| "auto".to_string());
     let enabled_skills = string_list_extra(&req, "enabled_skills");
     let workspace_unavailable =
         desktop_workspace_unavailable_for(&st, run_context.workspace.as_deref());
+    let skills_resolved = bool_extra(&req, "skills_resolved");
     let mut messages = req.messages;
+    if !skills_resolved {
+        let query = messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .map(ChatMessage::text_content)
+            .unwrap_or_default();
+        let skill_messages = crate::agent_skill_context(
+            &st,
+            &skill_mode,
+            &enabled_skills,
+            &query,
+            run_context.workspace(),
+        )
+        .messages();
+        let insert_at = messages
+            .iter()
+            .position(|message| message.role != "system")
+            .unwrap_or(messages.len());
+        messages.splice(insert_at..insert_at, skill_messages);
+    }
     add_workspace_instructions_for(&mut messages, run_context.workspace.as_deref());
     add_workspace_notice_if_needed(&mut messages, workspace_unavailable);
+    let mut registry = agent_registry_with_memory(&st, Some(memory), &tool_policy, &run_context);
+    register_skill_tools(
+        &mut registry,
+        &st,
+        &skill_mode,
+        &enabled_skills,
+        run_context.workspace(),
+    );
+    add_native_run_context(
+        &mut messages,
+        &registry,
+        &run_context,
+        &model,
+        tool_policy.plan_mode,
+    );
 
     if want_stream {
-        let mut registry =
-            agent_registry_with_memory(&st, Some(memory), &tool_policy, &run_context);
-        if !tool_policy.plan_mode {
-            register_skill_tools(&mut registry, &st, &skill_mode, &enabled_skills);
-        }
         let tools = std::sync::Arc::new(registry);
         let stream = milim_agents::run_agent_stream_with_config(
             service,
@@ -3895,13 +4320,9 @@ pub(crate) async fn agents_run(
             .into_response());
     }
 
-    let mut tools = agent_registry_with_memory(&st, Some(memory), &tool_policy, &run_context);
-    if !tool_policy.plan_mode {
-        register_skill_tools(&mut tools, &st, &skill_mode, &enabled_skills);
-    }
     let outcome = milim_agents::run_agent_with_config(
         service.as_ref(),
-        &tools,
+        &registry,
         &model,
         messages,
         reasoning_effort,
@@ -3911,7 +4332,7 @@ pub(crate) async fn agents_run(
     .map_err(ApiError)?;
 
     Ok(Json(AgentRunResponse {
-        id: gen_id("agentrun"),
+        id: run_id,
         object: "agent.run",
         model,
         message: outcome.message,
@@ -3947,6 +4368,7 @@ pub(crate) fn control_agent_stream(
     sampling: SamplingParams,
     run_limits: Option<&crate::control::RunLimitsV1>,
     pricing: Option<milim_core::api::openai::ModelPricing>,
+    context_window_tokens: Option<u32>,
     step_hook: Arc<dyn milim_agents::AgentStepHook>,
 ) -> milim_core::Result<ControlAgentStream> {
     let run_context = RunContext::from_control(st, workspace, privacy)?;
@@ -3971,7 +4393,10 @@ pub(crate) fn control_agent_stream(
         agent_config.approval_broker = Some(st.tool_approvals.clone());
     }
     agent_config.step_hook = Some(step_hook);
+    agent_config.interceptor =
+        crate::user_hooks::interceptor(run_context.workspace(), message_id, Some(thread_id));
     agent_config.sampling = sampling;
+    agent_config.context_window_tokens = context_window_tokens;
     if let Some(limits) = run_limits {
         if let Some(steps) = limits.max_steps {
             agent_config.max_iterations = steps as usize;
@@ -3994,7 +4419,16 @@ pub(crate) fn control_agent_stream(
     if !agent.system_prompt.trim().is_empty() {
         prefixed.push(ChatMessage::text("system", agent.system_prompt.clone()));
     }
-    prefixed.extend(crate::agent_skill_messages(st, agent, &query));
+    prefixed.extend(
+        crate::agent_skill_context(
+            st,
+            &agent.skill_mode,
+            &agent.enabled_skills,
+            &query,
+            run_context.workspace(),
+        )
+        .messages(),
+    );
     prefixed.append(&mut messages);
     add_workspace_instructions_for(&mut prefixed, run_context.workspace());
     add_workspace_notice_if_needed(
@@ -4029,9 +4463,14 @@ pub(crate) fn control_agent_stream(
         &tool_policy,
         &run_context,
     );
-    if !plan_mode {
-        register_skill_tools(&mut registry, st, &agent.skill_mode, &agent.enabled_skills);
-    }
+    register_skill_tools(
+        &mut registry,
+        st,
+        &agent.skill_mode,
+        &agent.enabled_skills,
+        run_context.workspace(),
+    );
+    add_native_run_context(&mut prefixed, &registry, &run_context, model, plan_mode);
     Ok(Box::pin(milim_agents::run_agent_stream_with_config(
         service,
         Arc::new(registry),
@@ -4146,6 +4585,12 @@ pub(crate) async fn agent_run_by_id(
     {
         agent_config.approval_broker = Some(st.tool_approvals.clone());
     }
+    let run_id = gen_id("agentrun");
+    agent_config.interceptor = crate::user_hooks::interceptor(
+        run_context.workspace(),
+        &run_id,
+        string_extra(&req, "thread_id").as_deref(),
+    );
     let mut memory = memory_context_from_request(&req, requested_model.clone());
     let mut messages = Vec::new();
     if !agent.system_prompt.is_empty() {
@@ -4158,16 +4603,29 @@ pub(crate) async fn agent_run_by_id(
         .find(|m| m.role == "user")
         .map(ChatMessage::text_content)
         .unwrap_or_default();
-    if !bool_extra(&req, "skills_resolved") {
-        messages.extend(crate::agent_skill_messages(&st, &agent, &skill_query));
-    }
-    let resolved_role = messages
-        .iter()
-        .filter(|message| message.role == "system")
-        .map(ChatMessage::text_content)
-        .filter(|text| !text.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n");
+    let skills = if bool_extra(&req, "skills_resolved") {
+        crate::AgentSkillContext::default()
+    } else {
+        crate::agent_skill_context(
+            &st,
+            &agent.skill_mode,
+            &agent.enabled_skills,
+            &skill_query,
+            run_context.workspace(),
+        )
+    };
+    messages.extend(skills.messages());
+    // Workers cannot call load_skill, so they inherit the Agent prompt and
+    // explicitly loaded skill bodies but not the skill index.
+    let resolved_role = [
+        Some(agent.system_prompt.as_str()),
+        skills.explicit.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|text| !text.trim().is_empty())
+    .collect::<Vec<_>>()
+    .join("\n\n");
     if !resolved_role.is_empty() {
         memory.worker_context = Some(
             [
@@ -4191,19 +4649,30 @@ pub(crate) async fn agent_run_by_id(
         &mut messages,
         desktop_workspace_unavailable_for(&st, run_context.workspace.as_deref()),
     );
+    let mut registry = agent_registry_for_mode_with_context(
+        &st,
+        &agent.tool_mode,
+        &agent.enabled_tools,
+        Some(memory),
+        &tool_policy,
+        &run_context,
+    );
+    register_skill_tools(
+        &mut registry,
+        &st,
+        &agent.skill_mode,
+        &agent.enabled_skills,
+        run_context.workspace(),
+    );
+    add_native_run_context(
+        &mut messages,
+        &registry,
+        &run_context,
+        &model,
+        tool_policy.plan_mode,
+    );
 
     if want_stream {
-        let mut registry = agent_registry_for_mode_with_context(
-            &st,
-            &agent.tool_mode,
-            &agent.enabled_tools,
-            Some(memory),
-            &tool_policy,
-            &run_context,
-        );
-        if !tool_policy.plan_mode {
-            register_skill_tools(&mut registry, &st, &agent.skill_mode, &agent.enabled_skills);
-        }
         let tools = std::sync::Arc::new(registry);
         let stream = milim_agents::run_agent_stream_with_config(
             service,
@@ -4218,20 +4687,9 @@ pub(crate) async fn agent_run_by_id(
             .into_response());
     }
 
-    let mut tools = agent_registry_for_mode_with_context(
-        &st,
-        &agent.tool_mode,
-        &agent.enabled_tools,
-        Some(memory),
-        &tool_policy,
-        &run_context,
-    );
-    if !tool_policy.plan_mode {
-        register_skill_tools(&mut tools, &st, &agent.skill_mode, &agent.enabled_skills);
-    }
     let outcome = milim_agents::run_agent_with_config(
         service.as_ref(),
-        &tools,
+        &registry,
         &model,
         messages,
         reasoning_effort,
@@ -4241,7 +4699,7 @@ pub(crate) async fn agent_run_by_id(
     .map_err(ApiError)?;
 
     Ok(Json(AgentRunResponse {
-        id: gen_id("agentrun"),
+        id: run_id,
         object: "agent.run",
         model,
         message: outcome.message,

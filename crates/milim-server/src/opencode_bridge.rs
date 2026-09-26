@@ -42,6 +42,7 @@ pub(crate) struct OpenCodeRunRequest {
     pub cwd: Option<String>,
     #[serde(default)]
     pub session_id: Option<String>,
+    /// Normalized by `run_stream`: a missing or unrecognized policy is `guarded`.
     #[serde(default)]
     pub tool_approval_policy: Option<String>,
     #[serde(default)]
@@ -91,15 +92,24 @@ pub(crate) async fn models() -> Result<Value> {
 }
 
 pub(crate) fn run_stream(
-    req: OpenCodeRunRequest,
+    mut req: OpenCodeRunRequest,
     redactions: BTreeMap<String, String>,
     approval_broker: Option<std::sync::Arc<ToolApprovalBroker>>,
 ) -> impl Stream<Item = HarnessEvent> {
+    normalize_policy(&mut req);
     let initial_session_id = req.session_id.clone();
     canonicalize_runtime_stream(
         native_event_stream(req, redactions, approval_broker),
         initial_session_id,
     )
+}
+
+/// A missing or unrecognized policy means Guarded, as for Claude and Codex.
+fn normalize_policy(req: &mut OpenCodeRunRequest) {
+    req.tool_approval_policy = Some(
+        crate::account_runtime_common::account_runtime_policy(req.tool_approval_policy.as_deref())
+            .to_string(),
+    );
 }
 
 fn native_event_stream(
@@ -199,7 +209,6 @@ fn native_event_stream(
                 let arguments = call.get("rawInput").cloned().unwrap_or(Value::Null).to_string();
                 let interactive = req.interactive_tool_approval && !req.tool_approval_grant;
                 let mut pending_delivery = None;
-                let mut always = false;
                 let approved = if interactive {
                     let Some(broker) = approval_broker.as_ref() else {
                         let _ = proc.respond(id, permission_response(params, false)).await;
@@ -213,8 +222,6 @@ fn native_event_stream(
                     });
                     let resolved = pending.wait().await;
                     let decision = resolved.approved;
-                    // "Allow for this chat" maps to OpenCode's native "always" option.
-                    always = resolved.scope == milim_agents::ApprovalScope::Thread;
                     yield json!({
                         "type": "tool_approval_status", "approval_id": pending.id,
                         "call_id": call_id, "decision": if decision { "approve" } else { "deny" },
@@ -223,9 +230,10 @@ fn native_event_stream(
                     pending_delivery = Some(pending);
                     decision
                 } else {
-                    req.tool_approval_grant || req.tool_approval_policy.as_deref() == Some("open")
+                    (req.tool_approval_grant && req.tool_approval_policy.as_deref() != Some("guarded"))
+                        || req.tool_approval_policy.as_deref() == Some("open")
                 };
-                if let Err(error) = proc.respond(id, permission_response_with_scope(params, approved, always)).await {
+                if let Err(error) = proc.respond(id, permission_response(params, approved)).await {
                     if let Some(pending) = pending_delivery.take() {
                         pending.fail(error.to_string());
                         yield json!({
@@ -362,25 +370,23 @@ fn prompt_params(req: &OpenCodeRunRequest, session_id: &str) -> Value {
     json!({ "sessionId": session_id, "prompt": prompt })
 }
 
+/// Select the ACP permission option. Approvals are always one-shot: "Allow
+/// for this chat" lives in milim's allowance store, which auto-resolves later
+/// matching requests and honors revocation, while OpenCode's native "always"
+/// could cover more than that rule and outlive it.
 fn permission_response(params: &Value, approved: bool) -> Value {
-    permission_response_with_scope(params, approved, false)
-}
-
-/// Select the ACP permission option. `always` prefers `allow_always` and falls
-/// back to `allow_once` when the request does not advertise it.
-fn permission_response_with_scope(params: &Value, approved: bool, always: bool) -> Value {
-    let options = params.get("options").and_then(Value::as_array);
-    let kinds: &[&str] = match (approved, always) {
-        (true, true) => &["allow_always", "allow_once"],
-        (true, false) => &["allow_once"],
-        (false, _) => &["reject_once"],
+    let kind = if approved {
+        "allow_once"
+    } else {
+        "reject_once"
     };
-    let option = kinds
-        .iter()
-        .find_map(|kind| {
-            options?
+    let option = params
+        .get("options")
+        .and_then(Value::as_array)
+        .and_then(|options| {
+            options
                 .iter()
-                .find(|item| item.get("kind").and_then(Value::as_str) == Some(*kind))
+                .find(|item| item.get("kind").and_then(Value::as_str) == Some(kind))
         })
         .and_then(|item| item.get("optionId"))
         .cloned();
@@ -399,7 +405,7 @@ fn usage_from_update(update: &Value) -> Option<Usage> {
             prompt_tokens: used,
             completion_tokens: 0,
             total_tokens: used,
-            cost_usd: None,
+            ..Default::default()
         });
     }
     let usage = usage?;
@@ -419,7 +425,7 @@ fn usage_from_update(update: &Value) -> Option<Usage> {
             .or_else(|| usage.get("total_tokens"))
             .and_then(Value::as_u64)
             .unwrap_or(0) as u32,
-        cost_usd: None,
+        ..Default::default()
     })
 }
 
@@ -1069,18 +1075,11 @@ mod tests {
             permission_response(&params, false)["outcome"]["optionId"],
             "reject"
         );
+        let always_only = json!({ "options": [{ "optionId": "always", "kind": "allow_always" }] });
         assert_eq!(
-            permission_response_with_scope(&params, true, true)["outcome"]["optionId"],
-            "always"
-        );
-        assert_eq!(
-            permission_response_with_scope(&params, false, true)["outcome"]["optionId"],
-            "reject"
-        );
-        let once_only = json!({ "options": [{ "optionId": "once", "kind": "allow_once" }] });
-        assert_eq!(
-            permission_response_with_scope(&once_only, true, true)["outcome"]["optionId"],
-            "once"
+            permission_response(&always_only, true)["outcome"]["outcome"],
+            "cancelled",
+            "a chat allowance never widens into OpenCode's native always"
         );
     }
 
@@ -1146,5 +1145,17 @@ mod tests {
             .to_string()
             .contains("privatePayload"));
         assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn missing_or_unknown_policy_is_guarded() {
+        for policy in [None, Some("Open ".to_string()), Some("yolo".to_string())] {
+            let mut req = request("open", false);
+            req.tool_approval_policy = policy;
+            req.tool_approval_grant = true;
+            normalize_policy(&mut req);
+            assert_eq!(req.tool_approval_policy.as_deref(), Some("guarded"));
+            assert_eq!(policy_overlay(&req)["permission"]["*"], "deny");
+        }
     }
 }

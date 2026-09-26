@@ -19,6 +19,10 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 use crate::account_profiles::ResolvedAccountProfile;
+use crate::account_runtime_common::{
+    account_runtime_policy, clean_optional, cli_path_warning, compact_json, is_cli_path_warning,
+    publish_worker, runtime_event_with_worker, tools_allowed, AccountWorkerEventSource,
+};
 use crate::account_runtime_events::{
     canonicalize_runtime_stream, serialize_runtime_event, HarnessEvent,
 };
@@ -1539,22 +1543,9 @@ fn runtime_event<T: Serialize>(value: &T) -> Value {
     serialize_runtime_event(value)
 }
 
-fn runtime_event_with_worker(
-    value: &ClaudeStreamEvent,
-    worker_events: &Option<tokio::sync::mpsc::UnboundedSender<AccountWorkerEvent>>,
-) -> Value {
-    if let Some(event) = account_worker_event_from_claude(value) {
-        publish_worker(worker_events, event);
-    }
-    runtime_event(value)
-}
-
-fn publish_worker(
-    worker_events: &Option<tokio::sync::mpsc::UnboundedSender<AccountWorkerEvent>>,
-    event: AccountWorkerEvent,
-) {
-    if let Some(worker_events) = worker_events {
-        let _ = worker_events.send(event);
+impl AccountWorkerEventSource for ClaudeStreamEvent {
+    fn account_worker_event(&self) -> Option<AccountWorkerEvent> {
+        account_worker_event_from_claude(self)
     }
 }
 
@@ -1856,13 +1847,6 @@ async fn terminate_claude_session_processes_impl(session_id: &str) -> bool {
     killed
 }
 
-fn clean_optional(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
 fn claude_native_worker_event(value: &Value) -> Option<AccountNativeWorkerLifecycle> {
     if value.get("type").and_then(Value::as_str) != Some("system") {
         return None;
@@ -1933,6 +1917,16 @@ fn claude_run_args(req: &ClaudeRunRequest) -> Vec<String> {
     }
     for denied in claude_denied_tools(req) {
         args.extend(["--disallowedTools".to_string(), denied.to_string()]);
+    }
+    if claude_guarded(req) {
+        // Guarded exposes only read-only built-in tools, and only milim's own
+        // MCP servers: tools from the user's Claude configuration could write
+        // or execute even under `dontAsk` when their settings pre-approve them.
+        args.extend([
+            "--tools".to_string(),
+            CLAUDE_GUARDED_TOOLS.join(","),
+            "--strict-mcp-config".to_string(),
+        ]);
     }
     if let Some(model) = clean_optional(req.model.as_deref()) {
         args.extend(["--model".to_string(), model]);
@@ -2063,25 +2057,18 @@ fn claude_home_dirs(profile: &ResolvedAccountProfile) -> Vec<PathBuf> {
     profile.home_dirs(".claude")
 }
 
-fn account_runtime_policy(value: Option<&str>) -> &str {
-    match value.map(str::trim) {
-        Some("review") => "review",
-        Some("open") => "open",
-        _ => "guarded",
-    }
-}
-
 fn claude_session_recovery_allowed(req: &ClaudeRunRequest) -> bool {
     req.allow_session_recovery
         || (!req.plan_mode && account_runtime_policy(req.tool_approval_policy.as_deref()) == "open")
 }
 
 fn claude_tools_allowed(req: &ClaudeRunRequest) -> bool {
-    !req.plan_mode
-        && match account_runtime_policy(req.tool_approval_policy.as_deref()) {
-            "review" => req.tool_approval_grant || req.interactive_tool_approval,
-            _ => true,
-        }
+    tools_allowed(
+        req.plan_mode,
+        account_runtime_policy(req.tool_approval_policy.as_deref()) == "review",
+        req.tool_approval_grant,
+        req.interactive_tool_approval,
+    )
 }
 
 pub(crate) fn claude_interactive_tool_approval(req: &ClaudeRunRequest) -> bool {
@@ -2105,12 +2092,23 @@ fn claude_permission_mode(req: &ClaudeRunRequest) -> &'static str {
     }
 }
 
+/// Built-in Claude tools available in Guarded. Everything else, including
+/// shell, edit, and subagent tools, is left out of the session.
+const CLAUDE_GUARDED_TOOLS: &[&str] =
+    &["Read", "Glob", "Grep", "TodoWrite", "WebFetch", "WebSearch"];
+
+fn claude_guarded(req: &ClaudeRunRequest) -> bool {
+    !req.plan_mode
+        && claude_tools_allowed(req)
+        && account_runtime_policy(req.tool_approval_policy.as_deref()) == "guarded"
+}
+
 fn claude_denied_tools(req: &ClaudeRunRequest) -> Vec<&'static str> {
     if req.plan_mode {
         Vec::new()
     } else if !claude_tools_allowed(req) {
         vec!["*"]
-    } else if account_runtime_policy(req.tool_approval_policy.as_deref()) == "guarded" {
+    } else if claude_guarded(req) {
         vec!["Bash", "PowerShell", "Edit", "Write", "NotebookEdit"]
     } else {
         Vec::new()
@@ -2157,14 +2155,6 @@ fn string_field(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
-fn compact_json(value: Option<&Value>) -> Option<String> {
-    let value = value?;
-    if value.is_null() {
-        return None;
-    }
-    Some(value.to_string())
-}
-
 fn claude_spawn_error_message(error: &std::io::Error) -> String {
     if error.kind() == std::io::ErrorKind::NotFound {
         return cli_path_warning(
@@ -2174,14 +2164,6 @@ fn claude_spawn_error_message(error: &std::io::Error) -> String {
         );
     }
     format!("failed to start `claude`: {error}. Install Anthropic's official Claude CLI and sign in with `claude auth login`.")
-}
-
-fn cli_path_warning(label: &str, command: &str, install: &str) -> String {
-    format!("{label} CLI was not found on PATH. Apps launched from the Dock or Finder do not inherit your shell PATH, so on macOS and Linux milim also reads your login shell's PATH and looks in the usual install directories (`~/.local/bin`, Homebrew, `~/.bun/bin`, and asdf/mise/volta shims). Install it with `{install}`, or use Locate binary... in Providers to choose the `{command}` executable.")
-}
-
-fn is_cli_path_warning(message: &str) -> bool {
-    message.contains("CLI was not found on PATH")
 }
 
 fn opt_u32(value: &Value, key: &str) -> Option<u32> {
@@ -2543,6 +2525,7 @@ not json
                     completion_tokens: 4,
                     total_tokens: 19,
                     cost_usd: None,
+                    ..
                 }),
                 cost_usd: Some(cost),
                 ..
@@ -2834,6 +2817,18 @@ not json
             claude_denied_tools(&req),
             vec!["Bash", "PowerShell", "Edit", "Write", "NotebookEdit"]
         );
+        let guarded_args = claude_run_args(&req);
+        let tools = guarded_args
+            .windows(2)
+            .find(|pair| pair[0] == "--tools")
+            .map(|pair| pair[1].clone())
+            .expect("Guarded passes a built-in tool allowlist");
+        assert_eq!(tools, "Read,Glob,Grep,TodoWrite,WebFetch,WebSearch");
+        assert!(!tools.contains("Bash") && !tools.contains("Edit") && !tools.contains("Agent"));
+        assert!(
+            guarded_args.iter().any(|arg| arg == "--strict-mcp-config"),
+            "Guarded ignores MCP servers from the user's Claude configuration"
+        );
 
         req.tool_approval_policy = Some("open".into());
         req.interactive_tool_approval = true;
@@ -2841,6 +2836,9 @@ not json
         assert!(claude_session_recovery_allowed(&req));
         assert_eq!(claude_permission_mode(&req), "bypassPermissions");
         assert!(claude_denied_tools(&req).is_empty());
+        let open_args = claude_run_args(&req);
+        assert!(!open_args.iter().any(|arg| arg == "--tools"));
+        assert!(!open_args.iter().any(|arg| arg == "--strict-mcp-config"));
 
         req.tool_approval_policy = Some("review".into());
         assert!(claude_interactive_tool_approval(&req));

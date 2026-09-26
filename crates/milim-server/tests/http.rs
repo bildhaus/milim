@@ -93,6 +93,8 @@ impl milim_tools::Tool for NamedTestTool {
             | "read_file"
             | "read_file_anchors"
             | "list_dir"
+            | "glob"
+            | "grep"
             | "screenshot"
             | "preview_dom_snapshot"
             | "schedule_list"
@@ -1048,6 +1050,102 @@ async fn create_and_send_control_smoke(
         .unwrap();
     assert_eq!(sent["status"], "accepted", "{sent}");
     sent["run_id"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn control_run_replay_and_harness_metrics_read_the_run_ledger() {
+    let store = Arc::new(
+        milim_storage::UserDataStore::new(milim_storage::Database::open_in_memory().unwrap())
+            .unwrap(),
+    );
+    let manager = milim_server::control::RunManager::new(store, "Replay fixture").unwrap();
+    let base = spawn(test_state().with_control(manager)).await;
+    let client = reqwest::Client::new();
+    let run_id = create_and_send_control_smoke(&client, &base, "replay-thread", "test-echo").await;
+    let inspection = wait_for_control_run(&client, &base, &run_id, Duration::from_secs(30)).await;
+    assert_eq!(inspection["run"]["status"], "completed", "{inspection}");
+
+    let events: Value = client
+        .get(format!("{base}/control/v1/runs/{run_id}/events?limit=200"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let stored_request = events["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "model_request_resolved")
+        .map(|event| event["data"]["artifact"].clone())
+        .expect("provider request recorded");
+
+    let dry: Value = client
+        .post(format!("{base}/control/v1/runs/{run_id}/replay"))
+        .json(&json!({ "dry_run": true }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(dry["dry_run"], true);
+    assert_eq!(dry["request"], stored_request);
+
+    let replay: Value = client
+        .post(format!("{base}/control/v1/runs/{run_id}/replay"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(replay["replay"]["content"], replay["original"]["content"]);
+    assert_eq!(replay["diff"]["text_similarity"], 1.0);
+    assert_eq!(replay["diff"]["same_tool_names"], true);
+
+    let missing = client
+        .post(format!("{base}/control/v1/runs/missing-run/replay"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let metrics: Value = client
+        .get(format!("{base}/usage/harness?days=1"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(metrics["runs"], 1, "{metrics}");
+    assert_eq!(metrics["runs_by_status"][0]["status"], "completed");
+    assert_eq!(metrics["model_steps"], 1);
+    assert_eq!(metrics["step_latency"]["samples"], 1);
+    assert_eq!(metrics["available_runtimes"], json!(["provider"]));
+    let filtered: Value = client
+        .get(format!("{base}/usage/harness?days=1&runtime=codex"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(filtered["runs"], 0);
+    let invalid = client
+        .get(format!("{base}/usage/harness?days=0"))
+        .send()
+        .await
+        .unwrap();
+    assert!(invalid.status().is_client_error());
 }
 
 #[tokio::test]
@@ -3937,8 +4035,11 @@ async fn anthropic_provider_kind_routes_via_messages_api() {
     );
     assert_eq!(requests[1].method, "POST");
     assert_eq!(requests[1].path, "/v1/messages");
-    assert_eq!(requests[1].body["system"], "Be direct.");
-    assert_eq!(requests[1].body["messages"][0]["content"], "Ping");
+    assert_eq!(requests[1].body["system"][0]["text"], "Be direct.");
+    assert_eq!(
+        requests[1].body["messages"][0]["content"][0]["text"],
+        "Ping"
+    );
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -5348,7 +5449,10 @@ async fn workspace_git_action_checkpoint_restores_worktree() {
         .await
         .unwrap();
 
-    assert_eq!(restored["ok"], true);
+    assert_eq!(restored["ok"], true, "{restored}");
+    assert!(restored["undo_checkpoint"]
+        .as_str()
+        .is_some_and(|undo| undo.starts_with("refs/milim/checkpoints/")));
     assert_eq!(
         fs::read_to_string(root.join("note.txt"))
             .unwrap()
@@ -5760,6 +5864,109 @@ async fn mcp_server_tools_follow_chat_approval_policy() {
 }
 
 #[tokio::test]
+async fn external_mcp_read_only_hints_require_server_trust() {
+    if Command::new("node").arg("--version").output().is_err() {
+        return;
+    }
+    let root = unique_temp_path("milim-mcp-annotation-trust");
+    fs::create_dir_all(&root).unwrap();
+    let script = r#"const readline=require('readline');const rl=readline.createInterface({input:process.stdin});const send=(id,result)=>process.stdout.write(JSON.stringify({jsonrpc:'2.0',id,result})+'\n');rl.on('line',line=>{const m=JSON.parse(line);if(m.id===undefined)return;if(m.method==='initialize')return send(m.id,{protocolVersion:'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'hints',version:'1'}});if(m.method==='tools/list')return send(m.id,{tools:[{name:'lookup',inputSchema:{type:'object'},annotations:{readOnlyHint:true}},{name:'erase',inputSchema:{type:'object'},annotations:{readOnlyHint:true,destructiveHint:true}}]});if(m.method==='tools/call')return send(m.id,{content:[{type:'text',text:'ok'}]})});"#;
+    let hub = Arc::new(milim_mcp_client::McpHub::open(&root));
+    let config = milim_mcp_client::McpServerConfig {
+        id: "hints".into(),
+        name: "Hints".into(),
+        command: "node".into(),
+        args: vec!["-e".into(), script.into()],
+        ..Default::default()
+    };
+    hub.upsert(config.clone()).await.unwrap();
+    let state = AppState::new(Arc::new(ToolListingBackend), ServerConfiguration::default())
+        .with_tools(milim_tools::ToolRegistry::new())
+        .with_mcp(hub.clone());
+    let base = spawn(state).await;
+    let client = reqwest::Client::new();
+    let catalog = || {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            client
+                .get(format!("{base}/mcp/tools"))
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|tool| tool["name"].as_str().unwrap().contains("__tool_"))
+                .map(|tool| {
+                    (
+                        tool["name"]
+                            .as_str()
+                            .unwrap()
+                            .rsplit("__tool_")
+                            .next()
+                            .unwrap()
+                            .to_string(),
+                        tool["effect"].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        }
+    };
+    let guarded = || {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            client
+                .post(format!("{base}/agents/run"))
+                .json(&json!({
+                    "model": "tool-listing",
+                    "messages": [{ "role": "user", "content": "list tools" }],
+                    "tool_approval_policy": "guarded",
+                    "interactive_tool_approval": false
+                }))
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()["message"]["content"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        }
+    };
+
+    // Untrusted by default: the hint is shown but still needs approval, so
+    // Guarded mode withholds the tool.
+    let untrusted = catalog().await;
+    assert_eq!(untrusted["lookup"], "unknown");
+    assert_eq!(untrusted["erase"], "mutating");
+    let offered = guarded().await;
+    assert!(!offered.contains("__tool_lookup"), "{offered}");
+    assert_eq!(hub.list()[0].declared_read_only_tools, 2);
+
+    hub.upsert(milim_mcp_client::McpServerConfig {
+        trust_read_only_hints: true,
+        ..config
+    })
+    .await
+    .unwrap();
+    let trusted = catalog().await;
+    assert_eq!(trusted["lookup"], "read_only");
+    assert_eq!(trusted["erase"], "mutating");
+    let offered = guarded().await;
+    assert!(offered.contains("__tool_lookup"), "{offered}");
+    assert!(!offered.contains("__tool_erase"), "{offered}");
+
+    drop(hub);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn mcp_apps_http_bridge_auth_validation_and_isolation() {
     if Command::new("node").arg("--version").output().is_err() {
         return;
@@ -5778,9 +5985,7 @@ async fn mcp_apps_http_bridge_auth_validation_and_isolation() {
         name: "Apps fixture".into(),
         command: "node".into(),
         args: vec![fixture.to_string_lossy().into_owned()],
-        cwd: None,
-        env: Vec::new(),
-        enabled: true,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -5967,6 +6172,93 @@ async fn memory_ingest_and_search() {
     // Exact match ranks first (test backend embedding is deterministic).
     assert_eq!(v["hits"][0]["text"], "rust is fast");
     assert_eq!(v["hits"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn memory_embedding_status_tracks_the_current_model() {
+    use milim_memory::MemoryStore;
+    use milim_storage::Database;
+
+    let mem = MemoryStore::new(
+        Database::open_in_memory().unwrap(),
+        Arc::new(TestBackend::new()),
+    )
+    .unwrap();
+    let state = AppState::new(Arc::new(TestBackend::new()), ServerConfiguration::default())
+        .with_memory(mem);
+    let base = spawn(state).await;
+    let client = reqwest::Client::new();
+
+    let empty: Value = client
+        .get(format!("{base}/memory/embeddings"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(empty["model"], Value::Null);
+    assert_eq!(empty["total"], 0);
+
+    client
+        .post(format!("{base}/memory/register"))
+        .json(&json!({
+            "model": "test-echo",
+            "scope": { "kind": "global", "label": "Personal", "locator": "personal" },
+            "node": { "title": "Tracked vector", "body": "Embedded with test-echo." }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    let status: Value = client
+        .post(format!("{base}/memory/embeddings/reindex"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status["model"], "test-echo");
+    assert_eq!(status["dim"], 16);
+    assert_eq!(status["total"], 1);
+    assert_eq!(status["current"], 1);
+    assert_eq!(status["stale"], 0);
+
+    let cancelled: Value = client
+        .post(format!("{base}/memory/embeddings/cancel"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(cancelled["current"], 1);
+    assert_eq!(cancelled["configured_model"], Value::Null);
+
+    let pinned: Value = client
+        .put(format!("{base}/memory/embeddings/model"))
+        .json(&json!({ "model": "test-echo" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(pinned["configured_model"], "test-echo");
+    assert_eq!(pinned["model"], "test-echo");
+    let unpinned: Value = client
+        .put(format!("{base}/memory/embeddings/model"))
+        .json(&json!({ "model": null }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(unpinned["configured_model"], Value::Null);
 }
 
 #[tokio::test]
@@ -6364,6 +6656,8 @@ async fn thread_supervisor_runs_child_with_test_backend() {
                 access: milim_agents::WorkerAccess::ReadOnly,
                 worktree_path: None,
                 account_profile_id: None,
+                base_prompt: None,
+                environment: None,
             },
         )
         .unwrap();
@@ -6412,6 +6706,8 @@ async fn thread_events_stream_supervisor_updates() {
                 access: milim_agents::WorkerAccess::ReadOnly,
                 worktree_path: None,
                 account_profile_id: None,
+                base_prompt: None,
+                environment: None,
             },
         )
         .unwrap();
@@ -7302,6 +7598,8 @@ async fn agent_run_plan_mode_exposes_only_read_only_workspace_tools() {
         "read_file",
         "read_file_anchors",
         "list_dir",
+        "glob",
+        "grep",
         "write_file",
         "edit_file",
         "patch_file",
@@ -7344,7 +7642,266 @@ async fn agent_run_plan_mode_exposes_only_read_only_workspace_tools() {
         .split(',')
         .filter(|name| !name.is_empty())
         .collect();
-    assert_eq!(names, vec!["list_dir", "read_file", "read_file_anchors"]);
+    assert_eq!(
+        names,
+        vec!["glob", "grep", "list_dir", "read_file", "read_file_anchors"]
+    );
+}
+
+type CapturedCall = (Vec<milim_core::api::openai::ChatMessage>, Vec<String>);
+
+/// Records every request's messages and tool names. Calls `echo` once when
+/// the user message starts with `/tool`, then answers.
+#[derive(Clone, Default)]
+struct PromptCaptureBackend {
+    calls: Arc<std::sync::Mutex<Vec<CapturedCall>>>,
+}
+
+impl PromptCaptureBackend {
+    fn calls(&self) -> Vec<CapturedCall> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ModelService for PromptCaptureBackend {
+    fn name(&self) -> &str {
+        "prompt-capture"
+    }
+
+    async fn list_models(&self) -> milim_core::Result<Vec<Model>> {
+        Ok(vec![Model::local("prompt-capture", 0)])
+    }
+
+    async fn stream(&self, req: CompletionRequest) -> milim_core::Result<EventStream> {
+        let tools: Vec<String> = req
+            .tools
+            .iter()
+            .map(|tool| tool.function.name.clone())
+            .collect();
+        let want_tool = !tools.is_empty()
+            && req.last_user_text().starts_with("/tool")
+            && !req.messages.iter().any(|message| message.role == "tool");
+        self.calls
+            .lock()
+            .unwrap()
+            .push((req.messages.clone(), tools));
+        let stream = async_stream::stream! {
+            if want_tool {
+                yield Ok(StreamEvent::Delta(DeltaEvent {
+                    tool_calls: vec![DeltaToolCall {
+                        index: 0,
+                        id: Some("call_0".to_string()),
+                        kind: Some("function".to_string()),
+                        function: DeltaFunction {
+                            name: Some("echo".to_string()),
+                            arguments: Some("{\"text\":\"hi\"}".to_string()),
+                        },
+                    }],
+                    ..Default::default()
+                }));
+                yield Ok(StreamEvent::Done {
+                    finish_reason: "tool_calls".to_string(),
+                    usage: Usage::new(1, 1),
+                });
+                return;
+            }
+            yield Ok(StreamEvent::Delta(DeltaEvent::text("done")));
+            yield Ok(StreamEvent::Done {
+                finish_reason: "stop".to_string(),
+                usage: Usage::new(1, 1),
+            });
+        };
+        Ok(Box::pin(stream))
+    }
+
+    async fn embed(&self, _model: &str, inputs: Vec<String>) -> milim_core::Result<Vec<Vec<f32>>> {
+        Ok(inputs.iter().map(|_| vec![0.0]).collect())
+    }
+}
+
+fn system_texts(messages: &[milim_core::api::openai::ChatMessage]) -> Vec<String> {
+    messages
+        .iter()
+        .filter(|message| message.role == "system")
+        .map(|message| message.text_content())
+        .collect()
+}
+
+const BASE_PROMPT_START: &str = "You are milim's coding agent";
+
+#[tokio::test]
+async fn native_agent_runs_lead_with_base_prompt_and_keep_environment_stable() {
+    let backend = PromptCaptureBackend::default();
+    let workspace = unique_temp_path("milim-base-prompt");
+    fs::create_dir_all(&workspace).unwrap();
+    let state = AppState::new(Arc::new(backend.clone()), ServerConfiguration::default())
+        .with_tools(milim_tools::ToolRegistry::with_builtins())
+        .with_workspace(Arc::new(RwLock::new(Some(workspace.clone()))));
+    let base = spawn(state).await;
+    let client = reqwest::Client::new();
+
+    let run: Value = client
+        .post(format!("{base}/agents/run"))
+        .json(&json!({
+            "model": "prompt-capture",
+            "tool_approval_policy": "open",
+            "messages": [
+                {"role": "system", "content": "Custom instructions: be terse."},
+                {"role": "user", "content": "/tool go"}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(run["message"]["content"], "done");
+    let calls = backend.calls();
+    assert_eq!(calls.len(), 2, "one tool step, then the answer");
+    let first = system_texts(&calls[0].0);
+    assert!(first[0].starts_with(BASE_PROMPT_START), "{first:?}");
+    let custom = first
+        .iter()
+        .position(|text| text.starts_with("Custom instructions"))
+        .unwrap();
+    let environment = first
+        .iter()
+        .position(|text| text.starts_with("<environment>"))
+        .unwrap();
+    assert!(custom < environment);
+    assert!(first[environment].contains(&format!("Workspace root: {}", workspace.display())));
+    assert!(first[environment].contains("Model: prompt-capture"));
+    assert_eq!(
+        first,
+        system_texts(&calls[1].0),
+        "base prompt and environment must stay byte-identical across steps"
+    );
+
+    client
+        .post(format!("{base}/v1/chat/completions"))
+        .json(&json!({
+            "model": "prompt-capture",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    client
+        .post(format!("{base}/agents/run"))
+        .json(&json!({
+            "model": "prompt-capture",
+            "tool_approval_policy": "review",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let calls = backend.calls();
+    for (messages, tools) in &calls[2..] {
+        assert!(tools.is_empty());
+        assert!(
+            !system_texts(messages).iter().any(
+                |text| text.starts_with(BASE_PROMPT_START) || text.starts_with("<environment>")
+            ),
+            "plain chat and tool-less runs get no base prompt"
+        );
+    }
+    let _ = fs::remove_dir_all(workspace);
+}
+
+#[tokio::test]
+async fn native_agent_runs_index_skills_and_load_project_skills() {
+    let backend = PromptCaptureBackend::default();
+    let workspace = unique_temp_path("milim-project-skills");
+    let skill_dir = workspace.join(".claude").join("skills").join("release");
+    fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: Release\ndescription: Cut a release\n---\nRun the release script.",
+    )
+    .unwrap();
+    fs::write(skill_dir.join("scripts").join("cut.sh"), "echo cut").unwrap();
+    let store =
+        milim_skills::SkillStore::new(milim_storage::Database::open_in_memory().unwrap()).unwrap();
+    store
+        .create("Code Review", "Review diffs", "List findings first.")
+        .unwrap();
+    store.create("Mailer", "Send email", "Use SMTP.").unwrap();
+    store
+        .create("Release", "User release notes", "User release body.")
+        .unwrap();
+    let state = AppState::new(Arc::new(backend.clone()), ServerConfiguration::default())
+        .with_tools(milim_tools::ToolRegistry::with_builtins())
+        .with_skills(store)
+        .with_workspace(Arc::new(RwLock::new(Some(workspace.clone()))));
+    let base = spawn(state).await;
+    let client = reqwest::Client::new();
+
+    for skills_resolved in [false, true] {
+        client
+            .post(format!("{base}/agents/run"))
+            .json(&json!({
+                "model": "prompt-capture",
+                "tool_approval_policy": "open",
+                "skills_resolved": skills_resolved,
+                "messages": [{"role": "user", "content": "Please use @mailer to announce it"}]
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+    }
+    let calls = backend.calls();
+    let (messages, tools) = &calls[0];
+    assert!(tools.iter().any(|name| name == "load_skill"));
+    assert!(tools.iter().any(|name| name == "milim_skill_search"));
+    let skills = system_texts(messages)
+        .into_iter()
+        .find(|text| text.contains("Installed skills"))
+        .expect("skill index");
+    assert!(skills.contains("- Code Review: Review diffs"), "{skills}");
+    assert!(skills.contains("- Release: Cut a release"), "{skills}");
+    assert!(
+        !skills.contains("User release notes"),
+        "project skills win: {skills}"
+    );
+    assert!(
+        !skills.contains("List findings first."),
+        "index only: {skills}"
+    );
+    assert!(
+        !skills.contains("Mailer"),
+        "explicit skills leave the index: {skills}"
+    );
+    assert!(
+        system_texts(messages)
+            .iter()
+            .any(|text| text.contains("referenced these skills") && text.contains("Use SMTP.")),
+        "explicit mentions load in full"
+    );
+    assert!(!system_texts(&calls[1].0)
+        .iter()
+        .any(|text| text.contains("Installed skills")));
+
+    let loaded: Value = client
+        .post(format!("{base}/mcp/call"))
+        .json(&json!({"name": "load_skill", "arguments": {"name": "release"}}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(loaded["result"]["instructions"], "Run the release script.");
+    assert_eq!(loaded["result"]["files"], json!(["scripts/cut.sh"]));
+    let _ = fs::remove_dir_all(workspace);
 }
 
 #[tokio::test]
@@ -7903,7 +8460,7 @@ async fn named_agent_run_does_not_execute_unselected_tools() {
     assert!(run["steps"][0]["result"]["error"]
         .as_str()
         .unwrap()
-        .contains("unknown tool: echo"));
+        .contains("Unknown tool `echo`"));
     assert!(run["steps"][0]["result"].get("echoed").is_none());
 }
 
@@ -8109,4 +8666,75 @@ async fn anthropic_tool_use_block() {
     assert_eq!(block["type"], "tool_use");
     assert_eq!(block["name"], "echo");
     assert_eq!(block["input"]["text"], "test");
+}
+
+#[tokio::test]
+async fn custom_commands_list_and_expand_workspace_templates() {
+    let workspace =
+        std::env::temp_dir().join(format!("milim-http-commands-{}", uuid::Uuid::new_v4()));
+    let commands = workspace.join(".milim").join("commands").join("git");
+    std::fs::create_dir_all(&commands).unwrap();
+    std::fs::write(
+        commands.join("review.md"),
+        "---\ndescription: Review a branch\nargument-hint: <branch> [focus]\n---\nReview $1 focusing on $2. All: $ARGUMENTS",
+    )
+    .unwrap();
+    let state = AppState::new(Arc::new(TestBackend::new()), ServerConfiguration::default());
+    let base = spawn(state).await;
+    let client = reqwest::Client::new();
+    let folder = workspace.to_string_lossy().to_string();
+
+    let listed: Value = client
+        .get(format!("{base}/commands"))
+        .query(&[("workspace", folder.as_str())])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let review = listed["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|command| command["name"] == "git:review")
+        .expect("project command is listed");
+    assert_eq!(review["source"], "project");
+    assert_eq!(review["description"], "Review a branch");
+    assert_eq!(review["argument_hint"], "<branch> [focus]");
+    assert!(review.get("template").is_none());
+
+    let expanded: Value = client
+        .post(format!("{base}/commands/expand"))
+        .json(&json!({"workspace": folder, "name": "git:review", "arguments": "main tests"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        expanded["prompt"],
+        "Review main focusing on tests. All: main tests"
+    );
+
+    let missing = client
+        .post(format!("{base}/commands/expand"))
+        .json(&json!({"workspace": folder, "name": "git:missing"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let invalid = client
+        .get(format!("{base}/commands"))
+        .query(&[(
+            "workspace",
+            workspace.join("absent").to_string_lossy().as_ref(),
+        )])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), reqwest::StatusCode::BAD_REQUEST);
+    std::fs::remove_dir_all(workspace).ok();
 }

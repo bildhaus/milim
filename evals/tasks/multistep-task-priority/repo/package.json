@@ -1,0 +1,7 @@
+{
+  "name": "todo-fixture",
+  "private": true,
+  "type": "module",
+  "bin": { "todo": "src/cli.js" },
+  "scripts": { "test": "node --test test/" }
+}

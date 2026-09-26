@@ -206,6 +206,10 @@ export interface TokenUsage {
   total_tokens: number;
   /** Provider-reported billed cost normalized from fields such as OpenRouter's `usage.cost`. */
   cost_usd?: number;
+  /** Prompt tokens served from a provider prompt cache; already inside `prompt_tokens`. */
+  cache_read_tokens?: number;
+  /** Prompt tokens written to a provider prompt cache; already inside `prompt_tokens`. */
+  cache_write_tokens?: number;
 }
 
 export type CostSource = "provider" | "estimate";
@@ -421,6 +425,10 @@ export type ChatStreamPart =
       approvalId?: string;
       approvalStatus?: ToolApprovalLifecycleStatus;
       approvalRequest?: ToolApprovalRequest;
+      /** Leading words Rust would allow for this chat, e.g. `cargo test`. */
+      allowancePrefix?: string;
+      /** Untrusted project hooks the user can review and trust. */
+      hookTrust?: { workspace: string; configHash: string };
     };
 
 export type ToolApprovalLifecycleStatus =
@@ -477,6 +485,10 @@ export interface RunTrace {
   status: RunStatus;
   error?: string;
   context?: ContextSnapshot;
+  /** A provider retry the run is waiting on; cleared once the retried step streams. */
+  retry?: { attempt: number; delayMs: number; reason: string };
+  /** The latest context compaction before a model step. */
+  compaction?: { elidedToolResults: number; summarizedMessages: number };
 }
 
 const DEFAULT_BASE = "http://127.0.0.1:7377";
@@ -3672,7 +3684,6 @@ export interface AgentToolContext {
   worker_model?: string;
   skill_mode?: AgentSkillMode;
   enabled_skills?: string[];
-  skills_resolved?: boolean;
 }
 
 export interface AccountRuntimeMilimContext {
@@ -3973,6 +3984,9 @@ export interface AgentEvent {
     | "worker_run_worker_done"
     | "worker_run_worker_error"
     | "worker_run_worker_stopped"
+    | "hook"
+    | "provider_retry"
+    | "context_compacted"
     | "final"
     | "done"
     | "error";
@@ -4006,7 +4020,20 @@ export interface AgentEvent {
   approval_id?: string;
   effect?: "read_only" | "mutating" | "command" | "unknown";
   decision?: "approve" | "deny";
+  /** `tool_approval_resolved`: why the loop resolved it itself, e.g. `timed_out`. */
+  reason?: string;
   status?: "decided" | "delivered";
+  /** `provider_retry`: retry number and wait before the retried step. */
+  attempt?: number;
+  delay_ms?: number;
+  /** `provider_retry`: UTF-8 bytes of text and reasoning the failed attempt streamed. */
+  discarded_content_bytes?: number;
+  discarded_reasoning_bytes?: number;
+  /** `context_compacted`: what was compacted before the model step. */
+  elided_tool_results?: number;
+  summarized_messages?: number;
+  estimated_tokens_before?: number;
+  estimated_tokens_after?: number;
 }
 
 export type ToolApprovalEvent =
@@ -4032,6 +4059,7 @@ export type ToolApprovalEvent =
       approval_id: string;
       call_id?: string;
       decision: "approve" | "deny";
+      reason?: string;
     }
   | {
       type: "tool_approval_failed";
@@ -4074,7 +4102,7 @@ export type ToolApprovalRequest =
 // ----- Providers (LLM remotes and media credentials) -----
 
 export type ProviderKind =
-  "openai_compatible" | "anthropic" | "gemini" | "replicate" | "fal";
+  "openai_compatible" | "anthropic" | "gemini" | "replicate" | "fal" | "brave_search" | "tavily";
 
 export interface ProviderInfo {
   id: string;
@@ -4181,6 +4209,18 @@ export const PROVIDER_PRESETS: Array<{
     name: "fal",
     kind: "fal",
     base_url: "https://queue.fal.run",
+    needsKey: true,
+  },
+  {
+    name: "Brave Search",
+    kind: "brave_search",
+    base_url: "https://api.search.brave.com/res/v1",
+    needsKey: true,
+  },
+  {
+    name: "Tavily",
+    kind: "tavily",
+    base_url: "https://api.tavily.com",
     needsKey: true,
   },
   {
@@ -4813,6 +4853,10 @@ export interface UsageTotals {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  /** Input tokens served from a provider prompt cache (inside `prompt_tokens`). */
+  cache_read_tokens: number;
+  /** Input tokens written to a provider prompt cache (inside `prompt_tokens`). */
+  cache_write_tokens: number;
   /** Every known cost, reported plus estimated. */
   cost_usd: number;
   /** Billed cost reported by a provider or account runtime. */
@@ -4852,6 +4896,131 @@ export async function getUsageSummary(days: number): Promise<UsageSummary> {
   );
 }
 
+export interface LatencyPercentiles {
+  samples: number;
+  p50_ms: number | null;
+  p95_ms: number | null;
+}
+
+export interface HarnessToolHealth {
+  name: string;
+  calls: number;
+  errors: number;
+  error_rate: number;
+}
+
+/** Run-ledger health from `GET /usage/harness`. */
+export interface HarnessMetrics {
+  since_ms: number;
+  until_ms: number;
+  runtime: string | null;
+  model: string | null;
+  runs: number;
+  runs_by_status: { status: string; runs: number }[];
+  model_steps: number;
+  timed_model_steps: number;
+  step_latency: LatencyPercentiles;
+  first_token: LatencyPercentiles;
+  approval_wait: LatencyPercentiles;
+  pending_approvals: number;
+  tool_calls: number;
+  tool_errors: number;
+  tool_error_rate: number;
+  tools: HarnessToolHealth[];
+  avg_steps_per_run: number | null;
+  avg_cost_usd_per_run: number | null;
+  priced_runs: number;
+  retries: number;
+  runs_with_retries: number;
+  available_runtimes: string[];
+  available_models: string[];
+}
+
+export async function getHarnessMetrics(
+  days: number,
+  filter: { runtime?: string; model?: string } = {},
+): Promise<HarnessMetrics> {
+  const params = new URLSearchParams({ days: String(days) });
+  if (filter.runtime) params.set("runtime", filter.runtime);
+  if (filter.model) params.set("model", filter.model);
+  return await parseJsonResponse<HarnessMetrics>(
+    await authFetch(`${BASE}/usage/harness?${params}`),
+    "harness metrics HTTP failed",
+  );
+}
+
+/** A user- or project-defined slash command loaded from a Markdown file. */
+export interface CustomSlashCommand {
+  name: string;
+  description: string;
+  argument_hint?: string | null;
+  source: "project" | "user";
+  path: string;
+}
+
+/**
+ * Custom slash commands for a thread workspace. An empty workspace lists user
+ * commands only. Failures return an empty list so the built-in menu still works.
+ */
+export async function listCustomSlashCommands(workspace: string): Promise<CustomSlashCommand[]> {
+  try {
+    const params = new URLSearchParams({ workspace: workspace.trim() });
+    const response = await authFetch(`${BASE}/commands?${params}`);
+    if (!response.ok) return [];
+    const body = (await response.json()) as { commands?: CustomSlashCommand[] };
+    return Array.isArray(body.commands) ? body.commands : [];
+  } catch {
+    return [];
+  }
+}
+
+export interface HooksStatus {
+  user: { path: string; hooks: Record<string, unknown>; allow_hooks_to_approve: boolean };
+  project: {
+    workspace: string;
+    path: string;
+    hooks: Record<string, unknown>;
+    has_hooks: boolean;
+    config_hash: string | null;
+    trusted: boolean;
+  } | null;
+}
+
+/** User hooks plus a workspace's project hooks and whether they are trusted. */
+export async function getHooksStatus(workspace: string): Promise<HooksStatus> {
+  const params = new URLSearchParams({ workspace: workspace.trim() });
+  const response = await authFetch(`${BASE}/hooks?${params}`);
+  return await parseJsonResponse<HooksStatus>(response, "Loading hooks failed");
+}
+
+/** Trust a workspace's reviewed project hooks; a changed config is refused. */
+export async function trustWorkspaceHooks(
+  workspace: string,
+  configHash: string,
+): Promise<HooksStatus> {
+  const response = await authFetch(`${BASE}/hooks/trust`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspace, config_hash: configHash, trusted: true }),
+  });
+  return await parseJsonResponse<HooksStatus>(response, "Trusting hooks failed");
+}
+
+/** Expand a custom slash command template into the prompt text to send. */
+export async function expandCustomSlashCommand(
+  workspace: string,
+  name: string,
+  argumentsText: string,
+): Promise<string> {
+  const response = await authFetch(`${BASE}/commands/expand`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspace: workspace.trim(), name, arguments: argumentsText }),
+  });
+  const body = await parseJsonResponse<{ prompt: string }>(response, `Expanding /${name} failed`);
+  return body.prompt;
+}
+
 export async function getWorkspaceContext(): Promise<WorkspaceContext | null> {
   try {
     const r = await authFetch(`${BASE}/workspace/context`);
@@ -4866,6 +5035,7 @@ export async function resolveToolApproval(
   decision: "approve" | "deny",
   responseBody?: Record<string, unknown>,
   scope: "once" | "thread" = "once",
+  allowanceMatch: "exact" | "prefix" = "exact",
 ): Promise<ToolApprovalSnapshot | null> {
   const response = await authFetch(`${BASE}/tool-approvals/${encodeURIComponent(approvalId)}`, {
     method: "POST",
@@ -4874,6 +5044,7 @@ export async function resolveToolApproval(
       decision,
       ...(responseBody ? { response: responseBody } : {}),
       ...(scope === "thread" ? { scope } : {}),
+      ...(scope === "thread" && allowanceMatch === "prefix" ? { allowance_match: allowanceMatch } : {}),
     }),
   });
   if (!response.ok) throw new Error(await responseErrorMessage(response, "Tool approval failed"));
@@ -4882,10 +5053,12 @@ export async function resolveToolApproval(
 
 /** One "Allow for this chat" rule held in canonical Rust state. */
 export interface ApprovalAllowance {
-  /** `tool:<name>` or `command:<exact command>`. */
+  /** `tool:<name>`, `command:<exact command>`, or `prefix:<leading words>`. */
   key: string;
   tool: string;
   command?: string;
+  /** Simple commands starting with these words are allowed. */
+  prefix?: string;
   created_at_ms: number;
 }
 
@@ -5266,6 +5439,67 @@ export async function reviewMemoryNode(id: string): Promise<boolean> {
   }
 }
 
+/** Embedding coverage of scoped memories relative to the current model. */
+export interface MemoryEmbeddingStatus {
+  model: string | null;
+  /** The pinned memory embedding model; `null` follows the models chats embed with. */
+  configured_model?: string | null;
+  dim: number;
+  total: number;
+  current: number;
+  /** Vectors from an older embedding model or dimension. */
+  stale: number;
+  /** Entries without a vector that the current model has not tried yet. */
+  missing: number;
+  /** Entries the current model could not embed. */
+  unavailable: number;
+  reindexing: boolean;
+  reindexed: number;
+  last_error: string | null;
+}
+
+async function memoryEmbeddingsRequest(
+  path: "" | "/reindex" | "/cancel",
+): Promise<MemoryEmbeddingStatus | null> {
+  try {
+    const r = await authFetch(
+      `${BASE}/memory/embeddings${path}`,
+      path ? { method: "POST" } : undefined,
+    );
+    return r.ok ? ((await r.json()) as MemoryEmbeddingStatus) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function getMemoryEmbeddingStatus(): Promise<MemoryEmbeddingStatus | null> {
+  return memoryEmbeddingsRequest("");
+}
+
+export function reindexMemoryEmbeddings(): Promise<MemoryEmbeddingStatus | null> {
+  return memoryEmbeddingsRequest("/reindex");
+}
+
+export function cancelMemoryReindex(): Promise<MemoryEmbeddingStatus | null> {
+  return memoryEmbeddingsRequest("/cancel");
+}
+
+/** Pin the model memory embeds with, or pass `null` to follow the chat model. */
+export async function setMemoryEmbeddingModel(
+  model: string | null,
+): Promise<MemoryEmbeddingStatus | null> {
+  try {
+    const r = await authFetch(`${BASE}/memory/embeddings/model`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model }),
+    });
+    return r.ok ? ((await r.json()) as MemoryEmbeddingStatus) : null;
+  } catch {
+    return null;
+  }
+}
+
 // ----- Schedules -----
 
 export interface ScheduleInfo {
@@ -5357,19 +5591,56 @@ export async function deleteSchedule(id: string): Promise<boolean> {
 
 // ----- MCP client (external MCP servers whose tools we consume) -----
 
+export type McpTransportKind = "stdio" | "http";
+
+export type McpConnectionState =
+  | "disconnected"
+  | "disabled"
+  | "connecting"
+  | "connected"
+  | "reconnecting"
+  | "auth_required"
+  | "error";
+
+export interface McpAuthFlow {
+  id: string;
+  status: "pending" | "complete" | "error";
+  url?: string | null;
+  error?: string | null;
+}
+
+export interface McpLogEntry {
+  at_ms: number;
+  level: string;
+  logger?: string | null;
+  message: string;
+}
+
 export interface McpServerInfo {
   id: string;
   name: string;
+  type?: McpTransportKind;
   command: string;
   args: string[];
   cwd?: string | null;
   env?: McpEnvVar[];
+  url?: string | null;
+  headers?: McpEnvVar[];
   enabled: boolean;
   connected: boolean;
+  status?: McpConnectionState;
   tool_count: number;
+  declared_read_only_tools?: number;
+  trust_read_only_hints?: boolean;
+  call_timeout_secs?: number;
+  oauth_client_id?: string | null;
+  auth?: { status: "not_required" | "required" | "signed_in"; flow?: McpAuthFlow | null };
+  reconnect_attempt?: number;
+  retry_in_secs?: number | null;
   capabilities?: { tools: boolean; resources: boolean; prompts: boolean; apps: boolean };
   missing_env?: string[];
   error: string | null;
+  logs?: McpLogEntry[];
 }
 
 export interface McpEnvVar {
@@ -5380,12 +5651,30 @@ export interface McpEnvVar {
   has_value?: boolean;
 }
 
+/** Editable MCP server configuration sent to save/test. */
+export interface McpServerDraft {
+  id?: string;
+  name: string;
+  type: McpTransportKind;
+  command: string;
+  args: string[];
+  cwd?: string | null;
+  env?: McpEnvVar[];
+  url?: string | null;
+  headers?: McpEnvVar[];
+  enabled: boolean;
+  trust_read_only_hints: boolean;
+  call_timeout_secs?: number | null;
+  oauth_client_id?: string | null;
+}
+
 export interface McpTestResult {
   ok: boolean;
   connected: boolean;
   tool_count: number;
   capabilities?: { tools: boolean; resources: boolean; prompts: boolean; apps: boolean };
   missing_env?: string[];
+  auth_required?: boolean;
   error?: string | null;
 }
 
@@ -5436,15 +5725,7 @@ export async function listMcpServers(): Promise<McpServerInfo[]> {
 
 /** Add/update an MCP server. Connects immediately (may take a while as the
  *  server's package is fetched), so this call is intentionally untimed. */
-export async function saveMcpServer(s: {
-  id?: string;
-  name: string;
-  command: string;
-  args: string[];
-  cwd?: string | null;
-  env?: McpEnvVar[];
-  enabled: boolean;
-}): Promise<McpServerInfo | null> {
+export async function saveMcpServer(s: McpServerDraft): Promise<McpServerInfo | null> {
   try {
     const r = await authFetch(`${BASE}/mcp/servers`, {
       method: "POST",
@@ -5459,15 +5740,7 @@ export async function saveMcpServer(s: {
   }
 }
 
-export async function testMcpServer(s: {
-  id?: string;
-  name: string;
-  command: string;
-  args: string[];
-  cwd?: string | null;
-  env?: McpEnvVar[];
-  enabled: boolean;
-}): Promise<McpTestResult | null> {
+export async function testMcpServer(s: McpServerDraft): Promise<McpTestResult | null> {
   try {
     const r = await authFetch(`${BASE}/mcp/servers/test`, {
       method: "POST",
@@ -5490,6 +5763,33 @@ export async function deleteMcpServer(id: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** Drop and re-establish one MCP server connection. */
+export async function reconnectMcpServer(id: string): Promise<McpServerInfo | null> {
+  const response = await parseJsonResponse<{ server?: McpServerInfo | null }>(
+    await authFetch(`${BASE}/mcp/servers/${encodeURIComponent(id)}/reconnect`, { method: "POST" }),
+    "Reconnect failed",
+  );
+  return response.server ?? null;
+}
+
+/** Start OAuth sign-in for an HTTP MCP server; open `flow.url` in the browser. */
+export async function startMcpServerSignIn(id: string): Promise<McpAuthFlow> {
+  const response = await parseJsonResponse<{ flow: McpAuthFlow }>(
+    await authFetch(`${BASE}/mcp/servers/${encodeURIComponent(id)}/auth`, { method: "POST" }),
+    "Sign-in failed to start",
+  );
+  return response.flow;
+}
+
+/** Forget an HTTP MCP server's OAuth tokens. */
+export async function signOutMcpServer(id: string): Promise<McpServerInfo | null> {
+  const response = await parseJsonResponse<{ server?: McpServerInfo | null }>(
+    await authFetch(`${BASE}/mcp/servers/${encodeURIComponent(id)}/auth`, { method: "DELETE" }),
+    "Sign-out failed",
+  );
+  return response.server ?? null;
 }
 
 export async function readMcpAppResource(

@@ -1,0 +1,8 @@
+{
+  "id": "agents-md-conventions",
+  "title": "Add a helper while following AGENTS.md",
+  "category": "follow-agents-md",
+  "prompt": "Add a `titleCase(text)` helper to this library: it capitalizes the first letter of every word and lowercases the rest, where words are separated by spaces or hyphens (\"hello WORLD-wide\" -> \"Hello World-Wide\").",
+  "timeout_s": 420,
+  "check": "node check.mjs"
+}

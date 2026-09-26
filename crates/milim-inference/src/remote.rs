@@ -16,10 +16,14 @@ use milim_core::api::openai::{
     Model, ModelCapabilities, ModelReasoningMetadata, ModelsResponse, ReasoningEffort,
     StreamOptions, StringOrArray, Tool, Usage,
 };
+use milim_core::provider_error::upstream_stream_error;
 use milim_core::{Error, Result};
 use serde_json::{json, Map, Value};
 
-use crate::service::{CompletionRequest, DeltaEvent, EventStream, ModelService, StreamEvent};
+use crate::http_error::stream_read_error;
+use crate::service::{
+    normalize_finish_reason, CompletionRequest, DeltaEvent, EventStream, ModelService, StreamEvent,
+};
 
 /// Forwards generation to an OpenAI-compatible HTTP endpoint.
 #[derive(Debug, Clone)]
@@ -122,6 +126,13 @@ impl RemoteBackend {
         if let Some(value) = s.thinking_token_budget {
             extra.insert("thinking_token_budget".to_string(), json!(value));
         }
+        // Only OpenAI itself is sent `prompt_cache_key`; other compatible
+        // servers may reject unknown fields.
+        if self.is_openai() {
+            if let Some(key) = prompt_cache_key(req) {
+                extra.insert("prompt_cache_key".to_string(), json!(key));
+            }
+        }
         ChatCompletionRequest {
             model: req.model.clone(),
             messages: req.messages.clone(),
@@ -171,6 +182,16 @@ impl RemoteBackend {
                 .base_url
                 .to_ascii_lowercase()
                 .contains("openrouter.ai/")
+    }
+
+    fn is_openai(&self) -> bool {
+        reqwest::Url::parse(&self.base_url)
+            .ok()
+            .and_then(|url| {
+                url.host_str()
+                    .map(|host| host.eq_ignore_ascii_case("api.openai.com"))
+            })
+            .unwrap_or(false)
     }
 
     fn is_ollama(&self) -> bool {
@@ -457,18 +478,18 @@ impl ModelService for RemoteBackend {
             .await);
         }
 
+        let label = self.label.clone();
         let stream = async_stream::stream! {
             let mut bytes = resp.bytes_stream();
             let mut buf: Vec<u8> = Vec::new();
             let mut last_finish: Option<String> = None;
             let mut last_usage: Option<Usage> = None;
-            let mut terminated = false;
 
             'outer: while let Some(chunk) = bytes.next().await {
                 let chunk = match chunk {
                     Ok(b) => b,
                     Err(e) => {
-                        yield Err(upstream(e));
+                        yield Err(stream_read_error(&label, e));
                         return;
                     }
                 };
@@ -479,9 +500,10 @@ impl ModelService for RemoteBackend {
                     let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
                     let line = String::from_utf8_lossy(&line_bytes);
                     match parse_sse_line(line.trim_end()) {
-                        LineOutcome::Done => {
-                            terminated = true;
-                            break 'outer;
+                        LineOutcome::Done => break 'outer,
+                        LineOutcome::Error(e) => {
+                            yield Err(e.into_error(&label, "chat/completions"));
+                            return;
                         }
                         LineOutcome::Event(c) => {
                             let (delta, finish, usage) = chunk_to_delta(&c);
@@ -500,9 +522,8 @@ impl ModelService for RemoteBackend {
                 }
             }
 
-            let _ = terminated;
             yield Ok(StreamEvent::Done {
-                finish_reason: last_finish.unwrap_or_else(|| "stop".to_string()),
+                finish_reason: normalize_finish_reason(last_finish.as_deref()).to_string(),
                 usage: last_usage.unwrap_or_default(),
             });
         };
@@ -583,6 +604,7 @@ impl RemoteBackend {
             );
         }
 
+        let label = self.label.clone();
         let stream = async_stream::stream! {
             let mut bytes = resp.bytes_stream();
             let mut buf: Vec<u8> = Vec::new();
@@ -593,7 +615,7 @@ impl RemoteBackend {
                 let chunk = match chunk {
                     Ok(b) => b,
                     Err(e) => {
-                        yield Err(upstream(e));
+                        yield Err(stream_read_error(&label, e));
                         return;
                     }
                 };
@@ -605,6 +627,10 @@ impl RemoteBackend {
                     match parse_completion_sse_line(line.trim_end()) {
                         CompletionLineOutcome::Done => break 'outer,
                         CompletionLineOutcome::Event(value) => {
+                            if let Some(e) = StreamErrorPayload::from_value(&value) {
+                                yield Err(e.into_error(&label, "completions"));
+                                return;
+                            }
                             if let Some(text) = value.pointer("/choices/0/text").and_then(Value::as_str) {
                                 if !text.is_empty() {
                                     yield Ok(StreamEvent::Delta(DeltaEvent::text(text)));
@@ -623,7 +649,7 @@ impl RemoteBackend {
             }
 
             yield Ok(StreamEvent::Done {
-                finish_reason: last_finish.unwrap_or_else(|| "stop".to_string()),
+                finish_reason: normalize_finish_reason(last_finish.as_deref()).to_string(),
                 usage: last_usage.unwrap_or_default(),
             });
         };
@@ -644,17 +670,19 @@ impl RemoteBackend {
             return Err(crate::http_error::http_status_error(&self.label, "responses", resp).await);
         }
 
+        let label = self.label.clone();
         let stream = async_stream::stream! {
             let mut bytes = resp.bytes_stream();
             let mut buf: Vec<u8> = Vec::new();
             let mut usage = Usage::default();
             let mut saw_done = false;
+            let mut saw_tool_call = false;
 
             while let Some(chunk) = bytes.next().await {
                 let chunk = match chunk {
                     Ok(b) => b,
                     Err(e) => {
-                        yield Err(upstream(e));
+                        yield Err(stream_read_error(&label, e));
                         return;
                     }
                 };
@@ -670,6 +698,7 @@ impl RemoteBackend {
                         }
                         ResponsesLineOutcome::Event(value) => match responses_event_to_stream_event(&value) {
                             Ok(Some(StreamEvent::Delta(delta))) => {
+                                saw_tool_call |= !delta.tool_calls.is_empty();
                                 if !delta.is_empty() {
                                     yield Ok(StreamEvent::Delta(delta));
                                 }
@@ -693,7 +722,7 @@ impl RemoteBackend {
             }
 
             yield Ok(StreamEvent::Done {
-                finish_reason: "stop".to_string(),
+                finish_reason: if saw_tool_call { "tool_calls" } else { "stop" }.to_string(),
                 usage,
             });
         };
@@ -716,6 +745,7 @@ impl RemoteBackend {
             );
         }
 
+        let label = self.label.clone();
         let stream = async_stream::stream! {
             let mut bytes = resp.bytes_stream();
             let mut buf: Vec<u8> = Vec::new();
@@ -726,7 +756,7 @@ impl RemoteBackend {
                 let chunk = match chunk {
                     Ok(b) => b,
                     Err(e) => {
-                        yield Err(upstream(e));
+                        yield Err(stream_read_error(&label, e));
                         return;
                     }
                 };
@@ -1155,12 +1185,7 @@ fn native_chat_usage(value: &Value) -> Usage {
         .get("total_output_tokens")
         .and_then(Value::as_u64)
         .unwrap_or_default() as u32;
-    Usage {
-        prompt_tokens: prompt,
-        completion_tokens: completion,
-        total_tokens: prompt + completion,
-        cost_usd: None,
-    }
+    Usage::new(prompt, completion)
 }
 
 fn upstream(e: impl std::fmt::Display) -> Error {
@@ -1272,6 +1297,7 @@ fn parse_completion_sse_line(line: &str) -> CompletionLineOutcome {
 
 fn completion_usage(value: &Value) -> Option<Usage> {
     let usage = value.get("usage")?;
+    let (cache_read_tokens, cache_write_tokens) = openai_cache_tokens(usage);
     Some(Usage {
         prompt_tokens: usage
             .get("prompt_tokens")
@@ -1289,7 +1315,129 @@ fn completion_usage(value: &Value) -> Option<Usage> {
             .get("cost_usd")
             .or_else(|| usage.get("cost"))
             .and_then(Value::as_f64),
+        cache_read_tokens,
+        cache_write_tokens,
     })
+}
+
+/// Cached prompt tokens as OpenAI (`prompt_tokens_details.cached_tokens`,
+/// or `input_tokens_details` on the Responses API), OpenRouter
+/// (`cache_write_tokens`), and DeepSeek (`prompt_cache_hit_tokens`) report
+/// them. All are already included in the prompt token count.
+fn openai_cache_tokens(usage: &Value) -> (Option<u32>, Option<u32>) {
+    let count = |pointer: &str| {
+        usage
+            .pointer(pointer)
+            .and_then(Value::as_u64)
+            .filter(|n| *n > 0)
+            .map(|n| n as u32)
+    };
+    let read = count("/prompt_tokens_details/cached_tokens")
+        .or_else(|| count("/input_tokens_details/cached_tokens"))
+        .or_else(|| count("/prompt_cache_hit_tokens"));
+    let write = count("/prompt_tokens_details/cache_write_tokens");
+    (read, write)
+}
+
+/// A stable routing key for OpenAI's prompt cache. A caller-supplied key
+/// (the canonical thread id) is hashed so every turn of one thread shares a
+/// cache without sending the id itself. Otherwise the key hashes the leading
+/// system messages and the first conversation message, which stay fixed for
+/// every step of one conversation.
+fn prompt_cache_key(req: &CompletionRequest) -> Option<String> {
+    if let Some(key) = req
+        .sampling
+        .prompt_cache_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+    {
+        return Some(format!("milim-{:016x}", fnv1a(key.bytes())));
+    }
+    let end = req
+        .messages
+        .iter()
+        .position(|m| m.role != "system")
+        .map_or(req.messages.len(), |index| index + 1);
+    if end == 0 {
+        return None;
+    }
+    let hash = fnv1a(req.messages[..end].iter().flat_map(|message| {
+        message
+            .role
+            .bytes()
+            .chain([0])
+            .chain(message.text_content().into_bytes())
+            .chain([0])
+            .collect::<Vec<_>>()
+    }));
+    Some(format!("milim-{hash:016x}"))
+}
+
+/// FNV-1a keeps prompt cache keys stable across processes and Rust versions.
+fn fnv1a(bytes: impl IntoIterator<Item = u8>) -> u64 {
+    bytes.into_iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// An error object a provider sent inside an open stream: OpenAI's
+/// `{"error":{...}}`, OpenRouter's chunk-level `error` with a numeric code, or
+/// vLLM's `{"object":"error",...}`.
+struct StreamErrorPayload {
+    status: Option<u16>,
+    kind: Option<String>,
+    message: String,
+}
+
+impl StreamErrorPayload {
+    fn from_value(value: &Value) -> Option<Self> {
+        let error = match value.get("error") {
+            Some(error @ Value::Object(_)) => error,
+            Some(Value::String(message)) => {
+                return Some(Self {
+                    status: None,
+                    kind: None,
+                    message: message.clone(),
+                })
+            }
+            _ if value.get("object").and_then(Value::as_str) == Some("error") => value,
+            _ => return None,
+        };
+        let code = error.get("code");
+        let status = code
+            .and_then(Value::as_u64)
+            .or_else(|| code.and_then(Value::as_str).and_then(|c| c.parse().ok()))
+            .and_then(|code| u16::try_from(code).ok());
+        let kind = error
+            .get("type")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                code.and_then(Value::as_str)
+                    .filter(|c| c.parse::<u16>().is_err())
+            })
+            .map(str::to_string);
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        Some(Self {
+            status,
+            kind,
+            message,
+        })
+    }
+
+    fn into_error(self, label: &str, operation: &str) -> Error {
+        upstream_stream_error(
+            label,
+            operation,
+            self.status,
+            self.kind.as_deref(),
+            &self.message,
+        )
+    }
 }
 
 #[derive(Serialize)]
@@ -1518,6 +1666,16 @@ fn responses_event_to_stream_event(value: &Value) -> Result<Option<StreamEvent>>
             finish_reason: "stop".to_string(),
             usage: response_usage(value),
         })),
+        Some("error") => Err(upstream_stream_error(
+            "LM Studio",
+            "responses",
+            None,
+            value.get("code").and_then(Value::as_str),
+            value
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        )),
         Some("response.failed") => Err(Error::Upstream(format!(
             "LM Studio response failed: {}",
             response_error_message(value)
@@ -1578,6 +1736,7 @@ fn response_usage(value: &Value) -> Usage {
         .get("total_tokens")
         .and_then(Value::as_u64)
         .unwrap_or_else(|| u64::from(prompt + completion)) as u32;
+    let (cache_read_tokens, cache_write_tokens) = openai_cache_tokens(usage);
     Usage {
         prompt_tokens: prompt,
         completion_tokens: completion,
@@ -1586,6 +1745,8 @@ fn response_usage(value: &Value) -> Usage {
             .get("cost_usd")
             .or_else(|| usage.get("cost"))
             .and_then(Value::as_f64),
+        cache_read_tokens,
+        cache_write_tokens,
     }
 }
 
@@ -1604,6 +1765,8 @@ enum LineOutcome {
     Done,
     /// A parsed `chat.completion.chunk`.
     Event(ChatCompletionChunk),
+    /// An error object the provider sent instead of (or inside) a chunk.
+    Error(StreamErrorPayload),
     /// Comment, blank line, keepalive, or unparseable fragment.
     Ignore,
 }
@@ -1620,8 +1783,24 @@ fn parse_sse_line(line: &str) -> LineOutcome {
     if data == "[DONE]" {
         return LineOutcome::Done;
     }
-    match serde_json::from_str::<ChatCompletionChunk>(data) {
-        Ok(c) => LineOutcome::Event(c),
+    let Ok(value) = serde_json::from_str::<Value>(data) else {
+        return LineOutcome::Ignore;
+    };
+    if let Some(error) = StreamErrorPayload::from_value(&value) {
+        return LineOutcome::Error(error);
+    }
+    let (cache_read, cache_write) = value
+        .get("usage")
+        .map(openai_cache_tokens)
+        .unwrap_or_default();
+    match serde_json::from_value::<ChatCompletionChunk>(value) {
+        Ok(mut c) => {
+            if let Some(usage) = c.usage.as_mut() {
+                usage.cache_read_tokens = cache_read;
+                usage.cache_write_tokens = cache_write;
+            }
+            LineOutcome::Event(c)
+        }
         Err(_) => LineOutcome::Ignore,
     }
 }
@@ -2348,6 +2527,116 @@ mod tests {
             msg.contains("error sending request"),
             "expected upstream request error, got: {msg}"
         );
+    }
+
+    #[test]
+    fn stream_error_objects_become_typed_upstream_errors() {
+        use milim_core::provider_error::{classify_provider_error, retry_hint, ProviderErrorKind};
+
+        let openai = r#"data: {"error":{"message":"The server had an error processing your request.","type":"server_error","param":null,"code":null}}"#;
+        let LineOutcome::Error(error) = parse_sse_line(openai) else {
+            panic!("expected an error line");
+        };
+        let error = error.into_error("OpenAI", "chat/completions");
+        assert!(error.to_string().contains("-> 500 server_error"), "{error}");
+        assert!(retry_hint(&error).unwrap().retryable);
+
+        let openrouter = r#"data: {"id":"gen-1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":""},"finish_reason":"error"}],"error":{"code":429,"message":"Provider returned error"}}"#;
+        let LineOutcome::Error(error) = parse_sse_line(openrouter) else {
+            panic!("expected an error line");
+        };
+        let info = classify_provider_error(
+            &error
+                .into_error("OpenRouter", "chat/completions")
+                .to_string(),
+        );
+        assert_eq!(info.kind, ProviderErrorKind::RateLimited);
+        assert_eq!(info.status, Some(429));
+
+        let vllm = r#"data: {"object":"error","message":"This model's maximum context length is 8192 tokens","type":"BadRequestError","code":400}"#;
+        let LineOutcome::Error(error) = parse_sse_line(vllm) else {
+            panic!("expected an error line");
+        };
+        let error = error.into_error("vLLM", "chat/completions");
+        assert_eq!(
+            classify_provider_error(&error.to_string()).kind,
+            ProviderErrorKind::ContextLength
+        );
+        assert!(!retry_hint(&error).unwrap().retryable);
+    }
+
+    #[test]
+    fn extracts_cached_prompt_tokens_from_chunk_usage() {
+        let line = r#"data: {"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[],"usage":{"prompt_tokens":2000,"completion_tokens":10,"total_tokens":2010,"prompt_tokens_details":{"cached_tokens":1536}}}"#;
+        let LineOutcome::Event(chunk) = parse_sse_line(line) else {
+            panic!("expected a chunk");
+        };
+        let usage = chunk.usage.unwrap();
+        assert_eq!(usage.prompt_tokens, 2000);
+        assert_eq!(usage.cache_read_tokens, Some(1536));
+        assert_eq!(usage.cache_write_tokens, None);
+
+        let responses = json!({
+            "response": { "usage": {
+                "input_tokens": 50, "output_tokens": 5,
+                "input_tokens_details": { "cached_tokens": 32 }
+            }}
+        });
+        assert_eq!(response_usage(&responses).cache_read_tokens, Some(32));
+    }
+
+    #[test]
+    fn sends_prompt_cache_key_only_to_openai() {
+        let mut req = empty_req();
+        req.messages = vec![
+            milim_core::api::openai::ChatMessage::text("system", "Base."),
+            milim_core::api::openai::ChatMessage::text("user", "Fix it."),
+        ];
+        let openai = RemoteBackend::new("openai", "https://api.openai.com/v1", None);
+        let key = openai.build_body(&req, true).extra["prompt_cache_key"].clone();
+        assert!(key.as_str().unwrap().starts_with("milim-"));
+
+        // Later steps of the same conversation keep the key.
+        req.messages
+            .push(milim_core::api::openai::ChatMessage::text(
+                "assistant",
+                "Done.",
+            ));
+        req.messages
+            .push(milim_core::api::openai::ChatMessage::text(
+                "user", "Thanks.",
+            ));
+        assert_eq!(openai.build_body(&req, true).extra["prompt_cache_key"], key);
+
+        // A thread key wins over the message hash and survives prompt changes.
+        req.sampling.prompt_cache_key = Some("thread-1".into());
+        let thread_key = openai.build_body(&req, true).extra["prompt_cache_key"].clone();
+        assert_ne!(thread_key, key);
+        assert!(!thread_key.as_str().unwrap().contains("thread-1"));
+        req.messages[0] = milim_core::api::openai::ChatMessage::text("system", "Changed base.");
+        assert_eq!(
+            openai.build_body(&req, true).extra["prompt_cache_key"],
+            thread_key
+        );
+
+        for other in [
+            RemoteBackend::new("OpenRouter", "https://openrouter.ai/api/v1", None),
+            RemoteBackend::new("vllm", "http://127.0.0.1:8000/v1", None),
+            RemoteBackend::new("proxy", "https://api.openai.com.example.net/v1", None),
+        ] {
+            assert!(!other
+                .build_body(&req, true)
+                .extra
+                .contains_key("prompt_cache_key"));
+        }
+    }
+
+    #[test]
+    fn leaves_max_tokens_unset_by_default() {
+        let backend = RemoteBackend::new("openai", "https://api.openai.com/v1", None);
+        let body = serde_json::to_value(backend.build_body(&empty_req(), true)).unwrap();
+        assert!(body.get("max_tokens").is_none());
+        assert!(body.get("max_completion_tokens").is_none());
     }
 
     fn empty_req() -> CompletionRequest {

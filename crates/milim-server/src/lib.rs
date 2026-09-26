@@ -7,8 +7,10 @@
 //! embeddings, with bearer auth + loopback trust, CORS, and a body-size cap.
 
 mod account_profiles;
+mod account_runtime_common;
 mod account_runtime_events;
 mod account_runtime_update;
+mod agent_prompt;
 mod approval_allowances;
 mod auth;
 mod blocking;
@@ -19,6 +21,7 @@ mod cli_path;
 mod codex_bridge;
 pub mod companion;
 pub mod control;
+mod custom_commands;
 mod error;
 pub mod google_workspace;
 pub mod host_guard;
@@ -36,6 +39,7 @@ mod sse;
 mod state;
 pub mod threads;
 mod translate;
+mod user_hooks;
 mod workspace_context;
 
 use std::future::Future;
@@ -56,6 +60,13 @@ use tower_http::trace::TraceLayer;
 
 pub use host_guard::HostPolicy;
 pub use state::AppState;
+
+/// The `PATH` used to locate helper CLIs such as `rg` from a GUI launch: the
+/// inherited entries, then the login shell's, then common install directories.
+#[cfg(not(windows))]
+pub fn cli_search_path() -> std::ffi::OsString {
+    cli_path::search_path()
+}
 
 /// Assemble the application router with all routes and middleware. The
 /// accepted `Host` names follow `expose_to_network`; listeners served through
@@ -150,6 +161,10 @@ pub fn build_router_with_host_policy(state: AppState, host_policy: HostPolicy) -
             "/control/v1/runs/{run_id}/events",
             get(routes::control_run_events),
         )
+        .route(
+            "/control/v1/runs/{run_id}/replay",
+            post(routes::control_run_replay),
+        )
         .route("/control/v1/commands", post(routes::control_command))
         .route(
             "/control/v1/socket-ticket",
@@ -233,6 +248,7 @@ pub fn build_router_with_host_policy(state: AppState, host_policy: HostPolicy) -
         .route("/media/library/{id}", delete(routes::media_library_delete))
         // Usage dashboard aggregates over canonical message metrics
         .route("/usage/summary", get(routes::usage_summary))
+        .route("/usage/harness", get(routes::usage_harness))
         // Host working folder (drives the filesystem/shell tools)
         .route(
             "/workspace",
@@ -241,6 +257,11 @@ pub fn build_router_with_host_policy(state: AppState, host_policy: HostPolicy) -
         .route("/workspace/git", get(routes::workspace_git_status))
         .route("/workspace/context", get(routes::workspace_context))
         .route("/workspace/git/action", post(routes::workspace_git_action))
+        // User and project slash commands (Markdown prompt templates)
+        .route("/commands", get(routes::custom_commands_list))
+        .route("/hooks", get(routes::hooks_status))
+        .route("/hooks/trust", post(routes::hooks_trust))
+        .route("/commands/expand", post(routes::custom_commands_expand))
         // Managed preview apps for no-folder chat artifacts.
         .route("/preview-apps/{thread_id}", get(routes::preview_app_get))
         .route(
@@ -370,6 +391,14 @@ pub fn build_router_with_host_policy(state: AppState, host_policy: HostPolicy) -
             post(routes::mcp_server_test_saved),
         )
         .route("/mcp/servers/{id}", delete(routes::mcp_server_delete))
+        .route(
+            "/mcp/servers/{id}/reconnect",
+            post(routes::mcp_server_reconnect),
+        )
+        .route(
+            "/mcp/servers/{id}/auth",
+            post(routes::mcp_server_sign_in).delete(routes::mcp_server_sign_out),
+        )
         // Agents (server-side tool-use loop + named agents)
         .route("/agents/run", post(routes::agents_run))
         .route(
@@ -444,6 +473,19 @@ pub fn build_router_with_host_policy(state: AppState, host_policy: HostPolicy) -
         .route(
             "/memory/nodes/{id}/review",
             post(routes::memory_node_review),
+        )
+        .route("/memory/embeddings", get(routes::memory_embeddings))
+        .route(
+            "/memory/embeddings/reindex",
+            post(routes::memory_embeddings_reindex),
+        )
+        .route(
+            "/memory/embeddings/cancel",
+            post(routes::memory_embeddings_cancel),
+        )
+        .route(
+            "/memory/embeddings/model",
+            put(routes::memory_embedding_model_set),
         )
         // Privacy filter
         .route("/privacy/scan", post(routes::privacy_scan))
@@ -556,6 +598,10 @@ pub fn build_mobile_companion_router(state: AppState) -> Router {
         .route(
             "/control/v1/runs/{run_id}/events",
             get(routes::control_run_events),
+        )
+        .route(
+            "/control/v1/runs/{run_id}/replay",
+            post(routes::control_run_replay),
         )
         .route("/control/v1/commands", post(routes::control_command))
         .route(
@@ -698,34 +744,121 @@ pub fn gen_id(prefix: &str) -> String {
     format!("{prefix}-{}", uuid::Uuid::new_v4().simple())
 }
 
-pub(crate) fn agent_skill_messages(
-    state: &AppState,
-    agent: &milim_agents::AgentDef,
-    query: &str,
-) -> Vec<ChatMessage> {
-    let Some(store) = state.skills.as_ref() else {
-        return Vec::new();
-    };
-    let skills = match milim_agents::normalize_skill_mode(&agent.skill_mode, &agent.enabled_skills)
-        .as_str()
-    {
-        "none" => Vec::new(),
-        "custom" => store
-            .select_filtered(query, 3, Some(&agent.enabled_skills))
-            .unwrap_or_default(),
-        _ => store.select(query, 3).unwrap_or_default(),
-    };
-    skill_instruction_message(&skills).into_iter().collect()
+/// Skill context for one native agent run: a compact index of the run's skills
+/// (loaded on demand with `load_skill`) plus the full bodies of skills the user
+/// explicitly mentioned with `@name` or `/name`.
+#[derive(Default)]
+pub(crate) struct AgentSkillContext {
+    pub index: Option<String>,
+    pub explicit: Option<String>,
 }
 
-fn skill_instruction_message(skills: &[milim_skills::SkillDef]) -> Option<ChatMessage> {
+impl AgentSkillContext {
+    pub(crate) fn messages(&self) -> Vec<ChatMessage> {
+        [&self.index, &self.explicit]
+            .into_iter()
+            .flatten()
+            .map(|text| ChatMessage::text("system", text.clone()))
+            .collect()
+    }
+}
+
+pub(crate) fn agent_skill_context(
+    state: &AppState,
+    skill_mode: &str,
+    enabled_skills: &[String],
+    query: &str,
+    workspace: Option<&std::path::Path>,
+) -> AgentSkillContext {
+    let Some(store) = state.skills.as_ref() else {
+        return AgentSkillContext::default();
+    };
+    let mode = milim_agents::normalize_skill_mode(skill_mode, enabled_skills);
+    let skills = match mode.as_str() {
+        "custom" => store.run_skills(Some(enabled_skills), None),
+        _ => store.run_skills(None, workspace),
+    }
+    .unwrap_or_default();
+    let query = milim_skills::SkillQuery::new(query);
+    let (explicit, others): (Vec<_>, Vec<_>) =
+        skills.into_iter().partition(|skill| query.mentions(skill));
+    // Skill mode "none" keeps explicit mentions but exposes no index or tools.
+    let others = if mode == "none" { Vec::new() } else { others };
+    AgentSkillContext {
+        index: skill_index_block(&query, others),
+        explicit: explicit_skill_block(&explicit),
+    }
+}
+
+/// List every skill when there are few; otherwise only the most relevant ones,
+/// so the index stays small. The index is ordered by name so it is stable
+/// across turns.
+fn skill_index_block(
+    query: &milim_skills::SkillQuery,
+    skills: Vec<milim_skills::SkillDef>,
+) -> Option<String> {
+    const MAX_INDEXED_SKILLS: usize = 20;
+    const MAX_DESCRIPTION_CHARS: usize = 200;
+    let total = skills.len();
+    let mut listed = if total <= MAX_INDEXED_SKILLS {
+        skills
+    } else {
+        let mut relevant: Vec<_> = skills
+            .into_iter()
+            .map(|skill| (query.score(&skill), skill))
+            .filter(|(_, skill)| query.is_relevant(skill))
+            .collect();
+        relevant.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        relevant
+            .into_iter()
+            .take(MAX_INDEXED_SKILLS)
+            .map(|(_, skill)| skill)
+            .collect()
+    };
+    let hidden = total - listed.len();
+    if listed.is_empty() && hidden == 0 {
+        return None;
+    }
+    listed.sort_by_key(|skill| skill.name.to_lowercase());
+    let mut text = String::from(
+        "Installed skills are folders of task-specific instructions and resources. When the request matches a skill's description, call load_skill with its name before starting and follow what it returns. Skills are optional guidance; the user's request and repository instructions take precedence.",
+    );
+    for skill in &listed {
+        let description = skill
+            .description
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let description = if description.chars().count() > MAX_DESCRIPTION_CHARS {
+            format!(
+                "{}...",
+                description
+                    .chars()
+                    .take(MAX_DESCRIPTION_CHARS)
+                    .collect::<String>()
+                    .trim_end()
+            )
+        } else {
+            description
+        };
+        text.push_str(&format!("\n- {}", skill.name));
+        if !description.is_empty() {
+            text.push_str(&format!(": {description}"));
+        }
+    }
+    if hidden > 0 {
+        text.push_str(&format!(
+            "\n{hidden} more skill{} installed; use milim_skill_search to find one by task.",
+            if hidden == 1 { " is" } else { "s are" }
+        ));
+    }
+    Some(text)
+}
+
+fn explicit_skill_block(skills: &[milim_skills::SkillDef]) -> Option<String> {
     const MAX_SKILL_CHARS: usize = 12_000;
-    let enabled = skills
-        .iter()
-        .filter(|skill| skill.enabled)
-        .collect::<Vec<_>>();
     let mut blocks = Vec::new();
-    for skill in &enabled {
+    for skill in skills {
         let block = format!(
             "## {}\nWhen to use: {}\nInstructions:\n{}",
             skill.name, skill.description, skill.instructions
@@ -738,22 +871,20 @@ fn skill_instruction_message(skills: &[milim_skills::SkillDef]) -> Option<ChatMe
         }
         blocks.push(block);
     }
-    let omitted = enabled.len().saturating_sub(blocks.len());
+    let omitted = skills.len().saturating_sub(blocks.len());
     let mut body = blocks.join("\n\n");
     if omitted > 0 {
         body.push_str(&format!(
-            "\n\n[{omitted} additional skill{} omitted by the prompt budget]",
-            if omitted == 1 { "" } else { "s" }
+            "\n\n[{omitted} additional skill{} omitted by the prompt budget; load {} with load_skill]",
+            if omitted == 1 { "" } else { "s" },
+            if omitted == 1 { "it" } else { "them" }
         ));
     }
     if body.trim().is_empty() {
         return None;
     }
-    Some(ChatMessage::text(
-        "system",
-        format!(
-            "Use these installed skills when relevant. Follow their instructions only if they help with the user's current request.\n\n{body}"
-        ),
+    Some(format!(
+        "The user referenced these skills for this request. Follow their instructions where they apply.\n\n{body}"
     ))
 }
 

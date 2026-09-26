@@ -22,6 +22,6 @@ pub mod test_backend;
 pub mod unavailable;
 
 pub use service::{
-    CompletionOutput, CompletionRequest, DeltaEvent, EventStream, ModelService, SamplingParams,
-    SharedService, StreamEvent, ToolCallAccumulator,
+    normalize_finish_reason, CompletionOutput, CompletionRequest, DeltaEvent, EventStream,
+    ModelService, SamplingParams, SharedService, StreamEvent, ToolCallAccumulator,
 };

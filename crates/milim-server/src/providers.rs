@@ -43,6 +43,10 @@ pub enum ProviderKind {
     Gemini,
     Replicate,
     Fal,
+    /// Brave Search API credential for the `web_search` tool.
+    BraveSearch,
+    /// Tavily search API credential for the `web_search` tool.
+    Tavily,
 }
 
 impl ProviderKind {
@@ -51,6 +55,14 @@ impl ProviderKind {
             self,
             ProviderKind::OpenAiCompatible | ProviderKind::Anthropic | ProviderKind::Gemini
         )
+    }
+
+    fn web_search_provider(self) -> Option<milim_tools::WebSearchProvider> {
+        match self {
+            ProviderKind::BraveSearch => Some(milim_tools::WebSearchProvider::Brave),
+            ProviderKind::Tavily => Some(milim_tools::WebSearchProvider::Tavily),
+            _ => None,
+        }
     }
 }
 
@@ -144,17 +156,21 @@ fn backend_for(cfg: &Provider) -> SharedService {
             cfg.base_url.clone(),
             api_key,
         )),
-        ProviderKind::Anthropic => Arc::new(AnthropicBackend::new(
-            cfg.name.clone(),
-            cfg.base_url.clone(),
-            api_key,
-        )),
+        ProviderKind::Anthropic => Arc::new(
+            AnthropicBackend::new(cfg.name.clone(), cfg.base_url.clone(), api_key)
+                .with_model_output_limits(cfg.model_context.iter().filter_map(
+                    |(model, context)| Some((model.clone(), context.max_completion_tokens?)),
+                )),
+        ),
         ProviderKind::Gemini => Arc::new(GeminiBackend::new(
             cfg.name.clone(),
             cfg.base_url.clone(),
             api_key,
         )),
-        ProviderKind::Replicate | ProviderKind::Fal => Arc::new(RemoteBackend::new(
+        ProviderKind::Replicate
+        | ProviderKind::Fal
+        | ProviderKind::BraveSearch
+        | ProviderKind::Tavily => Arc::new(RemoteBackend::new(
             cfg.name.clone(),
             cfg.base_url.clone(),
             api_key,
@@ -391,6 +407,20 @@ impl ProviderRegistry {
             .collect::<Vec<_>>();
         self.store.save(&snapshot)?;
         Ok(refreshed)
+    }
+
+    /// The first enabled, keyed web-search provider, in configuration order.
+    pub async fn web_search_api(&self) -> Option<milim_tools::WebSearchApi> {
+        self.inner.read().await.iter().find_map(|runtime| {
+            let cfg = &runtime.cfg;
+            let provider = cfg.kind.web_search_provider()?;
+            let api_key = cfg.api_key.as_deref().map(str::trim).unwrap_or("");
+            (cfg.enabled && !api_key.is_empty()).then(|| milim_tools::WebSearchApi {
+                provider,
+                api_key: api_key.to_string(),
+                base_url: Some(cfg.base_url.clone()).filter(|url| !url.trim().is_empty()),
+            })
+        })
     }
 
     /// Remove a provider. Returns whether one was removed.
@@ -699,6 +729,17 @@ fn apply_model_overrides(provider: &mut Provider) {
     }
 }
 
+/// Prompt budget for one model: the provider-reported prompt or context
+/// limit, else the same fallback the model catalog shows.
+pub(crate) fn model_context_window(provider: &Provider, model: &str) -> Option<u32> {
+    let context = provider
+        .model_context
+        .get(model)
+        .cloned()
+        .unwrap_or_else(|| fallback_model_context(provider, model));
+    context.max_prompt_tokens.or(context.context_length)
+}
+
 fn fallback_model_context(provider: &Provider, model: &str) -> ModelContextMetadata {
     let id = model.to_ascii_lowercase();
     let context_length = match provider.kind {
@@ -719,7 +760,10 @@ fn fallback_model_context(provider: &Provider, model: &str) -> ModelContextMetad
                 Some(32_768)
             }
         }
-        ProviderKind::Replicate | ProviderKind::Fal => None,
+        ProviderKind::Replicate
+        | ProviderKind::Fal
+        | ProviderKind::BraveSearch
+        | ProviderKind::Tavily => None,
     };
     ModelContextMetadata {
         context_length,
@@ -820,7 +864,10 @@ fn fallback_model_reasoning(provider: &Provider, model: &str) -> Option<ModelRea
                 ))
             }
         }
-        ProviderKind::Replicate | ProviderKind::Fal => None,
+        ProviderKind::Replicate
+        | ProviderKind::Fal
+        | ProviderKind::BraveSearch
+        | ProviderKind::Tavily => None,
     }
 }
 

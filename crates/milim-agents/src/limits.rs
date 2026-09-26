@@ -63,6 +63,13 @@ impl RunBudget {
         self.reason_at(self.started.elapsed())
     }
 
+    /// Time left before the run time limit, when one is set.
+    pub(crate) fn remaining_time(&self) -> Option<Duration> {
+        self.limits
+            .max_duration
+            .map(|limit| limit.saturating_sub(self.started.elapsed()))
+    }
+
     fn reason_at(&self, elapsed: Duration) -> Option<String> {
         if self
             .limits

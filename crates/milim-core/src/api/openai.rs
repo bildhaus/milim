@@ -274,6 +274,14 @@ pub struct Usage {
     /// `usage.cost`; Milim normalizes it to `cost_usd` everywhere else.
     #[serde(default, alias = "cost", skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    /// Prompt tokens the provider served from its prompt cache. Already
+    /// counted in `prompt_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u32>,
+    /// Prompt tokens the provider wrote to its prompt cache. Already counted
+    /// in `prompt_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u32>,
 }
 
 impl Usage {
@@ -283,7 +291,21 @@ impl Usage {
             completion_tokens: completion,
             total_tokens: prompt + completion,
             cost_usd: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
         }
+    }
+
+    /// Add another response's cache token counts to this running total.
+    pub fn add_cache_tokens(&mut self, other: &Usage) {
+        fn sum(a: Option<u32>, b: Option<u32>) -> Option<u32> {
+            match (a, b) {
+                (None, None) => None,
+                (a, b) => Some(a.unwrap_or(0) + b.unwrap_or(0)),
+            }
+        }
+        self.cache_read_tokens = sum(self.cache_read_tokens, other.cache_read_tokens);
+        self.cache_write_tokens = sum(self.cache_write_tokens, other.cache_write_tokens);
     }
 }
 
@@ -513,6 +535,31 @@ impl ErrorEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_cache_tokens_are_optional_on_the_wire() {
+        let legacy: Usage =
+            serde_json::from_str(r#"{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}"#)
+                .unwrap();
+        assert_eq!(legacy.cache_read_tokens, None);
+        assert_eq!(
+            serde_json::to_value(legacy).unwrap(),
+            serde_json::json!({"prompt_tokens":10,"completion_tokens":2,"total_tokens":12})
+        );
+
+        let mut total = Usage {
+            cache_read_tokens: Some(8),
+            ..Usage::new(10, 2)
+        };
+        total.add_cache_tokens(&Usage {
+            cache_write_tokens: Some(5),
+            ..Usage::new(6, 1)
+        });
+        total.add_cache_tokens(&Usage::new(1, 1));
+        assert_eq!(total.cache_read_tokens, Some(8));
+        assert_eq!(total.cache_write_tokens, Some(5));
+        assert_eq!(serde_json::to_value(total).unwrap()["cache_read_tokens"], 8);
+    }
 
     #[test]
     fn parses_string_content() {

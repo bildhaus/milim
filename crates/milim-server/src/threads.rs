@@ -57,6 +57,12 @@ pub struct ChildRunSpec {
     /// Account profile inherited from the parent thread, so a delegated run
     /// uses the same subscription. `None` keeps the runtime's default account.
     pub account_profile_id: Option<String>,
+    /// Native Worker runs: milim's base agent prompt for the Worker's tools,
+    /// placed first like a native tool-agent run's.
+    pub base_prompt: Option<String>,
+    /// Native Worker runs: the environment snapshot that ends the leading
+    /// system block.
+    pub environment: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -487,22 +493,37 @@ fn agent_child_stream(
     tools: Arc<ToolRegistry>,
     spec: ChildRunSpec,
 ) -> ChildAgentStream {
-    let mut messages = Vec::new();
-    if let Some(system_prompt) = spec
-        .system_prompt
-        .as_deref()
-        .filter(|prompt| !prompt.trim().is_empty())
-    {
-        messages.push(ChatMessage::text("system", system_prompt));
-    }
-    messages.push(ChatMessage::text(
-        "system",
-        "You are a Milim Worker. Complete only the delegated task and return a concise final report. Do not delegate more work.",
-    ));
-    messages.push(ChatMessage::text("user", &spec.prompt));
+    let messages = worker_messages(&spec);
     Box::pin(milim_agents::run_agent_stream(
         service, tools, spec.model, messages, None,
     ))
+}
+
+/// A native Worker's conversation, laid out like a native tool-agent run:
+/// the base prompt, then the run and Agent instructions and the Worker role,
+/// then the environment snapshot, then the delegated task.
+fn worker_messages(spec: &ChildRunSpec) -> Vec<ChatMessage> {
+    let non_empty = |value: &Option<String>| {
+        value
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+            .map(|text| ChatMessage::text("system", text))
+    };
+    let mut messages = Vec::new();
+    messages.extend(non_empty(&spec.base_prompt));
+    messages.extend(non_empty(&spec.system_prompt));
+    let role = match spec.access {
+        milim_agents::WorkerAccess::ReadOnly => {
+            "You are a Milim Worker. Complete only the delegated task and return a concise final report. Do not delegate more work. Your tools are read-only: investigate and report what you find, and do not try to change files or run commands."
+        }
+        milim_agents::WorkerAccess::WriteReview => {
+            "You are a Milim Worker. Complete only the delegated task and return a concise final report. Do not delegate more work."
+        }
+    };
+    messages.push(ChatMessage::text("system", role));
+    messages.extend(non_empty(&spec.environment));
+    messages.push(ChatMessage::text("user", &spec.prompt));
+    messages
 }
 
 async fn run_child_stream(
@@ -526,6 +547,13 @@ async fn run_child_stream(
                     flush_token_event(&store, &events, &thread, &mut token_buffer);
                     last_token_flush = Instant::now();
                 }
+            }
+            AgentEvent::ProviderRetry {
+                discarded_content_bytes,
+                ..
+            } => {
+                // The retried step streams the discarded partial text again.
+                text.truncate(text.len().saturating_sub(discarded_content_bytes));
             }
             AgentEvent::Reasoning { text } => {
                 flush_token_event(&store, &events, &thread, &mut token_buffer);
@@ -659,6 +687,8 @@ async fn run_child_stream(
             AgentEvent::Start { .. }
             | AgentEvent::ToolApprovalRequired { .. }
             | AgentEvent::ToolApprovalResolved { .. }
+            | AgentEvent::ContextCompacted { .. }
+            | AgentEvent::Hook(_)
             | AgentEvent::MemoryRegistered { .. }
             | AgentEvent::ChildThreadStarted { .. }
             | AgentEvent::ChildThreadDone { .. }
@@ -773,6 +803,8 @@ mod tests {
                     access: WorkerAccess::ReadOnly,
                     worktree_path: None,
                     account_profile_id: None,
+                    base_prompt: None,
+                    environment: None,
                 },
             )
             .unwrap();
@@ -785,6 +817,74 @@ mod tests {
             .unwrap()
             .iter()
             .any(|event| event.kind == "done"));
+    }
+
+    #[test]
+    fn native_worker_messages_follow_the_native_run_layout() {
+        let spec = ChildRunSpec {
+            parent_id: "parent-1".to_string(),
+            title: "Worker".to_string(),
+            model: "model-x".to_string(),
+            agent_id: None,
+            system_prompt: Some("Workspace: /repo".to_string()),
+            prompt: "Find the bug.".to_string(),
+            run_id: None,
+            runtime: WorkerRuntime::Managed,
+            access: WorkerAccess::ReadOnly,
+            worktree_path: None,
+            account_profile_id: None,
+            base_prompt: Some("You are milim's coding agent.".to_string()),
+            environment: Some("<environment>\n</environment>".to_string()),
+        };
+        let messages = worker_messages(&spec);
+        let layout: Vec<(String, String)> = messages
+            .iter()
+            .map(|message| (message.role.clone(), message.text_content()))
+            .collect();
+        assert_eq!(layout[0].1, "You are milim's coding agent.");
+        assert_eq!(layout[1].1, "Workspace: /repo");
+        assert!(layout[2].1.starts_with("You are a Milim Worker."));
+        assert_eq!(layout[3].1, "<environment>\n</environment>");
+        assert_eq!(layout[4], ("user".to_string(), "Find the bug.".to_string()));
+
+        let bare = worker_messages(&ChildRunSpec {
+            base_prompt: None,
+            environment: None,
+            system_prompt: None,
+            ..spec
+        });
+        assert_eq!(bare.len(), 2, "legacy Workers keep the role and task only");
+
+        let read_only = worker_messages(&ChildRunSpec {
+            access: milim_agents::WorkerAccess::ReadOnly,
+            ..bare_spec_for_access()
+        });
+        assert!(read_only[0]
+            .text_content()
+            .contains("Your tools are read-only"));
+        let writer = worker_messages(&ChildRunSpec {
+            access: milim_agents::WorkerAccess::WriteReview,
+            ..bare_spec_for_access()
+        });
+        assert!(!writer[0].text_content().contains("read-only"));
+    }
+
+    fn bare_spec_for_access() -> ChildRunSpec {
+        ChildRunSpec {
+            parent_id: "parent-1".into(),
+            title: "Worker".into(),
+            model: "model-x".into(),
+            agent_id: None,
+            system_prompt: None,
+            prompt: "Find the bug.".into(),
+            run_id: None,
+            runtime: milim_agents::WorkerRuntime::Managed,
+            access: milim_agents::WorkerAccess::ReadOnly,
+            worktree_path: None,
+            account_profile_id: None,
+            base_prompt: None,
+            environment: None,
+        }
     }
 
     #[test]

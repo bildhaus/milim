@@ -50,7 +50,7 @@ use crate::translate::{
     openai_to_completion,
 };
 use crate::{gen_id, now_unix, rfc3339_now};
-use milim_core::api::anthropic::{self, MessagesRequest, MessagesResponse};
+use milim_core::api::anthropic::{MessagesRequest, MessagesResponse};
 use milim_core::api::ollama::{
     OllamaChatRequest, OllamaChatResponse, OllamaMessage, OllamaModelDetails, OllamaModelTag,
     OllamaTagsResponse,
@@ -70,8 +70,10 @@ use milim_tools::{Tool, ToolEffect, ToolRegistry};
 
 mod account_runtimes;
 mod agents;
+mod commands;
 mod control;
 mod harnesses;
+mod hooks;
 mod inference;
 mod mcp;
 mod media;
@@ -81,8 +83,10 @@ mod workspace;
 
 pub(crate) use account_runtimes::*;
 pub(crate) use agents::*;
+pub(crate) use commands::*;
 pub(crate) use control::*;
 pub(crate) use harnesses::*;
+pub(crate) use hooks::*;
 pub(crate) use inference::*;
 pub(crate) use mcp::*;
 pub(crate) use media::*;
@@ -1222,6 +1226,62 @@ pub(crate) async fn memory_node_review(
     authorize(&st, &headers, peer_addr(peer))?;
     let reviewed = memory_store(&st)?.review_node(&id).map_err(ApiError)?;
     Ok(Json(json!({ "reviewed": reviewed })).into_response())
+}
+
+/// `GET /memory/embeddings` — embedding coverage and re-embed job status.
+pub(crate) async fn memory_embeddings(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: Peer,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    let status = memory_store(&st)?.embedding_status().map_err(ApiError)?;
+    Ok(Json(status).into_response())
+}
+
+/// `POST /memory/embeddings/reindex` — re-embed stale memories in the background.
+pub(crate) async fn memory_embeddings_reindex(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: Peer,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    let mem = memory_store(&st)?;
+    mem.start_reembed();
+    Ok(Json(mem.embedding_status().map_err(ApiError)?).into_response())
+}
+
+/// `POST /memory/embeddings/cancel` — stop re-embedding after the current batch.
+pub(crate) async fn memory_embeddings_cancel(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: Peer,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    let mem = memory_store(&st)?;
+    mem.cancel_reembed();
+    Ok(Json(mem.embedding_status().map_err(ApiError)?).into_response())
+}
+
+#[derive(Deserialize)]
+pub(crate) struct MemoryEmbeddingModelRequest {
+    /// The model to pin, or `null` to follow the models chats embed with.
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// `PUT /memory/embeddings/model` — pin the memory embedding model or unpin it.
+pub(crate) async fn memory_embedding_model_set(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: Peer,
+    Json(req): Json<MemoryEmbeddingModelRequest>,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    let mem = memory_store(&st)?;
+    mem.set_configured_embedding_model(req.model.as_deref())
+        .map_err(ApiError)?;
+    Ok(Json(mem.embedding_status().map_err(ApiError)?).into_response())
 }
 
 // ----- Embeddings -----

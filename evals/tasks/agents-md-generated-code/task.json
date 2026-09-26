@@ -1,0 +1,8 @@
+{
+  "id": "agents-md-generated-code",
+  "title": "Add a route through the documented code generator",
+  "category": "follow-agents-md",
+  "prompt": "Add a `GET /health` endpoint that responds with status 200 and body `{ \"ok\": true, \"version\": <the version from package.json> }`.",
+  "timeout_s": 420,
+  "check": "node check.mjs"
+}

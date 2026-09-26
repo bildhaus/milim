@@ -1,0 +1,8 @@
+{
+  "id": "implement-ttl-cache",
+  "title": "Implement an LRU cache with TTL",
+  "category": "implement-to-spec",
+  "prompt": "Implement the `TtlCache` class in src/cache.js. The JSDoc on each method is the specification: follow it exactly, including eviction order, expiry, and the injectable clock. Do not add dependencies.",
+  "timeout_s": 420,
+  "check": "node check.mjs"
+}

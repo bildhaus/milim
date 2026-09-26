@@ -1,0 +1,4 @@
+[
+  { "method": "GET", "path": "/items", "handler": "list-items" },
+  { "method": "POST", "path": "/items", "handler": "create-item" }
+]

@@ -1,0 +1,8 @@
+{
+  "id": "refactor-extract-helper",
+  "title": "Extract a duplicated helper across three files",
+  "category": "refactor-multi-file",
+  "prompt": "src/invoice.js, src/receipt.js, and src/statement.js each contain their own copy of a money-formatting function. Extract a single exported `formatMoney(cents, currency)` into a new file src/money.js and make all three modules import and use it. Remove the duplicated local copies. Behavior must not change, and the existing tests must keep passing without modification.",
+  "timeout_s": 420,
+  "check": "node check.mjs"
+}

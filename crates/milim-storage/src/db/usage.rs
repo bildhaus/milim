@@ -5,6 +5,9 @@
 //! checkpoints store the metrics of their summary call. Partial expression
 //! indexes over those timestamps (user-data migration 11) keep a bounded
 //! date-range scan from touching messages without metrics.
+//!
+//! Harness health aggregates the canonical run ledger (`user_runs`,
+//! `user_run_events`, and pending approvals) over runs created in a range.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -26,6 +29,10 @@ pub struct UsageTotals {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
+    /// Prompt tokens served from a provider prompt cache (inside `prompt_tokens`).
+    pub cache_read_tokens: u64,
+    /// Prompt tokens written to a provider prompt cache (inside `prompt_tokens`).
+    pub cache_write_tokens: u64,
     /// Sum of every known cost, reported and estimated.
     pub cost_usd: f64,
     /// Portion billed and reported by a provider or account runtime.
@@ -69,6 +76,8 @@ struct UsageRecord {
     prompt_tokens: u64,
     completion_tokens: u64,
     total_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
     cost_usd: Option<f64>,
     cost_source: Option<String>,
 }
@@ -85,6 +94,8 @@ impl UsageTotals {
         self.prompt_tokens += record.prompt_tokens;
         self.completion_tokens += record.completion_tokens;
         self.total_tokens += record.total_tokens;
+        self.cache_read_tokens += record.cache_read_tokens;
+        self.cache_write_tokens += record.cache_write_tokens;
         match record.cost() {
             Some((cost, kind)) => {
                 self.cost_usd += cost;
@@ -185,6 +196,8 @@ fn record_from_row(row: &Row<'_>) -> rusqlite::Result<UsageRecord> {
         prompt_tokens: value_tokens(row, 4),
         completion_tokens: value_tokens(row, 5),
         total_tokens: value_tokens(row, 6),
+        cache_read_tokens: value_tokens(row, 10),
+        cache_write_tokens: value_tokens(row, 11),
         cost_usd: value_f64(row, 7).or_else(|| value_f64(row, 8)),
         cost_source: value_text(row, 9),
     };
@@ -205,7 +218,9 @@ const RESPONSE_USAGE_SQL: &str = "SELECT m.session_id,
         json_extract(m.message_json, '$.metrics.usage.total_tokens'),
         json_extract(m.message_json, '$.metrics.costUsd'),
         json_extract(m.message_json, '$.metrics.usage.cost_usd'),
-        json_extract(m.message_json, '$.metrics.costSource')
+        json_extract(m.message_json, '$.metrics.costSource'),
+        json_extract(m.message_json, '$.metrics.usage.cache_read_tokens'),
+        json_extract(m.message_json, '$.metrics.usage.cache_write_tokens')
      FROM user_session_messages m
      WHERE json_extract(m.message_json, '$.metrics.endedAt') IS NOT NULL
        AND json_extract(m.message_json, '$.metrics.endedAt') >= ?1
@@ -222,7 +237,9 @@ const COMPACTION_USAGE_SQL: &str = "SELECT m.session_id,
         json_extract(m.message_json, '$.compaction.summary.usage.total_tokens'),
         json_extract(m.message_json, '$.compaction.summary.costUsd'),
         json_extract(m.message_json, '$.compaction.summary.usage.cost_usd'),
-        json_extract(m.message_json, '$.compaction.summary.costSource')
+        json_extract(m.message_json, '$.compaction.summary.costSource'),
+        json_extract(m.message_json, '$.compaction.summary.usage.cache_read_tokens'),
+        json_extract(m.message_json, '$.compaction.summary.usage.cache_write_tokens')
      FROM user_session_messages m
      WHERE json_extract(m.message_json, '$.compaction.summary') IS NOT NULL
        AND json_extract(m.message_json, '$.compaction.createdAt') >= ?1
@@ -400,6 +417,458 @@ impl UserDataStore {
     }
 }
 
+/// Filters for [`UserDataStore::harness_metrics`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HarnessMetricsQuery {
+    /// Runs created inside `[since_ms, until_ms)` are included.
+    pub since_ms: i64,
+    pub until_ms: i64,
+    /// Run adapter such as `provider`, `codex`, or `claude`.
+    pub runtime: Option<String>,
+    /// Frozen run model, with or without its runtime prefix.
+    pub model: Option<String>,
+}
+
+/// Nearest-rank percentiles over one latency sample set, in milliseconds.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct LatencyPercentiles {
+    pub samples: u64,
+    pub p50_ms: Option<u64>,
+    pub p95_ms: Option<u64>,
+}
+
+/// Calls and failures for one tool name.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ToolHealth {
+    pub name: String,
+    pub calls: u64,
+    pub errors: u64,
+    pub error_rate: f64,
+}
+
+/// One run status and how many runs ended in it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct StatusCount {
+    pub status: String,
+    pub runs: u64,
+}
+
+/// Harness health aggregated from the canonical run ledger.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct HarnessMetrics {
+    pub since_ms: i64,
+    pub until_ms: i64,
+    pub runtime: Option<String>,
+    pub model: Option<String>,
+    pub runs: u64,
+    pub runs_by_status: Vec<StatusCount>,
+    pub model_steps: u64,
+    /// Steps measured by a `model_timing` event; the rest fall back to the
+    /// request and response event timestamps.
+    pub timed_model_steps: u64,
+    pub step_latency: LatencyPercentiles,
+    /// Only `model_timing` events carry time to first token.
+    pub first_token: LatencyPercentiles,
+    pub approval_wait: LatencyPercentiles,
+    pub pending_approvals: u64,
+    pub tool_calls: u64,
+    pub tool_errors: u64,
+    pub tool_error_rate: f64,
+    pub tools: Vec<ToolHealth>,
+    pub avg_steps_per_run: Option<f64>,
+    /// Average over runs with a recorded cost.
+    pub avg_cost_usd_per_run: Option<f64>,
+    pub priced_runs: u64,
+    pub retries: u64,
+    pub runs_with_retries: u64,
+    /// Every runtime and model seen in the range, for filter pickers.
+    pub available_runtimes: Vec<String>,
+    pub available_models: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct RunLedgerMetrics {
+    model_timings: Vec<ModelTiming>,
+    tool_timings: Vec<(String, bool)>,
+    /// `step_id -> (request timestamps, response timestamp)`.
+    steps: BTreeMap<String, (Vec<i64>, Option<i64>)>,
+    tool_results: Vec<(Option<String>, String)>,
+}
+
+#[derive(Debug)]
+struct ModelTiming {
+    duration_ms: Option<u64>,
+    first_token_ms: Option<u64>,
+    attempts: u64,
+}
+
+const HARNESS_RUNS_SQL: &str = "SELECT id, status, adapter,
+        COALESCE(json_extract(request_json, '$.config.model'), '')
+     FROM user_runs
+     WHERE created_at_ms >= ?1 AND created_at_ms < ?2";
+
+const HARNESS_EVENTS_SQL: &str = "SELECT e.step_id, e.event_type, e.data_json, e.created_at_ms
+     FROM user_run_events e
+     WHERE e.run_id = ?1
+       AND e.event_type IN ('model_timing', 'tool_timing', 'model_request_resolved',
+                            'harness_request_committed', 'model_response_committed',
+                            'tool_result_committed')
+     ORDER BY e.seq";
+
+const HARNESS_APPROVALS_SQL: &str = "SELECT created_at_ms, resolved_at_ms
+     FROM user_pending_approvals WHERE run_id = ?1";
+
+/// Tool results projected into the transcript keep their visible result JSON,
+/// so a failed call is recognizable without decoding ledger artifacts. One
+/// bounded scan serves every run in the range.
+const HARNESS_TOOL_ERRORS_SQL: &str = "SELECT run_id, json_extract(data_json, '$.call_id'),
+        COALESCE(json_extract(data_json, '$.name'), '')
+     FROM user_timeline_events
+     WHERE item_type = 'tool_result' AND run_id IS NOT NULL AND created_at_ms >= ?1
+       AND json_type(data_json, '$.result.error') IS NOT NULL";
+
+/// Run costs come from the completed assistant message metrics, which carry
+/// provider-reported or estimated cost. `?2` adds slack for runs that were
+/// created inside the range and finished after it.
+const HARNESS_RUN_COST_SQL: &str = "SELECT json_extract(m.message_json, '$.runId'),
+        json_extract(m.message_json, '$.metrics.costUsd'),
+        json_extract(m.message_json, '$.metrics.usage.cost_usd')
+     FROM user_session_messages m
+     WHERE json_extract(m.message_json, '$.metrics.endedAt') IS NOT NULL
+       AND json_extract(m.message_json, '$.metrics.endedAt') >= ?1
+       AND json_extract(m.message_json, '$.metrics.endedAt') < ?2
+       AND json_extract(m.message_json, '$.runId') IS NOT NULL";
+
+fn percentiles(mut samples: Vec<u64>) -> LatencyPercentiles {
+    samples.sort_unstable();
+    let rank = |percent: usize| -> Option<u64> {
+        if samples.is_empty() {
+            return None;
+        }
+        let index = (samples.len() * percent).div_ceil(100).max(1) - 1;
+        samples.get(index).copied()
+    };
+    LatencyPercentiles {
+        samples: samples.len() as u64,
+        p50_ms: rank(50),
+        p95_ms: rank(95),
+    }
+}
+
+fn json_u64(value: &serde_json::Value, key: &str) -> Option<u64> {
+    let value = value.get(key)?;
+    value.as_u64().or_else(|| {
+        value
+            .as_f64()
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .map(|v| v.round() as u64)
+    })
+}
+
+fn model_timing(data: &serde_json::Value) -> ModelTiming {
+    let started_at = json_u64(data, "started_at_ms");
+    // `first_token_ms` is a duration from the step start; an absolute
+    // timestamp from an older writer is converted against `started_at_ms`.
+    let first_token_ms = json_u64(data, "first_token_ms").map(|first| match started_at {
+        Some(start) if start > 0 && first >= start => first - start,
+        _ => first,
+    });
+    ModelTiming {
+        duration_ms: json_u64(data, "duration_ms"),
+        first_token_ms,
+        attempts: json_u64(data, "attempts").unwrap_or(1).max(1),
+    }
+}
+
+fn model_matches(filter: &str, adapter: &str, model: &str) -> bool {
+    let filter = filter.trim();
+    filter.eq_ignore_ascii_case(model)
+        || filter
+            .split_once(':')
+            .is_some_and(|(prefix, rest)| prefix.eq_ignore_ascii_case(adapter) && rest == model)
+}
+
+impl UserDataStore {
+    /// Aggregate run-ledger health over runs created inside the query range.
+    /// `model_timing` and `tool_timing` events are authoritative for the runs
+    /// that recorded them; older runs fall back to event timestamps and the
+    /// projected tool results.
+    pub fn harness_metrics(&self, query: &HarnessMetricsQuery) -> Result<HarnessMetrics> {
+        if query.until_ms <= query.since_ms {
+            return Err(Error::InvalidRequest(
+                "metrics range must end after it starts".into(),
+            ));
+        }
+        let runtime = query
+            .runtime
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let model = query
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let db = self
+            .read_db()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+
+        let mut runtimes = BTreeMap::<String, ()>::new();
+        let mut models = BTreeMap::<String, ()>::new();
+        let mut runs = Vec::new();
+        {
+            let mut statement = conn.prepare_cached(HARNESS_RUNS_SQL).map_err(sqlite)?;
+            let rows = statement
+                .query_map(params![query.since_ms, query.until_ms], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })
+                .map_err(sqlite)?;
+            for row in rows {
+                let (id, status, adapter, run_model) = row.map_err(sqlite)?;
+                runtimes.insert(adapter.clone(), ());
+                if !run_model.is_empty() {
+                    models.insert(run_model.clone(), ());
+                }
+                if runtime.is_some_and(|runtime| !runtime.eq_ignore_ascii_case(&adapter))
+                    || model.is_some_and(|model| !model_matches(model, &adapter, &run_model))
+                {
+                    continue;
+                }
+                runs.push((id, status));
+            }
+        }
+
+        let mut metrics = HarnessMetrics {
+            since_ms: query.since_ms,
+            until_ms: query.until_ms,
+            runtime: runtime.map(str::to_string),
+            model: model.map(str::to_string),
+            runs: runs.len() as u64,
+            available_runtimes: runtimes.into_keys().collect(),
+            available_models: models.into_keys().collect(),
+            ..HarnessMetrics::default()
+        };
+        let mut statuses = BTreeMap::<String, u64>::new();
+        let mut step_latency = Vec::new();
+        let mut first_token = Vec::new();
+        let mut approval_wait = Vec::new();
+        let mut tools = BTreeMap::<String, (u64, u64)>::new();
+        let mut steps_per_run = Vec::new();
+        let mut run_ids = HashMap::new();
+        let mut failed_tools = HashMap::<String, Vec<(Option<String>, String)>>::new();
+        if !runs.is_empty() {
+            let mut statement = conn
+                .prepare_cached(HARNESS_TOOL_ERRORS_SQL)
+                .map_err(sqlite)?;
+            let rows = statement
+                .query_map(params![query.since_ms], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(sqlite)?;
+            for row in rows {
+                let (run_id, call_id, name) = row.map_err(sqlite)?;
+                failed_tools
+                    .entry(run_id)
+                    .or_default()
+                    .push((call_id, name));
+            }
+        }
+        let mut events = conn.prepare_cached(HARNESS_EVENTS_SQL).map_err(sqlite)?;
+        let mut approvals = conn.prepare_cached(HARNESS_APPROVALS_SQL).map_err(sqlite)?;
+        for (run_id, status) in &runs {
+            *statuses.entry(status.clone()).or_default() += 1;
+            run_ids.insert(run_id.clone(), ());
+
+            let mut ledger = RunLedgerMetrics::default();
+            let rows = events
+                .query_map(params![run_id], |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                })
+                .map_err(sqlite)?;
+            for row in rows {
+                let (step_id, event_type, data_json, created_at_ms) = row.map_err(sqlite)?;
+                let data: serde_json::Value =
+                    serde_json::from_str(&data_json).unwrap_or(serde_json::Value::Null);
+                let step_key = step_id.unwrap_or_default();
+                match event_type.as_str() {
+                    "model_timing" => ledger.model_timings.push(model_timing(&data)),
+                    "tool_timing" => ledger.tool_timings.push((
+                        data.get("name")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        data.get("is_error")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false),
+                    )),
+                    "model_request_resolved" | "harness_request_committed" => ledger
+                        .steps
+                        .entry(step_key)
+                        .or_default()
+                        .0
+                        .push(created_at_ms),
+                    "model_response_committed" => {
+                        ledger.steps.entry(step_key).or_default().1 = Some(created_at_ms);
+                    }
+                    "tool_result_committed" => ledger.tool_results.push((
+                        data.get("call_id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string),
+                        data.get("name")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                    )),
+                    _ => {}
+                }
+            }
+
+            let mut run_retries = 0;
+            if ledger.model_timings.is_empty() {
+                let mut steps = 0;
+                for (requests, response) in ledger.steps.values() {
+                    let Some(first_request) = requests.first() else {
+                        continue;
+                    };
+                    steps += 1;
+                    run_retries += requests.len() as u64 - 1;
+                    if let Some(response) = response {
+                        step_latency.push(u64::try_from(response - first_request).unwrap_or(0));
+                    }
+                }
+                steps_per_run.push(steps);
+            } else {
+                metrics.timed_model_steps += ledger.model_timings.len() as u64;
+                for timing in &ledger.model_timings {
+                    run_retries += timing.attempts - 1;
+                    step_latency.extend(timing.duration_ms);
+                    first_token.extend(timing.first_token_ms);
+                }
+                steps_per_run.push(ledger.model_timings.len() as u64);
+            }
+            metrics.retries += run_retries;
+            if run_retries > 0 {
+                metrics.runs_with_retries += 1;
+            }
+
+            if ledger.tool_timings.is_empty() {
+                let mut unmatched = failed_tools.remove(run_id).unwrap_or_default();
+                for (call_id, name) in &ledger.tool_results {
+                    let position = unmatched.iter().position(|(failed_id, failed_name)| {
+                        match (call_id, failed_id) {
+                            (Some(call_id), Some(failed_id)) => call_id == failed_id,
+                            _ => failed_name == name,
+                        }
+                    });
+                    let is_error = position.map(|index| unmatched.remove(index)).is_some();
+                    let entry = tools.entry(name.clone()).or_default();
+                    entry.0 += 1;
+                    entry.1 += u64::from(is_error);
+                }
+            } else {
+                for (name, is_error) in &ledger.tool_timings {
+                    let entry = tools.entry(name.clone()).or_default();
+                    entry.0 += 1;
+                    entry.1 += u64::from(*is_error);
+                }
+            }
+
+            let rows = approvals
+                .query_map(params![run_id], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
+                })
+                .map_err(sqlite)?;
+            for row in rows {
+                match row.map_err(sqlite)? {
+                    (created, Some(resolved)) => {
+                        approval_wait.push(u64::try_from(resolved - created).unwrap_or(0));
+                    }
+                    (_, None) => metrics.pending_approvals += 1,
+                }
+            }
+        }
+        drop(events);
+        drop(approvals);
+
+        let mut run_costs = HashMap::<String, f64>::new();
+        if !run_ids.is_empty() {
+            let mut statement = conn.prepare_cached(HARNESS_RUN_COST_SQL).map_err(sqlite)?;
+            let rows = statement
+                .query_map(
+                    params![query.since_ms, query.until_ms.saturating_add(DAY_MS)],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            value_f64(row, 1).or_else(|| value_f64(row, 2)),
+                        ))
+                    },
+                )
+                .map_err(sqlite)?;
+            for row in rows {
+                let (run_id, cost) = row.map_err(sqlite)?;
+                if let Some(cost) = cost.filter(|cost| cost.is_finite() && *cost >= 0.0) {
+                    if run_ids.contains_key(&run_id) {
+                        *run_costs.entry(run_id).or_default() += cost;
+                    }
+                }
+            }
+        }
+        drop(db);
+
+        metrics.runs_by_status = statuses
+            .into_iter()
+            .map(|(status, runs)| StatusCount { status, runs })
+            .collect();
+        metrics.model_steps = steps_per_run.iter().sum();
+        metrics.avg_steps_per_run = (!steps_per_run.is_empty())
+            .then(|| metrics.model_steps as f64 / steps_per_run.len() as f64);
+        metrics.priced_runs = run_costs.len() as u64;
+        metrics.avg_cost_usd_per_run = (!run_costs.is_empty())
+            .then(|| run_costs.values().sum::<f64>() / run_costs.len() as f64);
+        metrics.step_latency = percentiles(step_latency);
+        metrics.first_token = percentiles(first_token);
+        metrics.approval_wait = percentiles(approval_wait);
+        let mut tools = tools
+            .into_iter()
+            .map(|(name, (calls, errors))| ToolHealth {
+                name,
+                calls,
+                errors,
+                error_rate: if calls == 0 {
+                    0.0
+                } else {
+                    errors as f64 / calls as f64
+                },
+            })
+            .collect::<Vec<_>>();
+        tools.sort_by(|a, b| b.calls.cmp(&a.calls).then_with(|| a.name.cmp(&b.name)));
+        metrics.tool_calls = tools.iter().map(|tool| tool.calls).sum();
+        metrics.tool_errors = tools.iter().map(|tool| tool.errors).sum();
+        metrics.tool_error_rate = if metrics.tool_calls == 0 {
+            0.0
+        } else {
+            metrics.tool_errors as f64 / metrics.tool_calls as f64
+        };
+        metrics.tools = tools;
+        Ok(metrics)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,7 +888,10 @@ mod tests {
                     "metrics": {
                         "startedAt": NOW - 3_000, "endedAt": NOW - 1_000,
                         "model": "provider:openrouter:anthropic/claude", "provider": "OpenRouter",
-                        "usage": { "prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150 },
+                        "usage": {
+                            "prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150,
+                            "cache_read_tokens": 60, "cache_write_tokens": 20
+                        },
                         "costUsd": 0.25, "costSource": "provider"
                     }
                 },
@@ -465,7 +937,10 @@ mod tests {
                         "sourceTokens": 1, "summaryTokens": 1,
                         "summary": {
                             "model": "gpt-local",
-                            "usage": { "prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10 },
+                            "usage": {
+                                "prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10,
+                                "cache_read_tokens": 4
+                            },
                             "costUsd": 0.1, "costSource": "estimate"
                         }
                     }
@@ -495,6 +970,8 @@ mod tests {
         assert!(close(summary.totals.reported_cost_usd, 0.25));
         assert!(close(summary.totals.estimated_cost_usd, 0.6));
         assert_eq!(summary.totals.unpriced_responses, 1);
+        assert_eq!(summary.totals.cache_read_tokens, 64);
+        assert_eq!(summary.totals.cache_write_tokens, 20);
 
         let yesterday = &summary.by_day[5];
         assert_eq!(yesterday.key, "2025-09-22");
@@ -509,6 +986,10 @@ mod tests {
             .expect("isolated worktree usage groups under its project");
         assert_eq!(beta.label, "beta");
         assert_eq!(beta.totals.responses, 3);
+        assert_eq!(
+            beta.totals.cache_read_tokens, 4,
+            "compaction summaries count their cached input"
+        );
         assert_eq!(summary.by_project[0].key, "/work/beta");
 
         let codex = summary
@@ -567,6 +1048,347 @@ mod tests {
                 "expected {index} in {plan:?}"
             );
         }
+    }
+
+    fn put_run(store: &UserDataStore, id: &str, status: &str, adapter: &str, model: &str) {
+        store
+            .control_put_run(&crate::ControlRunRecord {
+                id: id.into(),
+                thread_id: "thread-harness".into(),
+                status: status.into(),
+                adapter: adapter.into(),
+                request_json: json!({ "config": { "model": model, "adapter": adapter } })
+                    .to_string(),
+                agent_snapshot_json: None,
+                native_session_json: None,
+                created_at_ms: NOW - 60_000,
+                updated_at_ms: NOW,
+                completed_at_ms: Some(NOW),
+                error_json: None,
+            })
+            .unwrap();
+    }
+
+    fn put_event(
+        store: &UserDataStore,
+        run_id: &str,
+        step: Option<&str>,
+        event_type: &str,
+        data: serde_json::Value,
+        at_ms: i64,
+    ) {
+        let db = store.db.lock().unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO user_run_events
+                 (run_id, seq, event_id, step_id, event_type, data_json, created_at_ms)
+                 VALUES (?1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM user_run_events
+                              WHERE run_id = ?1), ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    run_id,
+                    uuid_like(run_id, event_type, at_ms),
+                    step,
+                    event_type,
+                    data.to_string(),
+                    at_ms
+                ],
+            )
+            .unwrap();
+    }
+
+    fn uuid_like(run_id: &str, event_type: &str, at_ms: i64) -> String {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        format!("{run_id}-{event_type}-{at_ms}-{n}")
+    }
+
+    fn harness_store() -> UserDataStore {
+        let store = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        let thread = json!({
+            "messages": [
+                { "id": "m1", "role": "assistant", "runId": "run-timed",
+                  "metrics": { "endedAt": NOW - 1_000, "costUsd": 0.3 } },
+                { "id": "m2", "role": "assistant", "runId": "run-legacy",
+                  "metrics": { "endedAt": NOW - 1_000, "usage": { "cost_usd": 0.1 } } }
+            ]
+        });
+        store
+            .control_create_thread("thread-harness", &thread.to_string(), "epoch")
+            .unwrap();
+
+        // New-format run: timing events are authoritative.
+        put_run(&store, "run-timed", "completed", "provider", "gpt-fixture");
+        for (step, duration, first_token, attempts) in
+            [(1, 1_000, Some(200), 1), (2, 3_000, None, 3)]
+        {
+            put_event(
+                &store,
+                "run-timed",
+                Some(&format!("step-{step}")),
+                "model_timing",
+                json!({
+                    "step": step, "started_at_ms": NOW - 50_000,
+                    "first_token_ms": first_token, "duration_ms": duration,
+                    "attempts": attempts, "finish_reason": "stop"
+                }),
+                NOW - 40_000,
+            );
+        }
+        // Request/response events are ignored for latency once timing exists.
+        put_event(
+            &store,
+            "run-timed",
+            Some("step-1"),
+            "model_request_resolved",
+            json!({}),
+            NOW - 50_000,
+        );
+        put_event(
+            &store,
+            "run-timed",
+            Some("step-1"),
+            "model_response_committed",
+            json!({}),
+            NOW - 10_000,
+        );
+        for (name, is_error) in [("read_file", false), ("shell", true), ("shell", false)] {
+            put_event(
+                &store,
+                "run-timed",
+                Some("step-1"),
+                "tool_timing",
+                json!({ "step": 1, "call_id": null, "name": name, "duration_ms": 5, "is_error": is_error }),
+                NOW - 30_000,
+            );
+        }
+
+        // Legacy run: latency from event timestamps, errors from the transcript.
+        put_run(&store, "run-legacy", "failed", "provider", "gpt-fixture");
+        put_event(
+            &store,
+            "run-legacy",
+            Some("step-1"),
+            "model_request_resolved",
+            json!({}),
+            NOW - 50_000,
+        );
+        put_event(
+            &store,
+            "run-legacy",
+            Some("step-1"),
+            "model_request_resolved",
+            json!({}),
+            NOW - 49_000,
+        );
+        put_event(
+            &store,
+            "run-legacy",
+            Some("step-1"),
+            "model_response_committed",
+            json!({}),
+            NOW - 48_000,
+        );
+        put_event(
+            &store,
+            "run-legacy",
+            Some("step-2"),
+            "model_request_resolved",
+            json!({}),
+            NOW - 47_000,
+        );
+        put_event(
+            &store,
+            "run-legacy",
+            Some("step-2"),
+            "model_response_committed",
+            json!({}),
+            NOW - 43_000,
+        );
+        for call_id in ["call-1", "call-2"] {
+            put_event(
+                &store,
+                "run-legacy",
+                Some("step-1"),
+                "tool_result_committed",
+                json!({ "call_id": call_id, "name": "shell", "artifact_digest": "sha256:x" }),
+                NOW - 48_500,
+            );
+        }
+        store
+            .control_append_timeline(
+                "thread-harness",
+                "tool-result-1",
+                Some("run-legacy"),
+                "tool_result",
+                &json!({ "type": "tool_result", "call_id": "call-2", "name": "shell",
+                         "result": { "error": "exit 1" } })
+                .to_string(),
+            )
+            .unwrap();
+        store
+            .control_put_approval(&crate::ControlApprovalRecord {
+                id: "approval-1".into(),
+                run_id: "run-legacy".into(),
+                thread_id: "thread-harness".into(),
+                kind: "command".into(),
+                request_json: "{}".into(),
+                status: "approved".into(),
+                decision_json: None,
+                created_at_ms: NOW - 48_400,
+                resolved_at_ms: Some(NOW - 46_400),
+            })
+            .unwrap();
+        store
+            .control_put_approval(&crate::ControlApprovalRecord {
+                id: "approval-2".into(),
+                run_id: "run-legacy".into(),
+                thread_id: "thread-harness".into(),
+                kind: "command".into(),
+                request_json: "{}".into(),
+                status: "pending".into(),
+                decision_json: None,
+                created_at_ms: NOW - 40_000,
+                resolved_at_ms: None,
+            })
+            .unwrap();
+
+        put_run(&store, "run-codex", "completed", "codex", "gpt-5");
+        put_event(
+            &store,
+            "run-codex",
+            Some("step-1"),
+            "harness_request_committed",
+            json!({}),
+            NOW - 30_000,
+        );
+        put_event(
+            &store,
+            "run-codex",
+            Some("step-1"),
+            "model_response_committed",
+            json!({}),
+            NOW - 20_000,
+        );
+        store
+    }
+
+    fn range() -> HarnessMetricsQuery {
+        HarnessMetricsQuery {
+            since_ms: NOW - DAY_MS,
+            until_ms: NOW,
+            ..HarnessMetricsQuery::default()
+        }
+    }
+
+    #[test]
+    fn harness_metrics_prefer_timing_events_and_fall_back_to_timestamps() {
+        let store = harness_store();
+        let metrics = store.harness_metrics(&range()).unwrap();
+        assert_eq!(metrics.runs, 3);
+        assert_eq!(
+            metrics.runs_by_status,
+            vec![
+                StatusCount {
+                    status: "completed".into(),
+                    runs: 2
+                },
+                StatusCount {
+                    status: "failed".into(),
+                    runs: 1
+                },
+            ]
+        );
+        // Timed: 1000, 3000. Legacy: 2000 (first request), 4000. Codex: 10000.
+        assert_eq!(metrics.model_steps, 5);
+        assert_eq!(metrics.timed_model_steps, 2);
+        assert_eq!(metrics.step_latency.samples, 5);
+        assert_eq!(metrics.step_latency.p50_ms, Some(3_000));
+        assert_eq!(metrics.step_latency.p95_ms, Some(10_000));
+        assert_eq!(metrics.first_token.samples, 1);
+        assert_eq!(metrics.first_token.p50_ms, Some(200));
+        // Two extra timed attempts plus one repeated legacy request.
+        assert_eq!(metrics.retries, 3);
+        assert_eq!(metrics.runs_with_retries, 2);
+        assert!(close(metrics.avg_steps_per_run.unwrap(), 5.0 / 3.0));
+
+        assert_eq!(metrics.tool_calls, 5);
+        assert_eq!(metrics.tool_errors, 2);
+        assert!(close(metrics.tool_error_rate, 0.4));
+        let shell = metrics
+            .tools
+            .iter()
+            .find(|tool| tool.name == "shell")
+            .unwrap();
+        assert_eq!((shell.calls, shell.errors), (4, 2));
+        assert_eq!(metrics.tools[0].name, "shell");
+
+        assert_eq!(metrics.approval_wait.samples, 1);
+        assert_eq!(metrics.approval_wait.p50_ms, Some(2_000));
+        assert_eq!(metrics.pending_approvals, 1);
+        assert_eq!(metrics.priced_runs, 2);
+        assert!(close(metrics.avg_cost_usd_per_run.unwrap(), 0.2));
+        assert_eq!(metrics.available_runtimes, vec!["codex", "provider"]);
+        assert_eq!(metrics.available_models, vec!["gpt-5", "gpt-fixture"]);
+    }
+
+    #[test]
+    fn harness_metrics_filter_by_runtime_model_and_range() {
+        let store = harness_store();
+        let codex = store
+            .harness_metrics(&HarnessMetricsQuery {
+                runtime: Some("codex".into()),
+                ..range()
+            })
+            .unwrap();
+        assert_eq!(codex.runs, 1);
+        assert_eq!(codex.step_latency.p50_ms, Some(10_000));
+        assert_eq!(codex.tool_calls, 0);
+        assert_eq!(codex.available_runtimes.len(), 2);
+
+        let prefixed = store
+            .harness_metrics(&HarnessMetricsQuery {
+                model: Some("codex:gpt-5".into()),
+                ..range()
+            })
+            .unwrap();
+        assert_eq!(prefixed.runs, 1);
+        let provider = store
+            .harness_metrics(&HarnessMetricsQuery {
+                model: Some("gpt-fixture".into()),
+                ..range()
+            })
+            .unwrap();
+        assert_eq!(provider.runs, 2);
+
+        let empty = store
+            .harness_metrics(&HarnessMetricsQuery {
+                since_ms: NOW,
+                until_ms: NOW + DAY_MS,
+                ..HarnessMetricsQuery::default()
+            })
+            .unwrap();
+        assert_eq!(empty.runs, 0);
+        assert_eq!(empty.step_latency.p50_ms, None);
+        assert_eq!(empty.avg_steps_per_run, None);
+        assert!(store
+            .harness_metrics(&HarnessMetricsQuery {
+                since_ms: NOW,
+                until_ms: NOW,
+                ..HarnessMetricsQuery::default()
+            })
+            .is_err());
+    }
+
+    #[test]
+    fn first_token_accepts_relative_and_absolute_timestamps() {
+        let relative = model_timing(&json!({ "started_at_ms": 1_000_000, "first_token_ms": 250 }));
+        assert_eq!(relative.first_token_ms, Some(250));
+        let absolute =
+            model_timing(&json!({ "started_at_ms": 1_000_000, "first_token_ms": 1_000_400 }));
+        assert_eq!(absolute.first_token_ms, Some(400));
+        assert_eq!(absolute.attempts, 1);
+        assert_eq!(percentiles(vec![5, 1, 3, 2, 4]).p50_ms, Some(3));
+        assert_eq!(percentiles((1..=20).collect()).p95_ms, Some(19));
     }
 
     #[test]

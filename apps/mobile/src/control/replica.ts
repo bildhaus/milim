@@ -273,6 +273,34 @@ function compactText(value: string, max = 140): string {
   return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text;
 }
 
+/** Drop the last `bytes` UTF-8 bytes; Rust counts discarded stream output in bytes. */
+function dropTrailingUtf8Bytes(text: string, bytes: number): string {
+  let remaining = bytes;
+  let end = text.length;
+  while (remaining > 0 && end > 0) {
+    const code = text.charCodeAt(end - 1);
+    const pair = end >= 2 && code >= 0xdc00 && code <= 0xdfff &&
+      (text.codePointAt(end - 2) ?? 0) >= 0x10000;
+    if (pair) {
+      end -= 2;
+      remaining -= 4;
+    } else {
+      end -= 1;
+      remaining -= code < 0x80 ? 1 : code < 0x800 ? 2 : 3;
+    }
+  }
+  return text.slice(0, end);
+}
+
+function retryLabel(data: Record<string, unknown>): string {
+  const cause = stringField(data, 'reason').replace(/\s*\(\d{3}\)$/, '');
+  const phrase = cause === 'rate limited'
+    ? 'rate limit'
+    : cause === 'provider overloaded' ? 'provider overload' : cause || 'provider error';
+  const attempt = numberField(data, 'attempt') ?? 1;
+  return `Retried after ${phrase} (attempt ${attempt})`;
+}
+
 function humanize(value: string): string {
   const text = value.replaceAll('-', '_').split('_').filter(Boolean).join(' ');
   return text ? text[0].toUpperCase() + text.slice(1) : 'Activity update';
@@ -447,6 +475,22 @@ function statusRow(item: TimelineItemV1, data: Record<string, unknown>): Project
       label: message || 'Runtime notice',
       detail: stringField(data, 'detail'),
       status: level === 'error' ? 'failed' : level === 'warning' ? 'warning' : 'completed',
+      icon: 'status',
+    };
+  }
+  if (item.type === 'context_compacted') {
+    const elided = numberField(data, 'elided_tool_results') ?? 0;
+    const summarized = numberField(data, 'summarized_messages') ?? 0;
+    return {
+      id: `activity-row-${item.id}`,
+      kind: 'status',
+      seq: item.seq,
+      label: 'Context compacted',
+      detail: [
+        elided ? `${elided} older tool output${elided === 1 ? '' : 's'} elided` : '',
+        summarized ? `${summarized} message${summarized === 1 ? '' : 's'} summarized` : '',
+      ].filter(Boolean).join(', '),
+      status: 'completed',
       icon: 'status',
     };
   }
@@ -635,6 +679,33 @@ export function projectTranscript(
       streaming.set(item.run_id, message);
       continue;
     }
+    if (item.type === 'provider_retry' && item.run_id) {
+      // The failed attempt's partial output is not part of the answer.
+      const message = streaming.get(item.run_id);
+      if (message) {
+        message.content = dropTrailingUtf8Bytes(
+          message.content,
+          numberField(data, 'discarded_content_bytes') ?? 0,
+        );
+        message.reasoning = dropTrailingUtf8Bytes(
+          message.reasoning,
+          numberField(data, 'discarded_reasoning_bytes') ?? 0,
+        );
+      }
+      const group = groupFor(item);
+      if (group) {
+        group.rows.push({
+          id: `activity-row-${item.id}`,
+          kind: 'status',
+          seq: item.seq,
+          label: retryLabel(data),
+          detail: '',
+          status: 'completed',
+          icon: 'status',
+        });
+      }
+      continue;
+    }
     if (item.type === 'message' && typeof data.id === 'string') {
       const role = data.role;
       if (role !== 'user' && role !== 'assistant' && role !== 'system') continue;
@@ -694,7 +765,9 @@ export function projectTranscript(
         label: failed
           ? 'Approval failed'
           : resolved
-            ? decision === 'approve' ? 'Approved' : 'Denied'
+            ? stringField(data, 'reason') === 'timed_out'
+              ? 'Approval timed out'
+              : decision === 'approve' ? 'Approved' : 'Denied'
             : copy.label,
         detail: failed ? compactText(stringField(data, 'message')) : copy.detail,
         approval: resolved || failed ? null : pending,

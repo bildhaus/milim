@@ -3954,23 +3954,6 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .agent-meta { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; flex: 1; }
 .agents-form { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; max-height: none; }
 
-/* Agent avatar text badges */
-.agent-badge {
-  width: 22px;
-  height: 22px;
-  flex: none;
-  display: grid;
-  place-items: center;
-  border-radius: 8px;
-  background: transparent;
-  border: 1px solid var(--border-secondary);
-  color: var(--primary-text);
-  font-size: 12px;
-  font-weight: 700;
-  line-height: 1;
-  text-transform: uppercase;
-  overflow: hidden;
-}
 .avatar-input-row { position: relative; display: flex; align-items: center; gap: 8px; }
 .avatar-input-row .css-input { flex: 1; min-width: 0; }
 .avatar-preview { width: 30px; height: 30px; font-size: 14px; }

@@ -42,6 +42,8 @@ import {
   isOpenCodeModel,
   isPiModel,
   listWorkspaceFiles,
+  listCustomSlashCommands,
+  expandCustomSlashCommand,
   listModelsDetailed,
   listProviders,
   listTools,
@@ -85,6 +87,7 @@ import {
   type ArtifactWritePreview,
   type ChatArtifact,
   type ChatAttachment,
+  type CustomSlashCommand,
   type ChatApprovalRequest,
   type ChatMessage,
   type ChatStreamPart,
@@ -1199,6 +1202,8 @@ type ChatNotice = {
   detail?: string;
   providerError?: ProviderErrorInfo;
   retryAfterSecs?: number;
+  /** Safety checkpoint taken by a restore; the notice offers to undo it. */
+  undoCheckpoint?: WorkspaceCheckpoint;
 };
 
 type RunTurnResult = {
@@ -1555,6 +1560,12 @@ export function ChatView({
     null,
   );
   const [chatNotice, setChatNotice] = useState<ChatNotice | null>(null);
+  const [customSlashCommands, setCustomSlashCommands] = useState<CustomSlashCommand[]>([]);
+  // Custom commands expand asynchronously; send with the latest render's state.
+  const sendComposerTextRef = useRef(sendComposerText);
+  useEffect(() => {
+    sendComposerTextRef.current = sendComposerText;
+  });
   const [modelPickerRequest, setModelPickerRequest] = useState(0);
   const retryInSecs = useRetryCountdown(chatNotice?.retryAfterSecs, chatNotice);
   const [goalPanelOpen, setGoalPanelOpen] = useState(false);
@@ -2266,7 +2277,11 @@ export function ChatView({
     : null;
   const composerActionLabel = composerActionText(composerAction, retryInSecs);
   const composerNoticeDismissible = composerNoticeIsDismissible(composerNotice, proactiveModelBlocker);
+  const composerUndoCheckpoint = composerNotice && composerNotice !== proactiveModelBlocker
+    ? (composerNotice as ChatNotice).undoCheckpoint
+    : undefined;
   useEffect(() => {
+    if (chatNotice?.undoCheckpoint) return;
     const delay = composerNoticeAutoDismissMs(chatNotice);
     if (delay == null) return;
     const timer = window.setTimeout(() => {
@@ -3536,6 +3551,26 @@ export function ChatView({
     })();
     return () => {
       cancelled = true;
+    };
+  }, [folder]);
+
+  // Custom slash commands come from the thread folder and the home folder;
+  // refresh them when the folder changes or the window becomes visible again.
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = () => {
+      void listCustomSlashCommands(folder).then((commands) => {
+        if (!cancelled) setCustomSlashCommands(commands);
+      });
+    };
+    refresh();
+    const onVisible = () => {
+      if (documentVisible()) refresh();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [folder]);
 
@@ -6291,7 +6326,29 @@ export function ChatView({
       setChatNotice({
         tone: "info",
         message: "Workspace restored to before this turn.",
+        undoCheckpoint: result.undo_checkpoint
+          ? { ...checkpoint, ref: result.undo_checkpoint, createdAt: Date.now() }
+          : undefined,
       });
+      openGitPanel();
+    } catch (error) {
+      setChatNotice({
+        tone: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  async function undoWorkspaceRestore(checkpoint: WorkspaceCheckpoint) {
+    if (busy) return;
+    setChatNotice(null);
+    try {
+      await setWorkspace(checkpoint.folder);
+      const result = await runWorkspaceGitAction("restore_checkpoint", {
+        checkpoint: checkpoint.ref,
+      });
+      if (!result.ok) throw new Error(result.message);
+      setChatNotice({ tone: "info", message: "Workspace restore undone." });
       openGitPanel();
     } catch (error) {
       setChatNotice({
@@ -7158,6 +7215,8 @@ export function ChatView({
       append,
       appendThinking,
       flush: () => streamBatcher.flush(),
+      discardStreamed: (contentBytes, reasoningBytes) =>
+        store.discardStreamContent(id, assistantMessageId, contentBytes, reasoningBytes),
       appendStreamEvent: (part) =>
         store.appendStreamEvent(id, assistantMessageId, part),
       completeStreamEvent: (name, part, callId) =>
@@ -7465,7 +7524,27 @@ export function ChatView({
   }
 
   function send() {
-    const text = input.trim();
+    sendComposerText(input);
+  }
+
+  async function runCustomSlashCommand(command: CustomSlashCommand, argument: string) {
+    try {
+      const prompt = await expandCustomSlashCommand(folder, command.name, argument);
+      if (!prompt.trim()) {
+        setChatNotice({ tone: "error", message: `/${command.name} expanded to an empty prompt.` });
+        return;
+      }
+      sendComposerTextRef.current(prompt);
+    } catch (error) {
+      setChatNotice({
+        tone: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  function sendComposerText(rawText: string) {
+    const text = rawText.trim();
     if (!text && pendingAttachments.length === 0 && pendingReviewComments.length === 0) return;
     if (rejectUnsupportedImageAttachments(pendingAttachments)) return;
     if (compactionInFlightRef.current) {
@@ -8747,6 +8826,15 @@ export function ChatView({
                     {composerActionLabel}
                   </button>
                 )}
+                {composerUndoCheckpoint && (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void undoWorkspaceRestore(composerUndoCheckpoint)}
+                  >
+                    Undo restore
+                  </button>
+                )}
                 {composerNoticeDetail && (
                   <details className="dock-notice-details">
                     <summary>Technical details</summary>
@@ -9014,6 +9102,8 @@ export function ChatView({
                   )
                 }
                 onSlashCommand={runSlashCommand}
+                customCommands={customSlashCommands}
+                onCustomCommand={(command, argument) => void runCustomSlashCommand(command, argument)}
                 agents={agents}
                 activeAgentId={activeAgentId}
                 onAgent={(agent) => {

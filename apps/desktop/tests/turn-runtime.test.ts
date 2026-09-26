@@ -518,6 +518,60 @@ assert.equal(agentUsage?.total_tokens, 15);
 assert(agentFlushes >= 5, "agent handler should flush before event parts");
 assert(snapshots >= 6, "agent handler should snapshot state-changing events");
 
+{
+  const retryRun: RunTrace = { model: "m", startedAt: 1, steps: [], status: "running" };
+  const discarded: Array<[number, number]> = [];
+  const appended: ChatStreamPart[] = [];
+  const completed: Array<{ name: string; part: ChatStreamPart }> = [];
+  const handler = createAgentRunEventHandler({
+    runRef: { current: retryRun },
+    append: () => {},
+    appendThinking: () => {},
+    flush: () => {},
+    discardStreamed: (contentBytes, reasoningBytes) => discarded.push([contentBytes, reasoningBytes]),
+    appendStreamEvent: (part) => appended.push(part),
+    completeStreamEvent: (name, part) => completed.push({ name, part }),
+    appendMemoryNotice: () => {},
+    upsertChildThread: () => {},
+    updateChildThread: () => {},
+    captureUsage: () => {},
+    captureUsageDelta: () => {},
+    snapshot: () => {},
+  });
+  handler({ type: "token", text: "partial" });
+  handler({
+    type: "provider_retry",
+    attempt: 1,
+    delay_ms: 1500,
+    reason: "provider overloaded (529)",
+    discarded_content_bytes: 7,
+    discarded_reasoning_bytes: 0,
+  });
+  assert.deepEqual(discarded, [[7, 0]], "a retry discards the failed attempt's streamed text");
+  assert.deepEqual(retryRun.retry, { attempt: 1, delayMs: 1500, reason: "provider overloaded (529)" });
+  assert.equal(
+    appended[0]?.kind === "event" ? appended[0].label : undefined,
+    "Retrying after provider overload (attempt 1, 1.5s)...",
+  );
+  handler({ type: "token", text: "again" });
+  assert.equal(retryRun.retry, undefined, "the run timeline clears the retry once output resumes");
+  assert.deepEqual(
+    completed.map(({ name, part }) => [name, part.kind === "event" ? part.label : "", part.kind === "event" ? part.status : ""]),
+    [["provider_retry", "Retried after provider overload (attempt 1)", "done"]],
+  );
+  handler({ type: "context_compacted", elided_tool_results: 1, summarized_messages: 0 });
+  assert.deepEqual(retryRun.compaction, { elidedToolResults: 1, summarizedMessages: 0 });
+  assert.equal(
+    appended[1]?.kind === "event" ? appended[1].label : undefined,
+    "Context compacted: 1 older tool output elided",
+  );
+  handler({ type: "tool_approval_resolved", approval_id: "a1", decision: "deny", reason: "timed_out" });
+  assert.equal(
+    completed.at(-1)?.part.kind === "event" ? (completed.at(-1)?.part as { label: string }).label : undefined,
+    "Approval timed out",
+  );
+}
+
 const modelOrder: string[] = [];
 const modelSignal = new AbortController().signal;
 let streamedMessages: ChatMessage[] = [];
@@ -670,7 +724,7 @@ const accountPromptContext = {
   useTools: false,
   accountRuntimeMayUseTools: true,
   toolMode: "none",
-  enabledTools: ["milim_skill_search", "milim_skill_read"],
+  enabledTools: ["milim_skill_search", "load_skill"],
   skillMode: "custom",
   enabledSkills: ["review"],
   runMemoryContext: {},
@@ -746,7 +800,7 @@ const codexResult = await runAccountRuntimeTurn({
     assert.equal(request.milim_context?.tool_context.interactive_tool_approval, false);
     assert.equal(request.milim_context?.tool_context.plan_mode, false);
     assert.deepEqual(request.images, [{ media_type: "image/png", data: "AAAA" }]);
-    assert.deepEqual(request.milim_context?.enabled_tools, ["milim_skill_search", "milim_skill_read"]);
+    assert.deepEqual(request.milim_context?.enabled_tools, ["milim_skill_search", "load_skill"]);
     assert.equal(request.milim_context?.skill_mode, "custom");
     assert.deepEqual(request.milim_context?.enabled_skills, ["review"]);
     assert.equal(request.developer_instructions, "System rule");

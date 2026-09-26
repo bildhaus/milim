@@ -1,0 +1,8 @@
+{
+  "id": "grep-quota-status",
+  "title": "Find the handler that returns the wrong quota status",
+  "category": "grep-and-fix",
+  "prompt": "Customers report that when they exceed their usage quota, the API answers with HTTP 500 instead of 429 Too Many Requests. Find where that happens in this repository and fix it so the response follows the same error conventions as the rest of the service. Keep the change minimal.",
+  "timeout_s": 420,
+  "check": "node check.mjs"
+}

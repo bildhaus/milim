@@ -36,7 +36,7 @@ export function skillDiscoveryMessage(
   const loadedMessage = skillInstructionMessage(loaded)?.content ?? "";
   const catalog = candidates.map((skill) => {
     const description = compactDescription(skill.description);
-    return `- ${skill.name} (id: ${skill.id})${description ? `: ${description}` : ""}`;
+    return `- ${skill.name}${description ? `: ${description}` : ""}`;
   }).join("\n");
   return {
     role: "system",
@@ -45,7 +45,7 @@ export function skillDiscoveryMessage(
       catalog ? [
         "Relevant milim skills available for this turn:",
         catalog,
-        "Skill bodies are not in context. Before following one, call milim_skill_read with its id. Use milim_skill_search if these candidates are insufficient.",
+        "Skill bodies are not in context. Before following one, call load_skill with its name. Use milim_skill_search if these candidates are insufficient.",
       ].join("\n") : "",
     ].filter(Boolean).join("\n\n"),
   };

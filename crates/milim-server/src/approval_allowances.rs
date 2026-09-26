@@ -3,12 +3,17 @@
 //! A rule is created only by an explicit `approval.resolve` with
 //! `scope: "thread"`. It is keyed by tool name, except for command-bearing
 //! requests, which are keyed by the exact command string so a shell tool is
-//! never blanket-allowed. Rules live in canonical user state rather than in
-//! the desktop-synchronized session JSON, so a stale client snapshot cannot
-//! drop or invent them.
+//! never blanket-allowed. With `allowance_match: "prefix"`, a simple command
+//! from a short list of common developer tools (`cargo test`, `npm run`,
+//! `git diff`, ...) is keyed by its first two words instead, and covers later
+//! simple commands that start with those words. Chained, piped, redirected,
+//! or substituted commands never match a prefix rule. Rules live in canonical
+//! user state rather than in the desktop-synchronized session JSON, so a
+//! stale client snapshot cannot drop or invent them.
 
 use milim_core::Result;
 use milim_storage::UserDataStore;
+use milim_tools::shell_command::{prefix_matches, simple_words, ShellDialect};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -36,14 +41,40 @@ const SHELL_TOOL_NAMES: &[&str] = &[
     "local_shell",
 ];
 
+/// Programs whose `<program> <subcommand>` families can be allowed as a
+/// prefix, with the subcommands that qualify.
+const PREFIX_COMMANDS: &[(&str, &[&str])] = &[
+    (
+        "cargo",
+        &[
+            "bench", "build", "check", "clippy", "doc", "fmt", "nextest", "test", "tree",
+        ],
+    ),
+    ("npm", &["run", "test"]),
+    ("pnpm", &["build", "lint", "run", "test"]),
+    ("yarn", &["build", "lint", "run", "test"]),
+    ("bun", &["run", "test"]),
+    ("go", &["build", "test", "vet"]),
+    ("dotnet", &["build", "test"]),
+    ("git", &["diff", "log", "show", "status"]),
+];
+
+/// POSIX shells whose `<shell> -c <script>` wrapper is looked through, as
+/// account runtimes such as Codex report commands that way.
+const WRAPPER_SHELLS: &[&str] = &["bash", "sh", "zsh"];
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ApprovalAllowance {
-    /// Stable identity: `tool:<name>` or `command:<exact command>`.
+    /// Stable identity: `tool:<name>`, `command:<exact command>`, or
+    /// `prefix:<leading words>`.
     pub key: String,
     /// Tool name as the runtime reported it when the rule was created.
     pub tool: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// Leading words a later simple command must start with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
     pub created_at_ms: i64,
 }
 
@@ -71,6 +102,7 @@ pub(crate) fn allowance_for(kind: &str, name: &str, arguments: &str) -> Option<A
             key: format!("command:{command}"),
             tool: tool.to_string(),
             command: Some(command),
+            prefix: None,
             created_at_ms: 0,
         });
     }
@@ -82,22 +114,103 @@ pub(crate) fn allowance_for(kind: &str, name: &str, arguments: &str) -> Option<A
         key: format!("tool:{lowered}"),
         tool: tool.to_string(),
         command: None,
+        prefix: None,
         created_at_ms: 0,
     })
+}
+
+/// The prefix rule "Allow for this chat" could create for this request, or
+/// `None` when it is not a simple command of a listed developer tool.
+pub(crate) fn prefix_allowance_for(
+    kind: &str,
+    name: &str,
+    arguments: &str,
+) -> Option<ApprovalAllowance> {
+    if kind != "command" {
+        return None;
+    }
+    let tool = name.trim();
+    let command = command_string(arguments)?;
+    if tool.is_empty() || command.chars().count() > MAX_COMMAND_CHARS {
+        return None;
+    }
+    let dialect = dialect_for(tool, &command);
+    let words = simple_words(&effective_command(&command, dialect), dialect)?;
+    let [program, subcommand, ..] = words.as_slice() else {
+        return None;
+    };
+    PREFIX_COMMANDS
+        .iter()
+        .any(|(candidate, subcommands)| {
+            candidate == program && subcommands.contains(&subcommand.as_str())
+        })
+        .then(|| ApprovalAllowance {
+            key: format!("prefix:{program} {subcommand}"),
+            tool: tool.to_string(),
+            command: None,
+            prefix: Some(format!("{program} {subcommand}")),
+            created_at_ms: 0,
+        })
+}
+
+fn dialect_for(tool: &str, command: &str) -> ShellDialect {
+    let lowered = tool.to_ascii_lowercase();
+    if lowered.contains("powershell") {
+        ShellDialect::PowerShell
+    } else if lowered == "bash" || starts_with_wrapper_shell(command) {
+        // Account runtimes report `/bin/zsh -lc '…'` whatever the host is.
+        ShellDialect::Posix
+    } else {
+        ShellDialect::host()
+    }
+}
+
+fn starts_with_wrapper_shell(command: &str) -> bool {
+    command
+        .split_whitespace()
+        .next()
+        .map(|first| first.rsplit(['/', '\\']).next().unwrap_or(first))
+        .is_some_and(|shell| WRAPPER_SHELLS.contains(&shell))
+}
+
+/// The script inside a `<shell> -c <script>` wrapper, or the command itself.
+fn effective_command(command: &str, dialect: ShellDialect) -> String {
+    if dialect == ShellDialect::Posix {
+        if let Some(words) = simple_words(command, dialect) {
+            if let [shell, flag, script] = words.as_slice() {
+                let shell = shell.rsplit('/').next().unwrap_or(shell);
+                if WRAPPER_SHELLS.contains(&shell) && matches!(flag.as_str(), "-c" | "-lc") {
+                    return script.clone();
+                }
+            }
+        }
+    }
+    command.to_string()
 }
 
 fn is_shell_like(name: &str) -> bool {
     name.contains("shell") || name.contains("bash") || name.contains("terminal")
 }
 
-/// The exact command a request would run, if its arguments carry one.
-fn command_text(arguments: &str) -> Option<String> {
+fn command_value(arguments: &str) -> Option<Value> {
     let value: Value = serde_json::from_str(arguments).ok()?;
-    let command = value
+    value
         .get("command")
         .or_else(|| value.get("cmd"))
-        .or_else(|| value.pointer("/input/command"))?;
-    let text = match command {
+        .or_else(|| value.pointer("/input/command"))
+        .cloned()
+}
+
+/// The command line a request would run, when it is a single string.
+fn command_string(arguments: &str) -> Option<String> {
+    let text = command_value(arguments)?.as_str()?.trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+/// The exact command a request would run, if its arguments carry one.
+fn command_text(arguments: &str) -> Option<String> {
+    let command = command_value(arguments)?;
+    let text = match &command {
         Value::String(text) => text.trim().to_string(),
         // Argument vectors keep their exact boundaries: `["a b"]` and
         // `["a", "b"]` are different commands.
@@ -175,15 +288,29 @@ pub(crate) fn matching(
     arguments: &str,
 ) -> Option<ApprovalAllowance> {
     let candidate = allowance_for(kind, name, arguments)?;
+    if let Some(exact) = allowances.iter().find(|item| item.key == candidate.key) {
+        return Some(exact.clone());
+    }
+    if kind != "command" {
+        return None;
+    }
+    let command = command_string(arguments)?;
+    let dialect = dialect_for(name.trim(), &command);
+    let command = effective_command(&command, dialect);
     allowances
         .iter()
-        .find(|item| item.key == candidate.key)
+        .find(|item| {
+            item.prefix
+                .as_deref()
+                .is_some_and(|prefix| prefix_matches(prefix, &command, dialect))
+        })
         .cloned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn shell_requests_are_keyed_by_exact_command() {
@@ -210,6 +337,96 @@ mod tests {
     }
 
     #[test]
+    fn prefix_rules_cover_arguments_but_never_chaining() {
+        let rule = prefix_allowance_for("command", "shell", r#"{"command":"cargo test -p core"}"#)
+            .expect("prefix rule");
+        assert_eq!(rule.key, "prefix:cargo test");
+        assert_eq!(rule.prefix.as_deref(), Some("cargo test"));
+        let rules = vec![rule];
+        for covered in [
+            "cargo test",
+            "cargo test --release -- parser",
+            "cargo  test 2>&1",
+        ] {
+            let arguments = json!({ "command": covered }).to_string();
+            assert!(
+                matching(&rules, "command", "shell", &arguments).is_some(),
+                "{covered}"
+            );
+        }
+        for refused in [
+            "cargo test && rm -rf target",
+            "cargo test; curl example.invalid",
+            "cargo test | tee out.txt",
+            "cargo test > out.txt",
+            "cargo test $(whoami)",
+            "cargo build",
+            "cargo",
+        ] {
+            let arguments = json!({ "command": refused }).to_string();
+            assert!(
+                matching(&rules, "command", "shell", &arguments).is_none(),
+                "{refused}"
+            );
+        }
+        // Account runtimes wrap commands in a shell; the script is what counts.
+        assert!(matching(
+            &rules,
+            "command",
+            "command",
+            r#"{"command":"/bin/zsh -lc 'cargo test --workspace'"}"#
+        )
+        .is_some());
+        assert!(matching(
+            &rules,
+            "command",
+            "command",
+            r#"{"command":"/bin/zsh -lc 'cargo test && rm -rf ~'"}"#
+        )
+        .is_none());
+        assert!(matching(
+            &rules,
+            "file_change",
+            "shell",
+            r#"{"command":"cargo test"}"#
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn prefix_rules_need_a_simple_command_of_a_listed_tool() {
+        assert!(
+            prefix_allowance_for("command", "shell", r#"{"command":"rm -rf target"}"#).is_none()
+        );
+        assert!(
+            prefix_allowance_for("command", "shell", r#"{"command":"git push origin"}"#).is_none()
+        );
+        assert!(
+            prefix_allowance_for("command", "shell", r#"{"command":"cargo test && ls"}"#).is_none()
+        );
+        assert!(
+            prefix_allowance_for("command", "shell", r#"{"command":["cargo","test"]}"#).is_none()
+        );
+        assert!(
+            prefix_allowance_for("file_change", "shell", r#"{"command":"cargo test"}"#).is_none()
+        );
+        assert_eq!(
+            prefix_allowance_for("command", "Bash", r#"{"command":"pnpm test --filter ui"}"#)
+                .and_then(|rule| rule.prefix),
+            Some("pnpm test".into())
+        );
+        assert_eq!(
+            prefix_allowance_for(
+                "command",
+                "command",
+                r#"{"command":"bash -c 'npm run lint'"}"#
+            )
+            .and_then(|rule| rule.prefix),
+            Some("npm run".into())
+        );
+    }
+
+    #[test]
     fn shell_tools_without_a_command_are_never_blanket_allowed() {
         assert!(allowance_for("command", "shell", "{}").is_none());
         assert!(allowance_for("command", "Bash", "not json").is_none());
@@ -228,5 +445,25 @@ mod tests {
         );
         assert!(allowance_for("permission_elevation", "permissions", "{}").is_none());
         assert!(allowance_for("mcp_form", "MCP github", "{}").is_none());
+    }
+
+    #[test]
+    fn wrapper_shell_commands_parse_as_posix_on_every_host() {
+        for command in [
+            "/bin/zsh -lc 'cargo test'",
+            "bash -c 'npm run lint'",
+            "sh -c ls",
+        ] {
+            assert_eq!(
+                dialect_for("command", command),
+                ShellDialect::Posix,
+                "{command}"
+            );
+        }
+        assert_eq!(
+            dialect_for("powershell", "bash -c ls"),
+            ShellDialect::PowerShell
+        );
+        assert_eq!(dialect_for("shell", "cargo test"), ShellDialect::host());
     }
 }

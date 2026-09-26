@@ -6,10 +6,11 @@ use serde_json::{json, Value};
 
 use milim_core::{Error, Result};
 
+use crate::html::{html_to_text, TextFlavor};
 use crate::{Tool, ToolConcurrency, ToolEffect, ToolUiDescriptor};
 
-/// Max characters returned by `http_fetch`.
-const MAX_FETCH_CHARS: usize = 100_000;
+/// Max characters of rendered content returned by one `http_fetch` page.
+const MAX_FETCH_CHARS: usize = 60_000;
 const MAX_FETCH_BYTES: usize = 1024 * 1024;
 const MAX_REDIRECTS: usize = 5;
 const MAX_CHART_SERIES: usize = 8;
@@ -402,8 +403,78 @@ fn chart_number_format_schema(description: &str) -> Value {
     })
 }
 
-/// Fetch an `http(s)` URL and return its status + (truncated) body.
+/// Fetch an `http(s)` URL and return its status and a readable page of its body.
 pub struct HttpFetchTool;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FetchFormat {
+    Markdown,
+    Text,
+    Raw,
+}
+
+impl FetchFormat {
+    fn parse(value: Option<&Value>) -> Result<Self> {
+        match value {
+            None | Some(Value::Null) => Ok(Self::Markdown),
+            Some(Value::String(value)) => match value.as_str() {
+                "markdown" => Ok(Self::Markdown),
+                "text" => Ok(Self::Text),
+                "raw" => Ok(Self::Raw),
+                _ => Err(Error::InvalidRequest(
+                    "format must be markdown, text, or raw".to_string(),
+                )),
+            },
+            Some(_) => Err(Error::InvalidRequest(
+                "format must be markdown, text, or raw".to_string(),
+            )),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Markdown => "markdown",
+            Self::Text => "text",
+            Self::Raw => "raw",
+        }
+    }
+}
+
+fn is_html(content_type: &str, body: &str) -> bool {
+    let content_type = content_type.to_ascii_lowercase();
+    if content_type.contains("html") {
+        return true;
+    }
+    if !content_type.is_empty() && !content_type.starts_with("text/plain") {
+        return false;
+    }
+    let head = body.trim_start().get(..512).unwrap_or(body.trim_start());
+    let head = head.to_ascii_lowercase();
+    head.starts_with("<!doctype html") || head.starts_with("<html")
+}
+
+/// Render the fetched body in the requested format and cut one page from it.
+fn fetch_page(
+    body: &str,
+    content_type: &str,
+    url: &reqwest::Url,
+    format: FetchFormat,
+    offset: usize,
+) -> (String, usize, &'static str) {
+    let (content, rendered) = if format != FetchFormat::Raw && is_html(content_type, body) {
+        let flavor = if format == FetchFormat::Markdown {
+            TextFlavor::Markdown
+        } else {
+            TextFlavor::Plain
+        };
+        (html_to_text(body, Some(url), flavor), format.as_str())
+    } else {
+        (body.to_string(), "raw")
+    };
+    let total = content.chars().count();
+    let page = content.chars().skip(offset).take(MAX_FETCH_CHARS).collect();
+    (page, total, rendered)
+}
 
 #[async_trait]
 impl Tool for HttpFetchTool {
@@ -412,13 +483,25 @@ impl Tool for HttpFetchTool {
     }
 
     fn description(&self) -> &str {
-        "Fetch an http(s) URL and return its status code and text body."
+        "Fetch a public http(s) URL. HTML pages are returned as readable Markdown by default; JSON and plain text pass through unchanged. Long content is paged with offset."
     }
 
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
-            "properties": { "url": { "type": "string", "description": "The http(s) URL to fetch." } },
+            "properties": {
+                "url": { "type": "string", "description": "The http(s) URL to fetch." },
+                "format": {
+                    "type": "string",
+                    "enum": ["markdown", "text", "raw"],
+                    "description": "How to return HTML: markdown (default) keeps headings, lists, links, code, and tables; text drops markup; raw returns the HTML source."
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Character offset into the rendered content, to continue a truncated page."
+                }
+            },
             "required": ["url"]
         })
     }
@@ -436,6 +519,13 @@ impl Tool for HttpFetchTool {
             .get("url")
             .and_then(Value::as_str)
             .ok_or_else(|| Error::InvalidRequest("missing 'url' argument".to_string()))?;
+        let format = FetchFormat::parse(args.get("format"))?;
+        let offset = match args.get("offset") {
+            None | Some(Value::Null) => 0,
+            Some(value) => value.as_u64().ok_or_else(|| {
+                Error::InvalidRequest("offset must be a non-negative integer".to_string())
+            })? as usize,
+        };
         let mut url = reqwest::Url::parse(url)
             .map_err(|error| Error::InvalidRequest(format!("invalid URL: {error}")))?;
         let mut resp = None;
@@ -465,8 +555,14 @@ impl Tool for HttpFetchTool {
         }
         let mut resp = resp.ok_or_else(|| Error::Upstream("request failed".to_string()))?;
         let status = resp.status().as_u16();
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_string();
         let mut bytes = Vec::new();
-        let mut body_truncated = false;
+        let mut bytes_truncated = false;
         while let Some(chunk) = resp
             .chunk()
             .await
@@ -475,19 +571,62 @@ impl Tool for HttpFetchTool {
             let remaining = MAX_FETCH_BYTES.saturating_sub(bytes.len());
             if chunk.len() > remaining {
                 bytes.extend_from_slice(&chunk[..remaining]);
-                body_truncated = true;
+                bytes_truncated = true;
                 break;
             }
             bytes.extend_from_slice(&chunk);
         }
         let body = String::from_utf8_lossy(&bytes);
-        let truncated: String = body.chars().take(MAX_FETCH_CHARS).collect();
-        body_truncated |= body.chars().count() > MAX_FETCH_CHARS;
-        Ok(json!({ "status": status, "body": truncated, "truncated": body_truncated }))
+        let (page, total_chars, rendered) = fetch_page(&body, &content_type, &url, format, offset);
+        let end = offset.saturating_add(page.chars().count());
+        let next_offset = (end < total_chars).then_some(end);
+        Ok(json!({
+            "status": status,
+            "url": url.as_str(),
+            "content_type": content_type,
+            "format": rendered,
+            "body": page,
+            "offset": offset,
+            "total_chars": total_chars,
+            "next_offset": next_offset,
+            "truncated": next_offset.is_some() || bytes_truncated,
+            "bytes_truncated": bytes_truncated,
+        }))
+    }
+
+    fn model_text(&self, result: &Value) -> Option<String> {
+        let status = result.get("status")?.as_u64()?;
+        let url = result.get("url")?.as_str()?;
+        let body = result.get("body")?.as_str()?;
+        let content_type = result
+            .get("content_type")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("unknown type");
+        let offset = result.get("offset").and_then(Value::as_u64).unwrap_or(0);
+        let total = result
+            .get("total_chars")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let mut text = format!("HTTP {status} {url} ({content_type})\n\n{body}");
+        if let Some(next) = result.get("next_offset").and_then(Value::as_u64) {
+            text.push_str(&format!(
+                "\n\n[Showing characters {offset}-{next} of {total}. Call http_fetch with offset={next} to continue.]"
+            ));
+        } else if offset > 0 {
+            text.push_str(&format!("\n\n[End of content at character {total}.]"));
+        }
+        if result.get("bytes_truncated").and_then(Value::as_bool) == Some(true) {
+            text.push_str(&format!(
+                "\n[The response exceeded {} MiB; only the beginning was downloaded.]",
+                MAX_FETCH_BYTES / (1024 * 1024)
+            ));
+        }
+        Some(text)
     }
 }
 
-async fn public_http_client(url: &reqwest::Url) -> Result<reqwest::Client> {
+pub(crate) async fn public_http_client(url: &reqwest::Url) -> Result<reqwest::Client> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err(Error::InvalidRequest(
             "only http(s) URLs are allowed".to_string(),
@@ -561,6 +700,92 @@ mod tests {
         assert!(!is_public_ip("169.254.169.254".parse().unwrap()));
         assert!(!is_public_ip("fc00::1".parse().unwrap()));
         assert!(is_public_ip("8.8.8.8".parse().unwrap()));
+    }
+
+    #[test]
+    fn fetch_pages_render_html_and_pass_through_other_types() {
+        let url = reqwest::Url::parse("https://example.com/a/").unwrap();
+        let html = "<html><head><title>T</title></head><body><p>Hi <a href=\"b\">there</a></p><script>x()</script></body></html>";
+        let (page, total, format) = fetch_page(
+            html,
+            "text/html; charset=utf-8",
+            &url,
+            FetchFormat::Markdown,
+            0,
+        );
+        assert_eq!(page, "# T\n\nHi [there](https://example.com/a/b)");
+        assert_eq!((total, format), (page.chars().count(), "markdown"));
+        let (page, _, format) = fetch_page(html, "text/html", &url, FetchFormat::Text, 0);
+        assert_eq!((page.as_str(), format), ("T\n\nHi there", "text"));
+        let (page, _, format) = fetch_page(html, "text/html", &url, FetchFormat::Raw, 0);
+        assert_eq!((page.as_str(), format), (html, "raw"));
+
+        let json_body = r#"{"a": "<b>not html</b>"}"#;
+        let (page, _, format) = fetch_page(
+            json_body,
+            "application/json",
+            &url,
+            FetchFormat::Markdown,
+            0,
+        );
+        assert_eq!((page.as_str(), format), (json_body, "raw"));
+        let (page, _, _) = fetch_page(
+            "plain <b>text</b>",
+            "text/plain",
+            &url,
+            FetchFormat::Markdown,
+            0,
+        );
+        assert_eq!(page, "plain <b>text</b>");
+        let (page, _, format) = fetch_page(
+            "<!DOCTYPE html><p>sniffed</p>",
+            "",
+            &url,
+            FetchFormat::Markdown,
+            0,
+        );
+        assert_eq!((page.as_str(), format), ("sniffed", "markdown"));
+
+        let long = "é".repeat(MAX_FETCH_CHARS + 10);
+        let (page, total, _) = fetch_page(&long, "text/plain", &url, FetchFormat::Markdown, 0);
+        assert_eq!(
+            (page.chars().count(), total),
+            (MAX_FETCH_CHARS, MAX_FETCH_CHARS + 10)
+        );
+        let (page, _, _) = fetch_page(
+            &long,
+            "text/plain",
+            &url,
+            FetchFormat::Markdown,
+            MAX_FETCH_CHARS,
+        );
+        assert_eq!(page.chars().count(), 10);
+    }
+
+    #[tokio::test]
+    async fn fetch_rejects_bad_arguments_and_renders_paging_notes() {
+        let tool = HttpFetchTool;
+        for args in [
+            json!({ "url": "https://example.com", "format": "pdf" }),
+            json!({ "url": "https://example.com", "offset": -1 }),
+            json!({ "url": "file:///etc/passwd" }),
+        ] {
+            assert!(tool.invoke(args).await.is_err());
+        }
+        let text = tool
+            .model_text(&json!({
+                "status": 200,
+                "url": "https://example.com/",
+                "content_type": "text/html",
+                "body": "# Page",
+                "offset": 0,
+                "total_chars": 90000,
+                "next_offset": 60000,
+                "bytes_truncated": false,
+            }))
+            .unwrap();
+        assert!(text.starts_with("HTTP 200 https://example.com/ (text/html)\n\n# Page"));
+        assert!(text.ends_with("Call http_fetch with offset=60000 to continue.]"));
     }
 
     #[tokio::test]

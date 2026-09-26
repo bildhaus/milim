@@ -143,6 +143,7 @@ export function updateApprovalField(
 }
 
 export type ToolApprovalScope = "once" | "thread";
+export type ToolApprovalAllowanceMatch = "exact" | "prefix";
 
 /** Mirrors `SHELL_TOOL_NAMES` in `crates/milim-server/src/approval_allowances.rs`. */
 const SHELL_TOOL_NAMES = new Set([
@@ -189,15 +190,22 @@ function approvalCommand(detail?: string): string | null {
 
 /**
  * What "Allow for this chat" would allow, or null when the request must stay
- * one-shot. Shell-style tools are allowed only for their exact command.
+ * one-shot. Shell-style tools are allowed only for their exact command, or
+ * for the command prefix Rust offered for a simple developer-tool command.
  */
 export function approvalChatAllowance(
   part: ApprovalPart,
-): { kind: "command"; command: string } | { kind: "tool"; tool: string } | null {
+):
+  | { kind: "prefix"; prefix: string }
+  | { kind: "command"; command: string }
+  | { kind: "tool"; tool: string }
+  | null {
   const requestKind = part.approvalRequest?.kind;
   if (requestKind && requestKind !== "command" && requestKind !== "file_change") return null;
   const tool = approvalToolName(part);
   if (!tool) return null;
+  const prefix = part.allowancePrefix?.trim();
+  if (prefix && requestKind !== "file_change") return { kind: "prefix", prefix };
   const command = approvalCommand(part.detail);
   if (command) return { kind: "command", command };
   const lowered = tool.toLowerCase();

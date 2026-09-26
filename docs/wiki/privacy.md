@@ -6,7 +6,7 @@ title: Privacy and security
 summary: Local and remote data boundaries, Google Workspace access, privacy modes, redaction, blocking, bearer auth, and CORS boundaries.
 group: Local data
 order: 70
-updated: 2026-09-23
+updated: 2026-09-26
 ---
 
 Privacy settings are easiest to reason about as a routing question: what stays local, what goes to a provider, and which gate runs before a remote send.
@@ -34,10 +34,15 @@ Because image content cannot be scanned or redacted by the text privacy gate, re
 | Remote chat providers | Enforced before the provider router sends a completion request. |
 | Remote embeddings | Enforced before embedding inputs leave the machine. |
 | Remote media providers | Enforced before Replicate, fal, or OpenRouter image, video, or prompt-to-music prompts are sent. |
-| Codex runtime | Text is scanned/redacted/blocked before `/codex/run`; image pixels require Privacy Off before any bytes are decoded or written to temporary files. |
-| Installed Claude CLI | Text is scanned/redacted/blocked before `/claude/run`; image pixels require Privacy Off before the native multimodal message is built. |
-| OpenCode and Pi | Text is scanned/redacted/blocked before `/opencode/run` or `/pi/run`; image pixels require Privacy Off before native ACP/RPC input is built. |
+| Codex runtime | Prompt text is scanned/redacted/blocked before `/codex/run`; image pixels require Privacy Off before any bytes are decoded or written to temporary files. Files and output Codex reads with its own tools are not gated. |
+| Installed Claude CLI | Prompt text is scanned/redacted/blocked before `/claude/run`; image pixels require Privacy Off before the native multimodal message is built. Files and output Claude reads with its own tools are not gated. |
+| OpenCode and Pi | Prompt text is scanned/redacted/blocked before `/opencode/run` or `/pi/run`; image pixels require Privacy Off before native ACP/RPC input is built. Files and output these CLIs read with their own tools are not gated. |
+| `web_search` tool | The query is scanned before it goes to Brave Search, Tavily, or DuckDuckGo. Block refuses a query with detected PII; Redact sends placeholders that are never restored. |
 | Local Ollama or LM Studio | Not scanned by milim because the configured local runtime receives the prompt on the machine. |
+
+### Account runtime tool reads
+
+For Codex, Claude, OpenCode, and Pi, milim's gate covers only what milim sends: the prompt, developer instructions, and images. These CLIs then run their own tools inside the workspace, and the files, command output, and web pages those tools read go straight to the runtime's model provider. milim does not proxy that traffic, so Redact and Block do not apply to it. Treat a workspace opened with an account runtime as shared with that provider, keep secrets out of it, or use Guarded or Plan to limit which tools run. milim-native provider chats are different: their tool results pass through the remote completion gate before each model step.
 
 Each desktop run snapshots its selected privacy mode and canonical workspace when the request starts. That immutable context is reused for every inference iteration, tool call, delegation, approval, and retry, so changing another thread cannot redirect or reclassify an in-flight run. Legacy API clients may omit the run mode; the server then snapshots the current `POST /privacy/mode` default once at request start. An invalid explicit mode or workspace is rejected instead of falling back.
 
@@ -51,7 +56,7 @@ Canonical runs keep a local privacy-processed ledger for their lifetime. The res
 |---|---|
 | Local Ollama or LM Studio | Prompt, files, and embeddings stay on the machine unless that runtime is configured otherwise. |
 | Hosted model provider | Messages, selected context, embedding inputs, and tool-visible text go to the provider after the privacy mode is applied. |
-| Account runtime | Prompt text and, only in Privacy Off, attached image pixels go to the selected Codex, Claude, OpenCode, or Pi runtime and its configured model provider. |
+| Account runtime | Prompt text and, only in Privacy Off, attached image pixels go to the selected Codex, Claude, OpenCode, or Pi runtime and its configured model provider. Anything the CLI reads with its own tools, such as workspace files, command output, and fetched pages, also goes to that provider without passing milim's privacy gate. |
 | Media provider | Prompt text and model parameters go to Replicate, fal, OpenRouter media, or the selected media backend after the privacy mode is applied. OpenRouter video bytes return through an authenticated milim proxy; the provider key remains server-side. Generated media URLs or data URLs are stored with the chat result when persistence is enabled. |
 | Mobile companion | Paired phone text, files, and photos travel directly to the user's running desktop over Tailscale, opt-in LAN, or a manual endpoint. Rust accepts the turn with the thread's current privacy configuration and applies the same provider/runtime gate. milim operates no managed relay or hosted transcript store. |
 | MCP tools | External MCP servers run as configured local child processes or remotes; treat each configured server as its own trust boundary. |

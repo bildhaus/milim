@@ -12,6 +12,8 @@ mod backup;
 #[cfg(feature = "computer-use")]
 mod computer_tools;
 mod diagnostics;
+#[cfg(debug_assertions)]
+mod e2e_control;
 mod host_tools;
 mod preview_tools;
 mod preview_webview;
@@ -4254,6 +4256,9 @@ fn build_state(
         .expect("valid loopback address");
 
     let paths = Paths::resolve();
+    // Oversized agent tool output is saved here for ranged reads; entries
+    // older than a week are pruned on startup.
+    milim_tools::init_tool_output_root(paths.root().join("tool-output"));
 
     let mut tools = ToolRegistry::with_builtins();
     tools.register(Arc::new(RunCommandTool::default()));
@@ -4568,6 +4573,8 @@ fn finish_after_server_shutdown<R: tauri::Runtime>(
     let preview_runtime = app.state::<DesktopPreviewRuntime>().0.clone();
     tauri::async_runtime::spawn(async move {
         server_runtime.shutdown(preview_runtime).await;
+        #[cfg(debug_assertions)]
+        e2e_control::withdraw_from_env();
         arm_desktop_finish_watchdog(action);
         match action {
             DesktopFinishAction::Exit => app.exit(0),
@@ -4922,6 +4929,8 @@ pub fn run() {
     });
     native_perf_mark("servers_listening");
     let api_base = format!("http://{addr}");
+    #[cfg(debug_assertions)]
+    e2e_control::publish_from_env(&api_base, &api_key);
     let mobile_local_target = format!("http://{mobile_addr}");
     let preview_runtime = state.preview_runtime.clone();
     let mobile_state = state.clone();
