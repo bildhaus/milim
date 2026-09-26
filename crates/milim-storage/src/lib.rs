@@ -15,9 +15,10 @@ pub use db::{
     ControlBackupState, ControlCommandReceiptRecord, ControlHostRecord, ControlInboxRecord,
     ControlMailboxRecord, ControlQueuedTurnRecord, ControlRunArtifactRecord, ControlRunEventRecord,
     ControlRunRecord, ControlThreadLinkRecord, ControlThreadRecord, ControlTimelinePage,
-    ControlTimelineRecord, Database, DatabaseOptions, JournalMode, Migration,
-    RunArtifactMigrationProgress, SecretKv, SessionMessagesPage, SessionsDelta,
-    StoragePerformanceSnapshot, UsageBucket, UsageSummary, UsageTotals, UserChatSearchResult,
-    UserDataStore, SECRETS_MIGRATIONS, USAGE_MAX_DAYS,
+    ControlTimelineRecord, Database, DatabaseOptions, HarnessMetrics, HarnessMetricsQuery,
+    JournalMode, LatencyPercentiles, Migration, RunArtifactMigrationProgress, SecretKv,
+    SessionMessagesPage, SessionsDelta, StatusCount, StoragePerformanceSnapshot, ToolHealth,
+    UsageBucket, UsageSummary, UsageTotals, UserChatSearchResult, UserDataStore,
+    SECRETS_MIGRATIONS, USAGE_MAX_DAYS,
 };
 pub use private_file::create_private_file;
