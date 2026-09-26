@@ -3188,6 +3188,7 @@ dependencies = [
  "milim-storage",
  "milim-tools",
  "objc2-web-kit",
+ "regex",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

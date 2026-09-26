@@ -93,12 +93,16 @@ function toolEventIcon(name?: string): ChatStreamEventIcon {
     case "read_file":
     case "read_file_anchors":
     case "list_dir":
+    case "glob":
+    case "grep":
     case "write_file":
     case "edit_file":
     case "patch_file":
     case "file_change":
       return "file";
     case "shell":
+    case "process_output":
+    case "process_kill":
     case "run_command":
     case "command":
       return "command";
@@ -130,6 +134,10 @@ function toolLabel(name: string | undefined, done: boolean): string {
       return done ? "Read anchored file" : "Reading anchored file";
     case "list_dir":
       return done ? "Listed files" : "Listing files";
+    case "glob":
+      return done ? "Found files" : "Finding files";
+    case "grep":
+      return done ? "Searched files" : "Searching files";
     case "write_file":
       return done ? "Created file" : "Creating file";
     case "edit_file":
@@ -138,6 +146,10 @@ function toolLabel(name: string | undefined, done: boolean): string {
       return done ? "Patched file" : "Patching file";
     case "shell":
       return done ? "Ran command" : "Running command";
+    case "process_output":
+      return done ? "Checked background command" : "Checking background command";
+    case "process_kill":
+      return done ? "Stopped background command" : "Stopping background command";
     case "run_command":
       return done ? "Ran sandbox command" : "Running sandbox command";
     case "http_fetch":
@@ -174,6 +186,10 @@ function toolFailedLabel(name: string | undefined): string {
       return "Read anchored file failed";
     case "list_dir":
       return "List files failed";
+    case "glob":
+      return "Find files failed";
+    case "grep":
+      return "Search failed";
     case "write_file":
       return "Create file failed";
     case "edit_file":
@@ -182,6 +198,10 @@ function toolFailedLabel(name: string | undefined): string {
       return "Patch file failed";
     case "shell":
       return "Command failed";
+    case "process_output":
+      return "Check background command failed";
+    case "process_kill":
+      return "Stop background command failed";
     case "run_command":
       return "Sandbox command failed";
     case "scroll":
@@ -208,6 +228,15 @@ function toolFailedLabel(name: string | undefined): string {
   }
 }
 
+function searchResultCount(name: string, record: Record<string, unknown> | null): string | undefined {
+  if (name === "glob" || record?.mode === "files_with_matches") {
+    const count = numericToolField(record, ["count"]);
+    return count == null ? undefined : `${count} file${count === 1 ? "" : "s"}`;
+  }
+  const count = numericToolField(record, record?.mode === "count" ? ["total"] : ["matches"]);
+  return count == null ? undefined : `${count} match${count === 1 ? "" : "es"}`;
+}
+
 function toolDetail(name: string | undefined, args: Record<string, unknown> | null, result?: unknown): string | undefined {
   const path = toolArg(args, "path");
   const url = toolArg(args, "url");
@@ -215,6 +244,14 @@ function toolDetail(name: string | undefined, args: Record<string, unknown> | nu
   const record = asRecord(result);
   const error = toolErrorMessage(result);
   if (error) return compactText(path ? `${path}: ${error}` : error, 110);
+  const pattern = toolArg(args, "pattern");
+  if ((name === "glob" || name === "grep") && pattern) {
+    const target = path ? `${pattern} in ${path}` : pattern;
+    const count = result === undefined ? undefined : searchResultCount(name, record);
+    return compactText(count ? `${target} (${count})` : target);
+  }
+  const processId = toolArg(args, "process_id");
+  if ((name === "process_output" || name === "process_kill") && processId) return processId;
   const diffStats = name === "write_file" || name === "edit_file" || name === "patch_file" ? toolDiffStats(record) : undefined;
   if (command) return command;
   if (path) return compactText(diffStats ? `${path} ${diffStats}` : path);

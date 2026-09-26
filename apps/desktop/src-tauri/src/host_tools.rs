@@ -1,19 +1,39 @@
-//! Host filesystem + shell tools, using the GUI's selected working folder.
+//! Host filesystem, search, and shell tools, using the GUI's selected working folder.
 //!
 //! Unlike `milim-tools`'s fixed-root fs tools (and the Docker-sandboxed
 //! `run_command`), these operate on the **real** machine. Review and Guarded
 //! keep them inside the folder selected via the desktop "Folder" chip; Open
 //! accepts full host paths while retaining that folder as the working directory.
+//!
+//! Tools rebound for one run share a [`RunState`]: the files read in that run
+//! (so edits can detect stale content), the shell's working directory, and the
+//! run's background processes, which are killed when the run's tools drop.
 
+mod edit;
+mod search;
+mod shell;
+
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::time::SystemTime;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use milim_core::proc::ProcessTreeGuard;
 use milim_core::{Error, Result};
-use milim_tools::{atomic_write, read_text_range, resolve_workspace_path, Tool, ToolEffect};
+use milim_tools::{
+    atomic_write, read_text_range, resolve_workspace_path, Tool, ToolConcurrency, ToolEffect,
+};
+
+use edit::EditFileTool;
+use search::{GlobTool, GrepTool};
+use shell::{ProcessKillTool, ProcessOutputTool, ShellTool};
+
+/// Max bytes `read_file_anchors` reads.
+const MAX_ANCHORED_READ: u64 = 1024 * 1024;
 
 /// A cell holding the active working folder (shared with the server state).
 pub type Workspace = Arc<RwLock<Option<PathBuf>>>;
@@ -25,9 +45,172 @@ enum ToolWorkspace {
     FullAccess(Arc<PathBuf>),
 }
 
-/// Max bytes returned by `read_file`.
-const MAX_READ: u64 = 1024 * 1024;
-const MAX_LIST_ENTRIES: usize = 1000;
+/// Size and modification time of a file when a run last read or wrote it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileStamp {
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+impl FileStamp {
+    fn of(path: &Path) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        Some(Self {
+            modified: metadata.modified().ok(),
+            len: metadata.len(),
+        })
+    }
+}
+
+/// Whether a file may be edited given what this run has seen of it.
+#[derive(Debug, Eq, PartialEq)]
+enum Freshness {
+    /// Unchanged since this run last read or wrote it.
+    Current,
+    /// Never read in this run; the edit proceeds with a note.
+    Unread,
+}
+
+/// State shared by one run's host tools.
+#[derive(Default)]
+struct RunState {
+    stamps: Mutex<HashMap<PathBuf, FileStamp>>,
+    shell: shell::ShellRunState,
+}
+
+impl RunState {
+    fn key(path: &Path) -> PathBuf {
+        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+
+    /// Remember the file's current stamp after the run read or wrote it.
+    fn record(&self, path: &Path) {
+        if let (Some(stamp), Ok(mut stamps)) = (FileStamp::of(path), self.stamps.lock()) {
+            stamps.insert(Self::key(path), stamp);
+        }
+    }
+
+    /// Refuse edits to files that changed on disk after this run read them.
+    fn freshness(&self, path: &Path) -> Result<Freshness> {
+        let recorded = self
+            .stamps
+            .lock()
+            .ok()
+            .and_then(|stamps| stamps.get(&Self::key(path)).copied());
+        match recorded {
+            None => Ok(Freshness::Unread),
+            Some(stamp) if FileStamp::of(path) == Some(stamp) => Ok(Freshness::Current),
+            Some(_) => Err(Error::InvalidRequest(format!(
+                "{} changed on disk since this run last read it; read it again before editing",
+                path.display()
+            ))),
+        }
+    }
+}
+
+thread_local! {
+    /// The run state most recently created on this thread, and the tools
+    /// already bound to it.
+    static RUN_BINDING: RefCell<Option<RunBinding>> = const { RefCell::new(None) };
+}
+
+struct RunBinding {
+    family: u64,
+    run: Weak<RunState>,
+    bound: Vec<String>,
+}
+
+static NEXT_FAMILY: AtomicU64 = AtomicU64::new(1);
+
+/// A host tool's workspace binding plus the run state it shares with the
+/// other host tools of the same run.
+#[derive(Clone)]
+struct HostCtx {
+    ws: ToolWorkspace,
+    run: Arc<RunState>,
+    /// Identifies the tools created by one [`host_tools`] call.
+    family: u64,
+}
+
+impl HostCtx {
+    fn new(ws: ToolWorkspace) -> Self {
+        Self {
+            ws,
+            run: Arc::new(RunState::default()),
+            family: NEXT_FAMILY.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+
+    fn full_access(&self) -> bool {
+        matches!(self.ws, ToolWorkspace::FullAccess(_))
+    }
+
+    fn fixed(&self, root: &Path) -> Self {
+        Self {
+            ws: ToolWorkspace::Fixed(Arc::new(root.to_path_buf())),
+            ..self.clone()
+        }
+    }
+
+    fn with_full_access(&self, cwd: &Path) -> Self {
+        Self {
+            ws: ToolWorkspace::FullAccess(Arc::new(cwd.to_path_buf())),
+            ..self.clone()
+        }
+    }
+
+    /// Bind `tool` to a run's shared state. `ToolRegistry::scoped_for_run`
+    /// rebinds every tool of a registry synchronously, one after another, so
+    /// host tools rebound back to back on one thread belong to the same run.
+    /// A tool that is already bound to the latest state starts the next run.
+    fn for_run(&self, tool: &str) -> Self {
+        let run = RUN_BINDING.with(|cell| {
+            let mut binding = cell.borrow_mut();
+            if let Some(current) = binding.as_mut().filter(|current| {
+                current.family == self.family && !current.bound.iter().any(|name| name == tool)
+            }) {
+                if let Some(run) = current.run.upgrade() {
+                    current.bound.push(tool.to_string());
+                    return run;
+                }
+            }
+            let run = Arc::new(RunState::default());
+            *binding = Some(RunBinding {
+                family: self.family,
+                run: Arc::downgrade(&run),
+                bound: vec![tool.to_string()],
+            });
+            run
+        });
+        Self {
+            run,
+            ..self.clone()
+        }
+    }
+}
+
+/// Implements the workspace, full-access, and per-run rebinding hooks for a
+/// host tool whose only field is `ctx: HostCtx`.
+macro_rules! host_tool_scoping {
+    () => {
+        fn scoped_to_workspace(&self, root: &Path) -> Option<Arc<dyn Tool>> {
+            Some(Arc::new(Self {
+                ctx: self.ctx.fixed(root),
+            }))
+        }
+        fn with_full_access(&self, cwd: &Path) -> Option<Arc<dyn Tool>> {
+            Some(Arc::new(Self {
+                ctx: self.ctx.with_full_access(cwd),
+            }))
+        }
+        fn scoped_for_run(&self) -> Option<Arc<dyn Tool>> {
+            Some(Arc::new(Self {
+                ctx: self.ctx.for_run(self.name()),
+            }))
+        }
+    };
+}
+use host_tool_scoping;
 
 /// The current workspace root, or an error if the user hasn't picked a folder.
 fn root_of(ws: &ToolWorkspace) -> Result<PathBuf> {
@@ -55,38 +238,114 @@ fn safe_join(ws: &ToolWorkspace, path: &str) -> Result<PathBuf> {
     resolve_workspace_path(&root_of(ws)?, path)
 }
 
+/// Like [`safe_join`], but also admits saved oversized tool output.
+fn read_path(ws: &ToolWorkspace, path: &str) -> Result<PathBuf> {
+    if matches!(ws, ToolWorkspace::FullAccess(_)) {
+        return safe_join(ws, path);
+    }
+    milim_tools::ReadFileTool::resolve_read_path(&root_of(ws)?, path)
+}
+
+/// Whether `dir` may serve as a working directory for this binding.
+fn inside_workspace(ws: &ToolWorkspace, dir: &Path) -> bool {
+    if matches!(ws, ToolWorkspace::FullAccess(_)) {
+        return true;
+    }
+    let (Ok(root), Ok(dir)) = (
+        root_of(ws).and_then(|root| std::fs::canonicalize(root).map_err(Into::into)),
+        std::fs::canonicalize(dir),
+    ) else {
+        return false;
+    };
+    dir.starts_with(root)
+}
+
+/// Formats paths relative to the workspace root with `/` separators, or in
+/// full when they lie outside it.
+struct PathDisplay {
+    root: PathBuf,
+    canonical_root: PathBuf,
+}
+
+impl PathDisplay {
+    fn new(root: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            canonical_root: std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()),
+        }
+    }
+
+    fn show(&self, path: &Path) -> String {
+        let relative = path
+            .strip_prefix(&self.canonical_root)
+            .or_else(|_| path.strip_prefix(&self.root));
+        match relative {
+            Ok(relative) if relative.as_os_str().is_empty() => ".".into(),
+            Ok(relative) => relative
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/"),
+            Err(_) => path.display().to_string(),
+        }
+    }
+}
+
 fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| Error::InvalidRequest(format!("missing string argument: {key}")))
 }
 
+fn optional_arg_str<'a>(args: &'a Value, key: &str) -> Result<Option<&'a str>> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_str()
+            .map(Some)
+            .ok_or_else(|| Error::InvalidRequest(format!("{key} must be a string"))),
+    }
+}
+
 fn optional_u64(args: &Value, key: &str, default: u64) -> Result<u64> {
     match args.get(key) {
-        None => Ok(default),
+        None | Some(Value::Null) => Ok(default),
         Some(value) => value
             .as_u64()
             .ok_or_else(|| Error::InvalidRequest(format!("{key} must be a non-negative integer"))),
     }
 }
 
+fn optional_bool(args: &Value, key: &str) -> Result<bool> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(false),
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| Error::InvalidRequest(format!("{key} must be a boolean"))),
+    }
+}
+
 /// All host tools bound to the shared workspace cell.
 pub fn host_tools(ws: Workspace) -> Vec<Arc<dyn Tool>> {
-    let ws = ToolWorkspace::Live(ws);
+    let ctx = HostCtx::new(ToolWorkspace::Live(ws));
     vec![
-        Arc::new(ReadFileTool { ws: ws.clone() }),
-        Arc::new(ReadFileAnchorsTool { ws: ws.clone() }),
-        Arc::new(ListDirTool { ws: ws.clone() }),
-        Arc::new(WriteFileTool { ws: ws.clone() }),
-        Arc::new(EditFileTool { ws: ws.clone() }),
-        Arc::new(PatchFileTool { ws: ws.clone() }),
-        Arc::new(ShellTool { ws }),
+        Arc::new(ReadFileTool { ctx: ctx.clone() }),
+        Arc::new(ReadFileAnchorsTool { ctx: ctx.clone() }),
+        Arc::new(ListDirTool { ctx: ctx.clone() }),
+        Arc::new(GlobTool { ctx: ctx.clone() }),
+        Arc::new(GrepTool { ctx: ctx.clone() }),
+        Arc::new(WriteFileTool { ctx: ctx.clone() }),
+        Arc::new(EditFileTool { ctx: ctx.clone() }),
+        Arc::new(PatchFileTool { ctx: ctx.clone() }),
+        Arc::new(ShellTool { ctx: ctx.clone() }),
+        Arc::new(ProcessOutputTool { ctx: ctx.clone() }),
+        Arc::new(ProcessKillTool { ctx }),
     ]
 }
 
 /// Read a UTF-8 file from the working folder.
 pub struct ReadFileTool {
-    ws: ToolWorkspace,
+    ctx: HostCtx,
 }
 #[async_trait]
 impl Tool for ReadFileTool {
@@ -94,38 +353,31 @@ impl Tool for ReadFileTool {
         "read_file"
     }
     fn description(&self) -> &str {
-        if matches!(self.ws, ToolWorkspace::FullAccess(_)) {
-            "Read a UTF-8 text file from anywhere on the host. Relative paths use the working folder."
+        if self.ctx.full_access() {
+            "Read a UTF-8 text file from anywhere on the host. Relative paths use the working folder. Returns numbered lines; offset/limit select a line range (default: the first 2000 lines)."
         } else {
-            "Read a UTF-8 text file from the working folder (path is relative to it)."
+            "Read a UTF-8 text file from the working folder (path is relative to it). Returns numbered lines; offset/limit select a line range (default: the first 2000 lines)."
         }
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{
-            "path":{"type":"string"},
-            "offset":{"type":"integer","minimum":0,"description":"Byte offset, default 0."},
-            "limit":{"type":"integer","minimum":1,"maximum":1048576,"description":"Maximum bytes, default 1 MiB."}
-        },"required":["path"],"additionalProperties":false})
+        milim_tools::ReadFileTool::schema()
     }
     fn effect(&self) -> ToolEffect {
         ToolEffect::ReadOnly
     }
-    fn scoped_to_workspace(&self, root: &Path) -> Option<Arc<dyn Tool>> {
-        Some(Arc::new(Self {
-            ws: ToolWorkspace::Fixed(Arc::new(root.to_path_buf())),
-        }))
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Parallel
     }
-    fn with_full_access(&self, cwd: &Path) -> Option<Arc<dyn Tool>> {
-        Some(Arc::new(Self {
-            ws: ToolWorkspace::FullAccess(Arc::new(cwd.to_path_buf())),
-        }))
+    fn model_text(&self, result: &Value) -> Option<String> {
+        milim_tools::ReadFileTool::render_for_model(result)
     }
+    host_tool_scoping!();
     async fn invoke(&self, args: Value) -> Result<Value> {
-        let path = safe_join(&self.ws, arg_str(&args, "path")?)?;
-        let offset = optional_u64(&args, "offset", 0)?;
-        let limit = usize::try_from(optional_u64(&args, "limit", MAX_READ)?).unwrap_or(usize::MAX);
-        let (content, next_offset, eof) = read_text_range(&path, offset, limit)?;
-        Ok(json!({ "content": content, "offset": offset, "next_offset": next_offset, "eof": eof }))
+        let path = read_path(&self.ctx.ws, arg_str(&args, "path")?)?;
+        let (offset, limit) = milim_tools::ReadFileTool::line_window(&args)?;
+        let result = read_text_range(&path, offset, limit)?;
+        self.ctx.run.record(&path);
+        Ok(result)
     }
 }
 
@@ -309,7 +561,7 @@ fn resolve_patch_op(lines: &[String], op: &Value) -> Result<ResolvedPatch> {
 
 /// Read a UTF-8 file with line-numbered content-hash anchors.
 pub struct ReadFileAnchorsTool {
-    ws: ToolWorkspace,
+    ctx: HostCtx,
 }
 #[async_trait]
 impl Tool for ReadFileAnchorsTool {
@@ -317,7 +569,7 @@ impl Tool for ReadFileAnchorsTool {
         "read_file_anchors"
     }
     fn description(&self) -> &str {
-        if matches!(self.ws, ToolWorkspace::FullAccess(_)) {
+        if self.ctx.full_access() {
             "Read a UTF-8 text file anywhere on the host with line-numbered hash anchors for patch_file. Relative paths use the working folder."
         } else {
             "Read a UTF-8 text file with line-numbered hash anchors for patch_file."
@@ -329,22 +581,13 @@ impl Tool for ReadFileAnchorsTool {
     fn effect(&self) -> ToolEffect {
         ToolEffect::ReadOnly
     }
-    fn scoped_to_workspace(&self, root: &Path) -> Option<Arc<dyn Tool>> {
-        Some(Arc::new(Self {
-            ws: ToolWorkspace::Fixed(Arc::new(root.to_path_buf())),
-        }))
-    }
-    fn with_full_access(&self, cwd: &Path) -> Option<Arc<dyn Tool>> {
-        Some(Arc::new(Self {
-            ws: ToolWorkspace::FullAccess(Arc::new(cwd.to_path_buf())),
-        }))
-    }
+    host_tool_scoping!();
     async fn invoke(&self, args: Value) -> Result<Value> {
-        let path = safe_join(&self.ws, arg_str(&args, "path")?)?;
+        let path = safe_join(&self.ctx.ws, arg_str(&args, "path")?)?;
         let meta = std::fs::metadata(&path)?;
-        if meta.len() > MAX_READ {
+        if meta.len() > MAX_ANCHORED_READ {
             return Err(Error::InvalidRequest(format!(
-                "file too large ({} bytes, max {MAX_READ})",
+                "file too large ({} bytes, max {MAX_ANCHORED_READ})",
                 meta.len()
             )));
         }
@@ -354,13 +597,14 @@ impl Tool for ReadFileAnchorsTool {
                 "patch_file does not support mixed line endings; use edit_file".into(),
             ));
         }
+        self.ctx.run.record(&path);
         Ok(json!({ "content": anchored_content(&content) }))
     }
 }
 
 /// List directory entries within the working folder.
 pub struct ListDirTool {
-    ws: ToolWorkspace,
+    ctx: HostCtx,
 }
 #[async_trait]
 impl Tool for ListDirTool {
@@ -368,7 +612,7 @@ impl Tool for ListDirTool {
         "list_dir"
     }
     fn description(&self) -> &str {
-        if matches!(self.ws, ToolWorkspace::FullAccess(_)) {
+        if self.ctx.full_access() {
             "List a directory anywhere on the host. Relative paths use the working folder."
         } else {
             "List entries of a directory in the working folder (path defaults to the root)."
@@ -380,45 +624,22 @@ impl Tool for ListDirTool {
     fn effect(&self) -> ToolEffect {
         ToolEffect::ReadOnly
     }
-    fn scoped_to_workspace(&self, root: &Path) -> Option<Arc<dyn Tool>> {
-        Some(Arc::new(Self {
-            ws: ToolWorkspace::Fixed(Arc::new(root.to_path_buf())),
-        }))
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Parallel
     }
-    fn with_full_access(&self, cwd: &Path) -> Option<Arc<dyn Tool>> {
-        Some(Arc::new(Self {
-            ws: ToolWorkspace::FullAccess(Arc::new(cwd.to_path_buf())),
-        }))
+    fn model_text(&self, result: &Value) -> Option<String> {
+        milim_tools::ListDirTool::render_for_model(result)
     }
+    host_tool_scoping!();
     async fn invoke(&self, args: Value) -> Result<Value> {
-        let rel = match args.get("path") {
-            None => "",
-            Some(value) => value
-                .as_str()
-                .ok_or_else(|| Error::InvalidRequest("path must be a string".into()))?,
-        };
-        let dir = safe_join(&self.ws, rel)?;
-        let mut entries = Vec::new();
-        for entry in std::fs::read_dir(&dir)? {
-            let entry = entry?;
-            entries.push(json!({
-                "name": entry.file_name().to_string_lossy(),
-                "is_dir": entry.file_type().map(|t| t.is_dir()).unwrap_or(false),
-            }));
-            if entries.len() > MAX_LIST_ENTRIES {
-                break;
-            }
-        }
-        entries.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-        let truncated = entries.len() > MAX_LIST_ENTRIES;
-        entries.truncate(MAX_LIST_ENTRIES);
-        Ok(json!({ "entries": entries, "truncated": truncated }))
+        let rel = optional_arg_str(&args, "path")?.unwrap_or("");
+        milim_tools::ListDirTool::list(&safe_join(&self.ctx.ws, rel)?)
     }
 }
 
 /// Create or overwrite a UTF-8 file in the working folder.
 pub struct WriteFileTool {
-    ws: ToolWorkspace,
+    ctx: HostCtx,
 }
 #[async_trait]
 impl Tool for WriteFileTool {
@@ -426,7 +647,7 @@ impl Tool for WriteFileTool {
         "write_file"
     }
     fn description(&self) -> &str {
-        if matches!(self.ws, ToolWorkspace::FullAccess(_)) {
+        if self.ctx.full_access() {
             "Create or overwrite a UTF-8 text file anywhere on the host. Relative paths use the working folder."
         } else {
             "Create or overwrite a UTF-8 text file in the working folder."
@@ -438,93 +659,28 @@ impl Tool for WriteFileTool {
     fn effect(&self) -> ToolEffect {
         ToolEffect::Mutating
     }
-    fn scoped_to_workspace(&self, root: &Path) -> Option<Arc<dyn Tool>> {
-        Some(Arc::new(Self {
-            ws: ToolWorkspace::Fixed(Arc::new(root.to_path_buf())),
-        }))
+    fn model_text(&self, result: &Value) -> Option<String> {
+        milim_tools::WriteFileTool::render_for_model(result)
     }
-    fn with_full_access(&self, cwd: &Path) -> Option<Arc<dyn Tool>> {
-        Some(Arc::new(Self {
-            ws: ToolWorkspace::FullAccess(Arc::new(cwd.to_path_buf())),
-        }))
-    }
+    host_tool_scoping!();
     async fn invoke(&self, args: Value) -> Result<Value> {
-        let path = safe_join(&self.ws, arg_str(&args, "path")?)?;
+        let rel = arg_str(&args, "path")?;
+        let path = safe_join(&self.ctx.ws, rel)?;
         let content = arg_str(&args, "content")?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let path = safe_join(&self.ws, arg_str(&args, "path")?)?;
+        let path = safe_join(&self.ctx.ws, rel)?;
+        let created = !path.exists();
         atomic_write(&path, content.as_bytes())?;
-        Ok(json!({ "written": content.len() }))
-    }
-}
-
-/// Exact-string replacement in a file (a surgical code edit). The `old` text
-/// must occur exactly once, mirroring an editor's find/replace.
-pub struct EditFileTool {
-    ws: ToolWorkspace,
-}
-#[async_trait]
-impl Tool for EditFileTool {
-    fn name(&self) -> &str {
-        "edit_file"
-    }
-    fn description(&self) -> &str {
-        if matches!(self.ws, ToolWorkspace::FullAccess(_)) {
-            "Replace an exact text snippet in a file anywhere on the host. Relative paths use the working folder; 'old' must appear exactly once."
-        } else {
-            "Replace an exact text snippet in a file in the working folder. 'old' must appear exactly once."
-        }
-    }
-    fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{
-            "path":{"type":"string"},
-            "old":{"type":"string","description":"exact text to replace (must be unique in the file)"},
-            "new":{"type":"string","description":"replacement text"}
-        },"required":["path","old","new"]})
-    }
-    fn effect(&self) -> ToolEffect {
-        ToolEffect::Mutating
-    }
-    fn scoped_to_workspace(&self, root: &Path) -> Option<Arc<dyn Tool>> {
-        Some(Arc::new(Self {
-            ws: ToolWorkspace::Fixed(Arc::new(root.to_path_buf())),
-        }))
-    }
-    fn with_full_access(&self, cwd: &Path) -> Option<Arc<dyn Tool>> {
-        Some(Arc::new(Self {
-            ws: ToolWorkspace::FullAccess(Arc::new(cwd.to_path_buf())),
-        }))
-    }
-    async fn invoke(&self, args: Value) -> Result<Value> {
-        let path = safe_join(&self.ws, arg_str(&args, "path")?)?;
-        let old = arg_str(&args, "old")?;
-        let new = arg_str(&args, "new")?;
-        let content = std::fs::read_to_string(&path)?;
-        let count = content.matches(old).count();
-        if count == 0 {
-            return Err(Error::InvalidRequest("'old' text not found in file".into()));
-        }
-        if count > 1 {
-            return Err(Error::InvalidRequest(format!(
-                "'old' text is not unique ({count} matches) - include more surrounding context"
-            )));
-        }
-        let updated = content.replacen(old, new, 1);
-        if std::fs::read_to_string(&path)? != content {
-            return Err(Error::InvalidRequest(
-                "file changed while edit_file was running; read it again".into(),
-            ));
-        }
-        atomic_write(&path, updated.as_bytes())?;
-        Ok(json!({ "replaced": 1, "bytes": updated.len() }))
+        self.ctx.run.record(&path);
+        Ok(milim_tools::WriteFileTool::result(rel, content, created))
     }
 }
 
 /// Apply line-anchored edits produced from `read_file_anchors`.
 pub struct PatchFileTool {
-    ws: ToolWorkspace,
+    ctx: HostCtx,
 }
 #[async_trait]
 impl Tool for PatchFileTool {
@@ -532,7 +688,7 @@ impl Tool for PatchFileTool {
         "patch_file"
     }
     fn description(&self) -> &str {
-        if matches!(self.ws, ToolWorkspace::FullAccess(_)) {
+        if self.ctx.full_access() {
             "Patch a UTF-8 text file anywhere on the host using LINE#HASH anchors from read_file_anchors. Relative paths use the working folder."
         } else {
             "Patch a UTF-8 text file using LINE#HASH anchors from read_file_anchors."
@@ -553,18 +709,9 @@ impl Tool for PatchFileTool {
     fn effect(&self) -> ToolEffect {
         ToolEffect::Mutating
     }
-    fn scoped_to_workspace(&self, root: &Path) -> Option<Arc<dyn Tool>> {
-        Some(Arc::new(Self {
-            ws: ToolWorkspace::Fixed(Arc::new(root.to_path_buf())),
-        }))
-    }
-    fn with_full_access(&self, cwd: &Path) -> Option<Arc<dyn Tool>> {
-        Some(Arc::new(Self {
-            ws: ToolWorkspace::FullAccess(Arc::new(cwd.to_path_buf())),
-        }))
-    }
+    host_tool_scoping!();
     async fn invoke(&self, args: Value) -> Result<Value> {
-        let path = safe_join(&self.ws, arg_str(&args, "path")?)?;
+        let path = safe_join(&self.ctx.ws, arg_str(&args, "path")?)?;
         let ops = args
             .get("ops")
             .and_then(Value::as_array)
@@ -626,175 +773,18 @@ impl Tool for PatchFileTool {
             ));
         }
         atomic_write(&path, updated.as_bytes())?;
+        self.ctx.run.record(&path);
         Ok(
             json!({ "patched": ops.len(), "added": added, "removed": removed, "bytes": updated.len() }),
         )
     }
 }
 
-/// Run a command in the host terminal, in the working folder. PowerShell on
-/// Windows, `sh -c` elsewhere. Executes on the real machine - the agentic
-/// counterpart to the Docker-sandboxed `run_command`.
-pub struct ShellTool {
-    ws: ToolWorkspace,
-}
-#[async_trait]
-impl Tool for ShellTool {
-    fn name(&self) -> &str {
-        "shell"
-    }
-    fn description(&self) -> &str {
-        if cfg!(windows) {
-            "Run a PowerShell command on the host, in the working folder. Returns stdout/stderr/exit_code."
-        } else {
-            "Run a shell command (sh -c) on the host, in the working folder. Returns stdout/stderr/exit_code."
-        }
-    }
-    fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]})
-    }
-    fn effect(&self) -> ToolEffect {
-        ToolEffect::Command
-    }
-    fn scoped_to_workspace(&self, root: &Path) -> Option<Arc<dyn Tool>> {
-        Some(Arc::new(Self {
-            ws: ToolWorkspace::Fixed(Arc::new(root.to_path_buf())),
-        }))
-    }
-    fn with_full_access(&self, cwd: &Path) -> Option<Arc<dyn Tool>> {
-        Some(Arc::new(Self {
-            ws: ToolWorkspace::FullAccess(Arc::new(cwd.to_path_buf())),
-        }))
-    }
-    async fn invoke(&self, args: Value) -> Result<Value> {
-        let cwd = root_of(&self.ws)?;
-        let command = arg_str(&args, "command")?.to_string();
-        run_shell(&cwd, &command).await
-    }
-}
-
-/// Milim's own credentials (remote API keys, OAuth client secrets, API
-/// tokens) must not reach model-run commands. Only `MILIM_*` variables whose
-/// names look secret are withheld; non-secret settings such as `MILIM_HOME`
-/// and the user's unrelated environment stay inherited.
-fn milim_secret_env_keys() -> Vec<std::ffi::OsString> {
-    std::env::vars_os()
-        .filter_map(|(key, _)| {
-            let name = key.to_str()?;
-            let milim_owned = name
-                .get(..6)
-                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("MILIM_"));
-            (milim_owned && milim_mcp_client::secret_env_key(name)).then_some(key)
-        })
-        .collect()
-}
-
-async fn run_shell(cwd: &Path, command: &str) -> Result<Value> {
-    use std::process::Stdio;
-    use tokio::io::AsyncReadExt;
-    use tokio::process::Command;
-
-    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-    const MAX_OUTPUT: usize = 1024 * 1024;
-    let mut cmd = if cfg!(windows) {
-        let mut cmd = Command::new("powershell");
-        cmd.args(["-NoProfile", "-NonInteractive", "-Command", command])
-            .current_dir(cwd);
-        #[cfg(windows)]
-        cmd.creation_flags(milim_core::proc::CREATE_NO_WINDOW);
-        cmd
-    } else {
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", command]).current_dir(cwd);
-        cmd
-    };
-    for key in milim_secret_env_keys() {
-        cmd.env_remove(key);
-    }
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    #[cfg(unix)]
-    cmd.process_group(0);
-    let mut child = cmd
-        .spawn()
-        .map_err(|error| Error::Other(format!("shell failed to start: {error}")))?;
-    let mut guard = ProcessTreeGuard::attach(
-        child
-            .id()
-            .ok_or_else(|| Error::Other("shell process id unavailable".into()))?,
-    )
-    .map_err(|error| Error::Other(format!("failed to contain shell process: {error}")))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| Error::Other("shell stdout unavailable".into()))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| Error::Other("shell stderr unavailable".into()))?;
-    let read = |mut stream: tokio::process::ChildStdout| async move {
-        let mut kept = Vec::new();
-        let mut buffer = [0_u8; 8192];
-        let mut truncated = false;
-        loop {
-            let count = stream.read(&mut buffer).await?;
-            if count == 0 {
-                break;
-            }
-            let remaining = MAX_OUTPUT.saturating_sub(kept.len());
-            kept.extend_from_slice(&buffer[..count.min(remaining)]);
-            truncated |= count > remaining;
-        }
-        Ok::<_, std::io::Error>((kept, truncated))
-    };
-    let stdout_task = tokio::spawn(read(stdout));
-    let stderr_task = tokio::spawn(async move {
-        let mut stream = stderr;
-        let mut kept = Vec::new();
-        let mut buffer = [0_u8; 8192];
-        let mut truncated = false;
-        loop {
-            let count = stream.read(&mut buffer).await?;
-            if count == 0 {
-                break;
-            }
-            let remaining = MAX_OUTPUT.saturating_sub(kept.len());
-            kept.extend_from_slice(&buffer[..count.min(remaining)]);
-            truncated |= count > remaining;
-        }
-        Ok::<_, std::io::Error>((kept, truncated))
-    });
-    let status = match tokio::time::timeout(TIMEOUT, child.wait()).await {
-        Ok(result) => result?,
-        Err(_) => {
-            guard.terminate();
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            return Err(Error::Other("shell timed out after 120 seconds".into()));
-        }
-    };
-    guard.terminate();
-    let (stdout, stdout_truncated) = stdout_task
-        .await
-        .map_err(|error| Error::Other(format!("shell stdout task failed: {error}")))??;
-    let (stderr, stderr_truncated) = stderr_task
-        .await
-        .map_err(|error| Error::Other(format!("shell stderr task failed: {error}")))??;
-    Ok(json!({
-        "stdout": String::from_utf8_lossy(&stdout),
-        "stderr": String::from_utf8_lossy(&stderr),
-        "stdout_truncated": stdout_truncated,
-        "stderr_truncated": stderr_truncated,
-        "exit_code": status.code(),
-    }))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::future::Future;
+    use std::time::SystemTime;
 
     fn block_on<F: Future>(future: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread()
@@ -1018,6 +1008,505 @@ mod tests {
         std::env::remove_var(&secret_key);
         std::env::remove_var(&user_key);
         assert_eq!(result["stdout"], "|user-owned");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn run_registry(root: &Path) -> milim_tools::ToolRegistry {
+        let mut registry = milim_tools::ToolRegistry::new();
+        for item in host_tools(Arc::new(RwLock::new(Some(root.to_path_buf())))) {
+            registry.register(item);
+        }
+        registry.scoped_to_workspace(root).scoped_for_run()
+    }
+
+    fn model_text(registry: &milim_tools::ToolRegistry, name: &str, args: Value) -> String {
+        block_on(registry.call_for_agent(name, args))
+            .unwrap()
+            .model_text
+            .unwrap_or_else(|| panic!("{name} returned no model text"))
+    }
+
+    #[test]
+    fn read_file_returns_numbered_line_ranges() {
+        let root = temp_workspace();
+        let lines = (1..=30)
+            .map(|index| format!("line {index}"))
+            .collect::<Vec<_>>();
+        std::fs::write(root.join("long.txt"), lines.join("\n")).unwrap();
+        let registry = run_registry(&root);
+
+        let raw = block_on(registry.call(
+            "read_file",
+            json!({"path":"long.txt","offset":10,"limit":3}),
+        ))
+        .unwrap();
+        assert_eq!(raw["content"], "line 10\nline 11\nline 12");
+        assert_eq!(raw["total_lines"], 30);
+        assert_eq!(raw["next_offset"], 13);
+        let text = model_text(
+            &registry,
+            "read_file",
+            json!({"path":"long.txt","offset":10,"limit":3}),
+        );
+        assert_eq!(
+            text,
+            "    10\tline 10\n    11\tline 11\n    12\tline 12\n\n(Showing lines 10-12 of 30. Continue with offset=13.)"
+        );
+        let end = model_text(
+            &registry,
+            "read_file",
+            json!({"path":"long.txt","offset":29}),
+        );
+        assert_eq!(end, "    29\tline 29\n    30\tline 30");
+        assert_eq!(
+            registry
+                .execution_specs()
+                .iter()
+                .find(|spec| spec.name == "read_file")
+                .unwrap()
+                .concurrency,
+            ToolConcurrency::Parallel
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scoped_read_file_accepts_saved_tool_output_only() {
+        let output_root = std::env::temp_dir().join("milim-host-tools-test-output");
+        std::fs::create_dir_all(&output_root).unwrap();
+        milim_tools::set_tool_output_root(output_root.clone());
+        let output_root = milim_tools::tool_output_root().unwrap().to_path_buf();
+        let saved = output_root.join(format!("saved-{}.txt", std::process::id()));
+        std::fs::write(&saved, "saved output").unwrap();
+        let root = temp_workspace();
+        let outside = temp_workspace().join("other.txt");
+        std::fs::write(&outside, "private").unwrap();
+        let registry = run_registry(&root);
+
+        let read = block_on(registry.call("read_file", json!({"path": saved}))).unwrap();
+        assert_eq!(read["content"], "saved output");
+        assert!(block_on(registry.call("read_file", json!({"path": outside}))).is_err());
+        assert!(
+            block_on(registry.call("write_file", json!({"path": saved, "content": "no"}))).is_err()
+        );
+        let _ = std::fs::remove_file(saved);
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(outside.parent().unwrap());
+    }
+
+    #[test]
+    fn edit_file_replaces_all_and_reports_a_diff() {
+        let root = temp_workspace();
+        std::fs::write(root.join("app.js"), "let a = 1;\nuse(a);\nuse(a);\n").unwrap();
+        let registry = run_registry(&root);
+        block_on(registry.call("read_file", json!({"path":"app.js"}))).unwrap();
+
+        let error = block_on(registry.call(
+            "edit_file",
+            json!({"path":"app.js","old":"use(a)","new":"use(b)"}),
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("not unique (2 matches, at lines 2, 3)"),
+            "{error}"
+        );
+
+        let raw = block_on(registry.call(
+            "edit_file",
+            json!({"path":"app.js","old":"use(a)","new":"use(b)","replace_all":true}),
+        ))
+        .unwrap();
+        assert_eq!(raw["replaced"], 2);
+        assert_eq!(
+            (raw["added"].as_u64(), raw["removed"].as_u64()),
+            (Some(2), Some(2))
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("app.js")).unwrap(),
+            "let a = 1;\nuse(b);\nuse(b);\n"
+        );
+        let text = model_text(
+            &registry,
+            "edit_file",
+            json!({"path":"app.js","old":"let a = 1;","new":"let b = 1;"}),
+        );
+        assert_eq!(
+            text,
+            "Edited app.js: 1 replacement.\n@@ -1,3 +1,3 @@\n-let a = 1;\n+let b = 1;\n use(b);\n use(b);"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn edit_file_refuses_files_changed_since_they_were_read() {
+        let root = temp_workspace();
+        let path = root.join("notes.txt");
+        std::fs::write(&path, "alpha\nbeta\n").unwrap();
+        let registry = run_registry(&root);
+        block_on(registry.call("read_file", json!({"path":"notes.txt"}))).unwrap();
+        std::fs::write(&path, "alpha\nbeta\ngamma\n").unwrap();
+
+        let error = block_on(registry.call(
+            "edit_file",
+            json!({"path":"notes.txt","old":"beta","new":"BETA"}),
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("changed on disk"), "{error}");
+
+        block_on(registry.call("read_file", json!({"path":"notes.txt"}))).unwrap();
+        let first = block_on(registry.call(
+            "edit_file",
+            json!({"path":"notes.txt","old":"beta","new":"BETA"}),
+        ))
+        .unwrap();
+        assert_eq!(first["notes"], json!([]));
+        block_on(registry.call(
+            "edit_file",
+            json!({"path":"notes.txt","old":"gamma","new":"GAMMA"}),
+        ))
+        .unwrap();
+
+        let other_run = run_registry(&root);
+        let unread = block_on(other_run.call(
+            "edit_file",
+            json!({"path":"notes.txt","old":"alpha","new":"ALPHA"}),
+        ))
+        .unwrap();
+        assert!(unread["notes"][0]
+            .as_str()
+            .unwrap()
+            .contains("not read earlier in this run"));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "ALPHA\nBETA\nGAMMA\n"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn edit_file_applies_whitespace_normalized_matches_and_explains_misses() {
+        let root = temp_workspace();
+        let path = root.join("main.py");
+        std::fs::write(&path, "def run():\r\n    value = 1\r\n    return value\r\n").unwrap();
+        let registry = run_registry(&root);
+
+        let text = model_text(
+            &registry,
+            "edit_file",
+            json!({"path":"main.py","old":"value = 1\nreturn value","new":"value = 2\nreturn value"}),
+        );
+        assert!(text.contains("ignoring whitespace differences"), "{text}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "def run():\r\n    value = 2\r\n    return value\r\n"
+        );
+        let error = block_on(registry.call(
+            "edit_file",
+            json!({"path":"main.py","old":"    valeu = 2\n    return valeu","new":"x"}),
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("most similar region is lines 2-3"),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn write_and_list_tools_confirm_in_plain_text() {
+        let root = temp_workspace();
+        let registry = run_registry(&root);
+        assert_eq!(
+            model_text(
+                &registry,
+                "write_file",
+                json!({"path":"src/a.txt","content":"one\ntwo\n"})
+            ),
+            "Created src/a.txt (2 lines)."
+        );
+        assert_eq!(
+            model_text(
+                &registry,
+                "write_file",
+                json!({"path":"src/a.txt","content":"one\n"})
+            ),
+            "Overwrote src/a.txt (1 line)."
+        );
+        assert_eq!(model_text(&registry, "list_dir", json!({})), "src/");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn glob_and_grep_tools_search_the_workspace_newest_first() {
+        let root = temp_workspace();
+        std::fs::create_dir_all(root.join("src/nested")).unwrap();
+        std::fs::write(root.join("src/old.rs"), "fn old() {}\n").unwrap();
+        std::fs::write(root.join("src/nested/new.rs"), "fn new() {}\n").unwrap();
+        std::fs::write(root.join("README.md"), "fn in docs\n").unwrap();
+        let old = std::fs::File::options()
+            .write(true)
+            .open(root.join("src/old.rs"))
+            .unwrap();
+        old.set_modified(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000))
+            .unwrap();
+        let registry = run_registry(&root);
+
+        let found = block_on(registry.call("glob", json!({"pattern":"**/*.rs"}))).unwrap();
+        assert_eq!(found["files"], json!(["src/nested/new.rs", "src/old.rs"]));
+        let scoped =
+            block_on(registry.call("glob", json!({"pattern":"*.rs","path":"src/nested"}))).unwrap();
+        assert_eq!(scoped["files"], json!(["src/nested/new.rs"]));
+        assert_eq!(
+            model_text(&registry, "glob", json!({"pattern":"*.go"})),
+            "No files matched *.go."
+        );
+
+        let matches =
+            block_on(registry.call("grep", json!({"pattern":"^fn \\w+\\(","glob":"*.rs"})))
+                .unwrap();
+        assert_eq!(matches["files"], json!(["src/nested/new.rs", "src/old.rs"]));
+        let content = model_text(
+            &registry,
+            "grep",
+            json!({"pattern":"old","output_mode":"content"}),
+        );
+        assert_eq!(content, "src/old.rs:1:fn old() {}");
+        assert!(block_on(registry.call("grep", json!({"pattern":"x","path":"../"}))).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn search_tools_reject_symlink_escapes() {
+        let root = temp_workspace();
+        let outside = temp_workspace();
+        std::fs::write(outside.join("secret.rs"), "fn secret() {}\n").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.rs"), root.join("alias.rs")).unwrap();
+        let registry = run_registry(&root);
+
+        assert!(block_on(registry.call("glob", json!({"pattern":"*","path":"link"}))).is_err());
+        assert!(
+            block_on(registry.call("grep", json!({"pattern":"secret","path":"link"}))).is_err()
+        );
+        let all = block_on(registry.call("glob", json!({"pattern":"**"}))).unwrap();
+        assert_eq!(all["files"], json!([]));
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn shell_effect_and_deadline_depend_on_the_call() {
+        let registry = run_registry(&temp_workspace());
+        let effect = |args: Value| registry.effect_for_call("shell", &args).unwrap();
+        let read_only = if cfg!(windows) {
+            "Get-ChildItem"
+        } else {
+            "git status"
+        };
+        assert_eq!(effect(json!({"command": read_only})), ToolEffect::ReadOnly);
+        assert_eq!(
+            effect(json!({"command": "rm -rf build"})),
+            ToolEffect::Command
+        );
+        assert_eq!(
+            effect(json!({"command": read_only, "run_in_background": true})),
+            ToolEffect::Command
+        );
+        assert_eq!(
+            registry.effect_for_call("process_output", &json!({})),
+            Some(ToolEffect::ReadOnly)
+        );
+        assert_eq!(
+            registry.effect_for_call("process_kill", &json!({})),
+            Some(ToolEffect::Command)
+        );
+        let tools = host_tools(Arc::new(RwLock::new(None)));
+        let shell = tool(&tools, "shell");
+        assert_eq!(
+            shell.deadline_for_call(&json!({"command":"x","timeout_secs":300})),
+            Some(std::time::Duration::from_secs(315))
+        );
+        assert_eq!(
+            shell.deadline_for_call(&json!({"command":"x"})),
+            Some(std::time::Duration::from_secs(135))
+        );
+        assert_eq!(
+            shell.deadline_for_call(&json!({"command":"x","run_in_background":true})),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_timeout_kills_the_process_tree_and_keeps_partial_output() {
+        let root = temp_workspace();
+        let registry = run_registry(&root);
+        let started = std::time::Instant::now();
+        let result = block_on(registry.call(
+            "shell",
+            json!({"command":"echo started; sleep 30","timeout_secs":1}),
+        ))
+        .unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!(result["timed_out"], true);
+        assert_eq!(result["stdout"], "started\n");
+        let text = model_text(
+            &registry,
+            "shell",
+            json!({"command":"sleep 30","timeout_secs":1}),
+        );
+        assert!(
+            text.starts_with("exit code: none (timed out after 1 seconds"),
+            "{text}"
+        );
+        assert!(
+            block_on(registry.call("shell", json!({"command":"true","timeout_secs":601}))).is_err()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_keeps_the_working_directory_between_commands() {
+        let root = temp_workspace();
+        std::fs::create_dir_all(root.join("sub/inner")).unwrap();
+        let canonical = std::fs::canonicalize(&root).unwrap();
+        let registry = run_registry(&root);
+
+        let moved =
+            block_on(registry.call("shell", json!({"command":"cd sub && echo moved"}))).unwrap();
+        assert_eq!(moved["stdout"], "moved\n");
+        assert_eq!(moved["cwd"], "sub");
+        let here = block_on(registry.call("shell", json!({"command":"pwd -P"}))).unwrap();
+        assert_eq!(
+            here["stdout"].as_str().unwrap().trim(),
+            canonical.join("sub").to_str().unwrap()
+        );
+        let text = model_text(&registry, "shell", json!({"command":"cd inner; exit 3"}));
+        assert_eq!(text, "exit code: 3\n[cwd: sub]");
+
+        let left = model_text(&registry, "shell", json!({"command":"cd /"}));
+        assert!(left.contains("reset to the workspace root"), "{left}");
+        let back = block_on(registry.call("shell", json!({"command":"pwd -P"}))).unwrap();
+        assert_eq!(
+            back["stdout"].as_str().unwrap().trim(),
+            canonical.to_str().unwrap()
+        );
+
+        let other_run = run_registry(&root);
+        block_on(other_run.call("shell", json!({"command":"cd sub"}))).unwrap();
+        let fresh = block_on(registry.call("shell", json!({"command":"pwd -P"}))).unwrap();
+        assert_eq!(
+            fresh["stdout"].as_str().unwrap().trim(),
+            canonical.to_str().unwrap()
+        );
+
+        let mut base = milim_tools::ToolRegistry::new();
+        for item in host_tools(Arc::new(RwLock::new(Some(root.clone())))) {
+            base.register(item);
+        }
+        let full = base.with_full_access(&root).scoped_for_run();
+        block_on(full.call("shell", json!({"command":"cd /"}))).unwrap();
+        let outside = block_on(full.call("shell", json!({"command":"pwd -P"}))).unwrap();
+        assert_eq!(outside["stdout"], "/\n");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn background_processes_stream_output_and_die_with_their_run() {
+        let root = temp_workspace();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let registry = run_registry(&root);
+            let started = registry
+                .call_for_agent(
+                    "shell",
+                    json!({"command":"echo ready; sleep 30","run_in_background":true}),
+                )
+                .await
+                .unwrap();
+            let id = started.result["process_id"].as_str().unwrap().to_string();
+            assert!(started
+                .model_text
+                .unwrap()
+                .starts_with(&format!("Started background process {id}")));
+
+            let first = registry
+                .call_for_agent("process_output", json!({"process_id": id, "wait_secs": 1}))
+                .await
+                .unwrap();
+            assert_eq!(first.result["running"], true);
+            assert_eq!(first.model_text.unwrap(), format!("{id}: running\nready"));
+            let empty = registry
+                .call("process_output", json!({"process_id": id}))
+                .await
+                .unwrap();
+            assert_eq!(empty["output"], "");
+
+            let killed = registry
+                .call("process_kill", json!({"process_id": id}))
+                .await
+                .unwrap();
+            assert_eq!(killed["killed"], true);
+            assert_eq!(killed["running"], false);
+            assert!(registry
+                .call("process_output", json!({"process_id": id}))
+                .await
+                .is_err());
+
+            let finished = registry
+                .call(
+                    "shell",
+                    json!({"command":"echo done; exit 4","run_in_background":true}),
+                )
+                .await
+                .unwrap();
+            let finished_id = finished["process_id"].as_str().unwrap();
+            let status = registry
+                .call(
+                    "process_output",
+                    json!({"process_id": finished_id, "wait_secs": 10}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(status["exit_code"], 4);
+            assert_eq!(status["output"], "done\n");
+
+            let lingering = registry
+                .call(
+                    "shell",
+                    json!({"command":"sleep 30","run_in_background":true}),
+                )
+                .await
+                .unwrap();
+            let pid = lingering["pid"].as_u64().unwrap().to_string();
+            drop(registry);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let alive = std::process::Command::new("kill")
+                    .args(["-0", &pid])
+                    .status()
+                    .unwrap()
+                    .success();
+                if !alive {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "background process outlived its run"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        });
         let _ = std::fs::remove_dir_all(root);
     }
 }

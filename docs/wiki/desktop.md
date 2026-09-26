@@ -143,7 +143,7 @@ The latest eligible turn ends with a compact review card whose explicit state is
 |---|---|
 | Model | Pick any discovered chat, account-runtime, or media-capable model. The chip and picker groups use branded icons for provider/runtime identity while keeping readiness as a separate status. They also show runtime lane, capabilities, favorite state, and reasoning effort where supported. |
 | Generation | Expand **Generation** in session controls for per-model provider overrides. Common fields cover output limit, temperature, Top P, seed, stop sequences, and frequency/presence penalties; vLLM adds Top K, Min P, repetition penalty, and thinking-token budget. Blank means model default, and accepted turns freeze their values for direct and tool-agent requests. |
-| Folder | Sets the host working folder. Each run captures that folder immutably; filesystem tools reject symlink/junction escapes, writes replace files atomically, directory results are sorted and bounded, and `read_file` accepts byte `offset`/`limit` ranges. |
+| Folder | Sets the host working folder. Each run captures that folder immutably; the host file, search, and shell tools below work inside it (or from it, under Open approval), reject symlink/junction escapes, and replace files atomically. |
 | Docker sandbox | Enables bounded Docker execution through `run_command`: no network, read-only root, dropped capabilities, no-new-privileges, memory/CPU/PID limits, output caps, timeout, and cancellation cleanup. It is separate from each installed account runtime's native sandbox. |
 | Computer use | Enables OS-level screen capture plus mouse/keyboard tools when the desktop build includes the feature. |
 | Memory | Adds scoped thread/project memory search as cheap turn context. Durable memory writes use `memory_register` only on explicit remember/save requests or already tool-capable turns. |
@@ -151,6 +151,23 @@ The latest eligible turn ends with a compact review card whose explicit state is
 | Approval | Sets `review`, `guarded`, or `open` tool execution policy. Review is the new-chat default: consequential calls pause before execution and the resulting diff is inspected afterward. Open auto-starts eligible worker plans and flows into child tool execution, while connector input and authorization remain interactive. Changing the workspace folder resets approval to Review, so Open must be enabled explicitly for the new project boundary. |
 | Plan | Keeps the turn read-only until you approve execution. |
 | Goal | Tracks a thread objective, success criteria, constraints, turn count, and continuation prompts. |
+
+## Host file and shell tools
+
+With a folder selected, provider and local models get these host tools. Review and Guarded runs keep paths inside the folder; Open accepts full host paths and uses the folder as the working directory.
+
+| Tool | Behavior |
+|---|---|
+| `read_file` | Returns numbered lines. `offset` is a 1-based line and `limit` a line count (default 2000); longer lines are cut at 2000 characters and the reply notes the total line count and where to continue. Binary files and images are refused by name. Saved oversized tool output is readable by absolute path even in workspace-scoped runs. |
+| `list_dir` | Sorted, bounded directory entries. |
+| `glob` | Finds files by `*`, `**`, `?`, `[...]`, and `{a,b}` patterns (a pattern without `/` matches names at any depth). Inside a git repository it honors `.gitignore`; elsewhere it skips `.git`, `node_modules`, `target`, `dist`, `build`, and hidden directories. Returns up to 500 paths, newest first. |
+| `grep` | Regex search with `files_with_matches` (default, newest first), `content` (`path:line:text` with up to 10 context lines), or `count` output. Uses ripgrep when installed and an in-process scan of the `glob` file set otherwise; binary files and files over 2 MiB are skipped. |
+| `write_file` | Creates or overwrites a file and reports which, with its line count. |
+| `edit_file` | Replaces `old` with `new`. `old` must be unique unless `replace_all` is set. A match that differs only in indentation, trailing whitespace, or line endings is applied in the file's own style and reported; a miss returns the most similar region with line numbers. Edits keep the file's line endings and return a unified diff snippet. If the file changed on disk since the run last read it, the edit is refused until it is read again. |
+| `shell` | Runs `sh -c` (PowerShell on Windows). `timeout_secs` defaults to 120 (max 600) and kills the whole process tree, keeping partial output. `cd` persists between commands in a run; a workspace-scoped run returns to the folder root if a command leaves it. Commands that are provably read-only are classified as read-only for approval. |
+| `process_output`, `process_kill` | `shell` with `run_in_background` returns a `process_id`. `process_output` returns output since the last read (optionally waiting up to 60 seconds for exit) and the exit status; `process_kill` stops the process tree. The newest 1 MiB of output is kept, and every background process is killed when its run ends. |
+
+The Developer setting for hash-anchored edits adds `read_file_anchors` and `patch_file`.
 
 ## Artifacts
 
