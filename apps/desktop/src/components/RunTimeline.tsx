@@ -73,8 +73,10 @@ function stepDetail(step: RunTrace["steps"][number]): string | null {
   const path = stringArg(args, "path");
   const command = stringArg(args, "command");
   const url = stringArg(args, "url");
+  const pattern = stringArg(args, "pattern");
   if (step.error) return compactText(path ? `${path}: ${step.error}` : step.error);
   if (command) return compactText(command);
+  if (pattern) return compactText(path ? `${pattern} in ${path}` : pattern);
   if (path) return compactText(path);
   if (url) return compactText(url);
   if (step.result !== undefined) return compactText(typeof step.result === "string" ? step.result : safeJson(step.result), 160);

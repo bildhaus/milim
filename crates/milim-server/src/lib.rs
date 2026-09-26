@@ -59,6 +59,13 @@ use tower_http::trace::TraceLayer;
 pub use host_guard::HostPolicy;
 pub use state::AppState;
 
+/// The `PATH` used to locate helper CLIs such as `rg` from a GUI launch: the
+/// inherited entries, then the login shell's, then common install directories.
+#[cfg(not(windows))]
+pub fn cli_search_path() -> std::ffi::OsString {
+    cli_path::search_path()
+}
+
 /// Assemble the application router with all routes and middleware. The
 /// accepted `Host` names follow `expose_to_network`; listeners served through
 /// [`serve_listener`] derive them from the bound address instead.

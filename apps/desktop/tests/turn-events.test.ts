@@ -67,6 +67,37 @@ equal(failed.status, "error", "failed tool part should mark error status");
 equal(failed.label, "Command failed", "failed shell tool should use error label");
 equal(failed.detail, "exit 1", "failed shell tool should preserve the failure detail");
 
+const grep = toolCompletedPart({
+  type: "tool_result",
+  name: "grep",
+  call_id: "call-grep",
+  arguments: JSON.stringify({ pattern: "fn main", path: "src" }),
+  result: { mode: "files_with_matches", files: ["src/main.rs"], count: 1 },
+} as never);
+equal(grep.icon, "file", "grep should use the file icon");
+equal(grep.label, "Searched files", "completed grep label should be readable");
+equal(grep.detail, "fn main in src (1 file)", "grep detail should show the pattern, path, and count");
+
+const glob = toolStartedPart({
+  type: "tool_call",
+  name: "glob",
+  call_id: "call-glob",
+  arguments: JSON.stringify({ pattern: "**/*.ts" }),
+} as never);
+equal(glob.label, "Finding files", "started glob label should be readable");
+equal(glob.detail, "**/*.ts", "started glob detail should show the pattern");
+
+const processOutput = toolCompletedPart({
+  type: "tool_result",
+  name: "process_output",
+  call_id: "call-bg",
+  arguments: JSON.stringify({ process_id: "bg-1" }),
+  result: { process_id: "bg-1", output: "ready", running: true },
+} as never);
+equal(processOutput.icon, "command", "process tools should use the command icon");
+equal(processOutput.label, "Checked background command", "process_output label should be readable");
+equal(processOutput.detail, "bg-1", "process_output detail should name the process");
+
 const longCommand = `node -e "${"x".repeat(140)}"`;
 equal(toolStartedPart({
   type: "tool_call",
