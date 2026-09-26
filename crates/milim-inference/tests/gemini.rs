@@ -285,3 +285,84 @@ async fn streams_function_call_as_openai_tool_call() {
     assert_eq!(calls[0].function.name, "get_weather");
     assert_eq!(calls[0].function.arguments, r#"{"location":"Paris"}"#);
 }
+
+#[tokio::test]
+async fn later_system_messages_become_in_place_user_reminders() {
+    let sse = concat!(
+        r#"data: {"candidates":[{"content":{"parts":[{"text":"ok"}],"role":"model"},"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":900,"cachedContentTokenCount":600,"candidatesTokenCount":64,"totalTokenCount":964}}"#,
+        "\n\n"
+    );
+    let (base, captured) = spawn_once(sse, "text/event-stream").await;
+    let backend = GeminiBackend::new("gemini", base, Some("AIza-test".to_string()));
+    let mut req = basic_req("gemini-2.5-flash");
+    req.messages = vec![
+        ChatMessage::text("system", "Base prompt."),
+        ChatMessage::text("system", "Project rules."),
+        ChatMessage::text("user", "Fix the bug."),
+        ChatMessage::text("assistant", "Looking."),
+        ChatMessage::text("system", "Plan mode is off."),
+        ChatMessage::text("user", "Go ahead."),
+    ];
+
+    let out = backend.complete(req).await.unwrap();
+    let sent = captured.await.unwrap();
+
+    assert_eq!(
+        sent.body["systemInstruction"],
+        serde_json::json!({ "parts": [{ "text": "Base prompt." }, { "text": "Project rules." }] })
+    );
+    let contents = sent.body["contents"].as_array().unwrap();
+    assert_eq!(contents.len(), 3);
+    assert_eq!(contents[1]["role"], "model");
+    assert_eq!(
+        contents[2],
+        serde_json::json!({
+            "role": "user",
+            "parts": [
+                { "text": "<system-reminder>\nPlan mode is off.\n</system-reminder>" },
+                { "text": "Go ahead." }
+            ]
+        })
+    );
+    assert_eq!(out.finish_reason, "length");
+    assert_eq!(out.usage.prompt_tokens, 900);
+    assert_eq!(out.usage.cache_read_tokens, Some(600));
+}
+
+#[tokio::test]
+async fn safety_stops_report_content_filter() {
+    let sse = concat!(
+        r#"data: {"candidates":[{"finishReason":"SAFETY"}]}"#,
+        "\n\n"
+    );
+    let (base, _captured) = spawn_once(sse, "text/event-stream").await;
+    let backend = GeminiBackend::new("gemini", base, None);
+    let out = backend
+        .complete(basic_req("gemini-2.5-flash"))
+        .await
+        .unwrap();
+    assert_eq!(out.finish_reason, "content_filter");
+}
+
+#[tokio::test]
+async fn mid_stream_error_payloads_are_typed_upstream_errors() {
+    let sse = concat!(
+        r#"data: {"candidates":[{"content":{"parts":[{"text":"partial"}],"role":"model"}}]}"#,
+        "\n\n",
+        r#"data: {"error":{"code":503,"message":"The model is overloaded. Please try again later.","status":"UNAVAILABLE"}}"#,
+        "\n\n"
+    );
+    let (base, _captured) = spawn_once(sse, "text/event-stream").await;
+    let backend = GeminiBackend::new("gemini", base, None);
+
+    let err = backend
+        .complete(basic_req("gemini-2.5-flash"))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("-> 503 UNAVAILABLE"), "{err}");
+    assert!(
+        milim_core::provider_error::retry_hint(&err)
+            .unwrap()
+            .retryable
+    );
+}

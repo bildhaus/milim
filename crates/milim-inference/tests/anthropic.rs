@@ -55,6 +55,61 @@ async fn spawn_once(
     (format!("http://{addr}/v1"), rx)
 }
 
+/// Serve one scripted `(status, content type, body)` response per connection,
+/// in order, closing each connection so every request opens a new one.
+async fn spawn_sequence(
+    responses: Vec<(&'static str, &'static str, &'static str)>,
+) -> (
+    String,
+    tokio::sync::mpsc::UnboundedReceiver<CapturedRequest>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+
+    tokio::spawn(async move {
+        for (status, content_type, body) in responses {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            let mut buf = [0u8; 1024];
+            loop {
+                let n = socket.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&buf[..n]);
+                if request_complete(&bytes) {
+                    break;
+                }
+            }
+            let _ = tx.send(parse_request(&bytes));
+            let resp = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(resp.as_bytes()).await.unwrap();
+        }
+    });
+
+    (format!("http://{addr}/v1"), rx)
+}
+
+const MINIMAL_SSE: &str = concat!(
+    "event: message_start\n",
+    r#"data: {"type":"message_start","message":{"usage":{"input_tokens":5,"cache_read_input_tokens":40,"output_tokens":0}}}"#,
+    "\n\n",
+    "event: content_block_delta\n",
+    r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}"#,
+    "\n\n",
+    "event: message_delta\n",
+    r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}"#,
+    "\n\n",
+    "event: message_stop\n",
+    r#"data: {"type":"message_stop"}"#,
+    "\n\n"
+);
+
 fn request_complete(bytes: &[u8]) -> bool {
     let text = String::from_utf8_lossy(bytes);
     let Some((head, body)) = text.split_once("\r\n\r\n") else {
@@ -123,7 +178,7 @@ fn basic_req(model: &str) -> CompletionRequest {
 
 #[tokio::test]
 async fn lists_anthropic_models_with_required_headers() {
-    let body = r#"{"data":[{"id":"claude-sonnet-4-20250514","display_name":"Claude Sonnet 4"}],"has_more":false}"#;
+    let body = r#"{"data":[{"id":"claude-sonnet-4-20250514","display_name":"Claude Sonnet 4","max_input_tokens":200000,"max_tokens":64000}],"has_more":false}"#;
     let (base, captured) = spawn_once(body, "application/json").await;
     let backend = AnthropicBackend::new("anthropic", base, Some("sk-ant-test".to_string()));
 
@@ -142,6 +197,8 @@ async fn lists_anthropic_models_with_required_headers() {
     );
     assert_eq!(models[0].id, "claude-sonnet-4-20250514");
     assert_eq!(models[0].owned_by, "anthropic");
+    assert_eq!(models[0].context_length, Some(200_000));
+    assert_eq!(models[0].max_completion_tokens, Some(64_000));
 }
 
 #[tokio::test]
@@ -174,9 +231,23 @@ async fn streams_text_and_builds_messages_body() {
     assert_eq!(req.method, "POST");
     assert_eq!(req.path, "/v1/messages");
     assert_eq!(req.body["model"], "claude-sonnet-4-20250514");
-    assert_eq!(req.body["system"], "Be concise.");
+    assert_eq!(
+        req.body["system"],
+        serde_json::json!([{
+            "type": "text",
+            "text": "Be concise.",
+            "cache_control": { "type": "ephemeral" }
+        }])
+    );
     assert_eq!(req.body["messages"][0]["role"], "user");
-    assert_eq!(req.body["messages"][0]["content"], "Hello");
+    assert_eq!(
+        req.body["messages"][0]["content"],
+        serde_json::json!([{
+            "type": "text",
+            "text": "Hello",
+            "cache_control": { "type": "ephemeral" }
+        }])
+    );
     assert_eq!(req.body["max_tokens"], 64);
     let temp = req.body["temperature"].as_f64().unwrap();
     assert!((temp - 0.2).abs() < 0.000_001, "temperature was {temp}");
@@ -293,4 +364,91 @@ async fn streams_tool_use_as_openai_tool_calls() {
     assert_eq!(calls[0].id.as_deref(), Some("toolu_1"));
     assert_eq!(calls[0].function.name, "get_weather");
     assert_eq!(calls[0].function.arguments, r#"{"location":"Paris"}"#);
+}
+
+#[tokio::test]
+async fn retries_once_with_the_model_output_limit_and_remembers_it() {
+    let rejection = r#"{"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: 32000 > 8192, which is the maximum allowed number of output tokens for claude-3-5-sonnet-custom"}}"#;
+    let (base, mut captured) = spawn_sequence(vec![
+        ("400 Bad Request", "application/json", rejection),
+        ("200 OK", "text/event-stream", MINIMAL_SSE),
+        ("200 OK", "text/event-stream", MINIMAL_SSE),
+    ])
+    .await;
+    let backend = AnthropicBackend::new("anthropic", base, Some("sk-ant-test".to_string()));
+    let mut req = basic_req("custom-sonnet-proxy");
+    req.sampling.max_tokens = None;
+
+    let out = backend.complete(req.clone()).await.unwrap();
+    assert_eq!(out.message.text_content(), "ok");
+    assert_eq!(out.usage.prompt_tokens, 45);
+    assert_eq!(out.usage.cache_read_tokens, Some(40));
+    assert_eq!(out.usage.cache_write_tokens, None);
+    assert_eq!(captured.recv().await.unwrap().body["max_tokens"], 32_000);
+    assert_eq!(captured.recv().await.unwrap().body["max_tokens"], 8_192);
+
+    // The learned cap applies to the next request without another rejection.
+    backend.complete(req).await.unwrap();
+    assert_eq!(captured.recv().await.unwrap().body["max_tokens"], 8_192);
+}
+
+#[tokio::test]
+async fn unrelated_bad_requests_are_not_retried() {
+    let rejection = r#"{"type":"error","error":{"type":"invalid_request_error","message":"messages: roles must alternate"}}"#;
+    let (base, _captured) =
+        spawn_sequence(vec![("400 Bad Request", "application/json", rejection)]).await;
+    let backend = AnthropicBackend::new("anthropic", base, Some("sk-ant-test".to_string()));
+
+    let err = backend
+        .complete(basic_req("claude-sonnet-4-6"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("400"), "{err}");
+    assert!(err.contains("roles must alternate"), "{err}");
+}
+
+#[tokio::test]
+async fn mid_stream_error_events_are_typed_upstream_errors() {
+    let sse = concat!(
+        "event: message_start\n",
+        r#"data: {"type":"message_start","message":{"usage":{"input_tokens":5,"output_tokens":0}}}"#,
+        "\n\n",
+        "event: error\n",
+        r#"data: {"type":"error","error":{"type":"rate_limit_error","message":"Number of request tokens has exceeded your per-minute rate limit"}}"#,
+        "\n\n"
+    );
+    let (base, _captured) = spawn_once(sse, "text/event-stream").await;
+    let backend = AnthropicBackend::new("anthropic", base, Some("sk-ant-test".to_string()));
+
+    let err = backend
+        .complete(basic_req("claude-sonnet-4-6"))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("-> 429 rate_limit_error"), "{err}");
+    let hint = milim_core::provider_error::retry_hint(&err).unwrap();
+    assert!(hint.retryable);
+    assert_eq!(
+        milim_core::provider_error::classify_provider_error(&err.to_string()).kind,
+        milim_core::provider_error::ProviderErrorKind::RateLimited
+    );
+}
+
+#[tokio::test]
+async fn max_tokens_stop_reports_length() {
+    let sse = concat!(
+        "event: message_delta\n",
+        r#"data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":64}}"#,
+        "\n\n",
+        "event: message_stop\n",
+        r#"data: {"type":"message_stop"}"#,
+        "\n\n"
+    );
+    let (base, _captured) = spawn_once(sse, "text/event-stream").await;
+    let backend = AnthropicBackend::new("anthropic", base, None);
+    let out = backend
+        .complete(basic_req("claude-sonnet-4-6"))
+        .await
+        .unwrap();
+    assert_eq!(out.finish_reason, "length");
 }

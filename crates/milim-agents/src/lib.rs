@@ -1627,6 +1627,7 @@ fn add_usage(total: &mut Usage, usage: Usage) {
     total.prompt_tokens += usage.prompt_tokens;
     total.completion_tokens += usage.completion_tokens;
     total.total_tokens += usage.total_tokens;
+    total.add_cache_tokens(&usage);
 }
 
 fn memory_registered_event(result: &Value) -> Option<AgentEvent> {

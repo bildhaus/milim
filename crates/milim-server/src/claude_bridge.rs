@@ -2543,6 +2543,7 @@ not json
                     completion_tokens: 4,
                     total_tokens: 19,
                     cost_usd: None,
+                    ..
                 }),
                 cost_usd: Some(cost),
                 ..

@@ -2846,7 +2846,7 @@ fn usage_from_object(value: &Value) -> Option<Usage> {
         prompt_tokens,
         completion_tokens,
         total_tokens: total.unwrap_or(prompt_tokens + completion_tokens),
-        cost_usd: None,
+        ..Default::default()
     })
 }
 
