@@ -758,6 +758,9 @@ pub(crate) struct McpServerUpsert {
     #[serde(default)]
     id: Option<String>,
     name: String,
+    #[serde(default, rename = "type")]
+    transport: milim_mcp_client::McpTransportKind,
+    #[serde(default)]
     command: String,
     #[serde(default)]
     args: Vec<String>,
@@ -765,8 +768,51 @@ pub(crate) struct McpServerUpsert {
     cwd: Option<String>,
     #[serde(default)]
     env: Vec<milim_mcp_client::McpEnvVar>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    headers: Vec<milim_mcp_client::McpEnvVar>,
     #[serde(default = "default_enabled")]
     enabled: bool,
+    #[serde(default)]
+    trust_read_only_hints: bool,
+    #[serde(default)]
+    call_timeout_secs: Option<u64>,
+    #[serde(default)]
+    oauth_client_id: Option<String>,
+}
+
+impl McpServerUpsert {
+    fn into_config(self) -> milim_mcp_client::McpServerConfig {
+        milim_mcp_client::McpServerConfig {
+            id: self.id.unwrap_or_default(),
+            name: self.name,
+            transport: self.transport,
+            command: self.command,
+            args: self.args,
+            cwd: self.cwd,
+            env: self.env,
+            url: self.url,
+            headers: self.headers,
+            enabled: self.enabled,
+            trust_read_only_hints: self.trust_read_only_hints,
+            call_timeout_secs: self.call_timeout_secs,
+            oauth_client_id: self.oauth_client_id,
+        }
+    }
+}
+
+fn mcp_hub(st: &AppState) -> Result<&Arc<milim_mcp_client::McpHub>, ApiError> {
+    st.mcp
+        .as_ref()
+        .ok_or_else(|| ApiError(Error::InvalidRequest("MCP client is not enabled".into())))
+}
+
+fn mcp_server_info(
+    hub: &milim_mcp_client::McpHub,
+    id: &str,
+) -> Option<milim_mcp_client::McpServerInfo> {
+    hub.list().into_iter().find(|server| server.id == id)
 }
 
 /// `GET /mcp/servers` — list configured MCP servers with connection status.
@@ -791,22 +837,9 @@ pub(crate) async fn mcp_server_upsert(
     Json(req): Json<McpServerUpsert>,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
-    let hub = st
-        .mcp
-        .as_ref()
-        .ok_or_else(|| ApiError(Error::InvalidRequest("MCP client is not enabled".into())))?;
-    let cfg = milim_mcp_client::McpServerConfig {
-        id: req.id.unwrap_or_default(),
-        name: req.name,
-        command: req.command,
-        args: req.args,
-        cwd: req.cwd,
-        env: req.env,
-        enabled: req.enabled,
-    };
-    let saved = hub.upsert(cfg).await.map_err(ApiError)?;
-    let info = hub.list().into_iter().find(|s| s.id == saved.id);
-    Ok(Json(json!({ "server": info })).into_response())
+    let hub = mcp_hub(&st)?;
+    let saved = hub.upsert(req.into_config()).await.map_err(ApiError)?;
+    Ok(Json(json!({ "server": mcp_server_info(hub, &saved.id) })).into_response())
 }
 
 /// `POST /mcp/servers/test` — test a draft MCP server without saving/enabling it.
@@ -817,20 +850,8 @@ pub(crate) async fn mcp_server_test_draft(
     Json(req): Json<McpServerUpsert>,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
-    let hub = st
-        .mcp
-        .as_ref()
-        .ok_or_else(|| ApiError(Error::InvalidRequest("MCP client is not enabled".into())))?;
-    let cfg = milim_mcp_client::McpServerConfig {
-        id: req.id.unwrap_or_default(),
-        name: req.name,
-        command: req.command,
-        args: req.args,
-        cwd: req.cwd,
-        env: req.env,
-        enabled: req.enabled,
-    };
-    Ok(Json(hub.test_config(cfg).await).into_response())
+    let hub = mcp_hub(&st)?;
+    Ok(Json(hub.test_config(req.into_config()).await).into_response())
 }
 
 /// `POST /mcp/servers/{id}/test` — test a saved MCP server without enabling it.
@@ -841,10 +862,7 @@ pub(crate) async fn mcp_server_test_saved(
     peer: Peer,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
-    let hub = st
-        .mcp
-        .as_ref()
-        .ok_or_else(|| ApiError(Error::InvalidRequest("MCP client is not enabled".into())))?;
+    let hub = mcp_hub(&st)?;
     let cfg = hub
         .config(&id)
         .ok_or_else(|| ApiError(Error::ModelNotFound(format!("mcp server {id}"))))?;
@@ -859,11 +877,49 @@ pub(crate) async fn mcp_server_delete(
     peer: Peer,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
-    let hub = st
-        .mcp
-        .as_ref()
-        .ok_or_else(|| ApiError(Error::InvalidRequest("MCP client is not enabled".into())))?;
+    let hub = mcp_hub(&st)?;
     Ok(Json(json!({ "deleted": hub.remove(&id).map_err(ApiError)? })).into_response())
+}
+
+/// `POST /mcp/servers/{id}/reconnect` — drop and re-establish a connection.
+pub(crate) async fn mcp_server_reconnect(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    peer: Peer,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    let hub = mcp_hub(&st)?;
+    hub.reconnect(&id).await.map_err(ApiError)?;
+    Ok(Json(json!({ "server": mcp_server_info(hub, &id) })).into_response())
+}
+
+/// `POST /mcp/servers/{id}/auth` — start an OAuth sign-in. The response's
+/// `flow.url` is opened in the system browser; poll `GET /mcp/servers` for
+/// the flow status.
+pub(crate) async fn mcp_server_sign_in(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    peer: Peer,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    let hub = mcp_hub(&st)?;
+    let flow = hub.start_sign_in(&id).await.map_err(ApiError)?;
+    Ok(Json(json!({ "flow": flow })).into_response())
+}
+
+/// `DELETE /mcp/servers/{id}/auth` — forget OAuth tokens and reconnect.
+pub(crate) async fn mcp_server_sign_out(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    peer: Peer,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    let hub = mcp_hub(&st)?;
+    hub.sign_out(&id).await.map_err(ApiError)?;
+    Ok(Json(json!({ "server": mcp_server_info(hub, &id) })).into_response())
 }
 
 pub(crate) fn register_mcp_server_tools(
@@ -915,6 +971,9 @@ struct McpServerToolConfig {
     #[serde(default)]
     id: Option<String>,
     name: String,
+    #[serde(default, rename = "type")]
+    transport: milim_mcp_client::McpTransportKind,
+    #[serde(default)]
     command: String,
     #[serde(default)]
     args: Vec<String>,
@@ -924,6 +983,16 @@ struct McpServerToolConfig {
     env: Vec<McpServerToolEnv>,
     #[serde(default)]
     secret_env: Vec<McpServerToolSecretEnv>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    headers: Vec<McpServerToolEnv>,
+    #[serde(default)]
+    secret_headers: Vec<McpServerToolSecretEnv>,
+    #[serde(default)]
+    call_timeout_secs: Option<u64>,
+    #[serde(default)]
+    oauth_client_id: Option<String>,
     #[serde(default = "default_enabled")]
     enabled: bool,
 }
@@ -932,6 +1001,61 @@ struct McpServerToolConfig {
 #[serde(deny_unknown_fields)]
 struct McpServerDeleteToolArgs {
     id: String,
+}
+
+fn mcp_tool_entries(
+    plain: Vec<McpServerToolEnv>,
+    secret: Vec<McpServerToolSecretEnv>,
+    field: &str,
+    secret_field: &str,
+    looks_secret: impl Fn(&str) -> bool,
+) -> milim_core::Result<Vec<milim_mcp_client::McpEnvVar>> {
+    // Header names are case-insensitive; environment variable names are not.
+    let dedupe_key = |key: &str| {
+        if field == "headers" {
+            key.to_ascii_lowercase()
+        } else {
+            key.to_string()
+        }
+    };
+    let mut keys = HashSet::new();
+    let mut entries = Vec::with_capacity(plain.len() + secret.len());
+    for item in plain {
+        let key = trim_required_tool_arg(item.key, &format!("{field}[].key"))?;
+        if looks_secret(&key) {
+            return Err(Error::InvalidRequest(format!(
+                "{key} looks secret; declare it in {secret_field} without a value"
+            )));
+        }
+        if !keys.insert(dedupe_key(&key)) {
+            return Err(Error::InvalidRequest(format!(
+                "duplicate {field} entry: {key}"
+            )));
+        }
+        entries.push(milim_mcp_client::McpEnvVar {
+            key,
+            value: Some(item.value),
+            secret: false,
+            required: item.required,
+            has_value: false,
+        });
+    }
+    for item in secret {
+        let key = trim_required_tool_arg(item.key, &format!("{secret_field}[].key"))?;
+        if !keys.insert(dedupe_key(&key)) {
+            return Err(Error::InvalidRequest(format!(
+                "duplicate {field} entry: {key}"
+            )));
+        }
+        entries.push(milim_mcp_client::McpEnvVar {
+            key,
+            value: None,
+            secret: true,
+            required: item.required,
+            has_value: false,
+        });
+    }
+    Ok(entries)
 }
 
 impl McpServerToolConfig {
@@ -946,66 +1070,104 @@ impl McpServerToolConfig {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToString::to_string);
-        if update_must_exist && id.as_deref().is_some_and(|id| hub.config(id).is_none()) {
+        let existing = id.as_deref().and_then(|id| hub.config(id));
+        if update_must_exist && id.is_some() && existing.is_none() {
             return Err(Error::ModelNotFound(format!(
                 "mcp server {}",
                 id.as_deref().unwrap_or_default()
             )));
         }
 
-        let mut keys = HashSet::new();
-        let mut env = Vec::with_capacity(self.env.len() + self.secret_env.len());
-        for item in self.env {
-            let key = trim_required_tool_arg(item.key, "env[].key")?;
-            if milim_mcp_client::secret_env_key(&key) {
-                return Err(Error::InvalidRequest(format!(
-                    "environment variable {key} looks secret; declare it in secret_env without a value"
-                )));
-            }
-            if !keys.insert(key.clone()) {
-                return Err(Error::InvalidRequest(format!(
-                    "duplicate environment variable: {key}"
-                )));
-            }
-            env.push(milim_mcp_client::McpEnvVar {
-                key,
-                value: Some(item.value),
-                secret: false,
-                required: item.required,
-                has_value: false,
-            });
-        }
-        for item in self.secret_env {
-            let key = trim_required_tool_arg(item.key, "secret_env[].key")?;
-            if !keys.insert(key.clone()) {
-                return Err(Error::InvalidRequest(format!(
-                    "duplicate environment variable: {key}"
-                )));
-            }
-            env.push(milim_mcp_client::McpEnvVar {
-                key,
-                value: None,
-                secret: true,
-                required: item.required,
-                has_value: false,
-            });
-        }
-
-        Ok(milim_mcp_client::McpServerConfig {
-            id: id.unwrap_or_default(),
-            name: trim_required_tool_arg(self.name, "name")?,
-            command: trim_required_tool_arg(self.command, "command")?,
-            args: self.args,
-            cwd: self
-                .cwd
+        let env = mcp_tool_entries(
+            self.env,
+            self.secret_env,
+            "env",
+            "secret_env",
+            milim_mcp_client::secret_env_key,
+        )?;
+        let headers = mcp_tool_entries(
+            self.headers,
+            self.secret_headers,
+            "headers",
+            "secret_headers",
+            |key| {
+                key.eq_ignore_ascii_case("authorization") || milim_mcp_client::secret_env_key(key)
+            },
+        )?;
+        let trimmed = |value: Option<String>| {
+            value
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-                .map(ToString::to_string),
+                .map(ToString::to_string)
+        };
+        let name = trim_required_tool_arg(self.name, "name")?;
+        let command = match self.transport {
+            milim_mcp_client::McpTransportKind::Stdio => {
+                trim_required_tool_arg(self.command, "command")?
+            }
+            milim_mcp_client::McpTransportKind::Http => self.command.trim().to_string(),
+        };
+        let url = match self.transport {
+            milim_mcp_client::McpTransportKind::Http => {
+                Some(trim_required_tool_arg(self.url.unwrap_or_default(), "url")?)
+            }
+            milim_mcp_client::McpTransportKind::Stdio => trimmed(self.url),
+        };
+
+        Ok(milim_mcp_client::McpServerConfig {
+            id: id.unwrap_or_default(),
+            name,
+            transport: self.transport,
+            command,
+            args: self.args,
+            cwd: trimmed(self.cwd),
             env,
+            url,
+            headers,
             enabled: self.enabled,
+            // Trusting read-only hints bypasses approval, so only the user
+            // can enable it in MCP Servers; chat saves keep the stored value.
+            trust_read_only_hints: existing
+                .as_ref()
+                .is_some_and(|cfg| cfg.trust_read_only_hints),
+            call_timeout_secs: self.call_timeout_secs,
+            oauth_client_id: trimmed(self.oauth_client_id),
         })
     }
+}
+
+fn mcp_server_entries_schema(description: &str) -> Value {
+    json!({
+        "type": "array",
+        "description": description,
+        "items": {
+            "type": "object",
+            "properties": {
+                "key": { "type": "string" },
+                "value": { "type": "string" },
+                "required": { "type": "boolean" }
+            },
+            "required": ["key", "value"],
+            "additionalProperties": false
+        }
+    })
+}
+
+fn mcp_server_secret_entries_schema(description: &str) -> Value {
+    json!({
+        "type": "array",
+        "description": description,
+        "items": {
+            "type": "object",
+            "properties": {
+                "key": { "type": "string" },
+                "required": { "type": "boolean", "description": "Defaults to true." }
+            },
+            "required": ["key"],
+            "additionalProperties": false
+        }
+    })
 }
 
 fn mcp_server_config_schema() -> Value {
@@ -1014,39 +1176,20 @@ fn mcp_server_config_schema() -> Value {
         "properties": {
             "id": { "type": "string", "description": "Existing server id. Omit to create or test a new server." },
             "name": { "type": "string", "description": "Human-readable server name." },
-            "command": { "type": "string", "description": "Executable to run, such as npx, uvx, node, or an absolute executable path." },
-            "args": { "type": "array", "items": { "type": "string" }, "description": "Exact command arguments." },
-            "cwd": { "type": ["string", "null"], "description": "Optional working directory. Use the active workspace for a locally-authored server." },
-            "env": {
-                "type": "array",
-                "description": "Non-secret environment variables. Credential-looking keys are rejected.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "key": { "type": "string" },
-                        "value": { "type": "string" },
-                        "required": { "type": "boolean" }
-                    },
-                    "required": ["key", "value"],
-                    "additionalProperties": false
-                }
-            },
-            "secret_env": {
-                "type": "array",
-                "description": "Secret environment variable placeholders. Values must be entered later in Milim's encrypted MCP Manager.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "key": { "type": "string" },
-                        "required": { "type": "boolean", "description": "Defaults to true." }
-                    },
-                    "required": ["key"],
-                    "additionalProperties": false
-                }
-            },
+            "type": { "type": "string", "enum": ["stdio", "http"], "description": "stdio (default) launches a local command; http connects to a Streamable HTTP (or legacy SSE) MCP URL." },
+            "command": { "type": "string", "description": "stdio: executable to run, such as npx, uvx, node, or an absolute executable path." },
+            "args": { "type": "array", "items": { "type": "string" }, "description": "stdio: exact command arguments." },
+            "cwd": { "type": ["string", "null"], "description": "stdio: optional working directory. Use the active workspace for a locally-authored server." },
+            "env": mcp_server_entries_schema("stdio: non-secret environment variables. Credential-looking keys are rejected."),
+            "secret_env": mcp_server_secret_entries_schema("stdio: secret environment variable placeholders. Values must be entered later in Milim's encrypted MCP Manager."),
+            "url": { "type": "string", "description": "http: the server's MCP endpoint URL." },
+            "headers": mcp_server_entries_schema("http: non-secret request headers. Authorization and credential-looking names are rejected."),
+            "secret_headers": mcp_server_secret_entries_schema("http: secret header placeholders, such as Authorization. Values must be entered later in Milim's encrypted MCP Manager. Servers that use OAuth need no header; the user signs in from MCP Servers."),
+            "call_timeout_secs": { "type": "integer", "minimum": 1, "maximum": 600, "description": "Per-call tool timeout in seconds. Defaults to 60." },
+            "oauth_client_id": { "type": "string", "description": "http: OAuth client id for servers without dynamic client registration." },
             "enabled": { "type": "boolean", "description": "Connect after saving. Defaults to true." }
         },
-        "required": ["name", "command"],
+        "required": ["name"],
         "additionalProperties": false
     })
 }
@@ -1081,7 +1224,7 @@ impl Tool for McpServerTestTool {
     }
 
     fn description(&self) -> &str {
-        "Launch and test an MCP server configuration without saving it. Use an existing id to reuse its encrypted secret placeholders. Requires command approval."
+        "Launch or connect and test an MCP server configuration without saving it. Use an existing id to reuse its encrypted secret placeholders. Requires command approval."
     }
 
     fn input_schema(&self) -> Value {
@@ -1111,7 +1254,7 @@ impl Tool for McpServerSaveTool {
     }
 
     fn description(&self) -> &str {
-        "Create or fully replace a Milim-managed MCP server. Omit id to create; list first and include id to update. Connected tools become callable on the next chat turn. Requires command approval."
+        "Create or fully replace a Milim-managed stdio or HTTP MCP server. Omit id to create; list first and include id to update. Connected tools become callable on the next chat turn. HTTP servers that report auth_required need the user to sign in from MCP Servers. Requires command approval."
     }
 
     fn input_schema(&self) -> Value {
@@ -1255,6 +1398,7 @@ mod mcp_server_tool_tests {
                 has_value: false,
             }],
             enabled: false,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -1304,6 +1448,84 @@ mod mcp_server_tool_tests {
             .await
             .unwrap_err();
         assert!(missing_update.to_string().contains("mcp server missing"));
+
+        drop(tools);
+        drop(hub);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn saves_http_servers_without_letting_chat_trust_hints() {
+        let (root, hub) = hub();
+        let mut tools = ToolRegistry::new();
+        register_mcp_server_tools(&mut tools, hub.clone());
+
+        let leaky = tools
+            .call(
+                "mcp_server_save",
+                json!({
+                    "name": "Remote",
+                    "type": "http",
+                    "url": "https://mcp.example.com/mcp",
+                    "headers": [{ "key": "Authorization", "value": "Bearer leak" }],
+                    "enabled": false
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(leaky.to_string().contains("declare it in secret_headers"));
+
+        let created = tools
+            .call(
+                "mcp_server_save",
+                json!({
+                    "name": "Remote",
+                    "type": "http",
+                    "url": "https://mcp.example.com/mcp",
+                    "headers": [{ "key": "X-Team", "value": "core" }],
+                    "secret_headers": [{ "key": "Authorization" }],
+                    "call_timeout_secs": 300,
+                    "enabled": false
+                }),
+            )
+            .await
+            .unwrap();
+        let id = created["server"]["id"].as_str().unwrap().to_string();
+        assert_eq!(created["server"]["type"], "http");
+        assert_eq!(created["server"]["call_timeout_secs"], 300);
+        assert_eq!(created["server"]["missing_env"][0], "Authorization");
+
+        let mut trusted = hub.config(&id).unwrap();
+        trusted.trust_read_only_hints = true;
+        hub.upsert(trusted).await.unwrap();
+        tools
+            .call(
+                "mcp_server_save",
+                json!({
+                    "id": id,
+                    "name": "Remote renamed",
+                    "type": "http",
+                    "url": "https://mcp.example.com/mcp",
+                    "enabled": false
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(hub.config(&id).unwrap().trust_read_only_hints);
+        let untrusted = tools
+            .call(
+                "mcp_server_save",
+                json!({
+                    "name": "Sneaky",
+                    "type": "http",
+                    "url": "https://mcp.example.com/mcp",
+                    "trust_read_only_hints": true,
+                    "enabled": false
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(untrusted.to_string().contains("unknown field"));
 
         drop(tools);
         drop(hub);

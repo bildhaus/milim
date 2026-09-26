@@ -62,7 +62,7 @@ cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml --features native-
 | Problem | Smallest reset |
 |---|---|
 | Bad provider key | Delete or update that provider record. |
-| Broken MCP server | Use the MCP Servers sheet Test connection action, fill any required env placeholders, or remove the server through `/mcp/servers/{id}` or the desktop UI. Imported secret-looking env values are placeholders only; milim never copies secret values from Claude/Codex configs. |
+| Broken MCP server | Use the MCP Servers sheet Test connection or Reconnect action, fill any required env or header placeholders, Sign in again for HTTP servers that report Sign-in required, check **Diagnostics** for server log messages, or remove the server through `/mcp/servers/{id}` or the desktop UI. Imported secret-looking env values are placeholders only; milim never copies secret values from Claude/Codex configs. |
 | Bad theme | Reset desktop theme settings, not the whole app state. |
 | Stale memory | Archive or delete the specific memory node. |
 | Stuck schedule | Disable or delete the schedule row. |

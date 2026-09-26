@@ -5504,19 +5504,56 @@ export async function deleteSchedule(id: string): Promise<boolean> {
 
 // ----- MCP client (external MCP servers whose tools we consume) -----
 
+export type McpTransportKind = "stdio" | "http";
+
+export type McpConnectionState =
+  | "disconnected"
+  | "disabled"
+  | "connecting"
+  | "connected"
+  | "reconnecting"
+  | "auth_required"
+  | "error";
+
+export interface McpAuthFlow {
+  id: string;
+  status: "pending" | "complete" | "error";
+  url?: string | null;
+  error?: string | null;
+}
+
+export interface McpLogEntry {
+  at_ms: number;
+  level: string;
+  logger?: string | null;
+  message: string;
+}
+
 export interface McpServerInfo {
   id: string;
   name: string;
+  type?: McpTransportKind;
   command: string;
   args: string[];
   cwd?: string | null;
   env?: McpEnvVar[];
+  url?: string | null;
+  headers?: McpEnvVar[];
   enabled: boolean;
   connected: boolean;
+  status?: McpConnectionState;
   tool_count: number;
+  declared_read_only_tools?: number;
+  trust_read_only_hints?: boolean;
+  call_timeout_secs?: number;
+  oauth_client_id?: string | null;
+  auth?: { status: "not_required" | "required" | "signed_in"; flow?: McpAuthFlow | null };
+  reconnect_attempt?: number;
+  retry_in_secs?: number | null;
   capabilities?: { tools: boolean; resources: boolean; prompts: boolean; apps: boolean };
   missing_env?: string[];
   error: string | null;
+  logs?: McpLogEntry[];
 }
 
 export interface McpEnvVar {
@@ -5527,12 +5564,30 @@ export interface McpEnvVar {
   has_value?: boolean;
 }
 
+/** Editable MCP server configuration sent to save/test. */
+export interface McpServerDraft {
+  id?: string;
+  name: string;
+  type: McpTransportKind;
+  command: string;
+  args: string[];
+  cwd?: string | null;
+  env?: McpEnvVar[];
+  url?: string | null;
+  headers?: McpEnvVar[];
+  enabled: boolean;
+  trust_read_only_hints: boolean;
+  call_timeout_secs?: number | null;
+  oauth_client_id?: string | null;
+}
+
 export interface McpTestResult {
   ok: boolean;
   connected: boolean;
   tool_count: number;
   capabilities?: { tools: boolean; resources: boolean; prompts: boolean; apps: boolean };
   missing_env?: string[];
+  auth_required?: boolean;
   error?: string | null;
 }
 
@@ -5583,15 +5638,7 @@ export async function listMcpServers(): Promise<McpServerInfo[]> {
 
 /** Add/update an MCP server. Connects immediately (may take a while as the
  *  server's package is fetched), so this call is intentionally untimed. */
-export async function saveMcpServer(s: {
-  id?: string;
-  name: string;
-  command: string;
-  args: string[];
-  cwd?: string | null;
-  env?: McpEnvVar[];
-  enabled: boolean;
-}): Promise<McpServerInfo | null> {
+export async function saveMcpServer(s: McpServerDraft): Promise<McpServerInfo | null> {
   try {
     const r = await authFetch(`${BASE}/mcp/servers`, {
       method: "POST",
@@ -5606,15 +5653,7 @@ export async function saveMcpServer(s: {
   }
 }
 
-export async function testMcpServer(s: {
-  id?: string;
-  name: string;
-  command: string;
-  args: string[];
-  cwd?: string | null;
-  env?: McpEnvVar[];
-  enabled: boolean;
-}): Promise<McpTestResult | null> {
+export async function testMcpServer(s: McpServerDraft): Promise<McpTestResult | null> {
   try {
     const r = await authFetch(`${BASE}/mcp/servers/test`, {
       method: "POST",
@@ -5637,6 +5676,33 @@ export async function deleteMcpServer(id: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** Drop and re-establish one MCP server connection. */
+export async function reconnectMcpServer(id: string): Promise<McpServerInfo | null> {
+  const response = await parseJsonResponse<{ server?: McpServerInfo | null }>(
+    await authFetch(`${BASE}/mcp/servers/${encodeURIComponent(id)}/reconnect`, { method: "POST" }),
+    "Reconnect failed",
+  );
+  return response.server ?? null;
+}
+
+/** Start OAuth sign-in for an HTTP MCP server; open `flow.url` in the browser. */
+export async function startMcpServerSignIn(id: string): Promise<McpAuthFlow> {
+  const response = await parseJsonResponse<{ flow: McpAuthFlow }>(
+    await authFetch(`${BASE}/mcp/servers/${encodeURIComponent(id)}/auth`, { method: "POST" }),
+    "Sign-in failed to start",
+  );
+  return response.flow;
+}
+
+/** Forget an HTTP MCP server's OAuth tokens. */
+export async function signOutMcpServer(id: string): Promise<McpServerInfo | null> {
+  const response = await parseJsonResponse<{ server?: McpServerInfo | null }>(
+    await authFetch(`${BASE}/mcp/servers/${encodeURIComponent(id)}/auth`, { method: "DELETE" }),
+    "Sign-out failed",
+  );
+  return response.server ?? null;
 }
 
 export async function readMcpAppResource(

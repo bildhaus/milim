@@ -387,6 +387,14 @@ pub fn build_router_with_host_policy(state: AppState, host_policy: HostPolicy) -
             post(routes::mcp_server_test_saved),
         )
         .route("/mcp/servers/{id}", delete(routes::mcp_server_delete))
+        .route(
+            "/mcp/servers/{id}/reconnect",
+            post(routes::mcp_server_reconnect),
+        )
+        .route(
+            "/mcp/servers/{id}/auth",
+            post(routes::mcp_server_sign_in).delete(routes::mcp_server_sign_out),
+        )
         // Agents (server-side tool-use loop + named agents)
         .route("/agents/run", post(routes::agents_run))
         .route(

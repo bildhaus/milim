@@ -5861,6 +5861,109 @@ async fn mcp_server_tools_follow_chat_approval_policy() {
 }
 
 #[tokio::test]
+async fn external_mcp_read_only_hints_require_server_trust() {
+    if Command::new("node").arg("--version").output().is_err() {
+        return;
+    }
+    let root = unique_temp_path("milim-mcp-annotation-trust");
+    fs::create_dir_all(&root).unwrap();
+    let script = r#"const readline=require('readline');const rl=readline.createInterface({input:process.stdin});const send=(id,result)=>process.stdout.write(JSON.stringify({jsonrpc:'2.0',id,result})+'\n');rl.on('line',line=>{const m=JSON.parse(line);if(m.id===undefined)return;if(m.method==='initialize')return send(m.id,{protocolVersion:'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'hints',version:'1'}});if(m.method==='tools/list')return send(m.id,{tools:[{name:'lookup',inputSchema:{type:'object'},annotations:{readOnlyHint:true}},{name:'erase',inputSchema:{type:'object'},annotations:{readOnlyHint:true,destructiveHint:true}}]});if(m.method==='tools/call')return send(m.id,{content:[{type:'text',text:'ok'}]})});"#;
+    let hub = Arc::new(milim_mcp_client::McpHub::open(&root));
+    let config = milim_mcp_client::McpServerConfig {
+        id: "hints".into(),
+        name: "Hints".into(),
+        command: "node".into(),
+        args: vec!["-e".into(), script.into()],
+        ..Default::default()
+    };
+    hub.upsert(config.clone()).await.unwrap();
+    let state = AppState::new(Arc::new(ToolListingBackend), ServerConfiguration::default())
+        .with_tools(milim_tools::ToolRegistry::new())
+        .with_mcp(hub.clone());
+    let base = spawn(state).await;
+    let client = reqwest::Client::new();
+    let catalog = || {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            client
+                .get(format!("{base}/mcp/tools"))
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|tool| tool["name"].as_str().unwrap().contains("__tool_"))
+                .map(|tool| {
+                    (
+                        tool["name"]
+                            .as_str()
+                            .unwrap()
+                            .rsplit("__tool_")
+                            .next()
+                            .unwrap()
+                            .to_string(),
+                        tool["effect"].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        }
+    };
+    let guarded = || {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            client
+                .post(format!("{base}/agents/run"))
+                .json(&json!({
+                    "model": "tool-listing",
+                    "messages": [{ "role": "user", "content": "list tools" }],
+                    "tool_approval_policy": "guarded",
+                    "interactive_tool_approval": false
+                }))
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()["message"]["content"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        }
+    };
+
+    // Untrusted by default: the hint is shown but still needs approval, so
+    // Guarded mode withholds the tool.
+    let untrusted = catalog().await;
+    assert_eq!(untrusted["lookup"], "unknown");
+    assert_eq!(untrusted["erase"], "mutating");
+    let offered = guarded().await;
+    assert!(!offered.contains("__tool_lookup"), "{offered}");
+    assert_eq!(hub.list()[0].declared_read_only_tools, 2);
+
+    hub.upsert(milim_mcp_client::McpServerConfig {
+        trust_read_only_hints: true,
+        ..config
+    })
+    .await
+    .unwrap();
+    let trusted = catalog().await;
+    assert_eq!(trusted["lookup"], "read_only");
+    assert_eq!(trusted["erase"], "mutating");
+    let offered = guarded().await;
+    assert!(offered.contains("__tool_lookup"), "{offered}");
+    assert!(!offered.contains("__tool_erase"), "{offered}");
+
+    drop(hub);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn mcp_apps_http_bridge_auth_validation_and_isolation() {
     if Command::new("node").arg("--version").output().is_err() {
         return;
@@ -5879,9 +5982,7 @@ async fn mcp_apps_http_bridge_auth_validation_and_isolation() {
         name: "Apps fixture".into(),
         command: "node".into(),
         args: vec![fixture.to_string_lossy().into_owned()],
-        cwd: None,
-        env: Vec::new(),
-        enabled: true,
+        ..Default::default()
     })
     .await
     .unwrap();

@@ -1,5 +1,19 @@
 import { useEffect, useState } from "react";
-import { deleteMcpServer, listMcpServers, MCP_PRESETS, saveMcpServer, testMcpServer, type McpEnvVar, type McpServerInfo } from "../api";
+import {
+  deleteMcpServer,
+  listMcpServers,
+  MCP_PRESETS,
+  openExternalUrl,
+  reconnectMcpServer,
+  saveMcpServer,
+  signOutMcpServer,
+  startMcpServerSignIn,
+  testMcpServer,
+  type McpEnvVar,
+  type McpServerDraft,
+  type McpServerInfo,
+  type McpTransportKind,
+} from "../api";
 import { Cube, Plus, Trash, X } from "./icons";
 import { SheetDialog } from "./SheetDialog";
 import { PaneResizeHandle } from "./PaneResizeHandle";
@@ -11,6 +25,13 @@ import "./McpManager.css";
 type Selection = McpServerInfo | "new" | null;
 type McpStatusTone = "ready" | "warning" | "error" | "off" | "draft";
 type EnvDraft = McpEnvVar & { id: string };
+
+const DEFAULT_CALL_TIMEOUT_SECS = 60;
+const MAX_CALL_TIMEOUT_SECS = 600;
+const TRANSPORT_OPTIONS = [
+  { label: "Local command (stdio)", value: "stdio" },
+  { label: "Remote URL (Streamable HTTP)", value: "http" },
+];
 
 function capabilitySummary(server: McpServerInfo): string {
   const caps = server.capabilities;
@@ -25,8 +46,20 @@ function capabilitySummary(server: McpServerInfo): string {
 }
 
 function serverStatus(server: McpServerInfo): { tone: McpStatusTone; label: string; detail: string } {
-  if (server.missing_env?.length) return { tone: "warning", label: "Missing env", detail: `Missing required env: ${server.missing_env.join(", ")}` };
+  if (server.missing_env?.length) return { tone: "warning", label: "Missing values", detail: `Missing required values: ${server.missing_env.join(", ")}` };
   if (!server.enabled) return { tone: "off", label: "Disabled", detail: "Saved but not exposed to agent runs." };
+  switch (server.status) {
+    case "auth_required":
+      return { tone: "warning", label: "Sign-in required", detail: "Sign in to let milim call this server's tools." };
+    case "connecting":
+      return { tone: "warning", label: "Connecting", detail: "Starting the connection..." };
+    case "reconnecting": {
+      const retry = server.retry_in_secs != null ? ` Next attempt in ${server.retry_in_secs}s.` : "";
+      return { tone: "warning", label: "Reconnecting", detail: `Connection lost${server.error ? `: ${server.error}` : ""}. Its tools are withheld until it reconnects.${retry}` };
+    }
+    default:
+      break;
+  }
   if (server.error) return { tone: "error", label: "Error", detail: server.error };
   if (server.connected) {
     return {
@@ -35,7 +68,11 @@ function serverStatus(server: McpServerInfo): { tone: McpStatusTone; label: stri
       detail: `${server.tool_count} tool${server.tool_count === 1 ? "" : "s"} available to agents from ${capabilitySummary(server)}.`,
     };
   }
-  return { tone: "warning", label: "Not connected", detail: "Saved, but no live stdio connection is active." };
+  return { tone: "warning", label: "Not connected", detail: "Saved, but no live connection is active." };
+}
+
+function isSettling(server: McpServerInfo): boolean {
+  return server.status === "connecting" || server.status === "reconnecting" || server.auth?.flow?.status === "pending";
 }
 
 function envDrafts(env?: McpEnvVar[]): EnvDraft[] {
@@ -66,10 +103,14 @@ function argsSummary(args: string[]): string {
   return `${args.length} args`;
 }
 
+function serverTarget(server: McpServerInfo): string {
+  return server.type === "http" ? (server.url ?? "") : server.command;
+}
+
 function noteTone(note: string): McpStatusTone {
   if (note.startsWith("Error:")) return "error";
   if (note.startsWith("Click Delete again")) return "warning";
-  if (note.includes("Connecting") || note.includes("not connected")) return "warning";
+  if (note.includes("Connecting") || note.includes("not connected") || note.includes("Sign in") || note.includes("browser")) return "warning";
   return "ready";
 }
 
@@ -81,15 +122,60 @@ function McpListPlaceholder() {
   );
 }
 
+function KeyValueRows({
+  rows,
+  onChange,
+  emptyLabel,
+  keyPlaceholder,
+  removeLabel,
+}: {
+  rows: EnvDraft[];
+  onChange: (rows: EnvDraft[]) => void;
+  emptyLabel: string;
+  keyPlaceholder: string;
+  removeLabel: string;
+}) {
+  const update = (id: string, patch: Partial<EnvDraft>) => onChange(rows.map((row) => (row.id === id ? { ...row, ...patch } : row)));
+  return (
+    <div className="mcp-env-list">
+      {rows.length === 0 ? (
+        <span className="mcp-env-empty">{emptyLabel}</span>
+      ) : rows.map((item) => (
+        <div className="mcp-env-row" key={item.id}>
+          <input className="css-input" value={item.key} onChange={(e) => update(item.id, { key: e.target.value })} placeholder={keyPlaceholder} />
+          <input
+            className="css-input"
+            type={item.secret ? "password" : "text"}
+            value={item.value ?? ""}
+            onChange={(e) => update(item.id, { value: e.target.value })}
+            placeholder={item.secret && item.has_value ? "Saved secret - enter to replace" : "Value"}
+          />
+          <Toggle checked={Boolean(item.secret)} onChange={(checked) => update(item.id, { secret: checked, required: checked ? true : item.required })} label="Secret" />
+          <Toggle checked={Boolean(item.required)} onChange={(checked) => update(item.id, { required: checked })} label="Required" />
+          <button className="icon-btn" type="button" title={removeLabel} onClick={() => onChange(rows.filter((row) => row.id !== item.id))}>
+            <Trash size={13} />
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function McpManager({ onClose }: { onClose: () => void }) {
   const rail = useSplitPane("mcpRail", "--manager-rail-width", MANAGER_DETAIL_MIN_WIDTH);
   const [servers, setServers] = useState<McpServerInfo[]>([]);
   const [sel, setSel] = useState<Selection>(null);
   const [name, setName] = useState("");
+  const [transport, setTransport] = useState<McpTransportKind>("stdio");
   const [command, setCommand] = useState("");
   const [argsText, setArgsText] = useState("");
   const [cwd, setCwd] = useState("");
   const [env, setEnv] = useState<EnvDraft[]>([]);
+  const [url, setUrl] = useState("");
+  const [headers, setHeaders] = useState<EnvDraft[]>([]);
+  const [oauthClientId, setOauthClientId] = useState("");
+  const [trustHints, setTrustHints] = useState(false);
+  const [timeoutText, setTimeoutText] = useState(String(DEFAULT_CALL_TIMEOUT_SECS));
   const [enabled, setEnabled] = useState(true);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
@@ -100,23 +186,42 @@ export function McpManager({ onClose }: { onClose: () => void }) {
     refresh();
   }, []);
 
+  const settling = servers.some(isSettling);
+  useEffect(() => {
+    if (!settling) return;
+    const timer = window.setInterval(refresh, 2000);
+    return () => window.clearInterval(timer);
+  }, [settling]);
+
   function edit(s: McpServerInfo | "new") {
     setSel(s);
     setNote(null);
     setConfirmDeleteId(null);
     if (s === "new") {
       setName("");
+      setTransport("stdio");
       setCommand("");
       setArgsText("");
       setCwd("");
       setEnv([]);
+      setUrl("");
+      setHeaders([]);
+      setOauthClientId("");
+      setTrustHints(false);
+      setTimeoutText(String(DEFAULT_CALL_TIMEOUT_SECS));
       setEnabled(true);
     } else {
       setName(s.name);
+      setTransport(s.type ?? "stdio");
       setCommand(s.command);
       setArgsText(s.args.join("\n"));
       setCwd(s.cwd ?? "");
       setEnv(envDrafts(s.env));
+      setUrl(s.url ?? "");
+      setHeaders(envDrafts(s.headers));
+      setOauthClientId(s.oauth_client_id ?? "");
+      setTrustHints(Boolean(s.trust_read_only_hints));
+      setTimeoutText(String(s.call_timeout_secs ?? DEFAULT_CALL_TIMEOUT_SECS));
       setEnabled(s.enabled);
     }
   }
@@ -126,22 +231,51 @@ export function McpManager({ onClose }: { onClose: () => void }) {
     if (!p) return;
     setConfirmDeleteId(null);
     setName(p.name);
+    setTransport("stdio");
     setCommand(p.command);
     setArgsText(p.args.join("\n"));
     if (p.note) setNote(p.note);
   }
 
+  const args = argsText
+    .split("\n")
+    .map((a) => a.trim())
+    .filter(Boolean);
+  const timeoutSecs = Number.parseInt(timeoutText, 10);
+  const timeoutValid = Number.isFinite(timeoutSecs) && timeoutSecs >= 1 && timeoutSecs <= MAX_CALL_TIMEOUT_SECS;
+  const target = transport === "http" ? url.trim() : command.trim();
+
+  function draft(): McpServerDraft {
+    return {
+      id: sel && sel !== "new" ? sel.id : undefined,
+      name: name.trim(),
+      type: transport,
+      command: transport === "stdio" ? command.trim() : "",
+      args: transport === "stdio" ? args : [],
+      cwd: transport === "stdio" ? cwd.trim() || null : null,
+      env: transport === "stdio" ? apiEnv(env) : [],
+      url: transport === "http" ? url.trim() : null,
+      headers: transport === "http" ? apiEnv(headers) : [],
+      enabled,
+      trust_read_only_hints: trustHints,
+      call_timeout_secs: timeoutValid ? timeoutSecs : null,
+      oauth_client_id: transport === "http" ? oauthClientId.trim() || null : null,
+    };
+  }
+
+  function connectionNote(server: McpServerInfo): string {
+    if (server.status === "auth_required") return "Saved. Sign in to connect this server.";
+    if (server.error) return `Error: ${server.error}`;
+    if (server.connected) return `Connected - ${server.tool_count} tool${server.tool_count === 1 ? "" : "s"} available`;
+    return server.enabled ? "Saved, but not connected." : "Saved (disabled).";
+  }
+
   async function save() {
-    if (!name.trim() || !command.trim()) return;
+    if (!name.trim() || !target) return;
     setBusy(true);
     setConfirmDeleteId(null);
-    setNote(enabled ? "Connecting... (first run may fetch the server package)" : "Saving disabled server...");
-    const id = sel && sel !== "new" ? sel.id : undefined;
-    const args = argsText
-      .split("\n")
-      .map((a) => a.trim())
-      .filter(Boolean);
-    const saved = await saveMcpServer({ id, name: name.trim(), command: command.trim(), args, cwd: cwd.trim() || null, env: apiEnv(env), enabled });
+    setNote(enabled ? (transport === "stdio" ? "Connecting... (first run may fetch the server package)" : "Connecting...") : "Saving disabled server...");
+    const saved = await saveMcpServer(draft());
     setBusy(false);
     if (!saved) {
       setNote("Error: Failed to save MCP server.");
@@ -149,36 +283,72 @@ export function McpManager({ onClose }: { onClose: () => void }) {
     }
     await refresh();
     setSel(saved);
-    setNote(
-      saved.error
-        ? `Error: ${saved.error}`
-        : saved.connected
-          ? `Connected - ${saved.tool_count} tool${saved.tool_count === 1 ? "" : "s"} available`
-          : enabled
-            ? "Saved, but not connected."
-            : "Saved (disabled).",
-    );
+    setNote(connectionNote(saved));
   }
 
   async function testConnection() {
-    if (!name.trim() || !command.trim()) return;
+    if (!name.trim() || !target) return;
     setBusy(true);
     setConfirmDeleteId(null);
     setNote("Testing connection...");
-    const id = sel && sel !== "new" ? sel.id : undefined;
-    const args = argsText
-      .split("\n")
-      .map((a) => a.trim())
-      .filter(Boolean);
-    const result = await testMcpServer({ id, name: name.trim(), command: command.trim(), args, cwd: cwd.trim() || null, env: apiEnv(env), enabled });
+    const result = await testMcpServer(draft());
     setBusy(false);
     if (!result) {
       setNote("Error: Failed to test MCP server.");
       return;
     }
+    if (result.auth_required) {
+      setNote("Server reachable. Save it, then Sign in to finish connecting.");
+      return;
+    }
     setNote(result.ok
       ? `Connection OK - ${result.tool_count} tool${result.tool_count === 1 ? "" : "s"} advertised`
-      : `Error: ${result.error || (result.missing_env?.length ? `Missing env: ${result.missing_env.join(", ")}` : "Connection failed")}`);
+      : `Error: ${result.error || (result.missing_env?.length ? `Missing values: ${result.missing_env.join(", ")}` : "Connection failed")}`);
+  }
+
+  async function reconnect() {
+    if (!selectedServer) return;
+    setBusy(true);
+    setNote("Reconnecting...");
+    try {
+      const server = await reconnectMcpServer(selectedServer.id);
+      await refresh();
+      if (server) setNote(connectionNote(server));
+    } catch (error) {
+      setNote(`Error: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function signIn() {
+    if (!selectedServer) return;
+    setBusy(true);
+    setNote("Starting sign-in...");
+    try {
+      const flow = await startMcpServerSignIn(selectedServer.id);
+      if (flow.url) await openExternalUrl(flow.url);
+      setNote("Finish signing in in your browser. This server connects automatically afterwards.");
+      await refresh();
+    } catch (error) {
+      setNote(`Error: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function signOut() {
+    if (!selectedServer) return;
+    setBusy(true);
+    try {
+      await signOutMcpServer(selectedServer.id);
+      await refresh();
+      setNote("Signed out.");
+    } catch (error) {
+      setNote(`Error: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function remove() {
@@ -196,20 +366,18 @@ export function McpManager({ onClose }: { onClose: () => void }) {
   }
 
   const connectedCount = servers.filter((s) => s.connected).length;
-  const selectedServer = sel && sel !== "new" ? sel : null;
+  const selectedServer = sel && sel !== "new" ? (servers.find((s) => s.id === sel.id) ?? sel) : null;
   const selectedStatus = selectedServer ? serverStatus(selectedServer) : null;
-  const selectedPreset = MCP_PRESETS.find((p) => p.name === name && p.command === command && p.args.join("\n") === argsText.trim());
-  const args = argsText
-    .split("\n")
-    .map((a) => a.trim())
-    .filter(Boolean);
-  const canSave = Boolean(name.trim() && command.trim() && !busy);
-  const canTest = Boolean(name.trim() && command.trim() && !busy);
+  const selectedPreset = transport === "stdio" ? MCP_PRESETS.find((p) => p.name === name && p.command === command && p.args.join("\n") === argsText.trim()) : undefined;
+  const canSave = Boolean(name.trim() && target && timeoutValid && !busy);
+  const canTest = canSave;
   const editorTitle = sel === "new" ? "New MCP server" : name.trim() || selectedServer?.name || "Select an MCP server";
-  const updateEnv = (id: string, patch: Partial<EnvDraft>) =>
-    setEnv((rows) => rows.map((row) => row.id === id ? { ...row, ...patch } : row));
-  const addEnv = () =>
-    setEnv((rows) => [...rows, { id: `env-${Date.now()}`, key: "", value: "", secret: false, required: false, has_value: false }]);
+  const savedHttp = selectedServer?.type === "http";
+  const authStatus = selectedServer?.auth?.status ?? "not_required";
+  const authFlow = selectedServer?.auth?.flow;
+  const declaredReadOnly = selectedServer?.declared_read_only_tools ?? 0;
+  const logs = selectedServer?.logs ?? [];
+  const newRow = (prefix: string): EnvDraft => ({ id: `${prefix}-${Date.now()}`, key: "", value: "", secret: false, required: false, has_value: false });
 
   return (
     <SheetDialog title="MCP Servers" className="sheet agents-sheet mcp-manager-sheet" resizable={{ id: "mcp" }} onClose={onClose}>
@@ -217,8 +385,8 @@ export function McpManager({ onClose }: { onClose: () => void }) {
           <div className="mcp-manager-title">
             <h2>MCP Servers</h2>
             <p>
-              Connect external Model Context Protocol servers (stdio). Their tools become available to the agent
-              automatically. On Windows, <code>npx</code>/<code>uvx</code> resolve via the shell.
+              Connect external Model Context Protocol servers by local command (stdio) or remote URL (Streamable HTTP, with
+              OAuth sign-in). Their tools become available to the agent automatically. On Windows, <code>npx</code>/<code>uvx</code> resolve via the shell.
             </p>
           </div>
           <div className="mcp-manager-header-actions">
@@ -257,10 +425,10 @@ export function McpManager({ onClose }: { onClose: () => void }) {
                       <span className={"mcp-status-dot " + status.tone} aria-hidden="true" />
                       <span className="mcp-row-copy">
                         <span className="mcp-row-name">{s.name}</span>
-                        <span className="mcp-row-command">{s.command}</span>
+                        <span className="mcp-row-command">{serverTarget(s)}</span>
                         <span className="mcp-row-foot">
                           <span>{status.label}</span>
-                          <span>{s.connected ? `${s.tool_count} tools` : argsSummary(s.args)}</span>
+                          <span>{s.connected ? `${s.tool_count} tools` : s.type === "http" ? "HTTP" : argsSummary(s.args)}</span>
                         </span>
                       </span>
                     </button>
@@ -287,22 +455,34 @@ export function McpManager({ onClose }: { onClose: () => void }) {
                   <div className="mcp-impact-item">
                     <span>Connection</span>
                     <strong>{selectedStatus?.label ?? "Draft"}</strong>
-                    <em>{selectedStatus?.detail ?? "Choose a preset or enter a stdio command."}</em>
+                    <em>{selectedStatus?.detail ?? (transport === "http" ? "Enter the server's MCP URL." : "Choose a preset or enter a stdio command.")}</em>
                   </div>
                   <div className="mcp-impact-item">
-                    <span>Command</span>
-                    <strong>{command.trim() || "Required"}</strong>
-                    <em>{selectedPreset ? `${selectedPreset.name} preset` : "Manual stdio command"}</em>
+                    <span>{transport === "http" ? "URL" : "Command"}</span>
+                    <strong>{target || "Required"}</strong>
+                    <em>{transport === "http" ? "Streamable HTTP, legacy SSE fallback" : selectedPreset ? `${selectedPreset.name} preset` : "Manual stdio command"}</em>
                   </div>
+                  {transport === "stdio" ? (
+                    <div className="mcp-impact-item">
+                      <span>Arguments</span>
+                      <strong>{argsSummary(args)}</strong>
+                      <em>{args.length ? "Sent one per line" : "No process arguments"}</em>
+                    </div>
+                  ) : (
+                    <div className="mcp-impact-item">
+                      <span>Sign-in</span>
+                      <strong>{authStatus === "signed_in" ? "Signed in" : authStatus === "required" ? "Required" : "Not required"}</strong>
+                      <em>OAuth with PKCE when the server asks for it</em>
+                    </div>
+                  )}
                   <div className="mcp-impact-item">
-                    <span>Arguments</span>
-                    <strong>{argsSummary(args)}</strong>
-                    <em>{args.length ? "Sent one per line" : "No process arguments"}</em>
-                  </div>
-                  <div className="mcp-impact-item">
-                    <span>Environment</span>
-                    <strong>{env.length ? `${env.length} var${env.length === 1 ? "" : "s"}` : "None"}</strong>
-                    <em>{cwd.trim() ? `cwd: ${cwd.trim()}` : "Default working directory"}</em>
+                    <span>{transport === "http" ? "Headers" : "Environment"}</span>
+                    <strong>
+                      {transport === "http"
+                        ? (headers.length ? `${headers.length} header${headers.length === 1 ? "" : "s"}` : "None")
+                        : (env.length ? `${env.length} var${env.length === 1 ? "" : "s"}` : "None")}
+                    </strong>
+                    <em>{transport === "http" ? "Secret values stay encrypted" : cwd.trim() ? `cwd: ${cwd.trim()}` : "Default working directory"}</em>
                   </div>
                   <div className="mcp-impact-item">
                     <span>Tools</span>
@@ -313,16 +493,31 @@ export function McpManager({ onClose }: { onClose: () => void }) {
 
                 <section className="mcp-editor-section">
                   <div className="mcp-section-head">
-                    <h4>Preset</h4>
-                    <span>{selectedPreset?.name ?? "Optional"}</span>
+                    <h4>Transport</h4>
+                    <span>{transport === "http" ? "Remote" : "Local"}</span>
                   </div>
                   <Select
-                    value={selectedPreset?.name ?? ""}
-                    placeholder="Choose a preset..."
-                    options={MCP_PRESETS.map((p) => ({ label: p.name, value: p.name }))}
-                    onChange={applyPreset}
+                    value={transport}
+                    ariaLabel="MCP transport"
+                    options={TRANSPORT_OPTIONS}
+                    onChange={(value) => setTransport(value === "http" ? "http" : "stdio")}
                   />
                 </section>
+
+                {transport === "stdio" && (
+                  <section className="mcp-editor-section">
+                    <div className="mcp-section-head">
+                      <h4>Preset</h4>
+                      <span>{selectedPreset?.name ?? "Optional"}</span>
+                    </div>
+                    <Select
+                      value={selectedPreset?.name ?? ""}
+                      placeholder="Choose a preset..."
+                      options={MCP_PRESETS.map((p) => ({ label: p.name, value: p.name }))}
+                      onChange={applyPreset}
+                    />
+                  </section>
+                )}
 
                 <section className="mcp-editor-section">
                   <div className="mcp-section-head">
@@ -331,77 +526,145 @@ export function McpManager({ onClose }: { onClose: () => void }) {
                   </div>
                   <label className="field mcp-field">
                     <span>Name</span>
-                    <input className="css-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Filesystem" />
+                    <input className="css-input" value={name} onChange={(e) => setName(e.target.value)} placeholder={transport === "http" ? "Remote tools" : "Filesystem"} />
                   </label>
                 </section>
 
-                <section className="mcp-editor-section">
-                  <div className="mcp-section-head">
-                    <h4>Command</h4>
-                    <span>{command.trim() || "Required"}</span>
-                  </div>
-                  <label className="field mcp-field">
-                    <span>Command</span>
-                    <input
-                      className="css-input mcp-command-input"
-                      value={command}
-                      onChange={(e) => setCommand(e.target.value)}
-                      placeholder="npx"
-                    />
-                  </label>
-                  <label className="field mcp-field">
-                    <span>Arguments (one per line)</span>
-                    <textarea
-                      className="instr-input mcp-args-input"
-                      value={argsText}
-                      onChange={(e) => setArgsText(e.target.value)}
-                      placeholder={"-y\n@modelcontextprotocol/server-filesystem\nC:\\Users\\me\\project"}
-                    />
-                  </label>
-                  <label className="field mcp-field">
-                    <span>Working directory</span>
-                    <input
-                      className="css-input"
-                      value={cwd}
-                      onChange={(e) => setCwd(e.target.value)}
-                      placeholder="Optional cwd for the MCP process"
-                    />
-                  </label>
-                </section>
+                {transport === "stdio" ? (
+                  <>
+                    <section className="mcp-editor-section">
+                      <div className="mcp-section-head">
+                        <h4>Command</h4>
+                        <span>{command.trim() || "Required"}</span>
+                      </div>
+                      <label className="field mcp-field">
+                        <span>Command</span>
+                        <input
+                          className="css-input mcp-command-input"
+                          value={command}
+                          onChange={(e) => setCommand(e.target.value)}
+                          placeholder="npx"
+                        />
+                      </label>
+                      <label className="field mcp-field">
+                        <span>Arguments (one per line)</span>
+                        <textarea
+                          className="instr-input mcp-args-input"
+                          value={argsText}
+                          onChange={(e) => setArgsText(e.target.value)}
+                          placeholder={"-y\n@modelcontextprotocol/server-filesystem\nC:\\Users\\me\\project"}
+                        />
+                      </label>
+                      <label className="field mcp-field">
+                        <span>Working directory</span>
+                        <input
+                          className="css-input"
+                          value={cwd}
+                          onChange={(e) => setCwd(e.target.value)}
+                          placeholder="Optional cwd for the MCP process"
+                        />
+                      </label>
+                    </section>
 
-                <section className="mcp-editor-section">
-                  <div className="mcp-section-head">
-                    <h4>Environment</h4>
-                    <button className="section-icon-btn" type="button" title="Add env var" onClick={addEnv}>
-                      <Plus size={12} />
-                    </button>
-                  </div>
-                  <div className="mcp-env-list">
-                    {env.length === 0 ? (
-                      <span className="mcp-env-empty">No env vars</span>
-                    ) : env.map((item) => (
-                      <div className="mcp-env-row" key={item.id}>
-                        <input
-                          className="css-input"
-                          value={item.key}
-                          onChange={(e) => updateEnv(item.id, { key: e.target.value })}
-                          placeholder="ENV_KEY"
-                        />
-                        <input
-                          className="css-input"
-                          type={item.secret ? "password" : "text"}
-                          value={item.value ?? ""}
-                          onChange={(e) => updateEnv(item.id, { value: e.target.value })}
-                          placeholder={item.secret && item.has_value ? "Saved secret - enter to replace" : "Value"}
-                        />
-                        <Toggle checked={Boolean(item.secret)} onChange={(checked) => updateEnv(item.id, { secret: checked, required: checked ? true : item.required })} label="Secret" />
-                        <Toggle checked={Boolean(item.required)} onChange={(checked) => updateEnv(item.id, { required: checked })} label="Required" />
-                        <button className="icon-btn" type="button" title="Remove env var" onClick={() => setEnv((rows) => rows.filter((row) => row.id !== item.id))}>
-                          <Trash size={13} />
+                    <section className="mcp-editor-section">
+                      <div className="mcp-section-head">
+                        <h4>Environment</h4>
+                        <button className="section-icon-btn" type="button" title="Add env var" onClick={() => setEnv((rows) => [...rows, newRow("env")])}>
+                          <Plus size={12} />
                         </button>
                       </div>
-                    ))}
+                      <KeyValueRows rows={env} onChange={setEnv} emptyLabel="No env vars" keyPlaceholder="ENV_KEY" removeLabel="Remove env var" />
+                    </section>
+                  </>
+                ) : (
+                  <>
+                    <section className="mcp-editor-section">
+                      <div className="mcp-section-head">
+                        <h4>Endpoint</h4>
+                        <span>{url.trim() ? "Streamable HTTP" : "Required"}</span>
+                      </div>
+                      <label className="field mcp-field">
+                        <span>Server URL</span>
+                        <input
+                          className="css-input mcp-command-input"
+                          value={url}
+                          onChange={(e) => setUrl(e.target.value)}
+                          placeholder="https://mcp.example.com/mcp"
+                        />
+                      </label>
+                      <label className="field mcp-field">
+                        <span>OAuth client ID</span>
+                        <input
+                          className="css-input"
+                          value={oauthClientId}
+                          onChange={(e) => setOauthClientId(e.target.value)}
+                          placeholder="Optional - only for servers without dynamic client registration"
+                        />
+                      </label>
+                    </section>
+
+                    <section className="mcp-editor-section">
+                      <div className="mcp-section-head">
+                        <h4>Headers</h4>
+                        <button className="section-icon-btn" type="button" title="Add header" onClick={() => setHeaders((rows) => [...rows, newRow("header")])}>
+                          <Plus size={12} />
+                        </button>
+                      </div>
+                      <KeyValueRows rows={headers} onChange={setHeaders} emptyLabel="No headers" keyPlaceholder="Header-Name" removeLabel="Remove header" />
+                    </section>
+
+                    {savedHttp && (authStatus !== "not_required" || authFlow) && (
+                      <section className="mcp-editor-section">
+                        <div className="mcp-section-head">
+                          <h4>Sign-in</h4>
+                          <span>{authStatus === "signed_in" ? "Signed in" : authStatus === "required" ? "Required" : "Not required"}</span>
+                        </div>
+                        <div className="mcp-status-grid">
+                          {authStatus === "signed_in" ? (
+                            <button className="btn-ghost" type="button" disabled={busy} onClick={signOut}>Sign out</button>
+                          ) : (
+                            <button className="btn-accent" type="button" disabled={busy || !selectedServer?.enabled} onClick={signIn}>Sign in</button>
+                          )}
+                          <span>
+                            {authFlow?.status === "pending"
+                              ? "Waiting for the browser sign-in to finish..."
+                              : authFlow?.status === "error"
+                                ? `Last sign-in failed: ${authFlow.error ?? "unknown error"}`
+                                : authStatus === "signed_in"
+                                  ? "Tokens are stored encrypted and refresh automatically."
+                                  : "Opens your browser to sign in with OAuth."}
+                          </span>
+                        </div>
+                      </section>
+                    )}
+                  </>
+                )}
+
+                <section className="mcp-editor-section">
+                  <div className="mcp-section-head">
+                    <h4>Tool approval</h4>
+                    <span>{trustHints ? "Trusted hints" : "Hints untrusted"}</span>
                   </div>
+                  <div className="mcp-status-grid">
+                    <Toggle checked={trustHints} onChange={setTrustHints} label="Trust this server's read-only hints" />
+                    <span>
+                      {trustHints
+                        ? "Tools this server marks read-only skip approval and are offered in Guarded mode."
+                        : "Tools still need approval even when this server marks them read-only, and Guarded mode withholds them."}
+                      {selectedServer && declaredReadOnly > 0 ? ` ${declaredReadOnly} tool${declaredReadOnly === 1 ? "" : "s"} declared read-only.` : ""}
+                    </span>
+                  </div>
+                  <label className="field mcp-field">
+                    <span>Tool call timeout (seconds)</span>
+                    <input
+                      className="css-input"
+                      type="number"
+                      min={1}
+                      max={MAX_CALL_TIMEOUT_SECS}
+                      value={timeoutText}
+                      onChange={(e) => setTimeoutText(e.target.value)}
+                    />
+                  </label>
                 </section>
 
                 <section className="mcp-editor-section">
@@ -416,6 +679,24 @@ export function McpManager({ onClose }: { onClose: () => void }) {
                   {note && <p className={"mcp-note " + noteTone(note)}>{note}</p>}
                 </section>
 
+                {logs.length > 0 && (
+                  <section className="mcp-editor-section">
+                    <div className="mcp-section-head">
+                      <h4>Diagnostics</h4>
+                      <span>{logs.length} recent</span>
+                    </div>
+                    <ol className="mcp-log-list">
+                      {logs.slice().reverse().map((entry, index) => (
+                        <li key={`${entry.at_ms}-${index}`} className={"mcp-log-entry " + entry.level}>
+                          <time>{new Date(entry.at_ms).toLocaleTimeString()}</time>
+                          <strong>{entry.level}</strong>
+                          <span>{entry.logger ? `${entry.logger}: ${entry.message}` : entry.message}</span>
+                        </li>
+                      ))}
+                    </ol>
+                  </section>
+                )}
+
                 <div className="mcp-action-footer">
                   {sel !== "new" && (
                     <button className="btn-ghost danger mcp-delete-action" type="button" disabled={busy} onClick={remove}>
@@ -424,11 +705,16 @@ export function McpManager({ onClose }: { onClose: () => void }) {
                     </button>
                   )}
                   <span className="spacer" />
+                  {selectedServer?.enabled && (
+                    <button className="btn-ghost" type="button" disabled={busy} onClick={reconnect}>
+                      Reconnect
+                    </button>
+                  )}
                   <button className="btn-ghost" type="button" disabled={!canTest} onClick={testConnection}>
                     Test connection
                   </button>
                   <button className="btn-accent" type="button" disabled={!canSave} onClick={save}>
-                    {busy ? "Connecting..." : "Save & connect"}
+                    {busy ? "Working..." : "Save & connect"}
                   </button>
                 </div>
               </div>
@@ -440,8 +726,8 @@ export function McpManager({ onClose }: { onClose: () => void }) {
                 <h3>{servers.length ? "Select an MCP server" : "No MCP servers yet"}</h3>
                 <p>
                   {servers.length
-                    ? "Choose a saved server from the list, or connect another stdio tool source."
-                    : "Add a preset or custom stdio command to expose external tools to agents."}
+                    ? "Choose a saved server from the list, or connect another tool source."
+                    : "Add a preset, a local stdio command, or a remote MCP URL to expose external tools to agents."}
                 </p>
                 <button className="btn-accent mcp-header-action" type="button" onClick={() => edit("new")}>
                   <Plus size={14} />
