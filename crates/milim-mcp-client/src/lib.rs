@@ -489,7 +489,7 @@ fn read_or_make_key(path: &Path) -> Result<[u8; 32]> {
 // ----- Client -----
 
 enum Transport {
-    Stdio(StdioTransport),
+    Stdio(Box<StdioTransport>),
     Http(Arc<HttpTransport>),
 }
 
@@ -565,7 +565,7 @@ impl McpClient {
             })?)
             .map_err(|e| Error::Other(format!("failed to contain MCP server '{command}': {e}")))?;
         let (link, notifications) = Link::new();
-        let transport = Transport::Stdio(StdioTransport::start(child, tree, &link)?);
+        let transport = Transport::Stdio(Box::new(StdioTransport::start(child, tree, &link)?));
         Self::initialize(link, transport, notifications).await
     }
 
