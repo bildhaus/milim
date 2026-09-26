@@ -134,7 +134,7 @@ pub(crate) fn prefix_allowance_for(
     if tool.is_empty() || command.chars().count() > MAX_COMMAND_CHARS {
         return None;
     }
-    let dialect = dialect_for(tool);
+    let dialect = dialect_for(tool, &command);
     let words = simple_words(&effective_command(&command, dialect), dialect)?;
     let [program, subcommand, ..] = words.as_slice() else {
         return None;
@@ -153,15 +153,24 @@ pub(crate) fn prefix_allowance_for(
         })
 }
 
-fn dialect_for(tool: &str) -> ShellDialect {
+fn dialect_for(tool: &str, command: &str) -> ShellDialect {
     let lowered = tool.to_ascii_lowercase();
     if lowered.contains("powershell") {
         ShellDialect::PowerShell
-    } else if lowered == "bash" {
+    } else if lowered == "bash" || starts_with_wrapper_shell(command) {
+        // Account runtimes report `/bin/zsh -lc '…'` whatever the host is.
         ShellDialect::Posix
     } else {
         ShellDialect::host()
     }
+}
+
+fn starts_with_wrapper_shell(command: &str) -> bool {
+    command
+        .split_whitespace()
+        .next()
+        .map(|first| first.rsplit(['/', '\\']).next().unwrap_or(first))
+        .is_some_and(|shell| WRAPPER_SHELLS.contains(&shell))
 }
 
 /// The script inside a `<shell> -c <script>` wrapper, or the command itself.
@@ -286,7 +295,7 @@ pub(crate) fn matching(
         return None;
     }
     let command = command_string(arguments)?;
-    let dialect = dialect_for(name.trim());
+    let dialect = dialect_for(name.trim(), &command);
     let command = effective_command(&command, dialect);
     allowances
         .iter()
@@ -436,5 +445,25 @@ mod tests {
         );
         assert!(allowance_for("permission_elevation", "permissions", "{}").is_none());
         assert!(allowance_for("mcp_form", "MCP github", "{}").is_none());
+    }
+
+    #[test]
+    fn wrapper_shell_commands_parse_as_posix_on_every_host() {
+        for command in [
+            "/bin/zsh -lc 'cargo test'",
+            "bash -c 'npm run lint'",
+            "sh -c ls",
+        ] {
+            assert_eq!(
+                dialect_for("command", command),
+                ShellDialect::Posix,
+                "{command}"
+            );
+        }
+        assert_eq!(
+            dialect_for("powershell", "bash -c ls"),
+            ShellDialect::PowerShell
+        );
+        assert_eq!(dialect_for("shell", "cargo test"), ShellDialect::host());
     }
 }
