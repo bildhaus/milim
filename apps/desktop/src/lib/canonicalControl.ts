@@ -11,6 +11,7 @@ import {
   type WorkspaceCheckpoint,
 } from "../api.js";
 import { appendPhaseStreamPart } from "./streamParts.js";
+import { hookEventPart } from "./hookEvents.js";
 import { providerErrorFromValue, type ProviderErrorInfo } from "./providerErrors.js";
 import type { QueuedMessage } from "../sessions/store.js";
 
@@ -296,6 +297,7 @@ function eventPart(item: ControlTimelineItemV1): ChatStreamPart | null {
       status: item.type === "error" ? "error" : "done",
     };
   }
+  if (item.type === "hook") return hookEventPart(data);
   if (item.type === "workspace_checkpoint") {
     if (data.status === "created") {
       return {

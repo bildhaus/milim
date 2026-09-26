@@ -2,6 +2,8 @@ import { lazy, memo, Suspense, useEffect, useRef, useState } from "react";
 import {
   getControlRunEvents,
   getControlRunDetails,
+  getHooksStatus,
+  trustWorkspaceHooks,
   type ChatArtifact,
   type ChatStreamEventIcon,
   type ChatStreamPart,
@@ -12,6 +14,7 @@ import {
   type ToolApprovalMode,
   type ToolUiDescriptor,
 } from "../api";
+import { hookReviewLines } from "../lib/hookEvents";
 import { markPerfRender } from "../lib/perf";
 import {
   groupCompletedStreamActivity,
@@ -23,6 +26,7 @@ import {
 import { formatDuration } from "../lib/usageMetrics";
 import { Calendar, Code, Copy, Eye, FileText, Lightbulb, Pencil, X } from "./icons";
 import { TodoChecklist } from "./TodoChecklist";
+import { confirmApp } from "../ui/confirmation";
 
 const Markdown = lazy(() =>
   import("./Markdown").then((mod) => ({ default: mod.Markdown })),
@@ -245,6 +249,7 @@ function StreamEvent({
           />
         )}
       </div>
+      {part.hookTrust ? <HookTrustAction trust={part.hookTrust} /> : null}
       {part.name === "todo_write" && status === "done" ? (
         <TodoChecklist argumentsText={part.toolArguments} />
       ) : null}
@@ -258,6 +263,68 @@ function StreamEvent({
         </Suspense>
       ) : null}
     </>
+  );
+}
+
+/** Review a workspace's project hooks, then trust that exact config. */
+function HookTrustAction({ trust }: { trust: NonNullable<ChatStreamEventPart["hookTrust"]> }) {
+  const [state, setState] = useState<"idle" | "busy" | "trusted">("idle");
+  const [error, setError] = useState<string | null>(null);
+  const review = async () => {
+    setState("busy");
+    setError(null);
+    try {
+      const project = (await getHooksStatus(trust.workspace)).project;
+      if (!project?.has_hooks || !project.config_hash) {
+        throw new Error("This workspace no longer defines project hooks.");
+      }
+      if (project.trusted) {
+        setState("trusted");
+        return;
+      }
+      const accepted = await confirmApp({
+        title: "Trust project hooks?",
+        message: [
+          `${project.path} runs these commands on your machine during agent runs in this workspace:`,
+          "",
+          ...hookReviewLines(project.hooks),
+          "",
+          "Trust covers this exact configuration. Any change asks again.",
+        ].join("\n"),
+        confirmLabel: "Trust hooks",
+        tone: "danger",
+      });
+      if (!accepted) {
+        setState("idle");
+        return;
+      }
+      await trustWorkspaceHooks(trust.workspace, project.config_hash);
+      setState("trusted");
+    } catch (reason) {
+      setState("idle");
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+  if (state === "trusted") {
+    return (
+      <div className="stream-event-action" role="status">
+        Hooks trusted. They run from the next turn.
+      </div>
+    );
+  }
+  return (
+    <div className="stream-event-action">
+      <button
+        type="button"
+        className="btn-ghost"
+        data-testid="hook-trust-review"
+        disabled={state === "busy"}
+        onClick={() => void review()}
+      >
+        Review and trust hooks
+      </button>
+      {error ? <span className="stream-event-action-error" role="alert">{error}</span> : null}
+    </div>
   );
 }
 

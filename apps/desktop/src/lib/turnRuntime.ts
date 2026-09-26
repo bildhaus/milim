@@ -37,6 +37,7 @@ import {
 } from "./turnContext.js";
 import { attachmentsToPromptContext, reviewCommentsToPromptContext } from "./attachmentWire.js";
 import { friendlyError } from "./providerErrors.js";
+import { hookEventPart } from "./hookEvents.js";
 import { estimateMessagesTokens, estimateTextTokens, messagesForModelContext, modelContextBudget } from "./contextCompaction.js";
 import {
   accountRuntimeToolPart,
@@ -1542,6 +1543,10 @@ export function createAgentRunEventHandler({
             event.type === "worker_run_error" ? "error" : "status",
           ),
         );
+        break;
+      case "hook":
+        flush();
+        appendStreamEvent(hookEventPart(event as unknown as Record<string, unknown>));
         break;
       case "error":
         flush();

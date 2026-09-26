@@ -1354,6 +1354,7 @@ dependencies = [
  "milim-skills",
  "milim-storage",
  "milim-tools",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

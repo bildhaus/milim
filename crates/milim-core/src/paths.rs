@@ -44,6 +44,11 @@ impl Paths {
         self.config_dir().join("server.json")
     }
 
+    /// `<root>/settings.json` - user settings for hooks and language servers.
+    pub fn settings_file(&self) -> PathBuf {
+        self.root.join("settings.json")
+    }
+
     /// `<root>/milim.db` - canonical user state database for syncable profile data.
     pub fn user_db_file(&self) -> PathBuf {
         self.root.join("milim.db")

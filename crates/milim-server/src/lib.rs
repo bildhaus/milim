@@ -38,6 +38,7 @@ mod sse;
 mod state;
 pub mod threads;
 mod translate;
+mod user_hooks;
 mod workspace_context;
 
 use std::future::Future;
@@ -257,6 +258,8 @@ pub fn build_router_with_host_policy(state: AppState, host_policy: HostPolicy) -
         .route("/workspace/git/action", post(routes::workspace_git_action))
         // User and project slash commands (Markdown prompt templates)
         .route("/commands", get(routes::custom_commands_list))
+        .route("/hooks", get(routes::hooks_status))
+        .route("/hooks/trust", post(routes::hooks_trust))
         .route("/commands/expand", post(routes::custom_commands_expand))
         // Managed preview apps for no-folder chat artifacts.
         .route("/preview-apps/{thread_id}", get(routes::preview_app_get))

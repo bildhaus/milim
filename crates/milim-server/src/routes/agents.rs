@@ -4131,6 +4131,12 @@ pub(crate) async fn agents_run(
     {
         agent_config.approval_broker = Some(st.tool_approvals.clone());
     }
+    let run_id = gen_id("agentrun");
+    agent_config.interceptor = crate::user_hooks::interceptor(
+        run_context.workspace(),
+        &run_id,
+        string_extra(&req, "thread_id").as_deref(),
+    );
     let memory = memory_context_from_request(&req, model.clone());
     let skill_mode = string_extra(&req, "skill_mode").unwrap_or_else(|| "auto".to_string());
     let enabled_skills = string_list_extra(&req, "enabled_skills");
@@ -4204,7 +4210,7 @@ pub(crate) async fn agents_run(
     .map_err(ApiError)?;
 
     Ok(Json(AgentRunResponse {
-        id: gen_id("agentrun"),
+        id: run_id,
         object: "agent.run",
         model,
         message: outcome.message,
@@ -4265,6 +4271,8 @@ pub(crate) fn control_agent_stream(
         agent_config.approval_broker = Some(st.tool_approvals.clone());
     }
     agent_config.step_hook = Some(step_hook);
+    agent_config.interceptor =
+        crate::user_hooks::interceptor(run_context.workspace(), message_id, Some(thread_id));
     agent_config.sampling = sampling;
     agent_config.context_window_tokens = context_window_tokens;
     if let Some(limits) = run_limits {
@@ -4455,6 +4463,12 @@ pub(crate) async fn agent_run_by_id(
     {
         agent_config.approval_broker = Some(st.tool_approvals.clone());
     }
+    let run_id = gen_id("agentrun");
+    agent_config.interceptor = crate::user_hooks::interceptor(
+        run_context.workspace(),
+        &run_id,
+        string_extra(&req, "thread_id").as_deref(),
+    );
     let mut memory = memory_context_from_request(&req, requested_model.clone());
     let mut messages = Vec::new();
     if !agent.system_prompt.is_empty() {
@@ -4563,7 +4577,7 @@ pub(crate) async fn agent_run_by_id(
     .map_err(ApiError)?;
 
     Ok(Json(AgentRunResponse {
-        id: gen_id("agentrun"),
+        id: run_id,
         object: "agent.run",
         model,
         message: outcome.message,

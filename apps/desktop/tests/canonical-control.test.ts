@@ -794,4 +794,59 @@ assert.equal(
   "pending approvals carry the prefix Rust would allow for the chat",
 );
 
+const hooked = projectControlRunMessages([
+  item(1, "hook", {
+    event: "*",
+    hook: ".milim/settings.json",
+    source: "project",
+    outcome: "skipped",
+    duration_ms: 0,
+    message: "Project hooks did not run.",
+    trust: { workspace: "/repo", config_hash: "abc123" },
+  }),
+  item(2, "hook", {
+    event: "PreToolUse",
+    hook: "./guard.sh",
+    source: "user",
+    tool_name: "shell",
+    outcome: "deny",
+    duration_ms: 12,
+    message: "no rm -rf",
+  }),
+  item(3, "hook", {
+    event: "PostToolUse",
+    hook: "cargo fmt",
+    source: "user",
+    tool_name: "edit_file",
+    outcome: "ok",
+    duration_ms: 40,
+  }),
+], "run-1")[0];
+assert.deepEqual(hooked.streamParts, [
+  {
+    kind: "event",
+    eventType: "warning",
+    label: "Project hooks are not trusted",
+    detail: "Project hooks did not run.",
+    status: "done",
+    hookTrust: { workspace: "/repo", configHash: "abc123" },
+  },
+  {
+    kind: "event",
+    eventType: "warning",
+    label: "PreToolUse hook (shell) denied in 12 ms",
+    detail: "./guard.sh: no rm -rf",
+    status: "done",
+  },
+  {
+    kind: "event",
+    eventType: "tool",
+    label: "PostToolUse hook (edit_file) ran in 40 ms",
+    name: "PostToolUse hook",
+    icon: "tool",
+    detail: "cargo fmt",
+    status: "done",
+  },
+], "hook events render as warnings, with a trust action for untrusted project hooks");
+
 console.log("canonical control projection tests passed");

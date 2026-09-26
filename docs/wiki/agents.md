@@ -6,7 +6,7 @@ title: Agents, tools, skills, and schedules
 summary: Reusable Agent profiles, Worker Runs, tool modes, skills, schedules, and approval policies.
 group: Core
 order: 50
-updated: 2026-08-17
+updated: 2026-09-26
 ---
 
 Agents are for repeatable behavior, tool access, and longer work. Keep one-off questions in plain chat; save an agent when the same instructions or tool policy should survive across threads.
@@ -18,7 +18,7 @@ Agents are for repeatable behavior, tool access, and longer work. Keep one-off q
 | Named Agents | Model-agnostic profiles with name, description, deterministic avatar seed, system prompt, tool mode, and skill mode. **Start chat** creates a normal thread bound to the Agent while model choice remains thread-owned. The generated avatar follows the Agent through desktop persona, schedule, and assigned Worker surfaces plus the native mobile composer and Agent sheet; unassigned Workers receive deterministic run-local identities. An Agent is a saved role; a Worker is one live instance of that role. |
 | Tool modes | `all`, `custom`, or `none`. |
 | Skill modes | `auto`, `custom`, or `none`. Auto offers every enabled user and project skill, Custom only the Agent's allowlisted user skills, and None no index or skill tools. Explicit `@Skill Name` and `/Skill Name` prompt tags load a matching enabled skill in full for that turn, limited to the allowlist in Custom. See [Skills](#skills). |
-| Run timeline | Start, token, reasoning, tool call, bounded tool result, memory, Worker Run, per-request usage deltas, final usage, and error events render as structured stream parts. Tool results are capped before timeline persistence and again for model replay (see [Agent loop behavior](#agent-loop-behavior)). Worker events carry monotonic cursors and reload on demand. Runs stop at 100 model turns by default (`stopped_at_limit: true`). |
+| Run timeline | Start, token, reasoning, tool call, bounded tool result, [hook](#hooks), memory, Worker Run, per-request usage deltas, final usage, and error events render as structured stream parts. Tool results are capped before timeline persistence and again for model replay (see [Agent loop behavior](#agent-loop-behavior)). Worker events carry monotonic cursors and reload on demand. Runs stop at 100 model turns by default (`stopped_at_limit: true`). |
 | Schedules | Cron schedules capture an explicit model, creation workspace, prompt, files, and optional Agent. Each occurrence is a normal canonical thread with a durable schedule origin, complete run ledger, and desktop/mobile visibility. Retrying the same occurrence is idempotent. Legacy schedules with no model temporarily fall back to their Agent's deprecated saved model; editing persists that fallback. Missing both records a visible error. |
 | Tool approval | The UI sends approval policy to the server-side agent loop and resolves exact one-shot Review requests inline. |
 | MCP Apps | Negotiated MCP tools may attach a server-authored `ui://` view. The agent sees bounded fallback content while the transcript retains the full structured App result and descriptor. App-only tools stay out of the model catalog. |
@@ -49,6 +49,73 @@ These rules apply to milim-native provider runs; account runtimes use their own 
 milim-native uses the registry's effect metadata. Review and Guarded bind host filesystem tools to the selected workspace; Open removes that boundary. The separate **Docker sandbox** setting only enables the bounded `run_command` tool and does not constrain Open host tools. Codex keeps `on-request` approval and relays app-server command, file, and permission requests: Review uses a workspace-write sandbox after approval, while Open uses Codex `danger-full-access` and auto-approves ordinary requests. Claude uses a temporary per-run Streamable HTTP MCP permission tool and deletes its run token/configuration on completion. A runtime that cannot support its approval protocol fails Review instead of silently switching modes. API callers may still set `tool_approval_grant: true` as an explicit whole-run compatibility grant; streamed desktop runs do not.
 
 Each turn also reloads workspace instructions. milim-native receives both AGENTS and Claude families. Codex relies on its native AGENTS discovery and receives Claude-family additions; Claude relies on native Claude discovery and receives AGENTS-family additions. Conditional Claude rules with `paths:` frontmatter are reported but not globally applied by milim.
+
+## Hooks
+
+Hooks run your own shell commands at fixed points of a milim-native run: before a tool call, after it, when a turn starts, and when the run is about to finish. Account runtimes (Codex, Claude, OpenCode, Pi) keep their own hook systems and don't run milim hooks, and neither do managed Workers. Hooks run only for runs with a working folder.
+
+Configure them under `hooks` in `~/.milim/settings.json` (user, or `$MILIM_HOME/settings.json`) and `<workspace>/.milim/settings.json` (project). User hooks run first, then project hooks, each in file order.
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [{ "matcher": "shell|edit_file", "command": "./scripts/guard.sh", "timeout_secs": 30 }],
+    "PostToolUse": [],
+    "UserPromptSubmit": [],
+    "Stop": []
+  }
+}
+```
+
+`matcher` is a regex that must match the whole tool name (`shell|edit_file`, `mcp__.*`); empty or missing matches every tool, and it is ignored for `UserPromptSubmit` and `Stop`. `timeout_secs` defaults to 30 (max 600); a hook that runs longer is stopped with its whole process tree and logged as timed out. Commands run with `sh -c` (PowerShell on Windows) in the workspace folder, with the same search path as other helper tools. Milim's own secret `MILIM_*` variables are withheld; `MILIM_HOOK_EVENT` and `MILIM_WORKSPACE` are set. The event arrives as JSON on stdin:
+
+```json
+{"event": "PreToolUse", "tool_name": "shell", "tool_input": {"command": "cargo test"}, "call_id": "call_1", "run_id": "…", "thread_id": "…", "workspace": "/path/to/repo"}
+```
+
+`PostToolUse` adds `tool_output` (the tool's structured result), `UserPromptSubmit` has `prompt` instead of tool fields, and `Stop` has `last_message` and `stop_continuations`.
+
+| Event | Exit 0 | Exit 2 | Other exit codes |
+|---|---|---|---|
+| `PreToolUse` | Runs before approval. Stdout `{"decision":"deny","reason":"…"}` denies the call with that reason. `{"decision":"allow"}` skips the Review approval prompt only when user settings set `"allow_hooks_to_approve": true` (never read from project settings). Allow never adds a tool: Guarded and Plan mode still withhold what they withhold. | Denies the call; the model sees stderr as the reason. | Logged as a hook error; the call proceeds. |
+| `PostToolUse` | Non-empty stdout (up to 8 KiB) is appended to the model-visible tool result as `[hook] …`. | Stderr is appended the same way, as feedback. | Logged as a hook error. |
+| `UserPromptSubmit` | Runs before the turn's first model step. Non-empty stdout is added as extra context in a system reminder. | Blocks the turn; the run ends with stderr as the reason. | Logged as a hook error. |
+| `Stop` | The run finishes. | The run continues with stderr as a note to the model, at most 3 times per run. | Logged as a hook error. |
+
+Every hook run appears in the run timeline with its event, command, outcome, and duration. Routine runs fold into the turn's work summary; denials, blocks, errors, and timeouts show as warnings.
+
+**Project hooks need trust.** Project hooks are code from the repository, so they don't run until you trust them. A run that finds untrusted project hooks skips them and shows **Project hooks are not trusted** in the timeline; **Review and trust hooks** lists the commands and records trust for that workspace and that exact `hooks` configuration (a SHA-256 of it) in `~/.milim/config/hook-trust.json`. Any change to the project's hooks needs trust again. User hooks are always trusted. `GET /hooks?workspace=<path>` returns both configurations and the trust state, and `POST /hooks/trust` with `{workspace, config_hash, trusted}` records or removes trust; trusting with a hash that no longer matches the file is refused.
+
+Examples:
+
+```json Block rm -rf
+{"hooks": {"PreToolUse": [{
+  "matcher": "shell",
+  "command": "grep -q 'rm -rf' && { echo 'rm -rf is blocked in this repo' >&2; exit 2; }; exit 0"
+}]}}
+```
+
+```json Format after edits
+{"hooks": {"PostToolUse": [{
+  "matcher": "edit_file|write_file",
+  "command": "cargo fmt --quiet 2>&1 | tail -n 20"
+}]}}
+```
+
+```json Append test results after edits
+{"hooks": {"PostToolUse": [{
+  "matcher": "edit_file|write_file",
+  "command": "cargo test --quiet 2>&1 | tail -n 15",
+  "timeout_secs": 300
+}]}}
+```
+
+```json Keep going until tests pass
+{"hooks": {"Stop": [{
+  "command": "out=$(cargo test --quiet 2>&1) && exit 0; printf 'Tests fail:\\n%s\\n' \"$(printf '%s' \"$out\" | tail -n 40)\" >&2; exit 2",
+  "timeout_secs": 300
+}]}}
+```
 
 ## Base prompt and environment
 

@@ -423,6 +423,8 @@ export type ChatStreamPart =
       approvalRequest?: ToolApprovalRequest;
       /** Leading words Rust would allow for this chat, e.g. `cargo test`. */
       allowancePrefix?: string;
+      /** Untrusted project hooks the user can review and trust. */
+      hookTrust?: { workspace: string; configHash: string };
     };
 
 export type ToolApprovalLifecycleStatus =
@@ -3974,6 +3976,7 @@ export interface AgentEvent {
     | "worker_run_worker_done"
     | "worker_run_worker_error"
     | "worker_run_worker_stopped"
+    | "hook"
     | "final"
     | "done"
     | "error";
@@ -4941,6 +4944,38 @@ export async function listCustomSlashCommands(workspace: string): Promise<Custom
   } catch {
     return [];
   }
+}
+
+export interface HooksStatus {
+  user: { path: string; hooks: Record<string, unknown>; allow_hooks_to_approve: boolean };
+  project: {
+    workspace: string;
+    path: string;
+    hooks: Record<string, unknown>;
+    has_hooks: boolean;
+    config_hash: string | null;
+    trusted: boolean;
+  } | null;
+}
+
+/** User hooks plus a workspace's project hooks and whether they are trusted. */
+export async function getHooksStatus(workspace: string): Promise<HooksStatus> {
+  const params = new URLSearchParams({ workspace: workspace.trim() });
+  const response = await authFetch(`${BASE}/hooks?${params}`);
+  return await parseJsonResponse<HooksStatus>(response, "Loading hooks failed");
+}
+
+/** Trust a workspace's reviewed project hooks; a changed config is refused. */
+export async function trustWorkspaceHooks(
+  workspace: string,
+  configHash: string,
+): Promise<HooksStatus> {
+  const response = await authFetch(`${BASE}/hooks/trust`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspace, config_hash: configHash, trusted: true }),
+  });
+  return await parseJsonResponse<HooksStatus>(response, "Trusting hooks failed");
 }
 
 /** Expand a custom slash command template into the prompt text to send. */
