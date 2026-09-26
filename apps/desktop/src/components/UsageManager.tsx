@@ -1,5 +1,11 @@
 import { useEffect, useState } from "react";
-import { getUsageSummary, type UsageBucket, type UsageSummary } from "../api";
+import {
+  getHarnessMetrics,
+  getUsageSummary,
+  type HarnessMetrics,
+  type UsageBucket,
+  type UsageSummary,
+} from "../api";
 import {
   formatUsageCost,
   formatUsageCount,
@@ -133,6 +139,138 @@ function BreakdownTable({
         </table>
       ) : (
         <p className="usage-empty-note">No usage in this range.</p>
+      )}
+    </section>
+  );
+}
+
+const HARNESS_TOOL_ROWS = 8;
+
+function formatLatency(ms: number | null): string {
+  if (ms == null) return "-";
+  if (ms >= 10_000) return `${Math.round(ms / 1000)}s`;
+  if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${Math.round(ms)}ms`;
+}
+
+function formatRate(rate: number): string {
+  return `${(rate * 100).toFixed(rate > 0 && rate < 0.1 ? 1 : 0)}%`;
+}
+
+function HarnessHealth({ days, reloadKey }: { days: number; reloadKey: number }) {
+  const [runtime, setRuntime] = useState("");
+  const [metrics, setMetrics] = useState<HarnessMetrics | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setError(null);
+    getHarnessMetrics(days, { runtime: runtime || undefined })
+      .then((next) => {
+        if (!cancelled) setMetrics(next);
+      })
+      .catch((reason: unknown) => {
+        if (!cancelled)
+          setError(reason instanceof Error ? reason.message : "Harness metrics are unavailable.");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [days, runtime, reloadKey]);
+
+  const runtimes = metrics?.available_runtimes ?? [];
+  const statuses = metrics?.runs_by_status.map((entry) => `${formatUsageCount(entry.runs)} ${entry.status}`) ?? [];
+  const tools = metrics?.tools.slice(0, HARNESS_TOOL_ROWS) ?? [];
+  const details = metrics
+    ? [
+        metrics.avg_steps_per_run == null ? null : `${metrics.avg_steps_per_run.toFixed(1)} model steps per run`,
+        metrics.avg_cost_usd_per_run == null
+          ? null
+          : `${formatDollars(metrics.avg_cost_usd_per_run)} per priced run (${formatUsageCount(metrics.priced_runs)})`,
+        `${formatUsageCount(metrics.retries)} model retr${metrics.retries === 1 ? "y" : "ies"}`,
+      ].filter(Boolean)
+    : [];
+
+  return (
+    <section className="usage-panel usage-harness" aria-label="Harness health">
+      <div className="usage-panel-head">
+        <h3>Harness health</h3>
+        {runtimes.length > 1 && (
+          <div className="usage-segmented" role="group" aria-label="Runtime filter">
+            {["", ...runtimes].map((option) => (
+              <button key={option || "all"} type="button" aria-pressed={runtime === option} onClick={() => setRuntime(option)}>
+                {option || "All"}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      {error ? (
+        <p className="usage-note error" role="alert">
+          Harness metrics unavailable: {error}
+        </p>
+      ) : !metrics ? (
+        <p className="usage-note">Loading harness metrics...</p>
+      ) : metrics.runs === 0 ? (
+        <p className="usage-empty-note">No runs in this range.</p>
+      ) : (
+        <>
+          <div className="usage-stats">
+            <div className="usage-stat">
+              <span className="usage-stat-label">Runs</span>
+              <strong>{formatUsageCount(metrics.runs)}</strong>
+              <small title={statuses.join(" · ")}>{statuses.join(" · ")}</small>
+            </div>
+            <div className="usage-stat">
+              <span className="usage-stat-label">Model step p50</span>
+              <strong>{formatLatency(metrics.step_latency.p50_ms)}</strong>
+              <small>
+                p95 {formatLatency(metrics.step_latency.p95_ms)} · first token {formatLatency(metrics.first_token.p50_ms)}
+              </small>
+            </div>
+            <div className="usage-stat">
+              <span className="usage-stat-label">Tool errors</span>
+              <strong>{formatRate(metrics.tool_error_rate)}</strong>
+              <small>
+                {formatUsageCount(metrics.tool_errors)} of {formatUsageCount(metrics.tool_calls)} calls
+              </small>
+            </div>
+            <div className="usage-stat">
+              <span className="usage-stat-label">Approval wait p50</span>
+              <strong>{formatLatency(metrics.approval_wait.p50_ms)}</strong>
+              <small>
+                p95 {formatLatency(metrics.approval_wait.p95_ms)} · {formatUsageCount(metrics.pending_approvals)} pending
+              </small>
+            </div>
+          </div>
+          <p className="usage-note">{details.join(" · ")}</p>
+          {tools.length > 0 && (
+            <div className="usage-breakdown">
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Tool</th>
+                    <th scope="col">Calls</th>
+                    <th scope="col">Errors</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {tools.map((tool) => (
+                    <tr key={tool.name}>
+                      <th scope="row">
+                        <span className="usage-breakdown-name">{tool.name || "unknown"}</span>
+                      </th>
+                      <td>{formatUsageCount(tool.calls)}</td>
+                      <td>
+                        {formatUsageCount(tool.errors)} ({formatRate(tool.error_rate)})
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
       )}
     </section>
   );
@@ -275,6 +413,8 @@ export function UsageManager({ onClose }: { onClose: () => void }) {
               <BreakdownTable title="By provider or runtime" buckets={summary.by_provider} metric={metric} />
               <BreakdownTable title="By project" buckets={summary.by_project} metric={metric} />
             </div>
+
+            <HarnessHealth days={range} reloadKey={reloadKey} />
 
             <div className="usage-provenance" role="note">
               <strong>Cost provenance</strong>

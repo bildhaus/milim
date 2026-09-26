@@ -34,3 +34,5 @@ apps/desktop/downloaded-release-artifacts
 /.design-sync/learnings/
 /.design-sync/node_modules
 apps/desktop/dssync/ds-combined.css
+# Agent eval results (evals/run.mjs)
+evals/results/

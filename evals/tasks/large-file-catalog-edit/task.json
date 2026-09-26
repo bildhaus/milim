@@ -1,0 +1,8 @@
+{
+  "id": "large-file-catalog-edit",
+  "title": "Precise edits in a 1,600-entry file",
+  "category": "large-file-edit",
+  "prompt": "In src/catalog.js, make exactly these changes and nothing else: set the priceCents of SKU-0917 to 2499; set the stock of SKU-1203 to 0 and add `discontinued: true` to that same entry. Keep one entry per line and do not reformat, reorder, or touch any other line.",
+  "timeout_s": 300,
+  "check": "node check.mjs"
+}

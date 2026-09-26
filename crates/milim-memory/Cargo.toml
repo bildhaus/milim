@@ -19,3 +19,4 @@ tokio.workspace = true
 
 [dev-dependencies]
 milim-inference = { workspace = true, features = ["test-backend"] }
+serde_json.workspace = true

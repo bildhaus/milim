@@ -18,7 +18,10 @@ use sha2::{Digest, Sha256};
 use crate::crypto::EncryptedStore;
 
 mod usage;
-pub use usage::{UsageBucket, UsageSummary, UsageTotals, USAGE_MAX_DAYS};
+pub use usage::{
+    HarnessMetrics, HarnessMetricsQuery, LatencyPercentiles, StatusCount, ToolHealth, UsageBucket,
+    UsageSummary, UsageTotals, USAGE_MAX_DAYS,
+};
 
 /// Per-connection `prepare_cached` capacity; covers the hot control-ledger
 /// statements without evicting them on every timeline read.
@@ -3286,6 +3289,39 @@ impl UserDataStore {
             .map_err(sqlite)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(sqlite)
+    }
+
+    /// Every event of the listed types for one run, in ledger order. Uses the
+    /// `(run_id, event_type, seq)` index, so replay and inspection can find
+    /// model steps without paging through the whole ledger.
+    pub fn control_run_events_by_types(
+        &self,
+        run_id: &str,
+        event_types: &[&str],
+    ) -> Result<Vec<ControlRunEventRecord>> {
+        let run_id = required_control_text(run_id, "run id")?;
+        let db = self
+            .read_db()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let mut stmt = db
+            .conn()
+            .prepare_cached(
+                "SELECT run_id, seq, event_id, step_id, event_type, data_json, created_at_ms
+                 FROM user_run_events
+                 WHERE run_id = ?1 AND event_type = ?2 ORDER BY seq ASC",
+            )
+            .map_err(sqlite)?;
+        let mut events = Vec::new();
+        for event_type in event_types {
+            let rows = stmt
+                .query_map(params![run_id, event_type], control_run_event_from_row)
+                .map_err(sqlite)?;
+            for row in rows {
+                events.push(row.map_err(sqlite)?);
+            }
+        }
+        events.sort_by_key(|event| event.seq);
+        Ok(events)
     }
 
     pub fn control_put_run_artifact(&self, artifact: &ControlRunArtifactRecord) -> Result<()> {

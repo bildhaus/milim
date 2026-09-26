@@ -150,6 +150,10 @@ pub fn build_router_with_host_policy(state: AppState, host_policy: HostPolicy) -
             "/control/v1/runs/{run_id}/events",
             get(routes::control_run_events),
         )
+        .route(
+            "/control/v1/runs/{run_id}/replay",
+            post(routes::control_run_replay),
+        )
         .route("/control/v1/commands", post(routes::control_command))
         .route(
             "/control/v1/socket-ticket",
@@ -233,6 +237,7 @@ pub fn build_router_with_host_policy(state: AppState, host_policy: HostPolicy) -
         .route("/media/library/{id}", delete(routes::media_library_delete))
         // Usage dashboard aggregates over canonical message metrics
         .route("/usage/summary", get(routes::usage_summary))
+        .route("/usage/harness", get(routes::usage_harness))
         // Host working folder (drives the filesystem/shell tools)
         .route(
             "/workspace",
@@ -556,6 +561,10 @@ pub fn build_mobile_companion_router(state: AppState) -> Router {
         .route(
             "/control/v1/runs/{run_id}/events",
             get(routes::control_run_events),
+        )
+        .route(
+            "/control/v1/runs/{run_id}/replay",
+            post(routes::control_run_replay),
         )
         .route("/control/v1/commands", post(routes::control_command))
         .route(

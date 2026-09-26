@@ -297,6 +297,11 @@
   background: color-mix(in srgb, var(--accent) 72%, var(--accent-light));
 }
 
+.usage-harness .usage-breakdown {
+  padding: 0;
+  border: 0;
+}
+
 .usage-empty-note {
   margin: 0;
   color: var(--tertiary-text);

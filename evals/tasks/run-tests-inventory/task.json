@@ -1,0 +1,8 @@
+{
+  "id": "run-tests-inventory",
+  "title": "Run the suite and fix every failure",
+  "category": "run-tests-and-fix",
+  "prompt": "Run the test suite with `npm test` and fix whatever is failing. The tests describe the intended behavior and must not be changed.",
+  "timeout_s": 420,
+  "check": "node check.mjs"
+}

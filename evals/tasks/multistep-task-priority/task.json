@@ -1,0 +1,8 @@
+{
+  "id": "multistep-task-priority",
+  "title": "Ship a feature that spans model, query, CLI, docs, and tests",
+  "category": "multi-step",
+  "prompt": "Add task priorities to this todo tool. Plan the work as a checklist and complete every item:\n1. In src/store.js, `addTask(store, text, options)` accepts `options.priority` of \"low\", \"normal\", or \"high\" (default \"normal\"); any other value throws a RangeError. Stored tasks get a `priority` field.\n2. In src/query.js, export `sortByPriority(tasks)` returning a new array ordered high, normal, low; ties keep their original relative order. Do not mutate the input.\n3. In src/cli.js, `add` accepts `--priority=<level>` anywhere in its arguments, and `list --sort=priority` prints tasks in priority order. Printed lines gain a priority marker: `[!]` for high, `[ ]` for normal, `[-]` for low, placed before the task text (for example `1. [!] Pay rent`).\n4. Document both flags in the Usage section of README.md.\n5. Add tests for the new behavior in test/ and make sure `npm test` passes.",
+  "timeout_s": 600,
+  "check": "node check.mjs"
+}

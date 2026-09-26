@@ -1051,6 +1051,102 @@ async fn create_and_send_control_smoke(
 }
 
 #[tokio::test]
+async fn control_run_replay_and_harness_metrics_read_the_run_ledger() {
+    let store = Arc::new(
+        milim_storage::UserDataStore::new(milim_storage::Database::open_in_memory().unwrap())
+            .unwrap(),
+    );
+    let manager = milim_server::control::RunManager::new(store, "Replay fixture").unwrap();
+    let base = spawn(test_state().with_control(manager)).await;
+    let client = reqwest::Client::new();
+    let run_id = create_and_send_control_smoke(&client, &base, "replay-thread", "test-echo").await;
+    let inspection = wait_for_control_run(&client, &base, &run_id, Duration::from_secs(30)).await;
+    assert_eq!(inspection["run"]["status"], "completed", "{inspection}");
+
+    let events: Value = client
+        .get(format!("{base}/control/v1/runs/{run_id}/events?limit=200"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let stored_request = events["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "model_request_resolved")
+        .map(|event| event["data"]["artifact"].clone())
+        .expect("provider request recorded");
+
+    let dry: Value = client
+        .post(format!("{base}/control/v1/runs/{run_id}/replay"))
+        .json(&json!({ "dry_run": true }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(dry["dry_run"], true);
+    assert_eq!(dry["request"], stored_request);
+
+    let replay: Value = client
+        .post(format!("{base}/control/v1/runs/{run_id}/replay"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(replay["replay"]["content"], replay["original"]["content"]);
+    assert_eq!(replay["diff"]["text_similarity"], 1.0);
+    assert_eq!(replay["diff"]["same_tool_names"], true);
+
+    let missing = client
+        .post(format!("{base}/control/v1/runs/missing-run/replay"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let metrics: Value = client
+        .get(format!("{base}/usage/harness?days=1"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(metrics["runs"], 1, "{metrics}");
+    assert_eq!(metrics["runs_by_status"][0]["status"], "completed");
+    assert_eq!(metrics["model_steps"], 1);
+    assert_eq!(metrics["step_latency"]["samples"], 1);
+    assert_eq!(metrics["available_runtimes"], json!(["provider"]));
+    let filtered: Value = client
+        .get(format!("{base}/usage/harness?days=1&runtime=codex"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(filtered["runs"], 0);
+    let invalid = client
+        .get(format!("{base}/usage/harness?days=0"))
+        .send()
+        .await
+        .unwrap();
+    assert!(invalid.status().is_client_error());
+}
+
+#[tokio::test]
 async fn control_v1_real_harness_smoke_when_env_configured() {
     if std::env::var("MILIM_REAL_HARNESS_SMOKE").ok().as_deref() != Some("1") {
         return;

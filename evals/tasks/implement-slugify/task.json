@@ -1,0 +1,8 @@
+{
+  "id": "implement-slugify",
+  "title": "Implement slugify to spec",
+  "category": "implement-to-spec",
+  "prompt": "Implement the `slugify` function in src/slugify.js according to docs/SLUGIFY.md. Follow every rule in the spec exactly. Add tests if you like, but only the implementation is required.",
+  "timeout_s": 300,
+  "check": "node check.mjs"
+}
