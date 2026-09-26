@@ -7,6 +7,7 @@
 
 mod builtins;
 mod fs;
+pub mod shell_command;
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -70,6 +71,12 @@ pub trait Tool: Send + Sync {
     /// Result projected into the model-visible tool reply.
     fn model_result(&self, result: &Value) -> Value {
         result.clone()
+    }
+    /// Plain-text projection for the model. When `Some`, the agent loop sends
+    /// this text verbatim instead of the JSON-encoded [`Tool::model_result`],
+    /// so command output and file contents keep real newlines.
+    fn model_text(&self, _result: &Value) -> Option<String> {
+        None
     }
     /// Previous names accepted for persisted custom-agent selections.
     fn aliases(&self) -> Vec<String> {
@@ -257,8 +264,24 @@ pub enum ToolUiDescriptor {
 #[derive(Debug, Clone)]
 pub struct ToolAgentResult {
     pub result: Value,
+    /// Plain-text model projection from [`Tool::model_text`], when provided.
+    pub model_text: Option<String>,
     pub app_result: Option<Value>,
     pub ui: Option<ToolUiDescriptor>,
+}
+
+static TOOL_OUTPUT_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+/// Register the process-wide directory where oversized tool output is saved
+/// for later ranged reads. The first registration wins.
+pub fn set_tool_output_root(root: PathBuf) {
+    let _ = TOOL_OUTPUT_ROOT.set(root);
+}
+
+/// Directory holding saved oversized tool output, when one is registered.
+/// File tools may read absolute paths inside it even when workspace-scoped.
+pub fn tool_output_root() -> Option<&'static Path> {
+    TOOL_OUTPUT_ROOT.get().map(PathBuf::as_path)
 }
 
 /// A serializable description of a tool (for `/mcp/tools` and tool listings).
@@ -567,6 +590,7 @@ impl ToolRegistry {
         let ui = tool.ui();
         Ok(ToolAgentResult {
             result: tool.model_result(&raw),
+            model_text: tool.model_text(&raw),
             app_result: ui.is_some().then_some(raw),
             ui,
         })

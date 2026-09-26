@@ -1371,6 +1371,7 @@ async fn execute_tool_call(
         Ok(value) => value,
         Err(error) => milim_tools::ToolAgentResult {
             result: json!({ "error": error.to_string() }),
+            model_text: None,
             app_result: fallback_ui.as_ref().map(|_| {
                 json!({
                     "content": [{ "type": "text", "text": error.to_string() }],
