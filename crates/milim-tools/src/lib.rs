@@ -40,6 +40,16 @@ pub trait Tool: Send + Sync {
     fn effect(&self) -> ToolEffect {
         ToolEffect::Unknown
     }
+    /// The effect of one concrete call. Tools whose consequence depends on
+    /// their arguments (for example a shell running `git status`) narrow it
+    /// here; approval policy and scheduling use this value.
+    fn effect_for_call(&self, _args: &Value) -> ToolEffect {
+        self.effect()
+    }
+    /// Deadline for one concrete call. `None` keeps the pipeline default.
+    fn deadline_for_call(&self, _args: &Value) -> Option<Duration> {
+        None
+    }
     /// Read-only is necessary but not sufficient for concurrency. Tools must
     /// opt in after proving their implementation is parallel-safe.
     fn concurrency(&self) -> ToolConcurrency {
@@ -171,7 +181,10 @@ impl ToolExecutionPipeline {
         run_permits: Arc<tokio::sync::Semaphore>,
         _context: ToolExecutionContext,
     ) -> Result<ToolExecutionResult> {
-        let effect = tool.effect();
+        let effect = tool.effect_for_call(&request.arguments);
+        let deadline = tool
+            .deadline_for_call(&request.arguments)
+            .unwrap_or(request.deadline);
         let concurrency = match (effect, tool.concurrency()) {
             (ToolEffect::ReadOnly, ToolConcurrency::Parallel) => ToolConcurrency::Parallel,
             _ => ToolConcurrency::Exclusive,
@@ -196,12 +209,12 @@ impl ToolExecutionPipeline {
             .await
             .map_err(|_| Error::Other("tool process scheduler closed".into()))?;
         let started = Instant::now();
-        let raw = tokio::time::timeout(request.deadline, tool.invoke(request.arguments))
+        let raw = tokio::time::timeout(deadline, tool.invoke(request.arguments))
             .await
             .map_err(|_| {
                 Error::Other(format!(
                     "tool {} exceeded its {:?} deadline",
-                    request.name, request.deadline
+                    request.name, deadline
                 ))
             })??;
         let raw = normalize_tool_output(raw, request.output_limit_bytes);
@@ -567,6 +580,11 @@ impl ToolRegistry {
     /// Effect declared by a tool, resolving aliases the same way as calls.
     pub fn effect(&self, name: &str) -> Option<ToolEffect> {
         self.tool(name).ok().map(|tool| tool.effect())
+    }
+
+    /// Effect of one concrete call, resolving aliases the same way as calls.
+    pub fn effect_for_call(&self, name: &str, args: &Value) -> Option<ToolEffect> {
+        self.tool(name).ok().map(|tool| tool.effect_for_call(args))
     }
 
     pub fn environment_policy(&self, name: &str) -> Option<ProcessEnvironmentPolicy> {
