@@ -385,7 +385,7 @@ fn walk_listing(base: &Path) -> Vec<String> {
 }
 
 /// The `PATH` searched for helper binaries, resolved once per process.
-fn helper_search_path() -> &'static OsString {
+pub(super) fn helper_search_path() -> &'static OsString {
     static SEARCH_PATH: OnceLock<OsString> = OnceLock::new();
     SEARCH_PATH.get_or_init(|| {
         #[cfg(not(windows))]

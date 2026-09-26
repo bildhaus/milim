@@ -8,8 +8,11 @@
 //! Tools rebound for one run share a [`RunState`]: the files read in that run
 //! (so edits can detect stale content), the shell's working directory, and the
 //! run's background processes, which are killed when the run's tools drop.
+//! Language servers for `diagnostics` are shared across runs (see [`lsp`]).
 
+mod diagnostics;
 mod edit;
+mod lsp;
 mod search;
 mod shell;
 
@@ -28,7 +31,9 @@ use milim_tools::{
     atomic_write, read_text_range, resolve_workspace_path, Tool, ToolConcurrency, ToolEffect,
 };
 
+use diagnostics::DiagnosticsTool;
 use edit::EditFileTool;
+use lsp::LspManager;
 use search::{GlobTool, GrepTool};
 use shell::{ProcessKillTool, ProcessOutputTool, ShellTool};
 
@@ -75,6 +80,8 @@ enum Freshness {
 #[derive(Default)]
 struct RunState {
     stamps: Mutex<HashMap<PathBuf, FileStamp>>,
+    /// Files this run wrote or edited, in first-touch order.
+    touched: Mutex<Vec<PathBuf>>,
     shell: shell::ShellRunState,
 }
 
@@ -88,6 +95,25 @@ impl RunState {
         if let (Some(stamp), Ok(mut stamps)) = (FileStamp::of(path), self.stamps.lock()) {
             stamps.insert(Self::key(path), stamp);
         }
+    }
+
+    /// Remember a file this run wrote or edited.
+    fn touch(&self, path: &Path) {
+        self.record(path);
+        let key = Self::key(path);
+        if let Ok(mut touched) = self.touched.lock() {
+            if !touched.contains(&key) {
+                touched.push(key);
+            }
+        }
+    }
+
+    /// Files this run wrote or edited.
+    fn touched(&self) -> Vec<PathBuf> {
+        self.touched
+            .lock()
+            .map(|touched| touched.clone())
+            .unwrap_or_default()
     }
 
     /// Refuse edits to files that changed on disk after this run read them.
@@ -130,6 +156,7 @@ struct HostCtx {
     run: Arc<RunState>,
     /// Identifies the tools created by one [`host_tools`] call.
     family: u64,
+    lsp: Arc<LspManager>,
 }
 
 impl HostCtx {
@@ -138,6 +165,7 @@ impl HostCtx {
             ws,
             run: Arc::new(RunState::default()),
             family: NEXT_FAMILY.fetch_add(1, Ordering::Relaxed),
+            lsp: LspManager::global(),
         }
     }
 
@@ -327,13 +355,17 @@ fn optional_bool(args: &Value, key: &str) -> Result<bool> {
 
 /// All host tools bound to the shared workspace cell.
 pub fn host_tools(ws: Workspace) -> Vec<Arc<dyn Tool>> {
-    let ctx = HostCtx::new(ToolWorkspace::Live(ws));
+    tools_for(HostCtx::new(ToolWorkspace::Live(ws)))
+}
+
+fn tools_for(ctx: HostCtx) -> Vec<Arc<dyn Tool>> {
     vec![
         Arc::new(ReadFileTool { ctx: ctx.clone() }),
         Arc::new(ReadFileAnchorsTool { ctx: ctx.clone() }),
         Arc::new(ListDirTool { ctx: ctx.clone() }),
         Arc::new(GlobTool { ctx: ctx.clone() }),
         Arc::new(GrepTool { ctx: ctx.clone() }),
+        Arc::new(DiagnosticsTool { ctx: ctx.clone() }),
         Arc::new(WriteFileTool { ctx: ctx.clone() }),
         Arc::new(EditFileTool { ctx: ctx.clone() }),
         Arc::new(PatchFileTool { ctx: ctx.clone() }),
@@ -341,6 +373,22 @@ pub fn host_tools(ws: Workspace) -> Vec<Arc<dyn Tool>> {
         Arc::new(ProcessOutputTool { ctx: ctx.clone() }),
         Arc::new(ProcessKillTool { ctx }),
     ]
+}
+
+/// Add error diagnostics for a file an edit just wrote, when a language
+/// server reports them within the edit's small budget.
+async fn attach_diagnostics(ctx: &HostCtx, path: &Path, content: &str, result: &mut Value) {
+    let Ok(root) = root_of(&ctx.ws) else {
+        return;
+    };
+    if let Some(diagnostics) = ctx
+        .lsp
+        .after_edit(&root, path, content)
+        .await
+        .filter(|diagnostics| !diagnostics.is_empty())
+    {
+        result["diagnostics"] = json!(diagnostics);
+    }
 }
 
 /// Read a UTF-8 file from the working folder.
@@ -660,7 +708,7 @@ impl Tool for WriteFileTool {
         ToolEffect::Mutating
     }
     fn model_text(&self, result: &Value) -> Option<String> {
-        milim_tools::WriteFileTool::render_for_model(result)
+        lsp::with_after_edit(milim_tools::WriteFileTool::render_for_model(result), result)
     }
     host_tool_scoping!();
     async fn invoke(&self, args: Value) -> Result<Value> {
@@ -673,8 +721,10 @@ impl Tool for WriteFileTool {
         let path = safe_join(&self.ctx.ws, rel)?;
         let created = !path.exists();
         atomic_write(&path, content.as_bytes())?;
-        self.ctx.run.record(&path);
-        Ok(milim_tools::WriteFileTool::result(rel, content, created))
+        self.ctx.run.touch(&path);
+        let mut result = milim_tools::WriteFileTool::result(rel, content, created);
+        attach_diagnostics(&self.ctx, &path, content, &mut result).await;
+        Ok(result)
     }
 }
 
@@ -773,10 +823,10 @@ impl Tool for PatchFileTool {
             ));
         }
         atomic_write(&path, updated.as_bytes())?;
-        self.ctx.run.record(&path);
-        Ok(
-            json!({ "patched": ops.len(), "added": added, "removed": removed, "bytes": updated.len() }),
-        )
+        self.ctx.run.touch(&path);
+        let mut result = json!({ "patched": ops.len(), "added": added, "removed": removed, "bytes": updated.len() });
+        attach_diagnostics(&self.ctx, &path, &updated, &mut result).await;
+        Ok(result)
     }
 }
 
@@ -812,6 +862,83 @@ mod tests {
             .find(|tool| tool.name() == name)
             .unwrap_or_else(|| panic!("missing tool: {name}"))
             .clone()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn edits_append_language_server_errors_and_diagnostics_reports_touched_files() {
+        let root = temp_workspace();
+        let settings = lsp::tests::fake_server(&root);
+        let ctx = HostCtx {
+            lsp: LspManager::fixed(settings),
+            ..HostCtx::new(ToolWorkspace::Fixed(Arc::new(root.clone())))
+        };
+        let tools = tools_for(ctx);
+        let write = tool(&tools, "write_file");
+        let edit = tool(&tools, "edit_file");
+        block_on(async {
+            let written = write
+                .invoke(json!({"path": "src/lib.rs", "content": "use x;\nfn main() {}\n"}))
+                .await
+                .unwrap();
+            let text = write.model_text(&written).unwrap();
+            assert_eq!(
+                text,
+                "Created src/lib.rs (2 lines).\n\nDiagnostics after edit:\nsrc/lib.rs:2:5 error expected semicolon",
+                "only errors are appended"
+            );
+
+            let edited = edit
+                .invoke(json!({"path": "src/lib.rs", "old": "main", "new": "start"}))
+                .await
+                .unwrap();
+            assert_eq!(edited["diagnostics"][0]["message"], "expected semicolon");
+            assert!(edit
+                .model_text(&edited)
+                .unwrap()
+                .ends_with("Diagnostics after edit:\nsrc/lib.rs:2:5 error expected semicolon"));
+
+            let diagnostics = tool(&tools, "diagnostics");
+            let report = diagnostics.invoke(json!({})).await.unwrap();
+            assert_eq!(report["files"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                diagnostics.model_text(&report).unwrap(),
+                "1 error, 1 warning.\nsrc/lib.rs:2:5 error expected semicolon\nsrc/lib.rs:1:1 warning unused import"
+            );
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn edits_without_a_language_server_are_unchanged() {
+        let root = temp_workspace();
+        std::fs::write(root.join("lib.rs"), "fn main() {}\n").unwrap();
+        let ctx = HostCtx {
+            lsp: LspManager::fixed(lsp::LspSettings::default()),
+            ..HostCtx::new(ToolWorkspace::Fixed(Arc::new(root.clone())))
+        };
+        let tools = tools_for(ctx);
+        let edit = tool(&tools, "edit_file");
+        let edited =
+            block_on(edit.invoke(json!({"path": "lib.rs", "old": "main", "new": "start"})))
+                .unwrap();
+        assert!(edited.get("diagnostics").is_none());
+        assert!(!edit.model_text(&edited).unwrap().contains("Diagnostics"));
+
+        let diagnostics = tool(&tools, "diagnostics");
+        let error = block_on(diagnostics.invoke(json!({"path": "lib.rs"})))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("no language server found for .rs"),
+            "{error}"
+        );
+        let report = block_on(diagnostics.invoke(json!({}))).unwrap();
+        assert!(diagnostics
+            .model_text(&report)
+            .unwrap()
+            .contains("lib.rs: no language server found for .rs"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

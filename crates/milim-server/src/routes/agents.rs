@@ -356,6 +356,7 @@ const DESKTOP_WORKSPACE_TOOL_NAMES: &[&str] = &[
     "list_dir",
     "glob",
     "grep",
+    "diagnostics",
     "write_file",
     "edit_file",
     "patch_file",
@@ -395,6 +396,7 @@ const CHILD_THREAD_READ_ONLY_TOOL_NAMES: &[&str] = &[
     "list_dir",
     "glob",
     "grep",
+    "diagnostics",
     "http_fetch",
     "web_search",
     "current_time",
@@ -405,6 +407,7 @@ const PLAN_MODE_READ_ONLY_TOOL_NAMES: &[&str] = &[
     "list_dir",
     "glob",
     "grep",
+    "diagnostics",
     "list_agents",
     "linked_thread_list",
     "linked_thread_read",
@@ -414,7 +417,8 @@ const MAX_CHILD_THREAD_WAIT_MS: u64 = 300_000;
 /// before the pipeline deadline cancels the call.
 const TOOL_WAIT_GRACE: Duration = Duration::from_secs(30);
 /// Read-only workspace tools that need a selected working folder.
-const WORKSPACE_READ_TOOL_NAMES: &[&str] = &["read_file", "list_dir", "glob", "grep"];
+const WORKSPACE_READ_TOOL_NAMES: &[&str] =
+    &["read_file", "list_dir", "glob", "grep", "diagnostics"];
 const DEFAULT_LINKED_THREAD_WAIT_MS: u64 = 60_000;
 const WORKSPACE_UNAVAILABLE_SYSTEM_PROMPT: &str = concat!(
     "No working folder is selected in Milim. Host filesystem and host shell tools are unavailable. ",
@@ -1555,7 +1559,14 @@ mod native_run_context_tests {
 
     #[test]
     fn plan_and_guarded_modes_keep_glob_and_grep() {
-        let names = ["read_file", "list_dir", "glob", "grep", "shell"];
+        let names = [
+            "read_file",
+            "list_dir",
+            "glob",
+            "grep",
+            "diagnostics",
+            "shell",
+        ];
         let workspace = std::env::temp_dir();
         let state = state_with(&names, Some(workspace.clone()));
         let run_context = RunContext {
@@ -1573,14 +1584,19 @@ mod native_run_context_tests {
             &run_context,
         );
         let plan_names: Vec<String> = plan.list().into_iter().map(|tool| tool.name).collect();
-        assert_eq!(plan_names, ["glob", "grep", "list_dir", "read_file"]);
+        assert_eq!(
+            plan_names,
+            ["diagnostics", "glob", "grep", "list_dir", "read_file"]
+        );
 
         let guarded =
             agent_base_registry_with_memory(&state, None, &ToolRunPolicy::default(), &run_context);
         assert!(guarded.contains("glob"));
         assert!(guarded.contains("grep"));
+        assert!(guarded.contains("diagnostics"));
 
         let mut edit_tools = ToolRegistry::new();
+        edit_tools.register(Arc::new(ReadOnlyProbe("diagnostics")));
         edit_tools.register(Arc::new(ReadOnlyProbe("glob")));
         edit_tools.register(Arc::new(ReadOnlyProbe("grep")));
         edit_tools.register(Arc::new(ReadOnlyProbe("edit_file")));
@@ -1604,6 +1620,7 @@ mod native_run_context_tests {
         );
         assert!(!plan_without_folder.contains("glob"));
         assert!(!plan_without_folder.contains("grep"));
+        assert!(!plan_without_folder.contains("diagnostics"));
     }
 
     #[test]

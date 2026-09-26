@@ -12,8 +12,8 @@ use milim_core::{Error, Result};
 use milim_tools::{atomic_write, Tool, ToolEffect};
 
 use super::{
-    arg_str, has_mixed_newlines, host_tool_scoping, newline_separator, optional_bool, safe_join,
-    Freshness, HostCtx,
+    arg_str, attach_diagnostics, has_mixed_newlines, host_tool_scoping, lsp, newline_separator,
+    optional_bool, safe_join, Freshness, HostCtx,
 };
 
 /// Unchanged lines shown around each change.
@@ -68,7 +68,7 @@ impl Tool for EditFileTool {
             }
         }
         out.push_str(result.get("diff")?.as_str()?);
-        Some(out.trim_end().to_string())
+        lsp::with_after_edit(Some(out.trim_end().to_string()), result)
     }
     host_tool_scoping!();
     async fn invoke(&self, args: Value) -> Result<Value> {
@@ -99,7 +99,7 @@ impl Tool for EditFileTool {
             ));
         }
         atomic_write(&path, updated.as_bytes())?;
-        self.ctx.run.record(&path);
+        self.ctx.run.touch(&path);
         let mut notes = Vec::new();
         if plan.normalized {
             notes.push("Matched after ignoring whitespace differences; the file's indentation and line endings were kept.");
@@ -107,7 +107,7 @@ impl Tool for EditFileTool {
         if freshness == Freshness::Unread {
             notes.push("This file was not read earlier in this run; check the change below.");
         }
-        Ok(json!({
+        let mut result = json!({
             "path": rel,
             "replaced": plan.replacements.len(),
             "bytes": updated.len(),
@@ -116,7 +116,9 @@ impl Tool for EditFileTool {
             "normalized": plan.normalized,
             "diff": diff,
             "notes": notes,
-        }))
+        });
+        attach_diagnostics(&self.ctx, &path, &updated, &mut result).await;
+        Ok(result)
     }
 }
 

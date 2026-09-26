@@ -132,7 +132,20 @@ fn tool_guidance(tools: &[ToolSpec]) -> Vec<String> {
         ),
         (false, false) => {}
     }
-    if ["read_file", "glob", "grep", "list_dir"]
+    if has("diagnostics") {
+        let mut line = String::from(
+            "- Check compiler and linter errors with `diagnostics` (a file `path`, or no path for \
+             the files you changed).",
+        );
+        if has("edit_file") || has("write_file") {
+            line.push_str(
+                " Edits may already list new errors under `Diagnostics after edit`; fix those \
+                 before moving on.",
+            );
+        }
+        lines.push(line);
+    }
+    if ["read_file", "glob", "grep", "list_dir", "diagnostics"]
         .iter()
         .any(|name| has(name))
     {
@@ -256,6 +269,7 @@ mod tests {
                 ("web_search", &["query"]),
                 ("http_fetch", &["url"]),
                 ("load_skill", &["name"]),
+                ("diagnostics", &["path"]),
             ]),
             false,
         );
@@ -270,6 +284,8 @@ mod tests {
             "`todo_write`",
             "`web_search`",
             "`load_skill`",
+            "`diagnostics`",
+            "Diagnostics after edit",
             "in parallel",
         ] {
             assert!(full.contains(needle), "missing {needle}:\n{full}");
@@ -291,6 +307,7 @@ mod tests {
             "`offset`",
             "todo_write",
             "web_search",
+            "diagnostics",
         ] {
             assert!(!minimal.contains(absent), "unexpected {absent}:\n{minimal}");
         }

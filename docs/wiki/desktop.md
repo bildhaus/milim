@@ -163,11 +163,41 @@ With a folder selected, provider and local models get these host tools. Review a
 | `glob` | Finds files by `*`, `**`, `?`, `[...]`, and `{a,b}` patterns (a pattern without `/` matches names at any depth). Inside a git repository it honors `.gitignore`; elsewhere it skips `.git`, `node_modules`, `target`, `dist`, `build`, and hidden directories. Returns up to 500 paths, newest first. |
 | `grep` | Regex search with `files_with_matches` (default, newest first), `content` (`path:line:text` with up to 10 context lines), or `count` output. Uses ripgrep when installed and an in-process scan of the `glob` file set otherwise; binary files and files over 2 MiB are skipped. |
 | `write_file` | Creates or overwrites a file and reports which, with its line count. |
+| `diagnostics` | Read-only. Returns errors and warnings from the workspace's language server as `path:line:col severity message`. `path` checks one file; without it, the files written or edited in this run are checked (up to 20). A cold server gets up to 10 seconds to start and each file up to 3 seconds to report; slower results (rust-analyzer while it indexes) are marked partial. |
 | `edit_file` | Replaces `old` with `new`. `old` must be unique unless `replace_all` is set. A match that differs only in indentation, trailing whitespace, or line endings is applied in the file's own style and reported; a miss returns the most similar region with line numbers. Edits keep the file's line endings and return a unified diff snippet. If the file changed on disk since the run last read it, the edit is refused until it is read again. |
 | `shell` | Runs `sh -c` (PowerShell on Windows). `timeout_secs` defaults to 120 (max 600) and kills the whole process tree, keeping partial output. `cd` persists between commands in a run; a workspace-scoped run returns to the folder root if a command leaves it. Commands that are provably read-only are classified as read-only for approval. |
 | `process_output`, `process_kill` | `shell` with `run_in_background` returns a `process_id`. `process_output` returns output since the last read (optionally waiting up to 60 seconds for exit) and the exit status; `process_kill` stops the process tree. The newest 1 MiB of output is kept, and every background process is killed when its run ends. |
 
 The Developer setting for hash-anchored edits adds `read_file_anchors` and `patch_file`.
+
+### Language server diagnostics
+
+`diagnostics` and after-edit checks use language servers found through the same CLI discovery as other helper tools (the login shell's `PATH` plus common install folders):
+
+| Files | Server |
+|---|---|
+| `.rs` | `rust-analyzer` |
+| `.ts`, `.tsx`, `.js`, `.jsx` | `typescript-language-server --stdio` |
+| `.py` | `pyright-langserver --stdio`, else `pylsp` |
+| `.go` | `gopls` |
+
+A server starts on first use for a workspace, stays running across runs, and shuts down after 10 minutes without a request. milim opens or updates the file with its full text, saves it, and waits for the server's diagnostics for that file. A server that fails to start is not retried for 5 minutes.
+
+After a successful `write_file`, `edit_file`, or `patch_file`, milim spends at most 1.5 seconds, including a cold start, asking the server for that file's diagnostics and appends up to 20 errors to the result under `Diagnostics after edit:`. Warnings are left to `diagnostics`. When no server applies, it is still starting, or it doesn't answer in time, the edit result is unchanged; a starting server keeps starting for later calls.
+
+Add or override servers, or turn off the after-edit check, in `~/.milim/settings.json` (`$MILIM_HOME/settings.json` when set). A configured server wins over the built-in one for the same extension; `command` is a name on the search path or an absolute path.
+
+```json
+{
+  "lsp": {
+    "servers": [
+      { "extensions": [".rs"], "command": "rust-analyzer", "args": [] },
+      { "extensions": [".rb"], "command": "ruby-lsp" }
+    ],
+    "diagnostics_after_edit": true
+  }
+}
+```
 
 ## Artifacts
 
