@@ -4254,6 +4254,9 @@ fn build_state(
         .expect("valid loopback address");
 
     let paths = Paths::resolve();
+    // Oversized agent tool output is saved here for ranged reads; entries
+    // older than a week are pruned on startup.
+    milim_tools::init_tool_output_root(paths.root().join("tool-output"));
 
     let mut tools = ToolRegistry::with_builtins();
     tools.register(Arc::new(RunCommandTool::default()));
