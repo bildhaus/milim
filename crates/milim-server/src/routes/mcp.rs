@@ -4,7 +4,8 @@ use super::*;
 
 fn mcp_registry(st: &AppState) -> ToolRegistry {
     let mut reg = static_registry_for_run(st);
-    register_skill_tools(&mut reg, st, "auto", &[]);
+    let workspace = workspace_snapshot(st);
+    register_skill_tools(&mut reg, st, "auto", &[], workspace.as_deref());
     if let Some(hub) = &st.mcp {
         register_mcp_server_tools(&mut reg, hub.clone());
         for tool in hub.tools() {
@@ -18,9 +19,24 @@ fn mcp_registry(st: &AppState) -> ToolRegistry {
 
 const MAX_SKILL_READ_CHARS: usize = 40_000;
 
+/// The skills one run may see: an optional Agent allowlist over stored skills,
+/// plus the run workspace's project skills when there is no allowlist.
 #[derive(Clone)]
 struct MilimSkillScope {
-    allowed_ids: Option<Arc<HashSet<String>>>,
+    allowed_ids: Option<Arc<Vec<String>>>,
+    workspace: Option<PathBuf>,
+}
+
+impl MilimSkillScope {
+    fn skills(
+        &self,
+        store: &milim_skills::SkillStore,
+    ) -> milim_core::Result<Vec<milim_skills::SkillDef>> {
+        store.run_skills(
+            self.allowed_ids.as_deref().map(Vec::as_slice),
+            self.workspace.as_deref(),
+        )
+    }
 }
 
 struct MilimSkillSearchTool {
@@ -28,7 +44,7 @@ struct MilimSkillSearchTool {
     scope: MilimSkillScope,
 }
 
-struct MilimSkillReadTool {
+struct LoadSkillTool {
     store: Arc<milim_skills::SkillStore>,
     scope: MilimSkillScope,
 }
@@ -53,7 +69,8 @@ mod skill_tool_tests {
             .create("Deployment", "Deploy releases", "Push the release.")
             .unwrap();
         let scope = MilimSkillScope {
-            allowed_ids: Some(Arc::new(HashSet::from([allowed.id.clone()]))),
+            allowed_ids: Some(Arc::new(vec![allowed.id.clone()])),
+            workspace: None,
         };
         let search = MilimSkillSearchTool {
             store: store.clone(),
@@ -64,12 +81,63 @@ mod skill_tool_tests {
             .await
             .unwrap();
         assert_eq!(found["skills"].as_array().unwrap().len(), 1);
-        assert_eq!(found["skills"][0]["id"], allowed.id);
+        assert_eq!(found["skills"][0]["name"], "Code Review");
 
-        let read = MilimSkillReadTool { store, scope };
-        let loaded = read.invoke(json!({ "id": allowed.id })).await.unwrap();
+        let load = LoadSkillTool { store, scope };
+        let loaded = load.invoke(json!({ "name": "code review" })).await.unwrap();
         assert_eq!(loaded["instructions"], "List findings first.");
-        assert!(read.invoke(json!({ "id": blocked.id })).await.is_err());
+        assert!(load.invoke(json!({ "name": allowed.id })).await.is_ok());
+        assert!(load.invoke(json!({ "name": "Deployment" })).await.is_err());
+        assert!(load.invoke(json!({ "name": blocked.id })).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn load_skill_returns_project_skill_files_and_reads_resources() {
+        let workspace =
+            std::env::temp_dir().join(format!("milim-load-skill-{}", uuid::Uuid::new_v4()));
+        let skill_dir = workspace.join(".milim").join("skills").join("release");
+        std::fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: Release\ndescription: Cut a release\n---\nRun scripts/cut.sh.",
+        )
+        .unwrap();
+        std::fs::write(skill_dir.join("scripts").join("cut.sh"), "echo cut").unwrap();
+        std::fs::write(workspace.join("outside.txt"), "secret").unwrap();
+        let store =
+            Arc::new(milim_skills::SkillStore::new(Database::open_in_memory().unwrap()).unwrap());
+        store
+            .create("Release", "User release", "User body.")
+            .unwrap();
+        let load = LoadSkillTool {
+            store,
+            scope: MilimSkillScope {
+                allowed_ids: None,
+                workspace: Some(workspace.clone()),
+            },
+        };
+        assert_eq!(load.effect(), ToolEffect::ReadOnly);
+        assert_eq!(load.concurrency(), milim_tools::ToolConcurrency::Parallel);
+
+        let loaded = load.invoke(json!({ "name": "release" })).await.unwrap();
+        assert_eq!(loaded["source"], "project");
+        assert_eq!(loaded["instructions"], "Run scripts/cut.sh.");
+        assert_eq!(loaded["files"], json!(["scripts/cut.sh"]));
+        let text = load.model_text(&loaded).unwrap();
+        assert!(text.contains("Run scripts/cut.sh."));
+        assert!(text.contains("- scripts/cut.sh"));
+
+        let file = load
+            .invoke(json!({ "name": "Release", "file": "scripts/cut.sh" }))
+            .await
+            .unwrap();
+        assert_eq!(file["content"], "echo cut");
+        assert_eq!(load.model_text(&file).unwrap(), "echo cut");
+        assert!(load
+            .invoke(json!({ "name": "Release", "file": "../../../outside.txt" }))
+            .await
+            .is_err());
+        let _ = std::fs::remove_dir_all(workspace);
     }
 }
 
@@ -83,8 +151,10 @@ struct MilimSkillSearchArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct MilimSkillReadArgs {
-    id: String,
+struct LoadSkillArgs {
+    name: String,
+    #[serde(default)]
+    file: Option<String>,
 }
 
 pub(crate) fn register_skill_tools(
@@ -92,6 +162,7 @@ pub(crate) fn register_skill_tools(
     st: &AppState,
     skill_mode: &str,
     enabled_skills: &[String],
+    workspace: Option<&FsPath>,
 ) {
     let Some(store) = st.skills.as_ref().cloned() else {
         return;
@@ -99,23 +170,18 @@ pub(crate) fn register_skill_tools(
     let allowed_ids = match skill_mode {
         "none" => return,
         "custom" if enabled_skills.is_empty() => return,
-        "custom" => Some(Arc::new(enabled_skills.iter().cloned().collect())),
+        "custom" => Some(Arc::new(enabled_skills.to_vec())),
         _ => None,
     };
-    let scope = MilimSkillScope { allowed_ids };
+    let scope = MilimSkillScope {
+        allowed_ids,
+        workspace: workspace.map(FsPath::to_path_buf),
+    };
     registry.register(Arc::new(MilimSkillSearchTool {
         store: store.clone(),
         scope: scope.clone(),
     }));
-    registry.register(Arc::new(MilimSkillReadTool { store, scope }));
-}
-
-fn skill_allowed(scope: &MilimSkillScope, skill: &milim_skills::SkillDef) -> bool {
-    skill.enabled
-        && scope
-            .allowed_ids
-            .as_ref()
-            .is_none_or(|ids| ids.contains(&skill.id))
+    registry.register(Arc::new(LoadSkillTool { store, scope }));
 }
 
 fn compact_skill_description(value: &str) -> String {
@@ -141,7 +207,7 @@ impl Tool for MilimSkillSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Find relevant enabled Milim skills without loading their instruction bodies."
+        "Find relevant installed skills by task without loading their instruction bodies. Load one with load_skill."
     }
 
     fn input_schema(&self) -> Value {
@@ -160,19 +226,20 @@ impl Tool for MilimSkillSearchTool {
         ToolEffect::ReadOnly
     }
 
+    fn concurrency(&self) -> milim_tools::ToolConcurrency {
+        milim_tools::ToolConcurrency::Parallel
+    }
+
     async fn invoke(&self, args: Value) -> milim_core::Result<Value> {
         let args: MilimSkillSearchArgs = serde_json::from_value(args).map_err(|error| {
             Error::InvalidRequest(format!("invalid milim_skill_search arguments: {error}"))
         })?;
         let query = trim_required_tool_arg(args.query, "query")?;
-        let allowed = self
-            .scope
-            .allowed_ids
-            .as_ref()
-            .map(|ids| ids.iter().cloned().collect::<Vec<_>>());
-        let skills =
-            self.store
-                .select_filtered(&query, args.limit.clamp(1, 10), allowed.as_deref())?;
+        let skills = milim_skills::select_from(
+            &query,
+            self.scope.skills(&self.store)?,
+            args.limit.clamp(1, 10),
+        );
         Ok(json!({
             "skills": skills.into_iter().map(|skill| json!({
                 "id": skill.id,
@@ -184,22 +251,23 @@ impl Tool for MilimSkillSearchTool {
 }
 
 #[async_trait]
-impl Tool for MilimSkillReadTool {
+impl Tool for LoadSkillTool {
     fn name(&self) -> &str {
-        "milim_skill_read"
+        "load_skill"
     }
 
     fn description(&self) -> &str {
-        "Load the complete instructions for one enabled Milim skill selected by id."
+        "Load an installed skill's full instructions (SKILL.md) and the list of resource files in its folder. Pass `file` to read one of those resource files instead. Skills are never executed automatically."
     }
 
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "id": { "type": "string", "description": "Skill id returned by milim_skill_search or the turn's skill candidates." }
+                "name": { "type": "string", "description": "Skill name from the skill index or milim_skill_search." },
+                "file": { "type": "string", "description": "Optional resource path relative to the skill folder, as listed by a previous load_skill call." }
             },
-            "required": ["id"],
+            "required": ["name"],
             "additionalProperties": false
         })
     }
@@ -208,27 +276,83 @@ impl Tool for MilimSkillReadTool {
         ToolEffect::ReadOnly
     }
 
+    fn concurrency(&self) -> milim_tools::ToolConcurrency {
+        milim_tools::ToolConcurrency::Parallel
+    }
+
+    fn model_text(&self, result: &Value) -> Option<String> {
+        if let Some(content) = result.get("content").and_then(Value::as_str) {
+            return Some(content.to_string());
+        }
+        let name = result.get("name")?.as_str()?;
+        let mut text = format!("# Skill: {name}\n");
+        if let Some(description) = result
+            .get("description")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        {
+            text.push_str(description.trim());
+            text.push('\n');
+        }
+        text.push('\n');
+        text.push_str(result.get("instructions")?.as_str()?.trim());
+        let files: Vec<&str> = result
+            .get("files")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        if let Some(directory) = result.get("directory").and_then(Value::as_str) {
+            text.push_str(&format!("\n\nSkill folder: {directory}"));
+        }
+        if !files.is_empty() {
+            text.push_str("\nResource files (read one with load_skill and `file`):");
+            for file in files {
+                text.push_str(&format!("\n- {file}"));
+            }
+        }
+        Some(text)
+    }
+
     async fn invoke(&self, args: Value) -> milim_core::Result<Value> {
-        let args: MilimSkillReadArgs = serde_json::from_value(args).map_err(|error| {
-            Error::InvalidRequest(format!("invalid milim_skill_read arguments: {error}"))
+        let args: LoadSkillArgs = serde_json::from_value(args).map_err(|error| {
+            Error::InvalidRequest(format!("invalid load_skill arguments: {error}"))
         })?;
-        let id = trim_required_tool_arg(args.id, "id")?;
-        let skill = self
-            .store
-            .get(&id)?
-            .filter(|skill| skill_allowed(&self.scope, skill))
-            .ok_or_else(|| Error::ModelNotFound(format!("skill {id}")))?;
+        let name = trim_required_tool_arg(args.name, "name")?;
+        let skills = self.scope.skills(&self.store)?;
+        let skill = milim_skills::find_skill(&skills, &name)
+            .ok_or_else(|| Error::ModelNotFound(format!("skill {name}")))?;
+        let directory = milim_skills::skill_dir(skill);
+        if let Some(file) = args.file.filter(|file| !file.trim().is_empty()) {
+            let directory = directory.ok_or_else(|| {
+                Error::InvalidRequest(format!("skill {} has no resource files", skill.name))
+            })?;
+            let content = milim_skills::read_skill_resource(&directory, &file)?;
+            return Ok(json!({
+                "name": skill.name,
+                "file": file.trim(),
+                "content": content,
+            }));
+        }
         if skill.instructions.chars().count() > MAX_SKILL_READ_CHARS {
             return Err(Error::InvalidRequest(format!(
                 "skill {} exceeds the {} character read limit; move detailed material into referenced files",
                 skill.name, MAX_SKILL_READ_CHARS
             )));
         }
+        let files = directory
+            .as_deref()
+            .map(milim_skills::skill_resource_files)
+            .unwrap_or_default();
         Ok(json!({
             "id": skill.id,
             "name": skill.name,
             "description": skill.description,
+            "source": skill.source_kind,
             "instructions": skill.instructions,
+            "directory": directory.map(|dir| dir.display().to_string()),
+            "files": files,
         }))
     }
 }

@@ -670,7 +670,7 @@ const accountPromptContext = {
   useTools: false,
   accountRuntimeMayUseTools: true,
   toolMode: "none",
-  enabledTools: ["milim_skill_search", "milim_skill_read"],
+  enabledTools: ["milim_skill_search", "load_skill"],
   skillMode: "custom",
   enabledSkills: ["review"],
   runMemoryContext: {},
@@ -746,7 +746,7 @@ const codexResult = await runAccountRuntimeTurn({
     assert.equal(request.milim_context?.tool_context.interactive_tool_approval, false);
     assert.equal(request.milim_context?.tool_context.plan_mode, false);
     assert.deepEqual(request.images, [{ media_type: "image/png", data: "AAAA" }]);
-    assert.deepEqual(request.milim_context?.enabled_tools, ["milim_skill_search", "milim_skill_read"]);
+    assert.deepEqual(request.milim_context?.enabled_tools, ["milim_skill_search", "load_skill"]);
     assert.equal(request.milim_context?.skill_mode, "custom");
     assert.deepEqual(request.milim_context?.enabled_skills, ["review"]);
     assert.equal(request.developer_instructions, "System rule");

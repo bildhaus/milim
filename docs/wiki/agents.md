@@ -17,7 +17,7 @@ Agents are for repeatable behavior, tool access, and longer work. Keep one-off q
 |---|---|
 | Named Agents | Model-agnostic profiles with name, description, deterministic avatar seed, system prompt, tool mode, and skill mode. **Start chat** creates a normal thread bound to the Agent while model choice remains thread-owned. The generated avatar follows the Agent through desktop persona, schedule, and assigned Worker surfaces plus the native mobile composer and Agent sheet; unassigned Workers receive deterministic run-local identities. An Agent is a saved role; a Worker is one live instance of that role. |
 | Tool modes | `all`, `custom`, or `none`. |
-| Skill modes | `auto`, `custom`, or `none`; auto selects enabled skills by keyword, while explicit `@Skill Name` and `/Skill Name` prompt tags inject matching enabled skills for that turn. |
+| Skill modes | `auto`, `custom`, or `none`. Auto offers every enabled user and project skill, Custom only the Agent's allowlisted user skills, and None no index or skill tools. Explicit `@Skill Name` and `/Skill Name` prompt tags load a matching enabled skill in full for that turn, limited to the allowlist in Custom. See [Skills](#skills). |
 | Run timeline | Start, token, reasoning, tool call, bounded tool result, memory, Worker Run, per-request usage deltas, final usage, and error events render as structured stream parts. Tool results are capped before timeline persistence and again for model replay (see [Agent loop behavior](#agent-loop-behavior)). Worker events carry monotonic cursors and reload on demand. Runs stop at 100 model turns by default (`stopped_at_limit: true`). |
 | Schedules | Cron schedules capture an explicit model, creation workspace, prompt, files, and optional Agent. Each occurrence is a normal canonical thread with a durable schedule origin, complete run ledger, and desktop/mobile visibility. Retrying the same occurrence is idempotent. Legacy schedules with no model temporarily fall back to their Agent's deprecated saved model; editing persists that fallback. Missing both records a visible error. |
 | Tool approval | The UI sends approval policy to the server-side agent loop and resolves exact one-shot Review requests inline. |
@@ -50,6 +50,30 @@ milim-native uses the registry's effect metadata. Review and Guarded bind host f
 
 Each turn also reloads workspace instructions. milim-native receives both AGENTS and Claude families. Codex relies on its native AGENTS discovery and receives Claude-family additions; Claude relies on native Claude discovery and receives AGENTS-family additions. Conditional Claude rules with `paths:` frontmatter are reported but not globally applied by milim.
 
+## Base prompt and environment
+
+Every milim-native tool-agent run gets two server-built system messages, whether it starts from desktop, mobile, a schedule, or the `/agents/run` API. Account runtimes (Codex, Claude, OpenCode, Pi) keep their own harness prompts, and plain chat or a run whose policy leaves no tools gets neither.
+
+| Message | Contents |
+|---|---|
+| Base prompt | Placed first. Identifies milim's coding agent and covers working style (understand before changing, minimal consistent edits, verify with the project's tests or build, report outcomes honestly), tool use, safety (no destructive commands without clear intent, respect approvals, never exfiltrate secrets), and output (brief, `path:line` references). The tool section is built from the run's final registry and mentions only tools and parameters that exist, such as `glob`/`grep`, `read_file` ranges, `edit_file` versus `write_file`, parallel read-only calls, `shell` timeouts and background processes, `todo_write`, `web_search`/`http_fetch`, `delegate_workers`, and `load_skill`. In Plan mode it adds the read-only planning rules. It states that custom, Agent, and repository instructions, which follow it, take precedence. |
+| Environment | Placed at the end of the leading system messages. OS and architecture, shell dialect (`sh` or PowerShell), today's date with the local timezone, the absolute workspace root or "none", whether it is a Git repository with its current branch, up to 20 `git status --porcelain` lines with the total count, the five most recent commits, and the model id. Git commands run with a 3-second timeout and no optional locks. |
+
+Both are computed once when the run starts and stay byte-identical across its steps, so provider prompt caching keeps working within a run.
+
+## Skills
+
+A skill is a folder with a `SKILL.md` (frontmatter `name` and `description`, then instructions) and optional resources such as scripts, references, and templates. milim imports user skills from `$CODEX_HOME/skills`, `~/.codex/skills`, `~/.agents/skills`, and `~/.claude/skills` into its skill store at startup. Each native run also discovers project skills from `<workspace>/.milim/skills/*/SKILL.md` and `<workspace>/.claude/skills/*/SKILL.md` for that run's workspace only; a project skill replaces a user skill with the same name, and `.milim` wins over `.claude`.
+
+Native runs use progressive disclosure instead of injecting skill bodies every turn:
+
+- A compact index lists each available skill's name and one-line description. With 20 or fewer skills the index lists all of them in name order, so it stays stable across turns; with more it lists the 20 most relevant and points to `milim_skill_search` for the rest.
+- `load_skill {name}` returns the full `SKILL.md` instructions plus the list of resource files in the skill folder. `load_skill {name, file}` reads one of those files. Paths must stay inside the skill folder, and files over 256 KiB or that are not UTF-8 text are refused. Both skill tools are read-only, run in parallel, and stay available in Plan mode.
+- An explicit `@Skill Name` or `/Skill Name` mention injects that skill's full body up front, within a 12,000-character budget that keeps or omits whole skills.
+- Skill scripts are never executed automatically; the model reads them with `load_skill` and runs them through the normal tools and approval policy.
+
+Relevance ranking ignores stopwords and very common words, matches whole words with simple plural folding, scores name matches above description matches above body matches, and requires a minimum score, so a single incidental body match never selects a skill. `POST /skills/select` and `milim_skill_search` use the same ranking.
+
 Approval is not just UI decoration. The server rebuilds the effective tool registry per run and removes tools that are not allowed by the current policy.
 
 Approval controls execution, not a virtual patch queue. After an approved consequential call runs, the latest response's changed-files card inspects the resulting repository diff. Review failures retain **Retry** and **Open Git**, and **Undo** restores the pre-turn checkpoint.
@@ -78,7 +102,7 @@ Desktop shows compact Worker avatars plus planned/active/done counts in the thre
 
 Delegation is intended for independent work that benefits from parallelism, not short or sequential steps. Managed Workers receive the current request, selected goal and instructions, workspace and branch, resolved Agent instructions and skills, supported attachments, and their assigned task. They do not receive the full transcript.
 
-Workers are limited to four per Run and sixteen process-wide. Managed Workers have a five-minute deadline; milim stops unfinished work and preserves available results and visible failures. Stopping the parent stops its active Run, and restart recovery marks unfinished Runs as errors so stale running states are never shown.
+Workers are limited to four per Run and sixteen process-wide. Managed Workers have a five-minute deadline; milim stops unfinished work and preserves available results and visible failures. `delegate_workers` itself is allowed 30 seconds past that deadline, instead of the default two-minute tool deadline, so its cleanup always runs; `linked_thread_wait` likewise gets its requested wait plus 30 seconds. Stopping the parent stops its active Run, and restart recovery marks unfinished Runs as errors so stale running states are never shown.
 
 Managed Workers are read-only by default. In Open, their read tools inherit unrestricted host paths so audits can inspect sibling projects; the selected folder remains their working directory. An approved `ask` Run may request write-review access only when the parent uses Review with a grant or Open. Each writer runs against an isolated Git worktree and returns a reviewable diff that is never auto-applied. A non-Git workspace falls back to read-only.
 

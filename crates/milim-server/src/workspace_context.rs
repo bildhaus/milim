@@ -1,10 +1,14 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
 const AGENTS_MAX_BYTES: usize = 32 * 1024;
+const GIT_STATUS_MAX_LINES: usize = 20;
+const GIT_RECENT_COMMITS: &str = "5";
+const GIT_ENVIRONMENT_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct WorkspaceContext {
@@ -125,6 +129,204 @@ pub(crate) fn formatted(context: &WorkspaceContext, family: Option<&str>) -> Opt
         text.push('\n');
     }
     Some(text)
+}
+
+/// Machine and workspace facts a native agent run starts from. Captured once
+/// per run so the rendered block stays byte-identical across the run's steps.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct RunEnvironment {
+    pub os: String,
+    pub arch: String,
+    pub shell: &'static str,
+    pub date: String,
+    pub timezone: String,
+    pub workspace: Option<String>,
+    pub git: Option<GitSnapshot>,
+    pub model: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct GitSnapshot {
+    pub root: String,
+    pub branch: Option<String>,
+    pub status: Vec<String>,
+    pub status_total: usize,
+    pub commits: Vec<String>,
+}
+
+impl RunEnvironment {
+    pub(crate) fn capture(workspace: Option<&Path>, model: &str) -> Self {
+        let now = chrono::Local::now();
+        let offset = now.format("UTC%:z").to_string();
+        Self {
+            os: os_label().to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+            shell: match milim_tools::shell_command::ShellDialect::host() {
+                milim_tools::shell_command::ShellDialect::PowerShell => "PowerShell",
+                milim_tools::shell_command::ShellDialect::Posix => "sh (POSIX)",
+            },
+            date: now.format("%Y-%m-%d").to_string(),
+            timezone: match timezone_name() {
+                Some(name) => format!("{name}, {offset}"),
+                None => offset,
+            },
+            workspace: workspace.map(|path| path.display().to_string()),
+            git: workspace.and_then(git_snapshot),
+            model: model.to_string(),
+        }
+    }
+
+    pub(crate) fn render(&self) -> String {
+        let mut lines = vec![
+            "<environment>".to_string(),
+            format!("OS: {} ({}, {})", self.os, std::env::consts::OS, self.arch),
+            format!("Shell: {}", self.shell),
+            format!("Today's date: {} ({})", self.date, self.timezone),
+            match &self.workspace {
+                Some(path) => format!("Workspace root: {path}"),
+                None => "Workspace root: none (no working folder is selected)".to_string(),
+            },
+        ];
+        match (&self.workspace, &self.git) {
+            (None, _) => {}
+            (Some(_), None) => lines.push("Git repository: no".to_string()),
+            (Some(workspace), Some(git)) => {
+                let mut repo = String::from("Git repository: yes");
+                if &git.root != workspace {
+                    repo.push_str(&format!(" (root {})", git.root));
+                }
+                lines.push(repo);
+                lines.push(format!(
+                    "Current branch: {}",
+                    git.branch.as_deref().unwrap_or("(detached HEAD)")
+                ));
+                if git.status_total == 0 {
+                    lines.push("Git status: clean".to_string());
+                } else {
+                    let shown = if git.status.len() < git.status_total {
+                        format!(", first {}", git.status.len())
+                    } else {
+                        String::new()
+                    };
+                    lines.push(format!(
+                        "Git status ({} changed paths{shown}):",
+                        git.status_total
+                    ));
+                    lines.extend(git.status.iter().map(|line| format!("  {line}")));
+                }
+                if !git.commits.is_empty() {
+                    lines.push("Recent commits:".to_string());
+                    lines.extend(git.commits.iter().map(|line| format!("  {line}")));
+                }
+            }
+        }
+        lines.push(format!("Model: {}", self.model));
+        lines.push(
+            "This snapshot was taken when the run started; re-check git state before relying on it."
+                .to_string(),
+        );
+        lines.push("</environment>".to_string());
+        lines.join("\n")
+    }
+}
+
+fn os_label() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "macOS",
+        "windows" => "Windows",
+        "linux" => "Linux",
+        other => other,
+    }
+}
+
+fn timezone_name() -> Option<String> {
+    if let Some(tz) = std::env::var("TZ")
+        .ok()
+        .map(|value| value.trim().trim_start_matches(':').to_string())
+        .filter(|value| !value.is_empty() && !value.starts_with('/'))
+    {
+        return Some(tz);
+    }
+    let target = std::fs::read_link("/etc/localtime").ok()?;
+    let target = target.to_string_lossy();
+    let (_, name) = target.split_once("zoneinfo/")?;
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+fn git_snapshot(workspace: &Path) -> Option<GitSnapshot> {
+    let root = git_bounded(workspace, &["rev-parse", "--show-toplevel"])?;
+    let root = canonical(Path::new(root.trim())).display().to_string();
+    let branch = git_bounded(workspace, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let status_text = git_bounded(
+        workspace,
+        &["status", "--porcelain", "--untracked-files=normal"],
+    )
+    .unwrap_or_default();
+    let status: Vec<String> = status_text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(str::to_string)
+        .collect();
+    let commits = git_bounded(
+        workspace,
+        &[
+            "log",
+            "--oneline",
+            "--no-decorate",
+            "-n",
+            GIT_RECENT_COMMITS,
+        ],
+    )
+    .unwrap_or_default()
+    .lines()
+    .map(str::to_string)
+    .collect();
+    Some(GitSnapshot {
+        root,
+        branch,
+        status_total: status.len(),
+        status: status.into_iter().take(GIT_STATUS_MAX_LINES).collect(),
+        commits,
+    })
+}
+
+/// Run a read-only git command with a hard timeout. Optional locks are
+/// disabled so the snapshot never contends with the user's own git commands.
+fn git_bounded(cwd: &Path, args: &[&str]) -> Option<String> {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(cwd)
+        .args(["-c", "core.quotepath=false"])
+        .args(args)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = milim_core::proc::hide_console(&mut command).spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        std::io::Read::read_to_end(&mut stdout, &mut buffer).map(|_| buffer)
+    });
+    let deadline = Instant::now() + GIT_ENVIRONMENT_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    let output = reader.join().ok()?.ok()?;
+    status
+        .success()
+        .then(|| String::from_utf8_lossy(&output).trim_end().to_string())
 }
 
 fn add_first_agents(
@@ -365,6 +567,53 @@ mod tests {
             instructions: Vec::new(),
             warnings: Vec::new(),
         }
+    }
+
+    #[test]
+    fn environment_block_reports_git_state_and_is_stable() {
+        let dir = std::env::temp_dir().join(format!("milim-env-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = canonical(&dir);
+        let git_ok = |args: &[&str]| {
+            Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(args)
+                .output()
+                .is_ok_and(|output| output.status.success())
+        };
+        let plain = RunEnvironment::capture(Some(&dir), "model-a");
+        assert!(plain.git.is_none());
+        assert!(plain.render().contains("Git repository: no"));
+
+        if git_ok(&["init", "-q", "-b", "main"])
+            && git_ok(&["config", "user.email", "test@example.com"])
+            && git_ok(&["config", "user.name", "Test"])
+        {
+            std::fs::write(dir.join("a.txt"), "a").unwrap();
+            assert!(git_ok(&["add", "a.txt"]));
+            assert!(git_ok(&["commit", "-q", "-m", "first commit"]));
+            for index in 0..25 {
+                std::fs::write(dir.join(format!("new-{index:02}.txt")), "x").unwrap();
+            }
+            let env = RunEnvironment::capture(Some(&dir), "model-a");
+            let git = env.git.as_ref().expect("git snapshot");
+            assert_eq!(git.branch.as_deref(), Some("main"));
+            assert_eq!(git.status_total, 25);
+            assert_eq!(git.status.len(), GIT_STATUS_MAX_LINES);
+            assert!(git.commits[0].ends_with("first commit"));
+            let rendered = env.render();
+            assert!(rendered.contains(&format!("Workspace root: {}", dir.display())));
+            assert!(rendered.contains("Current branch: main"));
+            assert!(rendered.contains("Git status (25 changed paths, first 20):"));
+            assert!(rendered.contains("Model: model-a"));
+            assert_eq!(rendered, env.clone().render());
+        }
+
+        let none = RunEnvironment::capture(None, "model-b").render();
+        assert!(none.contains("Workspace root: none"));
+        assert!(!none.contains("Git repository"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
