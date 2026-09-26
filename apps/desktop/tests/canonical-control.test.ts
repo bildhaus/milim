@@ -780,5 +780,18 @@ assert.equal(
   "only milim checkpoint refs become restore points",
 );
 
+const prefixed = projectControlRunMessages([
+  item(1, "approval_requested", {
+    approval_id: "approval-prefix",
+    name: "shell",
+    arguments: '{"command":"cargo test -p core"}',
+    allowance_prefix: "cargo test",
+  }),
+], "run-1")[0];
+assert.equal(
+  prefixed.streamParts?.[0]?.kind === "event" ? prefixed.streamParts[0].allowancePrefix : undefined,
+  "cargo test",
+  "pending approvals carry the prefix Rust would allow for the chat",
+);
 
 console.log("canonical control projection tests passed");

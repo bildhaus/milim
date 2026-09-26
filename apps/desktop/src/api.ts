@@ -421,6 +421,8 @@ export type ChatStreamPart =
       approvalId?: string;
       approvalStatus?: ToolApprovalLifecycleStatus;
       approvalRequest?: ToolApprovalRequest;
+      /** Leading words Rust would allow for this chat, e.g. `cargo test`. */
+      allowancePrefix?: string;
     };
 
 export type ToolApprovalLifecycleStatus =
@@ -4866,6 +4868,7 @@ export async function resolveToolApproval(
   decision: "approve" | "deny",
   responseBody?: Record<string, unknown>,
   scope: "once" | "thread" = "once",
+  allowanceMatch: "exact" | "prefix" = "exact",
 ): Promise<ToolApprovalSnapshot | null> {
   const response = await authFetch(`${BASE}/tool-approvals/${encodeURIComponent(approvalId)}`, {
     method: "POST",
@@ -4874,6 +4877,7 @@ export async function resolveToolApproval(
       decision,
       ...(responseBody ? { response: responseBody } : {}),
       ...(scope === "thread" ? { scope } : {}),
+      ...(scope === "thread" && allowanceMatch === "prefix" ? { allowance_match: allowanceMatch } : {}),
     }),
   });
   if (!response.ok) throw new Error(await responseErrorMessage(response, "Tool approval failed"));
@@ -4882,10 +4886,12 @@ export async function resolveToolApproval(
 
 /** One "Allow for this chat" rule held in canonical Rust state. */
 export interface ApprovalAllowance {
-  /** `tool:<name>` or `command:<exact command>`. */
+  /** `tool:<name>`, `command:<exact command>`, or `prefix:<leading words>`. */
   key: string;
   tool: string;
   command?: string;
+  /** Simple commands starting with these words are allowed. */
+  prefix?: string;
   created_at_ms: number;
 }
 

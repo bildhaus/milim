@@ -4652,6 +4652,11 @@ impl RunManager {
                         arguments,
                     )? {
                         value["auto_approved"] = json!({ "scope": "thread", "allowance": key });
+                    } else if let Some(prefix) =
+                        crate::approval_allowances::prefix_allowance_for("command", name, arguments)
+                            .and_then(|rule| rule.prefix)
+                    {
+                        value["allowance_prefix"] = json!(prefix);
                     }
                 }
                 milim_agents::AgentEvent::Done {
@@ -4997,22 +5002,24 @@ impl RunManager {
                             created_at_ms: now_ms(),
                             resolved_at_ms: None,
                         })?;
+                        let name = value
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        let arguments = value
+                            .get("arguments")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
                         if let Some(key) = self.auto_resolve_allowed_approval(
-                            state,
-                            thread_id,
-                            id,
-                            kind,
-                            value
-                                .get("name")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default(),
-                            value
-                                .get("arguments")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default(),
+                            state, thread_id, id, kind, name, arguments,
                         )? {
                             timeline_value["auto_approved"] =
                                 json!({ "scope": "thread", "allowance": key });
+                        } else if let Some(prefix) =
+                            crate::approval_allowances::prefix_allowance_for(kind, name, arguments)
+                                .and_then(|rule| rule.prefix)
+                        {
+                            timeline_value["allowance_prefix"] = json!(prefix);
                         }
                     }
                 }
@@ -5484,10 +5491,24 @@ impl RunManager {
             return Err(Error::NotFound(format!("approval {approval_id}")));
         };
         // Optional `scope: "thread"` ("Allow for this chat"). Older clients
-        // omit it and keep one-shot semantics.
+        // omit it and keep one-shot semantics. `allowance_match: "prefix"`
+        // asks for a command-prefix rule and falls back to the exact command.
+        let prefix = match command
+            .payload
+            .get("allowance_match")
+            .and_then(Value::as_str)
+        {
+            None | Some("exact") => false,
+            Some("prefix") => true,
+            Some(_) => {
+                return Err(Error::InvalidRequest(
+                    "payload.allowance_match must be exact or prefix".into(),
+                ))
+            }
+        };
         let allowance = match command.payload.get("scope").and_then(Value::as_str) {
             None | Some("once") => None,
-            Some("thread") if approved => Some(thread_allowance_for_approval(&durable)?),
+            Some("thread") if approved => Some(thread_allowance_for_approval(&durable, prefix)?),
             Some("thread") => None,
             Some(_) => {
                 return Err(Error::InvalidRequest(
@@ -7580,24 +7601,27 @@ fn uppercase_role(role: &str) -> &'static str {
 /// The chat allowance an approved `scope: "thread"` decision would create.
 fn thread_allowance_for_approval(
     durable: &ControlApprovalRecord,
+    prefix: bool,
 ) -> Result<crate::approval_allowances::ApprovalAllowance> {
     let request: Value = serde_json::from_str(&durable.request_json).unwrap_or(Value::Null);
-    crate::approval_allowances::allowance_for(
-        &durable.kind,
-        request
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-        request
-            .get("arguments")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-    )
-    .ok_or_else(|| {
-        Error::InvalidRequest(
-            "this approval cannot be allowed for the whole chat; approve it once instead".into(),
-        )
-    })
+    let name = request
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let arguments = request
+        .get("arguments")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    prefix
+        .then(|| crate::approval_allowances::prefix_allowance_for(&durable.kind, name, arguments))
+        .flatten()
+        .or_else(|| crate::approval_allowances::allowance_for(&durable.kind, name, arguments))
+        .ok_or_else(|| {
+            Error::InvalidRequest(
+                "this approval cannot be allowed for the whole chat; approve it once instead"
+                    .into(),
+            )
+        })
 }
 
 fn normalized_approval_kind(kind: &str) -> &str {
@@ -7839,6 +7863,165 @@ mod tests {
         assert!(turn_checkpoint_folder(&config).is_some());
         std::fs::remove_dir_all(repo).ok();
         std::fs::remove_dir_all(plain).ok();
+    }
+
+    #[tokio::test]
+    async fn prefix_allowances_auto_resolve_account_runtime_requests() {
+        let (manager, state) = manager_and_state();
+        manager
+            .create_thread(&create_command("create", "codex:gpt-5.4"))
+            .unwrap();
+        manager
+            .store
+            .control_put_run(&ControlRunRecord {
+                id: "run-fixture".into(),
+                thread_id: "thread-fixture".into(),
+                status: "running".into(),
+                adapter: "codex".into(),
+                request_json: json!({ "text": "turn" }).to_string(),
+                agent_snapshot_json: None,
+                native_session_json: None,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                completed_at_ms: None,
+                error_json: None,
+            })
+            .unwrap();
+        let put_pending = |name: &str, arguments: &str| {
+            let mut pending = state.tool_approvals.request();
+            manager
+                .store
+                .control_put_approval(&ControlApprovalRecord {
+                    id: pending.id.clone(),
+                    run_id: "run-fixture".into(),
+                    thread_id: "thread-fixture".into(),
+                    kind: "command".into(),
+                    request_json: json!({ "name": name, "arguments": arguments }).to_string(),
+                    status: "pending".into(),
+                    decision_json: None,
+                    created_at_ms: now_ms(),
+                    resolved_at_ms: None,
+                })
+                .unwrap();
+            let id = pending.id.clone();
+            let waiter = tokio::spawn(async move {
+                let decision = pending.wait().await;
+                let _ = pending.deliver();
+                decision
+            });
+            (id, waiter)
+        };
+        // Codex reports `item/commandExecution/requestApproval` params as the
+        // arguments of a `command` request, with the shell wrapper intact.
+        let codex_arguments = |command: &str| {
+            json!({
+                "threadId": "codex-thread",
+                "turnId": "codex-turn",
+                "itemId": "item-1",
+                "command": command,
+                "cwd": "/work",
+                "availableDecisions": ["accept", "acceptForSession", "cancel"],
+            })
+            .to_string()
+        };
+
+        let (first, waiter) = put_pending(
+            "command",
+            &codex_arguments("/bin/zsh -lc 'cargo test -p core'"),
+        );
+        let result = manager
+            .command(
+                state.clone(),
+                None,
+                ControlCommandV1 {
+                    command_id: "resolve-prefix".into(),
+                    kind: ControlCommandKindV1::ApprovalResolve,
+                    thread_id: None,
+                    expected_revision: None,
+                    payload: json!({
+                        "approval_id": first,
+                        "decision": "approve",
+                        "scope": "thread",
+                        "allowance_match": "prefix",
+                    }),
+                    confirmation_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.status, ControlCommandStatusV1::Applied, "{result:?}");
+        assert_eq!(result.data["allowance"]["key"], "prefix:cargo test");
+        assert!(waiter.await.unwrap().approved);
+
+        // Later Codex and OpenCode requests in the family resolve in Rust.
+        let (codex, waiter) = put_pending(
+            "command",
+            &codex_arguments("/bin/zsh -lc 'cargo test --workspace'"),
+        );
+        assert_eq!(
+            manager
+                .auto_resolve_allowed_approval(
+                    &state,
+                    "thread-fixture",
+                    &codex,
+                    "command",
+                    "command",
+                    &codex_arguments("/bin/zsh -lc 'cargo test --workspace'"),
+                )
+                .unwrap()
+                .as_deref(),
+            Some("prefix:cargo test")
+        );
+        assert!(waiter.await.unwrap().approved);
+        // OpenCode's ACP `session/request_permission` carries the tool title
+        // and its raw input.
+        let opencode_arguments = r#"{"command":"cargo test parser","description":"Run tests"}"#;
+        let (opencode, waiter) = put_pending("bash", opencode_arguments);
+        assert!(manager
+            .auto_resolve_allowed_approval(
+                &state,
+                "thread-fixture",
+                &opencode,
+                "command",
+                "bash",
+                opencode_arguments,
+            )
+            .unwrap()
+            .is_some());
+        assert!(waiter.await.unwrap().approved);
+
+        // Chaining still asks.
+        let chained = codex_arguments("/bin/zsh -lc 'cargo test && rm -rf target'");
+        let (asked, _waiter) = put_pending("command", &chained);
+        assert!(manager
+            .auto_resolve_allowed_approval(
+                &state,
+                "thread-fixture",
+                &asked,
+                "command",
+                "command",
+                &chained,
+            )
+            .unwrap()
+            .is_none());
+
+        // Revoking the rule makes the family ask again.
+        manager
+            .revoke_approval_allowances("thread-fixture", Some(&["prefix:cargo test".to_string()]))
+            .unwrap();
+        let again = codex_arguments("/bin/zsh -lc 'cargo test'");
+        let (revoked, _waiter) = put_pending("command", &again);
+        assert!(manager
+            .auto_resolve_allowed_approval(
+                &state,
+                "thread-fixture",
+                &revoked,
+                "command",
+                "command",
+                &again,
+            )
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

@@ -104,6 +104,12 @@ const shellAllowance = approvalChatAllowance(approvalPart("Approve shell", '{"co
 equal(shellAllowance?.kind, "command", "shell approvals allow only their exact command");
 equal(shellAllowance?.kind === "command" ? shellAllowance.command : "", "cargo test", "the exact command is kept");
 equal(approvalChatAllowance(approvalPart("Approve shell", "{}")), null, "shell without a command is never allowed for a chat");
+const prefixAllowance = approvalChatAllowance({
+  ...approvalPart("Approval required: shell", '{"command":"cargo test -p core"}'),
+  allowancePrefix: "cargo test",
+});
+equal(prefixAllowance?.kind, "prefix", "a Rust-offered prefix replaces the exact command rule");
+equal(prefixAllowance?.kind === "prefix" ? prefixAllowance.prefix : "", "cargo test", "the offered prefix is kept");
 equal(approvalChatAllowance(approvalPart("Approval required: Bash")), null, "Bash without a command stays one-shot");
 const toolAllowance = approvalChatAllowance(approvalPart("Approve write_file", '{"path":"a.txt"}'));
 equal(toolAllowance?.kind === "tool" ? toolAllowance.tool : "", "write_file", "other tools are allowed by name");

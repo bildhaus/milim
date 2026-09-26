@@ -543,7 +543,9 @@ export function ControlBar({
                       <ul>
                         {approvalAllowances.map((allowance) => (
                           <li key={allowance.key}>
-                            {allowance.command ? (
+                            {allowance.prefix ? (
+                              <code title={`${allowance.tool}: ${allowance.prefix} and its arguments`}>{`${allowance.prefix} ...`}</code>
+                            ) : allowance.command ? (
                               <code title={`${allowance.tool}: ${allowance.command}`}>{allowance.command}</code>
                             ) : (
                               <span>{allowance.tool}</span>
@@ -552,7 +554,7 @@ export function ControlBar({
                               <button
                                 type="button"
                                 className="context-allowances-remove"
-                                aria-label={`Stop allowing ${allowance.command ?? allowance.tool}`}
+                                aria-label={`Stop allowing ${allowance.prefix ?? allowance.command ?? allowance.tool}`}
                                 title="Stop allowing"
                                 onClick={() => onClearApprovalAllowances([allowance.key])}
                               >

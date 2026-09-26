@@ -13,6 +13,7 @@ import {
   approvalShortcutTarget,
   initialApprovalValues,
   updateApprovalField,
+  type ToolApprovalAllowanceMatch,
   type ToolApprovalScope,
 } from "../lib/toolApproval";
 import { Check, Shield, X } from "./icons";
@@ -155,7 +156,11 @@ export function ToolApprovalPrompt({
   const chatAllowance = approvalChatAllowance(part);
   const decideRef = useRef<(decision: "approve" | "deny") => void>(() => {});
 
-  async function decide(decision: "approve" | "deny", scope: ToolApprovalScope = "once") {
+  async function decide(
+    decision: "approve" | "deny",
+    scope: ToolApprovalScope = "once",
+    allowanceMatch: ToolApprovalAllowanceMatch = "exact",
+  ) {
     if (!part.approvalId || resolving) return;
     if (decision === "approve" && part.approvalRequest?.kind === "mcp_unsupported") return;
     const result = decision === "approve"
@@ -168,7 +173,7 @@ export function ToolApprovalPrompt({
     setResolving(true);
     setError("");
     try {
-      await resolveToolApproval(part.approvalId, decision, result.response, scope);
+      await resolveToolApproval(part.approvalId, decision, result.response, scope, allowanceMatch);
       setSubmitted(decision);
       onResolved?.(scope);
     } catch (cause) {
@@ -243,13 +248,22 @@ export function ToolApprovalPrompt({
           }));
         }}
         onApprove={() => void decide("approve")}
-        onApproveForChat={chatAllowance ? () => void decide("approve", "thread") : undefined}
+        onApproveForChat={chatAllowance
+          ? () => void decide(
+            "approve",
+            "thread",
+            chatAllowance.kind === "prefix" ? "prefix" : "exact",
+          )
+          : undefined}
+        chatAllowancePrefix={chatAllowance?.kind === "prefix" ? chatAllowance.prefix : undefined}
         chatAllowanceTitle={
-          chatAllowance?.kind === "command"
-            ? `Run exactly \`${chatAllowance.command}\` without asking again in this chat`
-            : chatAllowance
-              ? `Allow ${chatAllowance.tool} without asking again in this chat`
-              : undefined
+          chatAllowance?.kind === "prefix"
+            ? `Run \`${chatAllowance.prefix}\` commands without asking again in this chat. Chained or piped commands still ask.`
+            : chatAllowance?.kind === "command"
+              ? `Run exactly \`${chatAllowance.command}\` without asking again in this chat`
+              : chatAllowance
+                ? `Allow ${chatAllowance.tool} without asking again in this chat`
+                : undefined
         }
         shortcutHint={shortcutsActive && composerEmpty}
         onDeny={() => void decide("deny")}
@@ -273,6 +287,7 @@ function ApprovalRequestBody({
   onChange,
   onApprove,
   onApproveForChat,
+  chatAllowancePrefix,
   chatAllowanceTitle,
   shortcutHint = false,
   onDeny,
@@ -286,6 +301,7 @@ function ApprovalRequestBody({
   onChange: (field: McpApprovalField, value: string | boolean) => void;
   onApprove: () => void;
   onApproveForChat?: () => void;
+  chatAllowancePrefix?: string;
   chatAllowanceTitle?: string;
   shortcutHint?: boolean;
   onDeny: () => void;
@@ -387,7 +403,9 @@ function ApprovalRequestBody({
             onClick={onApproveForChat}
             title={chatAllowanceTitle}
           >
-            Allow for this chat
+            {chatAllowancePrefix
+              ? <>Allow <code>{chatAllowancePrefix} ...</code> for this chat</>
+              : "Allow for this chat"}
           </button>
         )}
         {request?.kind !== "mcp_unsupported" && (

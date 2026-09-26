@@ -269,6 +269,9 @@ function eventPart(item: ControlTimelineItemV1): ChatStreamPart | null {
       status: "running",
       approvalId,
       approvalStatus: "pending",
+      ...(typeof data.allowance_prefix === "string"
+        ? { allowancePrefix: data.allowance_prefix }
+        : {}),
     };
   }
   if (item.type === "approval_resolved" || item.type === "tool_approval_resolved") {

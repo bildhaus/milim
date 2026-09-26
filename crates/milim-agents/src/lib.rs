@@ -182,9 +182,9 @@ pub enum ApprovalResolve {
     Missing,
 }
 
-/// How far an approval reaches. `Thread` asks the runtime to remember the
-/// allowance for the rest of its native session where it supports that, and
-/// Milim records a per-thread rule for later matching requests.
+/// How far an approval reaches. `Thread` means Milim also recorded a
+/// per-thread rule that approves later matching requests; runtimes still
+/// receive a one-shot approval so that rule alone governs repeats.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalScope {
