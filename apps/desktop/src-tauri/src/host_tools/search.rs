@@ -714,6 +714,11 @@ impl Tool for GrepTool {
         if truncated {
             out.push_str("\n(Results were truncated. Narrow the pattern, path, or glob.)");
         }
+        if result["literal"].as_bool() == Some(true) {
+            out.push_str(
+                "\n(The pattern is not a valid regex, so it was searched as literal text.)",
+            );
+        }
         Some(out)
     }
     host_tool_scoping!();
@@ -744,8 +749,9 @@ impl Tool for GrepTool {
         }
         let max_results =
             optional_u64(&args, "max_results", DEFAULT_MAX_RESULTS)?.clamp(1, MAX_MAX_RESULTS);
+        let (search, literal) = search_pattern(pattern);
         let request = GrepRequest {
-            pattern: pattern.to_string(),
+            pattern: search,
             target,
             target_is_file,
             glob: optional_arg_str(&args, "glob")?
@@ -756,7 +762,7 @@ impl Tool for GrepTool {
             context: context as usize,
             max_results: max_results as usize,
         };
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             let searched = match ripgrep() {
                 Some(rg) => grep_ripgrep(rg, &request)?.map(|found| (found, "ripgrep")),
                 None => None,
@@ -765,7 +771,7 @@ impl Tool for GrepTool {
                 Some(searched) => searched,
                 None => (grep_builtin(&request)?, "builtin"),
             };
-            Ok(render_findings(
+            Ok::<_, Error>(render_findings(
                 found,
                 &request,
                 &PathDisplay::new(&root),
@@ -773,8 +779,27 @@ impl Tool for GrepTool {
             ))
         })
         .await
-        .map_err(|error| Error::Other(format!("grep task failed: {error}")))?
+        .map_err(|error| Error::Other(format!("grep task failed: {error}")))??;
+        Ok(mark_literal(result, literal))
     }
+}
+
+/// The regex to search for, and whether `pattern` was escaped. Models often
+/// pass code verbatim (`return { status:`); ripgrep's default engine shares
+/// this regex syntax, so a pattern that does not parse is searched as literal
+/// text instead of failing the call.
+fn search_pattern(pattern: &str) -> (String, bool) {
+    match regex::Regex::new(pattern) {
+        Ok(_) => (pattern.to_string(), false),
+        Err(_) => (regex::escape(pattern), true),
+    }
+}
+
+fn mark_literal(mut result: Value, literal: bool) -> Value {
+    if literal {
+        result["literal"] = Value::Bool(true);
+    }
+    result
 }
 
 /// Search with ripgrep. `Ok(None)` means ripgrep could not start.
@@ -1195,6 +1220,30 @@ mod tests {
         rels.sort();
         assert_eq!(rels, [".env", "src/lib.rs"]);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn invalid_regex_is_searched_as_literal_text() {
+        let root = temp_dir();
+        write(&root, "src/usage.js", "  return { status: 429 };\n");
+        assert_eq!(search_pattern("fn \\w+"), ("fn \\w+".to_string(), false));
+        let (pattern, literal) = search_pattern("return { status:");
+        assert!(literal);
+        let found = grep_builtin(&request(&root, &pattern, GrepMode::Content)).unwrap();
+        let rendered = mark_literal(
+            render_findings(
+                found,
+                &request(&root, &pattern, GrepMode::Content),
+                &PathDisplay::new(&root),
+                "builtin",
+            ),
+            literal,
+        );
+        assert!(rendered["output"]
+            .as_str()
+            .unwrap()
+            .contains("src/usage.js:1:"));
+        assert_eq!(rendered["literal"], true);
     }
 
     #[test]
