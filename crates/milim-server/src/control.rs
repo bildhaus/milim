@@ -7194,7 +7194,7 @@ fn parse_value(value: &str) -> Result<Value> {
         .map_err(|error| Error::Other(format!("invalid stored control JSON: {error}")))
 }
 
-fn completion_request_value(request: &CompletionRequest) -> Result<Value> {
+pub(crate) fn completion_request_value(request: &CompletionRequest) -> Result<Value> {
     Ok(json!({
         "model": request.model,
         "messages": request.messages,
@@ -7218,6 +7218,46 @@ fn completion_request_value(request: &CompletionRequest) -> Result<Value> {
         },
         "reasoning_effort": request.reasoning_effort,
     }))
+}
+
+/// Inverse of [`completion_request_value`]: rebuilds the provider request a
+/// run ledger stored, so re-serializing it yields the same bytes.
+pub(crate) fn completion_request_from_value(value: &Value) -> Result<CompletionRequest> {
+    fn field<T: serde::de::DeserializeOwned + Default>(value: &Value, key: &str) -> Result<T> {
+        match value.get(key) {
+            None | Some(Value::Null) => Ok(T::default()),
+            Some(field) => serde_json::from_value(field.clone()).map_err(|error| {
+                Error::Other(format!(
+                    "stored provider request has invalid {key}: {error}"
+                ))
+            }),
+        }
+    }
+    let sampling = value.get("sampling").unwrap_or(&Value::Null);
+    let optional = |key: &str| value.get(key).filter(|field| !field.is_null()).cloned();
+    Ok(CompletionRequest {
+        model: field(value, "model")?,
+        messages: field(value, "messages")?,
+        tools: field(value, "tools")?,
+        tool_choice: optional("tool_choice"),
+        response_format: optional("response_format"),
+        prompt: field(value, "prompt")?,
+        suffix: field(value, "suffix")?,
+        sampling: SamplingParams {
+            temperature: field(sampling, "temperature")?,
+            top_p: field(sampling, "top_p")?,
+            max_tokens: field(sampling, "max_tokens")?,
+            stop: field(sampling, "stop")?,
+            seed: field(sampling, "seed")?,
+            frequency_penalty: field(sampling, "frequency_penalty")?,
+            presence_penalty: field(sampling, "presence_penalty")?,
+            top_k: field(sampling, "top_k")?,
+            min_p: field(sampling, "min_p")?,
+            repetition_penalty: field(sampling, "repetition_penalty")?,
+            thinking_token_budget: field(sampling, "thinking_token_budget")?,
+        },
+        reasoning_effort: field(value, "reasoning_effort")?,
+    })
 }
 
 fn control_chat_messages(store: &UserDataStore, thread_id: &str) -> Result<Vec<ChatMessage>> {
