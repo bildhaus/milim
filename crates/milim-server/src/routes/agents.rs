@@ -2582,6 +2582,10 @@ impl Tool for LinkedThreadWaitTool {
         Some(Duration::from_millis(wait_ms) + TOOL_WAIT_GRACE)
     }
 
+    fn waits_on_other_runs(&self) -> bool {
+        true
+    }
+
     fn concurrency(&self) -> milim_tools::ToolConcurrency {
         milim_tools::ToolConcurrency::Parallel
     }
@@ -3741,6 +3745,9 @@ impl Tool for DelegateWorkersTool {
     }
     fn deadline_for_call(&self, _args: &Value) -> Option<Duration> {
         Some(Duration::from_millis(MAX_CHILD_THREAD_WAIT_MS) + TOOL_WAIT_GRACE)
+    }
+    fn waits_on_other_runs(&self) -> bool {
+        true
     }
     fn description(&self) -> &str {
         "Delegate 1 to 4 genuinely independent tasks as one Worker Run. Do not delegate short or sequential work. Ask mode proposes a frozen plan unless tool approval is Open; Open and Auto start eligible workers immediately."

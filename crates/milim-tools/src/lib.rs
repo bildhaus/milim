@@ -58,6 +58,13 @@ pub trait Tool: Send + Sync {
     fn deadline_for_call(&self, _args: &Value) -> Option<Duration> {
         None
     }
+    /// Whether the tool only waits on other runs (delegated Workers, linked
+    /// thread replies). Such calls take no scheduler permits: holding them
+    /// while waiting would block the very runs they wait on from executing
+    /// their own tools.
+    fn waits_on_other_runs(&self) -> bool {
+        false
+    }
     /// Read-only is necessary but not sufficient for concurrency. Tools must
     /// opt in after proving their implementation is parallel-safe.
     fn concurrency(&self) -> ToolConcurrency {
@@ -203,15 +210,12 @@ impl ToolExecutionPipeline {
             (ToolEffect::ReadOnly, ToolConcurrency::Parallel) => ToolConcurrency::Parallel,
             _ => ToolConcurrency::Exclusive,
         };
-        let permits = if concurrency == ToolConcurrency::Parallel {
-            1
+        let (permits, process_permits) = if tool.waits_on_other_runs() {
+            (0, 0)
+        } else if concurrency == ToolConcurrency::Parallel {
+            (1, 1)
         } else {
-            RUN_TOOL_LIMIT
-        };
-        let process_permits = if concurrency == ToolConcurrency::Parallel {
-            1
-        } else {
-            PROCESS_TOOL_LIMIT
+            (RUN_TOOL_LIMIT, PROCESS_TOOL_LIMIT)
         };
         let _run_guard = run_permits
             .acquire_many_owned(permits)
@@ -989,5 +993,59 @@ mod tests {
         let (slow_result, good_result) = tokio::join!(slow_call, good_call);
         assert!(slow_result.unwrap_err().to_string().contains("deadline"));
         assert_eq!(good_result.unwrap().raw["truncated"], true);
+    }
+
+    struct DelegatingTool {
+        child: Arc<TimedTool>,
+    }
+
+    #[async_trait]
+    impl Tool for DelegatingTool {
+        fn name(&self) -> &str {
+            "delegate"
+        }
+        fn description(&self) -> &str {
+            "waits on another run's tool"
+        }
+        fn input_schema(&self) -> Value {
+            json!({"type":"object"})
+        }
+        fn waits_on_other_runs(&self) -> bool {
+            true
+        }
+        async fn invoke(&self, _args: Value) -> Result<Value> {
+            // The child run has its own run scheduler but shares the
+            // process-wide one with the waiting parent.
+            let child_permits = Arc::new(tokio::sync::Semaphore::new(RUN_TOOL_LIMIT as usize));
+            ToolExecutionPipeline::execute(
+                self.child.clone(),
+                ToolExecutionRequest::new("child", json!({})),
+                child_permits,
+                ToolExecutionContext::default(),
+            )
+            .await
+            .map(|result| result.raw)
+        }
+    }
+
+    #[tokio::test]
+    async fn waiting_tool_does_not_block_the_run_it_waits_on() {
+        let (child, _) = timed_tool(
+            "child",
+            ToolEffect::Command,
+            ToolConcurrency::Exclusive,
+            Duration::from_millis(1),
+        );
+        let parent_permits = Arc::new(tokio::sync::Semaphore::new(RUN_TOOL_LIMIT as usize));
+        let call = ToolExecutionPipeline::execute(
+            Arc::new(DelegatingTool { child }),
+            ToolExecutionRequest::new("delegate", json!({})),
+            parent_permits,
+            ToolExecutionContext::default(),
+        );
+        let result = tokio::time::timeout(Duration::from_secs(5), call)
+            .await
+            .expect("the delegated child ran while its parent waited");
+        assert!(result.is_ok());
     }
 }
