@@ -206,6 +206,10 @@ export interface TokenUsage {
   total_tokens: number;
   /** Provider-reported billed cost normalized from fields such as OpenRouter's `usage.cost`. */
   cost_usd?: number;
+  /** Prompt tokens served from a provider prompt cache; already inside `prompt_tokens`. */
+  cache_read_tokens?: number;
+  /** Prompt tokens written to a provider prompt cache; already inside `prompt_tokens`. */
+  cache_write_tokens?: number;
 }
 
 export type CostSource = "provider" | "estimate";
@@ -481,6 +485,10 @@ export interface RunTrace {
   status: RunStatus;
   error?: string;
   context?: ContextSnapshot;
+  /** A provider retry the run is waiting on; cleared once the retried step streams. */
+  retry?: { attempt: number; delayMs: number; reason: string };
+  /** The latest context compaction before a model step. */
+  compaction?: { elidedToolResults: number; summarizedMessages: number };
 }
 
 const DEFAULT_BASE = "http://127.0.0.1:7377";
@@ -3977,6 +3985,8 @@ export interface AgentEvent {
     | "worker_run_worker_error"
     | "worker_run_worker_stopped"
     | "hook"
+    | "provider_retry"
+    | "context_compacted"
     | "final"
     | "done"
     | "error";
@@ -4010,7 +4020,20 @@ export interface AgentEvent {
   approval_id?: string;
   effect?: "read_only" | "mutating" | "command" | "unknown";
   decision?: "approve" | "deny";
+  /** `tool_approval_resolved`: why the loop resolved it itself, e.g. `timed_out`. */
+  reason?: string;
   status?: "decided" | "delivered";
+  /** `provider_retry`: retry number and wait before the retried step. */
+  attempt?: number;
+  delay_ms?: number;
+  /** `provider_retry`: UTF-8 bytes of text and reasoning the failed attempt streamed. */
+  discarded_content_bytes?: number;
+  discarded_reasoning_bytes?: number;
+  /** `context_compacted`: what was compacted before the model step. */
+  elided_tool_results?: number;
+  summarized_messages?: number;
+  estimated_tokens_before?: number;
+  estimated_tokens_after?: number;
 }
 
 export type ToolApprovalEvent =
@@ -4036,6 +4059,7 @@ export type ToolApprovalEvent =
       approval_id: string;
       call_id?: string;
       decision: "approve" | "deny";
+      reason?: string;
     }
   | {
       type: "tool_approval_failed";
@@ -4829,6 +4853,10 @@ export interface UsageTotals {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  /** Input tokens served from a provider prompt cache (inside `prompt_tokens`). */
+  cache_read_tokens: number;
+  /** Input tokens written to a provider prompt cache (inside `prompt_tokens`). */
+  cache_write_tokens: number;
   /** Every known cost, reported plus estimated. */
   cost_usd: number;
   /** Billed cost reported by a provider or account runtime. */
@@ -5414,6 +5442,8 @@ export async function reviewMemoryNode(id: string): Promise<boolean> {
 /** Embedding coverage of scoped memories relative to the current model. */
 export interface MemoryEmbeddingStatus {
   model: string | null;
+  /** The pinned memory embedding model; `null` follows the models chats embed with. */
+  configured_model?: string | null;
   dim: number;
   total: number;
   current: number;
@@ -5452,6 +5482,22 @@ export function reindexMemoryEmbeddings(): Promise<MemoryEmbeddingStatus | null>
 
 export function cancelMemoryReindex(): Promise<MemoryEmbeddingStatus | null> {
   return memoryEmbeddingsRequest("/cancel");
+}
+
+/** Pin the model memory embeds with, or pass `null` to follow the chat model. */
+export async function setMemoryEmbeddingModel(
+  model: string | null,
+): Promise<MemoryEmbeddingStatus | null> {
+  try {
+    const r = await authFetch(`${BASE}/memory/embeddings/model`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model }),
+    });
+    return r.ok ? ((await r.json()) as MemoryEmbeddingStatus) : null;
+  } catch {
+    return null;
+  }
 }
 
 // ----- Schedules -----

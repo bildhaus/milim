@@ -4415,7 +4415,7 @@ impl RunManager {
             response_format: None,
             prompt: None,
             suffix: None,
-            sampling: sampling_from_generation(&accepted.config.generation),
+            sampling: sampling_from_generation(&accepted.config.generation, thread_id),
             reasoning_effort,
         };
         let journal = RunJournal {
@@ -4580,7 +4580,7 @@ impl RunManager {
             run_id,
             accepted.config.linked_thread_grants.clone(),
             reasoning_effort,
-            sampling_from_generation(&accepted.config.generation),
+            sampling_from_generation(&accepted.config.generation, thread_id),
             accepted.config.run_limits.as_ref(),
             provider_pricing(state, &accepted.config.model).await,
             provider_context_window(state, &accepted.config.model).await,
@@ -6848,7 +6848,9 @@ fn normalize_generation_settings(value: &Value) -> GenerationSettingsV1 {
     }
 }
 
-fn sampling_from_generation(generation: &GenerationSettingsV1) -> SamplingParams {
+/// Frozen generation controls for a run in `thread_id`. The thread id keys
+/// the provider prompt cache so every turn of the thread shares it.
+fn sampling_from_generation(generation: &GenerationSettingsV1, thread_id: &str) -> SamplingParams {
     SamplingParams {
         temperature: generation.temperature,
         top_p: generation.top_p,
@@ -6861,6 +6863,7 @@ fn sampling_from_generation(generation: &GenerationSettingsV1) -> SamplingParams
         min_p: generation.min_p,
         repetition_penalty: generation.repetition_penalty,
         thinking_token_budget: generation.thinking_token_budget,
+        prompt_cache_key: Some(thread_id.to_string()),
     }
 }
 
@@ -7414,7 +7417,7 @@ fn parse_value(value: &str) -> Result<Value> {
 }
 
 pub(crate) fn completion_request_value(request: &CompletionRequest) -> Result<Value> {
-    Ok(json!({
+    let mut value = json!({
         "model": request.model,
         "messages": request.messages,
         "tools": request.tools,
@@ -7436,7 +7439,13 @@ pub(crate) fn completion_request_value(request: &CompletionRequest) -> Result<Va
             "thinking_token_budget": request.sampling.thinking_token_budget,
         },
         "reasoning_effort": request.reasoning_effort,
-    }))
+    });
+    // Added only when set, so ledgers recorded before the key existed
+    // re-serialize to the same bytes.
+    if let Some(key) = &request.sampling.prompt_cache_key {
+        value["sampling"]["prompt_cache_key"] = json!(key);
+    }
+    Ok(value)
 }
 
 /// Inverse of [`completion_request_value`]: rebuilds the provider request a
@@ -7474,6 +7483,7 @@ pub(crate) fn completion_request_from_value(value: &Value) -> Result<CompletionR
             min_p: field(sampling, "min_p")?,
             repetition_penalty: field(sampling, "repetition_penalty")?,
             thinking_token_budget: field(sampling, "thinking_token_budget")?,
+            prompt_cache_key: field(sampling, "prompt_cache_key")?,
         },
         reasoning_effort: field(value, "reasoning_effort")?,
     })
@@ -9242,7 +9252,10 @@ mod tests {
             response_format: None,
             prompt: None,
             suffix: None,
-            sampling: SamplingParams::default(),
+            sampling: SamplingParams {
+                prompt_cache_key: Some("thread-1".into()),
+                ..SamplingParams::default()
+            },
             reasoning_effort: Some(ReasoningEffort::High),
         };
         let expected = serde_json::to_vec(&completion_request_value(&request).unwrap()).unwrap();
@@ -9254,6 +9267,21 @@ mod tests {
             .find(|artifact| artifact.kind == "provider_request")
             .unwrap();
         assert_eq!(artifact.data_json.as_bytes(), expected);
+        let stored: Value = serde_json::from_str(&artifact.data_json).unwrap();
+        assert_eq!(stored["sampling"]["prompt_cache_key"], "thread-1");
+        let rebuilt = completion_request_from_value(&stored).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&completion_request_value(&rebuilt).unwrap()).unwrap(),
+            expected,
+            "the stored request, cache key included, rebuilds byte for byte"
+        );
+        let legacy = CompletionRequest {
+            sampling: SamplingParams::default(),
+            ..rebuilt
+        };
+        assert!(completion_request_value(&legacy).unwrap()["sampling"]
+            .get("prompt_cache_key")
+            .is_none());
     }
 
     #[tokio::test]
@@ -9756,7 +9784,7 @@ mod tests {
             "repetitionPenalty": 1.05,
             "thinkingTokenBudget": 2048
         }));
-        let sampling = sampling_from_generation(&generation);
+        let sampling = sampling_from_generation(&generation, "thread-1");
 
         assert_eq!(sampling.max_tokens, Some(4096));
         assert_eq!(sampling.temperature, Some(0.4));
@@ -9769,6 +9797,7 @@ mod tests {
         assert_eq!(sampling.min_p, Some(0.1));
         assert_eq!(sampling.repetition_penalty, Some(1.05));
         assert_eq!(sampling.thinking_token_budget, Some(2048));
+        assert_eq!(sampling.prompt_cache_key.as_deref(), Some("thread-1"));
 
         let invalid = normalize_generation_settings(&json!({
             "temperature": 3,

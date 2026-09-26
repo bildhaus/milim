@@ -60,7 +60,12 @@ import {
   type QuickSummarySectionId,
 } from "../lib/quickSummary.js";
 import { normalizeReasoningEffortOverrides } from "../lib/reasoningEffort.js";
-import { appendPhaseStreamPart, coalesceStreamPhases } from "../lib/streamParts.js";
+import {
+  appendPhaseStreamPart,
+  coalesceStreamPhases,
+  discardStreamContent,
+  dropTrailingUtf8Bytes,
+} from "../lib/streamParts.js";
 import { deriveThreadTitle, NEW_CHAT_TITLE } from "../lib/threadTitles.js";
 import {
   readUserStateKey,
@@ -1335,7 +1340,7 @@ function completeEventStreamPart(
     const current = next[i];
     if (
       current.kind === "event" &&
-      current.eventType === "tool" &&
+      (current.eventType === "tool" || current.eventType === part.eventType) &&
       current.status === "running" &&
       current.name === name
     ) {
@@ -2082,6 +2087,13 @@ interface SessionState {
     chunks?: BufferedStreamChunk[],
   ) => void;
   finalizeMessageArtifacts: (id: string, messageId?: string) => void;
+  /** Drop output a failed provider attempt streamed (UTF-8 byte counts from Rust). */
+  discardStreamContent: (
+    id: string,
+    messageId: string,
+    contentBytes: number,
+    reasoningBytes: number,
+  ) => void;
   appendStreamEvent: (
     id: string,
     messageIdOrPart: string | ChatStreamEventPart,
@@ -3457,6 +3469,29 @@ export const useSessions = create<SessionState>()(
               if (target.role !== "assistant") return s;
               const messages = s.messages.slice();
               messages[targetIndex] = normalizeMessageArtifacts(target);
+              return { ...s, messages, updatedAt: Date.now() };
+            }),
+          })),
+
+        discardStreamContent: (id, messageId, contentBytes, reasoningBytes) =>
+          set((st) => ({
+            sessions: st.sessions.map((s) => {
+              if (s.id !== id) return s;
+              const targetIndex = s.messages.findIndex((message) => message.id === messageId);
+              if (targetIndex < 0) return s;
+              const messages = s.messages.slice();
+              const target = messages[targetIndex];
+              messages[targetIndex] = {
+                ...target,
+                content: dropTrailingUtf8Bytes(target.content, contentBytes),
+                streamParts: target.streamParts
+                  ? discardStreamContent(
+                      discardStreamContent(target.streamParts, "text", contentBytes),
+                      "thinking",
+                      reasoningBytes,
+                    )
+                  : target.streamParts,
+              };
               return { ...s, messages, updatedAt: Date.now() };
             }),
           })),

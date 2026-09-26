@@ -7215,6 +7215,8 @@ export function ChatView({
       append,
       appendThinking,
       flush: () => streamBatcher.flush(),
+      discardStreamed: (contentBytes, reasoningBytes) =>
+        store.discardStreamContent(id, assistantMessageId, contentBytes, reasoningBytes),
       appendStreamEvent: (part) =>
         store.appendStreamEvent(id, assistantMessageId, part),
       completeStreamEvent: (name, part, callId) =>

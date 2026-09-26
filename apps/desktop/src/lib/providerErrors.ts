@@ -120,6 +120,7 @@ const UNAVAILABLE_PHRASES = [
   "connection refused",
   "connection reset",
   "error sending request",
+  "stream interrupted",
   "dns error",
   "failed to lookup address",
   "failed to fetch",

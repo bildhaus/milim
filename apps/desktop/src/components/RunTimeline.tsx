@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { RunStatus, RunTrace } from "../api";
 import { isNearScrollBottom } from "../lib/scroll";
+import { contextCompactedLabel, providerRetryLabel } from "../lib/turnEvents";
 import { approvalWaitDuration } from "../lib/usageMetrics";
 
 const STATUS_LABEL: Record<RunStatus, string> = {
@@ -127,8 +128,13 @@ export function RunTimeline({ run }: { run: RunTrace }) {
   const elapsed = Math.max(0, clock - run.startedAt - approvalWaitDuration(run, clock));
   const doneSteps = run.steps.filter((step) => step.endedAt != null).length;
   const activeStep = run.status === "running" ? Math.max(1, doneSteps + 1) : doneSteps;
-  const statusLabel = waiting ? "Waiting for approval" : STATUS_LABEL[run.status];
-  const stepLabel = waiting
+  const retry = run.status === "running" && !waiting ? run.retry : undefined;
+  const statusLabel = waiting
+    ? "Waiting for approval"
+    : retry
+      ? providerRetryLabel(retry.attempt, retry.delayMs, retry.reason)
+      : STATUS_LABEL[run.status];
+  const stepLabel = waiting || retry
     ? statusLabel
     : run.steps.length
       ? `Step ${Math.min(activeStep, run.steps.length)} / ${run.steps.length}`
@@ -173,6 +179,11 @@ export function RunTimeline({ run }: { run: RunTrace }) {
             {detail && <div className="run-step-detail">{detail}</div>}
           </div>
         ))}
+        {run.compaction && (
+          <div className="run-note">
+            {contextCompactedLabel(run.compaction.elidedToolResults, run.compaction.summarizedMessages)}
+          </div>
+        )}
         {run.error && <div className="run-step-detail run-step-error">{run.error}</div>}
         {run.status === "stopped" && <div className="run-note">Stopped before final answer.</div>}
       </div>

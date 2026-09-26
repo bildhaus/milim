@@ -25,6 +25,8 @@ const MAX_MEMORY_BENCHMARK_CASES: usize = 100;
 const REEMBED_BATCH: usize = 32;
 const META_EMBEDDING_MODEL: &str = "embedding_model";
 const META_EMBEDDING_DIM: &str = "embedding_dim";
+/// The embedding model the user pinned for memory, if any.
+const META_CONFIGURED_MODEL: &str = "configured_embedding_model";
 /// Rows that still need a vector from the current model `?1` with
 /// dimension `?2`: vectors from another model or dimension, and entries
 /// without a vector that the current model has not attempted yet.
@@ -330,6 +332,8 @@ pub struct MemoryBenchmarkReport {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct MemoryEmbeddingStatus {
     pub model: Option<String>,
+    /// The pinned embedding model. `None` follows the models chats embed with.
+    pub configured_model: Option<String>,
     pub dim: usize,
     pub total: usize,
     pub current: usize,
@@ -356,6 +360,11 @@ struct EmbeddingIndex {
     progress: Mutex<ReembedProgress>,
     cancel: AtomicBool,
     resumed: AtomicBool,
+    /// The pinned embedding model, mirrored from `memory_meta`.
+    configured: Mutex<Option<String>>,
+    /// Without a pinned model, a different model must return vectors twice
+    /// in a row before it replaces the current one.
+    candidate: Mutex<Option<(String, usize)>>,
 }
 
 /// An embedding-backed memory store.
@@ -373,6 +382,7 @@ impl MemoryStore {
     /// Open a memory store, applying the schema migration.
     pub fn new(db: Database, embedder: SharedService) -> Result<Self> {
         db.migrate(MEMORY_MIGRATIONS)?;
+        let configured = read_meta(db.conn(), META_CONFIGURED_MODEL)?;
         let store = Self {
             db: Arc::new(Mutex::new(db)),
             embedder: embedder.clone(),
@@ -381,6 +391,8 @@ impl MemoryStore {
                 progress: Mutex::new(ReembedProgress::default()),
                 cancel: AtomicBool::new(false),
                 resumed: AtomicBool::new(false),
+                configured: Mutex::new(configured),
+                candidate: Mutex::new(None),
             }),
         };
         store.resume_reembed();
@@ -399,6 +411,7 @@ impl MemoryStore {
 
     /// Embed `text` with `model` and persist it. Returns the new id.
     pub async fn add(&self, model: &str, text: &str) -> Result<String> {
+        let model = &self.embedding_model_for(model);
         let embedding = self.embed_one(model, text).await?;
         let id = uuid::Uuid::new_v4().to_string();
         let bytes = vec_to_bytes(&embedding);
@@ -427,6 +440,8 @@ impl MemoryStore {
         let node = normalize_node(node)?;
         let reviewed_by_user = node.source.eq_ignore_ascii_case("user");
         let text = memory_text(&node.title, &node.body);
+        let model = self.embedding_model_for(model);
+        let model = model.as_str();
         let embedding = match self.embed_one(model, &text).await {
             Ok(v) => v,
             Err(e) => {
@@ -660,6 +675,8 @@ impl MemoryStore {
             .unwrap_or(current.confidence);
         let source = update.source.unwrap_or(current.source);
 
+        let model = self.embedding_model_for(model);
+        let model = model.as_str();
         let embedding = match self.embed_one(model, &memory_text(&title, &body)).await {
             Ok(v) => v,
             Err(e) => {
@@ -755,6 +772,8 @@ impl MemoryStore {
         top_k: usize,
         include_archived: bool,
     ) -> Result<Vec<MemoryGraphHit>> {
+        let model = self.embedding_model_for(model);
+        let model = model.as_str();
         let q = match self.embed_one(model, query).await {
             Ok(v) => v,
             Err(e) => {
@@ -969,6 +988,8 @@ impl MemoryStore {
 
     /// Return the `top_k` entries most similar to `query`.
     pub async fn search(&self, model: &str, query: &str, top_k: usize) -> Result<Vec<MemoryHit>> {
+        let model = self.embedding_model_for(model);
+        let model = model.as_str();
         let q = self.embed_one(model, query).await?;
         let query_model = model.to_string();
         let db = self.db.clone();
@@ -1067,6 +1088,7 @@ impl MemoryStore {
             status.model = Some(model);
             status.dim = dim;
         }
+        status.configured_model = self.configured_embedding_model();
         let progress = self.index.progress.lock().expect("memory index poisoned");
         status.reindexing = progress.running;
         status.reindexed = progress.processed;
@@ -1126,12 +1148,86 @@ impl MemoryStore {
         Ok(vector)
     }
 
-    /// Record the model that just produced a vector. A new model or
+    /// The pinned embedding model, if the user chose one.
+    pub fn configured_embedding_model(&self) -> Option<String> {
+        self.index
+            .configured
+            .lock()
+            .expect("memory index poisoned")
+            .clone()
+    }
+
+    /// Pin the model every memory embed uses, or `None` to follow the models
+    /// chats embed with. Pinning a model other than the current one starts
+    /// re-embedding with it.
+    pub fn set_configured_embedding_model(&self, model: Option<&str>) -> Result<()> {
+        let model = model.map(str::trim).filter(|model| !model.is_empty());
+        let changed = {
+            let db = self.db.lock().expect("memory db poisoned");
+            match model {
+                Some(model) => write_meta(db.conn(), META_CONFIGURED_MODEL, model)?,
+                None => {
+                    db.conn()
+                        .execute(
+                            "DELETE FROM memory_meta WHERE key = ?1",
+                            params![META_CONFIGURED_MODEL],
+                        )
+                        .map_err(sqlite)?;
+                }
+            }
+            *self.index.candidate.lock().expect("memory index poisoned") = None;
+            *self.index.configured.lock().expect("memory index poisoned") =
+                model.map(str::to_string);
+            model.is_some_and(|model| {
+                current_embedding_model(db.conn())
+                    .ok()
+                    .flatten()
+                    .is_none_or(|(current, _)| current != model)
+            })
+        };
+        if changed {
+            self.start_reembed();
+        }
+        Ok(())
+    }
+
+    /// The model to embed with: the pinned model when there is one,
+    /// otherwise the model the caller asked for.
+    fn embedding_model_for(&self, requested: &str) -> String {
+        self.configured_embedding_model()
+            .unwrap_or_else(|| requested.to_string())
+    }
+
+    /// Record the model that just produced a vector. A pinned model is
+    /// current as soon as it returns one. Otherwise a different model must
+    /// return vectors twice in a row, so alternating between two chat models
+    /// does not re-embed the library on every switch. A new current model or
     /// dimension makes existing vectors stale and starts re-embedding.
     fn note_embedding_model(&self, model: &str, dim: usize) -> Result<()> {
         let changed = {
             let db = self.db.lock().expect("memory db poisoned");
-            set_current_embedding_model(db.conn(), model, dim)?
+            let current = current_embedding_model(db.conn())?;
+            let pinned = self.configured_embedding_model().as_deref() == Some(model);
+            let mut candidate = self.index.candidate.lock().expect("memory index poisoned");
+            let observed = (model.to_string(), dim);
+            let adopt = match &current {
+                None => true,
+                Some(current) if *current == observed => {
+                    *candidate = None;
+                    false
+                }
+                Some(_) if pinned || candidate.as_ref() == Some(&observed) => true,
+                Some(_) => {
+                    *candidate = Some(observed);
+                    false
+                }
+            };
+            if adopt {
+                *candidate = None;
+                set_current_embedding_model(db.conn(), model, dim)?
+            } else {
+                false
+            }
         };
         if changed {
             tracing::info!("memory embedding model is now {model} ({dim} dimensions)");
@@ -1141,18 +1237,32 @@ impl MemoryStore {
     }
 }
 
-/// The model and dimension recorded by the most recent successful embed.
+fn read_meta(conn: &rusqlite::Connection, key: &str) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT value FROM memory_meta WHERE key = ?1",
+        params![key],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(sqlite)
+}
+
+fn write_meta(conn: &rusqlite::Connection, key: &str, value: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO memory_meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )
+    .map_err(sqlite)?;
+    Ok(())
+}
+
+/// The current embedding model and its dimension.
 fn current_embedding_model(conn: &rusqlite::Connection) -> Result<Option<(String, usize)>> {
-    let read = |key: &str| {
-        conn.query_row(
-            "SELECT value FROM memory_meta WHERE key = ?1",
-            params![key],
-            |r| r.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(sqlite)
-    };
-    let (Some(model), Some(dim)) = (read(META_EMBEDDING_MODEL)?, read(META_EMBEDDING_DIM)?) else {
+    let (Some(model), Some(dim)) = (
+        read_meta(conn, META_EMBEDDING_MODEL)?,
+        read_meta(conn, META_EMBEDDING_DIM)?,
+    ) else {
         return Ok(None);
     };
     Ok(dim
@@ -1171,17 +1281,8 @@ fn set_current_embedding_model(
     if current_embedding_model(conn)?.is_some_and(|(m, d)| m == model && d == dim) {
         return Ok(false);
     }
-    for (key, value) in [
-        (META_EMBEDDING_MODEL, model.to_string()),
-        (META_EMBEDDING_DIM, dim.to_string()),
-    ] {
-        conn.execute(
-            "INSERT INTO memory_meta (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![key, value],
-        )
-        .map_err(sqlite)?;
-    }
+    write_meta(conn, META_EMBEDDING_MODEL, model)?;
+    write_meta(conn, META_EMBEDDING_DIM, &dim.to_string())?;
     Ok(true)
 }
 
@@ -1234,10 +1335,21 @@ async fn run_reembed(db: Arc<Mutex<Database>>, index: Arc<EmbeddingIndex>) {
 /// are pending). Rows the embedder rejects individually are marked as
 /// attempted by the current model so they are not retried in a loop.
 async fn reembed_batch(db: &Arc<Mutex<Database>>, index: &EmbeddingIndex) -> Result<usize> {
+    let configured = index
+        .configured
+        .lock()
+        .expect("memory index poisoned")
+        .clone();
     let (model, dim, rows) = {
         let db = db.lock().expect("memory db poisoned");
-        let Some((model, dim)) = current_embedding_model(db.conn())? else {
-            return Ok(0);
+        let current = current_embedding_model(db.conn())?;
+        // A pinned model is the target even before it has returned a vector;
+        // its dimension is learned from the first batch.
+        let (model, dim) = match (configured, current) {
+            (Some(pinned), Some((current, dim))) if pinned == current => (pinned, dim),
+            (Some(pinned), _) => (pinned, 0),
+            (None, Some(current)) => current,
+            (None, None) => return Ok(0),
         };
         let mut stmt = db
             .conn()
@@ -2290,7 +2402,12 @@ mod tests {
         assert_eq!(status.missing, 0);
         assert_eq!(status.unavailable, 1);
 
-        // A search with a new model switches the index and re-embeds everything.
+        // One search with another model does not switch the index; a second
+        // in a row does, and re-embeds everything.
+        mem.search_graph("m5", "alpha project", &[], 3, false)
+            .await
+            .unwrap();
+        assert_eq!(wait_for_reembed(&mem).await.model.as_deref(), Some("m3"));
         mem.search_graph("m5", "alpha project", &[], 3, false)
             .await
             .unwrap();
@@ -2310,6 +2427,69 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(hits[0].node.id, missing);
+    }
+
+    #[tokio::test]
+    async fn alternating_chat_models_do_not_reembed_on_every_switch() {
+        let mem = fake_store(0);
+        let alpha = register_fact(&mem, "m3", "alpha project").await;
+        wait_for_reembed(&mem).await;
+        for model in ["m5", "m3", "m5", "m3", "m5"] {
+            mem.search_graph(model, "alpha", &[], 1, false)
+                .await
+                .unwrap();
+        }
+        let status = wait_for_reembed(&mem).await;
+        assert_eq!(status.model.as_deref(), Some("m3"));
+        assert_eq!(node_embedding(&mem, &alpha), ("m3".into(), 3));
+        assert_eq!(status.reindexed, 0, "no switch means no re-embedding");
+    }
+
+    #[tokio::test]
+    async fn a_pinned_model_is_current_at_once_and_embeds_every_request() {
+        let mem = fake_store(0);
+        let alpha = register_fact(&mem, "m3", "alpha project").await;
+        wait_for_reembed(&mem).await;
+
+        mem.set_configured_embedding_model(Some("m4")).unwrap();
+        let status = wait_for_reembed(&mem).await;
+        assert_eq!(status.configured_model.as_deref(), Some("m4"));
+        assert_eq!(status.model.as_deref(), Some("m4"));
+        assert_eq!(status.current, 1);
+        assert_eq!(node_embedding(&mem, &alpha), ("m4".into(), 4));
+
+        // Chats that ask for other models still embed with the pinned one.
+        let beta = register_fact(&mem, "m5", "beta notes").await;
+        assert_eq!(node_embedding(&mem, &beta), ("m4".into(), 4));
+        let hits = mem
+            .search_graph("m6", "beta notes", &[], 1, false)
+            .await
+            .unwrap();
+        assert_eq!(hits[0].node.id, beta);
+        assert_eq!(wait_for_reembed(&mem).await.model.as_deref(), Some("m4"));
+
+        // Unpinning keeps the current model until another one wins twice.
+        mem.set_configured_embedding_model(None).unwrap();
+        let status = wait_for_reembed(&mem).await;
+        assert_eq!(status.configured_model, None);
+        assert_eq!(status.model.as_deref(), Some("m4"));
+    }
+
+    #[tokio::test]
+    async fn the_pinned_model_survives_reopening_the_store() {
+        let path =
+            std::env::temp_dir().join(format!("milim-memory-pin-{}.db", uuid::Uuid::new_v4()));
+        let embedder: SharedService = Arc::new(FakeEmbedder {
+            delay: std::time::Duration::ZERO,
+        });
+        {
+            let mem = MemoryStore::new(Database::open(&path).unwrap(), embedder.clone()).unwrap();
+            mem.set_configured_embedding_model(Some("m4")).unwrap();
+        }
+        let reopened = MemoryStore::new(Database::open(&path).unwrap(), embedder).unwrap();
+        assert_eq!(reopened.configured_embedding_model().as_deref(), Some("m4"));
+        drop(reopened);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]
@@ -2356,12 +2536,16 @@ mod tests {
                 progress: Mutex::new(ReembedProgress::default()),
                 cancel: AtomicBool::new(false),
                 resumed: AtomicBool::new(true),
+                configured: Mutex::new(None),
+                candidate: Mutex::new(None),
             }),
             ..slow
         };
-        slow.search_graph("m4", "memory", &[], 1, false)
-            .await
-            .unwrap();
+        for _ in 0..2 {
+            slow.search_graph("m4", "memory", &[], 1, false)
+                .await
+                .unwrap();
+        }
         assert!(slow.embedding_status().unwrap().reindexing);
         slow.cancel_reembed();
         let status = wait_for_reembed(&slow).await;

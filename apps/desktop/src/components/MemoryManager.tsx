@@ -8,6 +8,7 @@ import {
   listMemoryNodes,
   registerGraphMemory,
   reindexMemoryEmbeddings,
+  setMemoryEmbeddingModel,
   restoreMemoryNode,
   reviewMemoryNode,
   searchGraphMemory,
@@ -18,7 +19,7 @@ import {
   type MemoryScopeRef,
   type WorkspaceContext,
 } from "../api";
-import { memoryEmbeddingNotice } from "../lib/memoryEmbeddings";
+import { memoryEmbeddingModelLabel, memoryEmbeddingNotice } from "../lib/memoryEmbeddings";
 import { DEFAULT_THREAD_SETTINGS, useSessions } from "../sessions/store";
 import { Archive, Check, Pencil, Plus, Refresh, Search, Trash, X } from "./icons";
 import { SheetDialog } from "./SheetDialog";
@@ -117,6 +118,7 @@ export function MemoryManager({
   const [workspaceContext, setWorkspaceContext] = useState<WorkspaceContext | null>(null);
   const [embeddings, setEmbeddings] = useState<MemoryEmbeddingStatus | null>(null);
   const embeddingNotice = memoryEmbeddingNotice(embeddings);
+  const embeddingModelLabel = memoryEmbeddingModelLabel(embeddings);
 
   const selected = useMemo(() => nodes.find((node) => node.id === selectedId) ?? null, [nodes, selectedId]);
   const canUseProject = Boolean(folder.trim());
@@ -155,6 +157,13 @@ export function MemoryManager({
 
   async function toggleReindex() {
     const next = reindexing ? await cancelMemoryReindex() : await reindexMemoryEmbeddings();
+    if (next) setEmbeddings(next);
+  }
+
+  async function togglePinnedEmbeddingModel() {
+    const next = await setMemoryEmbeddingModel(
+      embeddings?.configured_model ? null : embeddings?.model ?? null,
+    );
     if (next) setEmbeddings(next);
   }
 
@@ -428,6 +437,7 @@ export function MemoryManager({
         {tab !== "legacy" && <button className="btn-accent mem-icon-action" type="button" disabled={busy || (tab === "project" && !canUseProject)} onClick={startCreate}><Plus size={14} /> Add</button>}
       </div>
 
+      {embeddingModelLabel && <div className="mem-move mem-embedding-notice"><span>{embeddingModelLabel}</span><button className="btn-ghost" type="button" onClick={() => void togglePinnedEmbeddingModel()}>{embeddings?.configured_model ? "Follow chat model" : "Pin this model"}</button></div>}
       {embeddingNotice && <div className="mem-move mem-embedding-notice" role="status"><span>{embeddingNotice}</span><button className="btn-ghost mem-icon-action" type="button" onClick={() => void toggleReindex()}>{reindexing ? <><X size={14} /> Cancel</> : <><Refresh size={14} /> Re-index</>}</button></div>}
 
       <div ref={detail.containerRef} className="mem-layout" style={detail.style}>

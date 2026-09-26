@@ -21,3 +21,13 @@ export function memoryEmbeddingNotice(status: MemoryEmbeddingStatus | null): str
   if (status.last_error) return `${summary}. Re-indexing paused: ${status.last_error}`;
   return `${summary}. Search matches them by keyword until they are re-indexed.`;
 }
+
+/**
+ * Which model memory embeds with: the pinned model, or the model chats have
+ * settled on. `null` before any model has returned a vector.
+ */
+export function memoryEmbeddingModelLabel(status: MemoryEmbeddingStatus | null): string | null {
+  if (status?.configured_model) return `Memory embeds with ${status.configured_model} (pinned)`;
+  if (status?.model) return `Memory embeds with ${status.model}, the model chats last settled on`;
+  return null;
+}

@@ -65,6 +65,7 @@ const {
   summarizeMilimUsage,
   summarizeResponseMetrics,
   formatUsageCost,
+  usageCacheHitShare,
   usageCostSource,
   usageModelLabel,
 } = await import("../src/lib/usageMetrics.js");
@@ -3025,6 +3026,8 @@ const usageTotals = {
   prompt_tokens: 0,
   completion_tokens: 0,
   total_tokens: 30,
+  cache_read_tokens: 0,
+  cache_write_tokens: 0,
   cost_usd: 0.5,
   reported_cost_usd: 0.2,
   estimated_cost_usd: 0.3,
@@ -3039,5 +3042,11 @@ equal(
 );
 equal(formatUsageCost({ ...usageTotals, cost_usd: 0, reported_cost_usd: 0, estimated_cost_usd: 0, unpriced_responses: 3 }), "Unpriced", "usage with no recorded cost should say so");
 equal(usageModelLabel("codex:gpt-5"), "gpt-5", "usage model labels should drop runtime prefixes");
+equal(usageCacheHitShare(usageTotals), null, "no input tokens means no cache-hit share");
+equal(
+  usageCacheHitShare({ prompt_tokens: 1_000, cache_read_tokens: 750 }),
+  0.75,
+  "the cache-hit share is cached input over all input",
+);
 
 export {};

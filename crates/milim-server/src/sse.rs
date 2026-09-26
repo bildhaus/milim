@@ -8,6 +8,7 @@ use bytes::Bytes;
 use futures::{pin_mut, Stream, StreamExt};
 use milim_agents::AgentEvent;
 
+use milim_core::api::anthropic;
 use milim_core::api::ollama::{OllamaChatResponse, OllamaMessage};
 use milim_core::api::openai::{
     ChatCompletionChunk, ChunkChoice, Delta, DeltaToolCall, ErrorEnvelope, Usage,
@@ -15,7 +16,7 @@ use milim_core::api::openai::{
 use milim_inference::{EventStream, StreamEvent, ToolCallAccumulator};
 use serde_json::json;
 
-use crate::translate::anthropic_stop_reason;
+use crate::translate::{anthropic_stop_reason, anthropic_usage, openai_usage_value};
 
 /// Per-response identifiers shared across every emitted chunk.
 #[derive(Clone)]
@@ -76,8 +77,10 @@ pub fn openai_sse(
                     );
                     yield Ok(event(&chunk));
                     if include_usage {
-                        let uchunk = ctx.chunk(vec![], Some(usage));
-                        yield Ok(event(&uchunk));
+                        let uchunk = ctx.chunk(vec![], None);
+                        let mut value = serde_json::to_value(&uchunk).unwrap_or_default();
+                        value["usage"] = openai_usage_value(&usage);
+                        yield Ok(Event::default().data(value.to_string()));
                     }
                     yield Ok(Event::default().data("[DONE]"));
                     return;
@@ -222,7 +225,7 @@ pub fn anthropic_sse(
         let mut text_open = false;
         let mut index = 0u64;
         let mut tools = ToolCallAccumulator::default();
-        let mut output_tokens = 0u32;
+        let mut final_usage = anthropic::Usage::default();
         let mut stop_reason = "end_turn".to_string();
 
         while let Some(ev) = inner.next().await {
@@ -249,7 +252,7 @@ pub fn anthropic_sse(
                 }
                 Ok(StreamEvent::Done { finish_reason, usage }) => {
                     stop_reason = anthropic_stop_reason(&finish_reason);
-                    output_tokens = usage.completion_tokens;
+                    final_usage = anthropic_usage(&usage);
                     break;
                 }
                 Err(e) => {
@@ -292,7 +295,7 @@ pub fn anthropic_sse(
         yield named("message_delta", json!({
             "type": "message_delta",
             "delta": { "stop_reason": stop_reason, "stop_sequence": null },
-            "usage": { "output_tokens": output_tokens }
+            "usage": final_usage
         }));
         yield named("message_stop", json!({"type":"message_stop"}));
     }

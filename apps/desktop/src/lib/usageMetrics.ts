@@ -416,6 +416,15 @@ export function usageCostSource(
   return undefined;
 }
 
+/** Share of input tokens served from a provider prompt cache, or null without input. */
+export function usageCacheHitShare(
+  totals: Pick<UsageTotals, "prompt_tokens" | "cache_read_tokens">,
+): number | null {
+  if (!(totals.prompt_tokens > 0)) return null;
+  const cached = Math.max(0, totals.cache_read_tokens ?? 0);
+  return Math.min(1, cached / totals.prompt_tokens);
+}
+
 /** Spend label for a usage aggregate: `est.` marks estimates, `~` missing costs. */
 export function formatUsageCost(totals: UsageTotals): string {
   const priced = totals.responses > totals.unpriced_responses;

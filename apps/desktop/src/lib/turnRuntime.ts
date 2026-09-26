@@ -38,9 +38,12 @@ import {
 import { attachmentsToPromptContext, reviewCommentsToPromptContext } from "./attachmentWire.js";
 import { friendlyError } from "./providerErrors.js";
 import { hookEventPart } from "./hookEvents.js";
+import { PROVIDER_RETRY_EVENT } from "./streamParts.js";
 import { estimateMessagesTokens, estimateTextTokens, messagesForModelContext, modelContextBudget } from "./contextCompaction.js";
 import {
   accountRuntimeToolPart,
+  contextCompactedPart,
+  providerRetryPart,
   statusPart,
   toolApprovalPart,
   toolCompletedPart,
@@ -1346,6 +1349,7 @@ export function createAgentRunEventHandler({
   append,
   appendThinking,
   flush,
+  discardStreamed,
   appendStreamEvent,
   completeStreamEvent,
   appendMemoryNotice,
@@ -1362,6 +1366,8 @@ export function createAgentRunEventHandler({
   append: (text: string) => void;
   appendThinking: (text: string) => void;
   flush: () => void;
+  /** Drop the trailing UTF-8 bytes of text and reasoning a failed provider attempt streamed. */
+  discardStreamed?: (contentBytes: number, reasoningBytes: number) => void;
   appendStreamEvent: (part: ChatStreamEventPart) => void;
   completeStreamEvent: (
     name: string,
@@ -1378,9 +1384,16 @@ export function createAgentRunEventHandler({
   snapshot: () => void;
   now?: () => number;
 }): (event: AgentEvent) => void {
+  let pendingRetry: AgentEvent | null = null;
   return (event) => {
     const run = runRef.current;
     if (!run) return;
+    if (pendingRetry) {
+      // Anything after a retry means the retried attempt is under way.
+      completeStreamEvent(PROVIDER_RETRY_EVENT, providerRetryPart(pendingRetry, false));
+      pendingRetry = null;
+      run.retry = undefined;
+    }
     switch (event.type) {
       case "start":
         if (event.model) run.model = event.model;
@@ -1480,6 +1493,28 @@ export function createAgentRunEventHandler({
         );
         break;
       }
+      case "provider_retry":
+        flush();
+        discardStreamed?.(
+          event.discarded_content_bytes ?? 0,
+          event.discarded_reasoning_bytes ?? 0,
+        );
+        pendingRetry = event;
+        run.retry = {
+          attempt: event.attempt ?? 1,
+          delayMs: event.delay_ms ?? 0,
+          reason: event.reason ?? "",
+        };
+        appendStreamEvent(providerRetryPart(event));
+        break;
+      case "context_compacted":
+        flush();
+        run.compaction = {
+          elidedToolResults: event.elided_tool_results ?? 0,
+          summarizedMessages: event.summarized_messages ?? 0,
+        };
+        appendStreamEvent(contextCompactedPart(event));
+        break;
       case "memory_registered": {
         flush();
         const notice = normalizeMemoryNotice(event);

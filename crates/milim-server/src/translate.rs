@@ -7,7 +7,7 @@ use milim_core::api::anthropic::{
 use milim_core::api::ollama::{OllamaChatRequest, OllamaMessage};
 use milim_core::api::openai::{
     ChatCompletionRequest, ChatMessage, Content, ContentPart, FunctionCall, ImageUrl,
-    ReasoningEffort, Tool, ToolCall, ToolFunction,
+    ReasoningEffort, Tool, ToolCall, ToolFunction, Usage,
 };
 use milim_core::{Error, Result};
 use milim_inference::{CompletionRequest, SamplingParams};
@@ -43,6 +43,11 @@ pub fn openai_to_completion(req: ChatCompletionRequest) -> CompletionRequest {
             .get("thinking_token_budget")
             .and_then(Value::as_u64)
             .and_then(|value| u32::try_from(value).ok()),
+        prompt_cache_key: req
+            .extra
+            .get("prompt_cache_key")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     };
     CompletionRequest {
         model: req.model,
@@ -353,6 +358,35 @@ pub fn anthropic_stop_reason(finish: &str) -> String {
     .to_string()
 }
 
+/// Anthropic usage from milim usage. milim counts cached input inside
+/// `prompt_tokens`; Anthropic reports it beside `input_tokens`.
+pub fn anthropic_usage(usage: &Usage) -> anthropic::Usage {
+    let cache_read = usage.cache_read_tokens.unwrap_or(0);
+    let cache_write = usage.cache_write_tokens.unwrap_or(0);
+    anthropic::Usage {
+        input_tokens: usage
+            .prompt_tokens
+            .saturating_sub(cache_read)
+            .saturating_sub(cache_write),
+        output_tokens: usage.completion_tokens,
+        cache_creation_input_tokens: usage.cache_write_tokens,
+        cache_read_input_tokens: usage.cache_read_tokens,
+    }
+}
+
+/// OpenAI usage JSON, adding `prompt_tokens_details.cached_tokens` when the
+/// provider reported cache reads.
+pub fn openai_usage_value(usage: &Usage) -> Value {
+    let mut value = serde_json::to_value(usage).unwrap_or_default();
+    if let (Some(cached), Some(object)) = (usage.cache_read_tokens, value.as_object_mut()) {
+        object.insert(
+            "prompt_tokens_details".into(),
+            serde_json::json!({ "cached_tokens": cached }),
+        );
+    }
+    value
+}
+
 fn opt_f32(v: &Value, key: &str) -> Option<f32> {
     v.get(key).and_then(|x| x.as_f64()).map(|x| x as f32)
 }
@@ -382,6 +416,38 @@ mod tests {
     use super::*;
 
     const GEOMETRIC_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGP4z8DAAMIM/4EAAB/uBfsL2WiLAAAAAElFTkSuQmCC";
+
+    #[test]
+    fn wire_usage_carries_prompt_cache_tokens() {
+        let usage = Usage {
+            cache_read_tokens: Some(700),
+            cache_write_tokens: Some(200),
+            ..Usage::new(1_000, 50)
+        };
+        let anthropic = serde_json::to_value(anthropic_usage(&usage)).unwrap();
+        assert_eq!(
+            anthropic,
+            serde_json::json!({
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cache_creation_input_tokens": 200,
+                "cache_read_input_tokens": 700,
+            }),
+            "Anthropic input_tokens excludes the cached portions"
+        );
+        let openai = openai_usage_value(&usage);
+        assert_eq!(openai["prompt_tokens"], 1_000);
+        assert_eq!(openai["prompt_tokens_details"]["cached_tokens"], 700);
+
+        let uncached = Usage::new(10, 5);
+        assert_eq!(
+            serde_json::to_value(anthropic_usage(&uncached)).unwrap(),
+            serde_json::json!({ "input_tokens": 10, "output_tokens": 5 })
+        );
+        assert!(openai_usage_value(&uncached)
+            .get("prompt_tokens_details")
+            .is_none());
+    }
 
     #[test]
     fn maps_openai_sampling() {
