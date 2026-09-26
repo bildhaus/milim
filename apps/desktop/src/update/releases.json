@@ -1,4 +1,9 @@
 {
+  "0.2.73": {
+    "version": "0.2.73",
+    "summary": "milim 0.2.73 gives provider models a stronger coding harness with file search, safer edits, and background commands, fixes Gemini 3 tool use, checkpoints every turn from any client, and adds remote MCP servers, hooks, and custom slash commands.",
+    "items": []
+  },
   "0.2.72": {
     "version": "0.2.72",
     "summary": "milim 0.2.72 keeps long code and links inside the chat column so the transcript never scrolls sideways, renders runtime work summaries as collapsible sections, and trims the Tools menu back to six entries.",
