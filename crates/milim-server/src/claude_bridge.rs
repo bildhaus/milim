@@ -1934,6 +1934,16 @@ fn claude_run_args(req: &ClaudeRunRequest) -> Vec<String> {
     for denied in claude_denied_tools(req) {
         args.extend(["--disallowedTools".to_string(), denied.to_string()]);
     }
+    if claude_guarded(req) {
+        // Guarded exposes only read-only built-in tools, and only milim's own
+        // MCP servers: tools from the user's Claude configuration could write
+        // or execute even under `dontAsk` when their settings pre-approve them.
+        args.extend([
+            "--tools".to_string(),
+            CLAUDE_GUARDED_TOOLS.join(","),
+            "--strict-mcp-config".to_string(),
+        ]);
+    }
     if let Some(model) = clean_optional(req.model.as_deref()) {
         args.extend(["--model".to_string(), model]);
     }
@@ -2105,12 +2115,23 @@ fn claude_permission_mode(req: &ClaudeRunRequest) -> &'static str {
     }
 }
 
+/// Built-in Claude tools available in Guarded. Everything else, including
+/// shell, edit, and subagent tools, is left out of the session.
+const CLAUDE_GUARDED_TOOLS: &[&str] =
+    &["Read", "Glob", "Grep", "TodoWrite", "WebFetch", "WebSearch"];
+
+fn claude_guarded(req: &ClaudeRunRequest) -> bool {
+    !req.plan_mode
+        && claude_tools_allowed(req)
+        && account_runtime_policy(req.tool_approval_policy.as_deref()) == "guarded"
+}
+
 fn claude_denied_tools(req: &ClaudeRunRequest) -> Vec<&'static str> {
     if req.plan_mode {
         Vec::new()
     } else if !claude_tools_allowed(req) {
         vec!["*"]
-    } else if account_runtime_policy(req.tool_approval_policy.as_deref()) == "guarded" {
+    } else if claude_guarded(req) {
         vec!["Bash", "PowerShell", "Edit", "Write", "NotebookEdit"]
     } else {
         Vec::new()
@@ -2834,6 +2855,18 @@ not json
             claude_denied_tools(&req),
             vec!["Bash", "PowerShell", "Edit", "Write", "NotebookEdit"]
         );
+        let guarded_args = claude_run_args(&req);
+        let tools = guarded_args
+            .windows(2)
+            .find(|pair| pair[0] == "--tools")
+            .map(|pair| pair[1].clone())
+            .expect("Guarded passes a built-in tool allowlist");
+        assert_eq!(tools, "Read,Glob,Grep,TodoWrite,WebFetch,WebSearch");
+        assert!(!tools.contains("Bash") && !tools.contains("Edit") && !tools.contains("Agent"));
+        assert!(
+            guarded_args.iter().any(|arg| arg == "--strict-mcp-config"),
+            "Guarded ignores MCP servers from the user's Claude configuration"
+        );
 
         req.tool_approval_policy = Some("open".into());
         req.interactive_tool_approval = true;
@@ -2841,6 +2874,9 @@ not json
         assert!(claude_session_recovery_allowed(&req));
         assert_eq!(claude_permission_mode(&req), "bypassPermissions");
         assert!(claude_denied_tools(&req).is_empty());
+        let open_args = claude_run_args(&req);
+        assert!(!open_args.iter().any(|arg| arg == "--tools"));
+        assert!(!open_args.iter().any(|arg| arg == "--strict-mcp-config"));
 
         req.tool_approval_policy = Some("review".into());
         assert!(claude_interactive_tool_approval(&req));
