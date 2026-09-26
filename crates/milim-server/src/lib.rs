@@ -7,6 +7,7 @@
 //! embeddings, with bearer auth + loopback trust, CORS, and a body-size cap.
 
 mod account_profiles;
+mod account_runtime_common;
 mod account_runtime_events;
 mod account_runtime_update;
 mod agent_prompt;
