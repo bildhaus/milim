@@ -3174,7 +3174,7 @@ mod tests {
             return;
         }
         let dir = temp_dir("parallel");
-        let slow = r#"const readline=require('readline');const rl=readline.createInterface({input:process.stdin});rl.on('line',line=>{const m=JSON.parse(line);if(m.id===undefined)return;setTimeout(()=>process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result:m.method==='initialize'?{protocolVersion:'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'slow',version:'1'}}:{tools:[]}})+'\n'),800)});"#;
+        let slow = r#"const readline=require('readline');const rl=readline.createInterface({input:process.stdin});rl.on('line',line=>{const m=JSON.parse(line);if(m.id===undefined)return;setTimeout(()=>process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result:m.method==='initialize'?{protocolVersion:'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'slow',version:'1'}}:{tools:[]}})+'\n'),1500)});"#;
         let configs: Vec<McpServerConfig> = (0..3)
             .map(|index| node_config(&format!("slow-{index}"), slow))
             .collect();
@@ -3186,10 +3186,11 @@ mod tests {
         let hub = McpHub::open(&dir);
         let started = Instant::now();
         hub.connect_all().await;
-        // Each server needs ~1.6s (initialize + tools/list); serially that
-        // would be ~4.8s.
+        // Each server needs ~3s (initialize + tools/list); serially that
+        // would be ~9s. The bound leaves room for slow process startup on
+        // CI runners while still failing a serial connect.
         assert!(
-            started.elapsed() < Duration::from_millis(4000),
+            started.elapsed() < Duration::from_millis(6500),
             "{:?}",
             started.elapsed()
         );
