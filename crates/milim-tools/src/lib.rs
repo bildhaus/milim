@@ -284,6 +284,52 @@ pub fn tool_output_root() -> Option<&'static Path> {
     TOOL_OUTPUT_ROOT.get().map(PathBuf::as_path)
 }
 
+/// Saved tool output older than this is removed at startup.
+pub const TOOL_OUTPUT_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// Prune saved output older than [`TOOL_OUTPUT_RETENTION`] under `root`, then
+/// register it as the process-wide tool output root. Pruning is best-effort.
+pub fn init_tool_output_root(root: PathBuf) {
+    prune_tool_output(&root, TOOL_OUTPUT_RETENTION);
+    set_tool_output_root(root);
+}
+
+/// Remove files older than `max_age` under `root` (one level of run
+/// directories deep) and drop run directories left empty. Returns the number
+/// of removed files.
+pub fn prune_tool_output(root: &Path, max_age: Duration) -> usize {
+    let Some(cutoff) = std::time::SystemTime::now().checked_sub(max_age) else {
+        return 0;
+    };
+    let expired = |path: &Path| {
+        std::fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .is_ok_and(|modified| modified < cutoff)
+    };
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Ok(files) = std::fs::read_dir(&path) {
+                for file in files.flatten() {
+                    let file = file.path();
+                    if file.is_file() && expired(&file) && std::fs::remove_file(&file).is_ok() {
+                        removed += 1;
+                    }
+                }
+            }
+            // Fails harmlessly while the directory still holds recent output.
+            let _ = std::fs::remove_dir(&path);
+        } else if path.is_file() && expired(&path) && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 /// A serializable description of a tool (for `/mcp/tools` and tool listings).
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolSpec {
@@ -601,6 +647,16 @@ impl ToolRegistry {
         self.tool(name).ok()?.ui()
     }
 
+    /// Input schema of one tool, resolving aliases the same way as calls.
+    pub fn input_schema(&self, name: &str) -> Option<Value> {
+        self.tool(name).ok().map(|tool| tool.input_schema())
+    }
+
+    /// Canonical names of all registered tools, ordered by name.
+    pub fn names(&self) -> Vec<String> {
+        self.tools.keys().cloned().collect()
+    }
+
     /// Effect declared by a tool, resolving aliases the same way as calls.
     pub fn effect(&self, name: &str) -> Option<ToolEffect> {
         self.tool(name).ok().map(|tool| tool.effect())
@@ -851,6 +907,27 @@ mod tests {
         left.unwrap();
         right.unwrap();
         assert_eq!(maximum.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn prune_tool_output_removes_only_expired_files() {
+        let root = std::env::temp_dir().join(format!("milim-prune-{}", std::process::id()));
+        let run = root.join("run-1");
+        std::fs::create_dir_all(&run).unwrap();
+        let old = run.join("old.txt");
+        std::fs::write(&old, "old").unwrap();
+        let fresh_run = root.join("run-2");
+        std::fs::create_dir_all(&fresh_run).unwrap();
+        std::fs::write(fresh_run.join("fresh.txt"), "fresh").unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(fresh_run.join("fresh.txt"), "fresh").unwrap();
+        // Everything written before the sleep is older than the 10ms cutoff.
+        let removed = prune_tool_output(&root, Duration::from_millis(10));
+        assert_eq!(removed, 1);
+        assert!(!old.exists());
+        assert!(!run.exists(), "an emptied run directory is removed");
+        assert!(fresh_run.join("fresh.txt").exists());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[tokio::test]
