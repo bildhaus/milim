@@ -3,6 +3,11 @@ import { statusPart } from "./turnEvents.js";
 
 type ChatStreamEventPart = Extract<ChatStreamPart, { kind: "event" }>;
 
+/**
+ * Checkpoint the folder before a turn the renderer runs itself (goals and
+ * one-shot approval or recovery grants). Canonical control turns are
+ * checkpointed in Rust and arrive as `workspace_checkpoint` timeline items.
+ */
 export async function checkpointWorkspaceBeforeTurn({
   sessionId,
   turnId,
@@ -34,8 +39,15 @@ export async function checkpointWorkspaceBeforeTurn({
     await setWorkspace(workspaceFolder);
     const result = await runWorkspaceGitAction("checkpoint", { message: turnId });
     if (!result.ok || !result.checkpoint) {
-      if (!/No Git|No working folder/i.test(result.message)) {
-        appendStreamEvent(sessionId, statusPart("Workspace checkpoint skipped", result.message, "warning"));
+      if (!/No working folder/i.test(result.message)) {
+        appendStreamEvent(
+          sessionId,
+          statusPart(
+            "Workspace checkpoint skipped",
+            result.message,
+            /No Git/i.test(result.message) ? "status" : "warning",
+          ),
+        );
       }
       return;
     }

@@ -73,3 +73,20 @@ await checkpointWorkspaceBeforeTurn({
 assert.equal(warnings.length, 1);
 assert.equal(warnings[0].kind, "event");
 assert.match(warnings[0].kind === "event" ? warnings[0].detail ?? "" : "", /permission denied/);
+
+const notGit: ChatStreamPart[] = [];
+await checkpointWorkspaceBeforeTurn({
+  sessionId: "s4",
+  turnId: "turn-4",
+  folder: "C:\\plain",
+  planMode: false,
+  useTools: true,
+  accountRuntimeMayUseTools: false,
+  setWorkspace: async () => {},
+  runWorkspaceGitAction: async () =>
+    gitResult({ ok: false, message: "No Git repository found in the selected folder" }),
+  attachCheckpoint: () => assert.fail("a folder outside Git has no checkpoint"),
+  appendStreamEvent: (_sessionId, part) => notGit.push(part),
+});
+assert.equal(notGit.length, 1, "a folder outside Git reports the skipped checkpoint");
+assert.equal(notGit[0].kind === "event" ? notGit[0].eventType : undefined, "status");

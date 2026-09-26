@@ -217,7 +217,7 @@ fn staging_hunk_action(
         }
     };
     let command = git_command_text(apply_args);
-    match git_output_with_stdin(root, apply_args, patch.as_bytes()) {
+    match git_output_with_stdin(root, apply_args, &[], patch.as_bytes()) {
         Ok(output) if output.status.success() => workspace_git_combined_response(
             action,
             &command,
@@ -271,9 +271,10 @@ fn run_staging_git(
     }
 }
 
-fn git_output_with_stdin(
+pub(super) fn git_output_with_stdin(
     cwd: &FsPath,
     args: &[&str],
+    envs: &[(&str, String)],
     input: &[u8],
 ) -> std::result::Result<Output, String> {
     let mut cmd = Command::new("git");
@@ -283,13 +284,16 @@ fn git_output_with_stdin(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
     let mut child = milim_core::proc::hide_console(&mut cmd)
         .spawn()
         .map_err(|e| format!("Failed to run git: {e}"))?;
     if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(input)
-            .map_err(|e| format!("Failed to write patch to git: {e}"))?;
+            .map_err(|e| format!("Failed to write input to git: {e}"))?;
     }
     child
         .wait_with_output()

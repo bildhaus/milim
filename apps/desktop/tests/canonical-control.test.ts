@@ -715,4 +715,70 @@ assert.equal(
   "pending canonical approvals keep the exact request for review",
 );
 
+const checkpointData = {
+  ref: "refs/milim/checkpoints/turn-1",
+  createdAt: 42,
+  folder: "/work",
+  root: "/work",
+  head: "abc123",
+};
+const checkpointed = projectControlRunMessages([
+  item(1, "message", { id: "user-1", role: "user", content: "edit" }),
+  item(2, "workspace_checkpoint", { status: "created", checkpoint: checkpointData }),
+  item(3, "assistant_delta", { text: "partial" }),
+  item(4, "run_status", { status: "failed" }),
+], "run-1").find((message) => message.role === "assistant");
+assert.deepEqual(
+  checkpointed?.workspaceCheckpoint,
+  checkpointData,
+  "a Rust checkpoint stays attached even when the run failed before its reply",
+);
+assert.deepEqual(checkpointed?.streamParts?.[0], {
+  kind: "event",
+  eventType: "status",
+  label: "Workspace checkpoint",
+  detail: "Restore is available from this turn.",
+  status: "done",
+});
+const persistedCheckpoint = projectControlRunMessages([
+  item(1, "message", {
+    id: "assistant-1",
+    role: "assistant",
+    content: "done",
+    workspaceCheckpoint: checkpointData,
+  }),
+], "run-1")[0];
+assert.equal(persistedCheckpoint.workspaceCheckpoint?.ref, checkpointData.ref);
+const skippedCheckpoint = projectControlRunMessages([
+  item(1, "workspace_checkpoint", {
+    status: "skipped",
+    reason: "not_git",
+    message: "No Git repository found in the selected folder",
+  }),
+  item(2, "workspace_checkpoint", { status: "skipped", reason: "error", message: "disk full" }),
+  item(3, "assistant_delta", { text: "ok" }),
+], "run-1")[0];
+assert.equal(skippedCheckpoint.workspaceCheckpoint, undefined);
+assert.deepEqual(
+  skippedCheckpoint.streamParts?.slice(0, 2).map((part) =>
+    part.kind === "event" ? [part.eventType, part.label, part.detail] : null
+  ),
+  [
+    ["status", "Workspace checkpoint skipped", "No Git repository found in the selected folder"],
+    ["warning", "Workspace checkpoint skipped", "disk full"],
+  ],
+);
+assert.equal(
+  projectControlRunMessages([
+    item(1, "workspace_checkpoint", {
+      status: "created",
+      checkpoint: { ...checkpointData, ref: "refs/heads/main" },
+    }),
+    item(2, "assistant_delta", { text: "ok" }),
+  ], "run-1")[0].workspaceCheckpoint,
+  undefined,
+  "only milim checkpoint refs become restore points",
+);
+
+
 console.log("canonical control projection tests passed");

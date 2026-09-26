@@ -6,7 +6,7 @@ title: Desktop app
 summary: Unified threads, projects, composer controls, artifacts, plan mode, goals, search, rendering, settings, and slash commands.
 group: Core
 order: 30
-updated: 2026-09-23
+updated: 2026-09-26
 ---
 
 milim is your local control plane for coding agents: use your own models and subscriptions, keep one canonical thread, review the diff, and ship.
@@ -220,7 +220,9 @@ milim registers one active preview surface across artifact iframes, native URL p
 
 ## Workspace checkpoints
 
-Tool-enabled turns with a selected Git workspace create a Git worktree checkpoint before the assistant can write files or run commands. Assistant messages with a checkpoint expose a restore action that returns the workspace files to their pre-turn content without moving the current branch HEAD.
+Rust checkpoints the selected Git workspace when a canonical turn that may change files starts running, whichever client sent it: the desktop, a paired phone, the control API, or a schedule. That covers native provider turns with tools and every Codex, Claude, OpenCode, and Pi turn; Plan mode and provider turns without tools skip it. The checkpoint is a commit under `refs/milim/checkpoints/` that snapshots tracked and non-ignored untracked files without touching the index, HEAD, or branches. The run's timeline records it as a `workspace_checkpoint` item, the final assistant message carries it as `workspaceCheckpoint`, and the transcript shows **Workspace checkpoint**. A folder outside Git, or a checkpoint that fails, shows **Workspace checkpoint skipped** with the reason. Turns the renderer still runs itself, such as goals and one-shot approval grants, take the same checkpoint from the desktop before they start.
+
+Assistant messages with a checkpoint expose a restore action. A restore accepts only `refs/milim/checkpoints/` refs and first checkpoints the current files, so the notice offers **Undo restore**. It then rewrites only the working tree: files the checkpoint differs on are written back, files added after it are removed, and folders left empty are removed. Files that match an ignore rule are never deleted, and the Git index is left as it was, so staged changes stay staged and may show as edits relative to the restored files. HEAD and branches do not move. Each new checkpoint prunes refs beyond the newest 200 in that repository that are also more than 30 days old.
 
 ## Git side panel
 
