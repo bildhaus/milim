@@ -28,7 +28,7 @@ Agents are for repeatable behavior, tool access, and longer work. Keep one-off q
 | Mode | Server behavior |
 |---|---|
 | `review` | Read-only tools run automatically. Every mutating, command, or unknown call pauses before execution and shows its exact arguments inline. Approve or Deny resolves only that invocation; Stop, disconnect, or restart cancels it. This is the default for new chats. |
-| `guarded` | Only tools declaring a read-only effect are exposed. Writes, commands, schedules, computer/preview actions, memory writes, and unclassified MCP tools are withheld. |
+| `guarded` | Only tools declaring a read-only effect are exposed. Writes, commands, schedules, computer/preview actions, memory writes, and unclassified MCP tools are withheld. External MCP tools count as read-only only when their server marks them `readOnlyHint` and the user enabled **Trust this server's read-only hints**; otherwise Guarded withholds them. |
 | `open` | Host filesystem and shell tools run with unrestricted machine access; the selected folder is their working directory, not a sandbox boundary. Supported account runtimes receive their native full-access mode. Enabled-tool, computer-use, MCP, memory, skill, connector-input, and connector-authorization gates still apply. Switching to Open auto-approves ordinary pending and subsequent command, file-change, and permission requests. |
 
 milim-native uses the registry's effect metadata. Review and Guarded bind host filesystem tools to the selected workspace; Open removes that boundary. The separate **Docker sandbox** setting only enables the bounded `run_command` tool and does not constrain Open host tools. Codex keeps `on-request` approval and relays app-server command, file, and permission requests: Review uses a workspace-write sandbox after approval, while Open uses Codex `danger-full-access` and auto-approves ordinary requests. Claude uses a temporary per-run Streamable HTTP MCP permission tool and deletes its run token/configuration on completion. A runtime that cannot support its approval protocol fails Review instead of silently switching modes. API callers may still set `tool_approval_grant: true` as an explicit whole-run compatibility grant; streamed desktop runs do not.
@@ -39,7 +39,7 @@ Approval is not just UI decoration. The server rebuilds the effective tool regis
 
 Approval controls execution, not a virtual patch queue. After an approved consequential call runs, the latest response's changed-files card inspects the resulting repository diff. Review failures retain **Retry** and **Open Git**, and **Undo** restores the pre-turn checkpoint.
 
-The same policy is rechecked for calls made by an inline MCP App. Review approval is valid only for the exact displayed call; Guarded accepts only a tool whose MCP annotations declare it read-only; Open accepts eligible app-visible tools. An App can call only tools from its fixed originating server, so one server's view cannot use another server's private catalog.
+The same policy is rechecked for calls made by an inline MCP App. Review approval is valid only for the exact displayed call; Guarded accepts only a tool whose MCP annotations declare it read-only on a server whose read-only hints are trusted; Open accepts eligible app-visible tools. An App can call only tools from its fixed originating server, so one server's view cannot use another server's private catalog.
 
 ## Agents, Workers, and Runs
 
