@@ -457,6 +457,47 @@
   color: var(--error);
 }
 
+.mcp-log-list {
+  display: grid;
+  gap: 4px;
+  max-height: 180px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.mcp-log-entry {
+  display: grid;
+  grid-template-columns: max-content max-content minmax(0, 1fr);
+  gap: 8px;
+  color: var(--secondary-text);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.mcp-log-entry time,
+.mcp-log-entry strong {
+  color: var(--tertiary-text);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.mcp-log-entry span {
+  overflow-wrap: anywhere;
+}
+
+.mcp-log-entry.warning strong {
+  color: var(--warning);
+}
+
+.mcp-log-entry.error strong,
+.mcp-log-entry.critical strong,
+.mcp-log-entry.alert strong,
+.mcp-log-entry.emergency strong {
+  color: var(--error);
+}
+
 .mcp-action-footer {
   position: sticky;
   bottom: 0;
