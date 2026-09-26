@@ -8174,3 +8174,74 @@ async fn anthropic_tool_use_block() {
     assert_eq!(block["name"], "echo");
     assert_eq!(block["input"]["text"], "test");
 }
+
+#[tokio::test]
+async fn custom_commands_list_and_expand_workspace_templates() {
+    let workspace =
+        std::env::temp_dir().join(format!("milim-http-commands-{}", uuid::Uuid::new_v4()));
+    let commands = workspace.join(".milim").join("commands").join("git");
+    std::fs::create_dir_all(&commands).unwrap();
+    std::fs::write(
+        commands.join("review.md"),
+        "---\ndescription: Review a branch\nargument-hint: <branch> [focus]\n---\nReview $1 focusing on $2. All: $ARGUMENTS",
+    )
+    .unwrap();
+    let state = AppState::new(Arc::new(TestBackend::new()), ServerConfiguration::default());
+    let base = spawn(state).await;
+    let client = reqwest::Client::new();
+    let folder = workspace.to_string_lossy().to_string();
+
+    let listed: Value = client
+        .get(format!("{base}/commands"))
+        .query(&[("workspace", folder.as_str())])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let review = listed["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|command| command["name"] == "git:review")
+        .expect("project command is listed");
+    assert_eq!(review["source"], "project");
+    assert_eq!(review["description"], "Review a branch");
+    assert_eq!(review["argument_hint"], "<branch> [focus]");
+    assert!(review.get("template").is_none());
+
+    let expanded: Value = client
+        .post(format!("{base}/commands/expand"))
+        .json(&json!({"workspace": folder, "name": "git:review", "arguments": "main tests"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        expanded["prompt"],
+        "Review main focusing on tests. All: main tests"
+    );
+
+    let missing = client
+        .post(format!("{base}/commands/expand"))
+        .json(&json!({"workspace": folder, "name": "git:missing"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let invalid = client
+        .get(format!("{base}/commands"))
+        .query(&[(
+            "workspace",
+            workspace.join("absent").to_string_lossy().as_ref(),
+        )])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), reqwest::StatusCode::BAD_REQUEST);
+    std::fs::remove_dir_all(workspace).ok();
+}

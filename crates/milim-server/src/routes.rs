@@ -70,6 +70,7 @@ use milim_tools::{Tool, ToolEffect, ToolRegistry};
 
 mod account_runtimes;
 mod agents;
+mod commands;
 mod control;
 mod harnesses;
 mod inference;
@@ -81,6 +82,7 @@ mod workspace;
 
 pub(crate) use account_runtimes::*;
 pub(crate) use agents::*;
+pub(crate) use commands::*;
 pub(crate) use control::*;
 pub(crate) use harnesses::*;
 pub(crate) use inference::*;

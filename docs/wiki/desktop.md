@@ -6,7 +6,7 @@ title: Desktop app
 summary: Unified threads, projects, composer controls, artifacts, plan mode, goals, search, rendering, settings, and slash commands.
 group: Core
 order: 30
-updated: 2026-09-23
+updated: 2026-09-26
 ---
 
 milim is your local control plane for coding agents: use your own models and subscriptions, keep one canonical thread, review the diff, and ship.
@@ -313,6 +313,32 @@ While a milim provider-agent run advertises steering, Ctrl/Cmd+Enter and the exp
 | `/clear` | Start a fresh chat through the shared inherited/configured new-chat policy. Computer Use, Plan Mode, goals, temporary instructions, and running state always reset. |
 
 Calling `/privacy` or `/approval` without one of those valid arguments shows usage help and leaves the current state unchanged. Every slash command is also available from the command palette: commands that need an argument, such as `/agent` and `/model`, place `/<command> ` in the composer, and Privacy and Approval appear as one palette entry per mode.
+
+### Custom slash commands
+
+Markdown files define your own prompt commands. milim reads them from these folders, in precedence order:
+
+| Scope | Folders |
+|---|---|
+| Project | `<thread folder>/.milim/commands/`, then `<thread folder>/.claude/commands/` |
+| User | `~/.milim/commands/`, then `~/.claude/commands/` |
+
+Each `*.md` file becomes `/<file name>`, lowercased. Files in subfolders are namespaced, so `git/commit.md` becomes `/git:commit`; nesting is limited to two folder levels, and names may use only letters, digits, `-`, and `_`. When the same name appears more than once, the first definition in the order above wins, so project commands override user commands. Built-in commands always win over a custom command with the same name.
+
+An optional frontmatter block sets the menu text. Only flat `description` and `argument-hint` keys are read; other keys, such as Claude Code's `allowed-tools`, are ignored. Without a description, the menu shows the file's first non-empty line.
+
+```markdown
+---
+description: Review a branch
+argument-hint: <branch> [focus]
+---
+Review the changes on $1 against main. Focus on $2.
+Full request: $ARGUMENTS
+```
+
+The body is a prompt template. `$ARGUMENTS` is replaced by everything after the command name, and `$1` through `$9` by whitespace-separated positional arguments; quotes group words into one argument, and a missing argument becomes empty text. If the template uses no placeholder, non-empty arguments are appended after a blank line. Files larger than 64 KiB are skipped.
+
+Custom commands appear in the slash menu after the built-ins, labeled Project or User, and follow the Commands suggestion source. The list reloads when the thread folder changes and when the window becomes visible again. Selecting one inserts `/<name> `. Sending `/<name> arguments` expands the template on the server and sends the result as an ordinary user message, or queues it while a reply is running. The expanded text, not the command, is what appears in the transcript.
 
 ## Command palette and shortcuts
 

@@ -4864,6 +4864,46 @@ export async function getUsageSummary(days: number): Promise<UsageSummary> {
   );
 }
 
+/** A user- or project-defined slash command loaded from a Markdown file. */
+export interface CustomSlashCommand {
+  name: string;
+  description: string;
+  argument_hint?: string | null;
+  source: "project" | "user";
+  path: string;
+}
+
+/**
+ * Custom slash commands for a thread workspace. An empty workspace lists user
+ * commands only. Failures return an empty list so the built-in menu still works.
+ */
+export async function listCustomSlashCommands(workspace: string): Promise<CustomSlashCommand[]> {
+  try {
+    const params = new URLSearchParams({ workspace: workspace.trim() });
+    const response = await authFetch(`${BASE}/commands?${params}`);
+    if (!response.ok) return [];
+    const body = (await response.json()) as { commands?: CustomSlashCommand[] };
+    return Array.isArray(body.commands) ? body.commands : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Expand a custom slash command template into the prompt text to send. */
+export async function expandCustomSlashCommand(
+  workspace: string,
+  name: string,
+  argumentsText: string,
+): Promise<string> {
+  const response = await authFetch(`${BASE}/commands/expand`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspace: workspace.trim(), name, arguments: argumentsText }),
+  });
+  const body = await parseJsonResponse<{ prompt: string }>(response, `Expanding /${name} failed`);
+  return body.prompt;
+}
+
 export async function getWorkspaceContext(): Promise<WorkspaceContext | null> {
   try {
     const r = await authFetch(`${BASE}/workspace/context`);
