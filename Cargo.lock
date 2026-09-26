@@ -1282,11 +1282,16 @@ name = "milim-mcp-client"
 version = "0.2.72"
 dependencies = [
  "async-trait",
+ "axum",
+ "base64",
+ "futures",
  "milim-core",
  "milim-storage",
  "milim-tools",
+ "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tracing",
  "uuid",
