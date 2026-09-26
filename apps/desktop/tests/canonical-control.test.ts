@@ -794,4 +794,66 @@ assert.equal(
   "pending approvals carry the prefix Rust would allow for the chat",
 );
 
+// A provider retry drops the failed attempt's partial output (UTF-8 bytes)
+// and shows a pending notice until the retried attempt streams.
+const retryItems = [
+  item(1, "assistant_delta", { text: "Plan: ", reasoning: "think" }),
+  item(2, "assistant_delta", { text: "caf\u00e9 \u{1f600}", reasoning: "ing" }),
+  item(3, "provider_retry", {
+    attempt: 2,
+    delay_ms: 4000,
+    reason: "rate limited (429)",
+    discarded_content_bytes: 10,
+    discarded_reasoning_bytes: 3,
+  }),
+];
+const retrying = projectControlRunMessages(retryItems, "run-1")[0];
+assert.equal(retrying.content, "Plan: ", "the live stream drops the failed attempt's text");
+assert.deepEqual(
+  retrying.streamParts?.map((part) => part.kind === "event" ? [part.label, part.status] : [part.kind, part.content]),
+  [
+    ["text", "Plan: "],
+    ["thinking", "think"],
+    ["Retrying after rate limit (attempt 2, 4s)...", "running"],
+  ],
+);
+const retried = projectControlRunMessages([
+  ...retryItems,
+  item(4, "assistant_delta", { text: "done" }),
+  item(5, "message", { id: "assistant-1", role: "assistant", content: "Plan: done", reasoning: "think" }),
+], "run-1")[0];
+assert.deepEqual(
+  retried.streamParts?.map((part) => part.kind === "event" ? [part.label, part.status] : [part.kind, part.content]),
+  [
+    ["text", "Plan: "],
+    ["thinking", "think"],
+    ["Retried after rate limit (attempt 2)", "done"],
+    ["text", "done"],
+  ],
+  "the final message keeps the live parts once the retried text matches",
+);
+
+const compacted = projectControlRunMessages([
+  item(1, "context_compacted", {
+    elided_tool_results: 12,
+    summarized_messages: 30,
+    estimated_tokens_before: 150000,
+    estimated_tokens_after: 60000,
+  }),
+], "run-1")[0];
+assert.deepEqual(
+  compacted.streamParts?.map((part) => part.kind === "event" ? [part.eventType, part.label, part.detail] : []),
+  [["status", "Context compacted: 12 older tool outputs elided, 30 messages summarized", "About 150,000 to 60,000 tokens"]],
+);
+
+const timedOut = projectControlRunMessages([
+  item(1, "tool_approval_required", { approval_id: "approval-late", name: "shell" }),
+  item(2, "tool_approval_resolved", { approval_id: "approval-late", decision: "deny", reason: "timed_out" }),
+], "run-1")[0];
+assert.deepEqual(
+  timedOut.streamParts?.map((part) => part.kind === "event" ? [part.label, part.approvalStatus] : []),
+  [["Approval timed out", "denied"]],
+  "a timed-out approval resolves its own card",
+);
+
 console.log("canonical control projection tests passed");

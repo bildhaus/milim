@@ -10,7 +10,12 @@ import {
   type ControlTimelineItemV1,
   type WorkspaceCheckpoint,
 } from "../api.js";
-import { appendPhaseStreamPart } from "./streamParts.js";
+import {
+  appendPhaseStreamPart,
+  discardStreamContent,
+  dropTrailingUtf8Bytes,
+} from "./streamParts.js";
+import { contextCompactedPart, providerRetryPart } from "./turnEvents.js";
 import { providerErrorFromValue, type ProviderErrorInfo } from "./providerErrors.js";
 import type { QueuedMessage } from "../sessions/store.js";
 
@@ -281,11 +286,21 @@ function eventPart(item: ControlTimelineItemV1): ChatStreamPart | null {
     return {
       kind: "event",
       eventType: "status",
-      label: approved ? "Tool call approved" : "Tool call denied",
+      label: data.reason === "timed_out"
+        ? "Approval timed out"
+        : approved ? "Tool call approved" : "Tool call denied",
       status: "done",
       approvalId,
       approvalStatus: approved ? "approved" : "denied",
     };
+  }
+  if (item.type === "context_compacted") {
+    return contextCompactedPart({
+      elided_tool_results: finiteNumber(data.elided_tool_results),
+      summarized_messages: finiteNumber(data.summarized_messages),
+      estimated_tokens_before: finiteNumber(data.estimated_tokens_before),
+      estimated_tokens_after: finiteNumber(data.estimated_tokens_after),
+    });
   }
   if (item.type === "warning" || item.type === "error") {
     return {
@@ -329,6 +344,18 @@ function eventPart(item: ControlTimelineItemV1): ChatStreamPart | null {
   return null;
 }
 
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function providerRetryFields(data: Record<string, unknown>) {
+  return {
+    attempt: finiteNumber(data.attempt),
+    delay_ms: finiteNumber(data.delay_ms),
+    reason: typeof data.reason === "string" ? data.reason : undefined,
+  };
+}
+
 function appendStreamContent(
   parts: ChatStreamPart[],
   kind: "text" | "thinking",
@@ -344,6 +371,16 @@ function appendStreamEvent(
   parts: ChatStreamPart[],
   part: ChatStreamPart,
 ): void {
+  // A decision lands on the approval card it resolves.
+  if (part.kind === "event" && part.approvalId && part.approvalStatus !== "pending") {
+    for (let index = parts.length - 1; index >= 0; index -= 1) {
+      const current = parts[index];
+      if (current.kind === "event" && current.approvalId === part.approvalId) {
+        parts[index] = { ...current, ...part };
+        return;
+      }
+    }
+  }
   if (part.kind !== "event" || part.eventType !== "tool" || part.status === "running") {
     parts.push(part);
     return;
@@ -427,9 +464,32 @@ export function projectControlRunMessages(
   let streamingReasoning = "";
   let workspaceCheckpoint: WorkspaceCheckpoint | undefined;
   const streamParts: ChatStreamPart[] = [];
+  let pendingRetry: { index: number; data: Record<string, unknown> } | null = null;
   for (const item of items) {
     if (item.run_id !== runId) continue;
     const data = item.data;
+    if (pendingRetry) {
+      // Anything after a retry means the retried attempt is under way.
+      streamParts[pendingRetry.index] = providerRetryPart(providerRetryFields(pendingRetry.data), false);
+      pendingRetry = null;
+    }
+    if (item.type === "provider_retry") {
+      // Rust drops the failed attempt's partial output; the retried step
+      // streams the answer again.
+      const contentBytes = finiteNumber(data.discarded_content_bytes) ?? 0;
+      const reasoningBytes = finiteNumber(data.discarded_reasoning_bytes) ?? 0;
+      streamingText = dropTrailingUtf8Bytes(streamingText, contentBytes);
+      streamingReasoning = dropTrailingUtf8Bytes(streamingReasoning, reasoningBytes);
+      const kept = discardStreamContent(
+        discardStreamContent(streamParts, "text", contentBytes),
+        "thinking",
+        reasoningBytes,
+      );
+      streamParts.length = 0;
+      streamParts.push(...kept, providerRetryPart(providerRetryFields(data)));
+      pendingRetry = { index: streamParts.length - 1, data };
+      continue;
+    }
     if (item.type === "workspace_checkpoint") {
       workspaceCheckpoint = projectedWorkspaceCheckpoint(data.checkpoint) ?? workspaceCheckpoint;
     }

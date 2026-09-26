@@ -2,7 +2,10 @@ import type { ChatStreamPart } from "../src/api.js";
 import {
   appendPhaseStreamPart,
   coalesceStreamPhases,
+  discardStreamContent,
+  dropTrailingUtf8Bytes,
   groupCompletedStreamActivity,
+  PROVIDER_RETRY_EVENT,
 } from "../src/lib/streamParts.js";
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -207,4 +210,37 @@ deepEqual(
     { kind: "thinking", content: "working folder..." },
   ],
   "phase-aware ingest should append into the current text and thinking parts",
+);
+
+equal(dropTrailingUtf8Bytes("ab\u00e9\u{1f600}", 6), "ab", "UTF-8 byte counts drop whole code points");
+equal(dropTrailingUtf8Bytes("abc", 10), "", "over-long discards clamp to empty");
+deepEqual(
+  discardStreamContent(
+    [
+      { kind: "text", content: "before tool" },
+      { kind: "event", eventType: "tool", label: "Ran command", status: "done" },
+      { kind: "thinking", content: "hmm" },
+      { kind: "text", content: "partial answer" },
+    ],
+    "text",
+    100,
+  ),
+  [
+    { kind: "text", content: "before tool" },
+    { kind: "event", eventType: "tool", label: "Ran command", status: "done" },
+    { kind: "thinking", content: "hmm" },
+  ],
+  "discarding a failed attempt never reaches text before the last tool event",
+);
+const retryGrouped = groupCompletedStreamActivity(
+  [
+    { kind: "event", eventType: "status", label: "Retried after rate limit (attempt 1)", name: PROVIDER_RETRY_EVENT, status: "done" },
+    { kind: "text", content: "Answer" },
+  ],
+  false,
+);
+deepEqual(
+  retryGrouped.map((part) => part.kind),
+  ["workGroup", "text"],
+  "a settled retry notice folds into the completed work group",
 );

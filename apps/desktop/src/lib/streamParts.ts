@@ -56,6 +56,59 @@ export function appendPhaseStreamPart(
 }
 
 /**
+ * Drop the last `bytes` UTF-8 bytes of `text`. Rust reports output discarded
+ * by a failed provider attempt in UTF-8 bytes; JavaScript strings are UTF-16.
+ */
+export function dropTrailingUtf8Bytes(text: string, bytes: number): string {
+  let remaining = Math.max(0, Math.floor(bytes));
+  let end = text.length;
+  while (remaining > 0 && end > 0) {
+    const code = text.charCodeAt(end - 1);
+    const pair = end >= 2 && code >= 0xdc00 && code <= 0xdfff
+      && (text.codePointAt(end - 2) ?? 0) >= 0x10000;
+    if (pair) {
+      end -= 2;
+      remaining -= 4;
+    } else {
+      end -= 1;
+      remaining -= code < 0x80 ? 1 : code < 0x800 ? 2 : 3;
+    }
+  }
+  return text.slice(0, end);
+}
+
+/**
+ * Remove the trailing text or reasoning a failed provider attempt streamed.
+ * The attempt started after the last tool event, so trimming stops there.
+ */
+export function discardStreamContent(
+  parts: readonly ChatStreamPart[],
+  kind: "text" | "thinking",
+  bytes: number,
+): ChatStreamPart[] {
+  const next = parts.slice();
+  let remaining = Math.max(0, Math.floor(bytes));
+  for (let index = next.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const part = next[index];
+    if (part.kind === "event" && part.eventType === "tool") break;
+    if (part.kind !== kind) continue;
+    const size = utf8Length(part.content);
+    if (size <= remaining) {
+      next.splice(index, 1);
+      remaining -= size;
+    } else {
+      next[index] = { kind, content: dropTrailingUtf8Bytes(part.content, remaining) };
+      remaining = 0;
+    }
+  }
+  return next;
+}
+
+function utf8Length(text: string): number {
+  return new TextEncoder().encode(text).length;
+}
+
+/**
  * Text and reasoning are separate provider channels, not a shared chronology.
  * Coalesce each channel inside tool-event boundaries; tool events retain their order.
  */
@@ -105,11 +158,21 @@ export function liveWorkGroupSummary(group: ChatStreamWorkGroup): WorkGroupSumma
   return null;
 }
 
+/** Stream event name for a provider retry notice; it folds into the work group. */
+export const PROVIDER_RETRY_EVENT = "provider_retry";
+
+function isProviderRetryPart(part: ChatStreamPart): boolean {
+  return part.kind === "event" && part.name === PROVIDER_RETRY_EVENT;
+}
+
 function completedInternalPart(
   part: ChatStreamPart,
   terminalOutcome: StreamTerminalOutcome,
 ): ChatStreamPart | null {
   if (part.kind === "thinking") return part;
+  if (part.kind === "event" && isProviderRetryPart(part)) {
+    return part.status === "running" ? { ...part, status: "done" } : part;
+  }
   if (
     part.kind === "event" &&
     part.approvalId != null &&
@@ -133,6 +196,7 @@ function completedInternalPart(
 
 function isLiveInternalPart(part: ChatStreamPart): boolean {
   return part.kind === "thinking" ||
+    isProviderRetryPart(part) ||
     (part.kind === "event" && part.approvalId != null && (part.status ?? "done") !== "error") ||
     (part.kind === "event" && part.eventType === "tool" && !part.mcpApp);
 }

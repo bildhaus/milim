@@ -8,6 +8,7 @@ import type {
   ToolApprovalRequest,
   ToolApprovalRequestKind,
 } from "../api";
+import { PROVIDER_RETRY_EVENT } from "./streamParts.js";
 
 type ChatStreamEventPart = Extract<ChatStreamPart, { kind: "event" }>;
 type AccountRuntimeToolEvent = Extract<
@@ -359,12 +360,88 @@ export function statusPart(label: string, detail?: string, tone: "status" | "war
   };
 }
 
+function retryCause(reason: string): string {
+  const label = reason.replace(/\s*\(\d{3}\)$/, "").trim();
+  switch (label) {
+    case "rate limited":
+      return "rate limit";
+    case "provider overloaded":
+      return "provider overload";
+    default:
+      return label || "provider error";
+  }
+}
+
+function retryDelay(delayMs: number): string {
+  const seconds = Math.max(0, delayMs) / 1000;
+  if (seconds >= 10) return `${Math.round(seconds)}s`;
+  return `${Number(seconds.toFixed(1))}s`;
+}
+
+/** Transcript copy for a pending provider retry, e.g. "Retrying after rate limit (attempt 2, 4s)...". */
+export function providerRetryLabel(attempt: number, delayMs: number, reason: string): string {
+  return `Retrying after ${retryCause(reason)} (attempt ${attempt}, ${retryDelay(delayMs)})...`;
+}
+
+/**
+ * A provider retry notice. It runs until the retried attempt produces output,
+ * then settles into a quiet line that folds into the work group.
+ */
+export function providerRetryPart(
+  event: { attempt?: number; delay_ms?: number; reason?: string },
+  pending = true,
+): ChatStreamEventPart {
+  const attempt = event.attempt ?? 1;
+  const reason = event.reason ?? "";
+  return {
+    kind: "event",
+    eventType: "status",
+    label: pending
+      ? providerRetryLabel(attempt, event.delay_ms ?? 0, reason)
+      : `Retried after ${retryCause(reason)} (attempt ${attempt})`,
+    icon: "tool",
+    name: PROVIDER_RETRY_EVENT,
+    status: pending ? "running" : "done",
+  };
+}
+
+/** Transcript copy for a context compaction, e.g. "Context compacted: 12 older tool outputs elided, 30 messages summarized". */
+export function contextCompactedLabel(elidedToolResults: number, summarizedMessages: number): string {
+  const changes = [
+    elidedToolResults > 0
+      ? `${elidedToolResults} older tool output${elidedToolResults === 1 ? "" : "s"} elided`
+      : null,
+    summarizedMessages > 0
+      ? `${summarizedMessages} message${summarizedMessages === 1 ? "" : "s"} summarized`
+      : null,
+  ].filter(Boolean);
+  return changes.length ? `Context compacted: ${changes.join(", ")}` : "Context compacted";
+}
+
+export function contextCompactedPart(event: {
+  elided_tool_results?: number;
+  summarized_messages?: number;
+  estimated_tokens_before?: number;
+  estimated_tokens_after?: number;
+}): ChatStreamEventPart {
+  const before = event.estimated_tokens_before;
+  const after = event.estimated_tokens_after;
+  return statusPart(
+    contextCompactedLabel(event.elided_tool_results ?? 0, event.summarized_messages ?? 0),
+    before != null && after != null && before > 0
+      ? `About ${before.toLocaleString("en-US")} to ${after.toLocaleString("en-US")} tokens`
+      : undefined,
+  );
+}
+
 export function toolApprovalPart(
   event: {
     approval_id?: string;
     name?: string;
     arguments?: string;
     decision?: "approve" | "deny";
+    /** Why the loop resolved the approval itself, e.g. `timed_out`. */
+    reason?: string;
     status?: "decided" | "delivered";
     message?: string;
     request_kind?: ToolApprovalRequestKind;
@@ -401,7 +478,9 @@ export function toolApprovalPart(
       : progressing
         ? event.status === "decided" ? "Approval submitted" : "Approval delivered"
         : resolved
-          ? `${outcomeTarget} ${event.decision === "approve" ? "approved" : "denied"}`
+          ? event.reason === "timed_out"
+            ? "Approval timed out"
+            : `${outcomeTarget} ${event.decision === "approve" ? "approved" : "denied"}`
           : requestLabel,
     detail: failed
       ? event.message
