@@ -360,6 +360,8 @@ const DESKTOP_WORKSPACE_TOOL_NAMES: &[&str] = &[
     "edit_file",
     "patch_file",
     "shell",
+    "process_output",
+    "process_kill",
 ];
 const RUN_WORKSPACE_TOOL_NAMES: &[&str] = &["google_drive_transfer"];
 pub(crate) const HASHLINE_TOOL_NAMES: &[&str] = &["read_file_anchors", "patch_file"];
