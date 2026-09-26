@@ -3672,7 +3672,6 @@ export interface AgentToolContext {
   worker_model?: string;
   skill_mode?: AgentSkillMode;
   enabled_skills?: string[];
-  skills_resolved?: boolean;
 }
 
 export interface AccountRuntimeMilimContext {

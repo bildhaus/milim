@@ -404,6 +404,14 @@ assert.match(memory.memoryMessages[0].content, /untrusted historical context/);
 assert.match(memory.memoryMessages[0].content, /workspace files take precedence/);
 assert.doesNotMatch(memory.memoryMessages[0].content, /memory_register/);
 assert.match(memory.skillMessages[0].content, /## 1\. Skill/);
+assert.equal(contextMessagesForTurn(memory, "model").includes(memory.skillMessages[0]), true);
+assert.equal(
+  contextMessagesForTurn(memory, "tools").includes(memory.skillMessages[0]),
+  false,
+  "native tool runs get skills from Rust, which also indexes project skills",
+);
+assert.equal(contextMessagesForTurn(memory, "agent").includes(memory.skillMessages[0]), false);
+assert.equal("skills_resolved" in memory.toolContext, false, "Rust resolves skills for native agent runs");
 assert.equal(memory.runMemoryContext.project_label, undefined);
 
 const packedMemories = promptWithMemory(Array.from({ length: 8 }, (_, index) => ({
@@ -539,6 +547,12 @@ const planModeAccountRuntime = buildTurnPromptContext({
 });
 assert.equal(planModeAccountRuntime.useTools, false);
 assert.equal(planModeAccountRuntime.accountRuntimeMayUseTools, false, "plan mode should not start account-runtime tools");
+assert.match(contextMessagesForTurn(planModeAccountRuntime, "model").map((message) => message.content).join("\n"), /Plan Mode is active/);
+assert.equal(
+  contextMessagesForTurn(planModeAccountRuntime, "tools").some((message) => message.content.includes("Plan Mode is active")),
+  false,
+  "native tool runs get Plan Mode instructions from the Rust base prompt",
+);
 
 const searched: Array<{ query: string; scopes: unknown[]; limit: number; model?: string }> = [];
 const selectedQueries: Array<{ query: string; limit: number; ids?: string[] }> = [];
@@ -619,13 +633,13 @@ const skillOnlyPrepared = await prepareTurnPromptContext({
   tools: [
     { name: "shell", description: "Run commands", effect: "command" },
     { name: "milim_skill_search", description: "Find skills", effect: "read_only" },
-    { name: "milim_skill_read", description: "Read a skill", effect: "read_only" },
+    { name: "load_skill", description: "Load a skill", effect: "read_only" },
   ],
 });
 assert.equal(skillOnlyPrepared.useTools, true, "lazy skill loading should work when regular Agent tools are disabled");
 assert.deepEqual(
   skillOnlyPrepared.enabledTools,
-  ["milim_skill_search", "milim_skill_read"],
+  ["milim_skill_search", "load_skill"],
   "skill-only turns should expose only the lazy skill tools",
 );
 assert.doesNotMatch(

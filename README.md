@@ -21,7 +21,7 @@ Release artifacts target Windows and macOS. Linux packaging is not a primary rel
 - **A workbench when you need it.** The **Tools** launcher opens MCP servers and Apps, Skills, Schedules, media generation, Pull requests, and Usage. `Ctrl/Cmd+K` opens a command palette for every manager, including Providers, Agents, Memory, Google Workspace, and Mobile, plus panels, chat actions, and slash commands. Workers and previews extend the thread from the inspector.
 - **Direct mobile control.** The native iOS and Android companion connects to paired desktops over Tailscale, trusted LAN discovery, or a manual URL. Enabled desktop transports restore automatically after milim restarts. milim operates no relay, account service, or cloud transcript store for this path.
 
-Provider-backed chat and installed account runtimes remain distinct. Provider models use milim's tool-agent loop; account runtimes retain their own sessions and tools behind the same visible approval policy.
+Provider-backed chat and installed account runtimes remain distinct. Provider models use milim's tool-agent loop, which adds milim's coding-agent base prompt, an environment snapshot, and a compact index of installed skills (user skills plus the workspace's `.milim/skills` and `.claude/skills` folders) that the model loads on demand; account runtimes retain their own sessions, prompts, and tools behind the same visible approval policy.
 
 ## Core workflow
 

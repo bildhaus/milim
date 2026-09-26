@@ -10,7 +10,7 @@ import { folderLabel } from "./projectColors.js";
 const MEMORY_RECALL_CANDIDATES = 20;
 const MEMORY_CONTEXT_MAX_ITEMS = 5;
 const MEMORY_CONTEXT_MAX_TOKENS = 1_024;
-const SKILL_TOOL_NAMES = new Set(["milim_skill_search", "milim_skill_read"]);
+const SKILL_TOOL_NAMES = new Set(["milim_skill_search", "load_skill"]);
 
 export type MemoryHit = {
   node: {
@@ -284,7 +284,6 @@ export function buildTurnPromptContext({
       worker_model: workerModel.trim() || undefined,
       skill_mode: skillMode,
       enabled_skills: enabledSkills,
-      skills_resolved: true,
     },
     workspaceContext,
   };
@@ -436,12 +435,15 @@ export async function prepareTurnPromptContext({
 export function contextMessagesForTurn(context: TurnPromptContext, mode: TurnContextMessageMode): ChatMessage[] {
   const instructions = mode === "agent" ? [] : context.instructionMessages;
   const schedules = mode === "model" ? [] : context.scheduleMessages;
+  // Native tool runs receive Plan Mode and skill context from the Rust agent
+  // loop, which also sees the run workspace's project skills.
+  const rustResolved = mode !== "model";
   return [
     ...context.globalInstructionMessages,
     ...instructions,
-    ...context.planMessages,
+    ...(rustResolved ? [] : context.planMessages),
     ...context.goalMessages,
-    ...context.skillMessages,
+    ...(rustResolved ? [] : context.skillMessages),
     ...context.artifactMessages,
     ...schedules,
     ...context.memoryMessages,

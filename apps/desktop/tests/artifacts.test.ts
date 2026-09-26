@@ -652,7 +652,7 @@ const lazySkill = {
 };
 const lazySkillMessage = skillDiscoveryMessage([lazySkill], []);
 assert(lazySkillMessage, "automatic skills should create discovery metadata");
-assert(lazySkillMessage.content.includes("milim_skill_read"), "automatic skills should explain lazy loading");
+assert(lazySkillMessage.content.includes("load_skill"), "automatic skills should explain lazy loading");
 assert(lazySkillMessage.content.includes("..."), "long skill descriptions should be compacted");
 assert(!lazySkillMessage.content.includes(lazySkill.instructions), "automatic skills should omit full instructions");
 const explicitSkillMessage = skillDiscoveryMessage([lazySkill], [lazySkill.id]);
