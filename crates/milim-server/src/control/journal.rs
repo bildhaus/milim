@@ -12,8 +12,9 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use super::preview_runtime::managed_preview_runtime_context;
 use super::replay::completion_request_value;
-use super::{managed_preview_runtime_context, now_ms, parse_value, AcceptedTurnV1};
+use super::{now_ms, parse_value, AcceptedTurnV1};
 
 pub(super) struct RunJournal {
     pub(super) store: Arc<UserDataStore>,

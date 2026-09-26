@@ -6,7 +6,8 @@ use milim_storage::{ControlThreadRecord, ControlTimelineRecord};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use super::{timeline_item, RunManager};
+use super::views::timeline_item;
+use super::RunManager;
 
 impl RunManager {
     pub(super) fn persist_and_emit(

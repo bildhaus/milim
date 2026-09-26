@@ -8,7 +8,9 @@ use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use super::commands::{required_payload_string, required_thread_id};
-use super::{now_ms, parse_reasoning_effort, thread_title, timeline_item, RunManager, ThreadPatch};
+use super::run_config::parse_reasoning_effort;
+use super::views::{thread_title, timeline_item};
+use super::{now_ms, RunManager, ThreadPatch};
 
 impl RunManager {
     pub(super) fn create_thread(

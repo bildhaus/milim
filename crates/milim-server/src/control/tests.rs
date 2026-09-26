@@ -1,18 +1,36 @@
 use super::*;
 use milim_agents::AgentStepHook as _;
-use milim_core::api::openai::{ChatMessage, ModelPricing, ToolCall, Usage};
+use milim_core::api::openai::{ChatMessage, ModelPricing, ReasoningEffort, ToolCall, Usage};
 use milim_core::config::ServerConfiguration;
 use milim_inference::test_backend::TestBackend;
-use milim_inference::CompletionRequest;
-use milim_storage::Database;
+use milim_inference::{CompletionRequest, SamplingParams};
+use milim_storage::{ControlApprovalRecord, ControlRunRecord, Database};
+use serde_json::json;
 
 use super::approvals::normalized_approval_kind;
+use super::attachments::{validate_control_attachments, CONTROL_MAX_PENDING_UPLOADS_PER_DEVICE};
 use super::checkpoints::turn_checkpoint_folder;
+use super::client_state::{
+    decode_appearance_background, APPEARANCE_STATE_KEY, CUSTOM_THEMES_STATE_KEY,
+};
 use super::harness::{account_runtime_harness_prompt, account_runtime_prompt};
 use super::journal::RunJournal;
 use super::metrics::{estimate_usage_cost_usd, response_metrics_value};
+use super::native_sessions::{
+    current_runtime_session, runtime_session_field, NATIVE_SESSION_FULL_TRANSCRIPT_CURSOR,
+};
+use super::preview_runtime::{
+    managed_preview_runtime_context, preview_runtime_from_payload,
+    sanitize_managed_preview_runtime, MAX_PREVIEW_RUNTIME_URL_CHARS,
+};
 use super::replay::{completion_request_from_value, completion_request_value};
+use super::run_config::{
+    compose_labeled_instructions, configured_run_limits, frozen_harness_instructions,
+    frozen_run_instructions, normalize_generation_settings, resolve_frozen_config,
+    sampling_from_generation,
+};
 use super::turns::stream_placeholder_message_id;
+use crate::AppState;
 
 #[test]
 fn run_limits_validate_and_thread_overrides_replace_global_defaults() {
