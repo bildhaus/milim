@@ -1678,6 +1678,14 @@ mod native_run_context_tests {
     }
 
     #[test]
+    fn parent_context_is_framed_as_background_for_workers() {
+        let block = parent_context_block("  Implement slugify.\n");
+        assert!(block.starts_with("<parent_context>\n"));
+        assert!(block.contains("do not carry out the parent's request yourself"));
+        assert!(block.ends_with("Implement slugify.\n</parent_context>"));
+    }
+
+    #[test]
     fn native_workers_get_the_base_prompt_for_their_own_tools_and_an_environment() {
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(ReadOnlyProbe("read_file")));
@@ -3369,7 +3377,12 @@ fn worker_specs(
         .cloned()
         .zip(system_prompts)
         .map(|(task, system_prompt)| {
-            let system_prompt = [run.context.as_deref(), system_prompt.as_deref()]
+            let context = run
+                .context
+                .as_deref()
+                .filter(|context| !context.trim().is_empty())
+                .map(parent_context_block);
+            let system_prompt = [context.as_deref(), system_prompt.as_deref()]
                 .into_iter()
                 .flatten()
                 .filter(|value| !value.trim().is_empty())
@@ -3392,6 +3405,18 @@ fn worker_specs(
             }
         })
         .collect()
+}
+
+/// Frame the delegating chat's request as background. Without the framing a
+/// Worker reads the parent's goal ("implement X") as its own assignment and
+/// ignores the narrower delegated task in its user message.
+fn parent_context_block(context: &str) -> String {
+    format!(
+        "<parent_context>\nBackground from the chat that delegated this task. Use it to \
+         understand the goal, but do not carry out the parent's request yourself: your \
+         assignment is only the delegated task in the user message.\n\n{}\n</parent_context>",
+        context.trim()
+    )
 }
 
 /// Give a native Worker the same leading context as a native tool-agent run:

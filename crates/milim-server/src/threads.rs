@@ -512,10 +512,15 @@ fn worker_messages(spec: &ChildRunSpec) -> Vec<ChatMessage> {
     let mut messages = Vec::new();
     messages.extend(non_empty(&spec.base_prompt));
     messages.extend(non_empty(&spec.system_prompt));
-    messages.push(ChatMessage::text(
-        "system",
-        "You are a Milim Worker. Complete only the delegated task and return a concise final report. Do not delegate more work.",
-    ));
+    let role = match spec.access {
+        milim_agents::WorkerAccess::ReadOnly => {
+            "You are a Milim Worker. Complete only the delegated task and return a concise final report. Do not delegate more work. Your tools are read-only: investigate and report what you find, and do not try to change files or run commands."
+        }
+        milim_agents::WorkerAccess::WriteReview => {
+            "You are a Milim Worker. Complete only the delegated task and return a concise final report. Do not delegate more work."
+        }
+    };
+    messages.push(ChatMessage::text("system", role));
     messages.extend(non_empty(&spec.environment));
     messages.push(ChatMessage::text("user", &spec.prompt));
     messages
@@ -849,6 +854,37 @@ mod tests {
             ..spec
         });
         assert_eq!(bare.len(), 2, "legacy Workers keep the role and task only");
+
+        let read_only = worker_messages(&ChildRunSpec {
+            access: milim_agents::WorkerAccess::ReadOnly,
+            ..bare_spec_for_access()
+        });
+        assert!(read_only[0]
+            .text_content()
+            .contains("Your tools are read-only"));
+        let writer = worker_messages(&ChildRunSpec {
+            access: milim_agents::WorkerAccess::WriteReview,
+            ..bare_spec_for_access()
+        });
+        assert!(!writer[0].text_content().contains("read-only"));
+    }
+
+    fn bare_spec_for_access() -> ChildRunSpec {
+        ChildRunSpec {
+            parent_id: "parent-1".into(),
+            title: "Worker".into(),
+            model: "model-x".into(),
+            agent_id: None,
+            system_prompt: None,
+            prompt: "Find the bug.".into(),
+            run_id: None,
+            runtime: milim_agents::WorkerRuntime::Managed,
+            access: milim_agents::WorkerAccess::ReadOnly,
+            worktree_path: None,
+            account_profile_id: None,
+            base_prompt: None,
+            environment: None,
+        }
     }
 
     #[test]
