@@ -16,9 +16,13 @@ use milim_core::api::openai::{
     ChatMessage, Content, ContentPart, DeltaFunction, DeltaToolCall, Model, ReasoningEffort, Tool,
     Usage,
 };
+use milim_core::provider_error::upstream_stream_error;
 use milim_core::{Error, Result};
 
-use crate::service::{CompletionRequest, DeltaEvent, EventStream, ModelService, StreamEvent};
+use crate::http_error::stream_read_error;
+use crate::service::{
+    normalize_finish_reason, CompletionRequest, DeltaEvent, EventStream, ModelService, StreamEvent,
+};
 
 #[cfg(not(test))]
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -68,14 +72,14 @@ impl GeminiBackend {
     }
 
     fn build_body(&self, req: &CompletionRequest) -> Result<Value> {
+        let leading = leading_system_count(&req.messages);
         let mut body = json!({
-            "contents": build_contents(&req.messages)?,
+            "contents": build_contents(&req.messages[leading..])?,
         });
 
-        if let Some(system) = system_text(&req.messages) {
-            body["systemInstruction"] = json!({
-                "parts": [{ "text": system }]
-            });
+        let system = system_parts(&req.messages[..leading]);
+        if !system.is_empty() {
+            body["systemInstruction"] = json!({ "parts": system });
         }
 
         let generation_config = generation_config(req);
@@ -173,6 +177,7 @@ impl ModelService for GeminiBackend {
             .await);
         }
 
+        let label = self.label.clone();
         let stream = async_stream::stream! {
             let mut bytes = resp.bytes_stream();
             let mut buf: Vec<u8> = Vec::new();
@@ -182,7 +187,7 @@ impl ModelService for GeminiBackend {
                 let chunk = match chunk {
                     Ok(b) => b,
                     Err(e) => {
-                        yield Err(upstream(e));
+                        yield Err(stream_read_error(&label, e));
                         return;
                     }
                 };
@@ -197,8 +202,14 @@ impl ModelService for GeminiBackend {
                                 yield Ok(StreamEvent::Delta(d));
                             }
                         }
-                        GeminiLine::Error(e) => {
-                            yield Err(Error::Upstream(e));
+                        GeminiLine::Error { code, status, message } => {
+                            yield Err(upstream_stream_error(
+                                &label,
+                                "streamGenerateContent",
+                                code,
+                                status.as_deref(),
+                                &message,
+                            ));
                             return;
                         }
                         GeminiLine::Ignore => {}
@@ -207,7 +218,7 @@ impl ModelService for GeminiBackend {
             }
 
             yield Ok(StreamEvent::Done {
-                finish_reason: gemini_finish_to_openai(&state.finish_reason, state.saw_tool_call),
+                finish_reason: gemini_finish_reason(&state.finish_reason, state.saw_tool_call),
                 usage: state.usage,
             });
         };
@@ -247,7 +258,11 @@ struct GeminiStreamState {
 
 enum GeminiLine {
     Delta(DeltaEvent),
-    Error(String),
+    Error {
+        code: Option<u16>,
+        status: Option<String>,
+        message: String,
+    },
     Ignore,
 }
 
@@ -263,23 +278,32 @@ fn parse_sse_line(line: &str, state: &mut GeminiStreamState) -> GeminiLine {
         return GeminiLine::Ignore;
     };
 
-    if let Some(error) = v
-        .get("error")
-        .and_then(|e| e.get("message"))
-        .and_then(Value::as_str)
-    {
-        return GeminiLine::Error(error.to_string());
+    if let Some(error) = v.get("error").filter(|e| e.is_object()) {
+        return GeminiLine::Error {
+            code: error
+                .get("code")
+                .and_then(Value::as_u64)
+                .and_then(|code| u16::try_from(code).ok()),
+            status: error
+                .get("status")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            message: error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        };
     }
 
     if let Some(usage) = v.get("usageMetadata") {
+        let prompt = opt_u32(usage, "promptTokenCount").unwrap_or(0);
+        let completion = opt_u32(usage, "candidatesTokenCount").unwrap_or(0);
+        // `promptTokenCount` already includes implicitly cached tokens.
         state.usage = Usage {
-            prompt_tokens: opt_u32(usage, "promptTokenCount").unwrap_or(0),
-            completion_tokens: opt_u32(usage, "candidatesTokenCount").unwrap_or(0),
-            total_tokens: opt_u32(usage, "totalTokenCount").unwrap_or_else(|| {
-                opt_u32(usage, "promptTokenCount").unwrap_or(0)
-                    + opt_u32(usage, "candidatesTokenCount").unwrap_or(0)
-            }),
-            cost_usd: None,
+            total_tokens: opt_u32(usage, "totalTokenCount").unwrap_or(prompt + completion),
+            cache_read_tokens: opt_u32(usage, "cachedContentTokenCount").filter(|n| *n > 0),
+            ..Usage::new(prompt, completion)
         };
     }
 
@@ -325,24 +349,64 @@ fn parse_sse_line(line: &str, state: &mut GeminiStreamState) -> GeminiLine {
     }
 }
 
-fn system_text(messages: &[ChatMessage]) -> Option<String> {
-    let text = messages
-        .iter()
-        .filter(|m| m.role == "system")
-        .map(ChatMessage::text_content)
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    (!text.is_empty()).then_some(text)
+fn leading_system_count(messages: &[ChatMessage]) -> usize {
+    messages.iter().take_while(|m| m.role == "system").count()
 }
 
-fn build_contents(messages: &[ChatMessage]) -> Result<Vec<Value>> {
-    let mut tool_names = HashMap::new();
+/// The leading run of system messages, one `systemInstruction` part each.
+fn system_parts(messages: &[ChatMessage]) -> Vec<Value> {
     messages
         .iter()
-        .filter(|m| m.role != "system")
-        .map(|m| message_to_gemini(m, &mut tool_names))
+        .map(ChatMessage::text_content)
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| json!({ "text": text }))
         .collect()
+}
+
+/// Build `contents` from the messages after the leading system run. A later
+/// system message becomes user text wrapped in `<system-reminder>` at its
+/// original position, and consecutive same-role turns are merged with
+/// `functionResponse` parts kept first.
+fn build_contents(messages: &[ChatMessage]) -> Result<Vec<Value>> {
+    let mut tool_names = HashMap::new();
+    let mut contents: Vec<Value> = Vec::new();
+    for msg in messages {
+        let content = if msg.role == "system" {
+            let text = msg.text_content();
+            if text.trim().is_empty() {
+                continue;
+            }
+            json!({
+                "role": "user",
+                "parts": [{
+                    "text": format!("<system-reminder>\n{}\n</system-reminder>", text.trim())
+                }]
+            })
+        } else {
+            message_to_gemini(msg, &mut tool_names)?
+        };
+        match contents.last_mut() {
+            Some(last) if last["role"] == content["role"] => merge_content(last, content),
+            _ => contents.push(content),
+        }
+    }
+    Ok(contents)
+}
+
+fn merge_content(into: &mut Value, next: Value) {
+    let Value::Array(mut parts) = into["parts"].take() else {
+        return;
+    };
+    if let Value::Array(more) = next["parts"].clone() {
+        parts.extend(more);
+    }
+    let is_placeholder =
+        |part: &Value| part.as_object().is_some_and(|p| p.len() == 1) && part["text"] == "";
+    if parts.iter().any(|part| !is_placeholder(part)) {
+        parts.retain(|part| !is_placeholder(part));
+    }
+    parts.sort_by_key(|part| part.get("functionResponse").is_none());
+    into["parts"] = Value::Array(parts);
 }
 
 fn message_to_gemini(msg: &ChatMessage, tool_names: &mut HashMap<String, String>) -> Result<Value> {
@@ -676,16 +740,11 @@ fn model_id(name: &str) -> &str {
     name.strip_prefix("models/").unwrap_or(name)
 }
 
-fn gemini_finish_to_openai(reason: &Option<String>, saw_tool_call: bool) -> String {
+fn gemini_finish_reason(reason: &Option<String>, saw_tool_call: bool) -> String {
     if saw_tool_call {
         return "tool_calls".to_string();
     }
-    match reason.as_deref() {
-        Some("MAX_TOKENS") => "length",
-        Some("STOP") | None => "stop",
-        Some(other) => other,
-    }
-    .to_string()
+    normalize_finish_reason(reason.as_deref()).to_string()
 }
 
 fn opt_u32(v: &Value, key: &str) -> Option<u32> {

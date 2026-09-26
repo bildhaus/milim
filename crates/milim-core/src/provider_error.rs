@@ -6,6 +6,8 @@
 //! the HTTP status and any `Retry-After` value in a stable shape; account
 //! runtimes and older providers fall back to well-known phrases.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
@@ -55,6 +57,102 @@ pub fn upstream_http_error(
         message.push_str(&format!(" (retry after {seconds}s)"));
     }
     Error::Upstream(message)
+}
+
+/// Build the upstream error for a failure the provider reported inside an
+/// already-open stream (an SSE `error` event or an error object in a chunk).
+///
+/// `status` is the HTTP-equivalent code when the provider sent one; otherwise
+/// it is derived from `error_type` (e.g. `overloaded_error` -> 529). The shape
+/// is `"{label} {operation} stream -> {status} {error_type}: {message}"`, so
+/// [`classify_provider_error`] and [`retry_hint`] treat it exactly like the
+/// matching HTTP failure.
+pub fn upstream_stream_error(
+    label: &str,
+    operation: &str,
+    status: Option<u16>,
+    error_type: Option<&str>,
+    message: &str,
+) -> Error {
+    let error_type = error_type.map(str::trim).filter(|kind| !kind.is_empty());
+    let status = status
+        .filter(|status| (400..600).contains(status))
+        .or_else(|| error_type.and_then(stream_error_status));
+    let message = message.trim();
+    let detail = match (error_type, message.is_empty()) {
+        (Some(kind), false) => format!("{kind}: {message}"),
+        (Some(kind), true) => kind.to_string(),
+        (None, false) => message.to_string(),
+        (None, true) => "provider stream error".to_string(),
+    };
+    Error::Upstream(match status {
+        Some(status) => format!("{label} {operation} stream -> {status} {detail}"),
+        None => format!("{label} {operation} stream error: {detail}"),
+    })
+}
+
+/// HTTP-equivalent status for an error type or status name that Anthropic,
+/// OpenAI-compatible, or Gemini APIs send inside a stream.
+pub fn stream_error_status(error_type: &str) -> Option<u16> {
+    let status = match error_type.trim().to_ascii_lowercase().as_str() {
+        "invalid_request_error" | "invalid_argument" | "failed_precondition" => 400,
+        "authentication_error" | "unauthenticated" | "invalid_api_key" => 401,
+        "billing_error" => 402,
+        "permission_error" | "permission_denied" => 403,
+        "not_found_error" | "not_found" | "model_not_found" => 404,
+        "request_too_large" => 413,
+        "rate_limit_error"
+        | "rate_limit_exceeded"
+        | "resource_exhausted"
+        | "insufficient_quota"
+        | "tokens"
+        | "requests" => 429,
+        "api_error" | "server_error" | "internal" | "internal_error" | "internal_server_error" => {
+            500
+        }
+        "unavailable" | "service_unavailable" => 503,
+        "timeout_error" | "deadline_exceeded" => 504,
+        "overloaded_error" | "overloaded" => 529,
+        _ => return None,
+    };
+    Some(status)
+}
+
+/// Whether a failed provider call is worth retrying, and how long to wait.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RetryHint {
+    /// True for throttling and transient provider or network failures.
+    pub retryable: bool,
+    /// The provider's `Retry-After` (or `retry-after-ms`) hint, when sent.
+    pub retry_after: Option<Duration>,
+}
+
+/// Retry guidance for an error returned by a model backend, covering both
+/// HTTP status failures and errors reported mid-stream. Returns `None` for
+/// errors Milim raised itself (validation, missing models) and for provider
+/// failures it cannot recognize.
+pub fn retry_hint(error: &Error) -> Option<RetryHint> {
+    match error {
+        Error::Upstream(_) | Error::Inference(_) | Error::Io(_) | Error::Other(_) => {}
+        Error::InvalidRequest(_)
+        | Error::ModelNotFound(_)
+        | Error::NotFound(_)
+        | Error::Unauthorized(_)
+        | Error::Json(_) => return None,
+    }
+    let info = classify_provider_error(&error.to_string());
+    let retryable = match info.kind {
+        ProviderErrorKind::RateLimited | ProviderErrorKind::ProviderUnavailable => true,
+        ProviderErrorKind::Auth
+        | ProviderErrorKind::ContextLength
+        | ProviderErrorKind::ModelNotFound
+        | ProviderErrorKind::Quota => false,
+        ProviderErrorKind::Unknown => return None,
+    };
+    Some(RetryHint {
+        retryable,
+        retry_after: info.retry_after_secs.map(Duration::from_secs),
+    })
 }
 
 /// Parse a `Retry-After` header given in delta seconds. HTTP-date values are
@@ -166,6 +264,7 @@ pub fn classify_provider_error(message: &str) -> ProviderErrorInfo {
             "connection refused",
             "connection reset",
             "error sending request",
+            "stream interrupted",
             "dns error",
             "failed to lookup address",
         ])
@@ -332,11 +431,88 @@ mod tests {
             kind("Anthropic API overloaded"),
             ProviderErrorKind::ProviderUnavailable
         );
+        assert_eq!(
+            kind("upstream error: anthropic stream interrupted: error decoding response body"),
+            ProviderErrorKind::ProviderUnavailable
+        );
         assert_eq!(kind("something odd happened"), ProviderErrorKind::Unknown);
         assert_eq!(
             kind("tool call 42 failed at step 500"),
             ProviderErrorKind::Unknown
         );
+    }
+
+    #[test]
+    fn stream_errors_classify_like_http_errors() {
+        let overloaded = upstream_stream_error(
+            "Anthropic",
+            "messages",
+            None,
+            Some("overloaded_error"),
+            "Overloaded",
+        );
+        assert_eq!(
+            overloaded.to_string(),
+            "upstream error: Anthropic messages stream -> 529 overloaded_error: Overloaded"
+        );
+        let info = classify_provider_error(&overloaded.to_string());
+        assert_eq!(info.kind, ProviderErrorKind::ProviderUnavailable);
+        assert_eq!(info.status, Some(529));
+
+        let limited =
+            upstream_stream_error("Gemini", "streamGenerateContent", Some(429), None, "slow");
+        assert_eq!(kind(&limited.to_string()), ProviderErrorKind::RateLimited);
+
+        let quota = upstream_stream_error(
+            "OpenAI",
+            "chat/completions",
+            None,
+            Some("insufficient_quota"),
+            "You exceeded your current quota",
+        );
+        assert_eq!(kind(&quota.to_string()), ProviderErrorKind::Quota);
+
+        let unknown = upstream_stream_error("x", "chat", None, Some("weird"), "");
+        assert_eq!(
+            unknown.to_string(),
+            "upstream error: x chat stream error: weird"
+        );
+    }
+
+    #[test]
+    fn retry_hint_marks_transient_failures() {
+        let hint = retry_hint(&upstream_http_error(
+            "OpenAI",
+            "chat/completions",
+            "429 Too Many Requests",
+            Some("3"),
+            "slow down",
+        ))
+        .unwrap();
+        assert!(hint.retryable);
+        assert_eq!(hint.retry_after, Some(Duration::from_secs(3)));
+
+        let hint = retry_hint(&upstream_stream_error(
+            "Anthropic",
+            "messages",
+            None,
+            Some("api_error"),
+            "Internal server error",
+        ))
+        .unwrap();
+        assert!(hint.retryable);
+        assert_eq!(hint.retry_after, None);
+
+        let auth = retry_hint(&Error::Upstream(
+            "x chat/completions -> 401 Unauthorized: bad key".into(),
+        ))
+        .unwrap();
+        assert!(!auth.retryable);
+        assert_eq!(
+            retry_hint(&Error::InvalidRequest("rate limit wording".into())),
+            None
+        );
+        assert_eq!(retry_hint(&Error::Other("odd".into())), None);
     }
 
     #[test]

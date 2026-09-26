@@ -88,8 +88,27 @@ impl DeltaEvent {
 pub enum StreamEvent {
     /// Incremental content/reasoning/tool-call data.
     Delta(DeltaEvent),
-    /// Terminal event with the finish reason and token accounting.
+    /// Terminal event with the normalized finish reason (see
+    /// [`normalize_finish_reason`]) and token accounting.
     Done { finish_reason: String, usage: Usage },
+}
+
+/// Map a provider's raw stop reason onto the normalized finish reasons every
+/// backend reports on [`StreamEvent::Done`]: `stop`, `length`, `tool_calls`,
+/// `content_filter`, or `error`. A missing or unrecognized reason is `stop`.
+pub fn normalize_finish_reason(raw: Option<&str>) -> &'static str {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return "stop";
+    };
+    match raw.to_ascii_lowercase().as_str() {
+        // OpenAI `length`, Anthropic `max_tokens`, Gemini `MAX_TOKENS`.
+        "length" | "max_tokens" | "max_output_tokens" | "model_context_window_exceeded" => "length",
+        "tool_calls" | "tool_use" | "function_call" => "tool_calls",
+        "content_filter" | "refusal" | "safety" | "recitation" | "blocklist"
+        | "prohibited_content" | "spii" | "image_safety" | "language" => "content_filter",
+        "error" | "abort" | "malformed_function_call" | "unexpected_tool_call" => "error",
+        _ => "stop",
+    }
 }
 
 /// A pinned, boxed stream of [`StreamEvent`]s.
@@ -286,6 +305,29 @@ mod tests {
         assert_eq!(calls[0].id.as_deref(), Some("call_abc"));
         assert_eq!(calls[0].function.name, "get_weather");
         assert_eq!(calls[0].function.arguments, "{\"location\":\"NYC\"}");
+    }
+
+    #[test]
+    fn normalizes_provider_finish_reasons() {
+        for (raw, expected) in [
+            (None, "stop"),
+            (Some("end_turn"), "stop"),
+            (Some("stop_sequence"), "stop"),
+            (Some("STOP"), "stop"),
+            (Some("max_tokens"), "length"),
+            (Some("MAX_TOKENS"), "length"),
+            (Some("length"), "length"),
+            (Some("tool_use"), "tool_calls"),
+            (Some("tool_calls"), "tool_calls"),
+            (Some("refusal"), "content_filter"),
+            (Some("SAFETY"), "content_filter"),
+            (Some("content_filter"), "content_filter"),
+            (Some("MALFORMED_FUNCTION_CALL"), "error"),
+            (Some("error"), "error"),
+            (Some("pause_turn"), "stop"),
+        ] {
+            assert_eq!(normalize_finish_reason(raw), expected, "{raw:?}");
+        }
     }
 
     #[test]

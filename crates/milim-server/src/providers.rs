@@ -144,11 +144,12 @@ fn backend_for(cfg: &Provider) -> SharedService {
             cfg.base_url.clone(),
             api_key,
         )),
-        ProviderKind::Anthropic => Arc::new(AnthropicBackend::new(
-            cfg.name.clone(),
-            cfg.base_url.clone(),
-            api_key,
-        )),
+        ProviderKind::Anthropic => Arc::new(
+            AnthropicBackend::new(cfg.name.clone(), cfg.base_url.clone(), api_key)
+                .with_model_output_limits(cfg.model_context.iter().filter_map(
+                    |(model, context)| Some((model.clone(), context.max_completion_tokens?)),
+                )),
+        ),
         ProviderKind::Gemini => Arc::new(GeminiBackend::new(
             cfg.name.clone(),
             cfg.base_url.clone(),

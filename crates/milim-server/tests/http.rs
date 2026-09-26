@@ -3937,8 +3937,11 @@ async fn anthropic_provider_kind_routes_via_messages_api() {
     );
     assert_eq!(requests[1].method, "POST");
     assert_eq!(requests[1].path, "/v1/messages");
-    assert_eq!(requests[1].body["system"], "Be direct.");
-    assert_eq!(requests[1].body["messages"][0]["content"], "Ping");
+    assert_eq!(requests[1].body["system"][0]["text"], "Be direct.");
+    assert_eq!(
+        requests[1].body["messages"][0]["content"][0]["text"],
+        "Ping"
+    );
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
