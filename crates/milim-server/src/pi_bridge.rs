@@ -40,8 +40,7 @@ pub(crate) struct PiRunRequest {
     pub session_id: Option<String>,
     #[serde(default)]
     pub persist_session: Option<bool>,
-    /// Matched exactly, not through `account_runtime_common::account_runtime_policy`,
-    /// so a missing or unrecognized policy is not treated as `guarded` here.
+    /// Normalized by `run_stream`: a missing or unrecognized policy is `guarded`.
     #[serde(default)]
     pub tool_approval_policy: Option<String>,
     #[serde(default)]
@@ -95,15 +94,24 @@ pub(crate) async fn models() -> Result<Value> {
 }
 
 pub(crate) fn run_stream(
-    req: PiRunRequest,
+    mut req: PiRunRequest,
     redactions: BTreeMap<String, String>,
     approval_broker: Option<std::sync::Arc<ToolApprovalBroker>>,
 ) -> impl Stream<Item = HarnessEvent> {
+    normalize_policy(&mut req);
     let initial_session_id = req.session_id.clone();
     canonicalize_runtime_stream(
         native_event_stream(req, redactions, approval_broker),
         initial_session_id,
     )
+}
+
+/// A missing or unrecognized policy means Guarded, as for Claude and Codex.
+fn normalize_policy(req: &mut PiRunRequest) {
+    req.tool_approval_policy = Some(
+        crate::account_runtime_common::account_runtime_policy(req.tool_approval_policy.as_deref())
+            .to_string(),
+    );
 }
 
 fn native_event_stream(
@@ -267,7 +275,8 @@ fn native_event_stream(
                         pending_delivery = Some(pending);
                         decision
                     } else {
-                        req.tool_approval_grant || req.tool_approval_policy.as_deref() == Some("open")
+                        (req.tool_approval_grant && req.tool_approval_policy.as_deref() != Some("guarded"))
+                        || req.tool_approval_policy.as_deref() == Some("open")
                     };
                     if let Err(error) = proc.write_value(&json!({ "type": "extension_ui_response", "id": request_id, "confirmed": approved })).await {
                         if let Some(pending) = pending_delivery.take() {
@@ -1249,5 +1258,18 @@ mod tests {
             actionable_pi_error(pi_error_message(&message).unwrap()),
             "Pi sign-in expired. Open Pi, run /login, then refresh models in milim."
         );
+    }
+
+    #[test]
+    fn missing_or_unknown_policy_is_guarded() {
+        for policy in [None, Some("yolo".to_string())] {
+            let mut req = request("open");
+            req.tool_approval_policy = policy;
+            req.tool_approval_grant = true;
+            normalize_policy(&mut req);
+            assert_eq!(req.tool_approval_policy.as_deref(), Some("guarded"));
+            let args = run_arguments(&req, "openai-codex", "gpt", "session-1", None);
+            assert!(args.windows(2).any(|pair| pair == ["--tools", SAFE_TOOLS]));
+        }
     }
 }

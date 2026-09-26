@@ -42,8 +42,7 @@ pub(crate) struct OpenCodeRunRequest {
     pub cwd: Option<String>,
     #[serde(default)]
     pub session_id: Option<String>,
-    /// Matched exactly, not through `account_runtime_common::account_runtime_policy`,
-    /// so a missing or unrecognized policy is not treated as `guarded` here.
+    /// Normalized by `run_stream`: a missing or unrecognized policy is `guarded`.
     #[serde(default)]
     pub tool_approval_policy: Option<String>,
     #[serde(default)]
@@ -93,15 +92,24 @@ pub(crate) async fn models() -> Result<Value> {
 }
 
 pub(crate) fn run_stream(
-    req: OpenCodeRunRequest,
+    mut req: OpenCodeRunRequest,
     redactions: BTreeMap<String, String>,
     approval_broker: Option<std::sync::Arc<ToolApprovalBroker>>,
 ) -> impl Stream<Item = HarnessEvent> {
+    normalize_policy(&mut req);
     let initial_session_id = req.session_id.clone();
     canonicalize_runtime_stream(
         native_event_stream(req, redactions, approval_broker),
         initial_session_id,
     )
+}
+
+/// A missing or unrecognized policy means Guarded, as for Claude and Codex.
+fn normalize_policy(req: &mut OpenCodeRunRequest) {
+    req.tool_approval_policy = Some(
+        crate::account_runtime_common::account_runtime_policy(req.tool_approval_policy.as_deref())
+            .to_string(),
+    );
 }
 
 fn native_event_stream(
@@ -222,7 +230,8 @@ fn native_event_stream(
                     pending_delivery = Some(pending);
                     decision
                 } else {
-                    req.tool_approval_grant || req.tool_approval_policy.as_deref() == Some("open")
+                    (req.tool_approval_grant && req.tool_approval_policy.as_deref() != Some("guarded"))
+                        || req.tool_approval_policy.as_deref() == Some("open")
                 };
                 if let Err(error) = proc.respond(id, permission_response(params, approved)).await {
                     if let Some(pending) = pending_delivery.take() {
@@ -1136,5 +1145,17 @@ mod tests {
             .to_string()
             .contains("privatePayload"));
         assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn missing_or_unknown_policy_is_guarded() {
+        for policy in [None, Some("Open ".to_string()), Some("yolo".to_string())] {
+            let mut req = request("open", false);
+            req.tool_approval_policy = policy;
+            req.tool_approval_grant = true;
+            normalize_policy(&mut req);
+            assert_eq!(req.tool_approval_policy.as_deref(), Some("guarded"));
+            assert_eq!(policy_overlay(&req)["permission"]["*"], "deny");
+        }
     }
 }
