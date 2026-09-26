@@ -5266,6 +5266,49 @@ export async function reviewMemoryNode(id: string): Promise<boolean> {
   }
 }
 
+/** Embedding coverage of scoped memories relative to the current model. */
+export interface MemoryEmbeddingStatus {
+  model: string | null;
+  dim: number;
+  total: number;
+  current: number;
+  /** Vectors from an older embedding model or dimension. */
+  stale: number;
+  /** Entries without a vector that the current model has not tried yet. */
+  missing: number;
+  /** Entries the current model could not embed. */
+  unavailable: number;
+  reindexing: boolean;
+  reindexed: number;
+  last_error: string | null;
+}
+
+async function memoryEmbeddingsRequest(
+  path: "" | "/reindex" | "/cancel",
+): Promise<MemoryEmbeddingStatus | null> {
+  try {
+    const r = await authFetch(
+      `${BASE}/memory/embeddings${path}`,
+      path ? { method: "POST" } : undefined,
+    );
+    return r.ok ? ((await r.json()) as MemoryEmbeddingStatus) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function getMemoryEmbeddingStatus(): Promise<MemoryEmbeddingStatus | null> {
+  return memoryEmbeddingsRequest("");
+}
+
+export function reindexMemoryEmbeddings(): Promise<MemoryEmbeddingStatus | null> {
+  return memoryEmbeddingsRequest("/reindex");
+}
+
+export function cancelMemoryReindex(): Promise<MemoryEmbeddingStatus | null> {
+  return memoryEmbeddingsRequest("/cancel");
+}
+
 // ----- Schedules -----
 
 export interface ScheduleInfo {

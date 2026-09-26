@@ -1,19 +1,24 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   archiveMemoryNode,
+  cancelMemoryReindex,
   deleteMemoryNode,
+  getMemoryEmbeddingStatus,
   getWorkspaceContext,
   listMemoryNodes,
   registerGraphMemory,
+  reindexMemoryEmbeddings,
   restoreMemoryNode,
   reviewMemoryNode,
   searchGraphMemory,
   updateMemoryNode,
+  type MemoryEmbeddingStatus,
   type MemoryNode,
   type MemoryScopeKind,
   type MemoryScopeRef,
   type WorkspaceContext,
 } from "../api";
+import { memoryEmbeddingNotice } from "../lib/memoryEmbeddings";
 import { DEFAULT_THREAD_SETTINGS, useSessions } from "../sessions/store";
 import { Archive, Check, Pencil, Plus, Refresh, Search, Trash, X } from "./icons";
 import { SheetDialog } from "./SheetDialog";
@@ -110,6 +115,8 @@ export function MemoryManager({
   const listRevision = useRef(0);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [workspaceContext, setWorkspaceContext] = useState<WorkspaceContext | null>(null);
+  const [embeddings, setEmbeddings] = useState<MemoryEmbeddingStatus | null>(null);
+  const embeddingNotice = memoryEmbeddingNotice(embeddings);
 
   const selected = useMemo(() => nodes.find((node) => node.id === selectedId) ?? null, [nodes, selectedId]);
   const canUseProject = Boolean(folder.trim());
@@ -128,6 +135,28 @@ export function MemoryManager({
       .then(setWorkspaceContext)
       .catch(() => setWorkspaceContext(null));
   }, [folder]);
+
+  const reindexing = Boolean(embeddings?.reindexing);
+  useEffect(() => {
+    // Poll while the background re-embed job runs so the notice tracks it.
+    let cancelled = false;
+    let timer = 0;
+    const poll = () => void getMemoryEmbeddingStatus().then((status) => {
+      if (cancelled) return;
+      setEmbeddings(status);
+      if (status?.reindexing) timer = window.setTimeout(poll, 1500);
+    });
+    timer = window.setTimeout(poll, reindexing ? 1500 : 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [reindexing]);
+
+  async function toggleReindex() {
+    const next = reindexing ? await cancelMemoryReindex() : await reindexMemoryEmbeddings();
+    if (next) setEmbeddings(next);
+  }
 
   useEffect(() => {
     // `load` reads exactly these inputs; reload whenever the visible scope changes.
@@ -398,6 +427,8 @@ export function MemoryManager({
         <button className="btn-ghost mem-icon-action" type="button" disabled={busy} onClick={() => void load()}><Refresh size={14} /> Refresh</button>
         {tab !== "legacy" && <button className="btn-accent mem-icon-action" type="button" disabled={busy || (tab === "project" && !canUseProject)} onClick={startCreate}><Plus size={14} /> Add</button>}
       </div>
+
+      {embeddingNotice && <div className="mem-move mem-embedding-notice" role="status"><span>{embeddingNotice}</span><button className="btn-ghost mem-icon-action" type="button" onClick={() => void toggleReindex()}>{reindexing ? <><X size={14} /> Cancel</> : <><Refresh size={14} /> Re-index</>}</button></div>}
 
       <div ref={detail.containerRef} className="mem-layout" style={detail.style}>
       <PaneResizeHandle resize={detail.resize} className="memory-detail-resize-handle" data-testid="memory-detail-resize-handle" />

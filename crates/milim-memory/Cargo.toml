@@ -18,4 +18,5 @@ tracing.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 milim-inference = { workspace = true, features = ["test-backend"] }

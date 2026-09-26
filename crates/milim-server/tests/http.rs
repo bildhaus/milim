@@ -5970,6 +5970,70 @@ async fn memory_ingest_and_search() {
 }
 
 #[tokio::test]
+async fn memory_embedding_status_tracks_the_current_model() {
+    use milim_memory::MemoryStore;
+    use milim_storage::Database;
+
+    let mem = MemoryStore::new(
+        Database::open_in_memory().unwrap(),
+        Arc::new(TestBackend::new()),
+    )
+    .unwrap();
+    let state = AppState::new(Arc::new(TestBackend::new()), ServerConfiguration::default())
+        .with_memory(mem);
+    let base = spawn(state).await;
+    let client = reqwest::Client::new();
+
+    let empty: Value = client
+        .get(format!("{base}/memory/embeddings"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(empty["model"], Value::Null);
+    assert_eq!(empty["total"], 0);
+
+    client
+        .post(format!("{base}/memory/register"))
+        .json(&json!({
+            "model": "test-echo",
+            "scope": { "kind": "global", "label": "Personal", "locator": "personal" },
+            "node": { "title": "Tracked vector", "body": "Embedded with test-echo." }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    let status: Value = client
+        .post(format!("{base}/memory/embeddings/reindex"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status["model"], "test-echo");
+    assert_eq!(status["dim"], 16);
+    assert_eq!(status["total"], 1);
+    assert_eq!(status["current"], 1);
+    assert_eq!(status["stale"], 0);
+
+    let cancelled: Value = client
+        .post(format!("{base}/memory/embeddings/cancel"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(cancelled["current"], 1);
+}
+
+#[tokio::test]
 async fn memory_graph_register_search_update_and_delete() {
     use milim_memory::MemoryStore;
     use milim_storage::Database;

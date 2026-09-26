@@ -445,6 +445,15 @@ pub fn build_router_with_host_policy(state: AppState, host_policy: HostPolicy) -
             "/memory/nodes/{id}/review",
             post(routes::memory_node_review),
         )
+        .route("/memory/embeddings", get(routes::memory_embeddings))
+        .route(
+            "/memory/embeddings/reindex",
+            post(routes::memory_embeddings_reindex),
+        )
+        .route(
+            "/memory/embeddings/cancel",
+            post(routes::memory_embeddings_cancel),
+        )
         // Privacy filter
         .route("/privacy/scan", post(routes::privacy_scan))
         .route(

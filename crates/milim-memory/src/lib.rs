@@ -7,7 +7,10 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use rusqlite::{params, OptionalExtension};
@@ -18,6 +21,14 @@ use milim_inference::SharedService;
 use milim_storage::{Database, Migration};
 
 const MAX_MEMORY_BENCHMARK_CASES: usize = 100;
+/// Memories re-embedded per background batch.
+const REEMBED_BATCH: usize = 32;
+const META_EMBEDDING_MODEL: &str = "embedding_model";
+const META_EMBEDDING_DIM: &str = "embedding_dim";
+/// Rows that still need a vector from the current model `?1` with
+/// dimension `?2`: vectors from another model or dimension, and entries
+/// without a vector that the current model has not attempted yet.
+const REEMBED_PENDING_SQL: &str = "NOT (embedding_model = ?1 AND (dim = 0 OR dim = ?2))";
 
 /// Schema for the memory store.
 pub const MEMORY_MIGRATIONS: &[Migration] = &[
@@ -126,6 +137,17 @@ pub const MEMORY_MIGRATIONS: &[Migration] = &[
         version: 4,
         name: "memory_review_lifecycle",
         sql: "ALTER TABLE memory_nodes ADD COLUMN reviewed_at TEXT;",
+    },
+    Migration {
+        version: 5,
+        name: "memory_embedding_model",
+        sql: "ALTER TABLE memory_nodes ADD COLUMN embedding_model TEXT NOT NULL DEFAULT '';
+          ALTER TABLE memories ADD COLUMN embedding_model TEXT NOT NULL DEFAULT '';
+          CREATE INDEX memory_nodes_embedding_idx ON memory_nodes(embedding_model, dim);
+          CREATE TABLE memory_meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+          );",
     },
 ];
 
@@ -299,6 +321,43 @@ pub struct MemoryBenchmarkReport {
     pub cases: Vec<MemoryBenchmarkCaseResult>,
 }
 
+/// Embedding coverage of scoped memories relative to the current model.
+///
+/// The current model is the most recent model that produced an embedding
+/// for this store. `stale` entries hold vectors from another model or
+/// dimension, `missing` entries have no vector the current model has tried,
+/// and `unavailable` entries could not be embedded by the current model.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct MemoryEmbeddingStatus {
+    pub model: Option<String>,
+    pub dim: usize,
+    pub total: usize,
+    pub current: usize,
+    pub stale: usize,
+    pub missing: usize,
+    pub unavailable: usize,
+    pub reindexing: bool,
+    pub reindexed: usize,
+    pub last_error: Option<String>,
+}
+
+#[derive(Default)]
+struct ReembedProgress {
+    running: bool,
+    requested: u64,
+    processed: usize,
+    last_error: Option<String>,
+}
+
+/// Background re-embedding state shared by every view of one store.
+struct EmbeddingIndex {
+    /// The store's own embedder; run-scoped views never drive the job.
+    embedder: SharedService,
+    progress: Mutex<ReembedProgress>,
+    cancel: AtomicBool,
+    resumed: AtomicBool,
+}
+
 /// An embedding-backed memory store.
 ///
 /// The `Database` lives behind a `Mutex` so the async methods stay `Send`
@@ -307,16 +366,25 @@ pub struct MemoryBenchmarkReport {
 pub struct MemoryStore {
     db: Arc<Mutex<Database>>,
     embedder: SharedService,
+    index: Arc<EmbeddingIndex>,
 }
 
 impl MemoryStore {
     /// Open a memory store, applying the schema migration.
     pub fn new(db: Database, embedder: SharedService) -> Result<Self> {
         db.migrate(MEMORY_MIGRATIONS)?;
-        Ok(Self {
+        let store = Self {
             db: Arc::new(Mutex::new(db)),
-            embedder,
-        })
+            embedder: embedder.clone(),
+            index: Arc::new(EmbeddingIndex {
+                embedder,
+                progress: Mutex::new(ReembedProgress::default()),
+                cancel: AtomicBool::new(false),
+                resumed: AtomicBool::new(false),
+            }),
+        };
+        store.resume_reembed();
+        Ok(store)
     }
 
     /// Share this store's database while using a different embedder for one
@@ -325,6 +393,7 @@ impl MemoryStore {
         Self {
             db: self.db.clone(),
             embedder,
+            index: self.index.clone(),
         }
     }
 
@@ -337,8 +406,9 @@ impl MemoryStore {
         let db = self.db.lock().expect("memory db poisoned");
         db.conn()
             .execute(
-                "INSERT INTO memories (id, text, dim, embedding) VALUES (?1, ?2, ?3, ?4)",
-                params![id, text, embedding.len() as i64, bytes],
+                "INSERT INTO memories (id, text, dim, embedding, embedding_model)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id, text, embedding.len() as i64, bytes, model],
             )
             .map_err(sqlite)?;
         Ok(id)
@@ -365,6 +435,7 @@ impl MemoryStore {
             }
         };
         let bytes = vec_to_bytes(&embedding);
+        let embedding_model = if embedding.is_empty() { "" } else { model };
         let node_id = uuid::Uuid::new_v4().to_string();
         let event_id = uuid::Uuid::new_v4().to_string();
         let summary = if event.summary.trim().is_empty() {
@@ -378,9 +449,10 @@ impl MemoryStore {
         db.conn()
             .execute(
                 "INSERT INTO memory_nodes
-                 (id, scope_id, kind, title, body, dim, embedding, confidence, source, reviewed_at)
+                 (id, scope_id, kind, title, body, dim, embedding, confidence, source, reviewed_at,
+                  embedding_model)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
-                         CASE WHEN ?10 THEN datetime('now') END)",
+                         CASE WHEN ?10 THEN datetime('now') END, ?11)",
                 params![
                     node_id,
                     scope.id,
@@ -392,6 +464,7 @@ impl MemoryStore {
                     clamp_confidence(node.confidence),
                     node.source,
                     reviewed_by_user,
+                    embedding_model,
                 ],
             )
             .map_err(sqlite)?;
@@ -595,6 +668,7 @@ impl MemoryStore {
             }
         };
         let bytes = vec_to_bytes(&embedding);
+        let embedding_model = if embedding.is_empty() { "" } else { model };
 
         let db = self.db.lock().expect("memory db poisoned");
         db.conn()
@@ -602,7 +676,7 @@ impl MemoryStore {
                 "UPDATE memory_nodes
                  SET kind = ?2, title = ?3, body = ?4, dim = ?5, embedding = ?6,
                      confidence = ?7, source = ?8, reviewed_at = datetime('now'),
-                     updated_at = datetime('now')
+                     updated_at = datetime('now'), embedding_model = ?9
                  WHERE id = ?1",
                 params![
                     id,
@@ -612,7 +686,8 @@ impl MemoryStore {
                     embedding.len() as i64,
                     bytes,
                     confidence,
-                    source
+                    source,
+                    embedding_model
                 ],
             )
             .map_err(sqlite)?;
@@ -687,8 +762,14 @@ impl MemoryStore {
                 Vec::new()
             }
         };
+        self.resume_reembed();
         let fts_query = safe_fts_query(query);
         let result_limit = top_k.clamp(1, 200);
+        // Only vectors from the query's model and dimension are loaded; rows
+        // from before model tracking (empty model) still count when their
+        // dimension matches until the re-embed job replaces them.
+        let query_model = model.to_string();
+        let query_dim = if q.is_empty() { -1 } else { q.len() as i64 };
         let candidate_limit = result_limit.saturating_mul(4).clamp(20, 200);
         let scope_ids = scopes
             .iter()
@@ -710,14 +791,15 @@ impl MemoryStore {
                     "SELECT n.id, n.scope_id, s.kind, s.label, n.kind, n.title, n.body,
                             n.confidence, n.source, n.created_at, n.updated_at, n.archived_at,
                             n.reviewed_at,
-                            n.embedding
+                            CASE WHEN n.dim = ?2 AND n.embedding_model IN (?1, '')
+                                 THEN n.embedding ELSE X'' END
                      FROM memory_nodes n
                      JOIN memory_scopes s ON s.id = n.scope_id
                      WHERE 1 = 1 {archived_clause}"
                 );
                 let mut stmt = db.conn().prepare(&sql).map_err(sqlite)?;
                 let mapped = stmt
-                    .query_map([], row_to_node_with_embedding)
+                    .query_map(params![query_model, query_dim], row_to_node_with_embedding)
                     .map_err(sqlite)?;
                 collect_rows(mapped)?
             } else {
@@ -726,7 +808,8 @@ impl MemoryStore {
                     "SELECT n.id, n.scope_id, s.kind, s.label, n.kind, n.title, n.body,
                             n.confidence, n.source, n.created_at, n.updated_at, n.archived_at,
                             n.reviewed_at,
-                            n.embedding
+                            CASE WHEN n.dim = ?3 AND n.embedding_model IN (?2, '')
+                                 THEN n.embedding ELSE X'' END
                      FROM memory_nodes n
                      JOIN memory_scopes s ON s.id = n.scope_id
                      WHERE n.scope_id = ?1 {archived_clause}"
@@ -734,7 +817,10 @@ impl MemoryStore {
                 let mut stmt = db.conn().prepare(&sql).map_err(sqlite)?;
                 for id in scope_ids {
                     let mapped = stmt
-                        .query_map(params![id], row_to_node_with_embedding)
+                        .query_map(
+                            params![id, query_model, query_dim],
+                            row_to_node_with_embedding,
+                        )
                         .map_err(sqlite)?;
                     for row in mapped {
                         out.push(row.map_err(sqlite)?);
@@ -884,15 +970,21 @@ impl MemoryStore {
     /// Return the `top_k` entries most similar to `query`.
     pub async fn search(&self, model: &str, query: &str, top_k: usize) -> Result<Vec<MemoryHit>> {
         let q = self.embed_one(model, query).await?;
+        let query_model = model.to_string();
         let db = self.db.clone();
         tokio::task::spawn_blocking(move || {
             let db = db.lock().expect("memory db poisoned");
             let conn = db.conn();
             let mut stmt = conn
-                .prepare("SELECT id, text, embedding FROM memories")
+                .prepare(
+                    "SELECT id, text,
+                            CASE WHEN dim = ?2 AND embedding_model IN (?1, '')
+                                 THEN embedding ELSE X'' END
+                     FROM memories",
+                )
                 .map_err(sqlite)?;
             let mapped = stmt
-                .query_map([], |r| {
+                .query_map(params![query_model, q.len() as i64], |r| {
                     Ok((
                         r.get::<_, String>(0)?,
                         r.get::<_, String>(1)?,
@@ -933,11 +1025,304 @@ impl MemoryStore {
         Ok(n as usize)
     }
 
+    /// Embedding coverage of scoped memories and the re-embed job state.
+    pub fn embedding_status(&self) -> Result<MemoryEmbeddingStatus> {
+        self.resume_reembed();
+        let db = self.db.lock().expect("memory db poisoned");
+        let current = current_embedding_model(db.conn())?;
+        let mut status = match &current {
+            Some((model, dim)) => db
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*),
+                            COALESCE(SUM(dim > 0 AND embedding_model = ?1 AND dim = ?2), 0),
+                            COALESCE(SUM(dim > 0 AND NOT (embedding_model = ?1 AND dim = ?2)), 0),
+                            COALESCE(SUM(dim = 0 AND embedding_model != ?1), 0),
+                            COALESCE(SUM(dim = 0 AND embedding_model = ?1), 0)
+                     FROM memory_nodes",
+                    params![model, *dim as i64],
+                    |r| {
+                        Ok(MemoryEmbeddingStatus {
+                            total: r.get::<_, i64>(0)? as usize,
+                            current: r.get::<_, i64>(1)? as usize,
+                            stale: r.get::<_, i64>(2)? as usize,
+                            missing: r.get::<_, i64>(3)? as usize,
+                            unavailable: r.get::<_, i64>(4)? as usize,
+                            ..MemoryEmbeddingStatus::default()
+                        })
+                    },
+                )
+                .map_err(sqlite)?,
+            None => MemoryEmbeddingStatus {
+                total: db
+                    .conn()
+                    .query_row("SELECT COUNT(*) FROM memory_nodes", [], |r| {
+                        r.get::<_, i64>(0)
+                    })
+                    .map_err(sqlite)? as usize,
+                ..MemoryEmbeddingStatus::default()
+            },
+        };
+        if let Some((model, dim)) = current {
+            status.model = Some(model);
+            status.dim = dim;
+        }
+        let progress = self.index.progress.lock().expect("memory index poisoned");
+        status.reindexing = progress.running;
+        status.reindexed = progress.processed;
+        status.last_error = progress.last_error.clone();
+        Ok(status)
+    }
+
+    /// Start (or keep running) the background job that re-embeds stale and
+    /// missing memories with the current model. Progress lives in the rows
+    /// themselves, so a cancelled or interrupted job resumes where it
+    /// stopped. Returns `false` outside a Tokio runtime.
+    pub fn start_reembed(&self) -> bool {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return false;
+        };
+        self.index.cancel.store(false, Ordering::SeqCst);
+        {
+            let mut progress = self.index.progress.lock().expect("memory index poisoned");
+            progress.requested += 1;
+            if progress.running {
+                return true;
+            }
+            progress.running = true;
+            progress.processed = 0;
+            progress.last_error = None;
+        }
+        handle.spawn(run_reembed(self.db.clone(), self.index.clone()));
+        true
+    }
+
+    /// Stop the re-embed job after its current batch.
+    pub fn cancel_reembed(&self) {
+        self.index.cancel.store(true, Ordering::SeqCst);
+    }
+
+    /// Resume pending re-embedding once per process, on the first store
+    /// access that runs inside a Tokio runtime.
+    fn resume_reembed(&self) {
+        if self.index.resumed.load(Ordering::SeqCst)
+            || tokio::runtime::Handle::try_current().is_err()
+        {
+            return;
+        }
+        if !self.index.resumed.swap(true, Ordering::SeqCst) {
+            self.start_reembed();
+        }
+    }
+
     async fn embed_one(&self, model: &str, text: &str) -> Result<Vec<f32>> {
         let mut vecs = self.embedder.embed(model, vec![text.to_string()]).await?;
-        vecs.pop()
-            .ok_or_else(|| Error::Other("embedder returned no vector".to_string()))
+        let vector = vecs
+            .pop()
+            .ok_or_else(|| Error::Other("embedder returned no vector".to_string()))?;
+        if !vector.is_empty() {
+            self.note_embedding_model(model, vector.len())?;
+        }
+        Ok(vector)
     }
+
+    /// Record the model that just produced a vector. A new model or
+    /// dimension makes existing vectors stale and starts re-embedding.
+    fn note_embedding_model(&self, model: &str, dim: usize) -> Result<()> {
+        let changed = {
+            let db = self.db.lock().expect("memory db poisoned");
+            set_current_embedding_model(db.conn(), model, dim)?
+        };
+        if changed {
+            tracing::info!("memory embedding model is now {model} ({dim} dimensions)");
+            self.start_reembed();
+        }
+        Ok(())
+    }
+}
+
+/// The model and dimension recorded by the most recent successful embed.
+fn current_embedding_model(conn: &rusqlite::Connection) -> Result<Option<(String, usize)>> {
+    let read = |key: &str| {
+        conn.query_row(
+            "SELECT value FROM memory_meta WHERE key = ?1",
+            params![key],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(sqlite)
+    };
+    let (Some(model), Some(dim)) = (read(META_EMBEDDING_MODEL)?, read(META_EMBEDDING_DIM)?) else {
+        return Ok(None);
+    };
+    Ok(dim
+        .parse::<usize>()
+        .ok()
+        .filter(|dim| *dim > 0)
+        .map(|dim| (model, dim)))
+}
+
+/// Persist the current model; returns whether it changed.
+fn set_current_embedding_model(
+    conn: &rusqlite::Connection,
+    model: &str,
+    dim: usize,
+) -> Result<bool> {
+    if current_embedding_model(conn)?.is_some_and(|(m, d)| m == model && d == dim) {
+        return Ok(false);
+    }
+    for (key, value) in [
+        (META_EMBEDDING_MODEL, model.to_string()),
+        (META_EMBEDDING_DIM, dim.to_string()),
+    ] {
+        conn.execute(
+            "INSERT INTO memory_meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )
+        .map_err(sqlite)?;
+    }
+    Ok(true)
+}
+
+struct ReembedRow {
+    id: String,
+    title: String,
+    body: String,
+}
+
+/// Background loop: re-embed pending rows in batches until none remain,
+/// the job is cancelled, or the embedder cannot produce any vector.
+async fn run_reembed(db: Arc<Mutex<Database>>, index: Arc<EmbeddingIndex>) {
+    let mut seen = index
+        .progress
+        .lock()
+        .expect("memory index poisoned")
+        .requested;
+    loop {
+        let step = if index.cancel.load(Ordering::SeqCst) {
+            Ok(0)
+        } else {
+            reembed_batch(&db, &index).await
+        };
+        let mut progress = index.progress.lock().expect("memory index poisoned");
+        match step {
+            Ok(n) if n > 0 => {
+                progress.processed += n;
+                continue;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!("memory re-embedding paused: {error}");
+                progress.last_error = Some(error.to_string());
+                progress.running = false;
+                return;
+            }
+        }
+        // A model change or explicit start during the last batch may have
+        // produced new pending rows; look again before stopping.
+        if progress.requested != seen && !index.cancel.load(Ordering::SeqCst) {
+            seen = progress.requested;
+            continue;
+        }
+        progress.running = false;
+        return;
+    }
+}
+
+/// Re-embed one batch. Returns the number of rows processed (0 when none
+/// are pending). Rows the embedder rejects individually are marked as
+/// attempted by the current model so they are not retried in a loop.
+async fn reembed_batch(db: &Arc<Mutex<Database>>, index: &EmbeddingIndex) -> Result<usize> {
+    let (model, dim, rows) = {
+        let db = db.lock().expect("memory db poisoned");
+        let Some((model, dim)) = current_embedding_model(db.conn())? else {
+            return Ok(0);
+        };
+        let mut stmt = db
+            .conn()
+            .prepare(&format!(
+                "SELECT id, title, body FROM memory_nodes
+                 WHERE {REEMBED_PENDING_SQL}
+                 ORDER BY archived_at IS NOT NULL, updated_at DESC, id
+                 LIMIT ?3"
+            ))
+            .map_err(sqlite)?;
+        let mapped = stmt
+            .query_map(params![model, dim as i64, REEMBED_BATCH as i64], |r| {
+                Ok(ReembedRow {
+                    id: r.get(0)?,
+                    title: r.get(1)?,
+                    body: r.get(2)?,
+                })
+            })
+            .map_err(sqlite)?;
+        let rows = collect_rows(mapped)?;
+        (model, dim, rows)
+    };
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let texts = rows
+        .iter()
+        .map(|row| memory_text(&row.title, &row.body))
+        .collect::<Vec<_>>();
+    let vectors =
+        match index.embedder.embed(&model, texts.clone()).await {
+            Ok(vectors) if vectors.len() == rows.len() => vectors.into_iter().map(Ok).collect(),
+            batch => {
+                // Retry one by one so a single rejected entry (for example one
+                // blocked by the privacy gate) cannot stall the whole index.
+                let batch_error = batch.err();
+                let mut vectors = Vec::with_capacity(rows.len());
+                for text in texts {
+                    vectors.push(index.embedder.embed(&model, vec![text]).await.and_then(
+                        |mut v| {
+                            v.pop().ok_or_else(|| {
+                                Error::Other("embedder returned no vector".to_string())
+                            })
+                        },
+                    ));
+                }
+                if vectors.iter().all(Result::is_err) {
+                    return Err(batch_error
+                        .or_else(|| vectors.into_iter().find_map(Result::err))
+                        .unwrap_or_else(|| {
+                            Error::Other("embedder returned no vector".to_string())
+                        }));
+                }
+                vectors
+            }
+        };
+    let db = db.lock().expect("memory db poisoned");
+    // The embedder may report a new dimension for the same model; adopt it
+    // so rows written below are current instead of stale again.
+    if let Some(Ok(first)) = vectors.iter().find(|v| matches!(v, Ok(v) if !v.is_empty())) {
+        if first.len() != dim {
+            set_current_embedding_model(db.conn(), &model, first.len())?;
+        }
+    }
+    for (row, vector) in rows.iter().zip(vectors) {
+        let vector = vector.unwrap_or_default();
+        // Skip rows edited while this batch was embedding; the edit already
+        // stored its own vector, or left the row pending for the next batch.
+        db.conn()
+            .execute(
+                "UPDATE memory_nodes
+                 SET dim = ?2, embedding = ?3, embedding_model = ?4
+                 WHERE id = ?1 AND title = ?5 AND body = ?6",
+                params![
+                    row.id,
+                    vector.len() as i64,
+                    vec_to_bytes(&vector),
+                    model,
+                    row.title,
+                    row.body
+                ],
+            )
+            .map_err(sqlite)?;
+    }
+    Ok(rows.len())
 }
 
 fn default_node_kind() -> String {
@@ -1748,6 +2133,245 @@ mod tests {
             .unwrap();
         assert_eq!(with_archived.len(), 2);
         assert!(with_archived.iter().all(|hit| hit.node.scope_label == "A"));
+    }
+
+    /// Embeds with a dimension taken from the model name's trailing digits
+    /// (`m3` -> 3), refuses any request containing "reject", and fails every
+    /// request for the model `down`.
+    struct FakeEmbedder {
+        delay: std::time::Duration,
+    }
+
+    #[async_trait::async_trait]
+    impl milim_inference::ModelService for FakeEmbedder {
+        fn name(&self) -> &str {
+            "fake"
+        }
+
+        async fn list_models(&self) -> Result<Vec<milim_core::api::openai::Model>> {
+            Ok(Vec::new())
+        }
+
+        async fn stream(
+            &self,
+            _req: milim_inference::CompletionRequest,
+        ) -> Result<milim_inference::EventStream> {
+            Err(Error::Other("fake embedder cannot generate".into()))
+        }
+
+        async fn embed(&self, model: &str, inputs: Vec<String>) -> Result<Vec<Vec<f32>>> {
+            if !self.delay.is_zero() {
+                tokio::time::sleep(self.delay).await;
+            }
+            let dim = model
+                .trim_start_matches(|c: char| !c.is_ascii_digit())
+                .parse::<usize>()
+                .unwrap_or(0);
+            if dim == 0 || inputs.iter().any(|input| input.contains("reject")) {
+                return Err(Error::Upstream(format!("{model} cannot embed this")));
+            }
+            Ok(inputs
+                .iter()
+                .map(|input| {
+                    let mut v = vec![0.01f32; dim];
+                    for (i, b) in input.bytes().enumerate() {
+                        v[i % dim] += b as f32;
+                    }
+                    v
+                })
+                .collect())
+        }
+    }
+
+    fn fake_store(delay_ms: u64) -> MemoryStore {
+        let embedder: SharedService = Arc::new(FakeEmbedder {
+            delay: std::time::Duration::from_millis(delay_ms),
+        });
+        MemoryStore::new(Database::open_in_memory().unwrap(), embedder).unwrap()
+    }
+
+    async fn register_fact(mem: &MemoryStore, model: &str, title: &str) -> String {
+        mem.register(
+            model,
+            MemoryScopeInput {
+                kind: "project".into(),
+                label: "P".into(),
+                locator: "p".into(),
+            },
+            MemoryNodeInput {
+                kind: "fact".into(),
+                title: title.into(),
+                body: String::new(),
+                confidence: 1.0,
+                source: "test".into(),
+            },
+            Vec::new(),
+            MemoryEventInput::default(),
+        )
+        .await
+        .unwrap()
+        .node
+        .id
+    }
+
+    async fn wait_for_reembed(mem: &MemoryStore) -> MemoryEmbeddingStatus {
+        for _ in 0..500 {
+            let status = mem.embedding_status().unwrap();
+            if !status.reindexing {
+                return status;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("memory re-embedding did not finish");
+    }
+
+    fn node_embedding(mem: &MemoryStore, id: &str) -> (String, i64) {
+        let db = mem.db.lock().unwrap();
+        db.conn()
+            .query_row(
+                "SELECT embedding_model, dim FROM memory_nodes WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn embedding_status_counts_stale_missing_and_unavailable_vectors() {
+        let db = Database::open_in_memory().unwrap();
+        db.migrate(MEMORY_MIGRATIONS).unwrap();
+        db.conn()
+            .execute_batch(
+                "INSERT INTO memory_scopes (id, kind, label, locator, locator_hash)
+                 VALUES ('scope', 'project', 'Project', 'project', 'hash');
+                 INSERT INTO memory_nodes (id, scope_id, title, body, dim, embedding, embedding_model)
+                 VALUES ('current', 'scope', 'a', '', 4, X'00000000000000000000000000000000', 'm4'),
+                        ('old-model', 'scope', 'b', '', 3, X'000000000000000000000000', 'm3'),
+                        ('legacy', 'scope', 'c', '', 4, X'00000000000000000000000000000000', ''),
+                        ('missing', 'scope', 'd', '', 0, X'', ''),
+                        ('unavailable', 'scope', 'e', '', 0, X'', 'm4');
+                 INSERT INTO memory_meta (key, value)
+                 VALUES ('embedding_model', 'm4'), ('embedding_dim', '4');",
+            )
+            .unwrap();
+        // No Tokio runtime here, so the store cannot start re-embedding.
+        let mem = MemoryStore::new(
+            db,
+            Arc::new(FakeEmbedder {
+                delay: std::time::Duration::ZERO,
+            }),
+        )
+        .unwrap();
+        let status = mem.embedding_status().unwrap();
+        assert_eq!(status.model.as_deref(), Some("m4"));
+        assert_eq!(status.dim, 4);
+        assert_eq!(status.total, 5);
+        assert_eq!(status.current, 1);
+        assert_eq!(status.stale, 2);
+        assert_eq!(status.missing, 1);
+        assert_eq!(status.unavailable, 1);
+        assert!(!status.reindexing);
+        assert!(!mem.start_reembed());
+    }
+
+    #[tokio::test]
+    async fn model_change_reembeds_stale_and_missing_memories() {
+        let mem = fake_store(0);
+        let alpha = register_fact(&mem, "m3", "alpha project").await;
+        let beta = register_fact(&mem, "m3", "beta reject").await;
+        let missing = register_fact(&mem, "down", "gamma notes").await;
+        let status = wait_for_reembed(&mem).await;
+        assert_eq!(status.model.as_deref(), Some("m3"));
+        // The job embedded the entry the failing model left without a vector
+        // and marked the entry m3 rejects as attempted.
+        assert_eq!(node_embedding(&mem, &missing), ("m3".into(), 3));
+        assert_eq!(node_embedding(&mem, &beta), ("m3".into(), 0));
+        assert_eq!(status.current, 2);
+        assert_eq!(status.missing, 0);
+        assert_eq!(status.unavailable, 1);
+
+        // A search with a new model switches the index and re-embeds everything.
+        mem.search_graph("m5", "alpha project", &[], 3, false)
+            .await
+            .unwrap();
+        let status = wait_for_reembed(&mem).await;
+        assert_eq!(status.model.as_deref(), Some("m5"));
+        assert_eq!(status.dim, 5);
+        assert_eq!(status.stale, 0);
+        assert_eq!(status.missing, 0);
+        assert_eq!(status.unavailable, 1);
+        assert_eq!(status.current, 2);
+        assert!(status.last_error.is_none());
+        assert_eq!(node_embedding(&mem, &alpha), ("m5".into(), 5));
+        assert_eq!(node_embedding(&mem, &beta), ("m5".into(), 0));
+
+        let hits = mem
+            .search_graph("m5", "gamma notes", &[], 1, false)
+            .await
+            .unwrap();
+        assert_eq!(hits[0].node.id, missing);
+    }
+
+    #[tokio::test]
+    async fn pending_reembedding_resumes_when_the_store_reopens() {
+        let db = Database::open_in_memory().unwrap();
+        db.migrate(MEMORY_MIGRATIONS).unwrap();
+        db.conn()
+            .execute_batch(
+                "INSERT INTO memory_scopes (id, kind, label, locator, locator_hash)
+                 VALUES ('scope', 'project', 'Project', 'project', 'hash');
+                 INSERT INTO memory_nodes (id, scope_id, title, body, dim, embedding, embedding_model)
+                 VALUES ('old', 'scope', 'old vector', '', 3, X'000000000000000000000000', 'm3');
+                 INSERT INTO memory_meta (key, value)
+                 VALUES ('embedding_model', 'm4'), ('embedding_dim', '4');",
+            )
+            .unwrap();
+        let mem = MemoryStore::new(
+            db,
+            Arc::new(FakeEmbedder {
+                delay: std::time::Duration::ZERO,
+            }),
+        )
+        .unwrap();
+        let status = wait_for_reembed(&mem).await;
+        assert_eq!(status.current, 1);
+        assert_eq!(status.stale, 0);
+        assert_eq!(node_embedding(&mem, "old"), ("m4".into(), 4));
+    }
+
+    #[tokio::test]
+    async fn reembedding_can_be_cancelled_and_restarted() {
+        let mem = fake_store(0);
+        for index in 0..(REEMBED_BATCH * 2 + 5) {
+            register_fact(&mem, "m3", &format!("memory {index}")).await;
+        }
+        wait_for_reembed(&mem).await;
+
+        let slow = mem.with_embedder(mem.embedder.clone());
+        let slow = MemoryStore {
+            index: Arc::new(EmbeddingIndex {
+                embedder: Arc::new(FakeEmbedder {
+                    delay: std::time::Duration::from_millis(50),
+                }),
+                progress: Mutex::new(ReembedProgress::default()),
+                cancel: AtomicBool::new(false),
+                resumed: AtomicBool::new(true),
+            }),
+            ..slow
+        };
+        slow.search_graph("m4", "memory", &[], 1, false)
+            .await
+            .unwrap();
+        assert!(slow.embedding_status().unwrap().reindexing);
+        slow.cancel_reembed();
+        let status = wait_for_reembed(&slow).await;
+        assert!(status.stale > 0, "cancel should leave pending entries");
+        assert!(status.reindexed <= REEMBED_BATCH);
+
+        assert!(slow.start_reembed());
+        let status = wait_for_reembed(&slow).await;
+        assert_eq!(status.stale, 0);
+        assert_eq!(status.current, REEMBED_BATCH * 2 + 5);
     }
 
     #[test]
