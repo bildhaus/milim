@@ -79,6 +79,25 @@ enum Command {
         #[command(subcommand)]
         action: KeysAction,
     },
+    /// Re-send one recorded model step of a canonical run and compare responses.
+    Replay {
+        #[command(flatten)]
+        client: ClientArgs,
+        /// Model step to replay (defaults to the run's last model step).
+        #[arg(long)]
+        step: Option<usize>,
+        /// Provider or local model to send to instead of the recorded one.
+        #[arg(long)]
+        model: Option<String>,
+        /// Print the reconstructed request without calling a model.
+        #[arg(long)]
+        dry_run: bool,
+        /// Print raw JSON.
+        #[arg(long)]
+        json: bool,
+        /// Run id from `GET /control/v1/bootstrap` or the run details view.
+        run_id: String,
+    },
     /// Run a stdio MCP server (for Claude Desktop etc.) proxying to the local server.
     Mcp {
         #[command(flatten)]
@@ -154,6 +173,14 @@ async fn main() -> anyhow::Result<()> {
             .await
         }
         Command::Models { client, json } => models(client, json).await,
+        Command::Replay {
+            client,
+            step,
+            model,
+            dry_run,
+            json,
+            run_id,
+        } => replay(client, run_id, replay_body(step, model, dry_run), json).await,
         Command::Keys { action } => keys_cmd(action),
         Command::Mcp { client } => {
             let base = client_base_url(&client)?;
@@ -540,6 +567,93 @@ fn handle_sse_event(raw: &str, full: &mut String) -> anyhow::Result<bool> {
     Ok(false)
 }
 
+fn replay_body(step: Option<usize>, model: Option<String>, dry_run: bool) -> Value {
+    let mut body = json!({ "dry_run": dry_run });
+    if let Some(step) = step {
+        body["step"] = json!(step);
+    }
+    if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
+        body["model"] = json!(model.trim());
+    }
+    body
+}
+
+async fn replay(
+    client_args: ClientArgs,
+    run_id: String,
+    body: Value,
+    raw_json: bool,
+) -> anyhow::Result<()> {
+    let base = client_base_url(&client_args)?;
+    let client = reqwest::Client::new();
+    let url = format!(
+        "{base}/control/v1/runs/{}/replay",
+        encode_path_segment(run_id.trim())
+    );
+    let v = get_json_value(
+        auth(client.post(url).json(&body), client_args.token.as_deref()),
+        &base,
+    )
+    .await?;
+    if raw_json || v["dry_run"] == true {
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    println!(
+        "run {} step {} (privacy {})",
+        run_id.trim(),
+        v["step"],
+        v["privacy"].as_str().unwrap_or("off")
+    );
+    for (label, side) in [("original", &v["original"]), ("replay", &v["replay"])] {
+        if side.is_null() {
+            println!("\n[{label}] no recorded response");
+            continue;
+        }
+        let tools = side["tool_calls"]
+            .as_array()
+            .map(|calls| {
+                calls
+                    .iter()
+                    .filter_map(|call| call["function"]["name"].as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        println!(
+            "\n[{label}] {} - finish {}, {} ms, tokens {}, tools [{tools}]",
+            side["model"].as_str().unwrap_or("?"),
+            side["finish_reason"].as_str().unwrap_or("?"),
+            side["latency_ms"],
+            side["usage"]["total_tokens"],
+        );
+        println!("{}", side["content"].as_str().unwrap_or_default());
+    }
+    let diff = &v["diff"];
+    if !diff.is_null() {
+        println!(
+            "\ndiff: same tool names {}, same arguments {}, same finish {}, text similarity {:.2}",
+            diff["same_tool_names"],
+            diff["same_tool_arguments"],
+            diff["same_finish_reason"],
+            diff["text_similarity"].as_f64().unwrap_or(0.0),
+        );
+    }
+    Ok(())
+}
+
+fn encode_path_segment(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
+}
+
 async fn get_json_value(req: reqwest::RequestBuilder, base: &str) -> anyhow::Result<Value> {
     let response = checked_response(req, base).await?;
     response.json().await.context("read JSON response")
@@ -724,6 +838,41 @@ mod tests {
             }
             _ => panic!("expected status command"),
         }
+    }
+
+    #[test]
+    fn clap_parses_replay_flags_into_the_request_body() {
+        let cli = Cli::try_parse_from([
+            "milim",
+            "replay",
+            "--step",
+            "3",
+            "--model",
+            "gpt-x",
+            "--dry-run",
+            "run/1",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Replay {
+                step,
+                model,
+                dry_run,
+                run_id,
+                ..
+            } => {
+                assert_eq!(
+                    replay_body(step, model, dry_run),
+                    json!({ "step": 3, "model": "gpt-x", "dry_run": true })
+                );
+                assert_eq!(encode_path_segment(&run_id), "run%2F1");
+            }
+            _ => panic!("expected replay command"),
+        }
+        assert_eq!(
+            replay_body(None, Some(" ".into()), false),
+            json!({ "dry_run": false })
+        );
     }
 
     #[test]
