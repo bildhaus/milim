@@ -157,7 +157,7 @@ fn tool_guidance(tools: &[ToolSpec]) -> Vec<String> {
     }
     if has("shell") {
         let mut line = String::from(
-            "- Use `shell` for builds, tests, git, and other commands; it runs in the workspace root.",
+            "- Use `shell` for builds, tests, git, and other commands. It starts in the workspace root, and a `cd` carries over to later calls.",
         );
         if has_param("shell", "timeout_secs") {
             line.push_str(" Pass `timeout_secs` for commands that may take long.");
