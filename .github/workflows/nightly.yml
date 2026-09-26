@@ -1,5 +1,5 @@
 # Runs the Windows WebView2 suites that are too slow for every pull request,
-# plus a macOS debug build and launch check of the real desktop binary.
+# plus a macOS debug build and /control/v1 smoke of the real desktop binary.
 name: Nightly
 
 on:
@@ -55,15 +55,13 @@ jobs:
           path: apps/desktop/tester-artifacts/nightly-perf
           if-no-files-found: warn
 
-  # WKWebView has no WebDriver or CDP endpoint, the desktop API token is
-  # random per launch and handed only to the webview, and the mobile control
-  # listener binds an ephemeral port that needs an in-app pairing approval.
-  # A /control/v1 smoke against the real app therefore needs a test hook, so
-  # this job builds the debug app and proves the real binary starts its
-  # embedded server. evals/smoke.mjs covers the control API wherever a
-  # credential is available.
+  # WKWebView has no WebDriver or CDP endpoint, and the desktop API token is
+  # random per launch and handed only to the webview. Debug builds therefore
+  # write `{api_url, token}` to MILIM_E2E_CONTROL_FILE (0600, removed on exit;
+  # compiled out of release builds), so this job launches the real debug
+  # binary and runs the /control/v1 smoke in evals/smoke.mjs against it.
   desktop-macos-launch:
-    name: Desktop macOS debug build and launch
+    name: Desktop macOS debug build and control smoke
     runs-on: macos-latest
     timeout-minutes: 90
     steps:
@@ -83,40 +81,33 @@ jobs:
       - run: pnpm -C apps/desktop install --frozen-lockfile
       - name: Debug desktop build
         run: pnpm -C apps/desktop verify:tauri
-      - name: Launch the debug binary and wait for its embedded server
+      - name: Launch the debug binary and run the control smoke
         shell: bash
         run: |
           binary=apps/desktop/src-tauri/target/tauri-verify/debug/milim-desktop
           test -x "$binary"
-          if nc -z 127.0.0.1 7377; then
-            echo "port 7377 is already in use" >&2
-            exit 1
-          fi
           export MILIM_HOME="$(mktemp -d)"
+          e2e_dir="$(mktemp -d)"
+          chmod 700 "$e2e_dir"
+          export MILIM_E2E_CONTROL_FILE="$e2e_dir/control.json"
           log="$RUNNER_TEMP/milim-desktop.log"
           RUST_BACKTRACE=1 "$binary" >"$log" 2>&1 &
           pid=$!
-          healthy=0
-          for _ in $(seq 1 120); do
-            if ! kill -0 "$pid" 2>/dev/null; then
-              echo "desktop binary exited before its server was ready" >&2
-              break
-            fi
-            if curl -fsS http://127.0.0.1:7377/health >/dev/null 2>&1; then
-              healthy=1
-              break
-            fi
-            sleep 0.5
-          done
+          status=0
+          MILIM_SMOKE_TIMEOUT_MS=60000 node evals/smoke.mjs || status=$?
+          if [ "$status" = 0 ]; then
+            api_url="$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.env.MILIM_E2E_CONTROL_FILE, "utf8")).api_url)')"
+            curl -fsS "$api_url/health" >/dev/null || status=1
+          fi
           kill "$pid" 2>/dev/null || true
           for _ in $(seq 1 20); do
             kill -0 "$pid" 2>/dev/null || break
             sleep 0.5
           done
           kill -9 "$pid" 2>/dev/null || true
-          rm -rf "$MILIM_HOME"
-          if [ "$healthy" != 1 ]; then
+          rm -rf "$MILIM_HOME" "$e2e_dir"
+          if [ "$status" != 0 ]; then
             cat "$log"
             exit 1
           fi
-          echo "macOS debug binary served /health"
+          echo "macOS debug binary passed the control smoke"

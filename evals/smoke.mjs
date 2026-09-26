@@ -5,26 +5,58 @@
 //   MILIM_DEVICE_KEY    paired-device bearer key (mobile/control listener), or
 //   MILIM_API_TOKEN     desktop bearer token (main listener); both optional
 //                       for a loopback-trusted test server
+//   MILIM_E2E_CONTROL_FILE  instead of the three above: the file a debug
+//                       desktop build writes `{api_url, token}` to when it is
+//                       launched with the same variable; waited for until the
+//                       timeout
 //   MILIM_SMOKE_TIMEOUT_MS  per-run timeout (default 30000)
 //
 // Credentials are sent only as Authorization headers and never printed.
 
-const base = (process.env.MILIM_CONTROL_URL || "").replace(/\/+$/, "");
-const credential = process.env.MILIM_DEVICE_KEY || process.env.MILIM_API_TOKEN || "";
+import { readFile } from "node:fs/promises";
+
 const timeoutMs = Number(process.env.MILIM_SMOKE_TIMEOUT_MS || 30_000);
 const nonce = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 const terminal = new Set(["completed", "failed", "cancelled", "interrupted"]);
-
-if (!base) fail("MILIM_CONTROL_URL is required.");
+let base = (process.env.MILIM_CONTROL_URL || "").replace(/\/+$/, "");
+let credential = process.env.MILIM_DEVICE_KEY || process.env.MILIM_API_TOKEN || "";
 
 try {
+  const controlFile = process.env.MILIM_E2E_CONTROL_FILE;
+  if (!base && controlFile) {
+    const control = await readControlFile(controlFile);
+    base = control.apiUrl;
+    credential = control.token;
+    step("read the desktop control file");
+  }
+  if (!base) fail("MILIM_CONTROL_URL or MILIM_E2E_CONTROL_FILE is required.");
   await main();
 } catch (error) {
   fail(error instanceof Error ? error.message : String(error));
 }
 
+/** Wait for a debug desktop build to publish its API URL and token. */
+async function readControlFile(path) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      const value = JSON.parse(await readFile(path, "utf8"));
+      if (typeof value.api_url === "string" && typeof value.token === "string") {
+        return { apiUrl: value.api_url.replace(/\/+$/, ""), token: value.token };
+      }
+      throw new Error("control file is missing api_url or token");
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`timed out after ${timeoutMs} ms waiting for the control file`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
 async function main() {
-  const bootstrap = await request("GET", "/control/v1/bootstrap");
+  const bootstrap = await retryUntilReady(() => request("GET", "/control/v1/bootstrap"));
   if (bootstrap?.protocol?.min == null || !Array.isArray(bootstrap.threads)) {
     throw new Error("bootstrap is missing protocol or threads");
   }
@@ -91,6 +123,19 @@ async function main() {
     step(`warning: thread.archive returned ${archived.status}`);
   }
   console.log("control smoke passed");
+}
+
+/** A freshly launched host may not accept connections yet. */
+async function retryUntilReady(attempt) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      return await attempt();
+    } catch (error) {
+      if (Date.now() > deadline || !/ failed: /.test(String(error?.message))) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
 }
 
 async function waitForRun(runId) {
