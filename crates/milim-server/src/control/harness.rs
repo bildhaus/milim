@@ -11,13 +11,13 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 
+use super::approvals::normalized_approval_kind;
 use super::delta::{flush_deltas, DELTA_FLUSH_BYTES, DELTA_FLUSH_INTERVAL};
 use super::journal::RunJournal;
 use super::metrics::response_metrics_value;
 use super::{
     control_account_images, frozen_harness_instructions, linked_run_context,
-    managed_preview_runtime_context, normalized_approval_kind, now_ms, AcceptedTurnV1, RunManager,
-    RunOutcome,
+    managed_preview_runtime_context, now_ms, AcceptedTurnV1, RunManager, RunOutcome,
 };
 use crate::AppState;
 
