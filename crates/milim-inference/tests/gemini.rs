@@ -281,7 +281,10 @@ async fn streams_function_call_as_openai_tool_call() {
         "object"
     );
     assert_eq!(out.finish_reason, "tool_calls");
-    assert_eq!(calls[0].id.as_deref(), Some("gemini_call_0"));
+    assert!(calls[0]
+        .id
+        .as_deref()
+        .is_some_and(|id| id.starts_with("gemini_call_")));
     assert_eq!(calls[0].function.name, "get_weather");
     assert_eq!(calls[0].function.arguments, r#"{"location":"Paris"}"#);
 }

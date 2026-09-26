@@ -4,7 +4,9 @@
 //! `generateContent` request shape and maps Gemini SSE responses back into the
 //! neutral [`StreamEvent`] shape used by the rest of milim.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -41,6 +43,50 @@ pub struct GeminiBackend {
     base_url: String,
     api_key: Option<String>,
     client: reqwest::Client,
+    signatures: Arc<Mutex<ThoughtSignatures>>,
+}
+
+/// Thought signatures Gemini attached to the function calls it streamed,
+/// keyed by the call id milim assigned. Gemini 3 rejects a follow-up request
+/// whose current-turn function call lacks its signature, so each one is sent
+/// back with the call it came from. Bounded; the oldest entries go first.
+#[derive(Debug, Default)]
+struct ThoughtSignatures {
+    by_call: HashMap<String, String>,
+    order: VecDeque<String>,
+}
+
+const MAX_THOUGHT_SIGNATURES: usize = 4096;
+
+/// Documented placeholder for a function call Gemini did not produce in this
+/// process (history from another model, or from before a restart).
+const SKIP_THOUGHT_SIGNATURE: &str = "skip_thought_signature_validator";
+
+impl ThoughtSignatures {
+    fn insert(&mut self, call_id: String, signature: String) {
+        if self.by_call.insert(call_id.clone(), signature).is_none() {
+            self.order.push_back(call_id);
+        }
+        while self.order.len() > MAX_THOUGHT_SIGNATURES {
+            if let Some(oldest) = self.order.pop_front() {
+                self.by_call.remove(&oldest);
+            }
+        }
+    }
+}
+
+/// Process-unique call ids, seeded from the clock so ids from an earlier
+/// process never match a signature recorded by this one.
+fn next_call_id() -> String {
+    static NEXT: OnceLock<AtomicU64> = OnceLock::new();
+    let next = NEXT.get_or_init(|| {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_micros() as u64)
+            .unwrap_or_default();
+        AtomicU64::new(seed << 8)
+    });
+    format!("gemini_call_{:x}", next.fetch_add(1, Ordering::Relaxed))
 }
 
 impl GeminiBackend {
@@ -57,6 +103,7 @@ impl GeminiBackend {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key,
             client: default_client(),
+            signatures: Arc::default(),
         }
     }
 
@@ -74,7 +121,7 @@ impl GeminiBackend {
     fn build_body(&self, req: &CompletionRequest) -> Result<Value> {
         let leading = leading_system_count(&req.messages);
         let mut body = json!({
-            "contents": build_contents(&req.messages[leading..])?,
+            "contents": build_contents(&req.messages[leading..], &self.signatures)?,
         });
 
         let system = system_parts(&req.messages[..leading]);
@@ -178,10 +225,14 @@ impl ModelService for GeminiBackend {
         }
 
         let label = self.label.clone();
+        let signatures = self.signatures.clone();
         let stream = async_stream::stream! {
             let mut bytes = resp.bytes_stream();
             let mut buf: Vec<u8> = Vec::new();
-            let mut state = GeminiStreamState::default();
+            let mut state = GeminiStreamState {
+                signatures: signatures.clone(),
+                ..GeminiStreamState::default()
+            };
 
             while let Some(chunk) = bytes.next().await {
                 let chunk = match chunk {
@@ -254,6 +305,7 @@ struct GeminiStreamState {
     finish_reason: Option<String>,
     saw_tool_call: bool,
     next_tool_index: u32,
+    signatures: Arc<Mutex<ThoughtSignatures>>,
 }
 
 enum GeminiLine {
@@ -328,9 +380,20 @@ fn parse_sse_line(line: &str, state: &mut GeminiStreamState) -> GeminiLine {
                     let index = state.next_tool_index;
                     state.next_tool_index += 1;
                     state.saw_tool_call = true;
+                    let id = next_call_id();
+                    if let Some(signature) = part
+                        .get("thoughtSignature")
+                        .or_else(|| part.get("thought_signature"))
+                        .and_then(Value::as_str)
+                        .filter(|signature| !signature.is_empty())
+                    {
+                        if let Ok(mut signatures) = state.signatures.lock() {
+                            signatures.insert(id.clone(), signature.to_string());
+                        }
+                    }
                     delta.tool_calls.push(DeltaToolCall {
                         index,
-                        id: Some(format!("gemini_call_{index}")),
+                        id: Some(id),
                         kind: Some("function".to_string()),
                         function: DeltaFunction {
                             name: call.get("name").and_then(Value::as_str).map(str::to_string),
@@ -367,7 +430,13 @@ fn system_parts(messages: &[ChatMessage]) -> Vec<Value> {
 /// system message becomes user text wrapped in `<system-reminder>` at its
 /// original position, and consecutive same-role turns are merged with
 /// `functionResponse` parts kept first.
-fn build_contents(messages: &[ChatMessage]) -> Result<Vec<Value>> {
+fn build_contents(
+    messages: &[ChatMessage],
+    signatures: &Mutex<ThoughtSignatures>,
+) -> Result<Vec<Value>> {
+    let signatures = signatures
+        .lock()
+        .map_err(|_| Error::Other("Gemini thought signature cache poisoned".into()))?;
     let mut tool_names = HashMap::new();
     let mut contents: Vec<Value> = Vec::new();
     for msg in messages {
@@ -383,7 +452,7 @@ fn build_contents(messages: &[ChatMessage]) -> Result<Vec<Value>> {
                 }]
             })
         } else {
-            message_to_gemini(msg, &mut tool_names)?
+            message_to_gemini(msg, &mut tool_names, &signatures)?
         };
         match contents.last_mut() {
             Some(last) if last["role"] == content["role"] => merge_content(last, content),
@@ -409,7 +478,11 @@ fn merge_content(into: &mut Value, next: Value) {
     into["parts"] = Value::Array(parts);
 }
 
-fn message_to_gemini(msg: &ChatMessage, tool_names: &mut HashMap<String, String>) -> Result<Value> {
+fn message_to_gemini(
+    msg: &ChatMessage,
+    tool_names: &mut HashMap<String, String>,
+    signatures: &ThoughtSignatures,
+) -> Result<Value> {
     if msg.role == "tool" {
         let name = msg
             .name
@@ -440,18 +513,36 @@ fn message_to_gemini(msg: &ChatMessage, tool_names: &mut HashMap<String, String>
     let mut parts = content_parts(msg)?;
 
     if let Some(calls) = &msg.tool_calls {
-        for call in calls {
+        let known = |call: &milim_core::api::openai::ToolCall| {
+            call.id
+                .as_ref()
+                .and_then(|id| signatures.by_call.get(id))
+                .cloned()
+        };
+        // Gemini signs only the first call of a parallel batch. Calls it never
+        // signed here get the documented placeholder on the first part only.
+        let any_known = calls.iter().any(|call| known(call).is_some());
+        for (position, call) in calls.iter().enumerate() {
             if let Some(id) = &call.id {
                 tool_names.insert(id.clone(), call.function.name.clone());
             }
             let args = serde_json::from_str::<Value>(&call.function.arguments)
                 .unwrap_or_else(|_| Value::Object(Default::default()));
-            parts.push(json!({
+            let mut part = json!({
                 "functionCall": {
                     "name": call.function.name,
                     "args": args
                 }
-            }));
+            });
+            let signature = match known(call) {
+                Some(signature) => Some(signature),
+                None if !any_known && position == 0 => Some(SKIP_THOUGHT_SIGNATURE.to_string()),
+                None => None,
+            };
+            if let Some(signature) = signature {
+                part["thoughtSignature"] = Value::String(signature);
+            }
+            parts.push(part);
         }
     }
 
@@ -853,5 +944,79 @@ mod schema_tests {
         };
         let out = gemini_tools(&[tool]);
         assert_eq!(out[0]["parameters"], json!({"type": "object"}));
+    }
+}
+
+#[cfg(test)]
+mod thought_signature_tests {
+    use super::*;
+    use milim_core::api::openai::{FunctionCall, ToolCall};
+
+    fn assistant_calls(ids: &[&str]) -> ChatMessage {
+        ChatMessage {
+            role: "assistant".into(),
+            content: None,
+            name: None,
+            tool_calls: Some(
+                ids.iter()
+                    .map(|id| ToolCall {
+                        id: Some((*id).to_string()),
+                        kind: "function".into(),
+                        function: FunctionCall {
+                            name: "list_dir".into(),
+                            arguments: "{}".into(),
+                        },
+                    })
+                    .collect(),
+            ),
+            tool_call_id: None,
+            reasoning_content: None,
+        }
+    }
+
+    #[test]
+    fn streamed_signature_returns_with_its_call() {
+        let mut state = GeminiStreamState::default();
+        let line = r#"data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"list_dir","args":{}},"thoughtSignature":"sig-1"},{"functionCall":{"name":"list_dir","args":{}}}]}}]}"#;
+        let GeminiLine::Delta(delta) = parse_sse_line(line, &mut state) else {
+            panic!("expected a delta");
+        };
+        let ids: Vec<&str> = delta
+            .tool_calls
+            .iter()
+            .map(|call| call.id.as_deref().unwrap())
+            .collect();
+        assert_ne!(ids[0], ids[1], "call ids are unique");
+
+        let contents = build_contents(&[assistant_calls(&ids)], &state.signatures).unwrap();
+        let parts = contents[0]["parts"].as_array().unwrap();
+        assert_eq!(parts[0]["thoughtSignature"], "sig-1");
+        assert!(
+            parts[1].get("thoughtSignature").is_none(),
+            "the unsigned sibling of a parallel batch stays unsigned"
+        );
+    }
+
+    #[test]
+    fn unknown_calls_get_the_placeholder_on_the_first_part_only() {
+        let signatures = Mutex::new(ThoughtSignatures::default());
+        let contents = build_contents(
+            &[assistant_calls(&["call_from_other_model", "second"])],
+            &signatures,
+        )
+        .unwrap();
+        let parts = contents[0]["parts"].as_array().unwrap();
+        assert_eq!(parts[0]["thoughtSignature"], SKIP_THOUGHT_SIGNATURE);
+        assert!(parts[1].get("thoughtSignature").is_none());
+    }
+
+    #[test]
+    fn signature_cache_is_bounded() {
+        let mut signatures = ThoughtSignatures::default();
+        for index in 0..MAX_THOUGHT_SIGNATURES + 10 {
+            signatures.insert(format!("call-{index}"), "sig".into());
+        }
+        assert_eq!(signatures.by_call.len(), MAX_THOUGHT_SIGNATURES);
+        assert!(!signatures.by_call.contains_key("call-0"));
     }
 }
