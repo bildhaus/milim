@@ -1,0 +1,8 @@
+{
+  "id": "run-tests-async-queue",
+  "title": "Diagnose a failing async test",
+  "category": "run-tests-and-fix",
+  "prompt": "One of the tests in this project fails intermittently in CI and consistently on some machines. Run `npm test`, find the root cause in the source, and fix it. Do not modify the tests or add sleeps or retries.",
+  "timeout_s": 420,
+  "check": "node check.mjs"
+}

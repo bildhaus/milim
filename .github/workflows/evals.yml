@@ -1,0 +1,61 @@
+# Agent-quality evals (evals/README.md). Manual only: the suite drives a
+# running, paired milim desktop app through /control/v1, so it needs a
+# self-hosted runner where that app is already running and paired under
+# Settings > Mobile. GitHub-hosted runners have neither the app nor a model.
+#
+# The runner machine must provide MILIM_CONTROL_URL and MILIM_DEVICE_KEY in
+# its own environment (for example the runner service's .env file). This
+# workflow wires no secrets and never runs on pull requests.
+name: Evals
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: Thread model id (MILIM_EVAL_MODEL)
+        required: true
+        type: string
+      tasks:
+        description: Optional comma list of task ids or substrings (MILIM_EVAL_TASKS)
+        required: false
+        type: string
+        default: ""
+      runner:
+        description: Self-hosted runner label with a paired milim app
+        required: true
+        type: string
+        default: milim-evals
+
+permissions:
+  contents: read
+
+concurrency:
+  group: evals
+  cancel-in-progress: false
+
+jobs:
+  evals:
+    name: Agent evals
+    runs-on: [self-hosted, "${{ inputs.runner }}"]
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Check fixtures match their generators
+        run: node evals/fixtures-gen/generate.mjs --check
+      - name: Check the control API is reachable
+        run: node evals/run.mjs --self-test
+      - name: Run evals
+        env:
+          MILIM_EVAL_MODEL: ${{ inputs.model }}
+          MILIM_EVAL_TASKS: ${{ inputs.tasks }}
+          MILIM_EVAL_ARCHIVE: "1"
+        run: node evals/run.mjs --out evals/results/ci.json
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: eval-results
+          path: evals/results/
+          if-no-files-found: ignore

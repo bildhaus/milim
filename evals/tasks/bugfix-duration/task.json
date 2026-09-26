@@ -1,0 +1,8 @@
+{
+  "id": "bugfix-duration",
+  "title": "Fix compound duration parsing",
+  "category": "bugfix-failing-test",
+  "prompt": "`npm test` fails: parseDuration in src/duration.js mishandles compound durations such as \"1h30m\". Fix the parser so all tests pass. Keep the public API unchanged and do not edit the tests.",
+  "timeout_s": 300,
+  "check": "node check.mjs"
+}

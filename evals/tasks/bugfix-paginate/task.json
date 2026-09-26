@@ -1,0 +1,8 @@
+{
+  "id": "bugfix-paginate",
+  "title": "Fix an off-by-one in pagination",
+  "category": "bugfix-failing-test",
+  "prompt": "The test in test/paginate.test.js is failing. Find the bug in src/paginate.js and fix it. Do not change the tests.",
+  "timeout_s": 300,
+  "check": "node check.mjs"
+}

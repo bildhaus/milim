@@ -1,0 +1,8 @@
+{
+  "id": "multistep-config-v2",
+  "title": "Introduce a v2 config format with migration",
+  "category": "multi-step",
+  "prompt": "Introduce version 2 of this project's config format. Track these steps as a checklist and finish all of them:\n1. v2 is JSON shaped `{ \"version\": 2, \"server\": { \"host\": string, \"port\": number }, \"features\": string[] }`. Make `loadConfig(text)` in src/config.js accept both the existing v1 format and v2 (detect v2 by the text starting with `{` after leading whitespace) and return the same normalized `{ host, port, features }` object for both.\n2. Both formats must reject a port that is not an integer from 1 to 65535 with a RangeError whose message mentions `port`.\n3. Add src/migrate.js exporting `migrateV1ToV2(text)`, which returns the equivalent v2 document as JSON with 2-space indentation and a trailing newline, keys in the order shown above.\n4. Convert config/example.conf to config/example.json using that format, and delete the old file.\n5. Update docs/CONFIG.md to document v2 as the current format and mark v1 as deprecated.\n6. Add tests covering v2 loading, validation, and migration; `npm test` must pass.",
+  "timeout_s": 600,
+  "check": "node check.mjs"
+}

@@ -1,0 +1,8 @@
+{
+  "id": "readonly-discount-question",
+  "title": "Answer a question about the code without changing it",
+  "category": "read-only-question",
+  "prompt": "Do not modify any existing file. Investigate this codebase and answer: for a customer on the gold tier, which function ultimately decides their discount percentage, in which file is it defined, and what is the largest discount percentage a gold customer can ever receive? Write the answer as JSON to a new file ANSWER.json with exactly the keys `function` (string, the function name), `file` (string, path relative to the repository root), and `max_percent` (number).",
+  "timeout_s": 300,
+  "check": "node check.mjs"
+}

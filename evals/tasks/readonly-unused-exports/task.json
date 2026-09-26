@@ -1,0 +1,8 @@
+{
+  "id": "readonly-unused-exports",
+  "title": "Find exports that nothing uses",
+  "category": "read-only-question",
+  "prompt": "Do not modify any existing file. The entry point of this project is src/main.js. Find every exported function under src/ that is never imported or called by any other file in the project (exports used only inside their own file, or not at all, count as unused; src/main.js's own exports are the public API and count as used). Write the result to a new file ANSWER.json as `{ \"unused\": [\"<file>#<name>\", ...] }`, where <file> is relative to the repository root, sorted alphabetically.",
+  "timeout_s": 420,
+  "check": "node check.mjs"
+}
