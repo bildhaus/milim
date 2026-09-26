@@ -13,7 +13,7 @@ use tokio::sync::watch;
 
 use super::approvals::normalized_approval_kind;
 use super::attachments::control_account_images;
-use super::delta::{flush_deltas, DELTA_FLUSH_BYTES, DELTA_FLUSH_INTERVAL};
+use super::delta::{DeltaBuffer, DELTA_FLUSH_INTERVAL};
 use super::journal::RunJournal;
 use super::linked_threads::linked_run_context;
 use super::metrics::response_metrics_value;
@@ -142,11 +142,7 @@ impl RunManager {
             request,
         )
         .map_err(|error| error.0)?;
-        let mut content = String::new();
-        let mut reasoning = String::new();
-        let mut pending_text = String::new();
-        let mut pending_reasoning = String::new();
-        let mut emitted_first_delta = false;
+        let mut deltas = DeltaBuffer::new(self, thread_id, run_id);
         let mut final_usage: Option<Usage> = None;
         let mut reported_cost_usd: Option<f64> = None;
         let mut bound_session_id = accepted.config.native_session_id.clone();
@@ -155,13 +151,7 @@ impl RunManager {
             let event = tokio::select! {
                 changed = stop.changed() => {
                     if changed.is_ok() && *stop.borrow() {
-                        flush_deltas(
-                            self,
-                            thread_id,
-                            run_id,
-                            &mut pending_text,
-                            &mut pending_reasoning,
-                        )?;
+                        deltas.flush()?;
                         return Ok(RunOutcome::Cancelled);
                     }
                     None
@@ -170,13 +160,7 @@ impl RunManager {
                     match event {
                         Ok(event) => event,
                         Err(_) => {
-                            flush_deltas(
-                                self,
-                                thread_id,
-                                run_id,
-                                &mut pending_text,
-                                &mut pending_reasoning,
-                            )?;
+                            deltas.flush()?;
                             continue;
                         }
                     }
@@ -248,33 +232,19 @@ impl RunManager {
             match event_type {
                 "text_delta" => {
                     if let Some(text) = value.get("text").and_then(Value::as_str) {
-                        content.push_str(text);
-                        if !pending_reasoning.is_empty() {
-                            flush_deltas(
-                                self,
-                                thread_id,
-                                run_id,
-                                &mut pending_text,
-                                &mut pending_reasoning,
-                            )?;
+                        if deltas.has_pending_reasoning() {
+                            deltas.flush()?;
                         }
-                        pending_text.push_str(text);
+                        deltas.push_text(text);
                         is_delta = true;
                     }
                 }
                 "reasoning_delta" => {
                     if let Some(text) = value.get("text").and_then(Value::as_str) {
-                        reasoning.push_str(text);
-                        if !pending_text.is_empty() {
-                            flush_deltas(
-                                self,
-                                thread_id,
-                                run_id,
-                                &mut pending_text,
-                                &mut pending_reasoning,
-                            )?;
+                        if deltas.has_pending_text() {
+                            deltas.flush()?;
                         }
-                        pending_reasoning.push_str(text);
+                        deltas.push_reasoning(text);
                         is_delta = true;
                     }
                 }
@@ -327,27 +297,10 @@ impl RunManager {
                 _ => {}
             }
             if is_delta {
-                if !emitted_first_delta
-                    || pending_text.len() + pending_reasoning.len() >= DELTA_FLUSH_BYTES
-                {
-                    flush_deltas(
-                        self,
-                        thread_id,
-                        run_id,
-                        &mut pending_text,
-                        &mut pending_reasoning,
-                    )?;
-                    emitted_first_delta = true;
-                }
+                deltas.flush_if_due()?;
                 continue;
             }
-            flush_deltas(
-                self,
-                thread_id,
-                run_id,
-                &mut pending_text,
-                &mut pending_reasoning,
-            )?;
+            deltas.flush()?;
             if matches!(event_type, "approval_requested" | "approval_resolved") {
                 journal.append_event(1, event_type, journal.privacy_processed_value(&value)?)?;
             }
@@ -358,8 +311,8 @@ impl RunManager {
                     journal
                         .commit_model_response(
                             1,
-                            &content,
-                            &reasoning,
+                            deltas.content(),
+                            deltas.reasoning(),
                             &[],
                             "stop",
                             committed_usage,
@@ -374,6 +327,7 @@ impl RunManager {
                         reported_cost_usd,
                     )
                     .await?;
+                    let (content, reasoning) = deltas.into_output();
                     let assistant_message_id = self.complete_assistant_message(
                         thread_id,
                         run_id,

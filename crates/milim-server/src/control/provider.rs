@@ -1,6 +1,6 @@
 //! Direct provider runs (and the mock runtime used by tests and demos).
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use futures::StreamExt;
 use milim_agents::AgentStepHook as _;
@@ -11,7 +11,7 @@ use milim_storage::UserDataStore;
 use serde_json::{json, Value};
 use tokio::sync::watch;
 
-use super::delta::{flush_deltas, DELTA_FLUSH_BYTES, DELTA_FLUSH_INTERVAL};
+use super::delta::DeltaBuffer;
 use super::journal::RunJournal;
 use super::linked_threads::linked_run_context;
 use super::metrics::response_metrics_value;
@@ -30,11 +30,7 @@ impl RunManager {
         stop: &mut watch::Receiver<bool>,
     ) -> Result<RunOutcome> {
         let response = format!("Echo: {}", accepted.text.trim());
-        let mut content = String::new();
-        let mut pending_text = String::new();
-        let mut pending_reasoning = String::new();
-        let mut emitted_first_delta = false;
-        let mut last_flush = Instant::now();
+        let mut deltas = DeltaBuffer::timed(self, thread_id, run_id);
         for chunk in response.as_bytes().chunks(4) {
             tokio::select! {
                 changed = stop.changed() => {
@@ -44,27 +40,14 @@ impl RunManager {
                 }
                 _ = tokio::time::sleep(Duration::from_millis(5)) => {
                     let text = String::from_utf8_lossy(chunk).to_string();
-                    content.push_str(&text);
-                    pending_text.push_str(&text);
-                    if !emitted_first_delta
-                        || pending_text.len() >= DELTA_FLUSH_BYTES
-                        || last_flush.elapsed() >= DELTA_FLUSH_INTERVAL
-                    {
-                        flush_deltas(self, thread_id, run_id, &mut pending_text, &mut pending_reasoning)?;
-                        emitted_first_delta = true;
-                        last_flush = Instant::now();
-                    }
+                    deltas.push_text(&text);
+                    deltas.flush_if_due()?;
                 }
             }
         }
-        flush_deltas(
-            self,
-            thread_id,
-            run_id,
-            &mut pending_text,
-            &mut pending_reasoning,
-        )?;
-        self.complete_assistant_message(thread_id, run_id, content, String::new(), None)?;
+        deltas.flush()?;
+        let (content, reasoning) = deltas.into_output();
+        self.complete_assistant_message(thread_id, run_id, content, reasoning, None)?;
         Ok(RunOutcome::Completed)
     }
 
@@ -114,17 +97,12 @@ impl RunManager {
         };
         journal.commit_model_request(1, &request).await?;
         let mut stream = service.stream(request).await?;
-        let mut content = String::new();
-        let mut reasoning = String::new();
-        let mut pending_text = String::new();
-        let mut pending_reasoning = String::new();
-        let mut emitted_first_delta = false;
-        let mut last_flush = Instant::now();
+        let mut deltas = DeltaBuffer::timed(self, thread_id, run_id);
         loop {
             tokio::select! {
                 changed = stop.changed() => {
                     if changed.is_ok() && *stop.borrow() {
-                        flush_deltas(self, thread_id, run_id, &mut pending_text, &mut pending_reasoning)?;
+                        deltas.flush()?;
                         return Ok(RunOutcome::Cancelled);
                     }
                 }
@@ -132,29 +110,20 @@ impl RunManager {
                     match event {
                         Some(Ok(StreamEvent::Delta(delta))) => {
                             if let Some(text) = delta.content {
-                                content.push_str(&text);
-                                pending_text.push_str(&text);
+                                deltas.push_text(&text);
                             }
                             if let Some(text) = delta.reasoning {
-                                reasoning.push_str(&text);
-                                pending_reasoning.push_str(&text);
+                                deltas.push_reasoning(&text);
                             }
-                            if !emitted_first_delta
-                                || pending_text.len() + pending_reasoning.len() >= DELTA_FLUSH_BYTES
-                                || last_flush.elapsed() >= DELTA_FLUSH_INTERVAL
-                            {
-                                flush_deltas(self, thread_id, run_id, &mut pending_text, &mut pending_reasoning)?;
-                                emitted_first_delta = true;
-                                last_flush = Instant::now();
-                            }
+                            deltas.flush_if_due()?;
                         }
                         Some(Ok(StreamEvent::Done { finish_reason, usage })) => {
-                            flush_deltas(self, thread_id, run_id, &mut pending_text, &mut pending_reasoning)?;
+                            deltas.flush()?;
                             journal
                                 .commit_model_response(
                                     1,
-                                    &content,
-                                    &reasoning,
+                                    deltas.content(),
+                                    deltas.reasoning(),
                                     &[],
                                     &finish_reason,
                                     usage,
@@ -169,6 +138,7 @@ impl RunManager {
                                 None,
                             )
                             .await?;
+                            let (content, reasoning) = deltas.into_output();
                             self.complete_assistant_message(
                                 thread_id,
                                 run_id,
@@ -180,7 +150,7 @@ impl RunManager {
                         }
                         Some(Err(error)) => return Err(error),
                         None => {
-                            flush_deltas(self, thread_id, run_id, &mut pending_text, &mut pending_reasoning)?;
+                            deltas.flush()?;
                             return Err(Error::Other("provider stream ended without a terminal event".into()));
                         }
                     }

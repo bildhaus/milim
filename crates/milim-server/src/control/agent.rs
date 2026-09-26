@@ -9,7 +9,7 @@ use milim_storage::ControlApprovalRecord;
 use serde_json::{json, Value};
 use tokio::sync::watch;
 
-use super::delta::{flush_deltas, DELTA_FLUSH_BYTES, DELTA_FLUSH_INTERVAL};
+use super::delta::{DeltaBuffer, DELTA_FLUSH_INTERVAL};
 use super::journal::RunJournal;
 use super::linked_threads::linked_run_context;
 use super::metrics::{provider_context_window, provider_pricing, response_metrics_value};
@@ -107,16 +107,12 @@ impl RunManager {
             provider_context_window(state, &accepted.config.model).await,
             journal.clone(),
         )?;
-        let mut content = String::new();
-        let mut reasoning = String::new();
-        let mut pending_text = String::new();
-        let mut pending_reasoning = String::new();
-        let mut emitted_first_delta = false;
+        let mut deltas = DeltaBuffer::new(self, thread_id, run_id);
         loop {
             let event = tokio::select! {
                 changed = stop.changed() => {
                     if changed.is_ok() && *stop.borrow() {
-                        flush_deltas(self, thread_id, run_id, &mut pending_text, &mut pending_reasoning)?;
+                        deltas.flush()?;
                         return Ok(RunOutcome::Cancelled);
                     }
                     None
@@ -125,13 +121,7 @@ impl RunManager {
                     match event {
                         Ok(event) => event,
                         Err(_) => {
-                            flush_deltas(
-                                self,
-                                thread_id,
-                                run_id,
-                                &mut pending_text,
-                                &mut pending_reasoning,
-                            )?;
+                            deltas.flush()?;
                             continue;
                         }
                     }
@@ -156,37 +146,13 @@ impl RunManager {
             }
             match &event {
                 milim_agents::AgentEvent::Token { text } => {
-                    content.push_str(text);
-                    pending_text.push_str(text);
-                    if !emitted_first_delta
-                        || pending_text.len() + pending_reasoning.len() >= DELTA_FLUSH_BYTES
-                    {
-                        flush_deltas(
-                            self,
-                            thread_id,
-                            run_id,
-                            &mut pending_text,
-                            &mut pending_reasoning,
-                        )?;
-                        emitted_first_delta = true;
-                    }
+                    deltas.push_text(text);
+                    deltas.flush_if_due()?;
                     continue;
                 }
                 milim_agents::AgentEvent::Reasoning { text } => {
-                    reasoning.push_str(text);
-                    pending_reasoning.push_str(text);
-                    if !emitted_first_delta
-                        || pending_text.len() + pending_reasoning.len() >= DELTA_FLUSH_BYTES
-                    {
-                        flush_deltas(
-                            self,
-                            thread_id,
-                            run_id,
-                            &mut pending_text,
-                            &mut pending_reasoning,
-                        )?;
-                        emitted_first_delta = true;
-                    }
+                    deltas.push_reasoning(text);
+                    deltas.flush_if_due()?;
                     continue;
                 }
                 milim_agents::AgentEvent::ToolApprovalRequired {
@@ -197,13 +163,7 @@ impl RunManager {
                     environment_policy,
                     ..
                 } => {
-                    flush_deltas(
-                        self,
-                        thread_id,
-                        run_id,
-                        &mut pending_text,
-                        &mut pending_reasoning,
-                    )?;
+                    deltas.flush()?;
                     let approval_request = self.enrich_linked_thread_send_approval(
                         accepted,
                         json!({
@@ -252,30 +212,15 @@ impl RunManager {
                     discarded_reasoning_bytes,
                     ..
                 } => {
-                    flush_deltas(
-                        self,
-                        thread_id,
-                        run_id,
-                        &mut pending_text,
-                        &mut pending_reasoning,
-                    )?;
-                    // The failed attempt's partial text is not part of the
-                    // answer; the retried step streams it again.
-                    content.truncate(content.len().saturating_sub(*discarded_content_bytes));
-                    reasoning.truncate(reasoning.len().saturating_sub(*discarded_reasoning_bytes));
+                    deltas.flush()?;
+                    deltas.truncate_for_retry(*discarded_content_bytes, *discarded_reasoning_bytes);
                 }
                 milim_agents::AgentEvent::ToolApprovalResolved {
                     approval_id,
                     reason: Some(reason),
                     ..
                 } => {
-                    flush_deltas(
-                        self,
-                        thread_id,
-                        run_id,
-                        &mut pending_text,
-                        &mut pending_reasoning,
-                    )?;
+                    deltas.flush()?;
                     // The loop denied the request itself (e.g. it timed out);
                     // close the stored approval so it no longer shows pending.
                     if let Some(mut durable) = self.store.control_approval(approval_id)? {
@@ -293,13 +238,7 @@ impl RunManager {
                     stopped_at_limit,
                     ..
                 } => {
-                    flush_deltas(
-                        self,
-                        thread_id,
-                        run_id,
-                        &mut pending_text,
-                        &mut pending_reasoning,
-                    )?;
+                    deltas.flush()?;
                     self.persist_and_emit(thread_id, Some(run_id), &event_type, value)?;
                     let metrics = response_metrics_value(
                         state,
@@ -310,6 +249,7 @@ impl RunManager {
                         None,
                     )
                     .await?;
+                    let (content, reasoning) = deltas.into_output();
                     self.complete_assistant_message(
                         thread_id,
                         run_id,
@@ -324,24 +264,12 @@ impl RunManager {
                     });
                 }
                 milim_agents::AgentEvent::Error { message } => {
-                    flush_deltas(
-                        self,
-                        thread_id,
-                        run_id,
-                        &mut pending_text,
-                        &mut pending_reasoning,
-                    )?;
+                    deltas.flush()?;
                     self.persist_and_emit(thread_id, Some(run_id), &event_type, value)?;
                     return Err(Error::Other(message.clone()));
                 }
                 _ => {
-                    flush_deltas(
-                        self,
-                        thread_id,
-                        run_id,
-                        &mut pending_text,
-                        &mut pending_reasoning,
-                    )?;
+                    deltas.flush()?;
                 }
             }
             self.persist_and_emit(thread_id, Some(run_id), &event_type, value)?;
