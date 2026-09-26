@@ -93,6 +93,8 @@ impl milim_tools::Tool for NamedTestTool {
             | "read_file"
             | "read_file_anchors"
             | "list_dir"
+            | "glob"
+            | "grep"
             | "screenshot"
             | "preview_dom_snapshot"
             | "schedule_list"
@@ -7302,6 +7304,8 @@ async fn agent_run_plan_mode_exposes_only_read_only_workspace_tools() {
         "read_file",
         "read_file_anchors",
         "list_dir",
+        "glob",
+        "grep",
         "write_file",
         "edit_file",
         "patch_file",
@@ -7344,7 +7348,266 @@ async fn agent_run_plan_mode_exposes_only_read_only_workspace_tools() {
         .split(',')
         .filter(|name| !name.is_empty())
         .collect();
-    assert_eq!(names, vec!["list_dir", "read_file", "read_file_anchors"]);
+    assert_eq!(
+        names,
+        vec!["glob", "grep", "list_dir", "read_file", "read_file_anchors"]
+    );
+}
+
+type CapturedCall = (Vec<milim_core::api::openai::ChatMessage>, Vec<String>);
+
+/// Records every request's messages and tool names. Calls `echo` once when
+/// the user message starts with `/tool`, then answers.
+#[derive(Clone, Default)]
+struct PromptCaptureBackend {
+    calls: Arc<std::sync::Mutex<Vec<CapturedCall>>>,
+}
+
+impl PromptCaptureBackend {
+    fn calls(&self) -> Vec<CapturedCall> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ModelService for PromptCaptureBackend {
+    fn name(&self) -> &str {
+        "prompt-capture"
+    }
+
+    async fn list_models(&self) -> milim_core::Result<Vec<Model>> {
+        Ok(vec![Model::local("prompt-capture", 0)])
+    }
+
+    async fn stream(&self, req: CompletionRequest) -> milim_core::Result<EventStream> {
+        let tools: Vec<String> = req
+            .tools
+            .iter()
+            .map(|tool| tool.function.name.clone())
+            .collect();
+        let want_tool = !tools.is_empty()
+            && req.last_user_text().starts_with("/tool")
+            && !req.messages.iter().any(|message| message.role == "tool");
+        self.calls
+            .lock()
+            .unwrap()
+            .push((req.messages.clone(), tools));
+        let stream = async_stream::stream! {
+            if want_tool {
+                yield Ok(StreamEvent::Delta(DeltaEvent {
+                    tool_calls: vec![DeltaToolCall {
+                        index: 0,
+                        id: Some("call_0".to_string()),
+                        kind: Some("function".to_string()),
+                        function: DeltaFunction {
+                            name: Some("echo".to_string()),
+                            arguments: Some("{\"text\":\"hi\"}".to_string()),
+                        },
+                    }],
+                    ..Default::default()
+                }));
+                yield Ok(StreamEvent::Done {
+                    finish_reason: "tool_calls".to_string(),
+                    usage: Usage::new(1, 1),
+                });
+                return;
+            }
+            yield Ok(StreamEvent::Delta(DeltaEvent::text("done")));
+            yield Ok(StreamEvent::Done {
+                finish_reason: "stop".to_string(),
+                usage: Usage::new(1, 1),
+            });
+        };
+        Ok(Box::pin(stream))
+    }
+
+    async fn embed(&self, _model: &str, inputs: Vec<String>) -> milim_core::Result<Vec<Vec<f32>>> {
+        Ok(inputs.iter().map(|_| vec![0.0]).collect())
+    }
+}
+
+fn system_texts(messages: &[milim_core::api::openai::ChatMessage]) -> Vec<String> {
+    messages
+        .iter()
+        .filter(|message| message.role == "system")
+        .map(|message| message.text_content())
+        .collect()
+}
+
+const BASE_PROMPT_START: &str = "You are milim's coding agent";
+
+#[tokio::test]
+async fn native_agent_runs_lead_with_base_prompt_and_keep_environment_stable() {
+    let backend = PromptCaptureBackend::default();
+    let workspace = unique_temp_path("milim-base-prompt");
+    fs::create_dir_all(&workspace).unwrap();
+    let state = AppState::new(Arc::new(backend.clone()), ServerConfiguration::default())
+        .with_tools(milim_tools::ToolRegistry::with_builtins())
+        .with_workspace(Arc::new(RwLock::new(Some(workspace.clone()))));
+    let base = spawn(state).await;
+    let client = reqwest::Client::new();
+
+    let run: Value = client
+        .post(format!("{base}/agents/run"))
+        .json(&json!({
+            "model": "prompt-capture",
+            "tool_approval_policy": "open",
+            "messages": [
+                {"role": "system", "content": "Custom instructions: be terse."},
+                {"role": "user", "content": "/tool go"}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(run["message"]["content"], "done");
+    let calls = backend.calls();
+    assert_eq!(calls.len(), 2, "one tool step, then the answer");
+    let first = system_texts(&calls[0].0);
+    assert!(first[0].starts_with(BASE_PROMPT_START), "{first:?}");
+    let custom = first
+        .iter()
+        .position(|text| text.starts_with("Custom instructions"))
+        .unwrap();
+    let environment = first
+        .iter()
+        .position(|text| text.starts_with("<environment>"))
+        .unwrap();
+    assert!(custom < environment);
+    assert!(first[environment].contains(&format!("Workspace root: {}", workspace.display())));
+    assert!(first[environment].contains("Model: prompt-capture"));
+    assert_eq!(
+        first,
+        system_texts(&calls[1].0),
+        "base prompt and environment must stay byte-identical across steps"
+    );
+
+    client
+        .post(format!("{base}/v1/chat/completions"))
+        .json(&json!({
+            "model": "prompt-capture",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    client
+        .post(format!("{base}/agents/run"))
+        .json(&json!({
+            "model": "prompt-capture",
+            "tool_approval_policy": "review",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let calls = backend.calls();
+    for (messages, tools) in &calls[2..] {
+        assert!(tools.is_empty());
+        assert!(
+            !system_texts(messages).iter().any(
+                |text| text.starts_with(BASE_PROMPT_START) || text.starts_with("<environment>")
+            ),
+            "plain chat and tool-less runs get no base prompt"
+        );
+    }
+    let _ = fs::remove_dir_all(workspace);
+}
+
+#[tokio::test]
+async fn native_agent_runs_index_skills_and_load_project_skills() {
+    let backend = PromptCaptureBackend::default();
+    let workspace = unique_temp_path("milim-project-skills");
+    let skill_dir = workspace.join(".claude").join("skills").join("release");
+    fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: Release\ndescription: Cut a release\n---\nRun the release script.",
+    )
+    .unwrap();
+    fs::write(skill_dir.join("scripts").join("cut.sh"), "echo cut").unwrap();
+    let store =
+        milim_skills::SkillStore::new(milim_storage::Database::open_in_memory().unwrap()).unwrap();
+    store
+        .create("Code Review", "Review diffs", "List findings first.")
+        .unwrap();
+    store.create("Mailer", "Send email", "Use SMTP.").unwrap();
+    store
+        .create("Release", "User release notes", "User release body.")
+        .unwrap();
+    let state = AppState::new(Arc::new(backend.clone()), ServerConfiguration::default())
+        .with_tools(milim_tools::ToolRegistry::with_builtins())
+        .with_skills(store)
+        .with_workspace(Arc::new(RwLock::new(Some(workspace.clone()))));
+    let base = spawn(state).await;
+    let client = reqwest::Client::new();
+
+    for skills_resolved in [false, true] {
+        client
+            .post(format!("{base}/agents/run"))
+            .json(&json!({
+                "model": "prompt-capture",
+                "tool_approval_policy": "open",
+                "skills_resolved": skills_resolved,
+                "messages": [{"role": "user", "content": "Please use @mailer to announce it"}]
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+    }
+    let calls = backend.calls();
+    let (messages, tools) = &calls[0];
+    assert!(tools.iter().any(|name| name == "load_skill"));
+    assert!(tools.iter().any(|name| name == "milim_skill_search"));
+    let skills = system_texts(messages)
+        .into_iter()
+        .find(|text| text.contains("Installed skills"))
+        .expect("skill index");
+    assert!(skills.contains("- Code Review: Review diffs"), "{skills}");
+    assert!(skills.contains("- Release: Cut a release"), "{skills}");
+    assert!(
+        !skills.contains("User release notes"),
+        "project skills win: {skills}"
+    );
+    assert!(
+        !skills.contains("List findings first."),
+        "index only: {skills}"
+    );
+    assert!(
+        !skills.contains("Mailer"),
+        "explicit skills leave the index: {skills}"
+    );
+    assert!(
+        system_texts(messages)
+            .iter()
+            .any(|text| text.contains("referenced these skills") && text.contains("Use SMTP.")),
+        "explicit mentions load in full"
+    );
+    assert!(!system_texts(&calls[1].0)
+        .iter()
+        .any(|text| text.contains("Installed skills")));
+
+    let loaded: Value = client
+        .post(format!("{base}/mcp/call"))
+        .json(&json!({"name": "load_skill", "arguments": {"name": "release"}}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(loaded["result"]["instructions"], "Run the release script.");
+    assert_eq!(loaded["result"]["files"], json!(["scripts/cut.sh"]));
+    let _ = fs::remove_dir_all(workspace);
 }
 
 #[tokio::test]
