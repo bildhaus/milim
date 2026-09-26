@@ -199,6 +199,8 @@ async fn serve(port: Option<u16>, expose: bool) -> anyhow::Result<()> {
         println!("warning: exposed on the local network (0.0.0.0)");
     }
 
+    milim_tools::init_tool_output_root(paths.root().join("tool-output"));
+
     // Built-in tools + filesystem tools sandboxed to a workspace directory.
     let workspace = paths.root().join("workspace");
     std::fs::create_dir_all(&workspace).context("create CLI workspace")?;

@@ -527,6 +527,13 @@ async fn run_child_stream(
                     last_token_flush = Instant::now();
                 }
             }
+            AgentEvent::ProviderRetry {
+                discarded_content_bytes,
+                ..
+            } => {
+                // The retried step streams the discarded partial text again.
+                text.truncate(text.len().saturating_sub(discarded_content_bytes));
+            }
             AgentEvent::Reasoning { text } => {
                 flush_token_event(&store, &events, &thread, &mut token_buffer);
                 emit_thread_event(
@@ -659,6 +666,7 @@ async fn run_child_stream(
             AgentEvent::Start { .. }
             | AgentEvent::ToolApprovalRequired { .. }
             | AgentEvent::ToolApprovalResolved { .. }
+            | AgentEvent::ContextCompacted { .. }
             | AgentEvent::MemoryRegistered { .. }
             | AgentEvent::ChildThreadStarted { .. }
             | AgentEvent::ChildThreadDone { .. }

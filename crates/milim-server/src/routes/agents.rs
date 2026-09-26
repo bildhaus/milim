@@ -3947,6 +3947,7 @@ pub(crate) fn control_agent_stream(
     sampling: SamplingParams,
     run_limits: Option<&crate::control::RunLimitsV1>,
     pricing: Option<milim_core::api::openai::ModelPricing>,
+    context_window_tokens: Option<u32>,
     step_hook: Arc<dyn milim_agents::AgentStepHook>,
 ) -> milim_core::Result<ControlAgentStream> {
     let run_context = RunContext::from_control(st, workspace, privacy)?;
@@ -3972,6 +3973,7 @@ pub(crate) fn control_agent_stream(
     }
     agent_config.step_hook = Some(step_hook);
     agent_config.sampling = sampling;
+    agent_config.context_window_tokens = context_window_tokens;
     if let Some(limits) = run_limits {
         if let Some(steps) = limits.max_steps {
             agent_config.max_iterations = steps as usize;

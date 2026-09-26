@@ -746,22 +746,29 @@ impl RunJournal {
                 .unwrap_or_else(|| json!([])),
         )
         .map_err(|error| Error::Other(format!("decode stored provider tool calls: {error}")))?;
-        messages.push(ChatMessage {
-            role: "assistant".into(),
-            content: response
-                .get("content")
-                .and_then(Value::as_str)
-                .filter(|content| !content.is_empty())
-                .map(|content| milim_core::api::openai::Content::Text(content.to_string())),
-            name: None,
-            tool_calls: Some(tool_calls),
-            tool_call_id: None,
-            reasoning_content: response
-                .get("reasoning")
-                .and_then(Value::as_str)
-                .filter(|reasoning| !reasoning.is_empty())
-                .map(str::to_string),
-        });
+        let content = response
+            .get("content")
+            .and_then(Value::as_str)
+            .filter(|content| !content.is_empty())
+            .map(|content| milim_core::api::openai::Content::Text(content.to_string()));
+        // A step without tool calls only continues after an output-limit cut
+        // off; its partial text replays as plain assistant text, and a turn
+        // with no text at all is dropped rather than sent empty.
+        let had_tool_calls = !tool_calls.is_empty();
+        if content.is_some() || had_tool_calls {
+            messages.push(ChatMessage {
+                role: "assistant".into(),
+                content,
+                name: None,
+                tool_calls: had_tool_calls.then_some(tool_calls),
+                tool_call_id: None,
+                reasoning_content: response
+                    .get("reasoning")
+                    .and_then(Value::as_str)
+                    .filter(|reasoning| !reasoning.is_empty())
+                    .map(str::to_string),
+            });
+        }
         for event in previous
             .iter()
             .filter(|event| event.event_type == "tool_result_committed")
@@ -788,10 +795,12 @@ impl RunJournal {
 
         // Binary tool images are referenced rather than duplicated in the
         // ledger. Keep only those image follow-ups from the in-process cache;
-        // all text and JSON above is rebuilt from SQLite.
+        // all text and JSON above is rebuilt from SQLite. Only a step that
+        // ran tools can have produced new image follow-ups.
         if let Some(last_tool_call) = memory_cache
             .iter()
             .rposition(|message| message.role == "assistant" && message.tool_calls.is_some())
+            .filter(|_| had_tool_calls)
         {
             messages.extend(
                 memory_cache[last_tool_call + 1..]
@@ -1091,6 +1100,10 @@ fn scrub_credential_value(value: &Value) -> Value {
 
 #[async_trait::async_trait]
 impl milim_agents::AgentStepHook for RunJournal {
+    fn output_scope(&self) -> Option<String> {
+        Some(self.run_id.clone())
+    }
+
     async fn commit_tool_catalog(&self, tools: &[milim_tools::ToolExecutionSpec]) -> Result<()> {
         let tools = self.privacy_processed_value(
             &serde_json::to_value(tools)
@@ -1252,6 +1265,59 @@ impl milim_agents::AgentStepHook for RunJournal {
                 "call_id": call_id,
                 "name": name,
                 "model_content_bytes": model_content_bytes,
+            }),
+        )
+    }
+
+    async fn commit_context_compaction(
+        &self,
+        step: usize,
+        compaction: &milim_agents::ContextCompaction,
+    ) -> Result<()> {
+        self.append_event(
+            step,
+            "context_compacted",
+            serde_json::to_value(compaction)
+                .map_err(|error| Error::Other(format!("serialize context compaction: {error}")))?,
+        )
+    }
+
+    async fn commit_model_timing(
+        &self,
+        step: usize,
+        timing: &milim_agents::ModelStepTiming,
+    ) -> Result<()> {
+        self.append_event(
+            step,
+            "model_timing",
+            json!({
+                "step": step,
+                "started_at_ms": timing.started_at_ms,
+                "first_token_ms": timing.first_token_ms,
+                "duration_ms": timing.duration_ms,
+                "attempts": timing.attempts,
+                "finish_reason": timing.finish_reason,
+            }),
+        )
+    }
+
+    async fn commit_tool_timing(
+        &self,
+        step: usize,
+        call_id: Option<&str>,
+        name: &str,
+        duration_ms: u64,
+        is_error: bool,
+    ) -> Result<()> {
+        self.append_event(
+            step,
+            "tool_timing",
+            json!({
+                "step": step,
+                "call_id": call_id,
+                "name": name,
+                "duration_ms": duration_ms,
+                "is_error": is_error,
             }),
         )
     }
@@ -4467,6 +4533,7 @@ impl RunManager {
             sampling_from_generation(&accepted.config.generation),
             accepted.config.run_limits.as_ref(),
             provider_pricing(state, &accepted.config.model).await,
+            provider_context_window(state, &accepted.config.model).await,
             journal.clone(),
         )?;
         let mut content = String::new();
@@ -4602,6 +4669,47 @@ impl RunManager {
                         arguments,
                     )? {
                         value["auto_approved"] = json!({ "scope": "thread", "allowance": key });
+                    }
+                }
+                milim_agents::AgentEvent::ProviderRetry {
+                    discarded_content_bytes,
+                    discarded_reasoning_bytes,
+                    ..
+                } => {
+                    flush_deltas(
+                        self,
+                        thread_id,
+                        run_id,
+                        &mut pending_text,
+                        &mut pending_reasoning,
+                    )?;
+                    // The failed attempt's partial text is not part of the
+                    // answer; the retried step streams it again.
+                    content.truncate(content.len().saturating_sub(*discarded_content_bytes));
+                    reasoning.truncate(reasoning.len().saturating_sub(*discarded_reasoning_bytes));
+                }
+                milim_agents::AgentEvent::ToolApprovalResolved {
+                    approval_id,
+                    reason: Some(reason),
+                    ..
+                } => {
+                    flush_deltas(
+                        self,
+                        thread_id,
+                        run_id,
+                        &mut pending_text,
+                        &mut pending_reasoning,
+                    )?;
+                    // The loop denied the request itself (e.g. it timed out);
+                    // close the stored approval so it no longer shows pending.
+                    if let Some(mut durable) = self.store.control_approval(approval_id)? {
+                        if durable.status == "pending" {
+                            durable.status = "expired".into();
+                            durable.decision_json =
+                                Some(json!({ "decision": "deny", "reason": reason }).to_string());
+                            durable.resolved_at_ms = Some(now_ms());
+                            self.store.control_put_approval(&durable)?;
+                        }
                     }
                 }
                 milim_agents::AgentEvent::Done {
@@ -6117,6 +6225,19 @@ impl RunManager {
         confirmations
             .remove(&command.command_id)
             .is_some_and(|grant| grant.token == provided)
+    }
+}
+
+async fn provider_context_window(state: &AppState, model: &str) -> Option<u32> {
+    let providers = state.providers.as_ref()?.list().await;
+    if let Some((id, raw_model)) = crate::providers::provider_model_route(model) {
+        let provider = providers.iter().find(|provider| provider.id == id)?;
+        crate::providers::model_context_window(provider, &raw_model)
+    } else {
+        let provider = providers
+            .iter()
+            .find(|provider| provider.models.iter().any(|candidate| candidate == model))?;
+        crate::providers::model_context_window(provider, model)
     }
 }
 
@@ -8718,6 +8839,86 @@ mod tests {
             .find(|artifact| artifact.kind == "provider_request")
             .unwrap();
         assert_eq!(artifact.data_json.as_bytes(), expected);
+    }
+
+    #[tokio::test]
+    async fn step_timing_is_persisted_as_run_events() {
+        let (store, journal) = journal_fixture(crate::privacy::PrivacyMode::Off);
+        journal
+            .commit_model_timing(
+                2,
+                &milim_agents::ModelStepTiming {
+                    started_at_ms: 1_700_000_000_000,
+                    first_token_ms: Some(120),
+                    duration_ms: 900,
+                    attempts: 2,
+                    finish_reason: "tool_calls".into(),
+                },
+            )
+            .await
+            .unwrap();
+        journal
+            .commit_tool_timing(2, Some("call-1"), "read_file", 35, false)
+            .await
+            .unwrap();
+        let events = store.control_run_events("run-1", None, 50).unwrap();
+        let model = events
+            .iter()
+            .find(|event| event.event_type == "model_timing")
+            .unwrap();
+        assert_eq!(model.step_id.as_deref(), Some("step-2"));
+        assert_eq!(
+            parse_value(&model.data_json).unwrap(),
+            json!({
+                "step": 2,
+                "started_at_ms": 1_700_000_000_000u64,
+                "first_token_ms": 120,
+                "duration_ms": 900,
+                "attempts": 2,
+                "finish_reason": "tool_calls",
+            })
+        );
+        let tool = events
+            .iter()
+            .find(|event| event.event_type == "tool_timing")
+            .unwrap();
+        assert_eq!(
+            parse_value(&tool.data_json).unwrap(),
+            json!({
+                "step": 2,
+                "call_id": "call-1",
+                "name": "read_file",
+                "duration_ms": 35,
+                "is_error": false,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn step_after_an_output_limit_cut_replays_plain_assistant_text() {
+        let (_store, journal) = journal_fixture(crate::privacy::PrivacyMode::Off);
+        let request = CompletionRequest {
+            model: "fixture-model".into(),
+            messages: vec![ChatMessage::text("user", "write an essay")],
+            tools: vec![],
+            tool_choice: None,
+            response_format: None,
+            prompt: None,
+            suffix: None,
+            sampling: SamplingParams::default(),
+            reasoning_effort: None,
+        };
+        journal.commit_model_request(1, &request).await.unwrap();
+        journal
+            .commit_model_response(1, "part one", "", &[], "length", Usage::default())
+            .await
+            .unwrap();
+        let mut messages = Vec::new();
+        journal.prepare_model_step(2, &mut messages).await.unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(messages[1].text_content(), "part one");
+        assert!(messages[1].tool_calls.is_none());
     }
 
     #[tokio::test]

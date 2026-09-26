@@ -699,6 +699,17 @@ fn apply_model_overrides(provider: &mut Provider) {
     }
 }
 
+/// Prompt budget for one model: the provider-reported prompt or context
+/// limit, else the same fallback the model catalog shows.
+pub(crate) fn model_context_window(provider: &Provider, model: &str) -> Option<u32> {
+    let context = provider
+        .model_context
+        .get(model)
+        .cloned()
+        .unwrap_or_else(|| fallback_model_context(provider, model));
+    context.max_prompt_tokens.or(context.context_length)
+}
+
 fn fallback_model_context(provider: &Provider, model: &str) -> ModelContextMetadata {
     let id = model.to_ascii_lowercase();
     let context_length = match provider.kind {

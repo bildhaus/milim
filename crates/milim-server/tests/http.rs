@@ -7903,7 +7903,7 @@ async fn named_agent_run_does_not_execute_unselected_tools() {
     assert!(run["steps"][0]["result"]["error"]
         .as_str()
         .unwrap()
-        .contains("unknown tool: echo"));
+        .contains("Unknown tool `echo`"));
     assert!(run["steps"][0]["result"].get("echoed").is_none());
 }
 
