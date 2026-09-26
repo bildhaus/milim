@@ -130,9 +130,11 @@ pnpm -C apps/mobile verify
 pnpm -C apps/site build
 ```
 
+Agent-quality evals live in [`evals/`](evals/README.md). `node evals/run.mjs` drives a running desktop app through `/control/v1` with a paired Mobile device key, runs 18 small fixture tasks (bug fixes, spec implementations, multi-file refactors, large-file edits, AGENTS.md compliance, read-only questions, and multi-step work), grades each with a deterministic check, and records steps, tool calls and errors, tokens, cost, and wall time. `node evals/compare.mjs a.json b.json` diffs two result files.
+
 Platform release work should also follow the [release guide](https://docs.milim.ai/release). The broader packaged-app and Tauri smoke path is available through `pnpm -C apps/desktop verify:tester-ready`.
 
-Pull-request and `main`-push CI splits complete desktop verification between the Rust matrix, an MSRV check, a dependency audit (both Cargo lockfiles plus a check that they agree), the frontend job (including bundle-size budgets), and a Windows WebView2 close-to-tray check. A nightly workflow runs the full Windows WebView2 E2E suite and the enforced perf suite. Release runs reuse that protected validation and add the canonical Windows runtime benchmark plus packaged-artifact checks.
+Pull-request and `main`-push CI splits complete desktop verification between the Rust matrix, an MSRV check, a dependency audit (both Cargo lockfiles plus a check that they agree), the frontend job (including bundle-size budgets), and a Windows WebView2 close-to-tray check. A nightly workflow runs the full Windows WebView2 E2E suite and the enforced perf suite, and builds and launches the macOS desktop app in debug until its embedded server answers. Release runs reuse that protected validation and add the canonical Windows runtime benchmark plus packaged-artifact checks.
 
 ## Documentation
 

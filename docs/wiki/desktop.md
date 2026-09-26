@@ -6,7 +6,7 @@ title: Desktop app
 summary: Unified threads, projects, composer controls, artifacts, plan mode, goals, search, rendering, settings, and slash commands.
 group: Core
 order: 30
-updated: 2026-09-23
+updated: 2026-09-26
 ---
 
 milim is your local control plane for coding agents: use your own models and subscriptions, keep one canonical thread, review the diff, and ship.
@@ -235,6 +235,8 @@ The commit dialog makes the index explicit. **Staged changes only** commits what
 **Usage** in the sidebar Tools launcher opens a dashboard of tokens and spend for the last 7, 30, or 90 days. Totals cover tokens (input and output), spend, responses, active days, and a daily average. A daily bar chart switches between tokens and spend, and tables break the same range down by model, by provider or account runtime, and by project. Days follow your local calendar. Isolated worktree and retry threads count toward their original project.
 
 The backend aggregates canonical SQLite messages through `GET /usage/summary?days=<1-366>&tz_offset_minutes=<offset>` instead of loading sessions into the window. It counts completed assistant responses and compaction summaries that recorded metrics, and uses partial indexes on their timestamps. Every figure keeps its cost provenance. Reported costs come from the provider or account runtime. `est.` marks a total that includes costs estimated from cached per-token pricing, and `~` marks a total that is incomplete because some responses used tokens without a recorded cost. The dashboard shows the reported and estimated amounts separately. Archived chats are included. Deleted chats and turns without recorded metrics are not.
+
+**Harness health**, below the breakdowns, reads the run ledger through `GET /usage/harness` for the same range: runs by status, the p50 and p95 model step latency with time to first token, the tool error rate with a per-tool table, approval wait times, average model steps and cost per run, and model retries. When more than one runtime ran in the range, a filter narrows the section to one runtime. Steps that recorded a `model_timing` event use its duration and first-token time; older steps fall back to the gap between the recorded request and response, which has no first-token time. Account-runtime runs record one boundary step per turn, so their step count and tool figures are coarser than provider runs.
 
 ## Plan mode
 
