@@ -18,6 +18,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 use crate::account_profiles::ResolvedAccountProfile;
+use crate::account_runtime_common::{
+    account_runtime_policy, clean_optional, cli_path_warning, compact_json, is_cli_path_warning,
+    publish_worker, runtime_event_with_worker, tools_allowed, AccountWorkerEventSource,
+};
 use crate::account_runtime_events::{
     canonicalize_runtime_stream, serialize_runtime_event, HarnessEvent,
 };
@@ -1390,22 +1394,9 @@ fn sse_event<T: Serialize>(value: &T) -> std::result::Result<Event, Infallible> 
     Ok(Event::default().data(serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string())))
 }
 
-fn runtime_event_with_worker(
-    value: &CodexStreamEvent,
-    worker_events: &Option<tokio::sync::mpsc::UnboundedSender<AccountWorkerEvent>>,
-) -> Value {
-    if let Some(event) = account_worker_event_from_codex(value) {
-        publish_worker(worker_events, event);
-    }
-    serialize_runtime_event(value)
-}
-
-fn publish_worker(
-    worker_events: &Option<tokio::sync::mpsc::UnboundedSender<AccountWorkerEvent>>,
-    event: AccountWorkerEvent,
-) {
-    if let Some(worker_events) = worker_events {
-        let _ = worker_events.send(event);
+impl AccountWorkerEventSource for CodexStreamEvent {
+    fn account_worker_event(&self) -> Option<AccountWorkerEvent> {
+        account_worker_event_from_codex(self)
     }
 }
 
@@ -1723,13 +1714,6 @@ fn clean_model(value: Option<&str>) -> &str {
         .unwrap_or(CODEX_MODEL_FALLBACK)
 }
 
-fn clean_optional(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
 fn existing_absolute_directory(value: Option<&str>) -> Option<String> {
     let value = absolute_path(value)?;
     let path = PathBuf::from(&value);
@@ -1901,20 +1885,13 @@ fn codex_thread_request(req: &CodexRunRequest, model: &str) -> (&'static str, Va
     }
 }
 
-fn account_runtime_policy(value: Option<&str>) -> &str {
-    match value.map(str::trim) {
-        Some("review") => "review",
-        Some("open") => "open",
-        _ => "guarded",
-    }
-}
-
 fn codex_tools_allowed(req: &CodexRunRequest) -> bool {
-    !req.plan_mode
-        && match account_runtime_policy(req.tool_approval_policy.as_deref()) {
-            "review" => req.tool_approval_grant || req.interactive_tool_approval,
-            _ => true,
-        }
+    tools_allowed(
+        req.plan_mode,
+        account_runtime_policy(req.tool_approval_policy.as_deref()) == "review",
+        req.tool_approval_grant,
+        req.interactive_tool_approval,
+    )
 }
 
 fn codex_permissions_auto_approved(req: &CodexRunRequest) -> bool {
@@ -2697,14 +2674,6 @@ fn web_search_detail(item: &Value) -> Option<String> {
         .map(|detail| compact(&detail, 110))
 }
 
-fn compact_json(value: Option<&Value>) -> Option<String> {
-    let value = value?;
-    if value.is_null() {
-        return None;
-    }
-    Some(value.to_string())
-}
-
 fn compact(value: &str, limit: usize) -> String {
     let text = value.split_whitespace().collect::<Vec<_>>().join(" ");
     if text.chars().count() > limit {
@@ -2797,14 +2766,6 @@ fn codex_spawn_error_message(error: &std::io::Error) -> String {
     format!(
         "failed to start `codex app-server`: {error}. Install or update the Codex CLI and make sure `codex` is on PATH."
     )
-}
-
-fn cli_path_warning(label: &str, command: &str, install: &str) -> String {
-    format!("{label} CLI was not found on PATH. Apps launched from the Dock or Finder do not inherit your shell PATH, so on macOS and Linux milim also reads your login shell's PATH and looks in the usual install directories (`~/.local/bin`, Homebrew, `~/.bun/bin`, and asdf/mise/volta shims). Install it with `{install}`, or use Locate binary... in Providers to choose the `{command}` executable.")
-}
-
-fn is_cli_path_warning(message: &str) -> bool {
-    message.contains("CLI was not found on PATH")
 }
 
 fn usage_from_any(value: &Value) -> Option<Usage> {

@@ -109,11 +109,8 @@ pub(crate) fn account_runtime_tool_endpoint(
     let Some(context) = context else {
         return Ok(None);
     };
-    let approval = match context.tool_context.tool_approval_policy.as_deref() {
-        Some("review") => ToolApprovalPolicy::Review,
-        Some("open") => ToolApprovalPolicy::Open,
-        _ => ToolApprovalPolicy::Guarded,
-    };
+    let approval =
+        ToolApprovalPolicy::from_requested(context.tool_context.tool_approval_policy.as_deref());
     let policy = ToolRunPolicy {
         approval,
         approval_granted: context.tool_context.tool_approval_grant,
@@ -436,6 +433,18 @@ enum ToolApprovalPolicy {
     Review,
     Guarded,
     Open,
+}
+
+impl ToolApprovalPolicy {
+    /// Matches the requested policy exactly; anything else, including no
+    /// policy, is `Guarded`.
+    fn from_requested(value: Option<&str>) -> Self {
+        match value {
+            Some("review") => Self::Review,
+            Some("open") => Self::Open,
+            _ => Self::Guarded,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1766,11 +1775,8 @@ fn bool_extra(req: &ChatCompletionRequest, key: &str) -> bool {
 }
 
 fn tool_run_policy_from_request(req: &ChatCompletionRequest) -> ToolRunPolicy {
-    let approval = match string_extra(req, "tool_approval_policy").as_deref() {
-        Some("review") => ToolApprovalPolicy::Review,
-        Some("open") => ToolApprovalPolicy::Open,
-        _ => ToolApprovalPolicy::Guarded,
-    };
+    let approval =
+        ToolApprovalPolicy::from_requested(string_extra(req, "tool_approval_policy").as_deref());
     ToolRunPolicy {
         approval,
         approval_granted: bool_extra(req, "tool_approval_grant"),
@@ -2071,10 +2077,12 @@ fn agent_base_registry_with_memory(
 }
 
 fn tools_available(policy: &ToolRunPolicy) -> bool {
-    (policy.approval_granted
-        || policy.interactive_approval
-        || policy.approval != ToolApprovalPolicy::Review)
-        && !policy.plan_mode
+    crate::account_runtime_common::tools_allowed(
+        policy.plan_mode,
+        policy.approval == ToolApprovalPolicy::Review,
+        policy.approval_granted,
+        policy.interactive_approval,
+    )
 }
 
 #[derive(Deserialize)]

@@ -19,6 +19,10 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 use crate::account_profiles::ResolvedAccountProfile;
+use crate::account_runtime_common::{
+    account_runtime_policy, clean_optional, cli_path_warning, compact_json, is_cli_path_warning,
+    publish_worker, runtime_event_with_worker, tools_allowed, AccountWorkerEventSource,
+};
 use crate::account_runtime_events::{
     canonicalize_runtime_stream, serialize_runtime_event, HarnessEvent,
 };
@@ -1539,22 +1543,9 @@ fn runtime_event<T: Serialize>(value: &T) -> Value {
     serialize_runtime_event(value)
 }
 
-fn runtime_event_with_worker(
-    value: &ClaudeStreamEvent,
-    worker_events: &Option<tokio::sync::mpsc::UnboundedSender<AccountWorkerEvent>>,
-) -> Value {
-    if let Some(event) = account_worker_event_from_claude(value) {
-        publish_worker(worker_events, event);
-    }
-    runtime_event(value)
-}
-
-fn publish_worker(
-    worker_events: &Option<tokio::sync::mpsc::UnboundedSender<AccountWorkerEvent>>,
-    event: AccountWorkerEvent,
-) {
-    if let Some(worker_events) = worker_events {
-        let _ = worker_events.send(event);
+impl AccountWorkerEventSource for ClaudeStreamEvent {
+    fn account_worker_event(&self) -> Option<AccountWorkerEvent> {
+        account_worker_event_from_claude(self)
     }
 }
 
@@ -1856,13 +1847,6 @@ async fn terminate_claude_session_processes_impl(session_id: &str) -> bool {
     killed
 }
 
-fn clean_optional(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
 fn claude_native_worker_event(value: &Value) -> Option<AccountNativeWorkerLifecycle> {
     if value.get("type").and_then(Value::as_str) != Some("system") {
         return None;
@@ -2073,25 +2057,18 @@ fn claude_home_dirs(profile: &ResolvedAccountProfile) -> Vec<PathBuf> {
     profile.home_dirs(".claude")
 }
 
-fn account_runtime_policy(value: Option<&str>) -> &str {
-    match value.map(str::trim) {
-        Some("review") => "review",
-        Some("open") => "open",
-        _ => "guarded",
-    }
-}
-
 fn claude_session_recovery_allowed(req: &ClaudeRunRequest) -> bool {
     req.allow_session_recovery
         || (!req.plan_mode && account_runtime_policy(req.tool_approval_policy.as_deref()) == "open")
 }
 
 fn claude_tools_allowed(req: &ClaudeRunRequest) -> bool {
-    !req.plan_mode
-        && match account_runtime_policy(req.tool_approval_policy.as_deref()) {
-            "review" => req.tool_approval_grant || req.interactive_tool_approval,
-            _ => true,
-        }
+    tools_allowed(
+        req.plan_mode,
+        account_runtime_policy(req.tool_approval_policy.as_deref()) == "review",
+        req.tool_approval_grant,
+        req.interactive_tool_approval,
+    )
 }
 
 pub(crate) fn claude_interactive_tool_approval(req: &ClaudeRunRequest) -> bool {
@@ -2178,14 +2155,6 @@ fn string_field(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
-fn compact_json(value: Option<&Value>) -> Option<String> {
-    let value = value?;
-    if value.is_null() {
-        return None;
-    }
-    Some(value.to_string())
-}
-
 fn claude_spawn_error_message(error: &std::io::Error) -> String {
     if error.kind() == std::io::ErrorKind::NotFound {
         return cli_path_warning(
@@ -2195,14 +2164,6 @@ fn claude_spawn_error_message(error: &std::io::Error) -> String {
         );
     }
     format!("failed to start `claude`: {error}. Install Anthropic's official Claude CLI and sign in with `claude auth login`.")
-}
-
-fn cli_path_warning(label: &str, command: &str, install: &str) -> String {
-    format!("{label} CLI was not found on PATH. Apps launched from the Dock or Finder do not inherit your shell PATH, so on macOS and Linux milim also reads your login shell's PATH and looks in the usual install directories (`~/.local/bin`, Homebrew, `~/.bun/bin`, and asdf/mise/volta shims). Install it with `{install}`, or use Locate binary... in Providers to choose the `{command}` executable.")
-}
-
-fn is_cli_path_warning(message: &str) -> bool {
-    message.contains("CLI was not found on PATH")
 }
 
 fn opt_u32(value: &Value, key: &str) -> Option<u32> {

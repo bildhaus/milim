@@ -40,6 +40,8 @@ pub(crate) struct PiRunRequest {
     pub session_id: Option<String>,
     #[serde(default)]
     pub persist_session: Option<bool>,
+    /// Matched exactly, not through `account_runtime_common::account_runtime_policy`,
+    /// so a missing or unrecognized policy is not treated as `guarded` here.
     #[serde(default)]
     pub tool_approval_policy: Option<String>,
     #[serde(default)]
