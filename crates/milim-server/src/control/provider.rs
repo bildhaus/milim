@@ -148,7 +148,12 @@ impl RunManager {
                             )?;
                             return Ok(RunOutcome::Completed);
                         }
-                        Some(Err(error)) => return Err(error),
+                        Some(Err(error)) => {
+                            // Keep the partial answer visible like the
+                            // unterminated-stream case; the stream error wins.
+                            let _ = deltas.flush();
+                            return Err(error);
+                        }
                         None => {
                             deltas.flush()?;
                             return Err(Error::Other("provider stream ended without a terminal event".into()));
