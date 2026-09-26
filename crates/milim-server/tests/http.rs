@@ -6633,6 +6633,8 @@ async fn thread_supervisor_runs_child_with_test_backend() {
                 access: milim_agents::WorkerAccess::ReadOnly,
                 worktree_path: None,
                 account_profile_id: None,
+                base_prompt: None,
+                environment: None,
             },
         )
         .unwrap();
@@ -6681,6 +6683,8 @@ async fn thread_events_stream_supervisor_updates() {
                 access: milim_agents::WorkerAccess::ReadOnly,
                 worktree_path: None,
                 account_profile_id: None,
+                base_prompt: None,
+                environment: None,
             },
         )
         .unwrap();

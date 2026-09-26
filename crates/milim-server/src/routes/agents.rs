@@ -1652,6 +1652,45 @@ mod native_run_context_tests {
     }
 
     #[test]
+    fn native_workers_get_the_base_prompt_for_their_own_tools_and_an_environment() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(ReadOnlyProbe("read_file")));
+        let mut spec = ChildRunSpec {
+            parent_id: "parent-1".to_string(),
+            title: "Worker".to_string(),
+            model: "model-x".to_string(),
+            agent_id: None,
+            system_prompt: None,
+            prompt: "Inspect.".to_string(),
+            run_id: Some("run-1".to_string()),
+            runtime: milim_agents::WorkerRuntime::Managed,
+            access: milim_agents::WorkerAccess::ReadOnly,
+            worktree_path: None,
+            account_profile_id: None,
+            base_prompt: None,
+            environment: None,
+        };
+        add_native_worker_context(&mut spec, &registry, None);
+        let base = spec.base_prompt.as_deref().unwrap();
+        assert!(base.starts_with("You are milim's coding agent"));
+        assert!(base.contains("read_file"));
+        assert!(
+            !base.contains("edit_file"),
+            "guidance covers only the Worker's tools"
+        );
+        assert!(!base.contains("# Plan mode"));
+        let environment = spec.environment.as_deref().unwrap();
+        assert!(environment.starts_with("<environment>"));
+        assert!(environment.contains("Model: model-x"));
+
+        let mut bare = spec.clone();
+        bare.base_prompt = None;
+        bare.environment = None;
+        add_native_worker_context(&mut bare, &ToolRegistry::new(), None);
+        assert!(bare.base_prompt.is_none() && bare.environment.is_none());
+    }
+
+    #[test]
     fn native_run_context_leads_with_base_prompt_and_ends_system_block_with_environment() {
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(ReadOnlyProbe("read_file")));
@@ -3210,6 +3249,8 @@ mod worker_model_tests {
             access: milim_agents::WorkerAccess::ReadOnly,
             worktree_path: None,
             account_profile_id: Some("work".to_string()),
+            base_prompt: None,
+            environment: None,
         };
         let (adapter, request) = account_worker_harness_request(
             &spec,
@@ -3317,9 +3358,27 @@ fn worker_specs(
                 access: task.access,
                 worktree_path: None,
                 account_profile_id: None,
+                base_prompt: None,
+                environment: None,
             }
         })
         .collect()
+}
+
+/// Give a native Worker the same leading context as a native tool-agent run:
+/// the base prompt built from the Worker's own tools, and an environment
+/// snapshot of the folder it works in (its review worktree when it has one).
+fn add_native_worker_context(
+    spec: &mut ChildRunSpec,
+    tools: &ToolRegistry,
+    workspace: Option<&FsPath>,
+) {
+    if tools.is_empty() {
+        return;
+    }
+    spec.base_prompt = Some(crate::agent_prompt::base_system_prompt(tools, false));
+    spec.environment =
+        Some(crate::workspace_context::RunEnvironment::capture(workspace, &spec.model).render());
 }
 
 fn account_worker_harness_request(
@@ -3593,6 +3652,12 @@ pub(crate) async fn start_managed_worker_run(
                 Arc::new(move |spec| account_worker_agent_stream(&state, &run_context, spec));
             workers.push(supervisor.spawn_stream(factory, spec)?);
         } else {
+            let workspace = spec
+                .worktree_path
+                .as_deref()
+                .map(PathBuf::from)
+                .or_else(|| run_context.workspace.clone());
+            add_native_worker_context(&mut spec, &worker_tools, workspace.as_deref());
             workers.push(supervisor.spawn(service.clone(), worker_tools, spec)?);
         }
     }

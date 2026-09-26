@@ -52,7 +52,7 @@ Each turn also reloads workspace instructions. milim-native receives both AGENTS
 
 ## Base prompt and environment
 
-Every milim-native tool-agent run gets two server-built system messages, whether it starts from desktop, mobile, a schedule, or the `/agents/run` API. Account runtimes (Codex, Claude, OpenCode, Pi) keep their own harness prompts, and plain chat or a run whose policy leaves no tools gets neither.
+Every milim-native tool-agent run gets two server-built system messages, whether it starts from desktop, mobile, a schedule, or the `/agents/run` API. Managed Workers on a milim model get them too: the base prompt's tool section follows the Worker's own read-only or worktree-scoped tools, and the environment describes the folder the Worker works in (its review worktree when it has one). The Worker's run context, Agent instructions, and Worker role sit between the two. Account runtimes (Codex, Claude, OpenCode, Pi) keep their own harness prompts, and plain chat or a run whose policy leaves no tools gets neither.
 
 | Message | Contents |
 |---|---|
