@@ -6,11 +6,16 @@
 //! back as `tool`-role messages; repeat until the model answers in plain text.
 
 mod context;
+mod intercept;
 mod limits;
 mod retry;
 mod store;
 mod threads;
 mod tool_output;
+pub use intercept::{
+    HookActivity, HookTrustRequest, InterceptedCall, ResultInterception, StopInterception,
+    ToolDecision, ToolInterception, ToolInterceptor, TurnInterception, MAX_STOP_CONTINUATIONS,
+};
 pub use limits::AgentRunLimits;
 
 pub use store::{
@@ -79,6 +84,8 @@ pub struct AgentRunConfig {
     /// How long an interactive approval may wait before it is denied.
     /// `None` waits indefinitely.
     pub approval_timeout: Option<Duration>,
+    /// User hooks around turns, tool calls, and the final answer.
+    pub interceptor: Option<Arc<dyn ToolInterceptor>>,
 }
 
 impl Default for AgentRunConfig {
@@ -94,6 +101,7 @@ impl Default for AgentRunConfig {
             limits: AgentRunLimits::default(),
             context_window_tokens: None,
             approval_timeout: Some(DEFAULT_APPROVAL_TIMEOUT),
+            interceptor: None,
         }
     }
 }
@@ -750,6 +758,14 @@ pub async fn run_agent_with_config(
     let max_iterations = config.max_iterations();
     let mut steps = Vec::new();
     let mut budget = limits::RunBudget::new(config.limits.clone());
+    let mut stop_continuations = 0;
+    if let Some(interceptor) = config.interceptor.as_ref() {
+        let turn = interceptor.before_turn(&messages).await;
+        if let Some(reason) = turn.block {
+            return Err(Error::InvalidRequest(blocked_turn_message(&reason)));
+        }
+        messages.extend(intercept::context_message(&turn.context));
+    }
 
     let mut iteration = 0;
     loop {
@@ -787,6 +803,21 @@ pub async fn run_agent_with_config(
             });
         }
         if calls.is_empty() {
+            if let Some(interceptor) = config.interceptor.as_ref() {
+                let content = out.message.text_content();
+                let stop = interceptor.on_stop(&content, stop_continuations).await;
+                if let Some(feedback) = stop.continue_with.filter(|_| {
+                    stop_continuations < intercept::MAX_STOP_CONTINUATIONS
+                        && iteration < max_iterations
+                }) {
+                    stop_continuations += 1;
+                    if !content.is_empty() {
+                        messages.push(ChatMessage::text("assistant", content));
+                    }
+                    messages.push(intercept::stop_feedback_message(&feedback));
+                    continue;
+                }
+            }
             return Ok(AgentOutcome {
                 message: out.message,
                 steps,
@@ -815,22 +846,48 @@ pub async fn run_agent_with_config(
                     stopped_at_limit: true,
                 });
             }
-            let executed = match prepare_tool_arguments(
+            let arguments = prepare_tool_arguments(
                 tools,
                 &call.function.name,
                 &call.function.arguments,
                 truncated,
-            ) {
-                Ok(args) => execute_tool_call(tools, &call.function.name, args).await,
-                Err(message) => tool_error_result(tools, &call.function.name, message),
+            );
+            let denial = match (config.interceptor.as_ref(), &arguments) {
+                (Some(interceptor), Ok(args)) => {
+                    match interceptor
+                        .before_tool(&intercepted_call(&call, args))
+                        .await
+                        .decision
+                    {
+                        ToolDecision::Deny(reason) => Some(reason),
+                        ToolDecision::Continue | ToolDecision::Approve => None,
+                    }
+                }
+                _ => None,
+            };
+            let hook_args = arguments.as_ref().ok().cloned();
+            let executed = match (denial, arguments) {
+                (Some(reason), _) => denied_tool_call(tools, &call.function.name, Some(&reason)),
+                (None, Ok(args)) => execute_tool_call(tools, &call.function.name, args).await,
+                (None, Err(message)) => tool_error_result(tools, &call.function.name, message),
             };
             let visible = executed.visible;
-            let model_content = tool_output::model_tool_content(
+            let mut model_content = tool_output::model_tool_content(
                 executed.model_text.as_deref(),
                 &visible,
                 None,
                 call.id.as_deref(),
             );
+            if let (Some(interceptor), Some(args), true) = (
+                config.interceptor.as_ref(),
+                hook_args.as_ref(),
+                executed.attempted,
+            ) {
+                let after = interceptor
+                    .after_tool(&intercepted_call(&call, args), &visible)
+                    .await;
+                model_content = intercept::with_feedback(model_content, &after.feedback);
+            }
             steps.push(ToolStep {
                 name: call.function.name.clone(),
                 arguments: call.function.arguments.clone(),
@@ -922,6 +979,8 @@ pub enum AgentEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         mcp_app_result: Option<Value>,
     },
+    /// A user hook ran, or project hooks were skipped until trusted.
+    Hook(HookActivity),
     /// A memory registration tool created a durable graph memory.
     MemoryRegistered {
         id: String,
@@ -1011,6 +1070,7 @@ pub fn run_agent_stream_with_config(
         // ledger, so the committed request carries them.
         let mut pending_notes: Vec<ChatMessage> = Vec::new();
         let mut length_recoveries = 0;
+        let mut stop_continuations = 0;
 
         if let Some(hook) = config.step_hook.as_ref() {
             if let Err(e) = hook.commit_tool_catalog(&tools.execution_specs()).await {
@@ -1020,6 +1080,18 @@ pub fn run_agent_stream_with_config(
         }
 
         yield AgentEvent::Start { model: model.clone() };
+
+        if let Some(interceptor) = config.interceptor.as_ref() {
+            let turn = interceptor.before_turn(&messages).await;
+            for activity in turn.activity {
+                yield AgentEvent::Hook(activity);
+            }
+            if let Some(reason) = turn.block {
+                yield AgentEvent::Error { message: blocked_turn_message(&reason) };
+                return;
+            }
+            pending_notes.extend(intercept::context_message(&turn.context));
+        }
 
         let mut iteration = 0;
         loop {
@@ -1272,6 +1344,29 @@ pub fn run_agent_stream_with_config(
                     pending_notes.push(ChatMessage::text("user", LENGTH_RECOVERY_NOTE));
                     continue;
                 }
+                if let Some(interceptor) = config.interceptor.as_ref() {
+                    let stop = interceptor.on_stop(&content, stop_continuations).await;
+                    for activity in stop.activity {
+                        yield AgentEvent::Hook(activity);
+                    }
+                    if let Some(feedback) = stop.continue_with.filter(|_| {
+                        stop_continuations < intercept::MAX_STOP_CONTINUATIONS && iteration < max_iterations
+                    }) {
+                        stop_continuations += 1;
+                        if !content.is_empty() {
+                            messages.push(ChatMessage {
+                                role: "assistant".to_string(),
+                                content: Some(Content::Text(content)),
+                                name: None,
+                                tool_calls: None,
+                                tool_call_id: None,
+                                reasoning_content: (!reasoning.is_empty()).then_some(reasoning),
+                            });
+                        }
+                        pending_notes.push(intercept::stop_feedback_message(&feedback));
+                        continue;
+                    }
+                }
                 yield AgentEvent::Final { content };
                 yield AgentEvent::Done { iterations: iteration, stopped_at_limit: false, usage: total_usage };
                 return;
@@ -1320,7 +1415,21 @@ pub fn run_agent_stream_with_config(
                     truncated,
                 );
                 let mut denial: Option<String> = None;
-                let approved = if budget.reason().is_some() {
+                let mut hook_approved = false;
+                if let (Some(interceptor), Ok(args), None) =
+                    (config.interceptor.as_ref(), &arguments, budget.reason())
+                {
+                    let interception = interceptor.before_tool(&intercepted_call(&call, args)).await;
+                    for activity in interception.activity {
+                        yield AgentEvent::Hook(activity);
+                    }
+                    match interception.decision {
+                        ToolDecision::Continue => {}
+                        ToolDecision::Approve => hook_approved = true,
+                        ToolDecision::Deny(reason) => denial = Some(reason),
+                    }
+                }
+                let approved = if budget.reason().is_some() || denial.is_some() {
                     false
                 } else if let Ok(args) = &arguments {
                     let effect = tools
@@ -1330,7 +1439,7 @@ pub fn run_agent_stream_with_config(
                         .environment_policy(&call.function.name)
                         .unwrap_or(ProcessEnvironmentPolicy::HostShellInherited);
                     match config.approval_broker.as_ref() {
-                        Some(broker) if effect != ToolEffect::ReadOnly => {
+                        Some(broker) if effect != ToolEffect::ReadOnly && !hook_approved => {
                             let mut pending = broker.request();
                             yield AgentEvent::ToolApprovalRequired {
                                 approval_id: pending.id.clone(),
@@ -1408,12 +1517,20 @@ pub fn run_agent_stream_with_config(
             .await;
             for (call, executed, duration_ms) in executions {
                 let visible = executed.visible;
-                let model_content = tool_output::model_tool_content(
+                let mut model_content = tool_output::model_tool_content(
                     executed.model_text.as_deref(),
                     &visible,
                     output_scope.as_deref(),
                     call.id.as_deref(),
                 );
+                if let (Some(interceptor), true) = (config.interceptor.as_ref(), executed.attempted) {
+                    let args = tool_output::parse_tool_arguments(&call.function.arguments).unwrap_or(Value::Null);
+                    let after = interceptor.after_tool(&intercepted_call(&call, &args), &visible).await;
+                    for activity in after.activity {
+                        yield AgentEvent::Hook(activity);
+                    }
+                    model_content = intercept::with_feedback(model_content, &after.feedback);
+                }
                 if let Some(hook) = config.step_hook.as_ref() {
                     if let Err(e) = hook
                         .commit_tool_result(
@@ -1481,6 +1598,18 @@ pub fn run_agent_stream_with_config(
             }
         }
     }
+}
+
+fn intercepted_call<'a>(call: &'a ToolCall, arguments: &'a Value) -> InterceptedCall<'a> {
+    InterceptedCall {
+        call_id: call.id.as_deref(),
+        name: &call.function.name,
+        arguments,
+    }
+}
+
+fn blocked_turn_message(reason: &str) -> String {
+    format!("UserPromptSubmit hook blocked this turn: {}", reason.trim())
 }
 
 fn denied_tool_call(tools: &ToolRegistry, name: &str, reason: Option<&str>) -> ExecutedToolResult {
@@ -2576,6 +2705,7 @@ mod tests {
                 AgentEvent::ToolApprovalResolved { .. } => "tool_approval_resolved",
                 AgentEvent::ProviderRetry { .. } => "provider_retry",
                 AgentEvent::ContextCompacted { .. } => "context_compacted",
+                AgentEvent::Hook(_) => "hook",
                 AgentEvent::MemoryRegistered { .. } => "memory_registered",
                 AgentEvent::ChildThreadStarted { .. } => "child_thread_started",
                 AgentEvent::ChildThreadDone { .. } => "child_thread_done",
@@ -3615,6 +3745,278 @@ mod tests {
             .iter()
             .any(|event| matches!(event, AgentEvent::ToolApprovalRequired { .. })));
         assert_eq!(runs.load(Ordering::SeqCst), 1);
+    }
+
+    #[derive(Debug, Default)]
+    struct FakeInterceptor {
+        turn_context: Option<String>,
+        turn_block: Option<String>,
+        decision: ToolDecision,
+        feedback: Option<String>,
+        stop_feedback: Option<String>,
+        stops: AtomicUsize,
+        seen_results: Mutex<Vec<Value>>,
+    }
+
+    fn fake_activity(event: &str, outcome: &str) -> HookActivity {
+        HookActivity {
+            event: event.into(),
+            hook: "fake".into(),
+            source: "user".into(),
+            tool_name: None,
+            call_id: None,
+            outcome: outcome.into(),
+            duration_ms: 0,
+            message: None,
+            trust: None,
+        }
+    }
+
+    #[async_trait]
+    impl ToolInterceptor for FakeInterceptor {
+        async fn before_turn(&self, _messages: &[ChatMessage]) -> TurnInterception {
+            TurnInterception {
+                context: self.turn_context.clone().into_iter().collect(),
+                block: self.turn_block.clone(),
+                activity: vec![fake_activity("UserPromptSubmit", "ok")],
+            }
+        }
+
+        async fn before_tool(&self, call: &InterceptedCall<'_>) -> ToolInterception {
+            assert_eq!(call.call_id, Some("call-1"));
+            ToolInterception {
+                decision: self.decision.clone(),
+                activity: vec![fake_activity("PreToolUse", "checked")],
+            }
+        }
+
+        async fn after_tool(
+            &self,
+            _call: &InterceptedCall<'_>,
+            result: &Value,
+        ) -> ResultInterception {
+            self.seen_results.lock().unwrap().push(result.clone());
+            ResultInterception {
+                feedback: self.feedback.clone().into_iter().collect(),
+                activity: vec![fake_activity("PostToolUse", "feedback")],
+            }
+        }
+
+        async fn on_stop(&self, _final_content: &str, continuations: usize) -> StopInterception {
+            assert_eq!(
+                continuations,
+                self.stops.fetch_add(1, Ordering::SeqCst).min(3)
+            );
+            StopInterception {
+                continue_with: self.stop_feedback.clone(),
+                activity: vec![fake_activity("Stop", "continue")],
+            }
+        }
+    }
+
+    fn hook_events(events: &[AgentEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Hook(activity) => Some(activity.event.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn interceptor_denial_blocks_the_call_without_asking_for_approval() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(recording_tool("write", &runs));
+        let backend =
+            ScriptedBackend::new(vec![tool_step(&[("call-1", "write", "{}")], "tool_calls")]);
+        let interceptor = Arc::new(FakeInterceptor {
+            decision: ToolDecision::Deny("PreToolUse hook denied: no writes".into()),
+            ..Default::default()
+        });
+        let events = run_scripted(
+            backend.clone(),
+            registry,
+            vec![ChatMessage::text("user", "go")],
+            AgentRunConfig {
+                approval_broker: Some(Arc::new(ToolApprovalBroker::default())),
+                interceptor: Some(interceptor.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolApprovalRequired { .. })));
+        let result = &tool_results(&events)[0];
+        assert_eq!(result["error"], "PreToolUse hook denied: no writes");
+        assert_eq!(result["denied"], true);
+        assert!(tool_messages(&backend.requests()[1])[0].contains("no writes"));
+        assert!(
+            interceptor.seen_results.lock().unwrap().is_empty(),
+            "denied calls skip PostToolUse"
+        );
+        assert_eq!(
+            hook_events(&events),
+            vec!["UserPromptSubmit", "PreToolUse", "Stop"]
+        );
+    }
+
+    #[tokio::test]
+    async fn interceptor_approval_skips_the_interactive_prompt() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(recording_tool("write", &runs));
+        let backend =
+            ScriptedBackend::new(vec![tool_step(&[("call-1", "write", "{}")], "tool_calls")]);
+        let events = run_scripted(
+            backend,
+            registry,
+            vec![ChatMessage::text("user", "go")],
+            AgentRunConfig {
+                approval_broker: Some(Arc::new(ToolApprovalBroker::default())),
+                approval_timeout: Some(Duration::from_millis(20)),
+                interceptor: Some(Arc::new(FakeInterceptor {
+                    decision: ToolDecision::Approve,
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolApprovalRequired { .. })));
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn interceptor_context_and_feedback_reach_the_model() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(recording_tool("write", &runs));
+        let backend =
+            ScriptedBackend::new(vec![tool_step(&[("call-1", "write", "{}")], "tool_calls")]);
+        let hook = Arc::new(RecordingHook::default());
+        let interceptor = Arc::new(FakeInterceptor {
+            turn_context: Some("branch is main".into()),
+            feedback: Some("formatted 1 file".into()),
+            ..Default::default()
+        });
+        let events = run_scripted(
+            backend.clone(),
+            registry,
+            vec![ChatMessage::text("user", "go")],
+            AgentRunConfig {
+                step_hook: Some(hook.clone()),
+                interceptor: Some(interceptor.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+        let requests = backend.requests();
+        let first = requests[0].messages.last().unwrap();
+        assert_eq!(first.role, "system");
+        assert!(first.text_content().contains("branch is main"));
+        let expected = "{\"ok\":true}\n\n[hook] formatted 1 file".to_string();
+        assert_eq!(tool_messages(&requests[1]), vec![expected.clone()]);
+        assert_eq!(*hook.tool_contents.lock().unwrap(), vec![expected]);
+        assert_eq!(interceptor.seen_results.lock().unwrap()[0]["ok"], true);
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            hook_events(&events),
+            vec!["UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"]
+        );
+    }
+
+    #[tokio::test]
+    async fn interceptor_block_stops_the_turn_before_any_model_request() {
+        let backend = ScriptedBackend::new(vec![]);
+        let events = run_scripted(
+            backend.clone(),
+            ToolRegistry::new(),
+            vec![ChatMessage::text("user", "deploy prod")],
+            AgentRunConfig {
+                interceptor: Some(Arc::new(FakeInterceptor {
+                    turn_block: Some("no deploys on Friday".into()),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(backend.requests().is_empty());
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::Error { message })
+                if message == "UserPromptSubmit hook blocked this turn: no deploys on Friday"
+        ));
+    }
+
+    #[tokio::test]
+    async fn stop_feedback_continues_the_run_at_most_three_times() {
+        let backend = ScriptedBackend::new(vec![]);
+        let interceptor = Arc::new(FakeInterceptor {
+            stop_feedback: Some("tests still fail".into()),
+            ..Default::default()
+        });
+        let events = run_scripted(
+            backend.clone(),
+            ToolRegistry::new(),
+            vec![ChatMessage::text("user", "fix it")],
+            AgentRunConfig {
+                interceptor: Some(interceptor.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+        let requests = backend.requests();
+        assert_eq!(requests.len(), 4, "one answer plus three continuations");
+        let second = &requests[1].messages;
+        assert_eq!(second[second.len() - 2].role, "assistant");
+        assert_eq!(
+            second.last().unwrap().text_content(),
+            "[Stop hook feedback]\ntests still fail"
+        );
+        assert_eq!(interceptor.stops.load(Ordering::SeqCst), 4);
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                iterations: 4,
+                stopped_at_limit: false,
+                ..
+            })
+        ));
+
+        // The non-streaming loop applies the same cap and denial.
+        let runs = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(recording_tool("write", &runs));
+        let backend =
+            ScriptedBackend::new(vec![tool_step(&[("call-1", "write", "{}")], "tool_calls")]);
+        let outcome = run_agent_with_config(
+            backend.as_ref(),
+            &registry,
+            "scripted",
+            vec![ChatMessage::text("user", "go")],
+            None,
+            AgentRunConfig {
+                initial_stream_retry_backoff: Duration::ZERO,
+                interceptor: Some(Arc::new(FakeInterceptor {
+                    decision: ToolDecision::Deny("blocked".into()),
+                    stop_feedback: Some("again".into()),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
+        assert_eq!(outcome.steps[0].result["error"], "blocked");
+        assert_eq!(outcome.iterations, 5);
     }
 
     #[tokio::test]

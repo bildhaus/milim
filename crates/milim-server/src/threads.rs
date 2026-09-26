@@ -667,6 +667,7 @@ async fn run_child_stream(
             | AgentEvent::ToolApprovalRequired { .. }
             | AgentEvent::ToolApprovalResolved { .. }
             | AgentEvent::ContextCompacted { .. }
+            | AgentEvent::Hook(_)
             | AgentEvent::MemoryRegistered { .. }
             | AgentEvent::ChildThreadStarted { .. }
             | AgentEvent::ChildThreadDone { .. }
