@@ -8970,32 +8970,32 @@ mod tests {
     #[test]
     fn checked_in_protocol_fixtures_decode() {
         let bootstrap = serde_json::from_str::<ControlBootstrapV1>(include_str!(
-            "../../../contracts/control-v1/bootstrap.json"
+            "../../../../contracts/control-v1/bootstrap.json"
         ))
         .unwrap();
         assert_eq!(bootstrap.appearance.theme_id, "fixture-custom");
         serde_json::from_str::<ControlCommandV1>(include_str!(
-            "../../../contracts/control-v1/command-turn-send.json"
+            "../../../../contracts/control-v1/command-turn-send.json"
         ))
         .unwrap();
         serde_json::from_str::<ControlCommandResultV1>(include_str!(
-            "../../../contracts/control-v1/command-result.json"
+            "../../../../contracts/control-v1/command-result.json"
         ))
         .unwrap();
         serde_json::from_str::<ControlEventV1>(include_str!(
-            "../../../contracts/control-v1/event.json"
+            "../../../../contracts/control-v1/event.json"
         ))
         .unwrap();
         serde_json::from_str::<TimelinePageV1>(include_str!(
-            "../../../contracts/control-v1/timeline.json"
+            "../../../../contracts/control-v1/timeline.json"
         ))
         .unwrap();
         serde_json::from_str::<PendingApprovalV1>(include_str!(
-            "../../../contracts/control-v1/approval.json"
+            "../../../../contracts/control-v1/approval.json"
         ))
         .unwrap();
         let pairing: Value =
-            serde_json::from_str(include_str!("../../../contracts/control-v1/pairing.json"))
+            serde_json::from_str(include_str!("../../../../contracts/control-v1/pairing.json"))
                 .unwrap();
         assert_eq!(pairing["host_id"], "host-fixture");
     }
