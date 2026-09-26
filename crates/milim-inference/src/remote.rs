@@ -1339,10 +1339,21 @@ fn openai_cache_tokens(usage: &Value) -> (Option<u32>, Option<u32>) {
     (read, write)
 }
 
-/// A stable routing key for OpenAI's prompt cache: a hash of the leading
+/// A stable routing key for OpenAI's prompt cache. A caller-supplied key
+/// (the canonical thread id) is hashed so every turn of one thread shares a
+/// cache without sending the id itself. Otherwise the key hashes the leading
 /// system messages and the first conversation message, which stay fixed for
 /// every step of one conversation.
 fn prompt_cache_key(req: &CompletionRequest) -> Option<String> {
+    if let Some(key) = req
+        .sampling
+        .prompt_cache_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+    {
+        return Some(format!("milim-{:016x}", fnv1a(key.bytes())));
+    }
     let end = req
         .messages
         .iter()
@@ -1351,21 +1362,23 @@ fn prompt_cache_key(req: &CompletionRequest) -> Option<String> {
     if end == 0 {
         return None;
     }
-    // FNV-1a keeps the key stable across processes and Rust versions.
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for message in &req.messages[..end] {
-        for byte in message
+    let hash = fnv1a(req.messages[..end].iter().flat_map(|message| {
+        message
             .role
             .bytes()
             .chain([0])
             .chain(message.text_content().into_bytes())
             .chain([0])
-        {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    }
+            .collect::<Vec<_>>()
+    }));
     Some(format!("milim-{hash:016x}"))
+}
+
+/// FNV-1a keeps prompt cache keys stable across processes and Rust versions.
+fn fnv1a(bytes: impl IntoIterator<Item = u8>) -> u64 {
+    bytes.into_iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 /// An error object a provider sent inside an open stream: OpenAI's
@@ -2594,6 +2607,17 @@ mod tests {
                 "user", "Thanks.",
             ));
         assert_eq!(openai.build_body(&req, true).extra["prompt_cache_key"], key);
+
+        // A thread key wins over the message hash and survives prompt changes.
+        req.sampling.prompt_cache_key = Some("thread-1".into());
+        let thread_key = openai.build_body(&req, true).extra["prompt_cache_key"].clone();
+        assert_ne!(thread_key, key);
+        assert!(!thread_key.as_str().unwrap().contains("thread-1"));
+        req.messages[0] = milim_core::api::openai::ChatMessage::text("system", "Changed base.");
+        assert_eq!(
+            openai.build_body(&req, true).extra["prompt_cache_key"],
+            thread_key
+        );
 
         for other in [
             RemoteBackend::new("OpenRouter", "https://openrouter.ai/api/v1", None),

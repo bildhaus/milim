@@ -43,6 +43,11 @@ pub fn openai_to_completion(req: ChatCompletionRequest) -> CompletionRequest {
             .get("thinking_token_budget")
             .and_then(Value::as_u64)
             .and_then(|value| u32::try_from(value).ok()),
+        prompt_cache_key: req
+            .extra
+            .get("prompt_cache_key")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     };
     CompletionRequest {
         model: req.model,

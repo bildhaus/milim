@@ -12,7 +12,8 @@ use milim_core::api::openai::{
 };
 use milim_core::Result;
 
-/// Decoding/sampling parameters, normalized across wire formats.
+/// Decoding/sampling parameters and other per-run generation options,
+/// normalized across wire formats.
 #[derive(Debug, Clone, Default)]
 pub struct SamplingParams {
     pub temperature: Option<f32>,
@@ -28,6 +29,10 @@ pub struct SamplingParams {
     pub min_p: Option<f32>,
     pub repetition_penalty: Option<f32>,
     pub thinking_token_budget: Option<u32>,
+    /// Stable prompt-cache routing key, such as the canonical thread id.
+    /// Backends that support one (OpenAI's `prompt_cache_key`) send a hash
+    /// of it; without it they derive a key from the leading messages.
+    pub prompt_cache_key: Option<String>,
 }
 
 /// A backend-neutral generation request. The server builds this from an
