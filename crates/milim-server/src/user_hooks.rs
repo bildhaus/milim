@@ -998,6 +998,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn call<'a>(name: &'a str, arguments: &'a Value) -> InterceptedCall<'a> {
         InterceptedCall {
             call_id: Some("call-1"),
