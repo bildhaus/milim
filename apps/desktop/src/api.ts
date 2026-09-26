@@ -4852,6 +4852,59 @@ export async function getUsageSummary(days: number): Promise<UsageSummary> {
   );
 }
 
+export interface LatencyPercentiles {
+  samples: number;
+  p50_ms: number | null;
+  p95_ms: number | null;
+}
+
+export interface HarnessToolHealth {
+  name: string;
+  calls: number;
+  errors: number;
+  error_rate: number;
+}
+
+/** Run-ledger health from `GET /usage/harness`. */
+export interface HarnessMetrics {
+  since_ms: number;
+  until_ms: number;
+  runtime: string | null;
+  model: string | null;
+  runs: number;
+  runs_by_status: { status: string; runs: number }[];
+  model_steps: number;
+  timed_model_steps: number;
+  step_latency: LatencyPercentiles;
+  first_token: LatencyPercentiles;
+  approval_wait: LatencyPercentiles;
+  pending_approvals: number;
+  tool_calls: number;
+  tool_errors: number;
+  tool_error_rate: number;
+  tools: HarnessToolHealth[];
+  avg_steps_per_run: number | null;
+  avg_cost_usd_per_run: number | null;
+  priced_runs: number;
+  retries: number;
+  runs_with_retries: number;
+  available_runtimes: string[];
+  available_models: string[];
+}
+
+export async function getHarnessMetrics(
+  days: number,
+  filter: { runtime?: string; model?: string } = {},
+): Promise<HarnessMetrics> {
+  const params = new URLSearchParams({ days: String(days) });
+  if (filter.runtime) params.set("runtime", filter.runtime);
+  if (filter.model) params.set("model", filter.model);
+  return await parseJsonResponse<HarnessMetrics>(
+    await authFetch(`${BASE}/usage/harness?${params}`),
+    "harness metrics HTTP failed",
+  );
+}
+
 export async function getWorkspaceContext(): Promise<WorkspaceContext | null> {
   try {
     const r = await authFetch(`${BASE}/workspace/context`);
