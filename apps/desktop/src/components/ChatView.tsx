@@ -1202,6 +1202,8 @@ type ChatNotice = {
   detail?: string;
   providerError?: ProviderErrorInfo;
   retryAfterSecs?: number;
+  /** Safety checkpoint taken by a restore; the notice offers to undo it. */
+  undoCheckpoint?: WorkspaceCheckpoint;
 };
 
 type RunTurnResult = {
@@ -2275,7 +2277,11 @@ export function ChatView({
     : null;
   const composerActionLabel = composerActionText(composerAction, retryInSecs);
   const composerNoticeDismissible = composerNoticeIsDismissible(composerNotice, proactiveModelBlocker);
+  const composerUndoCheckpoint = composerNotice && composerNotice !== proactiveModelBlocker
+    ? (composerNotice as ChatNotice).undoCheckpoint
+    : undefined;
   useEffect(() => {
+    if (chatNotice?.undoCheckpoint) return;
     const delay = composerNoticeAutoDismissMs(chatNotice);
     if (delay == null) return;
     const timer = window.setTimeout(() => {
@@ -6320,7 +6326,29 @@ export function ChatView({
       setChatNotice({
         tone: "info",
         message: "Workspace restored to before this turn.",
+        undoCheckpoint: result.undo_checkpoint
+          ? { ...checkpoint, ref: result.undo_checkpoint, createdAt: Date.now() }
+          : undefined,
       });
+      openGitPanel();
+    } catch (error) {
+      setChatNotice({
+        tone: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  async function undoWorkspaceRestore(checkpoint: WorkspaceCheckpoint) {
+    if (busy) return;
+    setChatNotice(null);
+    try {
+      await setWorkspace(checkpoint.folder);
+      const result = await runWorkspaceGitAction("restore_checkpoint", {
+        checkpoint: checkpoint.ref,
+      });
+      if (!result.ok) throw new Error(result.message);
+      setChatNotice({ tone: "info", message: "Workspace restore undone." });
       openGitPanel();
     } catch (error) {
       setChatNotice({
@@ -8794,6 +8822,15 @@ export function ChatView({
                     }}
                   >
                     {composerActionLabel}
+                  </button>
+                )}
+                {composerUndoCheckpoint && (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void undoWorkspaceRestore(composerUndoCheckpoint)}
+                  >
+                    Undo restore
                   </button>
                 )}
                 {composerNoticeDetail && (

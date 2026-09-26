@@ -1022,8 +1022,6 @@ fn run_stream_with_worker_events(
                             }, &worker_events);
                             let resolved = pending.wait().await;
                             let approved = resolved.approved;
-                            // "Allow for this chat" maps to Codex's native session-wide acceptance.
-                            let session_scope = resolved.scope == milim_agents::ApprovalScope::Thread;
                             let decision = if approved { "approve" } else { "deny" };
                             yield runtime_event_with_worker(&CodexStreamEvent::ToolApprovalStatus {
                                 approval_id: pending.id.clone(),
@@ -1031,7 +1029,11 @@ fn run_stream_with_worker_events(
                                 decision,
                                 status: "decided",
                             }, &worker_events);
-                            let result = match codex_decision_response(params, approved, session_scope) {
+                            // Always a one-shot accept: "Allow for this chat" lives in
+                            // milim's allowance store, which auto-resolves later matching
+                            // requests and honors revocation. Codex's session-wide
+                            // acceptance could cover more than that rule and outlive it.
+                            let result = match codex_decision_response(params, approved, false) {
                                 Ok(result) => result,
                                 Err(error) => {
                                     pending.fail(error.to_string());

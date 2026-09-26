@@ -5449,7 +5449,10 @@ async fn workspace_git_action_checkpoint_restores_worktree() {
         .await
         .unwrap();
 
-    assert_eq!(restored["ok"], true);
+    assert_eq!(restored["ok"], true, "{restored}");
+    assert!(restored["undo_checkpoint"]
+        .as_str()
+        .is_some_and(|undo| undo.starts_with("refs/milim/checkpoints/")));
     assert_eq!(
         fs::read_to_string(root.join("note.txt"))
             .unwrap()

@@ -1357,6 +1357,9 @@ pub struct RunManager {
     confirmations: Mutex<HashMap<String, ConfirmationGrant>>,
     socket_tickets: Mutex<HashMap<String, SocketTicket>>,
     attachment_uploads: Mutex<HashMap<String, PendingAttachmentUpload>>,
+    /// Workspace checkpoints taken before active runs, keyed by run id, so
+    /// the final assistant message can carry its undo point.
+    turn_checkpoints: Mutex<HashMap<String, Value>>,
     events: broadcast::Sender<ControlEventV1>,
 }
 
@@ -1398,6 +1401,7 @@ impl RunManager {
             confirmations: Mutex::new(HashMap::new()),
             socket_tickets: Mutex::new(HashMap::new()),
             attachment_uploads: Mutex::new(HashMap::new()),
+            turn_checkpoints: Mutex::new(HashMap::new()),
             events,
         });
         manager.backfill_message_timelines()?;
@@ -4207,6 +4211,8 @@ impl RunManager {
             None,
             json!({ "run_id": run_id, "status": "running" }),
         );
+        self.checkpoint_turn_workspace(&thread_id, &run_id, &accepted.config)
+            .await;
 
         let outcome = if accepted.config.agent.is_some() || accepted.config.adapter == "provider" {
             self.run_agent(&state, &thread_id, &run_id, &accepted, &mut stop)
@@ -4236,6 +4242,10 @@ impl RunManager {
             let _ = journal.commit_failure(0, error);
         }
 
+        self.turn_checkpoints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&run_id);
         let limited = matches!(&outcome, Ok(RunOutcome::Limited));
         let (status, error) = match outcome {
             Ok(RunOutcome::Completed | RunOutcome::Limited) => ("completed", None),
@@ -4283,6 +4293,46 @@ impl RunManager {
         } else if status != "cancelled" && !limited {
             self.drain_queue(state, thread_id);
         }
+    }
+
+    /// Checkpoint the thread's Git workspace before a run that may change
+    /// files, whichever client started it, and record the outcome on the
+    /// run's timeline as a `workspace_checkpoint` item.
+    async fn checkpoint_turn_workspace(
+        &self,
+        thread_id: &str,
+        run_id: &str,
+        config: &FrozenRunConfigV1,
+    ) {
+        let Some(folder) = turn_checkpoint_folder(config) else {
+            return;
+        };
+        let label = run_id.to_string();
+        let outcome = tokio::task::spawn_blocking(move || {
+            crate::routes::turn_workspace_checkpoint(&folder, &label)
+        })
+        .await;
+        let data = match outcome {
+            Ok(Ok(checkpoint)) => {
+                let checkpoint = serde_json::to_value(checkpoint).unwrap_or(Value::Null);
+                self.turn_checkpoints
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(run_id.to_string(), checkpoint.clone());
+                json!({ "status": "created", "checkpoint": checkpoint })
+            }
+            Ok(Err(skip)) => json!({
+                "status": "skipped",
+                "reason": if skip.not_git { "not_git" } else { "error" },
+                "message": skip.message,
+            }),
+            Err(error) => json!({
+                "status": "skipped",
+                "reason": "error",
+                "message": format!("Workspace checkpoint failed: {error}"),
+            }),
+        };
+        let _ = self.persist_and_emit(thread_id, Some(run_id), "workspace_checkpoint", data);
     }
 
     async fn run_mock(
@@ -4669,6 +4719,11 @@ impl RunManager {
                         arguments,
                     )? {
                         value["auto_approved"] = json!({ "scope": "thread", "allowance": key });
+                    } else if let Some(prefix) =
+                        crate::approval_allowances::prefix_allowance_for("command", name, arguments)
+                            .and_then(|rule| rule.prefix)
+                    {
+                        value["allowance_prefix"] = json!(prefix);
                     }
                 }
                 milim_agents::AgentEvent::ProviderRetry {
@@ -5055,22 +5110,24 @@ impl RunManager {
                             created_at_ms: now_ms(),
                             resolved_at_ms: None,
                         })?;
+                        let name = value
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        let arguments = value
+                            .get("arguments")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
                         if let Some(key) = self.auto_resolve_allowed_approval(
-                            state,
-                            thread_id,
-                            id,
-                            kind,
-                            value
-                                .get("name")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default(),
-                            value
-                                .get("arguments")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default(),
+                            state, thread_id, id, kind, name, arguments,
                         )? {
                             timeline_value["auto_approved"] =
                                 json!({ "scope": "thread", "allowance": key });
+                        } else if let Some(prefix) =
+                            crate::approval_allowances::prefix_allowance_for(kind, name, arguments)
+                                .and_then(|rule| rule.prefix)
+                        {
+                            timeline_value["allowance_prefix"] = json!(prefix);
                         }
                     }
                 }
@@ -5169,7 +5226,7 @@ impl RunManager {
     ) -> Result<String> {
         let mailbox_content = content.clone();
         let message_id = Uuid::new_v4().to_string();
-        let message = json!({
+        let mut message = json!({
             "id": message_id,
             "role": "assistant",
             "content": content,
@@ -5178,6 +5235,14 @@ impl RunManager {
             "ledgerVersion": 1,
             "metrics": metrics,
         });
+        if let Some(checkpoint) = self
+            .turn_checkpoints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(run_id)
+        {
+            message["workspaceCheckpoint"] = checkpoint.clone();
+        }
         self.persist_message_and_event(
             thread_id,
             run_id,
@@ -5534,10 +5599,24 @@ impl RunManager {
             return Err(Error::NotFound(format!("approval {approval_id}")));
         };
         // Optional `scope: "thread"` ("Allow for this chat"). Older clients
-        // omit it and keep one-shot semantics.
+        // omit it and keep one-shot semantics. `allowance_match: "prefix"`
+        // asks for a command-prefix rule and falls back to the exact command.
+        let prefix = match command
+            .payload
+            .get("allowance_match")
+            .and_then(Value::as_str)
+        {
+            None | Some("exact") => false,
+            Some("prefix") => true,
+            Some(_) => {
+                return Err(Error::InvalidRequest(
+                    "payload.allowance_match must be exact or prefix".into(),
+                ))
+            }
+        };
         let allowance = match command.payload.get("scope").and_then(Value::as_str) {
             None | Some("once") => None,
-            Some("thread") if approved => Some(thread_allowance_for_approval(&durable)?),
+            Some("thread") if approved => Some(thread_allowance_for_approval(&durable, prefix)?),
             Some("thread") => None,
             Some(_) => {
                 return Err(Error::InvalidRequest(
@@ -6785,6 +6864,25 @@ fn sampling_from_generation(generation: &GenerationSettingsV1) -> SamplingParams
     }
 }
 
+/// The folder to checkpoint before a run, or `None` when the run cannot
+/// change files: Plan mode, no folder, or a provider turn without tools.
+fn turn_checkpoint_folder(config: &FrozenRunConfigV1) -> Option<std::path::PathBuf> {
+    if config.plan_mode {
+        return None;
+    }
+    let tool_mode = config
+        .agent
+        .as_ref()
+        .map_or(config.tool_mode.as_str(), |agent| agent.tool_mode.as_str());
+    let may_change_files = match config.adapter.as_str() {
+        "codex" | "claude" | "opencode" | "pi" => true,
+        "provider" => tool_mode != "none",
+        _ => false,
+    };
+    let folder = config.workspace.as_deref().map(str::trim)?;
+    (may_change_files && !folder.is_empty()).then(|| std::path::PathBuf::from(folder))
+}
+
 fn runtime_adapter(model: &str) -> &str {
     let model = model.trim();
     if model.eq_ignore_ascii_case("mock-echo") {
@@ -7664,24 +7762,27 @@ fn uppercase_role(role: &str) -> &'static str {
 /// The chat allowance an approved `scope: "thread"` decision would create.
 fn thread_allowance_for_approval(
     durable: &ControlApprovalRecord,
+    prefix: bool,
 ) -> Result<crate::approval_allowances::ApprovalAllowance> {
     let request: Value = serde_json::from_str(&durable.request_json).unwrap_or(Value::Null);
-    crate::approval_allowances::allowance_for(
-        &durable.kind,
-        request
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-        request
-            .get("arguments")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-    )
-    .ok_or_else(|| {
-        Error::InvalidRequest(
-            "this approval cannot be allowed for the whole chat; approve it once instead".into(),
-        )
-    })
+    let name = request
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let arguments = request
+        .get("arguments")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    prefix
+        .then(|| crate::approval_allowances::prefix_allowance_for(&durable.kind, name, arguments))
+        .flatten()
+        .or_else(|| crate::approval_allowances::allowance_for(&durable.kind, name, arguments))
+        .ok_or_else(|| {
+            Error::InvalidRequest(
+                "this approval cannot be allowed for the whole chat; approve it once instead"
+                    .into(),
+            )
+        })
 }
 
 fn normalized_approval_kind(kind: &str) -> &str {
@@ -7808,6 +7909,280 @@ mod tests {
             }),
             confirmation_token: None,
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn turns_checkpoint_git_workspaces_and_report_skips() {
+        let (manager, state) = manager_and_state();
+        let repo = std::env::temp_dir().join(format!("milim-turn-checkpoint-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            ["init", "-q"].as_slice(),
+            ["config", "user.name", "Milim Test"].as_slice(),
+            ["config", "user.email", "milim@example.invalid"].as_slice(),
+        ] {
+            assert!(std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        }
+        std::fs::write(repo.join("notes.txt"), "before turn\n").unwrap();
+        let mut create = create_command("create", "test-echo");
+        create.payload["settings"]["folder"] = json!(repo.to_string_lossy());
+        manager.create_thread(&create).unwrap();
+        let thread = manager
+            .store
+            .control_thread("thread-fixture")
+            .unwrap()
+            .unwrap();
+        let mut config = resolve_frozen_config(&state, &manager.store, &thread, vec![]).unwrap();
+        manager
+            .store
+            .control_put_run(&ControlRunRecord {
+                id: "run-checkpoint".into(),
+                thread_id: "thread-fixture".into(),
+                status: "running".into(),
+                adapter: config.adapter.clone(),
+                request_json: json!({ "text": "turn" }).to_string(),
+                agent_snapshot_json: None,
+                native_session_json: None,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                completed_at_ms: None,
+                error_json: None,
+            })
+            .unwrap();
+        let checkpoint_items = |manager: &RunManager| {
+            manager
+                .timeline_page("thread-fixture", None, None, true, 100)
+                .unwrap()
+                .unwrap()
+                .items
+                .into_iter()
+                .filter(|item| item.item_type == "workspace_checkpoint")
+                .map(|item| item.data)
+                .collect::<Vec<_>>()
+        };
+
+        manager
+            .checkpoint_turn_workspace("thread-fixture", "run-checkpoint", &config)
+            .await;
+        let items = checkpoint_items(&manager);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["status"], "created", "{}", items[0]);
+        let reference = items[0]["checkpoint"]["ref"].as_str().unwrap().to_string();
+        assert!(reference.starts_with("refs/milim/checkpoints/"));
+        assert_eq!(
+            items[0]["checkpoint"]["folder"],
+            repo.to_string_lossy().as_ref()
+        );
+        let message_id = manager
+            .complete_assistant_message(
+                "thread-fixture",
+                "run-checkpoint",
+                "done".into(),
+                String::new(),
+                None,
+            )
+            .unwrap();
+        let message = manager
+            .store
+            .control_messages("thread-fixture")
+            .unwrap()
+            .into_iter()
+            .map(|raw| serde_json::from_str::<Value>(&raw).unwrap())
+            .find(|message| message["id"] == message_id.as_str())
+            .unwrap();
+        assert_eq!(message["workspaceCheckpoint"]["ref"], reference.as_str());
+
+        // Plan mode never changes files, so it takes no checkpoint.
+        config.plan_mode = true;
+        manager
+            .checkpoint_turn_workspace("thread-fixture", "run-checkpoint", &config)
+            .await;
+        assert_eq!(checkpoint_items(&manager).len(), 1);
+
+        // Folders outside Git are reported as a skip.
+        config.plan_mode = false;
+        let plain = std::env::temp_dir().join(format!("milim-turn-plain-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&plain).unwrap();
+        config.workspace = Some(plain.to_string_lossy().to_string());
+        manager
+            .checkpoint_turn_workspace("thread-fixture", "run-checkpoint", &config)
+            .await;
+        let items = checkpoint_items(&manager);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[1]["status"], "skipped");
+        assert_eq!(items[1]["reason"], "not_git");
+
+        config.tool_mode = "none".into();
+        assert!(turn_checkpoint_folder(&config).is_none());
+        config.adapter = "codex".into();
+        assert!(turn_checkpoint_folder(&config).is_some());
+        std::fs::remove_dir_all(repo).ok();
+        std::fs::remove_dir_all(plain).ok();
+    }
+
+    #[tokio::test]
+    async fn prefix_allowances_auto_resolve_account_runtime_requests() {
+        let (manager, state) = manager_and_state();
+        manager
+            .create_thread(&create_command("create", "codex:gpt-5.4"))
+            .unwrap();
+        manager
+            .store
+            .control_put_run(&ControlRunRecord {
+                id: "run-fixture".into(),
+                thread_id: "thread-fixture".into(),
+                status: "running".into(),
+                adapter: "codex".into(),
+                request_json: json!({ "text": "turn" }).to_string(),
+                agent_snapshot_json: None,
+                native_session_json: None,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                completed_at_ms: None,
+                error_json: None,
+            })
+            .unwrap();
+        let put_pending = |name: &str, arguments: &str| {
+            let mut pending = state.tool_approvals.request();
+            manager
+                .store
+                .control_put_approval(&ControlApprovalRecord {
+                    id: pending.id.clone(),
+                    run_id: "run-fixture".into(),
+                    thread_id: "thread-fixture".into(),
+                    kind: "command".into(),
+                    request_json: json!({ "name": name, "arguments": arguments }).to_string(),
+                    status: "pending".into(),
+                    decision_json: None,
+                    created_at_ms: now_ms(),
+                    resolved_at_ms: None,
+                })
+                .unwrap();
+            let id = pending.id.clone();
+            let waiter = tokio::spawn(async move {
+                let decision = pending.wait().await;
+                let _ = pending.deliver();
+                decision
+            });
+            (id, waiter)
+        };
+        // Codex reports `item/commandExecution/requestApproval` params as the
+        // arguments of a `command` request, with the shell wrapper intact.
+        let codex_arguments = |command: &str| {
+            json!({
+                "threadId": "codex-thread",
+                "turnId": "codex-turn",
+                "itemId": "item-1",
+                "command": command,
+                "cwd": "/work",
+                "availableDecisions": ["accept", "acceptForSession", "cancel"],
+            })
+            .to_string()
+        };
+
+        let (first, waiter) = put_pending(
+            "command",
+            &codex_arguments("/bin/zsh -lc 'cargo test -p core'"),
+        );
+        let result = manager
+            .command(
+                state.clone(),
+                None,
+                ControlCommandV1 {
+                    command_id: "resolve-prefix".into(),
+                    kind: ControlCommandKindV1::ApprovalResolve,
+                    thread_id: None,
+                    expected_revision: None,
+                    payload: json!({
+                        "approval_id": first,
+                        "decision": "approve",
+                        "scope": "thread",
+                        "allowance_match": "prefix",
+                    }),
+                    confirmation_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.status, ControlCommandStatusV1::Applied, "{result:?}");
+        assert_eq!(result.data["allowance"]["key"], "prefix:cargo test");
+        assert!(waiter.await.unwrap().approved);
+
+        // Later Codex and OpenCode requests in the family resolve in Rust.
+        let (codex, waiter) = put_pending(
+            "command",
+            &codex_arguments("/bin/zsh -lc 'cargo test --workspace'"),
+        );
+        assert_eq!(
+            manager
+                .auto_resolve_allowed_approval(
+                    &state,
+                    "thread-fixture",
+                    &codex,
+                    "command",
+                    "command",
+                    &codex_arguments("/bin/zsh -lc 'cargo test --workspace'"),
+                )
+                .unwrap()
+                .as_deref(),
+            Some("prefix:cargo test")
+        );
+        assert!(waiter.await.unwrap().approved);
+        // OpenCode's ACP `session/request_permission` carries the tool title
+        // and its raw input.
+        let opencode_arguments = r#"{"command":"cargo test parser","description":"Run tests"}"#;
+        let (opencode, waiter) = put_pending("bash", opencode_arguments);
+        assert!(manager
+            .auto_resolve_allowed_approval(
+                &state,
+                "thread-fixture",
+                &opencode,
+                "command",
+                "bash",
+                opencode_arguments,
+            )
+            .unwrap()
+            .is_some());
+        assert!(waiter.await.unwrap().approved);
+
+        // Chaining still asks.
+        let chained = codex_arguments("/bin/zsh -lc 'cargo test && rm -rf target'");
+        let (asked, _waiter) = put_pending("command", &chained);
+        assert!(manager
+            .auto_resolve_allowed_approval(
+                &state,
+                "thread-fixture",
+                &asked,
+                "command",
+                "command",
+                &chained,
+            )
+            .unwrap()
+            .is_none());
+
+        // Revoking the rule makes the family ask again.
+        manager
+            .revoke_approval_allowances("thread-fixture", Some(&["prefix:cargo test".to_string()]))
+            .unwrap();
+        let again = codex_arguments("/bin/zsh -lc 'cargo test'");
+        let (revoked, _waiter) = put_pending("command", &again);
+        assert!(manager
+            .auto_resolve_allowed_approval(
+                &state,
+                "thread-fixture",
+                &revoked,
+                "command",
+                "command",
+                &again,
+            )
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

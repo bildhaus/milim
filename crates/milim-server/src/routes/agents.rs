@@ -2029,6 +2029,9 @@ pub(crate) struct ToolApprovalDecision {
     /// `once` (default) or `thread` for "Allow for this chat".
     #[serde(default)]
     scope: Option<String>,
+    /// `exact` (default) or `prefix` for a `thread` command allowance.
+    #[serde(default)]
+    allowance_match: Option<String>,
 }
 
 pub(crate) async fn tool_approval_status(
@@ -2084,6 +2087,7 @@ pub(crate) async fn tool_approval_resolve(
                         "decision": req.decision,
                         "response": req.response,
                         "scope": req.scope,
+                        "allowance_match": req.allowance_match,
                     }),
                     confirmation_token: None,
                 },

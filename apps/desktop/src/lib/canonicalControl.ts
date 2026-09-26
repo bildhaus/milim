@@ -8,6 +8,7 @@ import {
   type ControlPendingInputV1,
   type ControlQueuedTurnV1,
   type ControlTimelineItemV1,
+  type WorkspaceCheckpoint,
 } from "../api.js";
 import { appendPhaseStreamPart } from "./streamParts.js";
 import { providerErrorFromValue, type ProviderErrorInfo } from "./providerErrors.js";
@@ -101,6 +102,27 @@ function projectedResponseMetrics(value: unknown): ChatMessage["metrics"] | unde
     usage: parsedUsage,
     costUsd,
     costSource,
+  };
+}
+
+/** A Rust-recorded workspace checkpoint in the desktop message shape. */
+function projectedWorkspaceCheckpoint(value: unknown): WorkspaceCheckpoint | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const checkpoint = value as Record<string, unknown>;
+  if (
+    typeof checkpoint.ref !== "string"
+    || !checkpoint.ref.startsWith("refs/milim/checkpoints/")
+    || typeof checkpoint.folder !== "string"
+    || typeof checkpoint.createdAt !== "number"
+  ) {
+    return undefined;
+  }
+  return {
+    ref: checkpoint.ref,
+    createdAt: checkpoint.createdAt,
+    folder: checkpoint.folder,
+    root: typeof checkpoint.root === "string" ? checkpoint.root : undefined,
+    head: typeof checkpoint.head === "string" ? checkpoint.head : undefined,
   };
 }
 
@@ -247,6 +269,9 @@ function eventPart(item: ControlTimelineItemV1): ChatStreamPart | null {
       status: "running",
       approvalId,
       approvalStatus: "pending",
+      ...(typeof data.allowance_prefix === "string"
+        ? { allowancePrefix: data.allowance_prefix }
+        : {}),
     };
   }
   if (item.type === "approval_resolved" || item.type === "tool_approval_resolved") {
@@ -269,6 +294,24 @@ function eventPart(item: ControlTimelineItemV1): ChatStreamPart | null {
       label:
         typeof data.message === "string" ? data.message : `${item.type} from agent runtime`,
       status: item.type === "error" ? "error" : "done",
+    };
+  }
+  if (item.type === "workspace_checkpoint") {
+    if (data.status === "created") {
+      return {
+        kind: "event",
+        eventType: "status",
+        label: "Workspace checkpoint",
+        detail: "Restore is available from this turn.",
+        status: "done",
+      };
+    }
+    return {
+      kind: "event",
+      eventType: data.reason === "not_git" ? "status" : "warning",
+      label: "Workspace checkpoint skipped",
+      detail: typeof data.message === "string" ? data.message : undefined,
+      status: "done",
     };
   }
   if (item.type === "runtime_notice") {
@@ -382,10 +425,14 @@ export function projectControlRunMessages(
   let assistant: CanonicalMessage | null = null;
   let streamingText = "";
   let streamingReasoning = "";
+  let workspaceCheckpoint: WorkspaceCheckpoint | undefined;
   const streamParts: ChatStreamPart[] = [];
   for (const item of items) {
     if (item.run_id !== runId) continue;
     const data = item.data;
+    if (item.type === "workspace_checkpoint") {
+      workspaceCheckpoint = projectedWorkspaceCheckpoint(data.checkpoint) ?? workspaceCheckpoint;
+    }
     if (item.type === "assistant_delta") {
       const text = typeof data.text === "string" ? data.text : "";
       const reasoning = typeof data.reasoning === "string" ? data.reasoning : "";
@@ -430,6 +477,8 @@ export function projectControlRunMessages(
       if (message.role === "user") users.push(message);
       if (message.role === "assistant") {
         message.metrics = projectedResponseMetrics(data.metrics);
+        workspaceCheckpoint = projectedWorkspaceCheckpoint(data.workspaceCheckpoint)
+          ?? workspaceCheckpoint;
         const reasoning = typeof data.reasoning === "string" ? data.reasoning : streamingReasoning;
         message.streamParts = message.content === streamingText && reasoning === streamingReasoning
           ? streamParts
@@ -465,6 +514,9 @@ export function projectControlRunMessages(
     };
   }
   if (assistant) {
+    // The timeline item keeps undo available when the run failed or stopped
+    // after it started changing files.
+    if (workspaceCheckpoint) assistant.workspaceCheckpoint = workspaceCheckpoint;
     const terminalStatus = lastRunStatusItem(items, runId)?.data.status;
     assistant.streamTerminalOutcome = terminalStatus === "completed"
       ? "completed"
