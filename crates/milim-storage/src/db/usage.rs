@@ -29,6 +29,10 @@ pub struct UsageTotals {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
+    /// Prompt tokens served from a provider prompt cache (inside `prompt_tokens`).
+    pub cache_read_tokens: u64,
+    /// Prompt tokens written to a provider prompt cache (inside `prompt_tokens`).
+    pub cache_write_tokens: u64,
     /// Sum of every known cost, reported and estimated.
     pub cost_usd: f64,
     /// Portion billed and reported by a provider or account runtime.
@@ -72,6 +76,8 @@ struct UsageRecord {
     prompt_tokens: u64,
     completion_tokens: u64,
     total_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
     cost_usd: Option<f64>,
     cost_source: Option<String>,
 }
@@ -88,6 +94,8 @@ impl UsageTotals {
         self.prompt_tokens += record.prompt_tokens;
         self.completion_tokens += record.completion_tokens;
         self.total_tokens += record.total_tokens;
+        self.cache_read_tokens += record.cache_read_tokens;
+        self.cache_write_tokens += record.cache_write_tokens;
         match record.cost() {
             Some((cost, kind)) => {
                 self.cost_usd += cost;
@@ -188,6 +196,8 @@ fn record_from_row(row: &Row<'_>) -> rusqlite::Result<UsageRecord> {
         prompt_tokens: value_tokens(row, 4),
         completion_tokens: value_tokens(row, 5),
         total_tokens: value_tokens(row, 6),
+        cache_read_tokens: value_tokens(row, 10),
+        cache_write_tokens: value_tokens(row, 11),
         cost_usd: value_f64(row, 7).or_else(|| value_f64(row, 8)),
         cost_source: value_text(row, 9),
     };
@@ -208,7 +218,9 @@ const RESPONSE_USAGE_SQL: &str = "SELECT m.session_id,
         json_extract(m.message_json, '$.metrics.usage.total_tokens'),
         json_extract(m.message_json, '$.metrics.costUsd'),
         json_extract(m.message_json, '$.metrics.usage.cost_usd'),
-        json_extract(m.message_json, '$.metrics.costSource')
+        json_extract(m.message_json, '$.metrics.costSource'),
+        json_extract(m.message_json, '$.metrics.usage.cache_read_tokens'),
+        json_extract(m.message_json, '$.metrics.usage.cache_write_tokens')
      FROM user_session_messages m
      WHERE json_extract(m.message_json, '$.metrics.endedAt') IS NOT NULL
        AND json_extract(m.message_json, '$.metrics.endedAt') >= ?1
@@ -225,7 +237,9 @@ const COMPACTION_USAGE_SQL: &str = "SELECT m.session_id,
         json_extract(m.message_json, '$.compaction.summary.usage.total_tokens'),
         json_extract(m.message_json, '$.compaction.summary.costUsd'),
         json_extract(m.message_json, '$.compaction.summary.usage.cost_usd'),
-        json_extract(m.message_json, '$.compaction.summary.costSource')
+        json_extract(m.message_json, '$.compaction.summary.costSource'),
+        json_extract(m.message_json, '$.compaction.summary.usage.cache_read_tokens'),
+        json_extract(m.message_json, '$.compaction.summary.usage.cache_write_tokens')
      FROM user_session_messages m
      WHERE json_extract(m.message_json, '$.compaction.summary') IS NOT NULL
        AND json_extract(m.message_json, '$.compaction.createdAt') >= ?1
@@ -874,7 +888,10 @@ mod tests {
                     "metrics": {
                         "startedAt": NOW - 3_000, "endedAt": NOW - 1_000,
                         "model": "provider:openrouter:anthropic/claude", "provider": "OpenRouter",
-                        "usage": { "prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150 },
+                        "usage": {
+                            "prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150,
+                            "cache_read_tokens": 60, "cache_write_tokens": 20
+                        },
                         "costUsd": 0.25, "costSource": "provider"
                     }
                 },
@@ -920,7 +937,10 @@ mod tests {
                         "sourceTokens": 1, "summaryTokens": 1,
                         "summary": {
                             "model": "gpt-local",
-                            "usage": { "prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10 },
+                            "usage": {
+                                "prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10,
+                                "cache_read_tokens": 4
+                            },
                             "costUsd": 0.1, "costSource": "estimate"
                         }
                     }
@@ -950,6 +970,8 @@ mod tests {
         assert!(close(summary.totals.reported_cost_usd, 0.25));
         assert!(close(summary.totals.estimated_cost_usd, 0.6));
         assert_eq!(summary.totals.unpriced_responses, 1);
+        assert_eq!(summary.totals.cache_read_tokens, 64);
+        assert_eq!(summary.totals.cache_write_tokens, 20);
 
         let yesterday = &summary.by_day[5];
         assert_eq!(yesterday.key, "2025-09-22");
@@ -964,6 +986,10 @@ mod tests {
             .expect("isolated worktree usage groups under its project");
         assert_eq!(beta.label, "beta");
         assert_eq!(beta.totals.responses, 3);
+        assert_eq!(
+            beta.totals.cache_read_tokens, 4,
+            "compaction summaries count their cached input"
+        );
         assert_eq!(summary.by_project[0].key, "/work/beta");
 
         let codex = summary

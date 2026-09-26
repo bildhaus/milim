@@ -9,6 +9,7 @@ import {
 import {
   formatUsageCost,
   formatUsageCount,
+  usageCacheHitShare,
   usageCostSource,
   usageModelLabel,
 } from "../lib/usageMetrics";
@@ -306,6 +307,7 @@ export function UsageManager({ onClose }: { onClose: () => void }) {
 
   const totals = summary?.totals;
   const costSource = totals ? usageCostSource(totals) : undefined;
+  const cacheHitShare = totals ? usageCacheHitShare(totals) : null;
   const activeDays = summary?.by_day.filter((day) => day.responses > 0).length ?? 0;
 
   return (
@@ -353,12 +355,23 @@ export function UsageManager({ onClose }: { onClose: () => void }) {
         {!summary && !error && <p className="usage-note">Loading usage...</p>}
         {summary && totals && (
           <>
-            <div className="usage-stats" aria-label="Totals">
+            <div className="usage-stats usage-totals" aria-label="Totals">
               <div className="usage-stat">
                 <span className="usage-stat-label">Tokens</span>
                 <strong>{formatUsageCount(totals.total_tokens)}</strong>
                 <small>
-                  {formatUsageCount(totals.prompt_tokens)} in · {formatUsageCount(totals.completion_tokens)} out
+                  {formatUsageCount(totals.prompt_tokens)} in
+                  {totals.cache_read_tokens > 0 ? ` (${formatUsageCount(totals.cache_read_tokens)} cached)` : ""}
+                  {" · "}{formatUsageCount(totals.completion_tokens)} out
+                </small>
+              </div>
+              <div className="usage-stat">
+                <span className="usage-stat-label">Cache hits</span>
+                <strong>{cacheHitShare == null ? "-" : `${Math.round(cacheHitShare * 100)}%`}</strong>
+                <small>
+                  {totals.cache_read_tokens > 0
+                    ? `${formatUsageCount(totals.cache_read_tokens)} of ${formatUsageCount(totals.prompt_tokens)} input tokens`
+                    : "No cached input reported"}
                 </small>
               </div>
               <div className="usage-stat">

@@ -87,6 +87,12 @@ function projectedResponseMetrics(value: unknown): ChatMessage["metrics"] | unde
         prompt_tokens: usage.prompt_tokens,
         completion_tokens: usage.completion_tokens,
         total_tokens: usage.total_tokens,
+        ...(typeof usage.cache_read_tokens === "number"
+          ? { cache_read_tokens: usage.cache_read_tokens }
+          : {}),
+        ...(typeof usage.cache_write_tokens === "number"
+          ? { cache_write_tokens: usage.cache_write_tokens }
+          : {}),
       }
     : undefined;
   const costUsd = typeof metrics.costUsd === "number"

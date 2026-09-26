@@ -91,7 +91,10 @@ pub(crate) async fn openai_chat(
             usage: out.usage,
             system_fingerprint: None,
         };
-        Ok(Json(resp).into_response())
+        let mut body = serde_json::to_value(&resp)
+            .map_err(|error| ApiError(Error::Other(format!("serialize completion: {error}"))))?;
+        body["usage"] = crate::translate::openai_usage_value(&resp.usage);
+        Ok(Json(body).into_response())
     }
 }
 
@@ -1049,10 +1052,7 @@ pub(crate) async fn anthropic_messages(
             model,
             stop_reason: Some(anthropic_stop_reason(&out.finish_reason)),
             stop_sequence: None,
-            usage: anthropic::Usage {
-                input_tokens: out.usage.prompt_tokens,
-                output_tokens: out.usage.completion_tokens,
-            },
+            usage: crate::translate::anthropic_usage(&out.usage),
         };
         Ok(Json(resp).into_response())
     }

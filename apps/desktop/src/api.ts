@@ -206,6 +206,10 @@ export interface TokenUsage {
   total_tokens: number;
   /** Provider-reported billed cost normalized from fields such as OpenRouter's `usage.cost`. */
   cost_usd?: number;
+  /** Prompt tokens served from a provider prompt cache; already inside `prompt_tokens`. */
+  cache_read_tokens?: number;
+  /** Prompt tokens written to a provider prompt cache; already inside `prompt_tokens`. */
+  cache_write_tokens?: number;
 }
 
 export type CostSource = "provider" | "estimate";
@@ -4846,6 +4850,10 @@ export interface UsageTotals {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  /** Input tokens served from a provider prompt cache (inside `prompt_tokens`). */
+  cache_read_tokens: number;
+  /** Input tokens written to a provider prompt cache (inside `prompt_tokens`). */
+  cache_write_tokens: number;
   /** Every known cost, reported plus estimated. */
   cost_usd: number;
   /** Billed cost reported by a provider or account runtime. */

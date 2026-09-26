@@ -50,7 +50,7 @@ use crate::translate::{
     openai_to_completion,
 };
 use crate::{gen_id, now_unix, rfc3339_now};
-use milim_core::api::anthropic::{self, MessagesRequest, MessagesResponse};
+use milim_core::api::anthropic::{MessagesRequest, MessagesResponse};
 use milim_core::api::ollama::{
     OllamaChatRequest, OllamaChatResponse, OllamaMessage, OllamaModelDetails, OllamaModelTag,
     OllamaTagsResponse,

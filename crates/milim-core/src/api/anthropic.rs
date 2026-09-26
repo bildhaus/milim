@@ -138,11 +138,15 @@ pub enum ResponseBlock {
     },
 }
 
-/// Anthropic token accounting.
+/// Anthropic token accounting. `input_tokens` excludes the cached portions.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct Usage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<u32>,
 }
 
 /// Join the text of all text blocks with newlines.
