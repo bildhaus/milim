@@ -1261,6 +1261,27 @@ pub(crate) async fn memory_embeddings_cancel(
     Ok(Json(mem.embedding_status().map_err(ApiError)?).into_response())
 }
 
+#[derive(Deserialize)]
+pub(crate) struct MemoryEmbeddingModelRequest {
+    /// The model to pin, or `null` to follow the models chats embed with.
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// `PUT /memory/embeddings/model` — pin the memory embedding model or unpin it.
+pub(crate) async fn memory_embedding_model_set(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: Peer,
+    Json(req): Json<MemoryEmbeddingModelRequest>,
+) -> Result<Response, ApiError> {
+    authorize(&st, &headers, peer_addr(peer))?;
+    let mem = memory_store(&st)?;
+    mem.set_configured_embedding_model(req.model.as_deref())
+        .map_err(ApiError)?;
+    Ok(Json(mem.embedding_status().map_err(ApiError)?).into_response())
+}
+
 // ----- Embeddings -----
 
 #[derive(Deserialize)]

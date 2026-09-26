@@ -479,6 +479,10 @@ pub fn build_router_with_host_policy(state: AppState, host_policy: HostPolicy) -
             "/memory/embeddings/cancel",
             post(routes::memory_embeddings_cancel),
         )
+        .route(
+            "/memory/embeddings/model",
+            put(routes::memory_embedding_model_set),
+        )
         // Privacy filter
         .route("/privacy/scan", post(routes::privacy_scan))
         .route(

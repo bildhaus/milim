@@ -6236,6 +6236,29 @@ async fn memory_embedding_status_tracks_the_current_model() {
         .await
         .unwrap();
     assert_eq!(cancelled["current"], 1);
+    assert_eq!(cancelled["configured_model"], Value::Null);
+
+    let pinned: Value = client
+        .put(format!("{base}/memory/embeddings/model"))
+        .json(&json!({ "model": "test-echo" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(pinned["configured_model"], "test-echo");
+    assert_eq!(pinned["model"], "test-echo");
+    let unpinned: Value = client
+        .put(format!("{base}/memory/embeddings/model"))
+        .json(&json!({ "model": null }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(unpinned["configured_model"], Value::Null);
 }
 
 #[tokio::test]

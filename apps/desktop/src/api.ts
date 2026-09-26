@@ -5407,6 +5407,8 @@ export async function reviewMemoryNode(id: string): Promise<boolean> {
 /** Embedding coverage of scoped memories relative to the current model. */
 export interface MemoryEmbeddingStatus {
   model: string | null;
+  /** The pinned memory embedding model; `null` follows the models chats embed with. */
+  configured_model?: string | null;
   dim: number;
   total: number;
   current: number;
@@ -5445,6 +5447,22 @@ export function reindexMemoryEmbeddings(): Promise<MemoryEmbeddingStatus | null>
 
 export function cancelMemoryReindex(): Promise<MemoryEmbeddingStatus | null> {
   return memoryEmbeddingsRequest("/cancel");
+}
+
+/** Pin the model memory embeds with, or pass `null` to follow the chat model. */
+export async function setMemoryEmbeddingModel(
+  model: string | null,
+): Promise<MemoryEmbeddingStatus | null> {
+  try {
+    const r = await authFetch(`${BASE}/memory/embeddings/model`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model }),
+    });
+    return r.ok ? ((await r.json()) as MemoryEmbeddingStatus) : null;
+  } catch {
+    return null;
+  }
 }
 
 // ----- Schedules -----

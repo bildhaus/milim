@@ -78,7 +78,7 @@ Root aliases are also mounted for OpenAI chat, completions, models, and embeddin
 | Agents | `POST /agents/run`, `GET/POST /agents`, `GET/PUT/DELETE /agents/{id}`, `POST /agents/{id}/run` |
 | Worker Runs | `GET/POST /worker-runs`, `GET/DELETE /worker-runs/{id}`, cursor-aware `GET /worker-runs/{id}/events?after_seq=N`, `POST /worker-runs/{id}/start`, `POST /worker-runs/{id}/stop`, `POST /worker-runs/{id}/tasks/{task_id}/retry`; writer diff review/apply routes are scoped to a worker in the Run. |
 | Threads | `GET /threads/{id}` (`include_events=true&event_limit=N` returns `event_count` and `events_truncated`), `DELETE /threads/{id}`, `GET /threads/{id}/children`, `GET /threads/{id}/events`, `POST /threads/{id}/stop` |
-| Memory | `POST /memory/ingest`, `POST /memory/search`, `POST /memory/register`, `POST /memory/graph/search`, `POST /memory/benchmark`, `GET /memory/scopes`, `GET /memory/nodes`, node update/delete/archive/review/restore routes, `GET /memory/embeddings`, `POST /memory/embeddings/reindex`, `POST /memory/embeddings/cancel` |
+| Memory | `POST /memory/ingest`, `POST /memory/search`, `POST /memory/register`, `POST /memory/graph/search`, `POST /memory/benchmark`, `GET /memory/scopes`, `GET /memory/nodes`, node update/delete/archive/review/restore routes, `GET /memory/embeddings`, `POST /memory/embeddings/reindex`, `POST /memory/embeddings/cancel`, `PUT /memory/embeddings/model` |
 | Workspace context | `GET /workspace/context` |
 | Usage | Desktop-authenticated `GET /usage/summary`, `GET /usage/harness` |
 | Custom slash commands | `GET /commands?workspace=<path>`, `POST /commands/expand` |
