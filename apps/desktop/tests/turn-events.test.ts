@@ -33,6 +33,29 @@ equal(completed.callId, "call-1", "completed tool part should preserve call id")
 equal(completed.label, "Edited file", "completed edit_file label should be readable");
 equal(completed.detail, "src/App.tsx +3 -1", "completed tool part should include diff stats");
 
+const search = toolCompletedPart({
+  type: "tool_result",
+  name: "web_search",
+  call_id: "call-search",
+  arguments: JSON.stringify({ query: "tokio select macro" }),
+  result: { results: [] },
+} as never);
+equal(search.label, "Searched the web", "web_search should have a readable label");
+equal(search.detail, "tokio select macro", "web_search should show its query");
+
+const todos = toolCompletedPart({
+  type: "tool_result",
+  name: "todo_write",
+  call_id: "call-todos",
+  arguments: JSON.stringify({ todos: [
+    { content: "Read", status: "completed" },
+    { content: "Fix", status: "in_progress" },
+  ] }),
+  result: { todos: [] },
+} as never);
+equal(todos.label, "Updated todos", "todo_write should have a readable label");
+equal(todos.detail, "1/2 done", "todo_write should summarize progress");
+
 const failed = toolCompletedPart({
   type: "tool_result",
   name: "shell",

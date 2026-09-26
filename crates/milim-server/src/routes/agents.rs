@@ -391,6 +391,7 @@ const CHILD_THREAD_READ_ONLY_TOOL_NAMES: &[&str] = &[
     "read_file",
     "list_dir",
     "http_fetch",
+    "web_search",
     "current_time",
     "echo",
 ];
@@ -1621,7 +1622,37 @@ fn static_registry_for_context_with_access(
     if context.workspace.is_none() {
         reg = reg.without(RUN_WORKSPACE_TOOL_NAMES);
     }
-    reg.scoped_for_run()
+    let mut reg = reg.scoped_for_run();
+    if reg.contains("web_search") {
+        reg = reg.without(&["web_search"]);
+        reg.register(Arc::new(web_search_for_context(st, context)));
+    }
+    reg
+}
+
+struct ProviderWebSearchSource(Arc<crate::providers::ProviderRegistry>);
+
+#[async_trait]
+impl milim_tools::WebSearchApiSource for ProviderWebSearchSource {
+    async fn api(&self) -> Option<milim_tools::WebSearchApi> {
+        self.0.web_search_api().await
+    }
+}
+
+/// `web_search` bound to the configured search provider and the run's
+/// privacy mode, which applies to the query before it leaves the machine.
+fn web_search_for_context(st: &AppState, context: &RunContext) -> milim_tools::WebSearchTool {
+    let mut tool = milim_tools::WebSearchTool::default();
+    if let Some(providers) = st.providers.clone() {
+        tool = tool.with_api_source(Arc::new(ProviderWebSearchSource(providers)));
+    }
+    let mode = context.privacy_mode;
+    if mode != crate::privacy::PrivacyMode::Off {
+        tool = tool.with_query_filter(Arc::new(move |query: &str| {
+            crate::privacy::gate_outbound_tool_text(mode, query, "web search query")
+        }));
+    }
+    tool
 }
 
 fn registry_has_desktop_host_tools(reg: &ToolRegistry) -> bool {

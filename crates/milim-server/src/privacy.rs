@@ -258,6 +258,28 @@ pub fn kinds_summary(dets: &[Detection]) -> String {
     kinds.join(", ")
 }
 
+/// Apply `mode` to one piece of outbound text a tool sends to a remote
+/// service (for example a web search query): Block refuses detected PII and
+/// Redact replaces it with placeholders that are never restored.
+pub fn gate_outbound_tool_text(mode: PrivacyMode, text: &str, what: &str) -> Result<String> {
+    match mode {
+        PrivacyMode::Off => Ok(text.to_string()),
+        PrivacyMode::Block => {
+            let detections = milim_privacy::scan(text);
+            if detections.is_empty() {
+                Ok(text.to_string())
+            } else {
+                Err(Error::InvalidRequest(format!(
+                    "blocked by the privacy gate: {what} contains {} ({} item(s)). Switch the gate to Redact or Off to send it.",
+                    kinds_summary(&detections),
+                    detections.len()
+                )))
+            }
+        }
+        PrivacyMode::Redact => Ok(milim_privacy::redact(text).text),
+    }
+}
+
 /// Redact all outbound text with one reversible map per request.
 pub fn redact_request(req: &mut CompletionRequest) -> BTreeMap<String, String> {
     let mut redactor = Redactor::new();
@@ -462,6 +484,30 @@ mod tests {
         out.push_str(&u.push("] now"));
         out.push_str(&u.flush());
         assert_eq!(out, "contact a@b.com now");
+    }
+
+    #[test]
+    fn outbound_tool_text_follows_the_mode() {
+        let query = "contact alice@example.com";
+        assert_eq!(
+            gate_outbound_tool_text(PrivacyMode::Off, query, "query").unwrap(),
+            query
+        );
+        let blocked = gate_outbound_tool_text(PrivacyMode::Block, query, "web search query")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            blocked.contains("web search query contains email"),
+            "{blocked}"
+        );
+        assert_eq!(
+            gate_outbound_tool_text(PrivacyMode::Block, "rust async", "query").unwrap(),
+            "rust async"
+        );
+        assert_eq!(
+            gate_outbound_tool_text(PrivacyMode::Redact, query, "query").unwrap(),
+            "contact [EMAIL_1]"
+        );
     }
 
     #[test]

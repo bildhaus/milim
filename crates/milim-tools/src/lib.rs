@@ -7,7 +7,10 @@
 
 mod builtins;
 mod fs;
+mod html;
 pub mod shell_command;
+mod todo;
+mod web_search;
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -26,6 +29,10 @@ pub use builtins::{CurrentTimeTool, EchoTool, HttpFetchTool, RenderChartTool};
 pub use fs::{
     atomic_write, fs_tools, read_text_range, resolve_workspace_path, ListDirTool, ReadFileTool,
     WriteFileTool,
+};
+pub use todo::{TodoItem, TodoStatus, TodoWriteTool};
+pub use web_search::{
+    WebSearchApi, WebSearchApiSource, WebSearchProvider, WebSearchQueryFilter, WebSearchTool,
 };
 
 /// A callable tool exposed to agents and MCP clients.
@@ -324,6 +331,8 @@ impl ToolRegistry {
         r.register(Arc::new(CurrentTimeTool));
         r.register(Arc::new(HttpFetchTool));
         r.register(Arc::new(RenderChartTool));
+        r.register(Arc::new(WebSearchTool::default()));
+        r.register(Arc::new(TodoWriteTool::default()));
         r
     }
 
@@ -727,7 +736,14 @@ mod tests {
         let names: Vec<String> = reg.list().into_iter().map(|s| s.name).collect();
         assert_eq!(
             names,
-            vec!["current_time", "echo", "http_fetch", "render_chart"]
+            vec![
+                "current_time",
+                "echo",
+                "http_fetch",
+                "render_chart",
+                "todo_write",
+                "web_search"
+            ]
         ); // BTreeMap → sorted
 
         let out = reg.call("echo", json!({"text": "hi"})).await.unwrap();
@@ -750,7 +766,16 @@ mod tests {
 
         let filtered = reg.without(&["echo"]);
         let names: Vec<String> = filtered.list().into_iter().map(|s| s.name).collect();
-        assert_eq!(names, vec!["current_time", "http_fetch", "render_chart"]);
+        assert_eq!(
+            names,
+            vec![
+                "current_time",
+                "http_fetch",
+                "render_chart",
+                "todo_write",
+                "web_search"
+            ]
+        );
         assert!(!filtered.contains("echo"));
     }
 

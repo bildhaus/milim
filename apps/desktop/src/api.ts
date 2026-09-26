@@ -4074,7 +4074,7 @@ export type ToolApprovalRequest =
 // ----- Providers (LLM remotes and media credentials) -----
 
 export type ProviderKind =
-  "openai_compatible" | "anthropic" | "gemini" | "replicate" | "fal";
+  "openai_compatible" | "anthropic" | "gemini" | "replicate" | "fal" | "brave_search" | "tavily";
 
 export interface ProviderInfo {
   id: string;
@@ -4181,6 +4181,18 @@ export const PROVIDER_PRESETS: Array<{
     name: "fal",
     kind: "fal",
     base_url: "https://queue.fal.run",
+    needsKey: true,
+  },
+  {
+    name: "Brave Search",
+    kind: "brave_search",
+    base_url: "https://api.search.brave.com/res/v1",
+    needsKey: true,
+  },
+  {
+    name: "Tavily",
+    kind: "tavily",
+    base_url: "https://api.tavily.com",
     needsKey: true,
   },
   {

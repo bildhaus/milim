@@ -827,6 +827,8 @@ fn provider_kind_name(kind: crate::providers::ProviderKind) -> &'static str {
         crate::providers::ProviderKind::Gemini => "gemini",
         crate::providers::ProviderKind::Replicate => "replicate",
         crate::providers::ProviderKind::Fal => "fal",
+        crate::providers::ProviderKind::BraveSearch => "brave_search",
+        crate::providers::ProviderKind::Tavily => "tavily",
     }
 }
 

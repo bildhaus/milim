@@ -168,6 +168,23 @@ The built-in read-only `render_chart` tool accepts bounded structured data for b
 
 Hover or focus a mark to inspect it; tapping pins its pointed tooltip until another mark or the surrounding chart is selected, and the matching category label gains emphasis. Bar and line tooltips compare every visible series at the active category, while pie and scatter tooltips remain mark-specific. Keyboard arrows follow the visual direction: left and right move within vertical-bar, line, and scatter series, while up and down move within horizontal-bar series; the other arrow pair changes series at the same category. Legend buttons show or hide series or slices, and line and scatter charts add a crosshair to the active point. Layout, tick density, direct bar labels, and label wrapping adapt to the transcript width. Bars stay square at zero, round only at the value end, use a restrained accent-derived gradient without encoding another value, and reveal outward from the baseline with a short stagger. The renderer honors reduced motion and does not require an installed MCP server, remote HTML, or network access.
 
+## Web and checklist tools
+
+Provider-backed agents have three more built-in read-only tools.
+
+- **`web_search`** takes `query` and an optional `max_results` (default 8, at most 20). It returns a numbered list of titles, URLs, and snippets.
+  - It uses a Brave Search or Tavily key when one is saved under **Providers** (the **Brave Search** and **Tavily** presets, grouped under **Web search**). The first enabled provider with a key wins.
+  - Without a key it falls back to DuckDuckGo's HTML results page. DuckDuckGo may refuse automated searches; the tool then reports that and suggests adding a key.
+  - The query is outbound text. The chat's privacy mode applies to it before any request: **Block** refuses a query with detected PII, and **Redact** sends placeholders that are never restored.
+- **`http_fetch`** takes a `format`: `markdown` (default), `text`, or `raw`.
+  - For HTML, `markdown` keeps the title, headings, paragraphs, lists, `[text](url)` links, code blocks, and simple tables, and drops scripts, styles, navigation, footers, and SVG. `text` keeps the same structure without markup; `raw` returns the source.
+  - JSON and plain-text responses pass through unchanged.
+  - Each call returns at most 60,000 characters of rendered content. A longer page ends with a note naming the `offset` that continues it.
+  - The public-address, redirect, 1 MiB download, and timeout limits are unchanged.
+- **`todo_write`** replaces the agent's checklist with the complete list it sends. Each item has `content` and a `status` of `pending`, `in_progress`, or `completed`; at most one item may be in progress.
+  - The latest list is kept in memory per chat while milim runs, so later turns in the same chat replace the same list.
+  - The transcript renders each update as a checklist under the tool step.
+
 ## MCP Apps
 
 Provider/local chats and Codex, Claude, OpenCode, and Pi account runtimes can manage the same MCP server registry as the MCP Servers sheet through `mcp_server_list`, `mcp_server_test`, `mcp_server_save`, and `mcp_server_delete`. Guarded exposes only the read-only list; Review shows the exact configuration on the normal one-shot approval card before testing, saving, launching, or deleting; Open performs eligible calls immediately. Account runtimes receive these milim-owned tools through an authenticated per-turn loopback gateway while keeping their own filesystem and shell tools.

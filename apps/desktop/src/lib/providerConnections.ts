@@ -43,6 +43,8 @@ export const PROVIDER_KIND_OPTIONS: Array<{ label: string; value: ProviderKind }
   { label: "Gemini API", value: "gemini" },
   { label: "Replicate media", value: "replicate" },
   { label: "fal media", value: "fal" },
+  { label: "Brave web search", value: "brave_search" },
+  { label: "Tavily web search", value: "tavily" },
 ];
 
 export const KIND_LABEL: Record<ProviderKind, string> = {
@@ -51,6 +53,8 @@ export const KIND_LABEL: Record<ProviderKind, string> = {
   gemini: "Gemini API",
   replicate: "Replicate media",
   fal: "fal media",
+  brave_search: "Brave web search",
+  tavily: "Tavily web search",
 };
 
 type ProviderShape = Pick<ProviderInfo, "kind" | "name" | "base_url">;
@@ -68,6 +72,11 @@ export function isMediaOnlyProvider(provider: ProviderShape): boolean {
   return provider.kind === "replicate" || provider.kind === "fal";
 }
 
+/** Web search credentials back the agent's `web_search` tool, not chat. */
+export function isSearchProvider(provider: Pick<ProviderInfo, "kind">): boolean {
+  return provider.kind === "brave_search" || provider.kind === "tavily";
+}
+
 export function providerNeedsKey(provider: ProviderShape): boolean {
   const normalizedBase = provider.base_url.trim().replace(/\/+$/, "").toLowerCase();
   const preset = PROVIDER_PRESETS.find(
@@ -80,17 +89,19 @@ export function providerNeedsKey(provider: ProviderShape): boolean {
 }
 
 export function providerCategory(provider: ProviderShape): string {
+  if (isSearchProvider(provider)) return "Web search";
   if (isMediaOnlyProvider(provider)) return "Media";
   if (isOpenRouterProvider(provider)) return "Chat + media";
   return "Chat";
 }
 
-export type ProviderRailGroup = "hosted" | "local" | "media";
+export type ProviderRailGroup = "hosted" | "local" | "media" | "search";
 
 export const PROVIDER_RAIL_GROUPS: ReadonlyArray<{ id: ProviderRailGroup; label: string }> = [
   { id: "hosted", label: "Hosted" },
   { id: "local", label: "Local" },
   { id: "media", label: "Media" },
+  { id: "search", label: "Web search" },
 ];
 
 /**
@@ -99,6 +110,7 @@ export const PROVIDER_RAIL_GROUPS: ReadonlyArray<{ id: ProviderRailGroup; label:
  * Hosted.
  */
 export function providerRailGroup(provider: ProviderShape): ProviderRailGroup {
+  if (isSearchProvider(provider)) return "search";
   if (isMediaOnlyProvider(provider)) return "media";
   if (isLoopbackProviderEndpoint(provider.base_url)) return "local";
   return "hosted";
@@ -120,6 +132,11 @@ export function providerStatus(provider: ProviderInfo): ConnectionStatus {
   }
   if (provider.error) {
     return { tone: "error", label: "Unreachable", detail: provider.error };
+  }
+  if (isSearchProvider(provider)) {
+    return provider.has_key
+      ? { tone: "ready", label: "Search ready", detail: "The web_search tool uses this key instead of DuckDuckGo." }
+      : { tone: "warning", label: "Key missing", detail: "Add an API key; web_search uses DuckDuckGo until then." };
   }
   if (isMediaProvider(provider) && providerNeedsKey(provider) && !provider.has_key) {
     return {
@@ -151,14 +168,14 @@ export function providerRailHint(provider: ProviderInfo): string | null {
   if (!provider.enabled) return "Disabled";
   if (provider.error) return "Unreachable";
   if (providerNeedsKey(provider) && !provider.has_key) return "Key missing";
-  if (!isMediaProvider(provider) && provider.models.length === 0) return "No models";
+  if (!isMediaProvider(provider) && !isSearchProvider(provider) && provider.models.length === 0) return "No models";
   if (isOpenRouterProvider(provider)) return "+ media";
   return null;
 }
 
 /** Secondary fact for the Overview table: model count or media role. */
 export function providerDetail(provider: ProviderInfo): string {
-  if (isMediaOnlyProvider(provider)) return KIND_LABEL[provider.kind];
+  if (isMediaOnlyProvider(provider) || isSearchProvider(provider)) return KIND_LABEL[provider.kind];
   if (provider.models.length) return modelCount(provider.models.length);
   return isOpenRouterProvider(provider) ? "Chat + media" : "No models";
 }

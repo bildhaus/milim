@@ -449,6 +449,49 @@
   line-height: 1.3;
   white-space: nowrap;
 }
+.todo-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0;
+  padding: 2px 0 2px 22px;
+  list-style: none;
+  color: var(--secondary-text);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+.todo-checklist-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  min-width: 0;
+}
+.todo-checklist-mark {
+  flex: 0 0 12px;
+  width: 12px;
+  height: 12px;
+  margin-top: 2px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border-primary);
+  border-radius: 3px;
+}
+.todo-checklist-in-progress .todo-checklist-mark {
+  border-color: var(--accent);
+  background: radial-gradient(circle, var(--accent) 0 2.5px, transparent 3px);
+}
+.todo-checklist-in-progress .todo-checklist-text {
+  color: var(--primary-text);
+}
+.todo-checklist-completed .todo-checklist-mark {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+}
+.todo-checklist-completed .todo-checklist-text {
+  color: var(--tertiary-text);
+  text-decoration: line-through;
+}
 .stream-command-copy {
   display: grid;
   place-items: center;
@@ -1607,7 +1650,8 @@ g.native-chart-mark:focus-visible .native-chart-point {
   font-size: 12px;
 }
 .native-chart-data,
-.native-chart-sr-only {
+.native-chart-sr-only,
+.todo-checklist-sr-only {
   position: absolute;
   width: 1px;
   height: 1px;
