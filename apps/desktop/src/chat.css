@@ -3452,6 +3452,24 @@ g.native-chart-mark:focus-visible .native-chart-point {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Agent avatar text badges. Chat surfaces (the composer persona button,
+   thread chips) render before settings.css loads, so the base rule lives here. */
+.agent-badge {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: transparent;
+  border: 1px solid var(--border-secondary);
+  color: var(--primary-text);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  text-transform: uppercase;
+  overflow: hidden;
+}
 .chat-chip .agent-badge {
   width: 18px;
   height: 18px;
