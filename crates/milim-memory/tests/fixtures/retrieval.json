@@ -1,0 +1,614 @@
+{
+  "description": "Labelled developer memories and queries for the memory retrieval regression benchmark. Memory ids are fixture-local; the test maps them to registered node ids.",
+  "top_k": 5,
+  "scopes": {
+    "global": {
+      "kind": "global",
+      "label": "Personal",
+      "locator": "user"
+    },
+    "milim": {
+      "kind": "project",
+      "label": "milim",
+      "locator": "/work/milim"
+    },
+    "billing": {
+      "kind": "project",
+      "label": "billing-api",
+      "locator": "/work/billing-api"
+    },
+    "infra": {
+      "kind": "project",
+      "label": "infra",
+      "locator": "/work/infra"
+    }
+  },
+  "memories": [
+    {
+      "id": "pref-pnpm",
+      "scope": "global",
+      "kind": "preference",
+      "title": "Package manager",
+      "body": "Always use pnpm instead of npm or yarn for JavaScript projects."
+    },
+    {
+      "id": "pref-tabs",
+      "scope": "global",
+      "kind": "preference",
+      "title": "Indentation style",
+      "body": "Prefers two-space indentation in TypeScript and four spaces in Python; never tabs."
+    },
+    {
+      "id": "pref-commits",
+      "scope": "global",
+      "kind": "preference",
+      "title": "Commit messages",
+      "body": "Write conventional commit messages such as feat(scope) or fix(scope) with an imperative summary."
+    },
+    {
+      "id": "pref-no-emoji",
+      "scope": "global",
+      "kind": "preference",
+      "title": "No emoji",
+      "body": "Do not put emoji in code comments, commit messages, or pull request descriptions."
+    },
+    {
+      "id": "pref-editor",
+      "scope": "global",
+      "kind": "fact",
+      "title": "Editor",
+      "body": "Uses Neovim with the LazyVim distribution and rust-analyzer for Rust work."
+    },
+    {
+      "id": "pref-timezone",
+      "scope": "global",
+      "kind": "fact",
+      "title": "Timezone",
+      "body": "Works from Tel Aviv, timezone Asia/Jerusalem; standups happen at 10:00 local time."
+    },
+    {
+      "id": "pref-review",
+      "scope": "global",
+      "kind": "preference",
+      "title": "Code review style",
+      "body": "Wants review comments grouped by severity: blocking bugs first, then nits."
+    },
+    {
+      "id": "pref-shell",
+      "scope": "global",
+      "kind": "fact",
+      "title": "Shell",
+      "body": "Default shell is zsh on macOS and PowerShell 7 on the Windows workstation."
+    },
+    {
+      "id": "pref-tests-first",
+      "scope": "global",
+      "kind": "preference",
+      "title": "Tests before fixes",
+      "body": "Reproduce a bug with a failing regression test before changing production code."
+    },
+    {
+      "id": "pref-deps",
+      "scope": "global",
+      "kind": "preference",
+      "title": "Dependencies",
+      "body": "Avoid adding new third-party dependencies when the standard library can do the job."
+    },
+    {
+      "id": "milim-stack",
+      "scope": "milim",
+      "kind": "fact",
+      "title": "Desktop stack",
+      "body": "The desktop app is Tauri 2 with a Vite, React, and TypeScript frontend and an embedded Axum server."
+    },
+    {
+      "id": "milim-verify",
+      "scope": "milim",
+      "kind": "command",
+      "title": "Desktop verification",
+      "body": "Run pnpm -C apps/desktop verify before opening a desktop pull request."
+    },
+    {
+      "id": "milim-clippy",
+      "scope": "milim",
+      "kind": "command",
+      "title": "Rust lint",
+      "body": "Lint the workspace with cargo clippy --workspace --all-targets and treat warnings as errors."
+    },
+    {
+      "id": "milim-site",
+      "scope": "milim",
+      "kind": "fact",
+      "title": "Docs site",
+      "body": "The documentation site is a Vite React app deployed to Cloudflare Pages and imports docs/wiki markdown."
+    },
+    {
+      "id": "milim-ledger",
+      "scope": "milim",
+      "kind": "decision",
+      "title": "Run ledger",
+      "body": "Provider requests are stored byte for byte in the run ledger so a model step can be replayed later."
+    },
+    {
+      "id": "milim-privacy",
+      "scope": "milim",
+      "kind": "decision",
+      "title": "Privacy gate",
+      "body": "Remote providers pass through the privacy gate; Block mode refuses PII and Redact mode swaps it for placeholders."
+    },
+    {
+      "id": "milim-control",
+      "scope": "milim",
+      "kind": "fact",
+      "title": "Control API",
+      "body": "Desktop chats are driven through /control/v1 commands like thread.create and turn.send with a paired device key."
+    },
+    {
+      "id": "milim-mcp-readonly",
+      "scope": "milim",
+      "kind": "decision",
+      "title": "MCP is read-only",
+      "body": "The milim mcp bridge exposes read-only tools; mutations must run through an agent with approval."
+    },
+    {
+      "id": "milim-e2e-windows",
+      "scope": "milim",
+      "kind": "fact",
+      "title": "E2E platform",
+      "body": "The WebDriver end-to-end suite only runs on Windows because WKWebView has no WebDriver."
+    },
+    {
+      "id": "milim-release",
+      "scope": "milim",
+      "kind": "command",
+      "title": "Release preparation",
+      "body": "Prepare a release by bumping VERSION, updating the changelog, and tagging vX.Y.Z on main."
+    },
+    {
+      "id": "milim-approval-modes",
+      "scope": "milim",
+      "kind": "fact",
+      "title": "Approval modes",
+      "body": "Tool approval has three modes: review asks for every consequential call, guarded auto-approves safe calls, open approves everything."
+    },
+    {
+      "id": "milim-sqlite",
+      "scope": "milim",
+      "kind": "fact",
+      "title": "Storage engine",
+      "body": "User data lives in SQLite through rusqlite with numbered migrations; never edit an applied migration."
+    },
+    {
+      "id": "billing-postgres",
+      "scope": "billing",
+      "kind": "fact",
+      "title": "Billing database",
+      "body": "The billing API uses PostgreSQL 16 with sqlx; migrations live in db/migrations and run on deploy."
+    },
+    {
+      "id": "billing-stripe",
+      "scope": "billing",
+      "kind": "decision",
+      "title": "Payment provider",
+      "body": "Stripe is the payment processor; webhook signatures are verified with the STRIPE_WEBHOOK_SECRET variable."
+    },
+    {
+      "id": "billing-idempotency",
+      "scope": "billing",
+      "kind": "decision",
+      "title": "Idempotency keys",
+      "body": "Every invoice creation endpoint requires an Idempotency-Key header to make client retries safe."
+    },
+    {
+      "id": "billing-currency",
+      "scope": "billing",
+      "kind": "decision",
+      "title": "Money representation",
+      "body": "Store money as integer minor units (cents) with an ISO 4217 currency code; never use floats."
+    },
+    {
+      "id": "billing-tests",
+      "scope": "billing",
+      "kind": "command",
+      "title": "Billing tests",
+      "body": "Run the billing test suite with make test, which starts a disposable Postgres container first."
+    },
+    {
+      "id": "billing-oncall",
+      "scope": "billing",
+      "kind": "fact",
+      "title": "On-call rotation",
+      "body": "Billing on-call rotates weekly on Mondays; the pager escalation goes to the payments team lead."
+    },
+    {
+      "id": "billing-invoice-pdf",
+      "scope": "billing",
+      "kind": "fact",
+      "title": "Invoice PDFs",
+      "body": "Invoice PDFs are rendered by a headless Chromium worker and cached in the S3 bucket billing-invoices."
+    },
+    {
+      "id": "billing-tax",
+      "scope": "billing",
+      "kind": "decision",
+      "title": "Sales tax",
+      "body": "Sales tax and VAT are calculated by the tax service before an invoice is finalized."
+    },
+    {
+      "id": "infra-terraform",
+      "scope": "infra",
+      "kind": "fact",
+      "title": "Infrastructure as code",
+      "body": "All cloud resources are managed with Terraform 1.8; state is stored in an encrypted S3 backend with DynamoDB locking."
+    },
+    {
+      "id": "infra-k8s",
+      "scope": "infra",
+      "kind": "fact",
+      "title": "Cluster",
+      "body": "Services run on a Kubernetes cluster in eu-central-1 and deploy through Argo CD from the gitops repository."
+    },
+    {
+      "id": "infra-secrets",
+      "scope": "infra",
+      "kind": "decision",
+      "title": "Secrets management",
+      "body": "Secrets come from AWS Secrets Manager via the external-secrets operator; never commit .env files."
+    },
+    {
+      "id": "infra-alerts",
+      "scope": "infra",
+      "kind": "fact",
+      "title": "Alerting",
+      "body": "Prometheus alerts route through Alertmanager to the #ops-alerts Slack channel and PagerDuty."
+    },
+    {
+      "id": "infra-backups",
+      "scope": "infra",
+      "kind": "decision",
+      "title": "Database backups",
+      "body": "Nightly database snapshots are retained for 35 days and restore drills run every quarter."
+    },
+    {
+      "id": "infra-ci",
+      "scope": "infra",
+      "kind": "fact",
+      "title": "CI runners",
+      "body": "GitHub Actions uses self-hosted macOS runners for Apple builds and hosted Ubuntu runners for everything else."
+    },
+    {
+      "id": "infra-dns",
+      "scope": "infra",
+      "kind": "fact",
+      "title": "DNS",
+      "body": "DNS zones are hosted on Cloudflare and TLS certificates are issued by cert-manager with Let's Encrypt."
+    },
+    {
+      "id": "infra-cost",
+      "scope": "infra",
+      "kind": "decision",
+      "title": "Cost controls",
+      "body": "Non-production clusters scale to zero overnight to reduce cloud cost."
+    },
+    {
+      "id": "infra-logging",
+      "scope": "infra",
+      "kind": "fact",
+      "title": "Logging",
+      "body": "Application logs ship to Loki through Promtail and are kept for 14 days."
+    },
+    {
+      "id": "infra-node-version",
+      "scope": "infra",
+      "kind": "fact",
+      "title": "Node version",
+      "body": "Build images pin Node 22 LTS and Python 3.12 for tooling scripts."
+    }
+  ],
+  "queries": [
+    {
+      "name": "package manager exact",
+      "query": "which package manager: pnpm or npm?",
+      "relevant": [
+        "pref-pnpm"
+      ]
+    },
+    {
+      "name": "indentation",
+      "query": "indentation spaces or tabs",
+      "relevant": [
+        "pref-tabs"
+      ]
+    },
+    {
+      "name": "commit convention",
+      "query": "how should commit messages be written",
+      "relevant": [
+        "pref-commits",
+        "pref-no-emoji"
+      ]
+    },
+    {
+      "name": "emoji rule",
+      "query": "emoji in pull request descriptions",
+      "relevant": [
+        "pref-no-emoji"
+      ]
+    },
+    {
+      "name": "editor setup",
+      "query": "Neovim editor configuration",
+      "relevant": [
+        "pref-editor"
+      ]
+    },
+    {
+      "name": "standup timezone",
+      "query": "what timezone and standup time",
+      "relevant": [
+        "pref-timezone"
+      ]
+    },
+    {
+      "name": "regression test first",
+      "query": "failing regression test before fixing a bug",
+      "relevant": [
+        "pref-tests-first"
+      ]
+    },
+    {
+      "name": "desktop framework",
+      "query": "Tauri React desktop frontend",
+      "relevant": [
+        "milim-stack"
+      ]
+    },
+    {
+      "name": "desktop verify command",
+      "query": "command to verify the desktop app",
+      "relevant": [
+        "milim-verify"
+      ]
+    },
+    {
+      "name": "clippy lint",
+      "query": "cargo clippy warnings",
+      "relevant": [
+        "milim-clippy"
+      ]
+    },
+    {
+      "name": "docs deployment",
+      "query": "where is the documentation site deployed",
+      "relevant": [
+        "milim-site"
+      ]
+    },
+    {
+      "name": "replay provider request",
+      "query": "replay a model step from the ledger",
+      "relevant": [
+        "milim-ledger"
+      ]
+    },
+    {
+      "name": "privacy redact",
+      "query": "PII redact placeholders privacy",
+      "relevant": [
+        "milim-privacy"
+      ]
+    },
+    {
+      "name": "control commands",
+      "query": "thread.create turn.send device key",
+      "relevant": [
+        "milim-control"
+      ]
+    },
+    {
+      "name": "webdriver e2e",
+      "query": "why WebDriver end-to-end tests are Windows only",
+      "relevant": [
+        "milim-e2e-windows"
+      ]
+    },
+    {
+      "name": "approval open mode",
+      "query": "tool approval modes review guarded open",
+      "relevant": [
+        "milim-approval-modes"
+      ]
+    },
+    {
+      "name": "migrations milim",
+      "query": "SQLite migration rules",
+      "relevant": [
+        "milim-sqlite"
+      ],
+      "scopes": [
+        "milim"
+      ]
+    },
+    {
+      "name": "billing migrations",
+      "query": "Postgres migrations deploy",
+      "relevant": [
+        "billing-postgres"
+      ],
+      "scopes": [
+        "billing"
+      ]
+    },
+    {
+      "name": "stripe webhook",
+      "query": "verify Stripe webhook signature",
+      "relevant": [
+        "billing-stripe"
+      ]
+    },
+    {
+      "name": "idempotent invoice retries",
+      "query": "Idempotency-Key for invoice retries",
+      "relevant": [
+        "billing-idempotency"
+      ]
+    },
+    {
+      "name": "money floats",
+      "query": "store money in cents not floats",
+      "relevant": [
+        "billing-currency"
+      ]
+    },
+    {
+      "name": "run billing tests",
+      "query": "run billing test suite",
+      "relevant": [
+        "billing-tests"
+      ],
+      "scopes": [
+        "billing"
+      ]
+    },
+    {
+      "name": "invoice pdf storage",
+      "query": "where are invoice PDFs cached",
+      "relevant": [
+        "billing-invoice-pdf"
+      ]
+    },
+    {
+      "name": "terraform state",
+      "query": "Terraform state backend locking",
+      "relevant": [
+        "infra-terraform"
+      ]
+    },
+    {
+      "name": "deploy argo",
+      "query": "how services deploy to Kubernetes",
+      "relevant": [
+        "infra-k8s"
+      ]
+    },
+    {
+      "name": "secrets env files",
+      "query": "secrets manager and .env files",
+      "relevant": [
+        "infra-secrets"
+      ]
+    },
+    {
+      "name": "alert routing",
+      "query": "where do Prometheus alerts go",
+      "relevant": [
+        "infra-alerts"
+      ]
+    },
+    {
+      "name": "backup retention",
+      "query": "database snapshot retention days",
+      "relevant": [
+        "infra-backups"
+      ]
+    },
+    {
+      "name": "macos runners",
+      "query": "self-hosted macOS runners",
+      "relevant": [
+        "infra-ci"
+      ]
+    },
+    {
+      "name": "node python versions",
+      "query": "pinned Node and Python versions",
+      "relevant": [
+        "infra-node-version"
+      ]
+    },
+    {
+      "name": "cloud region",
+      "query": "what cloud region do we run in",
+      "relevant": [
+        "infra-k8s"
+      ]
+    },
+    {
+      "name": "overnight cluster cost",
+      "query": "cost of cloud clusters at night",
+      "relevant": [
+        "infra-cost"
+      ]
+    },
+    {
+      "name": "log retention",
+      "query": "how long are logs kept",
+      "relevant": [
+        "infra-logging"
+      ]
+    },
+    {
+      "name": "billing paging",
+      "query": "who gets paged for billing incidents",
+      "relevant": [
+        "billing-oncall"
+      ]
+    },
+    {
+      "name": "tax before finalize",
+      "query": "tax calculation before finalizing an invoice",
+      "relevant": [
+        "billing-tax"
+      ]
+    },
+    {
+      "name": "review ordering",
+      "query": "how to order code review comments",
+      "relevant": [
+        "pref-review"
+      ]
+    },
+    {
+      "name": "applied migrations",
+      "query": "never edit applied migrations",
+      "relevant": [
+        "milim-sqlite"
+      ]
+    },
+    {
+      "name": "tls certificates",
+      "query": "who issues our TLS certificates",
+      "relevant": [
+        "infra-dns"
+      ]
+    },
+    {
+      "name": "third-party packages",
+      "query": "should I add third-party packages",
+      "relevant": [
+        "pref-deps"
+      ]
+    },
+    {
+      "name": "windows shell",
+      "query": "what shell on the Windows machine",
+      "relevant": [
+        "pref-shell"
+      ]
+    },
+    {
+      "name": "mcp mutations",
+      "query": "can the MCP bridge mutate files",
+      "relevant": [
+        "milim-mcp-readonly"
+      ]
+    },
+    {
+      "name": "release tagging",
+      "query": "how do we tag a new version",
+      "relevant": [
+        "milim-release"
+      ]
+    }
+  ]
+}
