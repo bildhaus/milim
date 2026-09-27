@@ -50,6 +50,9 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
+          # Node-only job: the root packageManager field would otherwise
+          # make setup-node look for pnpm to cache its store.
+          package-manager-cache: false
       - name: Syntax
         run: for file in evals/*.mjs evals/lib/*.mjs evals/fixtures-gen/*.mjs; do node --check "$file"; done
       - name: Fixtures match their generators

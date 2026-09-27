@@ -51,6 +51,9 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
+          # Node-only job: the root packageManager field would otherwise
+          # make setup-node look for pnpm to cache its store.
+          package-manager-cache: false
       - name: Check fixtures match their generators
         run: node evals/fixtures-gen/generate.mjs --check
       - name: Check the control API is reachable
